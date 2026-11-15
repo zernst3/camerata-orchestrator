@@ -4429,19 +4429,19 @@ pub const COST_CAP_UNENFORCED_README_LINE: &str = "Spend limit: could not be enf
 fn manifest_file_facts(path: &str) -> (String, Option<String>) {
     let base = path.rsplit('/').next().unwrap_or(path);
     let purpose = if path.ends_with(".pdf") {
-        "Curated narrative report for a decision-maker."
+        "The report for a decision maker: the problems, their fixes and how the inspection was done."
     } else if path.ends_with(".xlsx") {
         "Complete working dataset across sheets, for engineers."
     } else if path == "findings.json" {
-        "All-Findings rows wrapped with provenance and summary counts, for tooling."
+        "Every row that was not ruled out, wrapped with the facts of the inspection and the summary counts, for tools."
     } else if path == "README.txt" {
         "Plain-text manifest of what each file is."
     } else if path == "decisions.json" {
-        "Every decision record the report was reviewed with, for tooling."
+        "Every decision record the report was reviewed with, for tools."
     } else if path == "csv/tickets.csv" {
-        "One ticket for each sub-group, for a Jira, Linear or GitHub Issues importer."
+        "One ticket for each fix, for a Jira, Linear or GitHub Issues importer."
     } else if path.starts_with("csv/") {
-        "One xlsx data table as RFC 4180 CSV, for tooling that does not read Excel."
+        "One xlsx data table as RFC 4180 CSV, for tools that do not read Excel."
     } else if path.starts_with("json/") {
         "One xlsx data table as a flat JSON array, for structured ingestion."
     } else {
