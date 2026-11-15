@@ -1455,6 +1455,22 @@ pub struct ResumeEstimate {
     pub stored_usd: f64,
     /// How the figure was reached, in one sentence.
     pub basis: String,
+    /// When the run made its re-quote after a scan stage (owner ruling R-9): that re-quote's
+    /// figures for the work that remains, less what the stored calls cost. `None` when the run
+    /// stopped before any scan stage finished; the figure then follows the pre-flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requote: Option<RemainingRequote>,
+}
+
+/// The re-quote after the scan stage, set against what a resume still has to do.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RemainingRequote {
+    /// The repo whose scan stage the re-quote followed.
+    pub repo: String,
+    /// The re-quote's expected figure for the whole run, less what the stored calls cost.
+    pub expected_usd: f64,
+    /// Its "at most" figure, less the same.
+    pub ceiling_usd: f64,
 }
 
 impl ResumeEstimate {
@@ -1475,6 +1491,14 @@ impl ResumeEstimate {
             "  estimated cost of the remaining work: up to ${:.2} ({})\n",
             self.usd, self.basis
         ));
+        if let Some(q) = &self.requote {
+            out.push_str(&format!(
+                "  re-quote after the scan stage: about ${:.2}, at most ${:.2} for the work that \
+                 remains (the re-quote made after the scan stage of {}, less what the stored \
+                 calls cost)\n",
+                q.expected_usd, q.ceiling_usd, q.repo
+            ));
+        }
         out.push_str(&format!(
             "  the stored calls cost ${:.2} when they were made; a spend limit counts it\n",
             self.stored_usd
@@ -1667,3 +1691,6 @@ pub fn prune_runs_in(root: &Path, project_key: &str, keep: usize) -> Vec<String>
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod requote_tests;

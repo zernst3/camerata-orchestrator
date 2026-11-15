@@ -1271,25 +1271,42 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
         })
         .count();
     let again_usd = again as f64 * average;
-    let (usd, basis) = match record.estimate_usd {
-        Some(full) if unreached > 0 => (
-            (full - spent).max(again_usd),
+    // R-9: the re-quote the run made once a scan stage had run is the firmer figure; the latest
+    // one (made with the most known) prices what remains, less what the stored calls cost.
+    let requote = load_requotes(dir).pop().map(|q| super::RemainingRequote {
+        expected_usd: (q.expected_usd - spent).max(0.0),
+        ceiling_usd: (q.ceiling_usd - spent).max((q.expected_usd - spent).max(0.0)),
+        repo: q.repo,
+    });
+    let (usd, basis) = match (&requote, record.estimate_usd) {
+        (Some(q), _) if unreached > 0 => (
+            q.expected_usd.max(again_usd),
             format!(
+                "the run's re-quote after the scan stage of {}, less the ${spent:.2} already \
+                 spent; {unreached} stage(s) had not finished",
+                q.repo
+            ),
+        ),
+        _ => match record.estimate_usd {
+            Some(full) if unreached > 0 => (
+                (full - spent).max(again_usd),
+                format!(
                 "the run's own pre-flight estimate of ${full:.2}, less the ${spent:.2} already \
                  spent; {unreached} stage(s) had not finished"
             ),
-        ),
-        _ if unreached > 0 => (
-            again_usd,
-            format!(
-                "{again} call(s) at the ${average:.4} average of the stored ones; {unreached} \
-                 stage(s) had not finished and this run recorded no estimate for them"
             ),
-        ),
-        _ => (
-            again_usd,
-            format!("{again} call(s) at the ${average:.4} average of the stored ones"),
-        ),
+            _ if unreached > 0 => (
+                again_usd,
+                format!(
+                    "{again} call(s) at the ${average:.4} average of the stored ones; {unreached} \
+                 stage(s) had not finished and this run recorded no estimate for them"
+                ),
+            ),
+            _ => (
+                again_usd,
+                format!("{again} call(s) at the ${average:.4} average of the stored ones"),
+            ),
+        },
     };
     ResumeEstimate {
         remaining: record
@@ -1313,5 +1330,6 @@ pub(crate) fn estimate_remaining(dir: &Path, record: &RunRecord) -> ResumeEstima
         usd,
         stored_usd,
         basis,
+        requote: requote.filter(|_| unreached > 0),
     }
 }
