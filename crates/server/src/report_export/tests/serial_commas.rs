@@ -171,7 +171,15 @@ fn authored_pdf_prose_has_no_second_person() {
 
 #[test]
 fn authored_prose_has_no_serial_comma() {
-    let sources: [(&str, &str, bool); 19] = [
+    let sources: [(&str, &str, bool); 23] = [
+        ("scan.rs", include_str!("../../routes/scan.rs"), false),
+        ("ownership.rs", include_str!("../../ownership.rs"), false),
+        ("scan_tools.rs", include_str!("../../scan_tools.rs"), false),
+        (
+            "xlsx_export.rs",
+            include_str!("../../xlsx_export.rs"),
+            false,
+        ),
         ("row_facts.rs", include_str!("../row_facts.rs"), false),
         ("tree_view.rs", include_str!("../tree_view.rs"), false),
         ("overlay.rs", include_str!("../overlay.rs"), false),

@@ -63,7 +63,7 @@ pub fn ownership_action(ownership: Ownership) -> Option<&'static str> {
         ),
         Ownership::ExternalDependency => Some(
             "No patched version is available yet. Monitor the advisory and upgrade when a fix \
-             ships, accept the risk in the meantime, or replace the dependency.",
+             ships, accept the risk in the meantime or replace the dependency.",
         ),
         Ownership::Generated => Some(
             "Fix this in the generator or its source, not in the generated artifact — the \
