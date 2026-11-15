@@ -1,0 +1,78 @@
+id = "ARCH-BOUNDED-LIST-READS-1"
+version = 1
+title = "Every list read that serves a request is bounded by a limit or a page, so no endpoint returns a whole growing table"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+# One acceptable state (a bounded read) with a carve-out for collections that have a hard, small
+# upper bound. The carve-out is per call site, not a repository-wide alternative, so it lives in
+# the directive and in `qualifies` rather than in a second unflagged option: `defect`.
+kind = "defect"
+inspectable = true
+# Severity, transcribed from the work order: an unbounded read is a cost, memory and exposure
+# fault that grows with the data rather than an exploit on its own, so it ships at medium. Who
+# may read the rows at all is a separate question owned by the authorization rules
+# (PERMISSIONS-*, SUPABASE-RLS-*), so a ceiling here does not hide an access-control defect.
+min_severity = "medium"
+max_severity = "medium"
+default = true
+cwe = ["CWE-770"]
+# `grounded`: OWASP API Security Top 10 2023 (API4, Unrestricted Resource Consumption) names
+# missing limits on the number of records returned per request as the weakness, CWE-770 is the
+# recognised code for it, and the vendor query docs cited below document the bounding call.
+# Only the owner sets `verified`.
+verification = "grounded"
+# Routing: only files that contain a query call are sent this rule. The markers are the list
+# calls of the common data-access libraries (PostgREST/Supabase and Drizzle and Knex `.select(`,
+# Prisma `findMany(`, Sequelize and JPA `findAll(`, Mongoose and TypeORM `.find(`, TypeORM
+# `getMany(`, Django `objects.all(`/`objects.filter(`, SQLAlchemy `.all()`, Rails `.all.`,
+# Entity Framework `ToList(`/`ToListAsync(`) plus raw SQL `select `. Over-inclusion only costs
+# tokens; a missing marker would cost recall, so the list errs wide.
+applies_to = { contains_any = [".select(", "findmany(", "findall(", ".find(", "getmany(", "objects.all(", "objects.filter(", ".all()", ".all.", "tolist(", "tolistasync(", "select "] }
+qualifies = "Applies to code that answers a request or runs on a schedule and reads a list of records from a database or data API: an HTTP route or API handler, a server action, a server component or page loader, a GraphQL resolver, a background job that loads rows into memory. The fault is a read of a collection that grows with use (orders, messages, users, events, audit rows, uploads) with no row limit and no pagination, so the size of the response and the memory and cost of the request grow with the table: a Supabase or PostgREST `.from(t).select(...)` with no `.limit()`, `.range()`, `.single()` or `.maybeSingle()`, a Prisma `findMany` with no `take`, a Sequelize or JPA `findAll` with no limit or Pageable, a Mongoose `find` with no `.limit()`, a Django queryset or SQLAlchemy query evaluated with `.all()` and no slice, an Entity Framework query materialised with `ToList` and no `Take`, a raw SQL `SELECT` with no `LIMIT` or `FETCH FIRST`. A filter alone does not bound a read when the filtered set itself grows (all orders of one customer, all messages in one channel). Not a fault: a read bounded by a limit, a page size, a cursor or a keyset condition; a read of a single row by its key; an aggregate or count query; a read of a collection with a hard, small upper bound that does not grow with use (a country list, a fixed set of plans, a status table), which the code or a comment makes evident; an export or migration script that deliberately streams or batches the whole table. The paging shape itself (cursor or offset) is the separate decision ARCH-CURSOR-PAGINATION-1 records; this rule only requires that some bound exists. A platform-side cap such as a PostgREST `max_rows` setting is a backstop, not the bound: it silently truncates the list instead of paging it. Coverage is the reviewed semantic read of the code; Camerata ships no deterministic check for this rule, because whether a collection has a hard upper bound is a judgment about the data that a syntax check cannot make without false alarms on lookup tables."
+
+# Source note: Names a missing maximum number of records returned in a single request as a cause of the weakness and recommends enforcing a limit on returned records per page.
+[[sources]]
+url = "https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/"
+title = "OWASP API Security Top 10 2023: API4:2023 Unrestricted Resource Consumption"
+
+# Source note: The recognised weakness code for an operation whose resource use is not capped; the code this rule carries in `cwe`.
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/770.html"
+title = "CWE-770: Allocation of Resources Without Limits or Throttling"
+
+# Source note: Documents `.range(from, to)` as the paging call on a PostgREST select; `.limit()` is documented beside it.
+[[sources]]
+url = "https://supabase.com/docs/reference/javascript/range"
+title = "Supabase JavaScript reference: range (limit the query result to a range of rows)"
+
+# Source note: Documents `take` as the bound on `findMany` and both paging shapes.
+[[sources]]
+url = "https://www.prisma.io/docs/orm/prisma-client/queries/pagination"
+title = "Prisma docs: Pagination (offset pagination with skip and take, cursor-based pagination)"
+
+[decision]
+question = "Does every list read that serves a request carry a bound (a limit, a page or a cursor), or can a handler read a whole growing collection?"
+default = "list-reads-are-bounded-by-a-limit-or-page"
+why = "A list read with no bound returns every row the query matches. While the table is small this is invisible: the page loads, the tests pass and the response is fast. As the table grows the same request reads, serialises and ships every row, so its memory, latency, database load and egress cost grow with the data until it times out or exhausts the process, and any caller can make the server do that work again with one request. The response also carries every matching record to the client, so data the page never shows still leaves the server. A limit or a page caps all of that at a size chosen in advance, and it is the shape the paging decision (cursor or offset) builds on. The one honest exception is a collection with a hard, small upper bound that cannot grow with use, such as a list of countries."
+
+[[option]]
+id = "list-reads-are-bounded-by-a-limit-or-page"
+label = "Every list read that serves a request is bounded by a row limit, a page or a cursor"
+directive = "Every database or data API read that returns a list to a request handler, server action, page loader, resolver or job carries an explicit bound: a row limit (`.limit(n)`, `take`, `LIMIT`), a page (`.range(from, to)`, offset and page size) or a cursor or keyset condition with a page size. The page size has a server-side maximum the caller cannot raise. A filter alone is not a bound when the filtered set can grow, such as all orders of one customer. The only lists read whole are collections with a hard, small upper bound that does not grow with use (a country list, a fixed set of plans), and the code says so. Whole-table exports and migrations stream or batch the rows instead of loading them into one response."
+remediation = """
+Add an explicit bound to the list read at <path>: a row limit, or a page taken from the request (for example `.range(from, to)` on a Supabase select, `take` and `skip` or a cursor on a Prisma `findMany`, `LIMIT` and `OFFSET` or a keyset condition in SQL), with a server-side maximum page size the caller cannot exceed. Return what the client needs to request the next page (a next cursor or the total count). If the collection genuinely has a hard, small upper bound, state that bound in a comment beside the query instead. Verify by seeding more rows than the page size and confirming the endpoint returns at most one page and that the next page is reachable.
+"""
+effort = "low"
+why = "A bounded read keeps each request's memory, latency, database load and response size fixed however large the table becomes, and it ships only the rows the caller asked for."
+
+[[option]]
+id = "list-reads-return-the-whole-collection"
+violates = true
+label = "A request handler reads a whole growing collection with no limit and no pagination"
+directive = "List reads may return every row the query matches, relying on the table staying small, rather than carrying a limit, a page or a cursor."
+why = "A list read with no limit returns every matching row, so the request's memory, latency, database load and egress cost grow with the table until it times out or exhausts the process, and any caller can trigger that work repeatedly. Every matching record is also sent to the client, including rows the page never shows. The fault is invisible while the data is small and appears in production as the table grows."
+remediation = """
+Add a row limit or pagination to the list read at <path>, with a server-side maximum page size, and return a next cursor or total count so the client can request further pages. Verify by seeding more rows than the page size and confirming the endpoint returns at most one page.
+"""
+effort = "low"
