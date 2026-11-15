@@ -338,6 +338,45 @@ fn entries(path: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// The rewrite advisory written next to `ledger`, parsed.
+fn advisory_beside(ledger: &Path) -> camerata_server::rewrite_advisory::RewriteAdvisory {
+    let (json, md, _history) = camerata_server::rewrite_advisory::paths_next_to(ledger);
+    assert!(
+        md.exists(),
+        "the readable note is beside the ledger: {}",
+        md.display()
+    );
+    let doc: camerata_server::rewrite_advisory::AdvisoryDocument =
+        serde_json::from_slice(&std::fs::read(&json).unwrap()).unwrap();
+    doc.rewrite_advisory
+}
+
+/// No member of the zip at `path` is the advisory or names one of its deny-listed terms (the
+/// workbook's own parts included).
+fn assert_no_advisory_in(path: &Path) {
+    use camerata_api_types::rewrite_advisory::terms_in;
+    fn scan(name: &str, bytes: &[u8]) {
+        assert!(terms_in(name).is_empty(), "member name {name}");
+        if name.ends_with(".xlsx") {
+            let mut book = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+            for i in 0..book.len() {
+                let mut part = book.by_index(i).unwrap();
+                let mut inner = Vec::new();
+                part.read_to_end(&mut inner).unwrap();
+                let found = terms_in(&String::from_utf8_lossy(&inner));
+                let part_name = part.name().map(|n| n.to_string()).unwrap_or_default();
+                assert!(found.is_empty(), "{name} > {part_name}: {found:?}");
+            }
+        } else {
+            let found = terms_in(&String::from_utf8_lossy(bytes));
+            assert!(found.is_empty(), "{name}: {found:?}");
+        }
+    }
+    for (name, bytes) in entries(path) {
+        scan(&name, &bytes);
+    }
+}
+
 /// Keys that describe the run, not the findings: when it ran, what it cost, which attempt.
 const RUN_METADATA: &[&str] = &[
     "generated_at",
@@ -661,6 +700,17 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
     let before: camerata_server::failure_report::FailureReport =
         serde_json::from_slice(&std::fs::read(&failures_json).unwrap()).unwrap();
     assert!(before.unresolved().count() >= 1, "the failure is on record");
+    // The operator's rewrite advisory sits beside the failure report, even for a refused run, and
+    // says the run did not complete.
+    let interrupted_note = advisory_beside(&ledger);
+    assert!(
+        interrupted_note
+            .guards
+            .iter()
+            .any(|g| g.reason == camerata_server::rewrite_advisory::GuardReason::IncompleteRun),
+        "{:?}",
+        interrupted_note.guards
+    );
 
     // The provider is back; resume.
     flaky.set(Outage::default());
@@ -712,6 +762,18 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
     assert_eq!(done.status, camerata_server::run_store::RunStatus::Complete);
     assert!(done.attempt >= 2);
     assert_same_exports(&export, &baseline_export);
+    // The resume rewrote the note for the completed run, and the released zip carries none of it.
+    let resumed_note = advisory_beside(&ledger);
+    assert_eq!(resumed_note.run_id, run_id);
+    assert!(
+        !resumed_note
+            .guards
+            .iter()
+            .any(|g| g.reason == camerata_server::rewrite_advisory::GuardReason::IncompleteRun),
+        "{:?}",
+        resumed_note.guards
+    );
+    assert_no_advisory_in(&export);
 
     // A complete run resumed again is a no-op that says so.
     let again = resume(&flaky, &run_id, None)
