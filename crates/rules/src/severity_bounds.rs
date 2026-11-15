@@ -217,6 +217,16 @@ pub fn downgrade_unlocated<F: BoundedFinding + ?Sized>(severity: String, f: &F) 
     }
 }
 
+/// Why [`raise_to_min_severity`] moved a severity, as the note [`bounded_severity_explained`]
+/// writes it (`severity raised from low to high: <this>`). One constant, so a reader of the
+/// recorded notes can tell a rule minimum from every other bound without matching prose.
+pub const MIN_SEVERITY_REASON: &str = "the rule sets a minimum severity for what it finds";
+
+/// Whether `note`, one recorded severity adjustment, is a raise to the rule's minimum.
+pub fn is_min_severity_note(note: &str) -> bool {
+    note.starts_with("severity raised from ") && note.trim_end().ends_with(MIN_SEVERITY_REASON)
+}
+
 /// `f`'s severity after every bound: normalize, the floor, C4-R1, then both ceilings (see the
 /// module docs for the order). `rule` is the corpus rule the caller resolved for `f`; `None`
 /// still applies C4-R1 and the deviation ceiling's default, which need no authored rule.
@@ -248,7 +258,7 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
     let raised = step(
         &start,
         raise_to_min_severity(start.clone(), f, rule),
-        "the rule sets a minimum severity for what it finds".to_string(),
+        MIN_SEVERITY_REASON.to_string(),
     );
     let located = step(
         &raised,
@@ -538,6 +548,29 @@ mod tests {
                 bounded_severity(&f, rule)
             );
         }
+    }
+
+    #[test]
+    fn a_rule_minimum_note_is_told_apart_from_every_other_bound() {
+        let floor = rule_set(|r| r.min_severity = Some("high".to_string()));
+        let (_, notes) =
+            bounded_severity_explained(&row("low", BoundKind::Defect), floor.get_by_id("BOUND-1"));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(is_min_severity_note(&notes[0]), "{notes:?}");
+        let ceiling = rule_set(|r| r.max_severity = Some("low".to_string()));
+        let (_, notes) = bounded_severity_explained(
+            &row("high", BoundKind::Defect),
+            ceiling.get_by_id("BOUND-1"),
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(!is_min_severity_note(&notes[0]), "{notes:?}");
+        let unlocated = Row {
+            path: String::new(),
+            line: 0,
+            ..row("high", BoundKind::Defect)
+        };
+        let (_, notes) = bounded_severity_explained(&unlocated, None);
+        assert!(notes.iter().all(|n| !is_min_severity_note(n)), "{notes:?}");
     }
 
     #[test]
