@@ -154,7 +154,7 @@ pub struct ConventionsSummaryJson {
 }
 
 /// One service's cell of a pattern row as the report prints it: the ledger's cell state plus
-/// the finished label ("Violated, 3 places", "Clean", "Not applicable: ...", "Not reviewed: ...").
+/// the finished label ("3 problems", "Clean", "Not applicable: ...", "Not reviewed: ...").
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PatternCellJson {
     pub repo: String,
@@ -200,12 +200,7 @@ pub const PATTERNS_NOTE: &str = "This section compares the services of this proj
 pub fn pattern_cell_label(state: &crate::scan_ledger::CellState) -> String {
     use crate::scan_ledger::CellState;
     match state {
-        CellState::Violated { sites } => {
-            format!(
-                "Violated, {}",
-                crate::xlsx_export::vocabulary::places_count(*sites)
-            )
-        }
+        CellState::Violated { sites } => crate::xlsx_export::vocabulary::problems_count(*sites),
         CellState::Clean => "Clean".to_string(),
         CellState::NotApplicable { reason } => format!("Not applicable: {reason}"),
         CellState::NotReviewed { reason } => format!("Not reviewed: {reason}"),
@@ -226,14 +221,38 @@ impl LowercaseFirst for str {
     }
 }
 
+/// Whether the reviewer ruled `f` out (`FalsePositive`). A ruled-out problem is not open.
+pub(crate) fn is_ruled_out(
+    dispositions: &std::collections::HashMap<String, super::DispositionWire>,
+    f: &crate::onboard::Finding,
+) -> bool {
+    dispositions
+        .get(&super::finding_key(f))
+        .is_some_and(|d| d.state == "FalsePositive")
+}
+
 /// The patterns section for a report, or `None` for a project of one repo. A row for a rule
 /// the corpus does not know (an id the model invented) is left out when a corpus is loaded:
 /// the section names rules by title and never prints a raw id.
+///
+/// The matrix is built here from the rows the export reads (the reviewed rows, with the
+/// reviewer's restores, additions and edits) and the reviewer's rulings, never taken from the
+/// copy stored at the seal: that copy predates the overlay, so a problem the reviewer put back
+/// or added would be missing from it and its service could read clean beside it. A problem the
+/// reviewer ruled out is not open. The themes a model grouped the stored rows into are kept only
+/// while every row they cite still exists.
 pub fn patterns_across_services_json(
     report: &crate::onboard::ScanReport,
     corpus: Option<&camerata_rules::RuleSet>,
+    dispositions: &std::collections::HashMap<String, super::DispositionWire>,
 ) -> Option<PatternsAcrossServicesJson> {
-    let matrix = &report.patterns_across_services;
+    let mut fresh =
+        crate::onboard::patterns_matrix::build_with(report, &|f| is_ruled_out(dispositions, f));
+    fresh.themes = crate::onboard::patterns_matrix::keep_valid_themes(
+        report.patterns_across_services.themes.clone(),
+        &fresh,
+    );
+    let matrix = &fresh;
     if !matrix.is_present() {
         return None;
     }

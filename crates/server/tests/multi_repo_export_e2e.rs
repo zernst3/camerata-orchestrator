@@ -273,7 +273,7 @@ fn the_section_is_in_no_severity_total_or_finding_count() {
     let xlsx = workbook(&report);
     let sheet = grid(&xlsx, "Patterns across services");
     let flat: Vec<&str> = sheet.iter().flatten().map(String::as_str).collect();
-    assert!(flat.iter().any(|c| c.starts_with("Violated 1")), "{flat:?}");
+    assert!(flat.contains(&"1 problem"), "{flat:?}");
     assert!(flat.contains(&"Clean"), "{flat:?}");
     assert!(
         !sheet[0].iter().any(|h| h.eq_ignore_ascii_case("severity")),

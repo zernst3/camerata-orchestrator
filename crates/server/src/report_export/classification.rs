@@ -1385,16 +1385,20 @@ pub(crate) fn apply_zero_finding_evidence_check(report: &mut crate::onboard::Sca
 
 /// For a rule listed under "What's healthy" in a project of several repos: the repos where it
 /// was checked and is clean, and the repos it does not apply to. The list says where the rule
-/// is healthy; a repo it never applied to is not one of them.
+/// is healthy; a repo it never applied to is not one of them. Read the way the patterns section
+/// reads a cell: a problem the reviewer ruled out is not open.
 pub(crate) fn healthy_repos_for(
     report: &crate::onboard::ScanReport,
     rule_id: &str,
+    dispositions: &std::collections::HashMap<String, super::DispositionWire>,
 ) -> (Vec<String>, Vec<String>) {
     use crate::scan_ledger::CellState;
     let mut clean = Vec::new();
     let mut not_applicable = Vec::new();
     for repo in &report.repos {
-        match crate::onboard::patterns_matrix::cell_for(report, rule_id, repo) {
+        match crate::onboard::patterns_matrix::cell_with(report, rule_id, repo, &|f| {
+            super::is_ruled_out(dispositions, f)
+        }) {
             CellState::Clean => clean.push(repo.clone()),
             CellState::NotApplicable { .. } => not_applicable.push(repo.clone()),
             CellState::Violated { .. } | CellState::NotReviewed { .. } => {}

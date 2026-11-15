@@ -1663,6 +1663,7 @@ fn build_coverage_rows(
     report: &ScanReport,
     rows: &[FindingRow],
     corpus: Option<&camerata_rules::RuleSet>,
+    dispositions: &HashMap<String, crate::report_export::DispositionWire>,
 ) -> Vec<CoverageRow> {
     report
         .provenance
@@ -1705,7 +1706,9 @@ fn build_coverage_rows(
                     .map(|repo| CoverageRepoCell {
                         repo: repo.clone(),
                         result: crate::report_export::pattern_cell_label(
-                            &crate::onboard::patterns_matrix::cell_for(report, rid, repo),
+                            &crate::onboard::patterns_matrix::cell_with(report, rid, repo, &|f| {
+                                crate::report_export::is_ruled_out(dispositions, f)
+                            }),
                         ),
                     })
                     .collect()
@@ -1810,12 +1813,12 @@ fn held_reasons(f: &crate::onboard::Finding) -> String {
     reasons.join("; ")
 }
 
-/// A grid cell of the patterns sheet: "Violated 3", "Clean", "Not applicable (reason)" or "Not
+/// A grid cell of the patterns sheet: "3 problems", "Clean", "Not applicable (reason)" or "Not
 /// reviewed (reason)".
 fn sheet_cell_label(state: &crate::scan_ledger::CellState) -> String {
     use crate::scan_ledger::CellState;
     match state {
-        CellState::Violated { sites } => format!("Violated {sites}"),
+        CellState::Violated { sites } => crate::xlsx_export::vocabulary::problems_count(*sites),
         CellState::Clean => "Clean".to_string(),
         CellState::NotApplicable { reason } => format!("Not applicable ({reason})"),
         CellState::NotReviewed { reason } => format!("Not reviewed ({reason})"),
@@ -1936,7 +1939,7 @@ pub fn build_workbook(
         reviewed, &rows, &dep_rows, corpus, false,
     ));
     let sorted_deps = sheets::sorted_deps(&dep_rows);
-    let coverage_rows = build_coverage_rows(report, &rows, corpus);
+    let coverage_rows = build_coverage_rows(report, &rows, corpus, reviewed.dispositions());
     let rules_applied_rows = build_rules_applied_rows(report, corpus);
     let tool_coverage_notes =
         crate::report_export::tool_coverage_disclosures_for(&report.coverage_notes, &report.ledger);
@@ -1954,7 +1957,11 @@ pub fn build_workbook(
         .map(|n| n.message.clone())
         .collect();
     let gaps = crate::report_export::coverage_gaps::coverage_gaps(report);
-    let patterns_json = crate::report_export::patterns_across_services_json(report, corpus);
+    let patterns_json = crate::report_export::patterns_across_services_json(
+        report,
+        corpus,
+        reviewed.dispositions(),
+    );
     let engine_discards = if opts.internal {
         sheets::engine_discards(&report.discarded)
     } else {
@@ -2297,7 +2304,7 @@ pub fn build_json_exports(
     let deviation_groups = build_deviation_groups(&findings_rows, corpus);
     let convention_rows = build_convention_rows(&convention_sheet_rows, corpus);
     let not_assessed_rows = build_not_assessed_rows(&coverage_kind_rows, corpus);
-    let coverage_rows = build_coverage_rows(report, &rows, corpus);
+    let coverage_rows = build_coverage_rows(report, &rows, corpus, reviewed.dispositions());
     let rules_applied_rows = build_rules_applied_rows(report, corpus);
 
     // One (path, bytes) per table; pretty-printed for a diffable, human-skimmable file.
@@ -5492,7 +5499,7 @@ mod tests {
             None,
             &HashMap::new(),
         );
-        let coverage = build_coverage_rows(&report, &rows, None);
+        let coverage = build_coverage_rows(&report, &rows, None, &HashMap::new());
         let absorbed_rule = coverage
             .iter()
             .find(|c| c.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
@@ -5531,7 +5538,7 @@ mod tests {
             None,
             &HashMap::new(),
         );
-        let coverage = build_coverage_rows(&report, &rows, None);
+        let coverage = build_coverage_rows(&report, &rows, None, &HashMap::new());
         let demoted = coverage
             .iter()
             .find(|c| c.rule_id == "ARCH-NO-DIRECT-DB-1")

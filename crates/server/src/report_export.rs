@@ -1490,7 +1490,7 @@ pub fn build_report_json(
         .filter(|rid| !rule_ids_with_any_finding.contains(rid.as_str()))
         .map(|rid| {
             let (clean_in, not_applicable_in) = if has_rule_ledger_data && report.repos.len() > 1 {
-                healthy_repos_for(report, rid)
+                healthy_repos_for(report, rid, dispositions)
             } else {
                 (Vec::new(), Vec::new())
             };
@@ -2092,7 +2092,7 @@ pub fn build_report_json(
         priority_grid,
         curated_findings,
         held_for_review_findings,
-        patterns_across_services: patterns_across_services_json(report, corpus),
+        patterns_across_services: patterns_across_services_json(report, corpus, dispositions),
         whats_healthy: WhatsHealthyJson {
             rules: healthy_rules,
             further_clean_count,
