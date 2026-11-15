@@ -2233,7 +2233,7 @@ async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
-    let run_controls = req.run_controls_for(&state);
+    let mut run_controls = req.run_controls_for(&state);
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -2368,6 +2368,22 @@ async fn onboard_audit(
     // which this function constructs fresh either way (real or synthesized), so there is
     // no stale/partially-mutated state a caller could see.
     use futures::FutureExt;
+    // The two-step quote (owner ruling R-9): what the pre-flight would price, so the run quotes
+    // again once each repo's scan stage has run. The line goes to the log and the ledger.
+    if run_ai_review {
+        run_controls.quote_plan = crate::quote::plan_for_run(
+            &sources,
+            &selected,
+            corpus.as_ref(),
+            model.as_deref(),
+            calibration_model.as_deref(),
+            &run_controls,
+            &backend_resolution,
+            mode == crate::ai_audit::ScanMode::Batch,
+            crate::quote::QuoteEcho::Stderr,
+        )
+        .await;
+    }
     // The review tree's stage 2 reads the final report with the run's own controls, and never
     // runs where the compliance gate blocked the AI review.
     let review_controls = run_controls.clone();
@@ -2909,6 +2925,22 @@ pub(crate) async fn start_audit_job(
                     }
                 },
             };
+            // The two-step quote (owner ruling R-9): what the pre-flight would price, so the run
+            // quotes again once each repo's scan stage has run; the run view shows the line.
+            if run_ai_review {
+                run_controls.quote_plan = crate::quote::plan_for_run(
+                    &sources,
+                    &selected,
+                    corpus.as_ref(),
+                    model.as_deref(),
+                    calibration_model.as_deref(),
+                    &run_controls,
+                    &backend_resolution,
+                    mode == crate::ai_audit::ScanMode::Batch,
+                    crate::quote::QuoteEcho::Stderr,
+                )
+                .await;
+            }
             // The run's own delimiter seed, carried with the audit future below (never global).
             let token_seed = run_store.as_ref().map(|s| s.nonce_seed());
             let sessions = crate::llm::SessionSink::new();

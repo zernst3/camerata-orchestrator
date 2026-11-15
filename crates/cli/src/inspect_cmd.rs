@@ -1057,29 +1057,18 @@ pub async fn run_inspect_pipeline_with(
         preflight_text = Some(text);
         // The resumed run quotes again once a scan stage has run, for the work that remains (owner
         // ruling R-9): it needs the plan the pre-flight is made from, though it prints none.
-        if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
-            let facts =
-                camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
-                    .await;
-            let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
-            controls.quote_plan = camerata_server::quote::QuotePlan::new(
-                &camerata_server::quote::resolve_quote_models(
-                    model,
-                    calibration_model,
-                    &controls,
-                    &ids,
-                ),
-                camerata_server::quote::run_inputs(&facts),
-                args.backend,
-                batch,
-                controls.efficiency.terse_output,
-                controls.consensus,
-            )
-            .map(|plan| camerata_server::quote::QuotePlan {
-                echo: camerata_server::quote::QuoteEcho::Stdout,
-                ..plan
-            });
-        }
+        controls.quote_plan = camerata_server::quote::plan_for_run(
+            &sources,
+            &selected,
+            corpus.as_ref(),
+            model,
+            calibration_model,
+            &controls,
+            &backend_resolution,
+            batch,
+            camerata_server::quote::QuoteEcho::Stdout,
+        )
+        .await;
     } else if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
         let facts =
             camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())

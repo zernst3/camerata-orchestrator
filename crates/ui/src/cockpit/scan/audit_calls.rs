@@ -569,6 +569,10 @@ pub(in crate::cockpit) struct JobStateView {
     /// look it up in the Anthropic console. `None` for parallel/sequential mode jobs.
     #[serde(default)]
     pub batch_id: Option<String>,
+    /// The latest re-quote after a repo's scan stage, worded by the server (owner ruling R-9).
+    /// `None` until a scan stage has finished on a run the server could plan.
+    #[serde(default)]
+    pub requote: Option<String>,
 }
 
 /// Full envelope for `GET /api/onboard/audit/job/:id` — the server wraps
@@ -769,6 +773,8 @@ pub(in crate::cockpit) async fn poll_job(
     // Set on `failed` (with the server's reason) or when the job vanishes mid-poll; cleared
     // by the caller when a fresh scan starts. `None` renders nothing (`ScanJobFailedBanner`).
     mut job_failed_message: Signal<Option<String>>,
+    // The re-quote after the scan stage, as the server words it; cleared when the job ends.
+    mut job_requote: Signal<Option<String>>,
     // Captured by the CALLER in its component render scope (never resolved from context in
     // here) — see the BOMBE-SILENT-MISS note above.
     loading_count: crate::loading::LoadingCount,
@@ -794,11 +800,15 @@ pub(in crate::cockpit) async fn poll_job(
                 if js.job.deterministic.total > 0 {
                     det_progress.set(Some(js.job.deterministic.clone()));
                 }
+                if js.job.requote.is_some() {
+                    job_requote.set(js.job.requote.clone());
+                }
                 match js.job.status.as_str() {
                     "done" => {
                         audit.set(js.job.report);
                         auditing.set(false);
                         job_progress.set(None);
+                        job_requote.set(None);
                         det_progress.set(None);
                         active_audit_job.set(None);
                         break;
@@ -809,6 +819,7 @@ pub(in crate::cockpit) async fn poll_job(
                         })));
                         auditing.set(false);
                         job_progress.set(None);
+                        job_requote.set(None);
                         det_progress.set(None);
                         active_audit_job.set(None);
                         break;
@@ -816,6 +827,7 @@ pub(in crate::cockpit) async fn poll_job(
                     "cancelled" => {
                         auditing.set(false);
                         job_progress.set(None);
+                        job_requote.set(None);
                         det_progress.set(None);
                         active_audit_job.set(None);
                         break;
@@ -833,6 +845,7 @@ pub(in crate::cockpit) async fn poll_job(
                     ));
                     auditing.set(false);
                     job_progress.set(None);
+                    job_requote.set(None);
                     det_progress.set(None);
                     active_audit_job.set(None);
                     break;

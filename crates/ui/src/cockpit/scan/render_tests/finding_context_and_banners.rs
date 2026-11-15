@@ -885,6 +885,63 @@ fn progress_never_counts_a_refused_pass_as_done() {
     assert_eq!((job.done, job.not_run), (3, 3));
 }
 
+// ── Tier-1 render: the re-quote after the scan stage (owner ruling R-9) ──────────────────
+// The run view shows the server's re-quote under the progress bar, verbatim, once a scan stage
+// has finished; nothing before that.
+
+const REQUOTE: &str = "re-quote after the scan stage: about $6.84, at most $8.10 (acme/api: 151 \
+    sites in 40 files, 3.77 a file where the pre-flight assumed 2.78; the pre-flight said about \
+    $5.33, at most $6.40). The expected cost is above the spend limit of $5.00: the run stops at \
+    the limit and says what was not run.";
+
+fn job_requote_harness() -> Element {
+    rsx! {
+        JobRequoteLine { line: Some(REQUOTE.to_string()) }
+    }
+}
+
+fn job_requote_none_harness() -> Element {
+    rsx! {
+        JobRequoteLine { line: None }
+    }
+}
+
+#[test]
+fn the_run_view_shows_the_requote_after_the_scan_stage() {
+    let job: JobStateView = serde_json::from_value(serde_json::json!({
+        "status": "running", "done": 3, "total": 6, "requote": REQUOTE
+    }))
+    .unwrap();
+    assert_eq!(
+        job.requote.as_deref(),
+        Some(REQUOTE),
+        "the polled job carries it"
+    );
+    let mut vdom = VirtualDom::new(job_requote_harness);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+    assert!(html.contains("job-progress-requote"), "html=\n{html}");
+    assert!(
+        html.contains("re-quote after the scan stage: about $6.84, at most $8.10"),
+        "html=\n{html}"
+    );
+    assert!(
+        html.contains("above the spend limit of $5.00"),
+        "html=\n{html}"
+    );
+
+    let mut none = VirtualDom::new(job_requote_none_harness);
+    none.rebuild_in_place();
+    let html = dioxus_ssr::render(&none);
+    assert!(
+        !html.contains("job-progress-requote"),
+        "nothing before a re-quote; html=\n{html}"
+    );
+    let before: JobStateView =
+        serde_json::from_value(serde_json::json!({ "status": "running" })).unwrap();
+    assert!(before.requote.is_none());
+}
+
 // ── Tier-1 render: ScanJobFailedBanner (background-job silent-death fix) ───────────────
 // Regression for "the scan silently dies with no error": a background job that ends
 // `failed` (or that the poller loses contact with) must render a loud, visible banner —

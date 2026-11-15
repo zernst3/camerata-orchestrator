@@ -248,6 +248,40 @@ impl QuotePlan {
     }
 }
 
+/// The plan of a run whose caller made no pre-flight of its own (the cockpit, and a resumed
+/// command-line run): the repos read the way the scan reads them, the models resolved the way the
+/// stages resolve them, echoed to `echo`. `None` where the compliance gate blocked the AI review
+/// (no model call is made) or the scan or calibration model has no list price.
+#[allow(clippy::too_many_arguments)]
+pub async fn plan_for_run(
+    sources: &[(String, std::path::PathBuf)],
+    selected: &[crate::onboard::SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    controls: &crate::cost_cap::RunControls,
+    resolution: &crate::llm::BackendResolution,
+    batch: bool,
+    echo: QuoteEcho,
+) -> Option<QuotePlan> {
+    let backend = match resolution {
+        crate::llm::BackendResolution::Api => ProjectBackend::Api,
+        crate::llm::BackendResolution::Cli => ProjectBackend::Cli,
+        crate::llm::BackendResolution::Blocked { .. } => return None,
+    };
+    let facts = crate::preflight::gather_scan_facts(sources, selected, corpus).await;
+    let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+    QuotePlan::new(
+        &resolve_quote_models(model, calibration_model, controls, &ids),
+        run_inputs(&facts),
+        backend,
+        batch,
+        controls.efficiency.terse_output,
+        controls.consensus,
+    )
+    .map(|plan| QuotePlan { echo, ..plan })
+}
+
 /// The facts of the moment one repo's scan stage finished.
 #[derive(Debug, Clone, Copy)]
 pub struct RequotePoint<'a> {

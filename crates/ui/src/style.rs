@@ -2951,6 +2951,11 @@ html, body {
   font-size: 12px; font-weight: 600; color: var(--ink-soft);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap;
 }
+/* The re-quote after the scan stage (R-9): one wrapping line under the progress bar. */
+.job-progress-requote {
+  margin: 6px 0 0; font-size: 12px; color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: normal;
+}
 
 /* Scan-type selector (Part C): the two "what to scan" checkboxes. */
 .scan-type-selector { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
