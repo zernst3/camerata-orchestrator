@@ -46,6 +46,7 @@ impl LlmPort for StubCompleter {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: self.text.clone(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -157,6 +158,7 @@ impl LlmPort for CapturingCompleter {
         self.seen.lock().unwrap().push(req);
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -459,6 +461,7 @@ impl RefusingCompleter {
         }
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[]}"#.to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -621,6 +624,7 @@ fn a_refused_batch_item_is_reported_as_a_refusal_not_as_missing() {
         "c0-b0".to_string(),
         LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[]}"#.to_string(),
             model: "m".to_string(),
             backend: "api/batch".to_string(),
@@ -680,6 +684,7 @@ impl NeedsFileThenRefuses {
         }
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[],"needs_files":["src/b.rs"]}"#.to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),

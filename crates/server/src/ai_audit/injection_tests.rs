@@ -31,6 +31,7 @@ impl LlmPort for Recorder {
         self.seen.lock().expect("lock").push(req);
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: reply,
             model: "stub".to_string(),
             backend: "stub".to_string(),

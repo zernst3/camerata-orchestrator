@@ -80,6 +80,7 @@ impl LlmPort for Script {
         }
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: self.reply.clone(),
             model: req.model.clone(),
             backend: "stub".to_string(),

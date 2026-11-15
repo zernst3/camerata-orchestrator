@@ -11,6 +11,7 @@ use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 fn response(text: &str, cost: f64) -> LlmResponse {
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -1656,6 +1657,7 @@ fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: boo
                 or_cache_discount: None,
                 truncated,
                 reported_model: None,
+                cli_cost_usd: None,
             }),
             error: None,
             class: None,

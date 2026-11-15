@@ -133,6 +133,7 @@ impl StageItems for Scripted {
 fn reply_for(prompt: &str) -> LlmResponse {
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text: format!("answer to {prompt}"),
         model: MODEL.to_string(),
         backend: "api".to_string(),

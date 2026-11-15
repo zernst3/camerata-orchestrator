@@ -106,6 +106,10 @@ pub struct StoredResponse {
     /// `LlmResponse::reported_model`).
     #[serde(default)]
     pub reported_model: Option<String>,
+    /// The dollar figure the CLI itself reported, beside the modeled `cost_usd` (see
+    /// `LlmResponse::cli_cost_usd`).
+    #[serde(default)]
+    pub cli_cost_usd: Option<f64>,
 }
 
 impl StoredResponse {
@@ -122,6 +126,7 @@ impl StoredResponse {
             or_cache_discount: r.or_cache_discount,
             truncated: r.truncated,
             reported_model: r.reported_model.clone(),
+            cli_cost_usd: r.cli_cost_usd,
         }
     }
 
@@ -131,6 +136,8 @@ impl StoredResponse {
     fn replayed(&self) -> LlmResponse {
         LlmResponse {
             reported_model: self.reported_model.clone(),
+            // Replayed at no cost, so there is no CLI figure to compare either.
+            cli_cost_usd: None,
             text: self.text.clone(),
             model: self.model.clone(),
             backend: self.backend.clone(),

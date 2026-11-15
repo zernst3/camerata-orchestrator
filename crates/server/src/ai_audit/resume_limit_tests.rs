@@ -55,6 +55,7 @@ impl LlmPort for Counting {
         };
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[],"real":"yes","reason":"ok"}"#.to_string(),
             model: req.model.clone(),
             backend: "api".to_string(),
@@ -390,6 +391,7 @@ async fn a_calibration_checkpoint_replays_past_the_limit_and_starts_its_stage() 
 fn reply(cost: f64) -> LlmResponse {
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text: String::new(),
         model: "m".into(),
         backend: "api".into(),
@@ -504,6 +506,7 @@ mod batches {
                         or_cache_discount: None,
                         truncated: false,
                         reported_model: None,
+                        cli_cost_usd: None,
                     }),
                     error: None,
                     billed: None,

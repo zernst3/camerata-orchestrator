@@ -391,6 +391,7 @@ impl LlmPort for SequencedCompleter {
         let text = super::reply_schemas::check::address_by_id(&req.prompt, &text);
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -1174,6 +1175,7 @@ impl LlmPort for AnswersOnceThenFails {
         );
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -1546,6 +1548,7 @@ impl LlmPort for CountingFixCompleter {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: super::reply_schemas::check::address_by_id(&req.prompt, &self.canned),
             model: "stub".to_string(),
             backend: "stub".to_string(),

@@ -17,6 +17,7 @@ const MALFORMED: &str = "I could not produce JSON for this, sorry.";
 fn response(text: &str) -> LlmResponse {
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
