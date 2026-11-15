@@ -1,4 +1,4 @@
-# Camerata — end-to-end user guide
+# Camerata: end-to-end user guide
 
 This is the "I have a repo new to Camerata — where do I start, and how do I take it all
 the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat bubble) answers from. Keep it accurate to what's actually shipped — an
@@ -110,12 +110,13 @@ setting**, not a global switch. Set it per project in that project's **Settings*
 
 | Option | How it works | API key needed? |
 |--------|-------------|-----------------|
-| **CLI** (default) | Spawns the `claude` CLI using your logged-in Claude Code subscription | No |
+| **CLI** (development only) | Spawns the `claude` CLI using the operator's logged-in Claude Code subscription | No |
 | **API** | Calls the Anthropic Messages API directly | Yes |
 
-CLI is the zero-setup default: a brand-new project's scan just works against your subscription,
-no key required. Switch a project to **API** for client work, since it is metered, single-party,
-and nameable in a contract, which a subscription running on your own machine is not.
+A new project starts on **API** as a client engagement, and a client engagement refuses **CLI**.
+The operator picks **CLI** only for their own development, after turning off **Client engagement**.
+API is the backend for client work because it is metered, single-party and nameable in a contract,
+which a subscription running on the operator's own machine is not.
 
 If a project is set to **API** and no Anthropic API key is configured, AI steps on that project
 (scan, decomposition, clarification questions, story and design authoring, diagrams, mockups,
@@ -1806,10 +1807,10 @@ Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a proj
 Anthropic API, is the default and uses the Anthropic key you saved in the app (Settings), with the
 `ANTHROPIC_API_KEY` environment variable only as the fallback when no key is saved there; with no key
 anywhere the run fails and tells you to add one, it never falls back to the Claude Code subscription; `--backend cli` is an explicit choice for
-internal benchmark runs, and the export's `manifest.json` and `README.txt` record the backend and provider,
-for example `api` / `anthropic`), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
-arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model` / `--fix-model` / `--clone-judge-model` (the only
-way to choose a model on the command line; with none given, the built-in default, Sonnet 5.5, runs), `--full` to ignore
+internal benchmark runs, and the export's `manifest.json` records the backend and provider,
+for example `api` / `anthropic`; a client package's `README.txt` carries no model lines), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
+arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model` / `--group-review-model` / `--fix-model` / `--clone-judge-model` (with `--group-review-model`, the only
+ways to choose a model on the command line; with none given, the built-in defaults run, listed under "Where a model comes from" in the model settings section), `--full` to ignore
 the incremental-scan cache and rescan every file, `--verbose` to print the per-rule coverage
 ledger rather than the concise summary, `--max-cost-usd` to cap the spend, and `--efficiency` to
 switch a saving off (both below).
@@ -1829,9 +1830,9 @@ later stage starts. Calls already started finish, so a run can end about one pas
 can include one retry of a reply that was cut off). When the limit stops a run:
 
 - the final report says so, and lists the passes that were NOT RUN (also shown under FAILED PASSES);
-- the export is still written but is marked incomplete: its report lists the passes that did not run,
-  `manifest.json` says `"cost_cap_reached": true` and `README.txt` says so in one line. No dollar
-  figure is put in the export;
+- a client export is refused and the run stays resumable; `--internal` still writes one, marked
+  INTERNAL INCOMPLETE, and its `manifest.json` says `"cost_cap_reached": true`. No dollar figure is
+  put in the export;
 - the command exits with status 4, so a script cannot mistake it for a complete inspection.
 
 A limit needs every model the run uses to have a known price. If the scan, calibration, fix, deep-tier
@@ -1871,9 +1872,9 @@ generated and vendored files.
 
 ### The three artifacts have three different jobs
 
-- **The PDF is the summary.** It is about 15 pages, written to be read by a person who will not open
+- **The PDF is the summary.** It is a summary of 20 pages at most (a test pins the cap), written to be read by a person who will not open
   a spreadsheet. It deliberately does not carry every row, and that is not a gap.
-- **The Excel workbook is the detail surface.** Every row that exists lands on exactly one sheet. A
+- **The Excel workbook is the detail surface.** Every problem is shown once on every sheet except All source rows. A
   row missing here IS a problem.
 - **`findings.json` is the data.** It carries the whole set, every kind included, for anything
   programmatic downstream.
@@ -1918,7 +1919,7 @@ checked against two public feeds: the CISA Known Exploited Vulnerabilities (KEV)
 FIRST.org EPSS exploit-probability scores. Matching is by CVE, including a CVE that a GitHub or
 RustSec advisory lists as an alias. A dependency on the KEV catalog is labelled "Known exploited" and
 raised to critical severity; a dependency with an EPSS score shows its probability of exploitation
-in the next 30 days and its percentile. The export's `README.txt` and `manifest.json` state how
+in the next 30 days and its percentile. The export's `manifest.json` states how
 current each source was ("Vulnerability data (CISA KEV) as of 2026-10-27", likewise for EPSS and
 OSV). When a feed cannot be reached, the scan still completes, a cached copy up to 7 days old is
 used and named as cached, and with no usable copy the line says plainly that the feed was not
@@ -1952,11 +1953,11 @@ is disclosed in your artifacts rather than only in Camerata's internal log.
 
 ### Check the scan before you pay to grade it
 
-A scan costs real model tokens. `camerata inspect` writes a coverage ledger to
-`<repo>/.camerata-scan-ledger.json`, and a second command turns that ledger into a verdict:
+A scan costs real model tokens. `camerata inspect` writes a coverage ledger to the operator's state
+folder and prints its path, and a second command turns that ledger into a verdict:
 
 ```
-cargo run -p camerata -- integrity-gate --ledger <PATH>/.camerata-scan-ledger.json
+cargo run -p camerata -- integrity-gate --ledger <LEDGER PATH THE RUN PRINTED>
 ```
 
 | Exit code | What it means | What to do |
@@ -2498,16 +2499,17 @@ does and where it runs:
 | Escalation | Translating escalation decisions into prose |
 | Clarification | Generating structured clarification questions |
 
-All steps default to `claude-sonnet-5-5` (Sonnet 5.5) when a project is created. A change to one project never
+Every step defaults to Sonnet 5.5 when a project is created, except calibration (Opus 5.5) and the group reviewer (Fable 5.1). A change to one project never
 touches another project's step models.
 
 For steps where you also pick a model per run (audit, calibration, research chat), your per-run
 choice wins over the project default for that run only.
 
-**Where a model comes from.** Models are chosen per project in the app (the settings above), and on
-the command line only by flags (`--model`, `--calibration-model`, `--fix-model`, `--clone-judge-model`). When nothing is
-chosen, the built-in default is Sonnet 5.5 (`claude-sonnet-5-5`), the cheap fix and clone-judge
-stages default to Haiku 5.5 and the fleet's strongest band defaults to Opus 5.5 (`claude-opus-5-5`). Camerata never reads a model from the environment or from a `.env`
+**Where a model comes from.** A model comes from the project's settings in the app or from `--model`,
+`--calibration-model`, `--group-review-model`, `--fix-model` and `--clone-judge-model` on the command
+line and from nowhere else (no environment variable picks one). The built-in defaults are Claude
+Sonnet 5.5 for the scan, Claude Opus 5.5 for calibration, Claude Fable 5.1 for the group reviewer and
+Claude Haiku 5.5 for the fix wording and the duplicate-code judge. Camerata never reads a model from the environment or from a `.env`
 file, so a stray line in a local file cannot change which model a run uses or what it costs. A
 project saved before a model setting existed opens with these built-in defaults. In the app the
 duplicate-code checker (the clone judge) runs on the project's fast model band.
