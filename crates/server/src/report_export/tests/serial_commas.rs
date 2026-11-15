@@ -88,6 +88,79 @@ fn serial_commas(text: &str) -> Vec<String> {
     found
 }
 
+/// The PDF speaks of the client in the third person: no "you" or "your" in the prose the report
+/// writes for it, outside a sheet name the vocabulary owns ("Your conventions").
+#[test]
+fn authored_pdf_prose_has_no_second_person() {
+    let sources: [(&str, &str, bool); 12] = [
+        (
+            "report_export.rs",
+            include_str!("../../report_export.rs"),
+            false,
+        ),
+        (
+            "citations_fixes.rs",
+            include_str!("../citations_fixes.rs"),
+            false,
+        ),
+        (
+            "classification.rs",
+            include_str!("../classification.rs"),
+            false,
+        ),
+        ("marking.rs", include_str!("../marking.rs"), false),
+        ("json_types.rs", include_str!("../json_types.rs"), false),
+        (
+            "coverage_gaps.rs",
+            include_str!("../coverage_gaps.rs"),
+            false,
+        ),
+        ("fix_text.rs", include_str!("../fix_text.rs"), false),
+        ("row_facts.rs", include_str!("../row_facts.rs"), false),
+        ("tree_view.rs", include_str!("../tree_view.rs"), false),
+        ("prose_checks.rs", include_str!("../prose_checks.rs"), false),
+        ("scan_tools.rs", include_str!("../../scan_tools.rs"), false),
+        (
+            "audit_report.typ",
+            include_str!("../../../templates/audit_report.typ"),
+            true,
+        ),
+    ];
+    let mut offenders = Vec::new();
+    for (name, source, is_template) in sources {
+        for prose in authored_prose(source, is_template) {
+            // The workbook's "Why it is waiting" column speaks in the product's voice ("before
+            // you act"); it is not PDF prose.
+            if prose.contains("a reviewer must rule on it before you act") {
+                continue;
+            }
+            let prose = prose.replace(crate::xlsx_export::vocabulary::YOUR_CONVENTIONS, " ");
+            for word in prose.split(|c: char| !c.is_alphanumeric() && c != '\'') {
+                if ["you", "your", "yours", "yourself", "you'll", "you're"]
+                    .contains(&word.to_lowercase().as_str())
+                {
+                    let at = prose.find(word).unwrap_or(0);
+                    let from = prose[..at]
+                        .char_indices()
+                        .rev()
+                        .nth(40)
+                        .map_or(0, |(i, _)| i);
+                    offenders.push(format!(
+                        "{name}: ...{}",
+                        &prose[from..prose.len().min(at + 40)]
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "second person in the prose written for the PDF (write about the client in the third \
+         person):\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn authored_prose_has_no_serial_comma() {
     let sources: [(&str, &str, bool); 19] = [

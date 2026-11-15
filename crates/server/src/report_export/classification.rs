@@ -1358,7 +1358,7 @@ pub(crate) fn apply_zero_finding_evidence_check(report: &mut crate::onboard::Sca
             detail: format!(
                 "This rule found no violation, but the evidence recorded for it describes a \
                  possible problem. The evidence reads \"{evidence}\". A reviewer must decide \
-                 whether it is a problem before you act on it."
+                 whether it is a problem before anyone acts on it."
             ),
             needs_review: true,
             confidence: Some("needs-review".to_string()),
