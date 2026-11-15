@@ -1297,3 +1297,67 @@ fn a_real_unauthenticated_bump_is_still_caught_for_a_security_rule_a_category_an
     );
     assert_eq!(apply_severity_calibration_rule(f).severity, "critical");
 }
+
+// ── A1 item 2: test-only code does not ship ───────────────────────────────
+
+/// A row whose place is a test file takes the test-scope severity (it does not ship) and is
+/// marked in-test, so it neither escalates ahead of production code nor reads as a live
+/// exposure. The same row in a production path keeps its severity.
+#[test]
+fn a1_test_file_row_is_capped_to_low_and_marked_in_test_but_production_keeps_severity() {
+    let tls = "TLS certificate verification is disabled for the test HTTPS client.";
+    let mut in_tests = finding_with_detail("AI-TLS-VERIFICATION-DISABLED", "critical", tls);
+    in_tests.path = "tests/integration.test.ts".to_string();
+    let out = apply_severity_ceiling_rule(in_tests);
+    assert_eq!(out.severity, "low", "test-only code does not ship");
+    assert!(out.in_test, "the row must be marked as test scope");
+    assert!(
+        out.needs_review,
+        "a capped test row is held for a reviewer, never buried"
+    );
+    assert!(
+        out.calibration_rationale
+            .as_deref()
+            .is_some_and(|r| r.contains("test")),
+        "the reason is recorded: {:?}",
+        out.calibration_rationale
+    );
+
+    let mut in_prod = finding_with_detail("AI-TLS-VERIFICATION-DISABLED", "critical", tls);
+    in_prod.path = "src/http/client.ts".to_string();
+    let out = apply_severity_ceiling_rule(in_prod);
+    assert_eq!(out.severity, "critical");
+    assert!(!out.in_test);
+}
+
+/// A real committed secret in a test file still matters: the secret class keeps its severity
+/// and is not marked as test scope.
+#[test]
+fn a1_secret_in_a_test_file_keeps_its_severity() {
+    let mut secret = finding_with_detail(
+        "AI-HARDCODED-API-KEY",
+        "high",
+        "A live API key is committed in the test setup.",
+    );
+    secret.path = "tests/setup.ts".to_string();
+    let out = apply_severity_ceiling_rule(secret);
+    assert_eq!(out.severity, "high");
+    assert!(!out.in_test);
+}
+
+/// The secret exemption covers every shape of credential rule id, not only the obvious words:
+/// a vendor token rule, a service-key rule and an invented id naming a key all keep severity.
+#[test]
+fn a1_secret_shaped_rule_ids_in_a_test_file_keep_their_severity() {
+    for rule in [
+        "SEC-NO-VENDOR-TOKEN-1",
+        "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+        "AI-STRIPE-KEY-EXPOSED",
+    ] {
+        let mut secret = finding_with_detail(rule, "high", "A live credential is committed.");
+        secret.path = "tests/setup.ts".to_string();
+        let out = apply_severity_ceiling_rule(secret);
+        assert_eq!(out.severity, "high", "{rule} keeps its severity");
+        assert!(!out.in_test, "{rule} is not marked as test scope");
+    }
+}

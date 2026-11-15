@@ -525,8 +525,8 @@ pub(crate) fn also_matches_titles(
 /// exists to catch, so it is never dropped, never silently demoted into an ordinary
 /// severity-capped appendix row, and (C5-7) never squashed into `informational` at a
 /// severity that invariant was never meant to carry — see [`effective_bucket`]'s doc comment
-/// for the held-vs-informational split this feeds into (held at high/critical, informational
-/// at medium/low/info, both still fully visible and both still excluded from
+/// for the held-vs-informational split this feeds into (held at medium and above, informational
+/// at low/info, both still fully visible and both still excluded from
 /// `curated_findings`).
 pub(crate) fn is_uncited_ai_finding(
     finding: &Finding,

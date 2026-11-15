@@ -19,7 +19,7 @@ fn a_rule_with_no_title_is_named_in_words_never_by_its_id() {
 
 #[test]
 fn a_held_row_keeps_a_plain_headline_and_says_why_it_is_waiting_in_its_own_field() {
-    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "low");
     let report = report_with(vec![f], vec![]);
     let json = build_report_json(
         &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),

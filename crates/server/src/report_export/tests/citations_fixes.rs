@@ -1848,7 +1848,7 @@ fn citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory() {
 /// headline, counted in the reconciling totals.
 #[test]
 fn citation_gate_holds_an_unclassifiable_ai_finding_out_of_curated_as_uncited() {
-    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+    let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "low");
     let report = report_with(vec![f], vec![]);
     let json = build_report_json(
         &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
@@ -1942,6 +1942,69 @@ fn citation_gate_routes_a_critical_uncited_ai_finding_to_held_not_informational(
     // The severity histogram (cover stats) still honestly reflects it — over-tell, not
     // hidden from the reader entirely, just excluded from the curated action tiers.
     assert_eq!(json.cover.stats.critical, 1);
+}
+
+/// A1 item 3: information only means info severity or a convention. A medium uncited AI row
+/// (a login endpoint with no throttling, say) is a real finding the reader must see called out
+/// as held, so it routes to `held` with its severity untouched, never to the informational
+/// appendix. A low row keeps the informational route.
+#[test]
+fn a1_medium_uncited_ai_row_routes_to_held_never_informational() {
+    let f = finding("AI-AUTH-RATE-LIMIT", "src/routes/auth.js", 33, "medium");
+    let report = report_with(vec![f], vec![]);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    assert!(
+        json.matrix.informational.is_empty(),
+        "a medium row must never sit in the informational group: {:?}",
+        json.matrix.informational
+    );
+    assert_eq!(json.matrix.held.len(), 1, "{:?}", json.matrix.held);
+    assert_eq!(json.matrix.held[0].severity, "medium");
+    assert_eq!(json.matrix.held[0].rule_id, "AI-AUTH-RATE-LIMIT");
+    assert!(
+        json.matrix.held[0].why_waiting.is_some(),
+        "a held row says why it is waiting"
+    );
+    assert!(
+        json.curated_findings.is_empty(),
+        "{:?}",
+        json.curated_findings
+    );
+    assert_eq!(json.executive_summary.held_for_review, 1);
+}
+
+/// A capped test-path row is held, never buried: an uncited AI row at critical on a tests/
+/// path, passed through the severity ceiling, lands in `held` at low with nothing in the
+/// informational group or the plan.
+#[test]
+fn a1_capped_test_path_ai_row_lands_in_held_at_low() {
+    let mut f = finding(
+        "AI-TLS-VERIFICATION-DISABLED",
+        "tests/tls_client.test.ts",
+        9,
+        "critical",
+    );
+    f.detail = "TLS certificate verification is disabled for the test HTTPS client.".to_string();
+    let f = crate::ai_audit::apply_severity_ceiling_rule(f);
+    assert_eq!(f.severity, "low");
+    let report = report_with(vec![f], vec![]);
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    assert_eq!(json.matrix.held.len(), 1, "{:?}", json.matrix.held);
+    assert_eq!(json.matrix.held[0].severity, "low");
+    assert!(
+        json.matrix.informational.is_empty(),
+        "{:?}",
+        json.matrix.informational
+    );
+    assert!(json.matrix.plan.is_empty(), "{:?}", json.matrix.plan);
 }
 
 /// C5-7: provenance/citation are ALWAYS the tier/citation of the row's OWN rule id, never
@@ -2273,7 +2336,7 @@ async fn zero_curated_findings_carry_a_model_inferred_or_empty_citation() {
         "CORS reflects the request Origin while Access-Control-Allow-Credentials is true."
             .to_string();
 
-    let unmapped = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "medium");
+    let unmapped = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "low");
 
     let report = report_with(
         vec![rls, xss, redirect, token, grammar, cors, unmapped],

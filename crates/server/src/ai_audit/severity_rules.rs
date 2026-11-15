@@ -653,7 +653,7 @@ pub(super) fn mentions_client_only_privilege_gate(text: &str) -> bool {
 /// unlike CORS, these two CAN legitimately co-occur with a floor-earned Critical in the same
 /// finding's prose, and must never demote it). R3 is a full bidirectional clamp like R2; R4 is
 /// cap-only like R1. R1 is checked last.
-pub(super) fn apply_severity_ceiling_rule(f: Finding) -> Finding {
+pub(crate) fn apply_severity_ceiling_rule(f: Finding) -> Finding {
     let before = f.severity.clone();
     let mut out = apply_severity_ceiling_rule_inner(f);
     if out.severity != before {
@@ -697,6 +697,31 @@ pub(super) fn names_cors_class(f: &Finding) -> bool {
         || f.category
             .as_deref()
             .is_some_and(|c| c.to_ascii_lowercase().contains("cors"))
+}
+
+/// Whether `f` is of the secret class: a committed credential, key or token. Decided by the
+/// row's category or rule id (the cockpit's own secret test, the secret-rule list), an exact
+/// KEY word in the rule id, or a snippet that holds a real secret value. Over-exempting is the
+/// safe direction: a real secret in a test file must keep its rating.
+pub(super) fn is_secret_class_row(f: &Finding) -> bool {
+    if crate::onboard::credential_cross_ref::is_secret_exposure(f)
+        || super::finding_merge::is_secret_rule(&f.rule_id)
+        || super::finding_merge::snippet_holds_real_secret(&f.snippet)
+    {
+        return true;
+    }
+    let cat = f
+        .category
+        .as_deref()
+        .map(|c| c.to_ascii_lowercase().replace(' ', "-"))
+        .or_else(|| categorize_rule_id(&f.rule_id));
+    if cat.as_deref() == Some("secret-exposure") {
+        return true;
+    }
+    f.rule_id
+        .to_ascii_uppercase()
+        .split(['-', '_'])
+        .any(|w| w == "KEY" || w == "KEYS")
 }
 
 pub(super) fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
@@ -755,6 +780,31 @@ pub(super) fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
              other calibrated severity."
                 .to_string(),
         );
+        return f;
+    }
+
+    // A1: a row whose place is a test file does not ship. It takes the test-scope severity the
+    // deterministic floor already gives such rows, is marked in-test, and so neither reads as a
+    // live exposure nor takes an escalation slot ahead of production code. Decided narrowly: by
+    // the row's own path (an inline test block inside a production file is not visible to a
+    // row), and the secret class keeps its severity, since a real committed secret in a test
+    // file is still a real secret.
+    if camerata_gateway::is_test_or_fixture_path(&f.path)
+        && !is_secret_class_row(&f)
+        && severity_rank(&f.severity) > severity_rank(camerata_gateway::TEST_PATH_SEVERITY)
+    {
+        let was = f.severity.clone();
+        f.severity = camerata_gateway::TEST_PATH_SEVERITY.to_string();
+        f.in_test = true;
+        // Held, never buried: a capped row stays visible for a reviewer, as the deterministic
+        // test-path floor does.
+        f.needs_review = true;
+        f.calibration_rationale = Some(format!(
+            "Severity ceiling: this row is in a test file, which is not shipped. Capped from \
+             {was} to {} and marked as test scope so it does not rank ahead of production code. \
+             The secret class is the exception and keeps its severity.",
+            camerata_gateway::TEST_PATH_SEVERITY
+        ));
         return f;
     }
 
