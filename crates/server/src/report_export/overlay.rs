@@ -68,7 +68,7 @@ pub const MERGED_LABEL_CAPTURE: &str = "merged_into_label";
 
 /// Every capture the overlay writes. Listed once so the engine's merge stages treat them as
 /// bookkeeping (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`) and the tests can check none leaks.
-pub const OVERLAY_CAPTURE_KEYS: [&str; 8] = [
+pub const OVERLAY_CAPTURE_KEYS: [&str; 9] = [
     REVIEWER_EDITED_CAPTURE,
     REVIEWER_FIELDS_CAPTURE,
     REVIEWER_HEADLINE_CAPTURE,
@@ -77,6 +77,7 @@ pub const OVERLAY_CAPTURE_KEYS: [&str; 8] = [
     MERGED_INTO_CAPTURE,
     MERGED_LABEL_CAPTURE,
     crate::engine_discard::ENGINE_RESTORED_CAPTURE,
+    super::unfold::UNFOLDED_FROM_CAPTURE,
 ];
 
 /// One edit that was applied.
@@ -224,6 +225,23 @@ impl ReviewedReport {
     ) -> Self {
         self.dispositions = dispositions;
         self.legacy = true;
+        // An older client's rulings unfold the places they leave open, like the store's.
+        let ruled_out: HashSet<String> = self
+            .dispositions
+            .iter()
+            .filter(|(_, d)| d.state == "FalsePositive")
+            .map(|(key, _)| key.clone())
+            .collect();
+        if !ruled_out.is_empty() {
+            self.report = self.report.overlaid(|r| {
+                let unfolded = super::unfold::unfold_ruled_out(r, &|f| {
+                    ruled_out.contains(&super::finding_key(f))
+                });
+                if unfolded > 0 {
+                    r.attach_tree();
+                }
+            });
+        }
         // The levels are worked out again here, in this module, with the older client's decisions
         // among the evidence of who looked at what.
         self.levels = compute_levels(
@@ -312,6 +330,15 @@ pub fn apply_overlay(
         }
         let (added_rows, taken) = add_findings(&mut r.findings, added);
         superseded = taken;
+        // A ruling on a row does not rule out the places of other rules it carries: each becomes
+        // a row of its own, held, before edits and merges so a reviewer can work on it.
+        let ruled_out: HashSet<String> = effective_by_key(&records)
+            .into_iter()
+            .filter(|(_, d)| d.state == DecisionState::FalsePositive)
+            .map(|(key, _)| key.to_string())
+            .collect();
+        let unfolded =
+            super::unfold::unfold_ruled_out(r, &|f| ruled_out.contains(&super::finding_key(f)));
 
         let outcome = apply_edits(&mut r.findings, &edits);
         applied = outcome.applied;
@@ -321,7 +348,7 @@ pub fn apply_overlay(
 
         // The tree is rebuilt only when a change could have moved a row: building it again for
         // an overlay of nothing would change a report the reviewer never touched.
-        if reinstated > 0 || added_rows > 0 || outcome.moves_rows {
+        if reinstated > 0 || added_rows > 0 || unfolded > 0 || outcome.moves_rows {
             r.attach_tree();
         }
         if !outcome.splits.is_empty() {
@@ -436,6 +463,7 @@ fn is_held_for_a_ruling(f: &Finding) -> bool {
         crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
         crate::junk_finding::JUNK_CONTENT_CAPTURE,
         crate::engine_discard::ENGINE_RESTORED_CAPTURE,
+        super::unfold::UNFOLDED_FROM_CAPTURE,
     ]
     .iter()
     .any(|capture| f.captures.contains_key(*capture))

@@ -1810,6 +1810,12 @@ fn held_reasons(f: &crate::onboard::Finding) -> String {
     {
         reasons.push("put back by the reviewer after the engine threw it out".to_string());
     }
+    if let Some(note) = f
+        .captures
+        .get(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE)
+    {
+        reasons.push(note.clone());
+    }
     reasons.join("; ")
 }
 
@@ -2190,10 +2196,10 @@ pub struct FindingsExport {
     /// counts from the rows (design 3B). A client package carries only what the client reads; an
     /// internal one adds the architect's triage of each node.
     pub tree: TreeJson,
-    /// The places of other rules that a ruled-out row carries and that stay open: a ruling on a
-    /// row clears its own rule, not another rule's site a merge put on it. The ruled-out row is
-    /// not in `findings`, so these places are listed here and the release gate reads them with
-    /// `findings`. Absent when there are none.
+    /// The places of other rules that a ruled-out row still carries: a ruling on a row clears its
+    /// own rule, not another rule's site a merge put on it. The overlay unfolds each such place
+    /// into a row of its own, so this is empty (and absent) in a normal export; it is a backstop,
+    /// and the release gate refuses a package that lists anything here.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_beside_ruled_out: Vec<OpenSiteJson>,
     /// The Fixes: the rule groups whose places are one change, with every place and rule of each
@@ -2210,14 +2216,27 @@ pub struct OpenSiteJson {
     pub line: usize,
 }
 
-/// The places of other rules (or other services) that ruled-out rows carry: every absorbed site
-/// whose rule or service is not the row's own, and every rule the row also matches. Collapsed
-/// sources (`flagged_by`) are the same site as the row and are ruled with it.
-fn open_beside_ruled_out(rows: &[FindingRow]) -> Vec<OpenSiteJson> {
+/// The places of other rules (or other services) that ruled-out rows still carry: every absorbed
+/// site whose rule or service is not the row's own, and every rule the row also matches
+/// ([`crate::onboard::patterns_matrix::is_other_rules_place`], the test the Patterns across
+/// services cell uses). Collapsed sources (`flagged_by`) are the same site as the row and are
+/// ruled with it.
+///
+/// A normal export lists nothing: the overlay unfolds every such place into a row of its own and
+/// removes it from the ruled-out row ([`crate::report_export::unfold`]). This stays as the
+/// backstop for a reviewed report the overlay did not unfold, and the release gate refuses a
+/// package whose key is not empty.
+fn open_beside_ruled_out(reviewed: &ReviewedReport) -> Vec<OpenSiteJson> {
+    use crate::onboard::patterns_matrix::is_other_rules_place;
+    let dispositions = reviewed.dispositions();
     let mut out = Vec::new();
-    for row in rows.iter().filter(|r| r.is_fp) {
+    for row in reviewed.report().findings.iter().filter(|f| {
+        dispositions
+            .get(&finding_key(f))
+            .is_some_and(|d| d.state == "FalsePositive")
+    }) {
         for site in &row.also_locations {
-            if site.repo != row.repo || !site.rule_id.eq_ignore_ascii_case(&row.rule_id) {
+            if is_other_rules_place(row, &site.repo, &site.rule_id) {
                 out.push(OpenSiteJson {
                     repo: site.repo.clone(),
                     rule_id: site.rule_id.clone(),
@@ -2226,13 +2245,15 @@ fn open_beside_ruled_out(rows: &[FindingRow]) -> Vec<OpenSiteJson> {
                 });
             }
         }
-        for rule in &row.also_match_ids {
-            out.push(OpenSiteJson {
-                repo: row.repo.clone(),
-                rule_id: rule.clone(),
-                path: row.path.clone(),
-                line: row.line,
-            });
+        for rule in &row.also_matches {
+            if is_other_rules_place(row, &row.repo, rule) {
+                out.push(OpenSiteJson {
+                    repo: row.repo.clone(),
+                    rule_id: rule.clone(),
+                    path: row.path.clone(),
+                    line: row.line,
+                });
+            }
         }
     }
     out
@@ -2259,7 +2280,7 @@ pub fn build_findings_export(
 ) -> FindingsExport {
     let (rows, _dep_rows) =
         partition_rows_for(reviewed, corpus, chosen_options, report_json.internal);
-    let open_beside_ruled_out = open_beside_ruled_out(&rows);
+    let open_beside_ruled_out = open_beside_ruled_out(reviewed);
     let findings: Vec<FindingRow> = rows.into_iter().filter(|r| !r.is_fp).collect();
     FindingsExport {
         open_beside_ruled_out,

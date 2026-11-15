@@ -137,6 +137,17 @@ fn stands_under(f: &Finding, rule_id: &str) -> bool {
             .is_some_and(|node| node.eq_ignore_ascii_case(rule_id))
 }
 
+/// Whether a place that row `f` carries (an absorbed site in `also_locations`, or a rule in
+/// `also_matches` at the row's own place) belongs to another rule or another service than the
+/// row's own: the place is in a repo other than the row's, or the rule is not one the row
+/// stands under ([`stands_under`]; a tool's row the review tree files under a native rule is in
+/// that rule's family). The ONE definition: [`cell_with`], the unfold of a ruled-out row's
+/// carried places and the release gate's backstop all ask it, so they cannot disagree about
+/// which places a ruling on the row leaves open.
+pub(crate) fn is_other_rules_place(f: &Finding, place_repo: &str, place_rule_id: &str) -> bool {
+    f.repo != place_repo || !stands_under(f, place_rule_id)
+}
+
 /// The ledger's cell for (rule, repo), refined with the report's findings for it. Every problem
 /// counts, held or not; see [`cell_with`]. The exports read [`cell_with`] with the reviewer's
 /// rulings; this is the same cell with none.
@@ -191,7 +202,7 @@ pub(crate) fn cell_with(
         // A site of the row's own rule in the row's own service is the row's place; any other
         // rule's or service's site merged into the row is a problem of its own.
         let (absorbed_same, absorbed_other) = sites.fold((0usize, 0usize), |(same, other), l| {
-            if f.repo == l.repo && f.rule_id.eq_ignore_ascii_case(&l.rule_id) {
+            if !is_other_rules_place(f, &l.repo, &l.rule_id) {
                 (same + 1, other)
             } else {
                 (same, other + 1)
