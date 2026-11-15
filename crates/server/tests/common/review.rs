@@ -264,6 +264,7 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
         escalated: false,
         over_budget_reason: None,
         why: "reachable without signing in".to_string(),
+        held: false,
     };
     let mut candidates = vec![
         candidate(

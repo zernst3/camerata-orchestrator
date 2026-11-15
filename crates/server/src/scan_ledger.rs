@@ -639,6 +639,13 @@ pub struct EscalationBlock {
     /// The escalated sites past the budget, by the reason that allowed it.
     #[serde(default)]
     pub over_budget_by_reason: BTreeMap<String, usize>,
+    /// Of [`Self::over_budget_by_reason`], the rows past the budget only because they are held
+    /// for a decision at high or critical with a security reason
+    /// ([`camerata_api_types::review::EscalationCandidate::rises_when_held`]): their reason and
+    /// severity alone would have kept them below the line. Empty in a run saved before the rule
+    /// existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub over_budget_held: BTreeMap<String, usize>,
     /// The reasons that were allowed past the budget in this run (wire names, in priority order):
     /// the project's effective set, so a set the engine upgraded on load is on record.
     #[serde(default)]
@@ -709,6 +716,10 @@ impl EscalationBlock {
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_held: Self::held_over_budget_rows(
+                candidates.iter().copied(),
+                &self.allowed_reasons(),
+            ),
             over_budget_reasons: self.over_budget_reasons.clone(),
             unplaced: self
                 .unplaced
@@ -719,6 +730,34 @@ impl EscalationBlock {
             rules_reviewed: self.rules_reviewed,
             rules_failed: self.rules_failed,
         }
+    }
+
+    /// The escalated rows past the budget that only a hold lifted, by reason
+    /// ([`Self::over_budget_held`]), under the over-budget set `allowed`.
+    pub fn held_over_budget_rows<'a>(
+        candidates: impl IntoIterator<Item = &'a camerata_api_types::review::EscalationCandidate>,
+        allowed: &[camerata_api_types::review::EscalationReason],
+    ) -> BTreeMap<String, usize> {
+        let mut out: BTreeMap<String, usize> = BTreeMap::new();
+        for c in candidates.into_iter().filter(|c| c.escalated) {
+            let Some(over) = c.over_budget_reason else {
+                continue;
+            };
+            let by_hold_alone = c.rises_when_held() == Some(over)
+                && !over.may_exceed_budget(c.ordering_severity(), allowed);
+            if by_hold_alone {
+                *out.entry(over.as_str().to_string()).or_default() += 1;
+            }
+        }
+        out
+    }
+
+    /// [`Self::over_budget_reasons`] parsed; a name that is not a reason is left out.
+    fn allowed_reasons(&self) -> Vec<camerata_api_types::review::EscalationReason> {
+        self.over_budget_reasons
+            .iter()
+            .filter_map(|n| camerata_api_types::review::EscalationReason::parse(n))
+            .collect()
     }
 
     /// The sentence the methodology section and the ledger state: "Escalated 347 of a budget of
@@ -732,10 +771,13 @@ impl EscalationBlock {
                 self.escalated, self.budget
             );
         }
+        // A reason is named for the severity it may pass the budget at only when some row passed
+        // it that way; the rows a hold alone lifted are named by the hold.
         let mut reasons: Vec<EscalationReason> = self
             .over_budget_by_reason
-            .keys()
-            .filter_map(|name| EscalationReason::parse(name))
+            .iter()
+            .filter(|(name, n)| **n > self.over_budget_held.get(*name).copied().unwrap_or(0))
+            .filter_map(|(name, _)| EscalationReason::parse(name))
             .collect();
         reasons.sort_by_key(|r| r.rank());
         // A reason is past the budget at critical, or at high or critical for the severe ones
@@ -761,6 +803,11 @@ impl EscalationBlock {
                 "{} at any severity",
                 EscalationReason::EvidenceUnverified.phrase()
             ));
+        }
+        if self.over_budget_held.values().any(|n| *n > 0) {
+            parts.push(
+                "a row held for a decision at high or critical with a security reason".to_string(),
+            );
         }
         if parts.is_empty() {
             return format!(

@@ -52,6 +52,7 @@ fn candidate(
         escalated: false,
         over_budget_reason: None,
         why: "reachable without signing in".to_string(),
+        held: false,
     }
 }
 

@@ -2078,6 +2078,10 @@ fn record_ledger(
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_held: crate::scan_ledger::EscalationBlock::held_over_budget_rows(
+                tree.candidates.iter(),
+                &cfg.rank.over_budget_reasons,
+            ),
             over_budget_reasons: cfg
                 .rank
                 .over_budget_reasons

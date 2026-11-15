@@ -122,6 +122,23 @@ impl EscalationReason {
         )
     }
 
+    /// The six reasons that say the site is dangerous: unauthenticated reach, authorization
+    /// bypass, injection, secret exposure, cross-tenant access and data loss. A row held for a
+    /// reviewer's decision at high or critical with one of them always goes above the line
+    /// ([`EscalationCandidate::rises_when_held`]). Every other reason is a doubt about the
+    /// finding, not a danger.
+    pub fn is_security_reason(self) -> bool {
+        matches!(
+            self,
+            Self::UnauthenticatedReach
+                | Self::AuthorizationBypass
+                | Self::Injection
+                | Self::SecretExposure
+                | Self::CrossTenant
+                | Self::DataLoss
+        )
+    }
+
     /// The reasons that go past the budget at high severity as well as critical (R-3): the
     /// flaws that cost a client most when they are missed. Unauthenticated reach is not among
     /// them: the group reviewer gives it to anything a logged-out caller touches, and a high one
@@ -346,6 +363,12 @@ pub struct EscalationCandidate {
     pub over_budget_reason: Option<EscalationReason>,
     /// The group reviewer's one-line reason in the architect's words.
     pub why: String,
+    /// The row was held for a reviewer's decision when the line was marked (the engine doubted
+    /// its evidence or text, the per-site reviewer hedged, or the reviewer put it back). Written
+    /// from the row each time the line is marked, never by a model. A candidate stored before
+    /// the field existed reads false until its line is marked again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 /// 3 critical, 2 high, 1 medium, 0 anything else.
@@ -366,6 +389,37 @@ impl EscalationCandidate {
             Some(s2) if severity_weight(s2) > severity_weight(&self.severity) => s2,
             _ => &self.severity,
         }
+    }
+
+    /// The security reason this candidate goes above the line for whatever the budget and the
+    /// project's over-budget set say: the row is held for a reviewer's decision, its ordering
+    /// severity is high or critical, and its reason is one of
+    /// [`EscalationReason::is_security_reason`]. A held row that serious cannot wait below the
+    /// line: the release gate will not let it out undecided, and the reviewer has to see it to
+    /// decide it. The owner rated unauthenticated access high by default, so high is enough for
+    /// every one of the six.
+    pub fn rises_when_held(&self) -> Option<EscalationReason> {
+        let serious = matches!(
+            self.ordering_severity().to_ascii_lowercase().as_str(),
+            "critical" | "high"
+        );
+        (self.held && serious && self.reason.is_security_reason()).then_some(self.reason)
+    }
+
+    /// The reason this candidate may go past the budget under `allowed`, when it may:
+    /// [`EscalationReason::may_exceed_budget`], or a serious held row
+    /// ([`Self::rises_when_held`]).
+    pub fn over_budget_reason_under(
+        &self,
+        allowed: &[EscalationReason],
+    ) -> Option<EscalationReason> {
+        if self
+            .reason
+            .may_exceed_budget(self.ordering_severity(), allowed)
+        {
+            return Some(self.reason);
+        }
+        self.rises_when_held()
     }
 
     /// Where this candidate stands against the line.
@@ -404,7 +458,8 @@ pub fn count_slots<'a>(
 /// Mark the line again over stored candidates, with no model call. `candidates` are in
 /// `global_rank` order; the first `budget` SLOTS are escalated (rows at one site share a slot,
 /// R-1), and past it only a slot with a candidate whose reason may exceed the budget under
-/// `allowed` ([`EscalationReason::may_exceed_budget`]) is, with its `over_budget_reason`
+/// `allowed` ([`EscalationReason::may_exceed_budget`]) or that is a serious held row
+/// ([`EscalationCandidate::rises_when_held`], whatever `allowed` says) is, with its `over_budget_reason`
 /// recorded on every row of the slot. The budget is recomputed from `rate_per_kloc`, `floor` and
 /// `counted_lines`, and its counts (in slots) are rewritten.
 pub fn re_mark(
@@ -432,9 +487,7 @@ pub fn re_mark(
         } else {
             let allowed_by = members
                 .iter()
-                .map(|&m| &candidates[m])
-                .find(|c| c.reason.may_exceed_budget(c.ordering_severity(), allowed))
-                .map(|c| c.reason);
+                .find_map(|&m| candidates[m].over_budget_reason_under(allowed));
             (allowed_by.is_some(), allowed_by)
         };
         for &m in members {
@@ -639,6 +692,7 @@ mod tests {
             escalated: false,
             over_budget_reason: None,
             why: String::new(),
+            held: false,
         }
     }
 
@@ -763,6 +817,7 @@ mod tests {
             escalated: false,
             over_budget_reason: None,
             why: String::new(),
+            held: false,
         };
         let mut candidates = vec![
             candidate(EscalationReason::OutlierInGroup),
@@ -819,6 +874,130 @@ mod tests {
         assert_eq!(budget.escalated, 4);
         assert_eq!(budget.over_budget, 2);
         assert_eq!(budget.candidates, 6);
+    }
+
+    /// The six reasons that say a security flaw is at the site, the closed list a held row rises
+    /// on.
+    const SECURITY_REASONS: [EscalationReason; 6] = [
+        EscalationReason::UnauthenticatedReach,
+        EscalationReason::AuthorizationBypass,
+        EscalationReason::Injection,
+        EscalationReason::SecretExposure,
+        EscalationReason::CrossTenant,
+        EscalationReason::DataLoss,
+    ];
+
+    /// A budget of one slot, taken by a critical secret exposure, then `row` in the next slot.
+    fn full_budget_then(
+        row: EscalationCandidate,
+        allowed: &[EscalationReason],
+    ) -> EscalationCandidate {
+        let mut candidates = vec![
+            cand("first", EscalationReason::SecretExposure, "critical", 1),
+            row,
+        ];
+        candidates[1].global_rank = 2;
+        let mut budget = EscalationBudget::compute(1.0, 1, 0);
+        re_mark(&mut candidates, &mut budget, allowed);
+        assert!(
+            candidates[0].escalated,
+            "the first slot is inside the budget"
+        );
+        candidates.remove(1)
+    }
+
+    #[test]
+    fn a_held_high_row_with_each_security_reason_rises_above_a_full_budget() {
+        for reason in SECURITY_REASONS {
+            for severity in ["high", "critical", "HIGH"] {
+                // Whatever the project's over-budget set says: the empty set allows nothing else.
+                for allowed in [EscalationReason::default_over_budget_set(), vec![]] {
+                    let mut row = cand("held", reason, severity, 2);
+                    row.held = true;
+                    let row = full_budget_then(row, &allowed);
+                    assert!(
+                        row.escalated,
+                        "a held {severity} row with {reason:?} rises (allowed {allowed:?})"
+                    );
+                    assert_eq!(
+                        row.over_budget_reason,
+                        Some(reason),
+                        "{reason:?} {severity}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_held_row_rises_on_the_reviewers_higher_severity_too() {
+        // The group reviewer rated the medium row high: the line reads the higher of the two.
+        let mut row = cand("held", EscalationReason::UnauthenticatedReach, "medium", 2);
+        row.held = true;
+        row.stage2_severity = Some("high".to_string());
+        assert!(full_budget_then(row, &[]).escalated);
+    }
+
+    #[test]
+    fn a_held_row_without_a_security_reason_or_below_high_stays_below_the_line() {
+        let set = EscalationReason::default_over_budget_set();
+        for reason in EscalationReason::ALL {
+            if SECURITY_REASONS.contains(&reason) || reason == EscalationReason::EvidenceUnverified
+            {
+                continue;
+            }
+            let mut row = cand("held", reason, "high", 2);
+            row.held = true;
+            let row = full_budget_then(row, &set);
+            assert!(!row.escalated, "a held high {reason:?} row does not rise");
+            assert_eq!(row.over_budget_reason, None);
+        }
+        for severity in ["medium", "low", "info"] {
+            let mut row = cand("held", EscalationReason::UnauthenticatedReach, severity, 2);
+            row.held = true;
+            assert!(
+                !full_budget_then(row, &set).escalated,
+                "a held {severity} row does not rise"
+            );
+        }
+        // Not held, a high unauthenticated reach still has to win a slot.
+        let row = cand("open", EscalationReason::UnauthenticatedReach, "high", 2);
+        assert!(!full_budget_then(row, &set).escalated);
+    }
+
+    #[test]
+    fn a_held_row_lifts_its_whole_slot_and_the_counts_say_so() {
+        let mut candidates = vec![
+            cand("a", EscalationReason::SecretExposure, "critical", 1),
+            cand("b", EscalationReason::RuleMisfit, "low", 2),
+            cand("c", EscalationReason::UnauthenticatedReach, "high", 3),
+            cand("d", EscalationReason::OutlierInGroup, "low", 4),
+        ];
+        for (c, slot) in candidates.iter_mut().zip([1, 2, 2, 3]) {
+            c.slot = slot;
+        }
+        candidates[2].held = true;
+        let before = candidates.len();
+        let mut budget = EscalationBudget::compute(1.0, 1, 0);
+        re_mark(&mut candidates, &mut budget, &[]);
+        assert_eq!(candidates.len(), before, "nothing is dropped");
+        let marks: Vec<(&str, bool, Option<EscalationReason>)> = candidates
+            .iter()
+            .map(|c| (c.key.as_str(), c.escalated, c.over_budget_reason))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                ("a", true, None),
+                ("b", true, Some(EscalationReason::UnauthenticatedReach)),
+                ("c", true, Some(EscalationReason::UnauthenticatedReach)),
+                ("d", false, None),
+            ]
+        );
+        assert_eq!(
+            (budget.candidates, budget.escalated, budget.over_budget),
+            (3, 2, 1)
+        );
     }
 
     #[test]

@@ -595,9 +595,14 @@ pub(crate) const STANCE_LAYER_DOMAINS: &[&str] = &[
 /// gap structurally: a hedge is a hedge regardless of severity, and `informational` stays
 /// reserved for the three genuinely low-stakes signals `is_informational` still owns.
 pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) -> bool {
-    if disposition != Disposition::Unresolved {
-        return false;
-    }
+    disposition == Disposition::Unresolved && is_held_row(finding)
+}
+
+/// Whether the row itself carries a hold, before any decision is applied: the half of
+/// [`is_held_for_review`] the escalation line reads when it is marked (it marks the sealed rows,
+/// with no decision overlaid). One predicate, so the line and the report's held bucket can never
+/// disagree about which rows are held.
+pub(crate) fn is_held_row(finding: &Finding) -> bool {
     // M5: a row whose quoted snippet was not found near its line is held until the reviewer
     // decides it; the release gate also refuses to export it without that decision.
     // M4: a row whose text is real junk (an empty or placeholder explanation, the model's own

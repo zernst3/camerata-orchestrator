@@ -212,6 +212,21 @@ impl ReviewTree {
         }
     }
 
+    /// Write each stored candidate's `held` from its row as the row stands now, so a run saved
+    /// before candidates carried the flag (or a row whose hold changed since) is marked by the
+    /// hold it has. A candidate whose row is not in `rows` keeps what it has.
+    pub fn refresh_held(&mut self, rows: &[crate::onboard::Finding]) {
+        let held: std::collections::HashMap<&str, bool> = rows
+            .iter()
+            .map(|f| (f.site_key.as_str(), crate::report_export::is_held_row(f)))
+            .collect();
+        for c in &mut self.candidates {
+            if let Some(h) = held.get(c.key.as_str()) {
+                c.held = *h;
+            }
+        }
+    }
+
     /// Move the line again over the stored candidates with new settings: no model call, no
     /// candidate added or dropped. Rewrites the budget, the candidates' marks and the rows'
     /// columns.
@@ -225,6 +240,7 @@ impl ReviewTree {
             settings.floor,
             settings.counted_lines,
         );
+        self.refresh_held(rows);
         camerata_api_types::review::re_mark(
             &mut self.candidates,
             &mut self.budget,

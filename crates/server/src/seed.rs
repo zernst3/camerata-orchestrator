@@ -778,6 +778,7 @@ impl Seeding {
                 escalated: false,
                 over_budget_reason: None,
                 why: c.why.clone(),
+                held: false,
             });
         }
         let mut budget = EscalationBudget::compute(
@@ -821,6 +822,10 @@ impl Seeding {
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_held: crate::scan_ledger::EscalationBlock::held_over_budget_rows(
+                candidates.iter(),
+                &EscalationReason::default_over_budget_set(),
+            ),
             over_budget_reasons: EscalationReason::default_over_budget_set()
                 .iter()
                 .map(|r| r.as_str().to_string())

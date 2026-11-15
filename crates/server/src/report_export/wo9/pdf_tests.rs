@@ -43,6 +43,7 @@ fn escalated_report() -> crate::onboard::SealedReport {
             escalated: true,
             over_budget_reason: None,
             why: "SECRET-WHY-ESCALATION".to_string(),
+            held: false,
         })
         .collect();
     tree.budget.escalated = 2;
@@ -267,6 +268,7 @@ fn ledger_states_budget_escalated_and_over_budget() {
             escalated: true,
             over_budget_reason: (n > 0).then_some(EscalationReason::UnauthenticatedReach),
             why: String::new(),
+            held: false,
         })
         .collect();
     tree.budget.escalated = 3;

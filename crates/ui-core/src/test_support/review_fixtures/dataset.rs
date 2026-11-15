@@ -1044,6 +1044,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
                 .as_ref()
                 .map(|s| s.why.clone())
                 .unwrap_or_default(),
+            held: false,
         };
         if let Some(s) = rows[i].stage2.as_mut() {
             s.state = c.state();
