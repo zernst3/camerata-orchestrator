@@ -358,6 +358,88 @@ fn a_clean_cell_beside_a_site_a_ruled_out_row_absorbed_for_another_rule_is_refus
     );
 }
 
+/// A package where the portal's only row (rule `RULE`) also matches rule B and the reviewer
+/// ruled that row out. The portal's rule B place stays open, so its rule B cell must not read
+/// clean. The web checked rule B and is clean, so the services differ on it.
+fn package_with_ruled_out_host_also_matching_another_rule(
+) -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    let mut report = two_repo_report();
+    report
+        .ledger
+        .record_rule("acme/portal", RULE_B, RuleTier::Semantic, true, None, 5, 0);
+    report
+        .ledger
+        .record_rule("acme/web", RULE_B, RuleTier::Semantic, true, None, 5, 0);
+    report.findings[0].also_matches = vec![RULE_B.to_string()];
+    let sealed = report.seal();
+    let host_key = crate::report_export::finding_key(&sealed.findings[0]);
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        host_key,
+        crate::report_export::DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "the value is a constant".to_string(),
+            ..Default::default()
+        },
+    );
+    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &dispositions);
+    let options = client_options();
+    let json = build_report_json(&reviewed, None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &reviewed,
+        None,
+        &options,
+        STEM,
+        (json, data, b"%PDF-1.7 stand-in for the gate tests".to_vec()),
+    )
+    .expect("the package assembles");
+    entries_of(package)
+}
+
+#[test]
+fn a_clean_cell_beside_a_rule_a_ruled_out_row_also_matches_is_refused() {
+    let (mut entries, report) = package_with_ruled_out_host_also_matching_another_rule();
+    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    assert_eq!(
+        findings["findings"].as_array().unwrap().len(),
+        0,
+        "anti-vacuity: the ruled-out row is not among the findings"
+    );
+    assert_eq!(
+        findings["open_beside_ruled_out"],
+        json!([{"repo": "acme/portal", "rule_id": RULE_B, "path": "src/db.rs", "line": 12}]),
+        "anti-vacuity: the rule it also matches is listed as open"
+    );
+    let section = report.patterns_across_services.as_ref().unwrap();
+    assert_eq!(section.rows.len(), 1, "anti-vacuity: rule B differs");
+    assert_eq!(section.rows[0].rule_id, RULE_B);
+    assert!(patterns_section_problems(&entries, &report).is_empty());
+    plant_clean_cell(&mut entries, "acme/portal");
+    let problems = patterns_section_problems(&entries, &report);
+    assert!(
+        problems.iter().any(|p| p.file == "findings.json"
+            && p.message.contains("acme/portal")
+            && p.message.contains(RULE_B)
+            && p.message.contains("clean")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn findings_json_omits_open_beside_ruled_out_when_there_is_nothing_to_list() {
+    let (entries, _report) = entries_of(package_for(two_repo_report()));
+    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    assert!(
+        findings.get("findings").is_some(),
+        "anti-vacuity: findings.json parsed with its findings"
+    );
+    assert!(
+        findings.get("open_beside_ruled_out").is_none(),
+        "{findings}"
+    );
+}
+
 /// The package as built, with `findings.json`'s rows replaced by `rows` and the patterns row's
 /// title by `title`, and the portal's cell planted clean.
 fn gate_problems_with_rows(rows: Value, title: Option<&str>) -> Vec<Problem> {
