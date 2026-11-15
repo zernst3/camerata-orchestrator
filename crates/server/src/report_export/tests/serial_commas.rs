@@ -149,6 +149,21 @@ fn the_second_person_scan_finds_every_form_and_cuts_on_a_character_boundary() {
     assert!(second_person_in("a young youth").is_empty());
 }
 
+/// The workbook reason ("before you act") is exempt from the second-person scan only because the
+/// PDF never prints it. If the template ever reads `why_waiting`, this fails and the exemption
+/// has to go.
+#[test]
+fn the_pdf_template_does_not_read_why_waiting() {
+    let template = include_str!("../../../templates/audit_report.typ");
+    for field in ["why_waiting", "waiting_reason"] {
+        assert!(
+            !template.contains(field),
+            "the template reads {field}: remove the second-person exemption for the waiting \
+             reason in authored_pdf_prose_has_no_second_person first"
+        );
+    }
+}
+
 /// The PDF speaks of the client in the third person: no "you" or "your" in the prose the report
 /// writes for it, outside a sheet name the vocabulary owns ("Your conventions").
 #[test]
