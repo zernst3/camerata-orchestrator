@@ -255,3 +255,33 @@ async fn the_rendered_pdf_prints_the_urgent_entries_then_the_check_list() {
         "urgent first, then the check list"
     );
 }
+
+/// The seam for a row-level doubt (the possible false positive flag another branch adds): the
+/// list is decided once, where the line is marked, and written on the candidate. Every surface
+/// reads that field, never the reasons, so a site moved onto the check list by anything that
+/// decides the list reaches every surface with no change to them. Here the danger site is put on
+/// the check list by hand, the way a future flag would put it, and every surface follows.
+#[test]
+fn every_surface_reads_the_list_from_the_candidate_and_not_from_its_reason() {
+    let mut report = two_lists().into_inner();
+    let tree = report.tree.as_mut().unwrap();
+    for c in &mut tree.candidates {
+        c.lane = EscalationLane::Check;
+    }
+    tree.budget.check = 2;
+    let tree = report.tree.clone().unwrap();
+    tree.sync_rows(&mut report.findings);
+    let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+    let block = reviewed.report().ledger.escalation().unwrap().clone();
+    assert_eq!((block.escalated, block.check), (2, 2));
+    let package = package_of(&reviewed, &client_options());
+    let e = &package.report_json.escalations;
+    assert!(
+        e.items.is_empty(),
+        "the secret exposure follows its list, not its reason"
+    );
+    assert_eq!(paths(&e.check_items), vec!["src/a.rs", "src/d.rs"]);
+    let problems =
+        crate::release_gate::fix_report_problems(&package.report_json, &package.findings_export);
+    assert!(problems.is_empty(), "{problems:?}");
+}

@@ -367,6 +367,19 @@ impl EscalationLane {
 
     /// The list of one slot (the rows at one site): urgent when any row is a danger
     /// ([`EscalationCandidate::is_danger`]), the check list when every row is only a doubt.
+    ///
+    /// # The seam for a row-level doubt
+    ///
+    /// This and [`EscalationCandidate::is_danger`] are the only place the list is decided:
+    /// [`re_mark`] writes the answer onto every candidate (`lane`), and every surface (the
+    /// ledger, the PDF, the workbook, the CSVs, the release gate, the review screens) reads that
+    /// field and never the reasons. A row-level signal that a finding may be a false positive
+    /// (the flag another branch, feat/possible-false-positive, is adding to rows) therefore needs
+    /// no change to any surface to move a site between the lists: carry it onto the candidate
+    /// from the row where the line is marked, the way `held` is
+    /// (`ReviewTree::refresh_held` in the server), and read it in `is_danger`. Whether a flagged
+    /// row with a security reason is still a danger is the owner's decision when the flag lands;
+    /// nothing here assumes the answer.
     pub fn of_slot<'a>(members: impl IntoIterator<Item = &'a EscalationCandidate>) -> Self {
         if members.into_iter().any(EscalationCandidate::is_danger) {
             Self::Urgent
