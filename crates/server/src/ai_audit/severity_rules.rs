@@ -712,9 +712,17 @@ pub(super) fn is_secret_class_row(f: &Finding) -> bool {
     }
     let id = f.rule_id.to_ascii_uppercase();
     let words: Vec<&str> = id.split('-').collect();
-    ["SECRET", "CREDENTIAL", "PASSWORD", "API-KEY", "APIKEY", "PRIVATE-KEY", "HARDCODED"]
-        .iter()
-        .any(|t| security_token_matches(&words, t))
+    [
+        "SECRET",
+        "CREDENTIAL",
+        "PASSWORD",
+        "API-KEY",
+        "APIKEY",
+        "PRIVATE-KEY",
+        "HARDCODED",
+    ]
+    .iter()
+    .any(|t| security_token_matches(&words, t))
 }
 
 pub(super) fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
