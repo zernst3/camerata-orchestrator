@@ -53,7 +53,7 @@ The opt-in development loop is the exception. It is off for a client engagement 
 
 ## What is removed before code is sent
 
-Before any code reaches a model, every value that matches a known credential shape is replaced with a short redacted form (`prefix…tail (N chars)`). Line numbers are kept, so a problem still points at the right line. This covers every prompt Camerata builds, the chat assistant's included: all of them pass one redaction point, and a test fails if any code sends a model request around it. The one exception is a Development-console agent that edits client code, which reads the files itself, secrets included, because changing that code (fixing a leaked secret among it) is its job. The shapes cover:
+Before any code reaches a model, every value that matches a known credential shape is replaced with a short redacted form (`prefix…tail (N chars)`). Line numbers are kept, so a problem still points at the right line. This covers every prompt Camerata builds, the chat assistant's included: all of them pass one redaction point, and a test fails if any code sends a model request around it. The one exception is a Development-console agent on the Claude CLI driver, which reads client files with its own file tools, secrets included, because changing that code (fixing a leaked secret among it) is its job; on the in-process API driver the file text an agent reads passes the same redaction point before it is sent. The shapes cover:
 
 - API keys and tokens (Supabase, Stripe, AWS, Azure storage, GitHub, Slack, Google, Anthropic, OpenAI, SendGrid, Twilio, Shopify, Mailgun, npm, Mapbox and Discord)
 - private keys
