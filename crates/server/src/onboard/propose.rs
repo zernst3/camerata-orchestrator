@@ -2083,6 +2083,35 @@ mod tests {
         );
     }
 
+    /// A JavaScript repository that does not depend on React (Vue, plain Node) is not proposed
+    /// the React effect rule: it has no `useEffect`.
+    #[tokio::test]
+    async fn react_effect_cleanup_is_not_proposed_for_a_non_react_javascript_repo() {
+        const ID: &str = "JAVASCRIPT-REACT-EFFECT-CLEANUP-1";
+        for (repo, source, manifest) in [
+            (
+                "acme/vue-app",
+                "src/main.js",
+                r#"{"dependencies":{"vue":"3.4.0"}}"#,
+            ),
+            (
+                "acme/node-api",
+                "src/server.js",
+                r#"{"dependencies":{"express":"4.19.0"}}"#,
+            ),
+        ] {
+            let repo_files = files(&[(source, "export {};"), ("package.json", manifest)]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed.iter().find(|r| r.id == ID);
+            assert!(
+                rule.is_none_or(|r| !r.recommended),
+                "{repo}: {ID} must not be suggested for a non-React repo: {rule:?}"
+            );
+        }
+    }
+
     /// `JAVASCRIPT-ASYNC-REJECTION-HANDLED-1` lives in the `javascript` domain, which a
     /// JavaScript repo reaches directly and a TypeScript repo through the `javascript:typescript`
     /// parent expansion, so no `domains_for_stack` edit is needed. A Python repo is not handed it.
