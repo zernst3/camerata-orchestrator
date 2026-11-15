@@ -271,6 +271,7 @@ pub(crate) enum OwnedEntry {
     Line(String),
     OverBand(String),
     BelowHeading(String),
+    CheckHeading(String),
 }
 
 fn entry_owned(e: &Entry<'_>) -> OwnedEntry {
@@ -279,6 +280,7 @@ fn entry_owned(e: &Entry<'_>) -> OwnedEntry {
         Entry::Line(t) => OwnedEntry::Line(t.clone()),
         Entry::OverBand(t) => OwnedEntry::OverBand(t.clone()),
         Entry::BelowHeading(t) => OwnedEntry::BelowHeading(t.clone()),
+        Entry::CheckHeading(t) => OwnedEntry::CheckHeading(t.clone()),
     }
 }
 
@@ -371,6 +373,11 @@ fn QueueTable(
                                     td { colspan: "9", "{text}" }
                                 }
                             },
+                            OwnedEntry::CheckHeading(text) => rsx! {
+                                tr { key: "check-{i}", class: "queue-check-heading",
+                                    td { colspan: "9", span { class: "mark-check", "check" } " {text}" }
+                                }
+                            },
                         }
                     }
                 }
@@ -398,6 +405,7 @@ fn QueueRowView(
     match band {
         Band::WithinBudget => class.push_str(" row-escalated"),
         Band::OverBudget => class.push_str(" row-escalated row-over"),
+        Band::Check => class.push_str(" row-escalated row-check"),
         Band::BelowLine => class.push_str(" row-candidate"),
     }
     if site.held.is_some() {

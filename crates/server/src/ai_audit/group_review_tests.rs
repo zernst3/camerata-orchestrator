@@ -1325,6 +1325,40 @@ fn the_escalation_sentence_reads_every_shape() {
     );
 }
 
+#[test]
+fn the_escalation_sentence_names_a_row_a_hold_lifted_and_not_its_reason_alone() {
+    // One held high unauthenticated reach past the budget, one critical one: the reason is still
+    // named at critical (one row passed that way) and the hold is named for the other.
+    let mut block = crate::scan_ledger::EscalationBlock {
+        budget: 20,
+        escalated: 22,
+        over_budget: 2,
+        ..Default::default()
+    };
+    block
+        .over_budget_by_reason
+        .insert("unauthenticated_reach".to_string(), 2);
+    block
+        .over_budget_held
+        .insert("unauthenticated_reach".to_string(), 1);
+    assert_eq!(
+        block.sentence(),
+        "Escalated 22 of a budget of 20 (2 over, all unauthenticated reach at critical, and a row \
+         held for a decision at high or critical with a security reason)"
+    );
+    // Only held rows past the budget: the reason is not claimed at critical.
+    block
+        .over_budget_by_reason
+        .insert("unauthenticated_reach".to_string(), 1);
+    block.escalated = 21;
+    block.over_budget = 1;
+    assert_eq!(
+        block.sentence(),
+        "Escalated 21 of a budget of 20 (1 over, all a row held for a decision at high or \
+         critical with a security reason)"
+    );
+}
+
 #[tokio::test]
 async fn changing_the_rate_after_a_review_re_marks_the_stored_candidates_with_no_model_call() {
     let mut report = report_of(&[(SQL, 8)]);

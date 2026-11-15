@@ -31,6 +31,9 @@ pub enum Band {
     WithinBudget,
     /// Past the budget, kept for a reason that may exceed it.
     OverBudget,
+    /// Above the line on the second list, "Check: possible false alarm": escalated only for a
+    /// doubt about the finding, never for a danger. Drawn after every urgent row.
+    Check,
     /// A candidate below the line.
     BelowLine,
 }
@@ -39,6 +42,8 @@ pub enum Band {
 pub fn band_of(row: &QueueRow) -> Band {
     if !row.candidate.escalated {
         Band::BelowLine
+    } else if row.candidate.lane == camerata_api_types::review::EscalationLane::Check {
+        Band::Check
     } else if row.candidate.over_budget_reason.is_some() {
         Band::OverBudget
     } else {
@@ -149,6 +154,8 @@ pub enum Entry<'a> {
     OverBand(String),
     /// The heading above the candidates below the line.
     BelowHeading(String),
+    /// The heading above the "Check: possible false alarm" rows.
+    CheckHeading(String),
 }
 
 /// What the table draws for a view and a state.
@@ -194,7 +201,11 @@ pub fn layout<'a>(view: &'a QueueView, state: &QueueState) -> Layout<'a> {
         .iter()
         .take_while(|r| band_of(r) == Band::WithinBudget)
         .count();
-    let over = escalated.len() - within;
+    let over = escalated[within..]
+        .iter()
+        .take_while(|r| band_of(r) == Band::OverBudget)
+        .count();
+    let check = escalated.len() - within - over;
     let shown = state.shown.min(escalated.len());
 
     let mut entries: Vec<Entry<'a>> = Vec::new();
@@ -202,8 +213,14 @@ pub fn layout<'a>(view: &'a QueueView, state: &QueueState) -> Layout<'a> {
         if i == within {
             entries.push(Entry::Line(line_text(view, within)));
             if over > 0 {
-                entries.push(Entry::OverBand(over_band_text(&escalated[within..])));
+                entries.push(Entry::OverBand(over_band_text(
+                    &escalated[within..within + over],
+                )));
             }
+        }
+        // The second list follows every urgent row, under its own heading.
+        if i == within + over && check > 0 {
+            entries.push(Entry::CheckHeading(check_heading(check)));
         }
         entries.push(Entry::Row(row));
     }
@@ -310,6 +327,11 @@ fn join_or(items: &[&str]) -> String {
 /// `Escalated 347 · 47 over budget (all ... at critical) · 1,212 candidates below the line`.
 pub fn counts_line(view: &QueueView) -> String {
     let mut parts = vec![format!("Escalated {}", thousands(view.escalated.len()))];
+    let check = view
+        .escalated
+        .iter()
+        .filter(|r| band_of(r) == Band::Check)
+        .count();
     let over: Vec<&QueueRow> = view
         .escalated
         .iter()
@@ -322,6 +344,12 @@ pub fn counts_line(view: &QueueView) -> String {
         } else {
             format!("{} over budget ({why})", thousands(over.len()))
         });
+    }
+    if check > 0 {
+        parts.push(format!(
+            "{} on {CHECK_POSSIBLE_FALSE_ALARM}",
+            thousands(check)
+        ));
     }
     parts.push(format!(
         "{} {} below the line",
@@ -364,6 +392,17 @@ fn over_band_text(over_rows: &[&QueueRow]) -> String {
     } else {
         format!("{} over budget: {why}", thousands(over_rows.len()))
     }
+}
+
+/// The words of the second list, the same on every surface.
+pub use camerata_api_types::review::CHECK_POSSIBLE_FALSE_ALARM;
+
+/// `Check: possible false alarm: 13 escalated for a doubt, not a danger`.
+fn check_heading(rows: usize) -> String {
+    format!(
+        "{CHECK_POSSIBLE_FALSE_ALARM}: {} escalated for a doubt, not a danger",
+        thousands(rows)
+    )
 }
 
 fn below_heading(view: &QueueView, loaded: usize) -> String {

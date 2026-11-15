@@ -26,7 +26,7 @@ const FINDING_DATASETS: [&str; 2] = ["all-findings", "false-positives"];
 /// The columns of `all-findings` and `false-positives` (one row shape), in the order the rows
 /// write them. A row of a deviation, a convention, a missing convention or a rule that could not be
 /// assessed adds its own payload columns at the end.
-const FINDING_COLUMNS: [&str; 54] = [
+const FINDING_COLUMNS: [&str; 55] = [
     "severity",
     "headline",
     "repo",
@@ -72,6 +72,7 @@ const FINDING_COLUMNS: [&str; 54] = [
     "sub_group",
     "sub_group_cause",
     "escalated",
+    "check_list",
     "merged_into",
     "carried_by",
     "deviating_sites",
@@ -123,6 +124,7 @@ pub(crate) fn columns_of(dataset: &str) -> Option<Vec<&'static str>> {
             "sub_group",
             "sub_group_cause",
             "escalated",
+            "check_list",
             "merged_into",
             "carried_by",
             "reviewer_edited",

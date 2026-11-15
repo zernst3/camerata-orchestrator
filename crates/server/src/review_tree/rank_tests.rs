@@ -1172,3 +1172,110 @@ fn an_upper_cased_stage_1_rating_is_read_as_its_lower_case() {
     let ranked = rank_candidates(&tree.nodes, &rows, &settings(5));
     assert!(ranked.candidates.is_empty(), "HIGH is not below high");
 }
+
+/// The densest-fixture case, in synthetic rows: two critical secret exposures fill a budget of
+/// two, and behind them sit a held high row with unauthenticated reach (a whole profile row
+/// selected and passed to a client component), the same reason on a row that is not held, and a
+/// held high row with a reason that is not a security reason.
+fn held_fixture() -> (ReviewTree, Vec<Finding>) {
+    let (mut tree, mut rows) = tree_of(3, |_, n| if n == 0 { "critical" } else { "high" });
+    rows[1].needs_review = true;
+    rows[1].detail =
+        "The whole profile row is selected and passed to a client component.".to_string();
+    rows[7].confidence = Some("needs-review".to_string());
+    let nominated = [
+        (0, EscalationReason::SecretExposure, 1),
+        (3, EscalationReason::SecretExposure, 1),
+        (1, EscalationReason::UnauthenticatedReach, 2),
+        (4, EscalationReason::UnauthenticatedReach, 2),
+        (7, EscalationReason::OutlierInGroup, 3),
+    ];
+    for (i, reason, rank) in nominated {
+        let f = rows[i].clone();
+        rule_node_of(&mut tree, &f)
+            .escalations
+            .push(esc(&f, reason, rank));
+    }
+    tree.sync_rows(&mut rows);
+    (tree, rows)
+}
+
+fn escalated_keys(candidates: &[EscalationCandidate]) -> Vec<&str> {
+    candidates
+        .iter()
+        .filter(|c| c.escalated)
+        .map(|c| c.key.as_str())
+        .collect()
+}
+
+#[test]
+fn a_held_high_row_with_a_security_reason_rises_past_a_full_budget() {
+    let (tree, rows) = held_fixture();
+    let ranked = rank_candidates(&tree.nodes, &rows, &settings(2));
+    assert_eq!(ranked.budget.budget, 2);
+    assert_eq!(
+        ranked.candidates.len(),
+        5,
+        "every nomination is a candidate"
+    );
+    let held = ranked
+        .candidates
+        .iter()
+        .find(|c| c.key == rows[1].site_key)
+        .unwrap();
+    assert!(held.held, "the row's hold is on the candidate");
+    assert!(
+        held.escalated,
+        "the held high row with unauthenticated reach rises"
+    );
+    assert_eq!(
+        held.over_budget_reason,
+        Some(EscalationReason::UnauthenticatedReach)
+    );
+    let mut want = vec![
+        rows[0].site_key.as_str(),
+        rows[3].site_key.as_str(),
+        rows[1].site_key.as_str(),
+    ];
+    want.sort();
+    let mut got = escalated_keys(&ranked.candidates);
+    got.sort();
+    assert_eq!(
+        got, want,
+        "the open high row with the same reason and the held row with no security reason stay \
+         below the line"
+    );
+    assert_eq!((ranked.budget.escalated, ranked.budget.over_budget), (3, 1));
+}
+
+#[test]
+fn a_saved_run_replayed_with_no_held_flag_rises_on_the_rows_hold() {
+    // A run saved before candidates carried the flag: the stored candidates say nothing about the
+    // hold, and marking the line again reads it from the rows.
+    let (mut tree, mut rows) = held_fixture();
+    let mut ranked = rank_candidates(&tree.nodes, &rows, &settings(2));
+    for c in &mut ranked.candidates {
+        c.held = false;
+        c.escalated = false;
+        c.over_budget_reason = None;
+    }
+    let before = (rows.len(), ranked.candidates.len());
+    tree.budget = ranked.budget;
+    tree.candidates = ranked.candidates;
+    tree.re_mark(&settings(2), &mut rows);
+    assert_eq!(
+        (rows.len(), tree.candidates.len()),
+        before,
+        "nothing is dropped"
+    );
+    let held = rows
+        .iter()
+        .find(|f| f.site_key == rows[1].site_key)
+        .unwrap();
+    assert_eq!(held.review.escalation_state, EscalationState::Escalated);
+    assert_eq!(
+        held.review.over_budget_reason,
+        Some(EscalationReason::UnauthenticatedReach)
+    );
+    assert_eq!(tree.budget.escalated, 3);
+}

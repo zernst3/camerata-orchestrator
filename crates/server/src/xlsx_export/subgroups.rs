@@ -1015,8 +1015,15 @@ pub(crate) struct PdfFixFacts {
 }
 
 /// The escalated places as the PDF prints them, one entry for each place whatever the number of
-/// rules at it. `rows` are all rows of the export.
-fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedSiteJson> {
+/// rules at it: the urgent list, then the "Check: possible false alarm" list (a place is on it
+/// when its escalated rows are; the rows of one place share one list). `rows` are all rows of
+/// the export.
+fn escalated_places(
+    rows: &[FindingRow],
+) -> (
+    Vec<crate::report_export::EscalatedSiteJson>,
+    Vec<crate::report_export::EscalatedSiteJson>,
+) {
     let mut by_place: BTreeMap<(String, String, usize), Vec<&FindingRow>> = BTreeMap::new();
     for r in rows.iter().filter(|r| !r.is_fp) {
         by_place
@@ -1024,11 +1031,12 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
             .or_default()
             .push(r);
     }
-    let mut out = Vec::new();
+    let (mut out, mut check) = (Vec::new(), Vec::new());
     for (_, at) in by_place {
         if !at.iter().any(|r| r.facts.escalated) {
             continue;
         }
+        let on_check = at.iter().any(|r| r.facts.check_list);
         // The row that heads the place: the worst severity, then the order the rows came in.
         let Some(head) = at
             .iter()
@@ -1057,7 +1065,8 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
                 decisions.push(state);
             }
         }
-        out.push(crate::report_export::EscalatedSiteJson {
+        let list = if on_check { &mut check } else { &mut out };
+        list.push(crate::report_export::EscalatedSiteJson {
             place: vocabulary::place_text(&head.repo, &head.path, head.line),
             rules_line: format!("{}: {}", vocabulary::H_RULES, rules.join(", ")),
             // The fix written for this place (its head row's own), else the rule's.
@@ -1091,14 +1100,17 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
     }
     // The worst first, so the PDF's cap keeps the most serious.
     out.sort_by_key(|e| severity_rank(&e.severity.to_ascii_lowercase()));
-    out
+    check.sort_by_key(|e| severity_rank(&e.severity.to_ascii_lowercase()));
+    (out, check)
 }
 
 /// What the PDF states from the reviewed report beyond its own row lists, worked out once from one
 /// partition of the rows.
 pub(crate) struct PdfSections {
-    /// The escalated places with their decisions, worst first.
+    /// The escalated places on the urgent list with their decisions, worst first.
     pub escalated: Vec<crate::report_export::EscalatedSiteJson>,
+    /// The escalated places on the "Check: possible false alarm" list, in the same shape.
+    pub check: Vec<crate::report_export::EscalatedSiteJson>,
     /// One pattern for each Fix.
     pub patterns: Vec<crate::report_export::PatternJson>,
     /// The facts of each Fix by id, for the top three.
@@ -1121,11 +1133,11 @@ pub(crate) fn pdf_sections(
     chosen_options: &std::collections::HashMap<String, String>,
 ) -> PdfSections {
     let (rows, deps) = super::partition_rows_for(reviewed, corpus, chosen_options, false);
-    let mut escalated = escalated_places(&rows);
+    let (mut escalated, mut check) = escalated_places(&rows);
     let mut facts = fix_facts(reviewed, &rows, &deps, corpus, true);
     facts.sort_by_key(|g| (g.open.is_empty(), g.sequence));
     // What each escalated place's Fix asks of the reader, in two sentences, and its effort.
-    for entry in &mut escalated {
+    for entry in escalated.iter_mut().chain(check.iter_mut()) {
         if let Some(g) = facts.iter().find(|g| g.id == entry.fix_id) {
             // Last resort: the Fix's own text.
             if entry.what_to_do.is_empty() {
@@ -1202,6 +1214,7 @@ pub(crate) fn pdf_sections(
         .collect();
     PdfSections {
         escalated,
+        check,
         patterns,
         fixes: by_id,
         conventions,

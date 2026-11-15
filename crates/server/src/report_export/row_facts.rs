@@ -52,8 +52,12 @@ pub struct RowFacts {
     pub sub_group: String,
     /// Why the sub-group's sites belong together.
     pub sub_group_cause: String,
-    /// The group reviewer put the site in the architect's queue and it is above the line.
+    /// The group reviewer put the site in the architect's queue and it is above the line, on
+    /// either list.
     pub escalated: bool,
+    /// Of `escalated`: the site is on the "Check: possible false alarm" list (a doubt, not a
+    /// danger), not the urgent one.
+    pub check_list: bool,
     /// The [`site_id`] of the row this one was merged into, when the reviewer merged it.
     pub merged_into: String,
     /// The [`site_id`] of the row that carries this one: another row at the same place
@@ -226,6 +230,7 @@ impl<'a> RowFactsIndex<'a> {
             fix_id: self.fixes.fix_id_of(f),
             group,
             escalated: f.review.escalation_state == EscalationState::Escalated,
+            check_list: f.review.in_check_list(),
             merged_into,
             carried_by: self
                 .carried_by

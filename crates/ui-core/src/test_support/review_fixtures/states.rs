@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 71] = [
+pub const FIXTURE_IDS: [&str; 72] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -43,6 +43,7 @@ pub const FIXTURE_IDS: [&str; 71] = [
     "queue/detail-form-open",
     "queue/merge-picker-empty-pool",
     "queue/place",
+    "queue/check-list",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",
@@ -644,6 +645,46 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
         "queue/over-budget" => {
             let ds = base();
             queue_state(&ds, ds.queue(false, 0, 100))
+        }
+        "queue/check-list" => {
+            // The base queue with four candidates that hold only a doubt raised onto the second
+            // list, the way the server marks them when the budget has room: the urgent rows
+            // first, then "Check: possible false alarm".
+            let ds = base();
+            let mut queue = ds.queue(true, 0, 100);
+            let mut raised: Vec<_> = Vec::new();
+            queue.below.retain(|r| {
+                if raised.len() < 4 && !r.candidate.is_danger() {
+                    raised.push(r.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            for mut r in raised {
+                r.candidate.escalated = true;
+                r.candidate.over_budget_reason = None;
+                r.candidate.lane = camerata_api_types::review::EscalationLane::Check;
+                queue.escalated.push(r);
+            }
+            let check = queue
+                .escalated
+                .iter()
+                .filter(|r| r.candidate.lane == camerata_api_types::review::EscalationLane::Check)
+                .count();
+            queue.below.clear();
+            queue.below_total -= check;
+            queue.show_below = false;
+            queue.budget.check = check;
+            queue.budget.escalated += check;
+            let mut fx = queue_state(&ds, queue);
+            if let Loaded::Ready(shell) = &mut fx.shell {
+                shell.budget.check = check;
+                shell.budget.escalated += check;
+                shell.lanes.check = check;
+                shell.lanes.escalations += check;
+            }
+            fx
         }
         "queue/line-lowered" => {
             let ds = base();

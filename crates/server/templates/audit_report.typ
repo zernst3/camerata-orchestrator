@@ -603,28 +603,46 @@
 // whatever the number of rules at it. Every other place is on the All problems sheet.
 #section("Escalations", sec(6))
 
-#if d.escalations.items.len() == 0 [
+// One entry: the place, its rules, the fix and the decision so far.
+#let escalation_entry(item) = block(breakable: false, above: 6pt, below: 8pt)[
+  #severity_chip(lower(item.severity)) #h(2pt) #text(weight: 600, fill: ink)[#fix_runs(item.headline)]
+  #linebreak()
+  #text(font: mono, size: 8pt, fill: ink_faint)[#breakable(item.place, n: 60)]
+  #linebreak()
+  #text(size: 8.5pt, fill: ink_soft)[#item.rules_line]
+  #if item.what_to_do != "" [
+    #linebreak()
+    #text(weight: 600, size: 9pt, fill: accent)[#W.what_to_do: ]#text(size: 9pt)[#fix_body(item.what_to_do)]
+  ]
+  #linebreak()
+  #text(font: mono, size: 8pt, fill: ink_faint)[#W.effort: #or_not_estimated(item.effort) · #W.decision_so_far: #item.decision]
+]
+
+#if d.escalations.items.len() == 0 and d.escalations.check_items.len() == 0 [
   No place was sent for review in person in this inspection.
+] else if d.escalations.items.len() == 0 [
+  No dangerous place was sent for review in person in this inspection.
 ] else [
   #text(size: 9pt, style: "italic", fill: ink_faint)[#d.escalations.intro]
   #v(4pt)
   #for item in d.escalations.items.slice(0, calc.min(d.escalations.items.len(), d.escalations.cap)) [
-    #block(breakable: false, above: 6pt, below: 8pt)[
-      #severity_chip(lower(item.severity)) #h(2pt) #text(weight: 600, fill: ink)[#fix_runs(item.headline)]
-      #linebreak()
-      #text(font: mono, size: 8pt, fill: ink_faint)[#breakable(item.place, n: 60)]
-      #linebreak()
-      #text(size: 8.5pt, fill: ink_soft)[#item.rules_line]
-      #if item.what_to_do != "" [
-        #linebreak()
-        #text(weight: 600, size: 9pt, fill: accent)[#W.what_to_do: ]#text(size: 9pt)[#fix_body(item.what_to_do)]
-      ]
-      #linebreak()
-      #text(font: mono, size: 8pt, fill: ink_faint)[#W.effort: #or_not_estimated(item.effort) · #W.decision_so_far: #item.decision]
-    ]
+    #escalation_entry(item)
   ]
   #if d.escalations.more_line != "" [
     #text(size: 9pt, fill: ink_soft)[#d.escalations.more_line]
+  ]
+]
+// The second list: places escalated only for a doubt about the problem, after every dangerous
+// one, at most the same cap.
+#if d.escalations.check_items.len() > 0 [
+  #v(6pt)
+  #text(size: 9pt, style: "italic", fill: ink_faint)[#d.escalations.check_line]
+  #v(4pt)
+  #for item in d.escalations.check_items.slice(0, calc.min(d.escalations.check_items.len(), d.escalations.cap)) [
+    #escalation_entry(item)
+  ]
+  #if d.escalations.check_more_line != "" [
+    #text(size: 9pt, fill: ink_soft)[#d.escalations.check_more_line]
   ]
 ]
 

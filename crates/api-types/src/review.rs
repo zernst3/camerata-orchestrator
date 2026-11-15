@@ -122,6 +122,23 @@ impl EscalationReason {
         )
     }
 
+    /// The six reasons that say the site is dangerous: unauthenticated reach, authorization
+    /// bypass, injection, secret exposure, cross-tenant access and data loss. A row held for a
+    /// reviewer's decision at high or critical with one of them always goes above the line
+    /// ([`EscalationCandidate::rises_when_held`]). Every other reason is a doubt about the
+    /// finding, not a danger.
+    pub fn is_security_reason(self) -> bool {
+        matches!(
+            self,
+            Self::UnauthenticatedReach
+                | Self::AuthorizationBypass
+                | Self::Injection
+                | Self::SecretExposure
+                | Self::CrossTenant
+                | Self::DataLoss
+        )
+    }
+
     /// The reasons that go past the budget at high severity as well as critical (R-3): the
     /// flaws that cost a client most when they are missed. Unauthenticated reach is not among
     /// them: the group reviewer gives it to anything a logged-out caller touches, and a high one
@@ -268,6 +285,12 @@ pub struct EscalationBudget {
     pub over_budget: usize,
     /// Candidates in all, above and below the line.
     pub candidates: usize,
+    /// Of `escalated`, the slots on the second list, "Check: possible false alarm": escalated
+    /// only for a doubt about the finding, never for a danger ([`EscalationLane::Check`]). The
+    /// rest of `escalated` is the urgent list. Zero in a budget saved before the lists existed,
+    /// until the line is marked again.
+    #[serde(default)]
+    pub check: usize,
 }
 
 /// The default `escalation_rate_per_kloc`.
@@ -300,6 +323,68 @@ impl EscalationBudget {
             escalated: 0,
             over_budget: 0,
             candidates: 0,
+            check: 0,
+        }
+    }
+}
+
+/// The name of the second list ([`EscalationLane::Check`]), spelled once for the server and the
+/// review screens. The product vocabulary (`xlsx_export::vocabulary::CHECK_POSSIBLE_FALSE_ALARM`)
+/// names it from here and holds its Glossary entry.
+pub const CHECK_POSSIBLE_FALSE_ALARM: &str = "Check: possible false alarm";
+
+/// The two lists a candidate can be on. Both are shown to the reviewer and nothing on either is
+/// dropped; they differ in what put the site there.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationLane {
+    /// A danger: at least one row at the site carries a security reason
+    /// ([`EscalationReason::is_security_reason`]). Only these take the budget's urgent slots.
+    #[default]
+    Urgent,
+    /// "Check: possible false alarm": every row at the site was escalated only for a doubt
+    /// about the finding (conflicting verdicts, unverified evidence and the like). Such a slot
+    /// never takes a slot an urgent one wants; it takes what the urgent list leaves of the
+    /// budget, and goes past the budget only for a reason that may.
+    Check,
+}
+
+impl EscalationLane {
+    /// The wire name (`urgent`, `check`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Urgent => "urgent",
+            Self::Check => "check",
+        }
+    }
+
+    /// True for [`Self::Urgent`] (serde leaves the default off).
+    pub fn is_urgent(&self) -> bool {
+        *self == Self::Urgent
+    }
+
+    /// The list of one slot (the rows at one site): urgent when any row is a danger
+    /// ([`EscalationCandidate::is_danger`]), the check list when every row is only a doubt.
+    ///
+    /// # The seam for a row-level doubt
+    ///
+    /// This and [`EscalationCandidate::is_danger`] are the only place the list is decided:
+    /// [`re_mark`] writes the answer onto every candidate (`lane`), and every surface (the
+    /// ledger, the PDF, the workbook, the CSVs, the release gate, the review screens) reads that
+    /// field and never the reasons. A row-level signal that a finding may be a false positive
+    /// (the flag another branch, feat/possible-false-positive, is adding to rows) therefore needs
+    /// no change to any surface to move a site between the lists: carry it onto the candidate
+    /// from the row where the line is marked, the way `held` is
+    /// (`ReviewTree::refresh_held` in the server), and read it in `is_danger`. Whether a flagged
+    /// row with a security reason is still a danger is the owner's decision when the flag lands;
+    /// nothing here assumes the answer.
+    pub fn of_slot<'a>(members: impl IntoIterator<Item = &'a EscalationCandidate>) -> Self {
+        if members.into_iter().any(EscalationCandidate::is_danger) {
+            Self::Urgent
+        } else {
+            Self::Check
         }
     }
 }
@@ -346,6 +431,17 @@ pub struct EscalationCandidate {
     pub over_budget_reason: Option<EscalationReason>,
     /// The group reviewer's one-line reason in the architect's words.
     pub why: String,
+    /// The row was held for a reviewer's decision when the line was marked (the engine doubted
+    /// its evidence or text, the per-site reviewer hedged, or the reviewer put it back). Written
+    /// from the row each time the line is marked, never by a model. A candidate stored before
+    /// the field existed reads false until its line is marked again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+    /// Which list the candidate's slot is on: urgent (a danger) or "Check: possible false alarm"
+    /// (only a doubt). Written with the line, for every row of the slot alike. A candidate stored
+    /// before the lists existed reads urgent until its line is marked again.
+    #[serde(default, skip_serializing_if = "EscalationLane::is_urgent")]
+    pub lane: EscalationLane,
 }
 
 /// 3 critical, 2 high, 1 medium, 0 anything else.
@@ -366,6 +462,45 @@ impl EscalationCandidate {
             Some(s2) if severity_weight(s2) > severity_weight(&self.severity) => s2,
             _ => &self.severity,
         }
+    }
+
+    /// The security reason this candidate goes above the line for whatever the budget and the
+    /// project's over-budget set say: the row is held for a reviewer's decision, its ordering
+    /// severity is high or critical, and its reason is one of
+    /// [`EscalationReason::is_security_reason`]. A held row that serious cannot wait below the
+    /// line: the release gate will not let it out undecided, and the reviewer has to see it to
+    /// decide it. The owner rated unauthenticated access high by default, so high is enough for
+    /// every one of the six.
+    pub fn rises_when_held(&self) -> Option<EscalationReason> {
+        let serious = matches!(
+            self.ordering_severity().to_ascii_lowercase().as_str(),
+            "critical" | "high"
+        );
+        (self.held && serious && self.reason.is_security_reason()).then_some(self.reason)
+    }
+
+    /// The row was escalated for a danger: its reason is a security reason
+    /// ([`EscalationReason::is_security_reason`]). Every other reason is a doubt about the
+    /// finding, and a slot of doubts alone goes on the "Check: possible false alarm" list
+    /// ([`EscalationLane::of_slot`]).
+    pub fn is_danger(&self) -> bool {
+        self.reason.is_security_reason()
+    }
+
+    /// The reason this candidate may go past the budget under `allowed`, when it may:
+    /// [`EscalationReason::may_exceed_budget`], or a serious held row
+    /// ([`Self::rises_when_held`]).
+    pub fn over_budget_reason_under(
+        &self,
+        allowed: &[EscalationReason],
+    ) -> Option<EscalationReason> {
+        if self
+            .reason
+            .may_exceed_budget(self.ordering_severity(), allowed)
+        {
+            return Some(self.reason);
+        }
+        self.rises_when_held()
     }
 
     /// Where this candidate stands against the line.
@@ -404,9 +539,15 @@ pub fn count_slots<'a>(
 /// Mark the line again over stored candidates, with no model call. `candidates` are in
 /// `global_rank` order; the first `budget` SLOTS are escalated (rows at one site share a slot,
 /// R-1), and past it only a slot with a candidate whose reason may exceed the budget under
-/// `allowed` ([`EscalationReason::may_exceed_budget`]) is, with its `over_budget_reason`
+/// `allowed` ([`EscalationReason::may_exceed_budget`]) or that is a serious held row
+/// ([`EscalationCandidate::rises_when_held`], whatever `allowed` says) is, with its `over_budget_reason`
 /// recorded on every row of the slot. The budget is recomputed from `rate_per_kloc`, `floor` and
 /// `counted_lines`, and its counts (in slots) are rewritten.
+///
+/// Danger before doubt: a slot is urgent when any row at it is a danger and on the "Check:
+/// possible false alarm" list otherwise ([`EscalationLane::of_slot`]). The budget's slots go to
+/// the urgent slots first, then to the check slots, each list in rank order, so a doubt never
+/// takes a slot a danger wants. Every candidate stays, on its list, above or below the line.
 pub fn re_mark(
     candidates: &mut [EscalationCandidate],
     budget: &mut EscalationBudget,
@@ -425,25 +566,38 @@ pub fn re_mark(
         });
         slots[at].push(position);
     }
+    // Each slot's list: urgent when any row at it is a danger, the check list otherwise. The
+    // urgent slots take the budget first, in rank order; the check slots take what is left, in
+    // rank order. Past the budget either list keeps only a slot one of its rows may lift.
+    let lanes: Vec<EscalationLane> = slots
+        .iter()
+        .map(|members| EscalationLane::of_slot(members.iter().map(|&m| &candidates[m])))
+        .collect();
     let mut escalated = 0usize;
-    for (at, members) in slots.iter().enumerate() {
-        let (is_escalated, over) = if at < budget.budget {
-            (true, None)
-        } else {
-            let allowed_by = members
-                .iter()
-                .map(|&m| &candidates[m])
-                .find(|c| c.reason.may_exceed_budget(c.ordering_severity(), allowed))
-                .map(|c| c.reason);
-            (allowed_by.is_some(), allowed_by)
-        };
-        for &m in members {
-            candidates[m].escalated = is_escalated;
-            candidates[m].over_budget_reason = over;
+    let mut check = 0usize;
+    let mut in_budget = 0usize;
+    for lane in [EscalationLane::Urgent, EscalationLane::Check] {
+        for (members, _) in slots.iter().zip(&lanes).filter(|(_, l)| **l == lane) {
+            let (is_escalated, over) = if in_budget < budget.budget {
+                in_budget += 1;
+                (true, None)
+            } else {
+                let allowed_by = members
+                    .iter()
+                    .find_map(|&m| candidates[m].over_budget_reason_under(allowed));
+                (allowed_by.is_some(), allowed_by)
+            };
+            for &m in members {
+                candidates[m].escalated = is_escalated;
+                candidates[m].over_budget_reason = over;
+                candidates[m].lane = lane;
+            }
+            escalated += usize::from(is_escalated);
+            check += usize::from(is_escalated && lane == EscalationLane::Check);
         }
-        escalated += usize::from(is_escalated);
     }
     budget.escalated = escalated;
+    budget.check = check;
     budget.over_budget = escalated.saturating_sub(budget.budget);
     budget.candidates = slots.len();
 }
@@ -513,6 +667,9 @@ pub struct SiteReview {
     /// Set when the site is escalated past the budget: the reason it may be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over_budget_reason: Option<EscalationReason>,
+    /// The list the site's slot is on (urgent, or "Check: possible false alarm").
+    #[serde(default, skip_serializing_if = "EscalationLane::is_urgent")]
+    pub escalation_lane: EscalationLane,
     /// The reason the group reviewer gave for the site not belonging with the rest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outlier_reason: Option<OutlierReason>,
@@ -545,6 +702,13 @@ impl SiteReview {
         self.global_rank = Some(c.global_rank);
         self.escalation_state = c.state();
         self.over_budget_reason = c.over_budget_reason;
+        self.escalation_lane = c.lane;
+    }
+
+    /// The site is above the line on the "Check: possible false alarm" list.
+    pub fn in_check_list(&self) -> bool {
+        self.escalation_state == EscalationState::Escalated
+            && self.escalation_lane == EscalationLane::Check
     }
 
     /// Clear the escalation columns (the site is not a candidate).
@@ -555,6 +719,7 @@ impl SiteReview {
         self.global_rank = None;
         self.escalation_state = EscalationState::NotACandidate;
         self.over_budget_reason = None;
+        self.escalation_lane = EscalationLane::Urgent;
     }
 }
 
@@ -639,6 +804,8 @@ mod tests {
             escalated: false,
             over_budget_reason: None,
             why: String::new(),
+            held: false,
+            lane: EscalationLane::Urgent,
         }
     }
 
@@ -763,6 +930,8 @@ mod tests {
             escalated: false,
             over_budget_reason: None,
             why: String::new(),
+            held: false,
+            lane: EscalationLane::Urgent,
         };
         let mut candidates = vec![
             candidate(EscalationReason::OutlierInGroup),
@@ -819,6 +988,295 @@ mod tests {
         assert_eq!(budget.escalated, 4);
         assert_eq!(budget.over_budget, 2);
         assert_eq!(budget.candidates, 6);
+    }
+
+    /// The six reasons that say a security flaw is at the site, the closed list a held row rises
+    /// on.
+    const SECURITY_REASONS: [EscalationReason; 6] = [
+        EscalationReason::UnauthenticatedReach,
+        EscalationReason::AuthorizationBypass,
+        EscalationReason::Injection,
+        EscalationReason::SecretExposure,
+        EscalationReason::CrossTenant,
+        EscalationReason::DataLoss,
+    ];
+
+    /// A budget of one slot, taken by a critical secret exposure, then `row` in the next slot.
+    fn full_budget_then(
+        row: EscalationCandidate,
+        allowed: &[EscalationReason],
+    ) -> EscalationCandidate {
+        let mut candidates = vec![
+            cand("first", EscalationReason::SecretExposure, "critical", 1),
+            row,
+        ];
+        candidates[1].global_rank = 2;
+        let mut budget = EscalationBudget::compute(1.0, 1, 0);
+        re_mark(&mut candidates, &mut budget, allowed);
+        assert!(
+            candidates[0].escalated,
+            "the first slot is inside the budget"
+        );
+        candidates.remove(1)
+    }
+
+    #[test]
+    fn a_held_high_row_with_each_security_reason_rises_above_a_full_budget() {
+        for reason in SECURITY_REASONS {
+            for severity in ["high", "critical", "HIGH"] {
+                // Whatever the project's over-budget set says: the empty set allows nothing else.
+                for allowed in [EscalationReason::default_over_budget_set(), vec![]] {
+                    let mut row = cand("held", reason, severity, 2);
+                    row.held = true;
+                    let row = full_budget_then(row, &allowed);
+                    assert!(
+                        row.escalated,
+                        "a held {severity} row with {reason:?} rises (allowed {allowed:?})"
+                    );
+                    assert_eq!(
+                        row.over_budget_reason,
+                        Some(reason),
+                        "{reason:?} {severity}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_held_row_rises_on_the_reviewers_higher_severity_too() {
+        // The group reviewer rated the medium row high: the line reads the higher of the two.
+        let mut row = cand("held", EscalationReason::UnauthenticatedReach, "medium", 2);
+        row.held = true;
+        row.stage2_severity = Some("high".to_string());
+        assert!(full_budget_then(row, &[]).escalated);
+    }
+
+    #[test]
+    fn a_held_row_without_a_security_reason_or_below_high_stays_below_the_line() {
+        let set = EscalationReason::default_over_budget_set();
+        for reason in EscalationReason::ALL {
+            if SECURITY_REASONS.contains(&reason) || reason == EscalationReason::EvidenceUnverified
+            {
+                continue;
+            }
+            let mut row = cand("held", reason, "high", 2);
+            row.held = true;
+            let row = full_budget_then(row, &set);
+            assert!(!row.escalated, "a held high {reason:?} row does not rise");
+            assert_eq!(row.over_budget_reason, None);
+        }
+        for severity in ["medium", "low", "info"] {
+            let mut row = cand("held", EscalationReason::UnauthenticatedReach, severity, 2);
+            row.held = true;
+            assert!(
+                !full_budget_then(row, &set).escalated,
+                "a held {severity} row does not rise"
+            );
+        }
+        // Not held, a high unauthenticated reach still has to win a slot.
+        let row = cand("open", EscalationReason::UnauthenticatedReach, "high", 2);
+        assert!(!full_budget_then(row, &set).escalated);
+    }
+
+    #[test]
+    fn a_held_row_lifts_its_whole_slot_and_the_counts_say_so() {
+        let mut candidates = vec![
+            cand("a", EscalationReason::SecretExposure, "critical", 1),
+            cand("b", EscalationReason::RuleMisfit, "low", 2),
+            cand("c", EscalationReason::UnauthenticatedReach, "high", 3),
+            cand("d", EscalationReason::OutlierInGroup, "low", 4),
+        ];
+        for (c, slot) in candidates.iter_mut().zip([1, 2, 2, 3]) {
+            c.slot = slot;
+        }
+        candidates[2].held = true;
+        let before = candidates.len();
+        let mut budget = EscalationBudget::compute(1.0, 1, 0);
+        re_mark(&mut candidates, &mut budget, &[]);
+        assert_eq!(candidates.len(), before, "nothing is dropped");
+        let marks: Vec<(&str, bool, Option<EscalationReason>)> = candidates
+            .iter()
+            .map(|c| (c.key.as_str(), c.escalated, c.over_budget_reason))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                ("a", true, None),
+                ("b", true, Some(EscalationReason::UnauthenticatedReach)),
+                ("c", true, Some(EscalationReason::UnauthenticatedReach)),
+                ("d", false, None),
+            ]
+        );
+        assert_eq!(
+            (budget.candidates, budget.escalated, budget.over_budget),
+            (3, 2, 1)
+        );
+    }
+
+    /// The marks of `candidates` as (key, escalated, lane).
+    fn lanes(candidates: &[EscalationCandidate]) -> Vec<(&str, bool, EscalationLane)> {
+        candidates
+            .iter()
+            .map(|c| (c.key.as_str(), c.escalated, c.lane))
+            .collect()
+    }
+
+    #[test]
+    fn a_doubt_only_row_takes_no_urgent_slot() {
+        // Two doubts rank first (critical), two dangers behind them (medium, so neither may go
+        // past the budget). A budget of two goes to the dangers; the doubts are on the check list.
+        let mut candidates = vec![
+            cand(
+                "doubt-1",
+                EscalationReason::ConflictingVerdicts,
+                "critical",
+                1,
+            ),
+            cand("doubt-2", EscalationReason::OutlierInGroup, "critical", 2),
+            cand("danger-1", EscalationReason::SecretExposure, "medium", 3),
+            cand("danger-2", EscalationReason::Injection, "medium", 4),
+        ];
+        let mut budget = EscalationBudget::compute(1.0, 2, 0);
+        re_mark(
+            &mut candidates,
+            &mut budget,
+            &EscalationReason::default_over_budget_set(),
+        );
+        use EscalationLane::{Check, Urgent};
+        assert_eq!(
+            lanes(&candidates),
+            vec![
+                ("doubt-1", false, Check),
+                ("doubt-2", false, Check),
+                ("danger-1", true, Urgent),
+                ("danger-2", true, Urgent),
+            ]
+        );
+        assert_eq!(
+            (budget.escalated, budget.check, budget.candidates),
+            (2, 0, 4)
+        );
+    }
+
+    #[test]
+    fn the_check_list_takes_what_the_urgent_list_leaves_of_the_budget() {
+        let mut candidates = vec![
+            cand(
+                "doubt-1",
+                EscalationReason::ConflictingVerdicts,
+                "critical",
+                1,
+            ),
+            cand("doubt-2", EscalationReason::OutlierInGroup, "critical", 2),
+            cand("danger-1", EscalationReason::SecretExposure, "medium", 3),
+            cand("doubt-3", EscalationReason::EvidenceUnverified, "low", 4),
+        ];
+        let mut budget = EscalationBudget::compute(1.0, 2, 0);
+        re_mark(&mut candidates, &mut budget, &[]);
+        use EscalationLane::{Check, Urgent};
+        assert_eq!(
+            lanes(&candidates),
+            vec![
+                ("doubt-1", true, Check),
+                ("doubt-2", false, Check),
+                ("danger-1", true, Urgent),
+                ("doubt-3", true, Check),
+            ],
+            "one slot is left for the first doubt; unverified evidence goes past the budget on \
+             the check list"
+        );
+        assert_eq!(
+            candidates[3].over_budget_reason,
+            Some(EscalationReason::EvidenceUnverified)
+        );
+        assert_eq!(
+            (budget.escalated, budget.check, budget.over_budget),
+            (3, 2, 1)
+        );
+    }
+
+    #[test]
+    fn a_site_with_a_danger_row_and_a_doubt_row_is_urgent_as_a_whole() {
+        let mut candidates = vec![
+            cand("doubt", EscalationReason::RuleMisfit, "high", 1),
+            cand("danger", EscalationReason::CrossTenant, "high", 2),
+            cand("other", EscalationReason::NeedsMoreCode, "high", 3),
+        ];
+        for (c, slot) in candidates.iter_mut().zip([1, 1, 2]) {
+            c.slot = slot;
+        }
+        let mut budget = EscalationBudget::compute(1.0, 1, 0);
+        re_mark(&mut candidates, &mut budget, &[]);
+        use EscalationLane::{Check, Urgent};
+        assert_eq!(
+            lanes(&candidates),
+            vec![
+                ("doubt", true, Urgent),
+                ("danger", true, Urgent),
+                ("other", false, Check)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_two_lists_and_the_line_reconcile_and_nothing_is_dropped() {
+        let reasons = EscalationReason::ALL;
+        let severities = ["critical", "high", "medium", "low"];
+        for floor in 0..12 {
+            let mut candidates: Vec<EscalationCandidate> = (0..24)
+                .map(|i| {
+                    let mut c = cand(
+                        &format!("k{i}"),
+                        reasons[(i * 5) % reasons.len()],
+                        severities[(i * 3) % severities.len()],
+                        i as u32 + 1,
+                    );
+                    c.slot = (i / 2) as u32 + 1;
+                    c.held = i % 7 == 0;
+                    c
+                })
+                .collect();
+            let keys: Vec<String> = candidates.iter().map(|c| c.key.clone()).collect();
+            let mut budget = EscalationBudget::compute(1.0, floor, 0);
+            re_mark(
+                &mut candidates,
+                &mut budget,
+                &EscalationReason::default_over_budget_set(),
+            );
+            let after: Vec<String> = candidates.iter().map(|c| c.key.clone()).collect();
+            assert_eq!(after, keys, "nothing is dropped or moved");
+            let (slots, escalated) = count_slots(&candidates);
+            let (_, check) = count_slots(
+                candidates
+                    .iter()
+                    .filter(|c| c.lane == EscalationLane::Check),
+            );
+            assert_eq!(budget.candidates, slots);
+            assert_eq!(budget.escalated, escalated);
+            assert_eq!(budget.check, check, "floor {floor}");
+            assert!(budget.check <= budget.escalated);
+            assert_eq!(budget.over_budget, escalated.saturating_sub(budget.budget));
+            // Every row of a slot is on the same list, and a slot is urgent exactly when one of
+            // its rows carries a security reason.
+            for slot in 1..=12u32 {
+                let rows: Vec<&EscalationCandidate> =
+                    candidates.iter().filter(|c| c.slot == slot).collect();
+                let danger = rows.iter().any(|c| c.reason.is_security_reason());
+                for c in rows {
+                    assert_eq!(c.lane == EscalationLane::Urgent, danger, "{c:?}");
+                }
+            }
+            // The urgent list never waits behind a doubt: a check slot is escalated inside the
+            // budget only when every urgent slot is.
+            let urgent_below = candidates
+                .iter()
+                .any(|c| c.lane == EscalationLane::Urgent && !c.escalated);
+            let check_in_budget = candidates.iter().any(|c| {
+                c.lane == EscalationLane::Check && c.escalated && c.over_budget_reason.is_none()
+            });
+            assert!(!(urgent_below && check_in_budget), "floor {floor}");
+        }
     }
 
     #[test]

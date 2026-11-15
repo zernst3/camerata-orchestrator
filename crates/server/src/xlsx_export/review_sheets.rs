@@ -67,6 +67,7 @@ pub(super) fn grouped_table(nodes: &[TreeNodeView], internal: bool) -> Table {
         for h in [
             "Summary source",
             v::H_ESCALATED,
+            v::CHECK_POSSIBLE_FALSE_ALARM,
             "Below the line",
             "Outliers",
             "Unplaced",
@@ -110,6 +111,7 @@ pub(super) fn grouped_table(nodes: &[TreeNodeView], internal: bool) -> Table {
         if let Some(t) = &n.internal {
             c.put("Summary source", Cell::text(&t.summary_source))
                 .put(v::H_ESCALATED, Cell::Num(t.escalated as f64))
+                .put(v::CHECK_POSSIBLE_FALSE_ALARM, Cell::Num(t.check as f64))
                 .put("Below the line", Cell::Num(t.below_the_line as f64))
                 .put("Outliers", Cell::Num(t.outliers as f64))
                 .put("Unplaced", Cell::Num(t.unplaced as f64))

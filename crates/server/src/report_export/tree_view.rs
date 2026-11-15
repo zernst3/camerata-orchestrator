@@ -47,6 +47,8 @@ pub struct NodeTriage {
     /// `model` or `reviewer`.
     pub summary_source: String,
     pub escalated: usize,
+    /// Of `escalated`, the sites on the "Check: possible false alarm" list.
+    pub check: usize,
     pub below_the_line: usize,
     pub outliers: usize,
     pub unplaced: usize,
@@ -125,6 +127,7 @@ pub fn tree_view(reviewed: &ReviewedReport, internal: bool) -> Vec<TreeNodeView>
                     }
                     .to_string(),
                     escalated: counts.escalated,
+                    check: counts.check,
                     below_the_line: counts.below_the_line,
                     outliers: counts.outliers,
                     unplaced: counts.unplaced,

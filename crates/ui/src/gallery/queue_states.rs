@@ -103,6 +103,7 @@ states! {
     detail_form_open => "queue/detail-form-open",
     merge_picker_empty_pool => "queue/merge-picker-empty-pool",
     place => "queue/place",
+    check_list => "queue/check-list",
 }
 
 #[cfg(test)]

@@ -778,6 +778,8 @@ impl Seeding {
                 escalated: false,
                 over_budget_reason: None,
                 why: c.why.clone(),
+                held: false,
+                lane: camerata_api_types::review::EscalationLane::Urgent,
             });
         }
         let mut budget = EscalationBudget::compute(
@@ -813,6 +815,13 @@ impl Seeding {
             candidate_rows: candidates.len(),
             escalated_rows: candidates.iter().filter(|c| c.escalated).count(),
             over_budget: budget.over_budget,
+            check: budget.check,
+            check_rows: candidates
+                .iter()
+                .filter(|c| {
+                    c.escalated && c.lane == camerata_api_types::review::EscalationLane::Check
+                })
+                .count(),
             total_sites,
             share_escalated: if total_sites == 0 {
                 0.0
@@ -821,6 +830,10 @@ impl Seeding {
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_held: crate::scan_ledger::EscalationBlock::held_over_budget_rows(
+                candidates.iter(),
+                &EscalationReason::default_over_budget_set(),
+            ),
             over_budget_reasons: EscalationReason::default_over_budget_set()
                 .iter()
                 .map(|r| r.as_str().to_string())

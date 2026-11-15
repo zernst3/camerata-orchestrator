@@ -223,6 +223,8 @@ struct RawEscalation {
     /// The engine added this candidate (no stage 2 nomination): it sorts after every reasoned
     /// candidate of its severity.
     mechanical: bool,
+    /// The row is held for a reviewer's decision ([`crate::report_export::is_held_row`]).
+    held: bool,
 }
 
 impl RawEscalation {
@@ -336,8 +338,10 @@ impl RankedSite {
 ///    a top reason never outranks a high row), then interleaved across nodes inside one severity
 ///    and reason (rank 1 of every node before rank 2 of any), so one noisy rule cannot take the
 ///    whole budget (D6). The same candidates always give the same list.
-/// 5. The first `budget` slots are escalated; past it only the D5 reasons at their severity and
-///    `evidence_unverified` are, each recording why. The rest stay, in order, below the line.
+/// 5. The first `budget` slots are escalated; past it only the D5 reasons at their severity,
+///    `evidence_unverified` and a row held for a decision at high or critical with a security
+///    reason ([`EscalationCandidate::rises_when_held`]) are, each recording why. The rest stay,
+///    in order, below the line.
 pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSettings) -> Ranked {
     use std::collections::{BTreeMap, HashMap};
 
@@ -367,6 +371,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                         why: e.why.clone(),
                         site: site_of(row),
                         mechanical: false,
+                        held: crate::report_export::is_held_row(row),
                     },
                 );
             }
@@ -400,6 +405,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                             .to_string(),
                         site: site_of(f),
                         mechanical: false,
+                        held: crate::report_export::is_held_row(f),
                     },
                 );
             }
@@ -448,6 +454,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                 ),
                 site: site_of(f),
                 mechanical: true,
+                held: crate::report_export::is_held_row(f),
             },
         );
     }
@@ -536,6 +543,8 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
                 escalated: false,
                 over_budget_reason: None,
                 why: r.why,
+                held: r.held,
+                lane: camerata_api_types::review::EscalationLane::Urgent,
             });
         }
     }

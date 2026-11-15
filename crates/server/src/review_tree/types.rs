@@ -159,6 +159,9 @@ pub struct NodeCounts {
     pub outliers: usize,
     /// Sites under the node the group reviewer did not place in a sub-group.
     pub unplaced: usize,
+    /// Of `escalated`, the sites on the "Check: possible false alarm" list.
+    #[serde(default)]
+    pub check: usize,
 }
 
 /// The review tree of one report. Sealed with it, stored in the inspection entry.
@@ -212,6 +215,21 @@ impl ReviewTree {
         }
     }
 
+    /// Write each stored candidate's `held` from its row as the row stands now, so a run saved
+    /// before candidates carried the flag (or a row whose hold changed since) is marked by the
+    /// hold it has. A candidate whose row is not in `rows` keeps what it has.
+    pub fn refresh_held(&mut self, rows: &[crate::onboard::Finding]) {
+        let held: std::collections::HashMap<&str, bool> = rows
+            .iter()
+            .map(|f| (f.site_key.as_str(), crate::report_export::is_held_row(f)))
+            .collect();
+        for c in &mut self.candidates {
+            if let Some(h) = held.get(c.key.as_str()) {
+                c.held = *h;
+            }
+        }
+    }
+
     /// Move the line again over the stored candidates with new settings: no model call, no
     /// candidate added or dropped. Rewrites the budget, the candidates' marks and the rows'
     /// columns.
@@ -225,6 +243,7 @@ impl ReviewTree {
             settings.floor,
             settings.counted_lines,
         );
+        self.refresh_held(rows);
         camerata_api_types::review::re_mark(
             &mut self.candidates,
             &mut self.budget,
@@ -267,9 +286,11 @@ impl ReviewTree {
             .count();
         let mut escalated = 0;
         let mut below_the_line = 0;
+        let mut check = 0;
         for c in self.candidates.iter().filter(|c| members.contains(&c.key)) {
             if c.escalated {
                 escalated += 1;
+                check += usize::from(c.lane == camerata_api_types::review::EscalationLane::Check);
             } else {
                 below_the_line += 1;
             }
@@ -280,6 +301,7 @@ impl ReviewTree {
             below_the_line,
             outliers: outliers.len(),
             unplaced,
+            check,
         }
     }
 

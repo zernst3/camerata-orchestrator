@@ -551,7 +551,10 @@ fn no_queue_text_has_an_em_dash_or_a_raw_nul() {
     ];
     for e in &l.entries {
         match e {
-            Entry::Line(t) | Entry::OverBand(t) | Entry::BelowHeading(t) => texts.push(t.clone()),
+            Entry::Line(t)
+            | Entry::OverBand(t)
+            | Entry::BelowHeading(t)
+            | Entry::CheckHeading(t) => texts.push(t.clone()),
             Entry::Row(r) => {
                 texts.push(reason_cell(r));
                 texts.push(node_cell(r));
@@ -719,4 +722,127 @@ fn a_new_since_decision_row_in_the_queue_says_the_verb_the_tree_says() {
     assert!(crate::edits::decision_line(&row.site, &ctx)
         .text
         .contains("you decided this group"));
+}
+
+/// A queue of two urgent rows inside the budget, an urgent row past it, and two rows on the
+/// check list (one in the budget's last slot, one past it for unverified evidence).
+fn two_list_view() -> QueueView {
+    use camerata_api_types::review::EscalationLane;
+    use EscalationReason::{ConflictingVerdicts, EvidenceUnverified, Injection, SecretExposure};
+    let urgent = [
+        row_of(SecretExposure, 1, Band::WithinBudget),
+        row_of(Injection, 2, Band::WithinBudget),
+        row_of(SecretExposure, 3, Band::OverBudget),
+    ];
+    let mut check = [
+        row_of(ConflictingVerdicts, 4, Band::WithinBudget),
+        row_of(EvidenceUnverified, 5, Band::OverBudget),
+    ];
+    for r in &mut check {
+        r.candidate.lane = EscalationLane::Check;
+    }
+    let mut v = view();
+    // Sent in rank order, a check row first, as a server could: the table still draws the
+    // urgent list first.
+    v.escalated = vec![
+        check[0].clone(),
+        urgent[0].clone(),
+        urgent[1].clone(),
+        urgent[2].clone(),
+        check[1].clone(),
+    ];
+    v.below.clear();
+    v.below_total = 0;
+    v.budget.budget = 3;
+    v.budget.escalated = 5;
+    v.budget.over_budget = 2;
+    v.budget.check = 2;
+    v
+}
+
+#[test]
+fn check_rows_are_drawn_after_every_urgent_row_under_their_own_heading() {
+    let v = two_list_view();
+    let l = layout(&v, &QueueState::default());
+    let drawn: Vec<String> = l
+        .entries
+        .iter()
+        .map(|e| match e {
+            Entry::Row(r) => format!("row {}", r.candidate.global_rank),
+            Entry::Line(_) => "line".to_string(),
+            Entry::OverBand(_) => "over".to_string(),
+            Entry::CheckHeading(_) => "check".to_string(),
+            Entry::BelowHeading(_) => "below".to_string(),
+        })
+        .collect();
+    assert_eq!(
+        drawn,
+        vec!["row 1", "row 2", "line", "over", "row 3", "check", "row 4", "row 5"]
+    );
+    let heading = l
+        .entries
+        .iter()
+        .find_map(|e| match e {
+            Entry::CheckHeading(t) => Some(t.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        heading,
+        "Check: possible false alarm: 2 escalated for a doubt, not a danger"
+    );
+    let Some(Entry::Line(line)) = l.entries.iter().find(|e| matches!(e, Entry::Line(_))) else {
+        unreachable!()
+    };
+    assert_eq!(line, "the line: 2 of a budget of 3");
+    assert_eq!(band_of(&v.escalated[0]), Band::Check);
+    assert!(
+        has_needed_me_box(&v.escalated[0]),
+        "a check row is decided like any other"
+    );
+}
+
+#[test]
+fn the_counts_line_says_how_many_are_on_the_check_list_and_nothing_is_dropped() {
+    let v = two_list_view();
+    let counts = counts_line(&v);
+    assert_eq!(
+        counts,
+        "Escalated 5 \u{b7} 1 over budget (all secret exposure at critical) \u{b7} 2 on \
+         Check: possible false alarm \u{b7} 0 candidates below the line"
+    );
+    let l = layout(&v, &QueueState::default());
+    assert_eq!(
+        l.row_count(),
+        v.escalated.len(),
+        "every escalated row is drawn"
+    );
+    // With no check row the line reads as it always did.
+    assert!(
+        !counts_line(&view()).contains("Check"),
+        "{}",
+        counts_line(&view())
+    );
+}
+
+#[test]
+fn the_check_list_gallery_fixture_has_rows_on_both_lists() {
+    use crate::test_support::review_fixtures::{fixture, Body, Loaded};
+    let Some(fx) = fixture("queue/check-list") else {
+        panic!("no fixture")
+    };
+    let Body::Queue(q) = fx.body else {
+        panic!("not a queue")
+    };
+    let Loaded::Ready(v) = q.queue else {
+        panic!("not ready")
+    };
+    let check = v
+        .escalated
+        .iter()
+        .filter(|r| band_of(r) == Band::Check)
+        .count();
+    assert_eq!(check, 4);
+    assert!(v.escalated.len() > check, "and urgent rows");
+    assert_eq!(v.budget.check, check);
 }

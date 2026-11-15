@@ -2070,6 +2070,14 @@ fn record_ledger(
             candidate_rows: tree.candidates.len(),
             escalated_rows: tree.candidates.iter().filter(|c| c.escalated).count(),
             over_budget: budget.over_budget,
+            check: budget.check,
+            check_rows: tree
+                .candidates
+                .iter()
+                .filter(|c| {
+                    c.escalated && c.lane == camerata_api_types::review::EscalationLane::Check
+                })
+                .count(),
             total_sites: total,
             share_escalated: if total == 0 {
                 0.0
@@ -2078,6 +2086,10 @@ fn record_ledger(
             },
             by_reason,
             over_budget_by_reason: over_by_reason,
+            over_budget_held: crate::scan_ledger::EscalationBlock::held_over_budget_rows(
+                tree.candidates.iter(),
+                &cfg.rank.over_budget_reasons,
+            ),
             over_budget_reasons: cfg
                 .rank
                 .over_budget_reasons

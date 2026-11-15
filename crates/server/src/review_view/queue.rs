@@ -17,6 +17,8 @@ pub(super) struct QueueGroup {
     pub candidate: usize,
     /// Whether any candidate of the group is above the line.
     pub escalated: bool,
+    /// Whether the group's shown candidate is on the "Check: possible false alarm" list.
+    pub check: bool,
 }
 
 impl<'a> ReviewComposer<'a> {
@@ -51,6 +53,8 @@ impl<'a> ReviewComposer<'a> {
                 QueueGroup {
                     candidate,
                     escalated,
+                    check: self.candidates[candidate].lane
+                        == camerata_api_types::review::EscalationLane::Check,
                 }
             })
             .collect()

@@ -342,6 +342,11 @@ pub const H_ROWS: &str = "Rows";
 pub const YES: &str = "Yes";
 /// The decision state of a fix or a place with a rule no reviewer has ruled on.
 pub const OPEN: &str = "Open";
+/// The second list of escalated places: the ones sent for review in person only because the
+/// finding was in doubt (conflicting verdicts, unverified evidence and the like), never because
+/// the place is dangerous. They take no urgent slot. The same words on the PDF, the workbook and
+/// the review screens.
+pub const CHECK_POSSIBLE_FALSE_ALARM: &str = camerata_api_types::review::CHECK_POSSIBLE_FALSE_ALARM;
 /// The decision state of a fix whose rules were decided differently.
 pub const MIXED_SEE_RULES: &str = "Mixed, see rules";
 /// The word for a fix some of whose rules were decided differently, in an Open count.
@@ -525,6 +530,11 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Open",
         "A fix or a place with at least one rule no reviewer has ruled on yet. The count says how many rules are decided.",
         "The Decision so far column of Fix plan and All problems",
+    ),
+    e(
+        CHECK_POSSIBLE_FALSE_ALARM,
+        "A place sent for review in person because the problem was in doubt, not because the place is dangerous. It takes no review slot a dangerous problem needs.",
+        "The Escalations section of the report",
     ),
     e(
         "Mixed",

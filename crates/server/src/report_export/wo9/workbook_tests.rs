@@ -510,6 +510,7 @@ fn internal_headers() -> Vec<String> {
         v::H_REVIEW_FLAGS.to_string(),
         v::H_HELD.to_string(),
         v::H_ESCALATED.to_string(),
+        v::CHECK_POSSIBLE_FALSE_ALARM.to_string(),
         "Summary source".to_string(),
         "Below the line".to_string(),
         "Outliers".to_string(),

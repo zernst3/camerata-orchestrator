@@ -52,6 +52,8 @@ fn candidate(
         escalated: false,
         over_budget_reason: None,
         why: "reachable without signing in".to_string(),
+        held: false,
+        lane: camerata_api_types::review::EscalationLane::Urgent,
     }
 }
 
@@ -1154,4 +1156,61 @@ fn a_carried_row_knows_when_its_carrier_has_been_decided() {
         "the carried row has none of its own"
     );
     assert!(row.carried_by.as_ref().unwrap().decided);
+}
+
+#[test]
+fn the_review_lanes_count_the_check_list_apart_and_the_counts_reconcile() {
+    // `staged` nominates two dangers (unauthenticated reach, secret exposure) and two doubts
+    // (rule misfit, needs more code). The floor of 20 puts all four above the line: the two
+    // dangers on the urgent list, the two doubts on "Check: possible false alarm".
+    let sealed = staged();
+    let stores = Stores::default();
+    let reviewed = apply_overlay(
+        &crate::report_export::re_mark_line(&sealed, &stores.settings),
+        &[],
+        &[],
+        &[],
+    );
+    let shell = compose(&reviewed, &stores, |c| c.shell());
+    let q = compose(&reviewed, &stores, |c| c.queue(true, 0, 100));
+    assert_eq!((shell.lanes.escalations, shell.lanes.check), (4, 2));
+    assert_eq!((shell.budget.escalated, shell.budget.check), (4, 2));
+    let on_check: Vec<&str> = q
+        .escalated
+        .iter()
+        .filter(|r| r.candidate.lane == camerata_api_types::review::EscalationLane::Check)
+        .map(|r| r.site.path.as_str())
+        .collect();
+    assert_eq!(on_check, vec!["src/q01.rs", "src/q02.rs"]);
+    assert_eq!(q.escalated.len(), shell.lanes.escalations);
+    assert_eq!(on_check.len(), shell.lanes.check);
+
+    // A floor of 1: the doubts take no urgent slot and wait below the line; the critical secret
+    // exposure goes past the budget. Nothing is dropped.
+    let mut stores = Stores::default();
+    stores.settings.escalation_rate_per_kloc = 0.0;
+    stores.settings.escalation_floor = 1;
+    let reviewed = apply_overlay(
+        &crate::report_export::re_mark_line(&sealed, &stores.settings),
+        &[],
+        &[],
+        &[],
+    );
+    let shell = compose(&reviewed, &stores, |c| c.shell());
+    let q = compose(&reviewed, &stores, |c| c.queue(true, 0, 100));
+    assert_eq!((shell.lanes.escalations, shell.lanes.check), (2, 0));
+    assert_eq!(
+        q.escalated.len() + q.below_total,
+        4,
+        "every candidate is listed"
+    );
+    assert!(q
+        .below
+        .iter()
+        .all(|r| r.candidate.lane == camerata_api_types::review::EscalationLane::Check));
+    assert_eq!(
+        reviewed.report().findings.len(),
+        sealed.findings.len(),
+        "no row is dropped"
+    );
 }
