@@ -139,7 +139,7 @@ cargo run -p camerata -- integrity-gate --ledger <LEDGER PATH THE RUN PRINTED>
 
 Without `--internal`, every inspection is a client engagement: it runs only on the Anthropic API with Anthropic models and never executes the repository's own code. `--internal` is for the maintainer's own development.
 
-The workbook holds every row, organised by the question a reader asks: **Start here** and **Glossary**, then **Fix plan** (one row per fix, in the order to do them), **All problems** (every problem once, at its place), **Needs a decision**, **Your conventions**, **Departures** (one row per rule, at the grain the departure numbers are actually computed), **Dependencies**, then **Rules checked**, **Ruled out** and **Not checked**; last come the reviewers' sheets (**All source rows**, **Reviewer decisions** and **How problems were grouped**). The PDF is a summary of 20 pages at most and deliberately does not carry every row; `findings.json` carries every problem that was not ruled out, every kind included. Each problem carries a rough range of hours to fix, labeled as a rough range. Exit code 2 on the gate is the point of the design: a wrapper that read "the gate could not run" as "the gate passed" would be the same class of bug as a scan that reads "the tool did not run" as "the rule is clean".
+The workbook holds every row, organised by the question a reader asks: **Start here** and **Glossary**, then **Fix plan** (one row per fix, in the order to do them), **All problems** (every problem once, at its place), **Needs a decision**, **Your conventions**, **Departures** (one row per rule, at the grain the departure numbers are actually computed), **Dependencies**, then **Rules checked**, **Patterns across services** (only for a project of several repos), **Ruled out** and **Not checked**; last come the reviewers' sheets (**All source rows**, **Reviewer decisions** and **How problems were grouped**). The PDF is a summary of 20 pages at most and deliberately does not carry every row; `findings.json` carries every problem that was not ruled out, every kind included. Each problem carries a rough range of hours to fix, labeled as a rough range. Exit code 2 on the gate is the point of the design: a wrapper that read "the gate could not run" as "the gate passed" would be the same class of bug as a scan that reads "the tool did not run" as "the rule is clean".
 
 ## What has changed recently
 
@@ -224,7 +224,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 
 **Built, but the accuracy and efficiency tests are still pending:**
 
-- **The inspection's accuracy.** How precise and how complete the AI pass is on large real-world codebases has not been measured and published. Accuracy testing has started on fixture repositories with planted defects and decoys. How precise and complete the AI pass is on large real-world codebases has not been measured, and until it is the AI findings are unproven at that scale.
+- **The inspection's accuracy.** Accuracy testing has started on fixture repositories with planted defects and decoys. How precise and how complete the AI pass is on large real-world codebases has not been measured, and until it is the AI findings are unproven at that scale.
 - **The inspection's token efficiency.** The savings listed under token-efficiency switches are built and each can be switched off, but the effect of each on cost and on findings has not yet been measured across a set of real runs.
 
 **Built and tested, but not yet validated live:**

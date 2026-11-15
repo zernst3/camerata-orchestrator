@@ -1,7 +1,7 @@
 # Camerata: end-to-end user guide
 
-This is the "I have a repo new to Camerata, where do I start and how do I take it all
-the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat bubble) answers from. Keep it accurate to what's actually shipped, an
+This is the "I have a repo new to Camerata: where do I start and how do I take it all
+the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat bubble) answers from. Keep it accurate to what's actually shipped; an
 assistant that describes a feature that doesn't exist undercuts the whole point.
 
 > Status (updated 2026-11-15): the Codebase Inspection (the audit of an existing repository, ending
@@ -10,7 +10,7 @@ assistant that describes a feature that doesn't exist undercuts the whole point.
 > refuses the **CLI** backend and any OpenRouter model before any file is read or any model is called.
 > The client's own build tooling (the `cargo clippy` scan preview and the dev loop's layer-2 checks)
 > runs only when the operator opts in for that engagement. The operator turns **Client engagement**
-> off per project for their own development. Credentials are an **Anthropic API key** and a **GitHub
+> off per project for the operator's own development. Credentials are an **Anthropic API key** and a **GitHub
 > token**, both set in Settings (keychain-backed, shown masked); an OpenRouter key is for the
 > operator's own development only. The inspection ends in a review stage (a tree, an escalation queue
 > and a group reviewer, described in section 3) and a client package (PDF, Excel workbook,
@@ -36,8 +36,8 @@ paths the operator uses:
      live fleet.
    - **API path (OpenRouter or Anthropic API):** set an **OpenRouter API key** in Settings, or an
      **Anthropic API key** in Settings (Chat backend, API). The Anthropic key saved in the app is
-     the one every model call uses, in the app and in the `camerata` command line, and a key the operator
-     save or replace takes effect on the next call with no restart. The `ANTHROPIC_API_KEY`
+     the one every model call uses, in the app and in the `camerata` command line, and a key the operator saves or replaces
+     takes effect on the next call with no restart. The `ANTHROPIC_API_KEY`
      environment variable is only a fallback (for CI and existing `.env` setups) and is used only
      when no key has been saved in the app. The `ApiAgentDriver` owns the MCP tool-use loop
      in-process and works with any provider the model registry discovers (Claude, and every
@@ -75,9 +75,9 @@ setting**, not a global switch. Set it per project in that project's **Settings*
 | **API** | Calls the Anthropic Messages API directly | Yes |
 
 A new project starts on **API** as a client engagement, and a client engagement refuses **CLI**.
-The operator picks **CLI** only for their own development, after turning off **Client engagement**.
+The operator picks **CLI** only for the operator's own development, after turning off **Client engagement**.
 API is the backend for client work because it is metered, single-party and nameable in a contract,
-which a subscription running on their own machine is not.
+which a subscription running on the operator's own machine is not.
 
 If a project is set to **API** and no Anthropic API key is configured, AI steps on that project
 (scan, decomposition, clarification questions, story and design authoring, diagrams, mockups,
@@ -93,7 +93,7 @@ project). It does not affect any project's scan, recommendations, rescans or dev
 always resolve from that project's own Backend setting above, never from the chat setting.
 
 **Local-first:** Camerata stores only configs + pointers (JSON in the operator's OS app-data dir:
-`projects.json`, `settings.json`, `onboarding-draft.json`); the repo code lives on their own
+`projects.json`, `settings.json`, `onboarding-draft.json`); the repo code lives on the operator's own
 machine. Each repo a project references must resolve to a local git checkout (see §5).
 
 ---
@@ -103,19 +103,19 @@ machine. Each repo a project references must resolve to a local git checkout (se
 A **project** holds its repos, ruleset and onboarded state. From the **Projects** home the operator can:
 - **Create** a project (just a name to start).
 - **Open** one (the cockpit's four+1 views only appear inside a project).
-- **Export** the open project, a single, **path-free** `camerata-project-<name>.json` containing
+- **Export** the open project: a single, **path-free** `camerata-project-<name>.json` containing
   only that project's repos (`owner/repo`), ruleset and which repos are onboarded. It does **not**
   include local paths or the operator's workspace settings.
 - **Import** a project config; it **upserts** into the operator's local projects. If the operator already has a
   project with the same name, Camerata **warns before overwriting**. The operator's own workspace settings are
-  never touched. After import the repos have no local paths yet, resolve them in the Rules view (§5).
+  never touched. After import the repos have no local paths yet; resolve them in the Rules view (§5).
 
 **Project config vs. project data:** the exported JSON contains only the project's transferable
 config (repos, ruleset, onboarded state, tier map). Units of Work, the story spine, onboarding
 drafts, and local repo paths are **local to each developer** and are never included in an export.
 UoWs represent in-progress dev-lifecycle state (branch, stage, run history, decisions, sign-off) and
-are machine-local, transferring them would produce overlapping work across developers. When the operator
-import a project on a new machine the operator starts with no UoWs; they accumulate as the operator works.
+are machine-local; transferring them would produce overlapping work across developers. When the operator
+imports a project on a new machine, the operator starts with no UoWs; they accumulate as the operator works.
 
 ---
 
@@ -240,7 +240,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    which repo the operator is editing. Selection is **per repo**: a rule ticked for repo A is bound to A only.
    **Project-level rules** apply to every repo. Click any rule to read its decision question, the
    options, the default and each option's rationale and to choose an alternative. **Option choices
-   are also per repo**, adopting an alternative for a rule while viewing one repo does not change
+   are also per repo**: adopting an alternative for a rule while viewing one repo does not change
    another repo's choice. A recommended rule that still needs an alternative chosen is **highlighted
    amber**, with a "Needs option" filter to find them and an informational hint naming them, but it
    no longer blocks Audit or Add-rules. The operator can leave it unresolved and proceed: the audit itself
@@ -311,9 +311,9 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    - **Test badge** (yellow): the finding is in test code (a test file path, or a line inside a
      `#[cfg(test)]` block). Test-scope violations are down-ranked to low severity. The nuance: a real
      secret in production code in the same file stays Critical even if the file also contains a test
-     block, classification is per-finding-by-line, not per-file.
+     block; classification is per-finding-by-line, not per-file.
    - **Needs review** (orange): the calibration pass flagged this finding as uncertain; read the
-     reason and decide themselves.
+     reason and decide.
    - **Self-referential** (gray badge, status `suppressed-self-reference`): Camerata's own rule
      descriptions contain the very patterns it looks for. When the scanner reads a governed repo's
      `CONVENTIONS.md` or `AGENTS.md` and encounters a rule directive such as "Do not set
@@ -413,7 +413,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    table mark items **resolve later** or **resolve now**, then **Process**: ignores become baseline
    waivers, and **every tech-debt item is filed as a GitHub issue** (the story). Resolve-now issues
    are titled for pickup by the dev engine (the actual dev work is Pillar 2; onboarding only *writes
-   the story*). There is no separate "fix the findings" button, fixing a finding is just its
+   the story*). There is no separate "fix the findings" button; fixing a finding is just its
    resolve-now story flowing into the dev layer. Triage/Process is **not required** to finish
    onboarding.
 
@@ -422,21 +422,21 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    Check**, **Flat view** and **Settings**. The Queue described in this section (the three tables,
    the Order select, the progress strip) is the **Flat view**.
 
-   - **The group reviewer (stage 2).** After the per-site review (stage 1, the calibration model),
-     the group reviewer reads each rule group together. One structured call per rule writes the
-     summary the operator reads at that node, sorts the members into sub-groups by shared cause,
-     marks the sites that do not belong with the rest (outliers, each with one reason from a closed
+   - **The group reviewer (stage 2).** After the per-place review (stage 1, the calibration model),
+     the group reviewer reads each rule's problems together. One structured call per rule (more for a rule with over 150 members) writes the
+     summary the operator reads at that node, sorts the members into rule groups by shared cause,
+     marks the places that do not belong with the rest (outliers, each with one reason from a closed
      list) and picks the places the architect should read in person, each with one reason from a
-     closed list. It never removes a site, never overwrites stage 1's answer (a disagreement is
-     stored beside it) and never writes a count: the numbers come from the tree. Its model is
+     closed list. It never removes a place, never overwrites stage 1's answer (a disagreement is
+     stored beside it) and never writes a count: the numbers come from the tree. The review screens call a place a "site". Its model is
      Claude Fable 5.1 by default, changed only by `--group-review-model` or the project's review
      settings. In a client engagement it must be an Anthropic API model like every other stage.
-   - **Tree.** The operator works through areas (categories), rules and sub-groups. A node is either
-     an escalation node (it holds a security-class or high-severity site, so the operator expects
-     to open it) or a bulk node (routine sites that can be decided as a batch). Decisions and
-     edits are stored under a site key, so on a rerun a decision on an unchanged site is kept, a
-     moved site shows its old decision beside it as stale rather than applying it silently, and a
-     site that is gone keeps its decision for history.
+   - **Tree.** The operator works through areas (categories), rules and rule groups. A node is either
+     an escalation node (it holds a security-class place or a critical or high one, so the operator expects
+     to open it) or a bulk node (routine places that can be decided as a batch). Decisions and
+     edits are stored under a site key, so on a rerun a decision on an unchanged place is kept, a
+     moved place shows its old decision beside it as stale rather than applying it silently, and a
+     place that is gone keeps its decision for history.
    - **Escalations.** The escalation queue orders the places that most need a person's eyes. A
      budget decides how many reach the queue: by default 1 place per 1,000 counted lines of code
      with a floor of 20 (`--escalation-rate`, or the **Escalation formula** in the Settings lane).
@@ -448,7 +448,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      line** and are checked like any other problem. Once a queue row is decided, its **Needed**
      box records whether the reviewer needed to see that place; it is available only for rows above
      the line, and the workbook marks escalated places "Reviewed in person".
-   - **Engine Check.** An internal sample of rows for their own quality control: one
+   - **Engine Check.** An internal sample of rows for the operator's own quality control: one
      Yes or No question per card, and a No opens the correction in place. It is never in a client
      file.
    - **Settings.** The stage models, the escalation formula with its live budget, the list of
@@ -594,7 +594,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    key is text and the buttons that act on cards (the four decisions, the page buttons, each card's
    **Code** button, the checkboxes) do nothing and are greyed out, so a stray click cannot change
    which cards the prompt's count and reason apply to; finish or cancel the prompt first. If the operator
-   decide a card somewhere else while the stack is open (in the viewer, for example), it comes back
+   decides a card somewhere else while the stack is open (in the viewer, for example), it comes back
    decided and unchecked, whatever the operator had clicked on it before.
 
    A group of more than 200 rows is shown 200 cards at a time. A line under the header says which
@@ -620,7 +620,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    at decisions made in this review (it is not carried across inspections), and an undo removes the
    memory along with the decision. If the operator's earlier decisions on the shape disagree, the line says
    so instead of choosing quietly: it shows the most common one and adds `, and 2 other rows
-   decided differently` (other reasons, a different disposition, or Confirmed and Tech debt rows).
+   decided differently` (other reasons, a different disposition or Confirmed and Tech debt rows).
    The same words typed with different spacing or capitals count as one decision. A reason is only
    ever offered for the same disposition it was given for: if the operator had only ever ignored the shape,
    `F` starts with an empty box (an "accepted risk" reason is not an answer to "the tool was
@@ -630,7 +630,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    **every** checked or selected finding would be offered the same one; if one has no earlier
    decision, or two have different ones, the box starts empty. If the operator presses Undo while a reason box
    is open, the box closes (the undo moves the operator to the restored finding, and a reason typed for
-   another one must not follow the operator there). The reason text is their own words from this
+   another one must not follow the operator there). The reason text is the operator's own words from this
    review and is shown as plain text.
 
    **Progress strip.** Above the table, one line says where the review stands, for example
@@ -653,7 +653,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    inside the Queue table, the detail pane, the viewer and the stacked view count as activity; keys
    and clicks elsewhere (the Conventions panel, say) neither add time nor resume an idle timer. The
    timer records how long the operator spent on each group and,
-   for each finding the operator decides, that the local operator reviewed it and when. This is for their own
+   for each finding the operator decides, that the local operator reviewed it and when. This is for the operator's own
    planning and pricing: it is saved in the operator's in-progress review, it is never in a report, a
    workbook, `findings.json` or any other file a client receives and the **Review time** button
    beside the strip opens a plain stats view (hours per repo, per group type and per severity)
@@ -668,7 +668,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    file, worst severity first within a rule, so the operator can decide one rule at a time. **Critical first**
    is one flat list with no groups, worst severity first. Picking a cut re-orders the table where it
    stands: the finding the cursor is on stays the finding the cursor is on (also right after the operator
-   have decided a finding, when the cursor is on the next one), its group is opened if the new
+   has decided a finding, when the cursor is on the next one), its group is opened if the new
    grouping had closed it, and the table scrolls to bring its row into view. The keyboard goes back
    to the detail pane, so the decision keys work without a click. The operator's row selection is kept; a column sort the operator had applied is
    dropped, because it would hide the order the operator just chose (**Default order**, beside the sentence
@@ -715,7 +715,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    pins), and the CI story still has to wire the rule for the gate to block on it. Honest stance: a
    missing tool, an unparseable result or a linter Camerata doesn't drive end-to-end
    (golangci-lint, rubocop, Checkstyle, Roslyn, …) yields a note in the **Scan coverage** section,
-   never a false clean. Mechanical rules **stay out of the AI/LLM review**, a deterministic tool
+   never a false clean. Mechanical rules **stay out of the AI/LLM review**: a deterministic tool
    runs them instead, which saves tokens. **Architectural rules are never attempted in the preview**;
    they need a bespoke checker and are covered by the AI review instead.
 
@@ -745,7 +745,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    multi-option rule the audit evaluated, including rules with zero violations (so the operator can still
    review and override them). Each row shows the rule id, its title, its finding count, and
    **"Evaluated against: \<option\>"** with a badge: **AI recommended**, **Your choice** (the operator has already
-   overrode it), **Override, pending rescan** (staged but not yet rescanned), or **Accepted** (the
+   overrode it), **Override, pending rescan** (staged but not yet rescanned) or **Accepted** (the
    selection is saved to the ruleset).
 
    - **Why?** opens a modal with the model's reasoning for that recommendation (grounded in what it
@@ -766,7 +766,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      caught up with it yet.
 
 5. **Add rules to repo(s)**: writes the governance files onto a `camerata/onboard-governance` branch
-   in each repo's **local clone AND pushes that branch to origin, no pull request is opened.** Each
+   in each repo's **local clone AND pushes that branch to origin; no pull request is opened.** Each
    repo's local clone is resolved from its recorded path (or, as a fallback, a workspace folder). The
    branch is Camerata-managed and regenerated each run (force-pushed), so re-applying is safe. Edit
    the working copy freely, then click **Open governance PR** (a separate, optional button) when ready.
@@ -776,11 +776,11 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
 
    | File | What it contains |
    |---|---|
-   | `AGENTS.md` | Prose rules, the agent's in-context directives. |
-   | `CONVENTIONS.md` | Structured, mechanical and architectural rules, conventions + CI conformance notes. |
-   | `.camerata/rules.json` | Armed rule ids, the gate config read by Layer 1. |
+   | `AGENTS.md` | Prose rules: the agent's in-context directives. |
+   | `CONVENTIONS.md` | Structured, mechanical and architectural rules: conventions + CI conformance notes. |
+   | `.camerata/rules.json` | Armed rule ids: the gate config read by Layer 1. |
    | `.camerata/baseline.json` | Accepted pre-existing debt (the full active-finding set at apply time). |
-   | **`.camerata/checks.toml`** | **The SSOT check manifest** read by both Layer 2 (dev-loop runner) and Layer 4 (CI). Each applied CI-tier rule becomes one `[[check]]` entry; mechanical rules carry a concrete command, architectural rules carry a TODO placeholder for the team to fill in. This is the single file the operator edits to add, remove or change a custom gate check, one edit covers both the dev loop and CI. |
+   | **`.camerata/checks.toml`** | **The SSOT check manifest** read by both Layer 2 (dev-loop runner) and Layer 4 (CI). Each applied CI-tier rule becomes one `[[check]]` entry; mechanical rules carry a concrete command, architectural rules carry a TODO placeholder for the team to fill in. This is the single file the operator edits to add, remove or change a custom gate check; one edit covers both the dev loop and CI. |
    | **`.github/workflows/camerata-gates.yml`** | **The generated CI workflow** (a real, runnable workflow file, not a placeholder). It is derived directly from `.camerata/checks.toml`, so it is always consistent with the manifest. Regenerate it any time by clicking **Regenerate CI workflow** in the Rules view. |
 
    **Apply scaffolds the CI layer; it does not turn CI enforcement on for the operator.** The two files above
@@ -935,7 +935,7 @@ reflects what the repos really enforce (including custom rules). Rules found in 
 not in the corpus are flagged as **"not in rule-bank"** (drift).
 
 **Opt-in rules are not pre-checked.** Rules with the `opt_in_only` flag (currently the two security-
-scan rules) appear in rule tables as **"Available"** only, no pre-checked checkbox, no recommended
+scan rules) appear in rule tables as **"Available"** only: no pre-checked checkbox, no recommended
 badge. The operator opts in deliberately by checking them.
 
 **Custom rules.** Beyond the built-in corpus the operator can author their own rules. A custom rule is a
@@ -980,7 +980,7 @@ The ruleset JSON is the source of truth and can move between projects or machine
 
 ## 5. Repo paths (resolution + health)
 
-Each repo resolves to a **local folder**, repos can live anywhere; the path is machine-local and is
+Each repo resolves to a **local folder**: repos can live anywhere; the path is machine-local and is
 **never exported**. The Rules view runs a continuous **health check**: any repo that doesn't point at
 a valid local git checkout (common right after importing a project) is flagged with a warning + a
 per-repo **Resolve…** button to browse to its folder. A repo is "broken" when its path is unset,
@@ -1142,12 +1142,12 @@ keyed by its branch. Worktrees live at `<clone>/.camerata-worktrees/<branch-name
 
 What this means in practice: two UoWs on the same repo can run development, update-branch and ship
 operations simultaneously without git checkout conflicts. The gate and all governance rules are
-unchanged, worktrees change WHERE the agent works, not WHETHER it's gated. Two UoWs editing the
+unchanged; worktrees change WHERE the agent works, not WHETHER it's gated. Two UoWs editing the
 same lines still produce a normal merge conflict at PR/merge time (expected, resolved at merge).
 
 Worktrees are cleaned up automatically on sign-off. A startup sweep reclaims any that leaked through
 crashes. A **disk headroom guard** (default: requires 10 GB free; override with
-`CAMERATA_MIN_DISK_HEADROOM_GB`) refuses to create a new worktree if disk space is low, this
+`CAMERATA_MIN_DISK_HEADROOM_GB`) refuses to create a new worktree if disk space is low; this
 protects against the `target/` multiplier when developing a large Rust project with several concurrent
 UoWs.
 
@@ -1166,12 +1166,12 @@ waiting pause point.
 
 The investigation phase can **pause mid-run** when the agent raises a question, park the run at
 "Awaiting clarification," and **resume** (re-spawn the gated agent with the Q+A in context) once the operator
-answer. The **development** phase can likewise pause (for a human-review *escalation*) and resume
+answers. The **development** phase can likewise pause (for a human-review *escalation*) and resume
 from a checkpoint (see the next section).
 
 ### Human review escalations (a run pauses, the operator decides, it resumes)
 
-Beyond clarifying questions, a governed **development** run can pause for a **review escalation**, a
+Beyond clarifying questions, a governed **development** run can pause for a **review escalation**: a
 decision only the operator should make. This happens when the agent's work meets the escalation condition of a
 rule the operator selected (for example, modifying an existing test, which `AGENTIC-NO-TEST-TAMPER-1` calls for
 review on). Instead of failing, the run **pauses**: it checkpoints its state, leaves the worktree
@@ -1204,7 +1204,7 @@ navigation between phases. The three phases are:
 > **Intake → Investigation & Refinement → Development**
 
 Unlike the old strict-sequence lifecycle strip, the operator can navigate between phases freely. Status
-within each phase is **informational**, the cockpit does not lock the operator into the current phase.
+within each phase is **informational**; the cockpit does not lock the operator into the current phase.
 The underlying `UowStage` server state (Intake / Investigating / DecisionsApproved / Development /
 AwaitingQa / SignedOff) still gates the actual AI runs, but the UI surfacing is free-nav.
 
@@ -1300,7 +1300,7 @@ gated re-run on the same branch.)
 **Bootstrap run, which skips the layer-2 checks (the chicken-and-egg escape hatch).** The development-run
 control carries a **default-OFF** bootstrap-run toggle (its label says it skips the layer-2 checks). Layer 2 is
 fail-closed: a repo with a manifest but no lint/test wired fails as "could-not-run," which is
-correct governance but creates a deadlock, the very run that would install the linters fails layer
+correct governance but creates a deadlock: the very run that would install the linters fails layer
 2 because the tools aren't there yet. Enabling this toggle skips only the post-task layer-2
 lint/test bounce for that one tool-installing run. **Layer 1 (deny-before-write) and the decisions
 gate still apply.** It is deliberate and visible, never silent or sticky.
@@ -1311,7 +1311,7 @@ button runs push → open PR → comment across all in-scope repos in sequence. 
 reflects the repos that will be touched by the story's fan-out work.
 
 **Done / archive.** A **"Mark Done (archive)"** button transitions the UoW to an archived state
-(read-only in the cockpit). The UoW is never deleted, reopening Development from the archived
+(read-only in the cockpit). The UoW is never deleted; reopening Development from the archived
 state is always available. Done UoWs remain visible in the left nav (with a done indicator) and in
 the history.
 
@@ -1504,8 +1504,8 @@ and one (L3) is AI-driven:
 > intentionally NOT renamed to avoid a code migration, so grepping the source for "layer3" finds the
 > CI tier. The canonical model in `ENFORCEMENT_MODEL.md` is the reference.
 
-**Layer 2 is cross-language and polyglot, across all seven supported languages.** It is no longer
-Rust-only: for each worktree it runs the checks for every **supported** language present, **Rust,
+**Layer 2 is cross-language and polyglot: across all seven supported languages.** It is no longer
+Rust-only: for each worktree it runs the checks for every **supported** language present: **Rust,
 JavaScript/TypeScript, Python, Go, Ruby, Java and C#**, using the **repo's own pinned toolchain**
 (the same tool versions the repo's CI uses, taken from the repo's lockfile/wrapper/SDK pin, never
 baked into Camerata). It is **fail-closed**: if a toolchain is missing, a check isn't defined or dep
@@ -1517,7 +1517,7 @@ pre-linted at dev time across all seven languages.
 > `pyproject.toml`, Go via `go.mod`, **Ruby** via `Gemfile.lock` + bundler (`bundle exec rubocop` +
 > `rspec`/`rake test`), **Java** via the repo's `./mvnw verify` / `./gradlew check` wrapper, and
 > **C#** via `dotnet format`/`build`/`test` (SDK pinned by `global.json`). This matches the seven
-> languages the rule corpus ships rules for, the layer-2 language gap is closed.
+> languages the rule corpus ships rules for; the layer-2 language gap is closed.
 
 Rule scopes: **corpus-global**, **repo-local** (from onboarding), **cross-repo** (contracts),
 **process** (workflow conventions). The agent has no `git`, so Camerata is the sole committer.
@@ -1749,7 +1749,7 @@ Both custom types flow through the Rules view editor and the emission system. A 
 
 When the operator runs an **onboarding audit** with the **"Deep report"** checkbox enabled, Camerata runs three advanced analysis lenses over each repo:
 
-1. **SOC-2 gap analysis**: maps detectable practices onto SOC-2 Common-Criteria controls and reports **gaps** (what controls appear to lack implementation). This is a **gap analysis, never a compliance report or certification**; it is advisory and model-inferred. **Note:** the SOC-2 lens is behind the `soc2` feature flag, which ships **OFF** (§12); it runs only if the operator res-enable the flag.
+1. **SOC-2 gap analysis**: maps detectable practices onto SOC-2 Common-Criteria controls and reports **gaps** (what controls appear to lack implementation). This is a **gap analysis, never a compliance report or certification**; it is advisory and model-inferred. **Note:** the SOC-2 lens is behind the `soc2` feature flag, which ships **OFF** (§12); it runs only if the operator re-enables the flag.
 2. **Deep security audit**: a layer deeper than the deterministic floor: authorization on write paths, sensitive-data handling, secret flows, trust boundaries. Findings flow into the same triage + tech-debt workflow as the standard audit.
 3. **Threat model**: a structured STRIDE-flavored view: entry points, trust boundaries, data stores, sensitive-data paths and threats + mitigations.
 
@@ -1761,7 +1761,7 @@ The deep tier is the **most expensive audit option** (~3× the standard audit co
 
 After the audit, the **deep report is rendered as structured Markdown**. The operator can **export it** (download as `.md`) from the findings screen. The markdown includes:
 
-- **Advisory notices**: prominent labels stating the output is model-inferred, a static-code analysis (not a pen test), and not externally validated.
+- **Advisory notices**: prominent labels stating the output is model-inferred, a static-code analysis (not a pen test) and not externally validated.
 - **Scoped-scan table**: deterministic security findings from the changed files (hardcoded secrets, raw SQL, etc.), the same floor that gates are enforced on.
 - **SOC-2 gap summary**: controls it appears the codebase leaves gaps in, with severity rankings.
 - **Deep security findings**: architectural + authorization issues, trust-boundary violations, sensitive-data handling gaps.
@@ -1870,9 +1870,9 @@ generated and vendored files.
 
 ### The three artifacts have three different jobs
 
-- **The PDF is the summary.** It is a summary of 20 pages at most (a test pins the cap), written to be read by a person who will not open
+- **The PDF is the summary.** It is a summary of 20 pages at most, written to be read by a person who will not open
   a spreadsheet. It deliberately does not carry every row, and that is not a gap.
-- **The Excel workbook is the detail surface.** Every problem is shown once on every sheet except All source rows. A
+- **The Excel workbook is the detail surface.** No sheet shows a problem more than once except All source rows, the raw record. A
   row missing here IS a problem.
 - **`findings.json` is the data.** It carries the whole set, every kind included, for anything
   programmatic downstream.
@@ -2066,7 +2066,7 @@ There is currently **one** runtime flag:
 
 So although the flag *defaults* on under the opt-out model, **SOC-2 is shipped OFF**: the checked-in
 `.camerata/features.toml` sets `soc2 = false`, so the SOC-2 lens does not run unless the operator re-enables it.
-When `soc2` is false, only the SOC-2 lens is skipped, the deep-security and threat-model lenses of the
+When `soc2` is false, only the SOC-2 lens is skipped; the deep-security and threat-model lenses of the
 deep tier still run, and the deep report is valid with an empty SOC-2 section. (Deep-security and
 threat-model are part of the deep tier and are not separately flag-gated today.)
 
@@ -2121,7 +2121,7 @@ A few `mechanical` rules carry an **`opt_in_only`** flag: they are grounded agai
 (`CICD-SEMGREP-SECURITY-SCAN-1`, `CICD-CODEQL-SECURITY-SCAN-1`, §3 step 6) are the current examples;
 they exist to generate a security-scan **CI story** for a DevOps engineer, not to constrain the agent's
 code, and they have **no default option** so selecting one forces a conscious tier choice. CodeQL also
-carries **`layer3_only`**, its whole-program database build is too heavy to run at the scan preview or
+carries **`layer3_only`**; its whole-program database build is too heavy to run at the scan preview or
 in the dev loop, so it is CI-only (L4 in the canonical model) and never appears in the scan-time
 preview. Note: the `layer3_only` flag name is a legacy artefact that predates the L3 AI reviewer;
 it means "CI / L4 only", not "only at L3". See §7 for the canonical stage numbering.
@@ -2190,7 +2190,7 @@ wiring model: **one entry in `.camerata/checks.toml` enforces a check at BOTH th
 
 Without a shared definition, Layer 2 and Layer 4 can drift: a custom linter the operator adds to CI never
 reaches the dev loop, so the agent gets no early feedback and can produce code that passes locally
-but fails in CI. The manifest eliminates this structurally, both consumers read the same file.
+but fails in CI. The manifest eliminates this structurally; both consumers read the same file.
 
 ### The manifest schema
 
@@ -2205,7 +2205,7 @@ in_loop  = true                           # true = run at Layer 2 AND Layer 4; f
 ```
 
 All five fields are required. A missing field is a parse error, not a silent misconfiguration. A
-missing manifest is never fatal, the built-in language runners (cargo/clippy/eslint/ruff/etc.)
+missing manifest is never fatal; the built-in language runners (cargo/clippy/eslint/ruff/etc.)
 are always unaffected.
 
 **`in_loop` decides when the check runs:**
@@ -2233,7 +2233,7 @@ needed.
 architectural rules (e.g. "service layer never touches the DB directly"). The story walks through
 a four-step process:
 1. Design a deterministic checker (options: a shell script, a custom Semgrep rule, an AST pass,
-   a dependency-cruiser config, anything that exits 0 for clean and nonzero for a violation).
+   a dependency-cruiser config: anything that exits 0 for clean and nonzero for a violation).
 2. Add the manifest entry with pinned tool + version + install command.
 3. Regenerate the CI workflow.
 4. Verify the check at both Layer 2 and Layer 4.
@@ -2354,17 +2354,17 @@ CI always installs the pinned version, so the check runs against the exact tool 
 
 ### What happens at Layer 2 (the operator's machine)
 
-Layer 2 does NOT install tools, installing in the dev loop is too heavy. Instead, before running a
+Layer 2 does NOT install tools: installing in the dev loop is too heavy. Instead, before running a
 pinned check, Camerata verifies that the operator's local tool version matches the pinned version. If it does,
 the check runs. If it doesn't, the operator gets a clear error like:
 
 ```
-local dependency-cruiser is 5.1.0 but manifest pins 6.3.0 :
+local dependency-cruiser is 5.1.0 but manifest pins 6.3.0
 install the pinned version: npm install -g dependency-cruiser@6.3.0
 ```
 
 The check is **skipped** (not silently run on the wrong version) until the operator reconciles. This is a
-violation, not a warning, a warning would still let the loop complete "green" on the wrong tool,
+violation, not a warning: a warning would still let the loop complete "green" on the wrong tool,
 which defeats the whole point.
 
 **To fix a drift error:** run the `install` command shown in the error message (it's always the exact
@@ -2386,7 +2386,7 @@ Click it to expand a by-model breakdown table.
 When the provider is rate-limiting requests, the meter swaps to an amber pulsing badge that says the provider is rate-limiting and the request is retrying instead of the normal readout. This clears automatically when the next request
 succeeds.
 
-The meter accumulates spend across ALL model calls, the audit, calibration, research chat, story
+The meter accumulates spend across ALL model calls: the audit, calibration, research chat, story
 authoring, decomposition, clarification and fleet runs, not just the last audit. It is purely
 observational: it does not change model selection, retry behavior or the gate.
 
@@ -2496,7 +2496,7 @@ does and where it runs:
 | Escalation | Translating escalation decisions into prose |
 | Clarification | Generating structured clarification questions |
 
-Every step defaults to Sonnet 5.5 when a project is created, except calibration (Opus 5.5) and the group reviewer (Fable 5.1). A change to one project never
+Every step defaults to Sonnet 5.5 when a project is created, except calibration (Opus 5.5), the group reviewer (Fable 5.1) and the fix wording and the duplicate-code judge (Haiku 5.5). A change to one project never
 touches another project's step models.
 
 For steps where the operator also picks a model per run (audit, calibration, research chat), the operator's per-run
@@ -2525,17 +2525,17 @@ softer "why / how / what we have learned" a well-briefed engineer carries. All t
 every agent's grounding and **travel with the project export**, so they transfer to another user on
 import.
 
-- **Product brief**: free text describing what the product is, who it is for, the quality bar, and
+- **Product brief**: free text describing what the product is, who it is for, the quality bar and
   the non-negotiables. The agents read it *above* the rules, so they grasp the why before the what. A
   scaffold prompts the sections to fill in.
 - **Operating principles**: how a good engineer works on this project (conduct, not the code): prefer
   explicit over clever, confirm irreversible changes, report honestly, escalate when blocked and so
-  on. New projects are seeded with a default set the operator can toggle off or extend with their own; only the
+  on. New projects are seeded with a default set the operator can toggle off or extend with the operator's own; only the
   *enabled* ones reach the agents.
 - **Project memory**: the accumulating, **human-curated** learnings (decisions, patterns, gotchas,
   constraints) that carry across runs, so the next agent does not rediscover what the last one learned.
   **Agents propose, the operator curates:** after a run, the agent's proposed learnings appear here as
-  **Proposed** (with a "N to review" badge); the operator approves, archives or deletes them or adds their own.
+  **Proposed** (with a "N to review" badge); the operator uses **Approve**, **Archive** or **Delete** on them, or adds entries of the operator's own.
   Only **Approved** entries (the most recent, capped) feed the agents' grounding.
 
 See `docs/PROJECT_CONTEXT_LAYERS.md` for the design.
@@ -2548,7 +2548,7 @@ answer to a fixed type system: freetext types (so custom ones slot in), and it e
 RELATIONSHIP rules that a flat label cannot.
 
 - A **palette** of built-in types (Initiative, Epic, Feature, Story, Defect, Task, Bug), each with a
-  hover explaining the term, plus an input to add their own **custom** types.
+  hover explaining the term, plus an input to add **custom** types of the operator's own.
 - **Drag a type onto another type's "children" zone** to allow that nesting. A parent may allow several
   child types (a Feature can parent a Story and a Defect), and a child type may sit under several
   parents. Cycles are prevented, so the graph stays a sane tree.
