@@ -2871,6 +2871,7 @@ mod tests {
             camerata_server::stage_telemetry::Stage::ScanPass,
             &camerata_server::llm::LlmResponse {
                 reported_model: None,
+                cli_cost_usd: None,
                 text: String::new(),
                 model: "m".to_string(),
                 backend: "api".to_string(),

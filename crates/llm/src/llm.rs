@@ -186,7 +186,22 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     cmd
 }
 
+/// The directory a `claude -p` call runs in (and whose Claude Code session folder holds its
+/// session file).
+fn spawn_dir(req: &LlmRequest) -> std::path::PathBuf {
+    match &req.repo_read_dir {
+        Some(dir) => dir.clone(),
+        None => camerata_api_types::claude_cli::engine_empty_cwd(),
+    }
+}
+
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
+    // Isolation first: the working directory (the repo, or an empty engine-owned one, never the
+    // launcher's) and the flags that keep project settings and the operator's memory out.
+    camerata_api_types::claude_cli::isolate_claude_call(
+        cmd.as_std_mut(),
+        req.repo_read_dir.as_deref(),
+    );
     cmd.arg("--strict-mcp-config")
         .arg("--disable-slash-commands")
         .arg("--permission-mode")
@@ -200,8 +215,7 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
             cmd.arg("--allowedTools")
                 .arg(READ_ONLY_TOOLS.join(" "))
                 .arg("--add-dir")
-                .arg(dir)
-                .current_dir(dir);
+                .arg(dir);
             // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
             // added as its own read-only `--add-dir` so a project-level model can scan across
             // all of them. READ-only — no write/exec tool is offered either way. Skip any that
@@ -516,6 +530,8 @@ async fn read_cli_stream(
     let mut usage_out = None;
     let mut usage_cache_read = 0u64;
     let mut usage_cache_creation = 0u64;
+    // The part of the cache writes billed at the 1-hour rate, when the result splits them.
+    let mut usage_cache_creation_1h: Option<u64> = None;
     // The model the CLI says answered (see [`LlmResponse::reported_model`]).
     let mut reported_model: Option<String> = None;
     // An in-band failure reported by the final `result` event, paired with whether it is
@@ -647,6 +663,10 @@ async fn read_cli_stream(
                         // stream events; take the max to avoid double-counting).
                         usage_cache_read = usage_cache_read.max(cr);
                         usage_cache_creation = usage_cache_creation.max(cc);
+                        usage_cache_creation_1h = v["usage"]["cache_creation"]
+                            ["ephemeral_1h_input_tokens"]
+                            .as_u64()
+                            .or(usage_cache_creation_1h);
                     }
                     _ => {}
                 }
@@ -707,12 +727,26 @@ async fn read_cli_stream(
             &stderr_text,
         ));
     }
+    let modeled_cost = modeled_cli_cost(
+        model,
+        reported_model.as_deref(),
+        &CallUsage {
+            input: usage_in,
+            output: usage_out,
+            cache_read: usage_cache_read,
+            cache_creation: usage_cache_creation,
+            cache_creation_1h: usage_cache_creation_1h,
+        },
+    );
     Ok(LlmResponse {
         reported_model,
+        cli_cost_usd: cost,
         text: full,
         model: model.to_string(),
         backend: "cli".to_string(),
-        cost_usd: cost,
+        // Priced by the engine from the tokens; the CLI's own figure is the fallback only when
+        // the call cannot be priced (see `modeled_cli_cost`).
+        cost_usd: modeled_cost.or(cost),
         input_tokens: usage_in,
         output_tokens: usage_out,
         cache_read_input_tokens: usage_cache_read,
@@ -720,6 +754,24 @@ async fn read_cli_stream(
         or_cache_discount: None,
         truncated: false,
     })
+}
+
+/// The cost of a CLI call from its token counts, at the engine's own list prices.
+///
+/// The CLI's `total_cost_usd` prices a model id it does not know at a default (Opus-class) rate,
+/// so a Haiku 5.5 call looked like Opus. The rate here is the model that answered (`reported`,
+/// when it names exactly one priced model), else the one that was requested. `None` when neither
+/// is priced or a token count is missing; the caller then keeps the CLI's figure rather than
+/// leave the call without a cost (a spend limit that cannot cost a call admits nothing more).
+fn modeled_cli_cost(requested: &str, reported: Option<&str>, usage: &CallUsage) -> Option<f64> {
+    // Real-time subscription calls write the 5-minute cache unless the result says otherwise.
+    let basis = PriceBasis {
+        batch: false,
+        cache_ttl: CacheTtl::FiveMinutes,
+    };
+    reported
+        .and_then(|id| usage_cost_usd(id, usage, basis))
+        .or_else(|| usage_cost_usd(requested, usage, basis))
 }
 
 /// Keep the first model id the CLI names (later events repeat it); blank names are ignored.
@@ -1126,6 +1178,7 @@ fn messages_response(
     );
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text,
         model: model.to_string(),
         backend: backend.to_string(),
@@ -2098,10 +2151,7 @@ impl Llm {
         // client's source" must be able to find it. Every attempt is its own session.
         let session_id = new_session_id();
         if let Some(sink) = &self.sessions {
-            let cwd = match &req.repo_read_dir {
-                Some(dir) => dir.clone(),
-                None => std::env::current_dir().unwrap_or_default(),
-            };
+            let cwd = spawn_dir(req);
             sink.record(ModelSession {
                 session_id: session_id.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
@@ -3257,6 +3307,7 @@ impl OpenRouterCompleter {
             .is_some_and(|choice| choice["finish_reason"].as_str() == Some("length"));
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: output,
             model: model_returned,
             backend: "openrouter/api".to_string(),
@@ -3569,6 +3620,10 @@ pub async fn call_with_fallback(
 mod temperature_tests;
 
 // The model-input chokepoint: every wire builder redacts what it is about to send.
+#[cfg(test)]
+mod cli_isolation_tests;
+#[cfg(test)]
+mod cli_pricing_tests;
 #[cfg(test)]
 mod model_input_tests;
 
@@ -4172,6 +4227,7 @@ mod tests {
         let ledger = crate::usage_ledger::UsageLedger::new();
         let resp = LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: String::new(),
             model: "claude-haiku-5-5".to_string(),
             backend: "api".to_string(),
@@ -4690,6 +4746,7 @@ malformed line, not json
                 custom_id: "c0-b0".to_string(),
                 response: Some(LlmResponse {
                     reported_model: None,
+                    cli_cost_usd: None,
                     text: "text A".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -4714,6 +4771,7 @@ malformed line, not json
                 custom_id: "c0-b1".to_string(),
                 response: Some(LlmResponse {
                     reported_model: None,
+                    cli_cost_usd: None,
                     text: "text B".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -5953,7 +6011,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         assert_eq!(lines[at + 1], recorded[0].session_id);
         assert_eq!(
             recorded[0].cwd,
-            std::env::current_dir().expect("cwd").to_string_lossy()
+            camerata_api_types::claude_cli::engine_empty_cwd().to_string_lossy()
         );
         assert!(!recorded[0].created_at.is_empty());
     }
@@ -6081,7 +6139,20 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
         );
         // Usage/cost accounting must survive the change too — the ledger chokepoint and the
         // cockpit meter read these off every completion.
-        assert_eq!(resp.cost_usd, Some(0.25));
+        // The cost is the engine's own price for the tokens; the CLI's figure rides beside it.
+        let modeled = usage_cost_usd(
+            "claude-sonnet-5-5",
+            &CallUsage {
+                input: Some(11),
+                output: Some(7),
+                cache_read: 0,
+                cache_creation: 0,
+                cache_creation_1h: None,
+            },
+            PriceBasis::realtime(),
+        );
+        assert_eq!(resp.cost_usd, modeled);
+        assert_eq!(resp.cli_cost_usd, Some(0.25));
         assert_eq!(resp.input_tokens, Some(11));
         assert_eq!(resp.output_tokens, Some(7));
     }

@@ -65,6 +65,7 @@ impl LlmPort for Recorder {
         self.requested.lock().unwrap().push(req.model.clone());
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: req.model.clone(),

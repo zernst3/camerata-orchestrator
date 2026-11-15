@@ -48,6 +48,7 @@ impl LlmPort for ScriptedLlm {
         let (text, truncated) = self.script[n.min(self.script.len() - 1)].clone();
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: super::reply_schemas::check::address_by_id(&req.prompt, &text),
             model: "stub".to_string(),
             backend: "api".to_string(),

@@ -32,6 +32,7 @@ impl LlmPort for Scripted {
         self.log.lock().unwrap().push("model call".to_string());
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),

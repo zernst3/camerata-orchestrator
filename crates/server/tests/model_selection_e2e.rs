@@ -71,6 +71,7 @@ impl LlmPort for CapturingCompleter {
         self.seen.lock().unwrap().push(req.model.clone());
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: self.reply.clone(),
             model: req.model.clone(),
             backend: "capture".to_string(),

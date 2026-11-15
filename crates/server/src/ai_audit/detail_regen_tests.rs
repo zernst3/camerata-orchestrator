@@ -55,6 +55,7 @@ fn role_of(system: &str) -> Role {
 fn stub_response(text: String) -> LlmResponse {
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text,
         model: "stub".to_string(),
         backend: "api".to_string(),

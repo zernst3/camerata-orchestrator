@@ -131,6 +131,7 @@ impl LlmPort for Capture {
             .push((req.prompt.clone(), req.cache_breakpoints.clone()));
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: "{\"findings\":[]}".to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),

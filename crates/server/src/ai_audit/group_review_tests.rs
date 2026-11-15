@@ -115,6 +115,7 @@ impl Reviewer {
 fn response(text: &str, model: &str) -> LlmResponse {
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: model.to_string(),
         backend: "stub".to_string(),

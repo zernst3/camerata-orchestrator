@@ -23,6 +23,7 @@ impl LlmPort for Capture {
         self.requests.lock().unwrap().push(req);
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),

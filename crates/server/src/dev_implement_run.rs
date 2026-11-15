@@ -3445,6 +3445,7 @@ mod tests {
         ) -> anyhow::Result<crate::llm::LlmResponse> {
             Ok(crate::llm::LlmResponse {
                 reported_model: None,
+                cli_cost_usd: None,
                 text: "PASS".to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -3482,6 +3483,7 @@ mod tests {
         ) -> anyhow::Result<crate::llm::LlmResponse> {
             Ok(crate::llm::LlmResponse {
                 reported_model: None,
+                cli_cost_usd: None,
                 text: "MISMATCH\n- backend omits email field required by contract".to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -3804,6 +3806,7 @@ mod tests {
             match next {
                 Ok(text) => Ok(crate::llm::LlmResponse {
                     reported_model: None,
+                    cli_cost_usd: None,
                     text,
                     model: "stub".to_string(),
                     backend: "stub".to_string(),

@@ -768,6 +768,7 @@ fn line_for(key: &str, resp: &LlmResponse) -> AbsorbedLine {
 fn response_from(line: &AbsorbedLine) -> LlmResponse {
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text: line.text.clone(),
         model: line.model.clone(),
         backend: line.backend.clone(),
@@ -785,6 +786,7 @@ fn response_from(line: &AbsorbedLine) -> LlmResponse {
 fn usage_only(resp: &LlmResponse) -> LlmResponse {
     LlmResponse {
         reported_model: None,
+        cli_cost_usd: None,
         text: String::new(),
         model: resp.model.clone(),
         backend: resp.backend.clone(),

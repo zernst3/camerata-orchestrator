@@ -267,6 +267,7 @@ mod tests {
     fn anthropic_resp(model: &str, input: u64, output: u64, cost: f64) -> LlmResponse {
         LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: String::new(),
             model: model.to_string(),
             backend: "cli".to_string(),
@@ -284,6 +285,7 @@ mod tests {
     fn gemini_shape_resp(model: &str, input: u64, output: u64) -> LlmResponse {
         LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text: String::new(),
             model: model.to_string(),
             backend: "api".to_string(),

@@ -21,6 +21,53 @@ pub fn scrub_anthropic_key_env(cmd: &mut std::process::Command) {
     cmd.env_remove(ANTHROPIC_API_KEY_ENV);
 }
 
+/// An empty directory the engine owns, for `claude -p` calls that read no repo.
+///
+/// Claude Code loads the agent instruction files and the operator's own auto-memory that belong
+/// to its working directory. A call that does not set one inherits the launcher's, so a run
+/// started from a repo checkout put that repo's instructions and the operator's private notes
+/// (about 9,000 tokens) into every audit prompt. This directory is created once per process
+/// under the system temp dir, holds nothing, and is never a repo.
+///
+/// If it cannot be created the path is returned anyway: the spawn then fails on the missing
+/// directory, so a call never falls back to the launcher's directory.
+pub fn engine_empty_cwd() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("camerata-claude-cwd-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // The resolved path: Claude Code names the session folder after the real directory, and
+        // the recorded session must point at the folder it wrote (macOS temp is a symlink).
+        std::fs::canonicalize(&dir).unwrap_or(dir)
+    })
+    .clone()
+}
+
+/// Keep the launcher's and the operator's instructions out of a `claude` call.
+///
+/// - `--setting-sources user`: project and local settings files are not loaded (the user's own
+///   settings still are, which keeps the CLI's login working).
+/// - `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`: the operator's per-project auto-memory is not loaded.
+/// - When the call reads no repo (`repo_dir` is `None`) it also runs in [`engine_empty_cwd`] and
+///   sets `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, so no instruction file is discovered at all.
+///   A call that reads a repo keeps that repo as its working directory.
+///
+/// Takes the std command so it works for `tokio::process::Command` via `as_std_mut()`.
+pub fn isolate_claude_call(cmd: &mut std::process::Command, repo_dir: Option<&std::path::Path>) {
+    cmd.arg("--setting-sources")
+        .arg("user")
+        .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+    match repo_dir {
+        Some(dir) => {
+            cmd.current_dir(dir);
+        }
+        None => {
+            cmd.current_dir(engine_empty_cwd())
+                .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

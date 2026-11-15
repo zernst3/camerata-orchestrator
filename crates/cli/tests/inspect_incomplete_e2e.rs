@@ -48,6 +48,7 @@ impl Scripted {
             }
             Mode::Malformed => Ok(LlmResponse {
                 reported_model: None,
+                cli_cost_usd: None,
                 text: "I could not produce JSON for this.".to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),

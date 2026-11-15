@@ -109,6 +109,7 @@ impl LlmPort for Scripted {
         };
         Ok(LlmResponse {
             reported_model: None,
+            cli_cost_usd: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),
