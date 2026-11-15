@@ -1,8 +1,11 @@
 //! Stage 1 calibration, the per-site first reviewer (review tree design 4.1, WO4).
 //!
 //! Every site gets its own structured call. The model sees the site (the rule it was raised
-//! under with the corpus text, the quoted code and the explanation) and about 30 lines of code
-//! each side of it, and answers `{severity, real: yes|no|unclear, effort, category, reason}`.
+//! under with the corpus text, the quoted code and the explanation) and the whole file it is in
+//! when that file fits [`WHOLE_FILE_BUDGET_CHARS`] (about 30 lines each side of it otherwise),
+//! and answers `{severity, real: yes|no|unclear, effort, category, reason}`. A reply that says
+//! `unclear` and names another file of the run (`more_code_file`) is asked once more with that
+//! file shown too, when it fits the same budget; the second verdict is the row's.
 //! It never removes a site. `real` is the only answer that bears on doubt: the row's
 //! `confidence` is derived from it and `needs_review` is set from `unclear` or from test code.
 //! Neither escalates a site by itself; the group reviewer (stage 2) decides what reaches the
@@ -22,12 +25,32 @@ use super::stage_batch::{
 use super::*;
 use crate::llm::LlmResponse;
 
+/// The largest file, in characters, a site is shown whole; a larger one is shown as the window
+/// of [`CODE_WINDOW_RADIUS`] lines each side. The estimator's own constant, so the pre-flight
+/// prices what is sent (the reasoning for the figure is on it). The same budget bounds the file a
+/// reply names for the second pass.
+pub const WHOLE_FILE_BUDGET_CHARS: usize = camerata_ui_core::scan::CALIBRATION_FILE_BUDGET_CHARS;
+
 /// Lines of code shown on each side of a site.
 pub const CODE_WINDOW_RADIUS: usize = 30;
 
 /// The radii a site's window shrinks through when its request would not fit the model's window.
 /// The first is the full window; the last shows the site's own line only.
 const WINDOW_SHRINK_RADII: [usize; 5] = [CODE_WINDOW_RADIUS, 15, 7, 3, 0];
+
+/// The code a site's request shows from the file it is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeView {
+    /// The whole file, for a file within [`WHOLE_FILE_BUDGET_CHARS`].
+    Whole,
+    /// This many lines each side of the site.
+    Window(usize),
+}
+
+/// Whether `content` is small enough to be shown whole.
+fn fits_whole(content: &str) -> bool {
+    content.chars().count() <= WHOLE_FILE_BUDGET_CHARS
+}
 
 /// The lines of one file shown around a site, numbered with their real line numbers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -201,6 +224,9 @@ pub struct Stage1Record {
     /// in a run saved before this was kept: nothing then says what stage 1 rated, and nothing
     /// guesses.
     pub severity: Option<String>,
+    /// The file the reply named and the second pass showed, when the verdict is the second
+    /// pass's. `None` for a first-pass verdict and in a run saved before the second pass.
+    pub more_code_file: Option<String>,
 }
 
 /// The stage 1 verdict recorded on `f`, when there is one.
@@ -210,6 +236,7 @@ pub fn stage1_of(f: &Finding) -> Option<Stage1Record> {
         real: Real::parse(v["real"].as_str()?)?,
         reason: v["reason"].as_str().unwrap_or("").to_string(),
         severity: v["severity"].as_str().map(str::to_string),
+        more_code_file: v["more_code_file"].as_str().map(str::to_string),
     })
 }
 
@@ -249,6 +276,10 @@ pub(super) struct Stage1Verdict {
     pub effort: Option<String>,
     pub category: Option<String>,
     pub reason: String,
+    /// The file the reply says the answer depends on (the needs-more-code path), as written.
+    pub more_code_file: Option<String>,
+    /// The file the second pass showed, set by [`Stage1Items`] on the verdict of a second pass.
+    pub shown_more_code: Option<String>,
 }
 
 impl Stage1Verdict {
@@ -262,6 +293,8 @@ impl Stage1Verdict {
             effort: text("effort"),
             category: text("category"),
             reason: text("reason").unwrap_or_default(),
+            more_code_file: text("more_code_file").filter(|p| !p.trim().is_empty()),
+            shown_more_code: None,
         })
     }
 }
@@ -274,7 +307,7 @@ impl Stage1Verdict {
 pub fn verify_system_prompt() -> String {
     r#"You are the first reviewer of an automated audit. A senior architect will see every finding. You never remove one. Your job is to rate this finding so the architect spends their time where it matters: give its real-world severity by the rules of thumb below, say whether it is real from the code shown and estimate the fix effort.
 
-You are shown ONE finding: the rule it was raised under, the code and explanation it quotes, and the lines of code around it. Judge it on its own merits. Whoever scanned the code may have been assertive on debatable points; that does NOT carry over, and your job is to put the nuance back. Rate only this finding. Refer to no other finding by index, row or any other pointer.
+You are shown ONE finding: the rule it was raised under, the code and explanation it quotes, and the file it is in (the whole file when it is small enough, otherwise the lines around the site). Read all of the code shown: a protection elsewhere in the file (a verified signature, a read-only database function, a role check in another function) bears on the finding as much as the lines beside it. Judge it on its own merits. Whoever scanned the code may have been assertive on debatable points; that does NOT carry over, and your job is to put the nuance back. Rate only this finding. Refer to no other finding by index, row or any other pointer.
 
 Answer four things, and give a one-line reason:
 - Assign a CALIBRATED SEVERITY (critical/high/medium/low) for this app's real-world context,
@@ -328,6 +361,7 @@ Answer four things, and give a one-line reason:
   * "yes": the code shown has the defect the finding describes.
   * "no": the code shown contradicts the finding, for example the guard it says is missing is in the lines shown.
   * "unclear": the code shown does not settle it. Use this when the answer depends on code you were not shown.
+  When you answer "unclear" because the answer depends on another file of this repository (a guard, a middleware or a database function the code imports or calls), name that file's path in `more_code_file`. You are then shown that file and asked once more. Name one file, and only with "unclear".
   A finding you rate "no" or "unclear" stays in the report. The architect decides what happens to it.
 - Estimate remediation EFFORT for a developer to fix this ONE finding, given only what you can
   see (the path/snippet/detail) — "low" (a one-line/local change: rename, add a check, swap a
@@ -349,7 +383,7 @@ finding: do not discount its severity for being unnamed, and do not inflate it
 either. The absence of a rule id is not evidence of anything.
 
 Return ONLY JSON, no prose:
-{"severity":"critical|high|medium|low","real":"yes|no|unclear","effort":"low|medium|high","category":"authorization|authentication|secret-exposure|injection|transport-security|rls-policy|resource-exposure|input-validation|error-handling|arch-conformance|testing-style|performance","reason":"one line"}"#
+{"severity":"critical|high|medium|low","real":"yes|no|unclear","effort":"low|medium|high","category":"authorization|authentication|secret-exposure|injection|transport-security|rls-policy|resource-exposure|input-validation|error-handling|arch-conformance|testing-style|performance","reason":"one line","more_code_file":"path, only with unclear"}"#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
@@ -591,10 +625,15 @@ fn apply_verdict(mut f: Finding, verdict: &Stage1Verdict) -> Finding {
         STAGE1_CAPTURE.to_string(),
         // The severity stage 1 left on the row. A rule's declared minimum raises the shown
         // severity after this, and nothing else keeps what stage 1 rated.
-        serde_json::json!({
-            "real": verdict.real.as_str(), "reason": reason, "severity": f.severity
-        })
-        .to_string(),
+        {
+            let mut record = serde_json::json!({
+                "real": verdict.real.as_str(), "reason": reason, "severity": f.severity
+            });
+            if let Some(path) = &verdict.shown_more_code {
+                record["more_code_file"] = serde_json::Value::String(path.clone());
+            }
+            record.to_string()
+        },
     );
     // The reason stays in the row's stage 1 record and goes nowhere else. The client's explanation
     // is left exactly as it was before calibration: no `[calibrated: ...]` and no
@@ -717,9 +756,14 @@ pub struct ItemReject {
 /// [`Self::absorb`], and a reply that was cut off gets one retry from [`Self::retry`].
 ///
 /// Every request passes `ensure_request_fits` before it leaves. A site whose request is over the
-/// model's window is split first, by shrinking the code shown around it (30 lines each side, then
-/// 15, 7, 3 and the site's own line); one that is over the window even then is refused, listed in
-/// [`Self::refused`] and never sent. Nothing is truncated and no site is dropped.
+/// model's window is split first, by shrinking the code shown around it (the whole file, then 30
+/// lines each side, 15, 7, 3 and the site's own line); one that is over the window even then is
+/// refused, listed in [`Self::refused`] and never sent. Nothing is truncated and no site is
+/// dropped.
+///
+/// [`Self::ask_for_more_code`] turns the sites whose verdict named another file into second-pass
+/// sites: their requests then also show that file, and the verdict a second pass returns replaces
+/// the first.
 pub struct Stage1Items<'a> {
     repo: String,
     model: Option<String>,
@@ -731,6 +775,8 @@ pub struct Stage1Items<'a> {
     findings: Vec<Finding>,
     verdicts: Vec<Option<Stage1Verdict>>,
     refused: Vec<(usize, request_budget::RequestTooLarge)>,
+    /// Second-pass sites: the file (its path in the run) each is shown beside its own.
+    more_code: std::collections::BTreeMap<usize, String>,
 }
 
 impl<'a> Stage1Items<'a> {
@@ -784,6 +830,7 @@ impl<'a> Stage1Items<'a> {
             findings,
             verdicts,
             refused: Vec::new(),
+            more_code: std::collections::BTreeMap::new(),
         }
     }
 
@@ -797,23 +844,86 @@ impl<'a> Stage1Items<'a> {
         self.findings.len()
     }
 
-    /// The window of the file around site `i`, `radius` lines each side; empty when the file is
-    /// not among the run's files.
-    fn window(&self, i: usize, radius: usize) -> CodeWindow {
+    /// The run's file at `path` (`./` at the front is ignored), with the path the run has it under.
+    fn file(&self, path: &str) -> Option<(&'a str, &'a str)> {
+        let bare = path.trim_start_matches("./");
+        self.files
+            .get_key_value(path)
+            .or_else(|| self.files.get_key_value(bare))
+            .map(|(p, c)| (*p, *c))
+    }
+
+    /// The code of site `i`'s own file shown as `view`; empty when the file is not among the run's
+    /// files, and for [`CodeView::Whole`] when the file is over the budget.
+    fn code(&self, i: usize, view: CodeView) -> CodeWindow {
         let f = &self.findings[i];
-        let path = f.path.trim_start_matches("./");
-        let content = self
-            .files
-            .get(f.path.as_str())
-            .or_else(|| self.files.get(path));
-        match content {
-            Some(content) => {
-                let mut w = code_window(content, f.line, radius);
-                w.text = camerata_secrets::redact_str(&w.text).into_owned();
-                w
+        let Some((_, content)) = self.file(&f.path) else {
+            return CodeWindow::default();
+        };
+        let mut w = match view {
+            CodeView::Whole if fits_whole(content) => {
+                code_window(content, f.line, content.lines().count())
             }
-            None => CodeWindow::default(),
+            CodeView::Whole => CodeWindow::default(),
+            CodeView::Window(radius) => code_window(content, f.line, radius),
+        };
+        w.text = camerata_secrets::redact_str(&w.text).into_owned();
+        w
+    }
+
+    /// The run's file a reply named, by the path the run has it under: the exact path, or else the
+    /// one file whose path ends in it after a `/` (a reply may write `auth.ts` for `src/auth.ts`).
+    /// `None` when no file, or more than one, matches.
+    fn resolve_named_file(&self, named: &str) -> Option<&'a str> {
+        let named = named
+            .trim()
+            .trim_start_matches("./")
+            .trim_start_matches('/');
+        if named.is_empty() {
+            return None;
         }
+        if let Some((path, _)) = self.file(named) {
+            return Some(path);
+        }
+        let suffix = format!("/{named}");
+        let mut matches = self
+            .files
+            .keys()
+            .filter(|p| p.trim_start_matches("./").ends_with(&suffix));
+        match (matches.next(), matches.next()) {
+            (Some(only), None) => Some(*only),
+            _ => None,
+        }
+    }
+
+    /// The file a second pass for site `i` would show: the file its verdict names, when that
+    /// verdict is `unclear`, the file is in the run, is not the site's own and fits the budget.
+    fn second_pass_file(&self, i: usize) -> Option<&'a str> {
+        let verdict = self.verdicts[i].as_ref()?;
+        if verdict.real != Real::Unclear || verdict.shown_more_code.is_some() {
+            return None;
+        }
+        let path = self.resolve_named_file(verdict.more_code_file.as_deref()?)?;
+        let own = self.file(&self.findings[i].path).map(|(p, _)| p);
+        if own == Some(path) {
+            return None;
+        }
+        let (_, content) = self.file(path)?;
+        fits_whole(content).then_some(path)
+    }
+
+    /// Make every site whose verdict named a file it can be shown a second-pass site, and return
+    /// them in order. A site is asked a second time at most once: a second pass's verdict that
+    /// names a file again is final.
+    pub fn ask_for_more_code(&mut self) -> Vec<usize> {
+        let sites: Vec<(usize, String)> = (0..self.len())
+            .filter(|i| !self.more_code.contains_key(i))
+            .filter_map(|i| self.second_pass_file(i).map(|p| (i, p.to_string())))
+            .collect();
+        for (i, path) in &sites {
+            self.more_code.insert(*i, path.clone());
+        }
+        sites.into_iter().map(|(i, _)| i).collect()
     }
 
     /// The part of every site's prompt that is the same for all of them: the repository line and
@@ -831,8 +941,9 @@ impl<'a> Stage1Items<'a> {
         prompt
     }
 
-    /// The user prompt for site `i` with `radius` lines of code each side, after the shared prefix.
-    fn site_prompt(&self, i: usize, radius: usize) -> String {
+    /// The user prompt for site `i` showing `view` of its file, after the shared prefix. A
+    /// second-pass site also shows the file its first verdict named, whole.
+    fn site_prompt(&self, i: usize, view: CodeView) -> String {
         let f = &self.findings[i];
         let mut prompt = self.shared_prefix();
         match self.rules.get(&f.rule_id.to_ascii_uppercase()) {
@@ -855,33 +966,59 @@ impl<'a> Stage1Items<'a> {
                 camerata_secrets::redact_str(&f.detail)
             ),
         ));
-        let window = self.window(i, radius);
-        if window.text.is_empty() {
+        let code = self.code(i, view);
+        if code.text.is_empty() {
             prompt.push_str(
                 "\nThe rest of the file is not available, so the quoted code above is all you can \
                  see. Say `unclear` if it does not settle whether the finding is real.\n",
             );
+        } else if view == CodeView::Whole {
+            prompt.push_str(&format!(
+                "\nThe whole file {} ({} lines; the finding is at line {}):\n",
+                f.path, code.last_line, f.line
+            ));
+            prompt.push_str(&crate::prompt_frame::frame_untrusted(
+                &self.nonce,
+                &format!("file of finding {i}"),
+                &code.text,
+            ));
         } else {
             prompt.push_str(&format!(
                 "\nThe code around the site (lines {} to {} of {}; the finding is at line {}):\n",
-                window.first_line, window.last_line, f.path, f.line
+                code.first_line, code.last_line, f.path, f.line
             ));
             prompt.push_str(&crate::prompt_frame::frame_untrusted(
                 &self.nonce,
                 &format!("code around finding {i}"),
-                &window.text,
+                &code.text,
+            ));
+        }
+        if let Some((path, content)) = self.more_code.get(&i).and_then(|p| self.file(p)) {
+            let named = code_window(content, 1, content.lines().count());
+            let text = camerata_secrets::redact_str(&named.text).into_owned();
+            prompt.push_str(&format!(
+                "\nYou said the answer depends on code in {path}. Here is that whole file ({} \
+                 lines). Answer again with it in view; this is the last code you can ask for.\n",
+                named.last_line
+            ));
+            prompt.push_str(&crate::prompt_frame::frame_untrusted(
+                &self.nonce,
+                &format!("named file for finding {i}"),
+                &text,
             ));
         }
         prompt
     }
 
-    fn request_at(&self, i: usize, radius: usize) -> LlmRequest {
+    fn request_at(&self, i: usize, view: CodeView) -> LlmRequest {
         // The system prompt and the shared prefix are the same for every site of the run: one
         // cache breakpoint at the end of the prefix lets the API serve them from its prompt cache
-        // instead of charging them again for every site.
+        // instead of charging them again for every site. The file gets none: the sites of one
+        // file are asked at the same time, so a cache entry for it would rarely be read before the
+        // next site of it is sent, and a cache write costs more than plain input.
         let prefix_end = self.shared_prefix().len();
         with_stage_effort(
-            LlmRequest::new(self.site_prompt(i, radius))
+            LlmRequest::new(self.site_prompt(i, view))
                 .with_cache_breakpoints(vec![prefix_end])
                 .with_system(self.system.clone())
                 .with_max_tokens(calibration_max_tokens(1))
@@ -892,26 +1029,37 @@ impl<'a> Stage1Items<'a> {
         )
     }
 
-    /// The request for site `i`, at the widest window that fits the model's window. An error when
-    /// not even the site's own line fits: such a request is never sent.
+    /// The request for site `i`, with the most code that fits the model's window: the whole file
+    /// when it is within the budget, then the window shrinking from 30 lines each side. An error
+    /// when not even the site's own line fits: such a request is never sent.
     pub(super) fn fitted_request(
         &self,
         i: usize,
     ) -> Result<LlmRequest, request_budget::RequestTooLarge> {
-        let radii: &[usize] = if self.window(i, CODE_WINDOW_RADIUS).text.is_empty() {
-            &[0]
+        let mut views: Vec<CodeView> = Vec::with_capacity(WINDOW_SHRINK_RADII.len() + 1);
+        if !self.code(i, CodeView::Whole).text.is_empty() {
+            views.push(CodeView::Whole);
+        }
+        if self
+            .code(i, CodeView::Window(CODE_WINDOW_RADIUS))
+            .text
+            .is_empty()
+        {
+            if views.is_empty() {
+                views.push(CodeView::Window(0));
+            }
         } else {
-            &WINDOW_SHRINK_RADII
-        };
+            views.extend(WINDOW_SHRINK_RADII.iter().map(|&r| CodeView::Window(r)));
+        }
         let mut refusal = None;
-        for &radius in radii {
-            let req = self.request_at(i, radius);
+        for view in views {
+            let req = self.request_at(i, view);
             match request_budget::ensure_request_fits(&req) {
                 Ok(()) => return Ok(req),
                 Err(e) => refusal = Some(e),
             }
         }
-        Err(refusal.expect("at least one radius was tried"))
+        Err(refusal.expect("at least one view was tried"))
     }
 
     /// One request per site that fits, with the site's position as its id. A site that does not
@@ -958,7 +1106,9 @@ impl<'a> Stage1Items<'a> {
     // The batch runner's entry points (the batch-stages work order); tested here.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn absorb(&mut self, id: usize, resp: &LlmResponse) -> Result<(), ItemReject> {
-        let verdict = self.parse_reply(resp)?;
+        let mut verdict = self.parse_reply(resp)?;
+        // A second pass's verdict says which file settled it; a first pass's says none.
+        verdict.shown_more_code = self.more_code.get(&id).cloned();
         self.verdicts[id] = Some(verdict);
         Ok(())
     }
@@ -1020,6 +1170,8 @@ struct Stage1Run<'a, 't> {
     n_groups: usize,
     /// Groups with a transcript entry so far, with the sites answered in each.
     registered: std::collections::BTreeMap<usize, usize>,
+    /// Added to the transcript session ids: empty for the first pass, `-more-code` for the second.
+    session_suffix: &'static str,
 }
 
 impl Stage1Run<'_, '_> {
@@ -1030,9 +1182,9 @@ impl Stage1Run<'_, '_> {
     /// The session id of group `gi`: single-group runs keep the id this stage always used.
     fn session(&self, gi: usize) -> String {
         if self.n_groups > 1 {
-            format!("audit-{}-calibrate-b{gi}", self.repo)
+            format!("audit-{}-calibrate-b{gi}{}", self.repo, self.session_suffix)
         } else {
-            format!("audit-{}-calibrate", self.repo)
+            format!("audit-{}-calibrate{}", self.repo, self.session_suffix)
         }
     }
 
@@ -1258,6 +1410,7 @@ pub async fn verify_findings(
         model_label: calibration_model.unwrap_or("default").to_string(),
         n_groups,
         registered: std::collections::BTreeMap::new(),
+        session_suffix: "",
     };
 
     let model = stage_model(calibration_model);
@@ -1345,7 +1498,48 @@ pub async fn verify_findings(
         .map(|(i, e)| (run.items.findings[i].clone(), e))
         .collect();
     refused.sort_by(|a, b| (a.0.path.as_str(), a.0.line).cmp(&(b.0.path.as_str(), b.0.line)));
-    let calibrated = run.items.into_findings();
+
+    // The needs-more-code pass: a site whose verdict said `unclear` and named another file of the
+    // run is asked once more with that file shown. A second pass that fails leaves the first
+    // verdict in place (that site was checked), so it is no failed part; its own checkpoint keeps
+    // a resumed run from reading a first-pass reply as the second's.
+    let mut items = run.items;
+    let second_sites = items.ask_for_more_code();
+    if !second_sites.is_empty() {
+        let keys: Vec<String> = second_sites.iter().map(|&i| run.keys[i].clone()).collect();
+        let mut more = Stage1Run {
+            items,
+            keys,
+            index_of: run.index_of,
+            refused: std::sync::Mutex::new(Vec::new()),
+            truncated: std::collections::BTreeSet::new(),
+            feedback,
+            repo: repo.to_string(),
+            model_label: run.model_label,
+            n_groups,
+            registered: std::collections::BTreeMap::new(),
+            session_suffix: "-more-code",
+        };
+        let checkpoint =
+            crate::checkpoint::stage_checkpoint(&format!("calibration_more_code_{repo}"));
+        let ctx = StageCtx {
+            repo,
+            model: &model,
+            realtime: llm,
+            batch: batch_api,
+            meter,
+            job: inputs.job,
+            checkpoint: checkpoint.as_ref(),
+            settings: StageSettings {
+                per_item_usd: site_input_usd(&model),
+                ..StageSettings::default()
+            },
+        };
+        let _ = run_stage(Stage::Calibration, &mut more, mode, &ctx).await;
+        more.close_groups(&std::collections::BTreeMap::new());
+        items = more.items;
+    }
+    let calibrated = items.into_findings();
 
     // C3-1b: a run-wide (not per-site) disclosure: every finding calibration was handed came back
     // with NO usable effort estimate at all. Neither D5 (severity floor) nor D6 (severity ceiling)

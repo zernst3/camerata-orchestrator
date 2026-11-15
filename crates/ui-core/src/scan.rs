@@ -208,7 +208,7 @@ pub const CALIBRATION_SITE_INPUT_TOKENS: f64 = 560.0;
 /// The part of a stage 1 request that is the site's own WITHOUT its code: the rule, the finding
 /// and the framing around the code. The code shown is priced on top of it by
 /// [`calibration_code_tokens`]. MEASURED on the scripted fixture, which a server test pins.
-pub const CALIBRATION_SITE_TEXT_TOKENS: f64 = 330.0;
+pub const CALIBRATION_SITE_TEXT_TOKENS: f64 = 255.0;
 /// The largest file, in characters, stage 1 shows whole; a larger file is shown as the 61 lines
 /// around the site. 24,000 characters is about 600 lines at 40 a line: a file a person can still
 /// read through in one sitting, the size hand-maintained files are split at (SPIRIT-FILE-SIZE-1),

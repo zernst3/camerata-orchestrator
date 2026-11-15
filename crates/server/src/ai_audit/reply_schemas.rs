@@ -174,6 +174,7 @@ pub(crate) fn stage1_reply_schema() -> Value {
             ("effort", one_of(&["low", "medium", "high"])),
             ("category", one_of(CALIBRATION_CATEGORIES)),
             ("reason", string()),
+            ("more_code_file", string()),
         ],
         &["severity", "real", "effort", "reason"],
     )
