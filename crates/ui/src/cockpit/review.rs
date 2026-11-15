@@ -962,7 +962,7 @@ mod tests {
             vdom.rebuild_in_place();
             dioxus_ssr::render(&vdom)
         };
-        let ready = PanelState::Ready(RewriteAdvisoryView {
+        let ready = PanelState::Ready(Box::new(RewriteAdvisoryView {
             run_id: "run-1".to_string(),
             finished_at: "2026-11-15T10:00:00Z".to_string(),
             outcome: "not_fired".to_string(),
@@ -972,7 +972,7 @@ mod tests {
                     .to_string(),
             ],
             ..RewriteAdvisoryView::default()
-        });
+        }));
         let html = render(ready);
         for needle in [
             "Rewrite advisory (internal)",

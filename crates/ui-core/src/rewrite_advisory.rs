@@ -184,7 +184,8 @@ impl RewriteAdvisoryView {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PanelState {
     Loading,
-    Ready(RewriteAdvisoryView),
+    /// Boxed: the advisory is far larger than the other two states.
+    Ready(Box<RewriteAdvisoryView>),
     Unavailable(String),
 }
 
@@ -192,7 +193,7 @@ impl PanelState {
     /// The state a fetch's result puts the panel in.
     pub fn of(result: Result<RewriteAdvisoryView, String>) -> Self {
         match result {
-            Ok(view) => PanelState::Ready(view),
+            Ok(view) => PanelState::Ready(Box::new(view)),
             Err(message) => PanelState::Unavailable(message),
         }
     }
