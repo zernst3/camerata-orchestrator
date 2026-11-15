@@ -173,10 +173,12 @@ pub(crate) fn stage1_reply_schema() -> Value {
             ("real", one_of(&["yes", "no", "unclear"])),
             ("effort", one_of(&["low", "medium", "high"])),
             ("category", one_of(CALIBRATION_CATEGORIES)),
+            ("central_fault", one_of(&["yes", "no"])),
             ("reason", string()),
+            ("protection_at", string()),
             ("more_code_file", string()),
         ],
-        &["severity", "real", "effort", "reason"],
+        &["severity", "real", "effort", "central_fault", "reason"],
     )
 }
 

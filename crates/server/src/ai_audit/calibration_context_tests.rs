@@ -234,3 +234,124 @@ fn the_rubric_rates_unauthenticated_access_high_by_default_and_critical_on_two_c
         "the client-side gate line follows the ruling: {flat}"
     );
 }
+
+// ── The central fault question, and lowering for a shown protection ───────────────────────
+
+/// A verdict with `central_fault` and, optionally, `protection_at`.
+fn verdict_with(severity: &str, real: &str, central: &str, protection: Option<&str>) -> String {
+    let mut v = serde_json::json!({
+        "severity": severity, "real": real, "effort": "low", "category": "authorization",
+        "reason": "r", "central_fault": central,
+    });
+    if let Some(at) = protection {
+        v["protection_at"] = serde_json::Value::String(at.to_string());
+    }
+    v.to_string()
+}
+
+#[test]
+fn the_reply_answers_whether_the_row_states_the_rules_central_fault() {
+    let system = verify_system_prompt();
+    assert!(
+        system.contains("does this row state the rule's central fault (yes/no)"),
+        "{system}"
+    );
+    let schema = reply_schemas::stage1_reply_schema();
+    assert_eq!(
+        schema["properties"]["central_fault"]["enum"],
+        serde_json::json!(["yes", "no"])
+    );
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("required")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(required.contains(&"central_fault"), "{required:?}");
+}
+
+#[tokio::test]
+async fn a_central_fault_no_is_recorded_and_the_row_stays_held_for_the_reviewer() {
+    let files = vec![numbered_file("a.rs", 20)];
+    let before = security_site("a.rs", 5);
+    let llm = Scripted::text(&verdict_with("medium", "yes", "no", None));
+    let (out, failed) = run(&llm, vec![before.clone()], &files).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(out.len(), 1, "a central fault of no never drops the row");
+    let row = &out[0];
+    let stage1 = stage1_of(row).expect("a stage 1 record");
+    assert_eq!(stage1.central_fault, Some(false), "the answer is recorded");
+    assert_eq!(stage1.real, Real::Yes, "and `real` is kept as answered");
+    // Held for the human reviewer: the hedge the report holds out of the action tiers.
+    assert!(row.needs_review);
+    assert_eq!(row.confidence.as_deref(), Some("needs-review"));
+    assert_eq!(row.detail, before.detail, "the client's text is untouched");
+    assert_eq!(row.severity, "medium");
+    // The group reviewer is told.
+    assert!(
+        super::group_review::member_line(row, 0, false).contains("central fault: no"),
+        "{}",
+        super::group_review::member_line(row, 0, false)
+    );
+
+    // A yes is recorded too and changes nothing else.
+    let llm = Scripted::text(&verdict_with("medium", "yes", "yes", None));
+    let (out, _) = run(&llm, vec![before.clone()], &files).await;
+    assert_eq!(
+        stage1_of(&out[0]).expect("record").central_fault,
+        Some(true)
+    );
+    assert!(!out[0].needs_review);
+    assert_eq!(out[0].confidence.as_deref(), Some("high"));
+    assert!(!super::group_review::member_line(&out[0], 0, false).contains("central fault"));
+}
+
+#[tokio::test]
+async fn a_verdict_lowering_severity_for_a_shown_protection_is_applied_and_noted() {
+    // The prompt lets calibration lower the severity for a protection it can see.
+    let system = verify_system_prompt();
+    assert!(
+        !system.contains("it does not lower the severity"),
+        "{system}"
+    );
+    let flat: String = system.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("When the code shown has a protection that defeats the fault"),
+        "{flat}"
+    );
+    assert!(flat.contains("`protection_at`"), "{flat}");
+
+    let files = vec![numbered_file("src/webhook.ts", 40)];
+    let mut before = security_site("src/webhook.ts", 30);
+    before.severity = "high".to_string();
+    let llm = Scripted::text(&verdict_with(
+        "low",
+        "yes",
+        "yes",
+        Some("src/webhook.ts:12"),
+    ));
+    let (out, failed) = run(&llm, vec![before.clone()], &files).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let row = &out[0];
+    assert_eq!(row.severity, "low", "the lowering is applied");
+    let why = crate::severity_bounds::recorded_adjustments(row).join("\n");
+    assert!(
+        why.contains("severity lowered from high to low"),
+        "noted in why the severity changed: {why}"
+    );
+    assert!(
+        why.contains("a protection that defeats the fault at src/webhook.ts:12"),
+        "{why}"
+    );
+    assert_eq!(row.detail, before.detail);
+
+    // A protection named at a line the code shown does not have is not cited: the change is
+    // still the model's to make, and is noted with the rule's severity basis instead.
+    for bad in ["src/webhook.ts:41", "src/other.ts:3", "line twelve"] {
+        let llm = Scripted::text(&verdict_with("low", "yes", "yes", Some(bad)));
+        let (out, _) = run(&llm, vec![before.clone()], &files).await;
+        let why = crate::severity_bounds::recorded_adjustments(&out[0]).join("\n");
+        assert!(why.contains("severity lowered from high to low"), "{why}");
+        assert!(!why.contains("protection"), "{bad}: {why}");
+    }
+}
