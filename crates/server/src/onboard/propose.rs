@@ -1981,6 +1981,54 @@ mod tests {
         );
     }
 
+    /// `ARCH-BOUNDED-LIST-READS-1` lives in the `api-layer` domain, which every language stack
+    /// arms (an unbounded list read is a backend fault in any language), so no
+    /// `domains_for_stack` edit is needed. Proved for a Next.js app, a Django app and a Go service.
+    #[tokio::test]
+    async fn bounded_list_reads_is_proposed_for_js_python_and_go_backends() {
+        const ID: &str = "ARCH-BOUNDED-LIST-READS-1";
+        for (repo, path, manifest, manifest_body) in [
+            (
+                "acme/next-app",
+                "app/api/orders/route.ts",
+                "package.json",
+                r#"{"dependencies":{"next":"15.0.0","react":"19.0.0"}}"#,
+            ),
+            (
+                "acme/django-app",
+                "orders/views.py",
+                "requirements.txt",
+                "django==5.1\n",
+            ),
+            (
+                "acme/go-svc",
+                "internal/http/orders.go",
+                "go.mod",
+                "module acme/svc\n",
+            ),
+        ] {
+            let repo_files = files(&[(path, ""), (manifest, manifest_body)]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            assert!(
+                domains.contains(&"api-layer".to_string()),
+                "{repo}: {domains:?}"
+            );
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "api-layer");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a grounded rule is auto-recommended (pre-checked)"
+            );
+            assert_eq!(rule.repos, vec![repo.to_string()]);
+        }
+    }
+
     /// `STYLE-NEEDLESS-COMPLEXITY-1` (Wave D) lives in the `javascript` domain, which a
     /// JavaScript repo reaches directly and a TypeScript repo through the `javascript:typescript`
     /// parent expansion, so no `domains_for_stack` edit is needed. A Python repo is not handed it.

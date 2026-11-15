@@ -15,6 +15,7 @@
 "ARCH-API-DTOS-1" = { version = 3, hash = "sha256:fb4874e92b7f7187e4fa57296df87fba44dc25267f29511a725efcb994a8fab4" }
 "ARCH-API-VERSIONING-1" = { version = 3, hash = "sha256:939874db4a5394418a19ae10a92218d8fdc9b8795cd1ef30f468f04679b8f455" }
 "ARCH-BOUNDARY-VALIDATION-1" = { version = 4, hash = "sha256:1fd02f6b54faac6b3c49bddfc9130d2a91dd33bfd033199a5c611cdd04df43bf" }
+"ARCH-BOUNDED-LIST-READS-1" = { version = 1, hash = "sha256:15babfb4a2e127a26f2132f00db0d3020fbbe6f507dc5e3f2ce665114d55f13f" }
 "ARCH-CURRENCY-CONSISTENCY-1" = { version = 4, hash = "sha256:741ab20b6f4e074fa4928981d3fb88fa80f0a57abbb5afea44a1f43f3759d101" }
 "ARCH-CURSOR-PAGINATION-1" = { version = 3, hash = "sha256:be358d6893c69ece34e4c4585d375ba4f52fe648ee5dcd14fb9831adf2efa57d" }
 "ARCH-DEAD-CODE-1" = { version = 4, hash = "sha256:89a65dded809b3d2306c5b2614f4eae473b990a015f3dd0e26fcc1d77b86d32d" }

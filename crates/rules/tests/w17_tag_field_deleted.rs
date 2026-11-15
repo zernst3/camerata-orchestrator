@@ -165,8 +165,9 @@ fn req_w17_layer_is_untouched_on_every_corpus_rule() {
         ("testing", 7),
         // 136 plus UI-STATE-SHAPE-1 (W29 Wave D), TESTING-MEANINGFUL-ASSERTION-1 (22e) and
         // SEC-NO-AI-REVIEWER-INSTRUCTIONS-1 (prompt-injection defense), SEC-NO-END-OF-LIFE-RUNTIME-1
-        // and SEC-NO-KNOWN-VULNERABLE-RUNTIME-1 (runtime end of life and runtime vulnerabilities).
-        ("universal", 141),
+        // and SEC-NO-KNOWN-VULNERABLE-RUNTIME-1 (runtime end of life and runtime vulnerabilities),
+        // and ARCH-BOUNDED-LIST-READS-1 (unbounded list reads, a new rule, not a re-labelled one).
+        ("universal", 142),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))
