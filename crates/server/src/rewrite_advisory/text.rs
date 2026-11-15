@@ -192,9 +192,7 @@ pub(super) fn lines(a: &RewriteAdvisory) -> Vec<String> {
     if a.files_not_reviewed > 0 {
         out.push(understated_line(a.files_not_reviewed));
     }
-    if a.outcome == Outcome::Fired {
-        out.push(caveat_line(a.fixes.without_estimate));
-    }
+    out.push(caveat_line(a.fixes.without_estimate));
     out
 }
 

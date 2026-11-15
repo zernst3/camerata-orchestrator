@@ -394,7 +394,7 @@ fn the_text_has_one_line_per_signal_and_the_context_line() {
     }
     fixes[0].severity = "critical";
     let a = advisory(&report_of(2_000, &fixes, Vec::new()));
-    assert_eq!(a.lines.len(), 6, "{:?}", a.lines);
+    assert_eq!(a.lines.len(), 7, "{:?}", a.lines);
     assert!(a.lines[1].starts_with("Fix hours against code size: 16.0 to 32.0 hours"));
     assert!(a.lines[2].starts_with("Structural share: 0.0 percent"));
     assert!(a.lines[3].starts_with("Areas without a settled habit: 0 of 0"));
@@ -629,6 +629,57 @@ fn fixes_with_no_estimate_are_left_out_and_counted() {
             .is_some_and(|l| l.contains("1 Fix has no estimate and is left out.")),
         "{:?}",
         a.lines
+    );
+}
+
+/// An effort that is not low, medium or high adds no hours, so it is no estimate: left out and
+/// counted as having none, not counted as estimated.
+#[test]
+fn a_fix_with_an_unrecognised_effort_has_no_estimate() {
+    let mut fixes = lows(4);
+    fixes.push(fx("odd", Some("extreme"), 40));
+    let a = advisory(&report_of(BIG, &fixes, Vec::new()));
+    assert_eq!(
+        a.fixes,
+        FixCount {
+            counted: 5,
+            without_estimate: 1
+        }
+    );
+    assert_eq!(a.rewrite_signals.repeat_cause_share.total_places, 4);
+    assert_eq!(a.rewrite_signals.fix_hours_per_kloc.low_hours, 8);
+}
+
+/// The not-fired text carries the same caveats as the fired text: the Fixes left out and the
+/// thresholds being guesses.
+#[test]
+fn the_not_fired_text_carries_the_left_out_count_and_the_caveat() {
+    let caveat = "These thresholds are guesses, not measured. Effort figures are rough bands.";
+    let none_left_out = advisory(&report_of(BIG, &lows(3), Vec::new()));
+    assert_eq!(none_left_out.outcome, Outcome::NotFired);
+    let last = none_left_out.lines.last().expect("text");
+    assert!(last.contains(caveat), "{:?}", none_left_out.lines);
+    assert!(!last.contains("have no estimate"), "{last}");
+
+    let mut fixes = lows(8);
+    fixes.push(fx("none1", None, 1));
+    let one = advisory(&report_of(BIG, &fixes, Vec::new()));
+    assert_eq!(one.outcome, Outcome::NotFired);
+    let last = one.lines.last().expect("text");
+    assert!(
+        last.contains(caveat) && last.contains("1 Fix has no estimate and is left out."),
+        "{:?}",
+        one.lines
+    );
+    fixes.push(fx("none2", None, 1));
+    let two = advisory(&report_of(BIG, &fixes, Vec::new()));
+    assert_eq!(two.outcome, Outcome::NotFired);
+    assert!(
+        two.lines
+            .last()
+            .is_some_and(|l| l.contains("2 Fixes have no estimate and are left out.")),
+        "{:?}",
+        two.lines
     );
 }
 

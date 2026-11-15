@@ -632,7 +632,15 @@ fn guards(report: &ScanReport, fixes: FixCount) -> Vec<Guard> {
 /// byte once serialized. Makes no model call and reads no file.
 pub fn compute(report: &ScanReport, corpus: Option<&camerata_rules::RuleSet>) -> RewriteAdvisory {
     let all = tally_fixes(report, corpus);
-    let estimated: Vec<&FixTally> = all.iter().filter(|fx| !fx.effort.is_empty()).collect();
+    // An effort that is not low, medium or high adds no hours, so it is no estimate.
+    let estimated: Vec<&FixTally> = all
+        .iter()
+        .filter(|fx| {
+            crate::report_export::effort_hours_bounds(Some(&fx.effort))
+                .0
+                .is_some()
+        })
+        .collect();
     let fixes = FixCount {
         counted: all.len(),
         without_estimate: all.len() - estimated.len(),
