@@ -34,6 +34,14 @@ const EXPECTED: &[Expected] = &[
         default_option: "effects-return-a-cleanup-for-what-they-start",
         fault_option: "effects-start-work-they-never-stop",
     },
+    Expected {
+        id: "JAVASCRIPT-ASYNC-REJECTION-HANDLED-1",
+        domain: "javascript",
+        min_severity: "medium",
+        max_severity: "high",
+        default_option: "async-handlers-catch-and-surface-rejections",
+        fault_option: "async-handler-rejections-go-unhandled",
+    },
 ];
 
 async fn corpus() -> camerata_rules::RuleSet {

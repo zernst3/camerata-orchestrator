@@ -22,6 +22,8 @@ enum Family {
     ListQueries,
     /// ECMAScript files that use a React effect hook.
     ReactEffects,
+    /// ECMAScript files with async functions or promise chains.
+    AsyncCode,
 }
 
 impl Family {
@@ -110,6 +112,16 @@ impl Family {
                 ("src/hooks/usePosition.ts", "useLayoutEffect(() => measure(), []);"),
                 ("lib/legacy.js", "import { useEffect } from 'react';"),
             ],
+            Family::AsyncCode => vec![
+                (
+                    "src/components/SaveButton.tsx",
+                    "<button onClick={async () => { await save(form); }} />",
+                ),
+                ("app/api/orders/route.ts", "export async function POST(req) {}"),
+                ("app/actions.ts", "'use server'; export async function createOrder() {}"),
+                ("src/hooks/useFeed.js", "useEffect(() => { load().then(setRows); }, []);"),
+                ("server/index.mjs", "app.get('/x', async (req, res) => {});"),
+            ],
         }
     }
 
@@ -123,6 +135,11 @@ impl Family {
             ),
             // A component with no effect hook cannot hold an effect without cleanup.
             Family::ReactEffects => (
+                "src/components/Badge.tsx",
+                "export const Badge = ({ n }) => <b>{n}</b>;",
+            ),
+            // Synchronous code awaits nothing and chains no promise.
+            Family::AsyncCode => (
                 "src/components/Badge.tsx",
                 "export const Badge = ({ n }) => <b>{n}</b>;",
             ),
@@ -168,6 +185,7 @@ const REVIEWED: &[(&str, Family)] = &[
     ("CICD-NO-SECRETS-ON-FORK-PR-1", Family::CiPipelines),
     ("ARCH-BOUNDED-LIST-READS-1", Family::ListQueries),
     ("JAVASCRIPT-REACT-EFFECT-CLEANUP-1", Family::ReactEffects),
+    ("JAVASCRIPT-ASYNC-REJECTION-HANDLED-1", Family::AsyncCode),
 ];
 
 async fn corpus() -> camerata_rules::RuleSet {
