@@ -136,6 +136,29 @@ fn a_planted_term_on_every_surface_makes_the_gate_refuse() {
     }
 }
 
+/// Owner call: a client whose own code holds a deny-listed term gets the export refused, with no
+/// override (an override would be a leak path). The refusal names the term and the member it was
+/// found in, so the operator can see why.
+#[test]
+fn a_term_in_the_clients_own_code_refuses_the_export_and_names_the_term_and_member() {
+    let mut pkg = package();
+    plant(
+        &mut pkg,
+        Surface::DatasetJson,
+        "let structural_share = compute(/Users/auditor/src);",
+    );
+    let failure = refused(release(pkg), "client code");
+    let shown = failure.to_string();
+    assert!(shown.contains("EXPORT BLOCKED"), "{shown}");
+    assert!(shown.contains("structural_share"), "{shown}");
+    assert!(shown.contains("json/deviations.json"), "{shown}");
+    assert!(shown.contains("file text"), "{shown}");
+    // No override: the same package is refused again, however it is asked for.
+    let mut again = package();
+    plant(&mut again, Surface::DatasetJson, "structural_share");
+    assert!(release_internal(again).is_err());
+}
+
 /// The operator's own internal package is held to it too: "never in any zip, internal included".
 #[test]
 fn an_internal_package_with_a_planted_term_is_refused_too() {
