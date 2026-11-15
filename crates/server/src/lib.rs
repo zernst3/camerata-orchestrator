@@ -1894,6 +1894,8 @@ pub fn router(state: AppState) -> Router {
         // that creates a phantom unit.
         // The review read model (WO9c): the routes live in `routes/review_routes.rs`.
         .merge(crate::routes::review_routes())
+        // The operator's rewrite advisory (internal only): `routes/rewrite_advisory_route.rs`.
+        .merge(crate::routes::rewrite_advisory_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::native_units::unknown_native_unit_gate,

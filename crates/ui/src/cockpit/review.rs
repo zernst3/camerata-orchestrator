@@ -13,6 +13,8 @@
 //!   into timer events, and the one-second tick that applies the idle rule.
 //! * [`LiveProgressStrip`] (the strip with its time-left text and Pause / Resume button) and
 //!   [`ReviewStatsModal`] (the internal stats view).
+//! * [`RewriteAdvisoryPanel`], drawn inside the stats view: the operator's rewrite advisory for
+//!   the latest inspection (`camerata_ui_core::rewrite_advisory`), internal like the stats.
 //!
 //! The timer observes decisions; it never writes one. `apply_rows` writes the dispositions and then
 //! tells the handle.
@@ -26,6 +28,7 @@ use camerata_ui_core::review_timer::{
     eta, eta_text, ClockEvent, Moment, ReviewLog, ReviewTimer, RowRef, SavedReviewLog,
     TimerStripView,
 };
+use camerata_ui_core::rewrite_advisory::{PanelState, PANEL_LOADING, PANEL_NOTE, PANEL_TITLE};
 use camerata_ui_core::triage::{finding_key, FindingView, TriageCounts, TriageState};
 use dioxus::prelude::*;
 
@@ -496,13 +499,71 @@ fn StatsTable(title: String, lines: Vec<StatLine>, by_group: bool) -> Element {
     }
 }
 
+// ── The rewrite advisory (internal) ─────────────────────────────────────────────────────────
+
+/// `GET /api/projects/:id/rewrite-advisory`: the operator's advisory for the latest inspection,
+/// or why there is none (the server's own message when it gave one).
+pub(super) async fn fetch_rewrite_advisory(project_id: &str) -> PanelState {
+    let url = format!(
+        "{}/api/projects/{}/rewrite-advisory",
+        crate::bff_base(),
+        project_id
+    );
+    let result = match reqwest::get(url).await {
+        Ok(resp) => {
+            let ok = resp.status().is_success();
+            match resp.text().await {
+                Ok(body) => camerata_ui_core::rewrite_advisory::parse_response(ok, &body),
+                Err(e) => Err(format!("The advisory could not be read: {e}")),
+            }
+        }
+        Err(e) => Err(format!("The advisory could not be read: {e}")),
+    };
+    PanelState::of(result)
+}
+
+/// THE REWRITE ADVISORY PANEL (internal): the server's fixed sentences about the latest
+/// inspection, opening line first. Props-only. Owner ruling: fix or rewrite is the architect's
+/// call alone, so this panel shows the numbers and says on its face that no client sees it.
+#[component]
+pub(super) fn RewriteAdvisoryPanel(state: PanelState) -> Element {
+    rsx! {
+        section { class: "rewrite-advisory", "aria-label": "{PANEL_TITLE}",
+            h4 { class: "review-stats-head", "{PANEL_TITLE}" }
+            p { class: "section-hint", "{PANEL_NOTE}" }
+            match state {
+                PanelState::Loading => rsx! {
+                    p { class: "section-hint", "{PANEL_LOADING}" }
+                },
+                PanelState::Unavailable(message) => rsx! {
+                    p { class: "section-hint", role: "status", "{message}" }
+                },
+                PanelState::Ready(advisory) => {
+                    let run = advisory.run_text();
+                    let opening = advisory.opening().to_string();
+                    let rest = advisory.rest().to_vec();
+                    rsx! {
+                        p { class: "section-hint", "{run}" }
+                        p { class: "rewrite-advisory-opening", strong { "{opening}" } }
+                        for (i, line) in rest.into_iter().enumerate() {
+                            p { key: "{i}", class: "rewrite-advisory-line", "{line}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// THE INTERNAL STATS VIEW: review hours per repo, per group type and per severity. Props-only.
-/// A data view for pricing; it says on its face that no client sees it.
+/// A data view for pricing; it says on its face that no client sees it. `advisory` draws the
+/// rewrite advisory panel under the tables; `None` draws none.
 #[component]
 pub(super) fn ReviewStatsModal(
     stats: ReviewStats,
     on_save: Callback<()>,
     on_close: Callback<()>,
+    #[props(default)] advisory: Option<PanelState>,
 ) -> Element {
     // Take the keyboard when it opens, so Esc closes it and no key reaches the pane under it.
     use_effect(|| super::viewer::focus_element(REVIEW_STATS_ID));
@@ -540,6 +601,9 @@ pub(super) fn ReviewStatsModal(
                 StatsTable { title: "Per repo", lines: stats.by_repo.clone(), by_group: true }
                 StatsTable { title: "Per group type", lines: stats.by_group_type.clone(), by_group: true }
                 StatsTable { title: "Per severity", lines: stats.by_severity.clone(), by_group: false }
+                if let Some(state) = advisory {
+                    RewriteAdvisoryPanel { state }
+                }
                 div { class: "queue-prompt-actions",
                     button {
                         class: "btn-run",
@@ -871,5 +935,65 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert_eq!(html.matches("Nothing recorded yet.").count(), 3, "{html}");
+        assert!(
+            !html.contains("Rewrite advisory"),
+            "no panel unless asked: {html}"
+        );
+    }
+
+    /// The rewrite advisory panel, drawn in the stats view, says on its face that it is internal
+    /// and shows the server's sentences, opening line first, in each of its states.
+    #[test]
+    fn the_rewrite_advisory_panel_says_internal_and_shows_the_servers_sentences() {
+        use camerata_ui_core::rewrite_advisory::RewriteAdvisoryView;
+        #[component]
+        fn Harness(advisory: PanelState) -> Element {
+            rsx! {
+                ReviewStatsModal {
+                    stats: ReviewStats::default(),
+                    on_save: Callback::new(|()| {}),
+                    on_close: Callback::new(|()| {}),
+                    advisory: Some(advisory),
+                }
+            }
+        }
+        let render = |advisory: PanelState| {
+            let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { advisory });
+            vdom.rebuild_in_place();
+            dioxus_ssr::render(&vdom)
+        };
+        let ready = PanelState::Ready(RewriteAdvisoryView {
+            run_id: "run-1".to_string(),
+            finished_at: "2026-11-15T10:00:00Z".to_string(),
+            outcome: "not_fired".to_string(),
+            lines: vec![
+                "No rewrite signal this run.".to_string(),
+                "Fix hours against code size: 3.0 to 6.0 hours per 1,000 counted lines."
+                    .to_string(),
+            ],
+            ..RewriteAdvisoryView::default()
+        });
+        let html = render(ready);
+        for needle in [
+            "Rewrite advisory (internal)",
+            "Internal note for the architect",
+            "not in any export",
+            "Inspection run-1, finished 2026-11-15T10:00:00Z.",
+            "<strong>No rewrite signal this run.</strong>",
+            "Fix hours against code size: 3.0 to 6.0",
+        ] {
+            assert!(html.contains(needle), "missing {needle:?} in\n{html}");
+        }
+        assert!(!html.contains('\u{2014}'), "{html}");
+        let loading = render(PanelState::Loading);
+        assert!(
+            loading.contains("(internal)") && loading.contains(PANEL_LOADING),
+            "{loading}"
+        );
+        let none = render(PanelState::Unavailable("Run an audit first.".to_string()));
+        assert!(
+            none.contains("(internal)") && none.contains("Run an audit first."),
+            "{none}"
+        );
     }
 }

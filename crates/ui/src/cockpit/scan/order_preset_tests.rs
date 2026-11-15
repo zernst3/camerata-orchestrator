@@ -503,6 +503,13 @@ async fn the_product_export_request_carries_no_review_log() {
     for key in camerata_api_types::review_timing::INTERNAL_ONLY_KEYS {
         assert!(!text.contains(key), "{key} in the export request: {text}");
     }
+    // Nor can the operator's rewrite advisory (owner ruling: fix or rewrite is the architect's
+    // call alone, never in a client file).
+    let advisory = camerata_api_types::rewrite_advisory::terms_in(&text);
+    assert!(
+        advisory.is_empty(),
+        "{advisory:?} in the export request: {text}"
+    );
 }
 
 /// TRIPWIRE, not proof. The Queue's own CSV button exports findings, which carry no

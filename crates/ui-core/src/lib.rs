@@ -31,6 +31,7 @@ pub mod readiness;
 pub mod review_settings;
 pub mod review_stats;
 pub mod review_timer;
+pub mod rewrite_advisory;
 pub mod rules;
 pub mod run;
 pub mod save_queue;
