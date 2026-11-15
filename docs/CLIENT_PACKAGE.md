@@ -8,7 +8,7 @@ The package is one ZIP. It holds a PDF, an Excel workbook, files for tools and a
 
 Three kinds of reader use it, each with a different file:
 
-- **The client's leadership** reads the PDF. It is a summary of about 15 pages, written for a person who will not open a spreadsheet. It does not carry every row, and that is by design.
+- **The client's leadership** reads the PDF. It is a summary of 20 pages at most, written for a person who will not open a spreadsheet. It does not carry every row, and that is by design.
 - **The client's engineers** work from the workbook and the files for tools. The workbook holds every problem once, the fixes in the order to do them and the reason for each. The CSV and JSON files and the ticket file hold the same rows for scripts and issue trackers.
 - **The architect who reviewed the report** reads the reviewer sheets at the end of the workbook, which show how problems were grouped and what each reviewer decision was.
 
@@ -99,7 +99,7 @@ A report that no human reviewer has signed off carries a draft banner on every p
 
 ## How the escalation line works
 
-The inspection finds more problems than a person can read one by one. A group reviewer first reads each rule's problems together and splits them into fixes. It then ranks the places that most need a person's eyes. A budget decides how many of those places the architect reads in person. By default it is one place for every 1,000 counted lines of code, with a minimum of 20. The places above that line are the escalated places. A critical place whose reason is one of the severe kinds (unauthenticated reach, a secret exposed, data loss, cross-tenant access, authorization bypass, injection, unverified evidence) is escalated even past the budget. Each one is read in person, and the workbook marks it "Reviewed in person".
+The inspection finds more problems than a person can read one by one. A group reviewer first reads each rule's problems together and splits them into fixes. It then ranks the places that most need a person's eyes. A budget decides how many of those places the architect reads in person. By default it is one place for every 1,000 counted lines of code, with a minimum of 20. The places above that line are the escalated places. A critical place whose reason is one of the severe kinds (unauthenticated reach, a secret exposed, data loss, cross-tenant access, authorization bypass, injection, unverified evidence) is escalated even past the budget. A high place passes the budget too when its reason is a secret exposed, data loss, cross-tenant access, authorization bypass or injection. Each one is read in person, and the workbook marks it "Reviewed in person".
 
 A place below the line is not left unchecked. The engine checked it against the code, and it is on the workbook like any other problem, with the Reviewed in person cell blank. The PDF's "The most serious problems" section prints the escalated places, worst first. The budget itself is the operator's setting and is not printed in a client file.
 

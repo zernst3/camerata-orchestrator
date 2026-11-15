@@ -13,7 +13,7 @@ Two kinds of check run. A deterministic scan answers the questions that have a p
 - **Five kinds of statement, not a yes/no:** a defect, a departure from the convention the codebase itself follows, a convention it follows well, a place where no convention exists and a rule that could not be completed. Each names its rule and the standard behind it, and carries a rough range of hours to fix.
 - **A report a person has reviewed.** The reviewer works through a tree of areas, rules, rule groups and fixes, an escalation queue that orders places by severity with one slot per place and a code viewer at every cited line. Every decision is recorded, a problem that needs a decision waits until someone rules on it, and a chat assistant answers questions about any problem from the same view of the report. A review timer records the hours spent for the reviewer's own planning; it never reaches the client.
 - **A complete client package in one ZIP**, marked "Confidential, prepared for" the client and pinned to the exact commit inspected:
-  - a **PDF report** for decision makers, a summary of about 15 pages: executive summary, area scorecard, a severity by effort matrix, the most serious problems, one line for every other fix, what is healthy, dependencies and the method with its limits, stated plainly as an assessment and not a certification;
+  - a **PDF report** for decision makers, a summary of 20 pages at most: executive summary, area scorecard, a severity by effort matrix, the most serious problems, one line for every other fix, what is healthy, dependencies and the method with its limits, stated plainly as an assessment and not a certification;
   - an **Excel workbook** for the engineers that holds every row: a Fix plan in the order to do the fixes, All problems (every problem once, at its place), Needs a decision, the code's conventions and departures from them, dependencies, Rules checked (found or clean), Ruled out with the reason for each and Not checked, then the reviewers' sheets (All source rows, Reviewer decisions and How problems were grouped);
   - **`findings.json`, `decisions.json` and CSV and JSON copies of every dataset**, including a `tickets.csv` with one ticket per fix ready to import into Jira, Linear or GitHub Issues, plus a manifest and a README. [`docs/CLIENT_PACKAGE.md`](docs/CLIENT_PACKAGE.md) lists every file, sheet and PDF section.
 
@@ -84,17 +84,17 @@ The full graph of all 30 workspace members is in [`PLATFORM.md`](PLATFORM.md#the
 
 ## By the numbers
 
-I architected Camerata and orchestrated its build: supervised AI agents wrote the code, working under the same deterministic governance rules Camerata itself enforces. Every architectural decision, review gate and scope call is mine. In under five months:
+I architected Camerata and orchestrated its build: supervised AI agents wrote the code, working under the same deterministic governance rules Camerata itself enforces. Every architectural decision, review gate and scope call is mine. In five months:
 
 | | |
 |---|---|
-| Rust | over 650,000 lines of Rust across 29 crates and one maintainer tool, including tests |
-| Tests | 11,000+ automated tests; roughly half the lines are test code |
+| Rust | over 700,000 lines of Rust across 29 crates and one maintainer tool, including tests |
+| Tests | 12,000+ automated tests; roughly half the lines are test code |
 | Test quality | mutation testing on the checks crate caught 97.9% of deliberately injected faults in an earlier run ([`docs/MUTATION_TESTING.md`](docs/MUTATION_TESTING.md)) |
 | Rule library | 443 rules across 22 domains; 442 cite at least one published source (901 sources in all) |
 | Commits | 2,800+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
 
-The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so every deterministic detector ships with a positive test and a "safe twin" that proves it stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Every prompt Camerata sends a model passes one redaction point, and a test fails if any code reaches a model around it, so client secrets never leave in a prompt; the release gate checks every export.
+The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so deterministic detectors ship with a positive test and a "safe twin" that proves each stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Every prompt Camerata sends a model passes one redaction point, and a test fails if any code reaches a model around it, so client secrets never leave in a prompt; the release gate checks every export.
 
 ## How it runs
 
