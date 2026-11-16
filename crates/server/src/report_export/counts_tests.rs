@@ -121,6 +121,17 @@ fn the_identity_check_names_each_identity_that_does_not_hold() {
     let mut bad = ok.clone();
     bad.problems.first += 1;
     assert_eq!(bad.identity_failures().len(), 1, "identity 4");
+    // Identity 5: the severities add to the total.
+    let mut bad = ok.clone();
+    bad.problems.by_severity.low += 1;
+    assert_eq!(bad.identity_failures().len(), 1, "identity 5");
+    let mut bad = ok.clone();
+    bad.problems.by_severity.high -= 1;
+    assert_eq!(
+        bad.identity_failures().len(),
+        1,
+        "identity 5, a severity short"
+    );
 }
 
 #[test]
@@ -145,13 +156,105 @@ fn the_counts_ride_in_the_pdf_data_and_in_findings_json_whole() {
     assert_eq!(findings["counts"], data["counts"]);
 }
 
+// ── A place a ruled-out row carries ───────────────────────────────────────────────────────
+
+/// The counts of `findings` with the row of `host_rule` at src/a.rs ruled out by a reviewer.
+fn counts_with_host_ruled_out(findings: Vec<crate::onboard::Finding>) -> ReportCounts {
+    let sealed = report_with(findings, vec!["SYN-A-1", "SYN-B-1"]).seal();
+    let host = sealed
+        .findings
+        .iter()
+        .find(|f| f.rule_id == "SYN-A-1" && f.path == "src/a.rs")
+        .expect("the host row");
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        finding_key(host),
+        DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "the value is a constant".to_string(),
+            ..Default::default()
+        },
+    );
+    report_counts(
+        &ReviewedReport::unreviewed(&sealed, &dispositions),
+        None,
+        &empty_opts(),
+    )
+}
+
+fn host_also_matching_b() -> crate::onboard::Finding {
+    let mut host = finding("SYN-A-1", "src/a.rs", 5, "medium");
+    host.also_matches = vec!["SYN-B-1".to_string()];
+    host
+}
+
+#[test]
+fn an_open_problem_carried_by_a_ruled_out_row_is_a_problem_that_needs_a_decision() {
+    let c = counts_with_host_ruled_out(vec![host_also_matching_b()]);
+    assert_eq!(c.rows.ruled_out, 1, "anti-vacuity: the host is ruled out");
+    assert_eq!(c.rows.problem, 0);
+    assert_eq!(c.problems.total, 1);
+    assert_eq!(c.problems.needs_decision, 1);
+    assert_eq!(c.problems.beside_ruled_out, 1);
+    assert_eq!(c.problems.for_action, 0);
+    assert_eq!(c.identity_failures(), Vec::<&str>::new());
+}
+
+#[test]
+fn a_ruled_out_host_whose_carried_place_was_split_into_its_own_problem_counts_one_problem() {
+    // After the unfold, the carried place is a row of its own in the reviewed report and the host
+    // no longer carries it.
+    let host = finding("SYN-A-1", "src/a.rs", 5, "medium");
+    let split_out = finding("SYN-B-1", "src/a.rs", 5, "medium");
+    let c = counts_with_host_ruled_out(vec![host, split_out]);
+    assert_eq!(c.rows.ruled_out, 1, "anti-vacuity: the host is ruled out");
+    assert_eq!(c.rows.problem, 1);
+    assert_eq!(c.problems.total, 1, "one problem, not two");
+    assert_eq!(c.problems.beside_ruled_out, 0);
+    assert_eq!(c.problems.for_action, 1);
+    assert_eq!(c.problems.needs_decision, 0);
+    // Both at once (the host still carries the place AND the split row exists): still one.
+    let both = counts_with_host_ruled_out(vec![
+        host_also_matching_b(),
+        finding("SYN-B-1", "src/a.rs", 5, "medium"),
+    ]);
+    assert_eq!(both.problems.total, 1);
+    assert_eq!(both.problems.beside_ruled_out, 0);
+    assert_eq!(both.identity_failures(), Vec::<&str>::new());
+}
+
+// ── Whole-file places per rule ───────────────────────────────────────────────────────────
+
+#[test]
+fn whole_file_problems_of_different_rules_in_one_file_are_separate_places() {
+    let three = counts_for(vec![
+        finding("SYN-A-1", "src/whole.rs", 0, "medium"),
+        finding("SYN-B-1", "src/whole.rs", 0, "medium"),
+        finding("SYN-A-2", "src/whole.rs", 0, "medium"),
+    ]);
+    assert_eq!(three.problems.total, 3);
+    assert_eq!(three.rows.folded, 0);
+    let same = counts_for(vec![
+        finding("SYN-A-1", "src/whole.rs", 0, "medium"),
+        finding("SYN-A-1", "src/whole.rs", 0, "high"),
+    ]);
+    assert_eq!(same.problems.total, 1);
+    assert_eq!(same.rows.folded, 1);
+}
+
 // ── The scale fixture (test 13) ───────────────────────────────────────────────────────────
 
 const TOTAL_PLACES: usize = 5_264;
 const NEEDS: usize = 406;
 const INFO: usize = 137;
+// First (222) and Next (38) are INVENTED values: the design leaves them "to be recounted", so
+// these two stand in for the real split of the 4,721 places for action. Only their sum with
+// Later is a fact of the run.
 const FIRST: usize = 222;
 const NEXT: usize = 38;
+/// Needs-a-decision places whose HEAD row is Later and whose second row is held, so the fixture
+/// tells "any row held" from "the head row held" (the old rule counted these 40 as for action).
+const LATER_HEAD_HELD_SECOND: usize = 40;
 const FOLDED: usize = 327;
 const DEPS: usize = 2_276;
 const CONVENTIONS: usize = 108;
@@ -192,7 +295,13 @@ fn scale_view() -> CountingView {
         };
         // Severity runs the other way round, so class and severity are independent.
         let j = TOTAL_PLACES - 1 - i;
-        let severity = if j < 173 {
+        // The 40 Later-head places take a medium head (the held row beside it is low), and 40
+        // medium places turn low in exchange, so the severity totals do not move.
+        let severity = if i < LATER_HEAD_HELD_SECOND {
+            "medium"
+        } else if (173 + 117..173 + 117 + LATER_HEAD_HELD_SECOND).contains(&j) {
+            "low"
+        } else if j < 173 {
             "critical"
         } else if j < 173 + 117 {
             "high"
@@ -201,6 +310,15 @@ fn scale_view() -> CountingView {
         } else {
             "low"
         };
+        if i < LATER_HEAD_HELD_SECOND {
+            // The head is a Later row; the second row at the place is held and less severe, so
+            // it never heads the place.
+            rows.push(row(i, "plan", severity, CountKind::Problem));
+            let mut held_row = row(i, "held", "low", CountKind::Problem);
+            held_row.rule_id = "SYN-HELD".to_string();
+            rows.push(held_row);
+            continue;
+        }
         rows.push(row(i, bucket, severity, CountKind::Problem));
         if i < FOLDED {
             // A second row at the place, same severity and bucket.
@@ -231,6 +349,7 @@ fn scale_view() -> CountingView {
     CountingView {
         rows,
         dependency_rows: DEPS,
+        open_beside_ruled_out: Vec::new(),
         fix_ids_to_do: HashSet::new(),
     }
 }

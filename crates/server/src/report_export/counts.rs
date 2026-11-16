@@ -6,12 +6,18 @@
 //! every decision, merge, hold and severity bound is applied. The names are the client words of
 //! `docs/glossary-operator.md`.
 //!
-//! The four identities hold by construction and are asserted in debug builds:
+//! The five identities hold by construction and are asserted in debug builds:
 //!
 //! 1. `rows.total = dependency + ruled_out + problem + convention + not_checked`
 //! 2. `problems.total = needs_decision + for_action + accepted + information_only`
-//! 3. `rows.problem = problems.total + rows.folded`
+//! 3. `rows.problem + problems.beside_ruled_out = problems.total + rows.folded`
 //! 4. `for_action = first + next + later`
+//! 5. `problems.total = critical + high + medium + low`
+//!
+//! A place of another rule that a ruled-out row carries and that no problem row already holds
+//! (`open_beside_ruled_out`) is a problem that needs a decision (fail closed): it has no row of
+//! its own, so `problems.beside_ruled_out` counts it, and it counts at the lowest severity, the
+//! rank an unknown severity has everywhere.
 //!
 //! A place needs a decision when ANY row there is held (fail closed); "information only" is its
 //! own class, apart from needs a decision. A place whose rows are accepted and information only
@@ -20,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::ReportOptions;
-use crate::review_tree::{places_of, PlaceClass};
+use crate::review_tree::{place_key, places_of, PlaceClass};
 use crate::xlsx_export::{CountKind, CountingView};
 
 /// Every count of the package. Serialised whole as `counts` in the PDF data and `findings.json`.
@@ -80,6 +86,10 @@ pub struct ProblemCounts {
     pub information_only: usize,
     /// Problems where any row was sent for review in person.
     pub escalated: usize,
+    /// Problems with no row of their own: a place of another rule that a ruled-out row carries
+    /// and that stays open. Each is also counted in `needs_decision`.
+    #[serde(default)]
+    pub beside_ruled_out: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,8 +123,10 @@ impl ReportCounts {
                 "problems are not needs a decision + for action + accepted + information only",
             );
         }
-        if r.problem != p.total + r.folded {
-            out.push("problem rows are not problems + rows at a shared place");
+        if r.problem + p.beside_ruled_out != p.total + r.folded {
+            out.push(
+                "problem rows and places beside a ruled out row are not problems + rows at a shared place",
+            );
         }
         if p.for_action != p.first + p.next + p.later {
             out.push("for action is not first + next + later");
@@ -211,6 +223,23 @@ pub(crate) fn counts_of(
         }
         if place.members.iter().any(|m| m.escalated) {
             p.escalated += 1;
+        }
+    }
+    // Fail closed: an open place a ruled-out row carries, that no problem row already holds, is
+    // a problem that needs a decision.
+    let held_places: std::collections::HashSet<_> = places
+        .iter()
+        .map(|pl| place_key(&pl.head.repo, &pl.head.path, pl.head.line, &pl.head.rule_id))
+        .collect();
+    let mut beside: std::collections::HashSet<(&str, &str, usize, &str)> =
+        std::collections::HashSet::new();
+    for site in &view.open_beside_ruled_out {
+        let key = place_key(&site.repo, &site.path, site.line, &site.rule_id);
+        if !held_places.contains(&key) && beside.insert(key) {
+            p.total += 1;
+            p.needs_decision += 1;
+            p.by_severity.low += 1;
+            p.beside_ruled_out += 1;
         }
     }
     let distinct_rules: std::collections::BTreeSet<&str> =

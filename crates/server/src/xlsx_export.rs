@@ -1164,6 +1164,9 @@ impl crate::review_tree::PlaceRow for FindingRow {
     fn place_line(&self) -> usize {
         self.line
     }
+    fn place_rule_id(&self) -> &str {
+        &self.rule_id
+    }
     fn place_severity(&self) -> &str {
         &self.severity
     }
@@ -1206,6 +1209,9 @@ impl crate::review_tree::PlaceRow for CountRow {
     fn place_line(&self) -> usize {
         self.line
     }
+    fn place_rule_id(&self) -> &str {
+        &self.rule_id
+    }
     fn place_severity(&self) -> &str {
         &self.severity
     }
@@ -1219,6 +1225,10 @@ impl crate::review_tree::PlaceRow for CountRow {
 pub(crate) struct CountingView {
     pub rows: Vec<CountRow>,
     pub dependency_rows: usize,
+    /// The places of other rules that ruled-out rows carry in THIS (reviewed, overlaid) report
+    /// and that stay open ([`open_beside_ruled_out`]). The counts read them here and nowhere
+    /// else, so a place a ruling already split into a problem of its own is never counted twice.
+    pub open_beside_ruled_out: Vec<OpenSiteJson>,
     /// Fixes with a problem on All problems or an advisory on Dependencies.
     pub fix_ids_to_do: std::collections::HashSet<String>,
 }
@@ -1231,9 +1241,9 @@ pub(crate) fn counting_view(
     chosen_options: &HashMap<String, String>,
     internal: bool,
 ) -> CountingView {
-    let (rows, dep_rows) = partition_rows_for(reviewed, corpus, chosen_options, internal);
-    let fix_ids_to_do = sheets::fixes_with_problems(&rows, &dep_rows);
-    let rows = rows
+    let (all_rows, dep_rows) = partition_rows_for(reviewed, corpus, chosen_options, internal);
+    let fix_ids_to_do = sheets::fixes_with_problems(&all_rows, &dep_rows);
+    let rows = all_rows
         .iter()
         .map(|r| CountRow {
             repo: r.repo.clone(),
@@ -1253,6 +1263,7 @@ pub(crate) fn counting_view(
         })
         .collect();
     CountingView {
+        open_beside_ruled_out: open_beside_ruled_out(&all_rows),
         rows,
         dependency_rows: dep_rows.len(),
         fix_ids_to_do,

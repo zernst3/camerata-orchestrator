@@ -35,8 +35,8 @@ pub use mapping::{
     UNCATEGORISED,
 };
 pub use places::{
-    class_of_place, is_place_row, merge_places, merge_places_where, place_id_of, places_for,
-    places_of, FixOrder, Place, PlaceClass, PlaceMergeBlock, PlaceNode, PlaceRow,
+    class_of_place, is_place_row, merge_places, merge_places_where, place_id_of, place_key,
+    places_for, places_of, FixOrder, Place, PlaceClass, PlaceMergeBlock, PlaceNode, PlaceRow,
     PLACE_MERGE_STAGE, PLACE_PREFIX,
 };
 pub use types::{
@@ -578,6 +578,8 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
 mod fixes_tests;
 #[cfg(test)]
 mod outlier_tests;
+#[cfg(test)]
+mod place_rule_tests;
 #[cfg(test)]
 mod places_tests;
 #[cfg(test)]

@@ -85,9 +85,9 @@ impl PlaceMergeBlock {
     /// The block for the problem rows of `findings` and the multi-row `places` among them.
     pub fn of(findings: &[Finding], places: &[PlaceNode]) -> Self {
         let rows: Vec<&Finding> = findings.iter().filter(|f| is_place_row(f)).collect();
-        let distinct: BTreeSet<(&str, &str, usize)> = rows
+        let distinct: BTreeSet<(&str, &str, usize, &str)> = rows
             .iter()
-            .map(|f| (f.repo.as_str(), f.path.as_str(), f.line))
+            .map(|f| place_key(&f.repo, &f.path, f.line, &f.rule_id))
             .collect();
         Self {
             stage: PLACE_MERGE_STAGE.to_string(),
@@ -142,17 +142,18 @@ pub fn merge_places_where(
     excluded: &dyn Fn(&Finding) -> bool,
 ) -> Vec<PlaceNode> {
     let n = findings.len();
-    let mut at: BTreeMap<(&str, &str, usize), Vec<usize>> = BTreeMap::new();
+    // The same key `places_of` uses: a whole-file problem (line 0) is a place of its own rule.
+    let mut at: BTreeMap<(&str, &str, usize, &str), Vec<usize>> = BTreeMap::new();
     for (i, f) in findings.iter().enumerate() {
         if is_place_row(f) && !excluded(f) {
-            at.entry((f.repo.as_str(), f.path.as_str(), f.line))
+            at.entry(place_key(&f.repo, &f.path, f.line, &f.rule_id))
                 .or_default()
                 .push(i);
         }
     }
     at.into_iter()
         .filter(|(_, rows)| rows.len() > 1)
-        .map(|((repo, path, line), mut rows)| {
+        .map(|((repo, path, line, rule), mut rows)| {
             // Best first; the earliest row on a tie (`primary_rank` ends on that).
             rows.sort_by_key(|&i| std::cmp::Reverse(primary_rank(&findings[i], n, i)));
             let rules: BTreeSet<String> =
@@ -165,7 +166,12 @@ pub fn merge_places_where(
                 .collect();
             let members: Vec<String> = rows.iter().map(|&i| findings[i].site_key.clone()).collect();
             PlaceNode {
-                id: place_id_of(repo, path, line),
+                // A whole-file place is told apart from the others in its file by its rule.
+                id: if line == 0 {
+                    place_id_of(repo, &format!("{path}\n{rule}"), line)
+                } else {
+                    place_id_of(repo, path, line)
+                },
                 repo: repo.to_string(),
                 path: path.to_string(),
                 line,
@@ -225,6 +231,8 @@ pub trait PlaceRow {
     fn place_repo(&self) -> &str;
     fn place_path(&self) -> &str;
     fn place_line(&self) -> usize;
+    /// The rule of the row. It is part of the place key only for a whole-file problem (line 0).
+    fn place_rule_id(&self) -> &str;
     fn place_severity(&self) -> &str;
     /// `"do_now"` | `"do_next"` | `"plan"` | `"accepted"` | `"informational"` | `"held"`.
     fn place_bucket(&self) -> &str;
@@ -294,16 +302,34 @@ pub fn class_of_place<'b>(buckets: impl IntoIterator<Item = &'b str>) -> PlaceCl
         .unwrap_or(PlaceClass::NeedsDecision)
 }
 
-/// THE place rule: one place for each (repo, path, line) of the problem rows given, in the order
-/// the places first appear. The head is the row with the worst severity, the first of them on a
-/// tie. The caller passes problem rows only (it knows what a problem is: a defect or a departure
-/// that is not ruled out); this function never drops a row.
+/// The key of a place: (repo, path, line), and for a whole-file problem (line 0) the rule id as
+/// well, so the whole-file problems of different rules in one file are separate places. A
+/// whole-file row and a line row never share a place.
+pub fn place_key<'a>(
+    repo: &'a str,
+    path: &'a str,
+    line: usize,
+    rule_id: &'a str,
+) -> (&'a str, &'a str, usize, &'a str) {
+    (repo, path, line, if line == 0 { rule_id } else { "" })
+}
+
+/// THE place rule: one place for each [`place_key`] of the problem rows given, in the order the
+/// places first appear. The head is picked by a total order that never depends on the order the
+/// rows arrive in: the worst severity, then the earliest fix order (a held row ranks first), then
+/// the stable key (repo, path, line, rule id). The caller passes problem rows only (it knows what
+/// a problem is: a defect or a departure that is not ruled out); this function never drops a row.
 pub fn places_of<'a, T: PlaceRow>(rows: impl IntoIterator<Item = &'a T>) -> Vec<Place<'a, T>> {
-    let mut order: Vec<(&'a str, &'a str, usize)> = Vec::new();
-    let mut at: std::collections::HashMap<(&'a str, &'a str, usize), Vec<&'a T>> =
-        std::collections::HashMap::new();
+    type Key<'k> = (&'k str, &'k str, usize, &'k str);
+    let mut order: Vec<Key<'a>> = Vec::new();
+    let mut at: std::collections::HashMap<Key<'a>, Vec<&'a T>> = std::collections::HashMap::new();
     for r in rows {
-        let key = (r.place_repo(), r.place_path(), r.place_line());
+        let key = place_key(
+            r.place_repo(),
+            r.place_path(),
+            r.place_line(),
+            r.place_rule_id(),
+        );
         at.entry(key)
             .or_insert_with(|| {
                 order.push(key);
@@ -311,20 +337,22 @@ pub fn places_of<'a, T: PlaceRow>(rows: impl IntoIterator<Item = &'a T>) -> Vec<
             })
             .push(r);
     }
+    let rank = |m: &&'a T| {
+        (
+            severity_order(m.place_severity()),
+            precedence(class_of_bucket(m.place_bucket())),
+            m.place_repo(),
+            m.place_path(),
+            m.place_line(),
+            m.place_rule_id(),
+        )
+    };
     order
         .into_iter()
         .filter_map(|k| at.remove(&k))
         .map(|mut members| {
-            let mut best = 0;
-            for (i, m) in members.iter().enumerate() {
-                if severity_order(m.place_severity())
-                    < severity_order(members[best].place_severity())
-                {
-                    best = i;
-                }
-            }
-            let head = members.remove(best);
-            members.insert(0, head);
+            members.sort_by(|a, b| rank(a).cmp(&rank(b)));
+            let head = members[0];
             let class = class_of_place(members.iter().map(|m| m.place_bucket()));
             Place {
                 head,

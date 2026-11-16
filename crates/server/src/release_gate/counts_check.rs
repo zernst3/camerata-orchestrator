@@ -8,7 +8,7 @@
 //! Checks (numbers are the design's):
 //!
 //! 1. The recount equals the object in `findings.json`, field by field.
-//! 2. The four identities hold, on the recount and on the object.
+//! 2. The identities hold, on the recount and on the object (restated here, not called).
 //! 3. Every surface equals the object: the PDF data's `counts`, the cover, the grid, the
 //!    methodology fields the template prints as "problems" and "need a decision", the Start here
 //!    row counts, the rows of each sheet and `tickets.csv`.
@@ -50,10 +50,43 @@ fn text(row: &Value, key: &str) -> String {
     }
 }
 
-fn array_of(entries: &Entries, name: &str) -> Option<Vec<Value>> {
-    match serde_json::from_slice::<Value>(entries.get(name)?) {
-        Ok(Value::Array(rows)) => Some(rows),
-        _ => None,
+/// The gate's own place key for a JSON row: (repo, path, line), and for a whole-file problem
+/// (line 0) the rule id as well, so whole-file problems of different rules are separate places.
+pub(super) fn place_key_of(row: &Value) -> (String, String, String, String) {
+    let line = text(row, "line");
+    let rule = if line == "0" {
+        text(row, "rule_id")
+    } else {
+        String::new()
+    };
+    (text(row, "repo"), text(row, "path"), line, rule)
+}
+
+fn cannot_recount(file: &str, why: impl AsRef<str>) -> Problem {
+    problem(
+        file,
+        COUNTS,
+        format!(
+            "the counts cannot be recounted from the package: {}",
+            why.as_ref()
+        ),
+    )
+}
+
+/// A dataset of the archive that must be a JSON array of rows. Missing or any other shape is a
+/// problem (fail closed): the recount works from these files, so a package that cannot be
+/// recounted is not a package that passes.
+fn array_of(entries: &Entries, name: &str) -> Result<Vec<Value>, Problem> {
+    let Some(bytes) = entries.get(name) else {
+        return Err(cannot_recount(name, "the file is missing"));
+    };
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(Value::Array(rows)) => Ok(rows),
+        Ok(_) => Err(cannot_recount(name, "the file is not a JSON array of rows")),
+        Err(e) => Err(cannot_recount(
+            name,
+            format!("the file does not parse ({e})"),
+        )),
     }
 }
 
@@ -66,13 +99,51 @@ fn severity_slot(s: &str) -> usize {
     }
 }
 
-/// The recount, from the archive's own files, with a tally written for this check alone.
-/// `None` when a file it needs is missing or unreadable (the dataset-set check reports that).
-pub(super) fn recount(entries: &Entries, report: &AuditReportJson) -> Option<ReportCounts> {
-    let live = array_of(entries, "json/all-findings.json")?;
-    let ruled_out = array_of(entries, "json/false-positives.json")?;
-    let deps = array_of(entries, "json/dependencies.json")?;
-    let findings_json: Value = serde_json::from_slice(entries.get("findings.json")?).ok()?;
+/// The recount, from the archive's own files, with a tally written for this check alone. A file
+/// it needs that is missing or of the wrong shape is a problem, never a pass (fail closed).
+pub(super) fn recount(
+    entries: &Entries,
+    report: &AuditReportJson,
+) -> Result<ReportCounts, Vec<Problem>> {
+    let mut failures = Vec::new();
+    let mut take = |name: &str| match array_of(entries, name) {
+        Ok(rows) => rows,
+        Err(p) => {
+            failures.push(p);
+            Vec::new()
+        }
+    };
+    let live = take("json/all-findings.json");
+    let ruled_out = take("json/false-positives.json");
+    let deps = take("json/dependencies.json");
+    let findings_json: Value = match entries
+        .get("findings.json")
+        .map(|b| serde_json::from_slice(b))
+    {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            failures.push(cannot_recount(
+                "findings.json",
+                format!("the file does not parse ({e})"),
+            ));
+            Value::Null
+        }
+        None => {
+            failures.push(cannot_recount("findings.json", "the file is missing"));
+            Value::Null
+        }
+    };
+    let fixes = findings_json.get("fixes").and_then(Value::as_array);
+    if fixes.is_none() && !findings_json.is_null() {
+        failures.push(cannot_recount(
+            "findings.json",
+            "it has no fixes array to count the fixes from",
+        ));
+    }
+    if !failures.is_empty() {
+        return Err(failures);
+    }
+    let fixes = fixes.expect("checked above");
 
     let is_problem = |r: &&Value| {
         crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&text(r, "kind").as_str())
@@ -102,11 +173,9 @@ pub(super) fn recount(entries: &Entries, report: &AuditReportJson) -> Option<Rep
         .count();
     c.rows.total = live.len() + ruled_out.len() + deps.len();
 
-    let mut at: BTreeMap<(String, String, String), Vec<&Value>> = BTreeMap::new();
+    let mut at: BTreeMap<(String, String, String, String), Vec<&Value>> = BTreeMap::new();
     for r in &problem_rows {
-        at.entry((text(r, "repo"), text(r, "path"), text(r, "line")))
-            .or_default()
-            .push(r);
+        at.entry(place_key_of(r)).or_default().push(r);
     }
     c.problems.total = at.len();
     for members in at.values() {
@@ -149,7 +218,25 @@ pub(super) fn recount(entries: &Entries, report: &AuditReportJson) -> Option<Rep
         }
     }
 
-    let fixes = findings_json.get("fixes").and_then(Value::as_array)?;
+    // Fail closed: each open place of another rule that a ruled-out row carries, and that no
+    // problem row already holds, is a problem that needs a decision (low: the rank of a
+    // severity nobody gave).
+    let mut beside: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+    for site in findings_json
+        .get("open_beside_ruled_out")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let key = place_key_of(site);
+        if !at.contains_key(&key) && beside.insert(key) {
+            c.problems.total += 1;
+            c.problems.needs_decision += 1;
+            c.problems.by_severity.low += 1;
+            c.problems.beside_ruled_out += 1;
+        }
+    }
+
     c.fixes.total = fixes.len();
     let to_do: BTreeSet<String> = problem_rows
         .iter()
@@ -173,7 +260,34 @@ pub(super) fn recount(entries: &Entries, report: &AuditReportJson) -> Option<Rep
         .map(|r| text(r, "rule_id"))
         .collect::<BTreeSet<_>>()
         .len();
-    Some(c)
+    Ok(c)
+}
+
+/// The identities of the design, restated here with the gate's own arithmetic (it does not call
+/// `ReportCounts::identity_failures`: a check that calls the code it checks proves nothing).
+/// The list of those that do not hold.
+fn identity_failures(c: &ReportCounts) -> Vec<&'static str> {
+    let (r, p) = (&c.rows, &c.problems);
+    let sev = &p.by_severity;
+    let mut out = Vec::new();
+    if r.total != r.dependency + r.ruled_out + r.problem + r.convention + r.not_checked {
+        out.push(
+            "source rows are not dependency + ruled out + problem + convention + not checked rows",
+        );
+    }
+    if p.total != p.needs_decision + p.for_action + p.accepted + p.information_only {
+        out.push("problems are not needs a decision + for action + accepted + information only");
+    }
+    if r.problem + p.beside_ruled_out != p.total + r.folded {
+        out.push("problem rows and places beside a ruled out row are not problems + rows at a shared place");
+    }
+    if p.for_action != p.first + p.next + p.later {
+        out.push("for action is not first + next + later");
+    }
+    if p.total != sev.critical + sev.high + sev.medium + sev.low {
+        out.push("problems are not critical + high + medium + low");
+    }
+    out
 }
 
 /// The object as `(path, value)` leaves, for comparing two objects field by field.
@@ -324,16 +438,36 @@ fn integers_in(sentence: &str) -> Vec<u64> {
     out
 }
 
-/// The data rows of a workbook sheet: the rows after the header with more than one cell filled.
-/// The note an empty sheet carries sits alone in the first column and is no row.
-fn sheet_rows(xlsx: &[u8], sheet: &str) -> Option<usize> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, sheet).ok()?;
-    Some(
-        grid.iter()
-            .skip(1)
-            .filter(|r| r.iter().filter(|c| !c.is_empty()).count() > 1)
-            .count(),
-    )
+/// The column that is filled in every data row of a sheet (and never holds the note an empty
+/// sheet carries in its first column), found by its header name.
+fn key_header(sheet: &str) -> Option<&'static str> {
+    match sheet {
+        v::ALL_PROBLEMS | v::NEEDS_A_DECISION => Some(v::H_SEVERITY),
+        v::FIX_PLAN => Some(v::H_FIX_ID),
+        v::DEPENDENCIES => Some(v::H_ADVISORY),
+        v::YOUR_CONVENTIONS => Some(v::H_HOW_CONSISTENTLY),
+        _ => None,
+    }
+}
+
+/// The data rows of a workbook sheet: the rows after the header with the sheet's key column
+/// filled. The header is found by name, as the older checks find theirs. `Err` when the sheet or
+/// its key column is not there.
+pub(super) fn sheet_rows(xlsx: &[u8], sheet: &str) -> Result<usize, String> {
+    let key = key_header(sheet).ok_or_else(|| format!("no key column is known for {sheet:?}"))?;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, sheet)?;
+    let header = grid
+        .first()
+        .ok_or_else(|| format!("the {sheet} sheet is empty"))?;
+    let col = header
+        .iter()
+        .position(|h| h == key)
+        .ok_or_else(|| format!("the {sheet} sheet has no {key:?} column"))?;
+    Ok(grid
+        .iter()
+        .skip(1)
+        .filter(|r| r.get(col).is_some_and(|c| !c.is_empty()))
+        .count())
 }
 
 /// The row count Start here states for `sheet` (its third column).
@@ -350,8 +484,9 @@ pub(super) fn counts_problems_with(
     report: &AuditReportJson,
     checks: CountsChecks,
 ) -> Vec<Problem> {
-    let Some(recounted) = recount(entries, report) else {
-        return Vec::new();
+    let recounted = match recount(entries, report) {
+        Ok(c) => c,
+        Err(refusals) => return refusals,
     };
     let mut problems = Vec::new();
 
@@ -389,9 +524,18 @@ pub(super) fn counts_problems_with(
         }
     }
 
-    // 2. The four identities, on the recount.
-    for failure in recounted.identity_failures() {
+    // 2. The identities, on the recount and on the object (the gate's own arithmetic).
+    for failure in identity_failures(&recounted) {
         problems.push(problem("json/all-findings.json", "identities", failure));
+    }
+    if let Some(object) = findings_json
+        .as_ref()
+        .and_then(|v| v.get("counts"))
+        .and_then(|c| serde_json::from_value::<ReportCounts>(c.clone()).ok())
+    {
+        for failure in identity_failures(&object) {
+            problems.push(problem("findings.json", "identities", failure));
+        }
     }
 
     // 3. Every surface equals the object (the recount is the reference).
@@ -459,37 +603,7 @@ pub(super) fn counts_problems_with(
             ));
         }
     }
-    if let Some(stem) = super::consistency::package_stem(entries) {
-        let xlsx_name = format!("{stem}-findings.xlsx");
-        if let Some(xlsx) = entries.get(&xlsx_name) {
-            let start = super::archive::xlsx_sheet_grid(xlsx, v::START_HERE).unwrap_or_default();
-            for (sheet, w) in [
-                (v::ALL_PROBLEMS, want.problems.total),
-                (v::NEEDS_A_DECISION, want.problems.needs_decision),
-                (v::FIX_PLAN, want.fixes.to_do),
-                (v::DEPENDENCIES, want.rows.dependency),
-                (v::YOUR_CONVENTIONS, want.rows.convention),
-            ] {
-                if let Some(rows) = sheet_rows(xlsx, sheet) {
-                    if rows != w {
-                        problems.push(problem(
-                            &xlsx_name,
-                            &format!("sheet \"{sheet}\" rows"),
-                            format!("the sheet lists {rows} rows and the counts give {w}"),
-                        ));
-                    }
-                }
-                match start_here_count(&start, sheet) {
-                    Some(said) if said != w => problems.push(problem(
-                        &xlsx_name,
-                        &format!("sheet \"Start here\" row count, sheet {sheet}"),
-                        format!("Start here states {said} and the counts give {w}"),
-                    )),
-                    _ => {}
-                }
-            }
-        }
-    }
+    problems.extend(workbook_problems(entries, want));
     if let Some(csv) = entries.get("csv/tickets.csv") {
         let tickets = csv::Reader::from_reader(csv.as_slice()).records().count();
         if tickets != want.fixes.to_do {
@@ -502,6 +616,12 @@ pub(super) fn counts_problems_with(
                 ),
             ));
         }
+    } else {
+        problems.push(problem(
+            "csv/tickets.csv",
+            "rows",
+            "the tickets file is missing, so its rows cannot be counted",
+        ));
     }
 
     // 4. Count sentences equal the ones rebuilt from the recount.
@@ -520,15 +640,13 @@ pub(super) fn counts_problems_with(
         }
     }
     let next_steps = &report.methodology.next_steps;
-    if next_steps.contains("a reviewer's decision") {
-        let expected = expected_decision_sentence(want);
-        if !next_steps.contains(&expected) {
-            problems.push(problem(
-                "PDF data",
-                "methodology.next_steps",
-                format!("the next steps do not state {expected:?}; they read {next_steps:?}"),
-            ));
-        }
+    let expected = expected_decision_sentence(want);
+    if !next_steps.contains(&expected) {
+        problems.push(problem(
+            "PDF data",
+            "methodology.next_steps",
+            format!("the next steps do not state {expected:?}; they read {next_steps:?}"),
+        ));
     }
 
     // 5. No stray number in an override.
@@ -552,19 +670,85 @@ pub(super) fn counts_problems_with(
     problems
 }
 
+/// The workbook part of check 3: the rows of each sheet and the row count Start here states for
+/// it equal the counts. Fail closed: a missing stem, workbook, sheet, key column or Start here row
+/// is a problem, never a skip.
+fn workbook_problems(entries: &Entries, want: &ReportCounts) -> Vec<Problem> {
+    let Some(stem) = super::consistency::package_stem(entries) else {
+        return vec![problem(
+            "package",
+            "workbook",
+            "the package does not hold exactly one PDF, so its workbook cannot be found to count its rows",
+        )];
+    };
+    let xlsx_name = format!("{stem}-findings.xlsx");
+    let Some(xlsx) = entries.get(&xlsx_name) else {
+        return vec![problem(
+            &xlsx_name,
+            "workbook",
+            "the workbook is missing, so its rows cannot be counted",
+        )];
+    };
+    let start = match super::archive::xlsx_sheet_grid(xlsx, v::START_HERE) {
+        Ok(grid) => grid,
+        Err(e) => {
+            return vec![problem(
+                &xlsx_name,
+                "sheet \"Start here\"",
+                format!("the Start here sheet cannot be read: {e}"),
+            )]
+        }
+    };
+    let mut problems = Vec::new();
+    for (sheet, w) in [
+        (v::ALL_PROBLEMS, want.problems.total),
+        (v::NEEDS_A_DECISION, want.problems.needs_decision),
+        (v::FIX_PLAN, want.fixes.to_do),
+        (v::DEPENDENCIES, want.rows.dependency),
+        (v::YOUR_CONVENTIONS, want.rows.convention),
+    ] {
+        match sheet_rows(xlsx, sheet) {
+            Ok(rows) if rows != w => problems.push(problem(
+                &xlsx_name,
+                &format!("sheet \"{sheet}\" rows"),
+                format!("the sheet lists {rows} rows and the counts give {w}"),
+            )),
+            Ok(_) => {}
+            Err(e) => problems.push(problem(
+                &xlsx_name,
+                &format!("sheet \"{sheet}\" rows"),
+                format!("the rows of the sheet cannot be counted: {e}"),
+            )),
+        }
+        match start_here_count(&start, sheet) {
+            Some(said) if said != w => problems.push(problem(
+                &xlsx_name,
+                &format!("sheet \"Start here\" row count, sheet {sheet}"),
+                format!("Start here states {said} and the counts give {w}"),
+            )),
+            Some(_) => {}
+            None => problems.push(problem(
+                &xlsx_name,
+                &format!("sheet \"Start here\" row count, sheet {sheet}"),
+                format!("Start here has no row count for the {sheet} sheet"),
+            )),
+        }
+    }
+    problems
+}
+
 /// Check 7: in every place with more than one problem row, all rows but the head carry
 /// `carried_by` naming the head's `site_id`.
 fn folded_rows_problems(entries: &Entries) -> Vec<Problem> {
-    let Some(live) = array_of(entries, "json/all-findings.json") else {
+    let Ok(live) = array_of(entries, "json/all-findings.json") else {
+        // The recount has already refused a package it cannot read.
         return Vec::new();
     };
-    let mut at: BTreeMap<(String, String, String), Vec<&Value>> = BTreeMap::new();
+    let mut at: BTreeMap<(String, String, String, String), Vec<&Value>> = BTreeMap::new();
     for r in live.iter().filter(|r| {
         crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&text(r, "kind").as_str())
     }) {
-        at.entry((text(r, "repo"), text(r, "path"), text(r, "line")))
-            .or_default()
-            .push(r);
+        at.entry(place_key_of(r)).or_default().push(r);
     }
     let mut out = Vec::new();
     for (place, members) in at.iter().filter(|(_, m)| m.len() > 1) {

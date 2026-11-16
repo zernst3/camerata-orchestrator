@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::consistency::counts_problems;
 use super::counts_check::{counts_problems_with, expected_narrative, CountsChecks};
-use super::tests::{client_options, scan_report};
+use super::tests::{client_options, drop_sheet_rows_with_text, rewrite_xlsx_part, scan_report};
 use super::*;
 use crate::onboard::Finding;
 use crate::report_export::{build_report_json, render_data_json};
@@ -20,16 +20,24 @@ use crate::report_export::{build_report_json, render_data_json};
 const STEM: &str = "acme-inspection";
 
 fn package_for(report: crate::onboard::ScanReport) -> ProductPackage {
+    package_with_dispositions(report, &HashMap::new())
+}
+
+/// A package whose reviewer dispositions are `dispositions` (keyed by finding key).
+fn package_with_dispositions(
+    report: crate::onboard::ScanReport,
+    dispositions: &HashMap<String, crate::report_export::DispositionWire>,
+) -> ProductPackage {
     let sealed = report.seal();
     let options = client_options();
     let json = build_report_json(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, dispositions),
         None,
         &options,
     );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, dispositions),
         None,
         &options,
         STEM,
@@ -372,5 +380,387 @@ fn the_counts_check_against_a_package_built_by_todays_code_records_the_to_do_lis
     assert!(
         !problems.iter().any(|p| p.location.starts_with("counts.")),
         "{list}"
+    );
+}
+
+// ── Round 1 fixes ─────────────────────────────────────────────────────────────────────────
+
+fn xlsx_name() -> String {
+    format!("{STEM}-findings.xlsx")
+}
+
+/// The (file, location) of every problem.
+fn located(problems: &[super::report::Problem]) -> std::collections::BTreeSet<(String, String)> {
+    problems
+        .iter()
+        .map(|p| (p.file.clone(), p.location.clone()))
+        .collect()
+}
+
+/// The mixed report's package as the zip holds it (the counts check is not on the release path,
+/// so this is not run through `release`), with the PDF data it was built from.
+fn mixed_entries() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    let sealed = mixed_report().seal();
+    let options = client_options();
+    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new());
+    let json = build_report_json(&reviewed, None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &reviewed,
+        None,
+        &options,
+        STEM,
+        (json, data, b"%PDF-1.7 stand-in for the gate tests".to_vec()),
+    )
+    .expect("the package assembles");
+    let report_json = package.report_json.clone();
+    let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
+    (read_zip_entries(&bytes).unwrap(), report_json)
+}
+
+/// The problems a tampered package has that the untouched one does not.
+fn new_problems(
+    entries: &BTreeMap<String, Vec<u8>>,
+    report: &AuditReportJson,
+    baseline: &std::collections::BTreeSet<(String, String)>,
+) -> std::collections::BTreeSet<(String, String)> {
+    located(&counts_problems(entries, report))
+        .difference(baseline)
+        .cloned()
+        .collect()
+}
+
+fn has(set: &std::collections::BTreeSet<(String, String)>, file: &str, location: &str) -> bool {
+    set.iter().any(|(f, l)| f == file && l == location)
+}
+
+// Defect 1: an open place carried by a ruled-out row.
+
+fn ruled_out_host_carrying_another_rules_place() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    let mut report = scan_report();
+    report.findings[0].also_matches = vec!["SYN-B-1".to_string()];
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        crate::report_export::finding_key(&sealed.findings[0]),
+        crate::report_export::DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "the value is a constant".to_string(),
+            ..Default::default()
+        },
+    );
+    let package = package_with_dispositions(report, &dispositions);
+    let report_json = package.report_json.clone();
+    let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
+    (read_zip_entries(&bytes).unwrap(), report_json)
+}
+
+#[test]
+fn the_gate_recount_counts_a_place_a_ruled_out_row_carries_as_a_problem_to_decide() {
+    let (entries, report) = ruled_out_host_carrying_another_rules_place();
+    // Anti-vacuity: the object counts the place, and findings.json lists it.
+    assert_eq!(report.counts.problems.total, 1);
+    assert_eq!(report.counts.problems.needs_decision, 1);
+    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    assert_eq!(findings["findings"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        findings["open_beside_ruled_out"].as_array().unwrap().len(),
+        1
+    );
+    let at_counts = |problems: &[super::report::Problem]| {
+        problems
+            .iter()
+            .filter(|p| p.location.starts_with("counts."))
+            .map(|p| format!("{} {}", p.file, p.location))
+            .collect::<Vec<_>>()
+    };
+    // The recount agrees with the object (the surfaces that do not show the place yet are the
+    // other locations, work order C's).
+    let honest = counts_problems(&entries, &report);
+    assert!(at_counts(&honest).is_empty(), "{}", messages(&honest));
+    // Remove the key: the recount sees no problem and the object says one.
+    let mut tampered = entries.clone();
+    edit_json(&mut tampered, "findings.json", |v| {
+        v.as_object_mut().unwrap().remove("open_beside_ruled_out");
+    });
+    let problems = counts_problems(&tampered, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "findings.json" && p.location == "counts.problems.total"),
+        "{}",
+        messages(&problems)
+    );
+}
+
+// Defect 2: the gate cannot recount.
+
+#[test]
+fn the_gate_refuses_a_findings_json_with_no_fixes_array() {
+    let (mut entries, report) = consistent();
+    edit_json(&mut entries, "findings.json", |v| {
+        v.as_object_mut().unwrap().remove("fixes");
+    });
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "findings.json" && p.message.contains("fixes array")),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_dataset_that_is_not_a_json_array() {
+    let (mut entries, report) = consistent();
+    entries.insert("json/dependencies.json".to_string(), b"{}".to_vec());
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "json/dependencies.json" && p.message.contains("not a JSON array")),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_missing_dataset() {
+    let (mut entries, report) = consistent();
+    entries.remove("json/false-positives.json");
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "json/false-positives.json" && p.message.contains("missing")),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_workbook_with_a_sheet_renamed() {
+    let (mut entries, report) = consistent();
+    let name = xlsx_name();
+    entries.insert(
+        name.clone(),
+        rewrite_xlsx_part(&entries[&name], "xl/workbook.xml", |xml| {
+            assert!(xml.contains("name=\"Fix plan\""), "anti-vacuity");
+            xml.replace("name=\"Fix plan\"", "name=\"Fix planned\"")
+        }),
+    );
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == name && p.location == "sheet \"Fix plan\" rows"),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_start_here_sheet_with_a_sheet_row_removed() {
+    let (mut entries, report) = consistent();
+    let name = xlsx_name();
+    entries.insert(
+        name.clone(),
+        drop_sheet_rows_with_text(&entries[&name], "Fix plan"),
+    );
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems.iter().any(|p| p.file == name
+            && p.location == "sheet \"Start here\" row count, sheet Fix plan"
+            && p.message.contains("no row count")),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_package_with_no_workbook_or_no_ticket_file() {
+    let (mut entries, report) = consistent();
+    entries.remove(&xlsx_name());
+    entries.remove("csv/tickets.csv");
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems.iter().any(|p| p.file == xlsx_name()),
+        "{}",
+        messages(&problems)
+    );
+    assert!(
+        problems.iter().any(|p| p.file == "csv/tickets.csv"),
+        "{}",
+        messages(&problems)
+    );
+}
+
+// Defect 3: one tamper test for each surface check 3 compares.
+
+/// Set the number in the third column of the Start here row for `sheet`.
+fn set_start_here_count(xlsx: &[u8], sheet: &str, to: usize) -> Vec<u8> {
+    let grid = super::archive::xlsx_sheet_grid(xlsx, "Start here").unwrap();
+    let row = grid
+        .iter()
+        .position(|r| r.first().is_some_and(|c| c == sheet))
+        .unwrap_or_else(|| panic!("Start here has no row for {sheet}"))
+        + 1;
+    let cell = format!("r=\"C{row}\"");
+    rewrite_xlsx_part(xlsx, "xl/worksheets/sheet1.xml", |xml| {
+        let at = xml.find(&cell).expect("the count cell");
+        let v0 = xml[at..].find("<v>").expect("a value") + at + 3;
+        let v1 = xml[v0..].find("</v>").expect("a closed value") + v0;
+        format!("{}{to}{}", &xml[..v0], &xml[v1..])
+    })
+}
+
+#[test]
+fn the_gate_refuses_a_row_removed_from_all_problems() {
+    let (entries, report) = mixed_entries();
+    let baseline = located(&counts_problems(&entries, &report));
+    let mut tampered = entries.clone();
+    let name = xlsx_name();
+    tampered.insert(
+        name.clone(),
+        drop_sheet_rows_with_text(&tampered[&name], "src/b.rs"),
+    );
+    let new = new_problems(&tampered, &report, &baseline);
+    assert!(has(&new, &name, "sheet \"All problems\" rows"), "{new:?}");
+}
+
+#[test]
+fn the_gate_refuses_a_row_removed_from_needs_a_decision() {
+    let (entries, report) = mixed_entries();
+    let baseline = located(&counts_problems(&entries, &report));
+    let mut tampered = entries.clone();
+    let name = xlsx_name();
+    tampered.insert(
+        name.clone(),
+        drop_sheet_rows_with_text(&tampered[&name], "src/a.rs"),
+    );
+    let new = new_problems(&tampered, &report, &baseline);
+    assert!(
+        has(&new, &name, "sheet \"Needs a decision\" rows"),
+        "{new:?}"
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_start_here_count_that_was_changed() {
+    let (entries, report) = mixed_entries();
+    let baseline = located(&counts_problems(&entries, &report));
+    let mut tampered = entries.clone();
+    let name = xlsx_name();
+    tampered.insert(
+        name.clone(),
+        set_start_here_count(&tampered[&name], "Needs a decision", 99),
+    );
+    let new = new_problems(&tampered, &report, &baseline);
+    assert!(
+        has(
+            &new,
+            &name,
+            "sheet \"Start here\" row count, sheet Needs a decision"
+        ),
+        "{new:?}"
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_grid_cell_that_was_emptied() {
+    let (entries, mut report) = mixed_entries();
+    let baseline = located(&counts_problems(&entries, &report));
+    let cell = report
+        .priority_grid
+        .rows
+        .iter_mut()
+        .flat_map(|r| r.cells.iter_mut())
+        .find(|c| !c.findings.is_empty())
+        .expect("anti-vacuity: the grid holds a problem");
+    cell.findings.clear();
+    let new = new_problems(&entries, &report, &baseline);
+    assert!(has(&new, "PDF data", "priority_grid"), "{new:?}");
+}
+
+#[test]
+fn the_sheet_row_count_finds_its_header_by_name_on_every_sheet() {
+    let (entries, report) = mixed_entries();
+    let xlsx = &entries[&xlsx_name()];
+    let want = &report.counts;
+    for (sheet, rows) in [
+        ("All problems", want.problems.total),
+        ("Needs a decision", want.problems.needs_decision),
+        ("Fix plan", want.fixes.to_do),
+        ("Dependencies", want.rows.dependency),
+        ("Your conventions", want.rows.convention),
+    ] {
+        assert_eq!(
+            super::counts_check::sheet_rows(xlsx, sheet),
+            Ok(rows),
+            "{sheet}"
+        );
+    }
+    assert!(
+        want.problems.needs_decision > 0 && want.fixes.to_do > 0,
+        "anti-vacuity"
+    );
+}
+
+// The identities are the gate's own arithmetic, on the object too.
+
+#[test]
+fn the_gate_refuses_an_object_that_breaks_an_identity() {
+    let (mut entries, report) = consistent();
+    edit_json(&mut entries, "findings.json", |v| {
+        v["counts"]["problems"]["accepted"] = json!(1);
+    });
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "findings.json" && p.location == "identities"),
+        "{}",
+        messages(&problems)
+    );
+}
+
+// The next steps must state the sentence.
+
+#[test]
+fn the_gate_refuses_next_steps_that_do_not_state_the_decision_sentence() {
+    let (entries, mut report) = consistent();
+    report.methodology.next_steps = "Fix the first group, then the next.".to_string();
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.location == "methodology.next_steps"),
+        "{}",
+        messages(&problems)
+    );
+}
+
+// Whole-file places per rule.
+
+#[test]
+fn the_gate_recount_counts_whole_file_problems_of_three_rules_as_three_places() {
+    let mut report = scan_report();
+    let mut rows = Vec::new();
+    for rule in ["SYN-A-1", "SYN-B-1", "SYN-C-1"] {
+        let mut f = report.findings[0].clone();
+        f.path = "src/whole.rs".to_string();
+        f.line = 0;
+        f.rule_id = rule.to_string();
+        rows.push(f);
+    }
+    report.findings = rows;
+    let (entries, report_json) = entries_of(package_for(report));
+    assert_eq!(report_json.counts.problems.total, 3, "the object");
+    let honest = counts_problems(&entries, &report_json);
+    assert!(
+        !honest.iter().any(|p| p.location.starts_with("counts.")),
+        "the recount agrees: {}",
+        messages(&honest)
     );
 }

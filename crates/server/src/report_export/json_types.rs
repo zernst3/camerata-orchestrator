@@ -477,6 +477,9 @@ impl crate::review_tree::PlaceRow for FindingRefJson {
     fn place_line(&self) -> usize {
         self.line
     }
+    fn place_rule_id(&self) -> &str {
+        &self.rule_id
+    }
     fn place_severity(&self) -> &str {
         &self.severity
     }

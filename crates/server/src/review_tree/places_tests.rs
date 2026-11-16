@@ -235,7 +235,9 @@ fn the_place_block_is_integral() {
     assert_eq!(block.stage, PLACE_MERGE_STAGE);
     assert_eq!(
         (block.rows_in, block.places_out, block.carried),
-        (6, 3, 3),
+        // The whole-file rows of two rules in one file are two places (ruling 2026-11-15), so
+        // four places, and only the three rows at src/a.ts:3 are carried (two of them).
+        (6, 4, 2),
         "{block:?}"
     );
     assert!(block.is_integral());

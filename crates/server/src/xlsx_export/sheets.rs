@@ -53,13 +53,17 @@ pub(super) struct PlaceRows<'a> {
 /// (repo, file and line), listing every row there. A committed secret that six rules flag at one
 /// line is one place, one row, six rules. Only All source rows repeats a problem.
 pub(super) fn place_rows(rows: &[FindingRow]) -> Vec<PlaceRows<'_>> {
-    let mut order: Vec<(String, String, usize)> = Vec::new();
-    let mut at: HashMap<(String, String, usize), Vec<&FindingRow>> = HashMap::new();
+    type Key = (String, String, usize, String);
+    let mut order: Vec<Key> = Vec::new();
+    let mut at: HashMap<Key, Vec<&FindingRow>> = HashMap::new();
     for r in rows
         .iter()
         .filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
     {
-        let key = (r.repo.clone(), r.path.clone(), r.line);
+        // The one place key: a whole-file problem (line 0) is a place of its own rule.
+        let (repo, path, line, rule) =
+            crate::review_tree::place_key(&r.repo, &r.path, r.line, &r.rule_id);
+        let key = (repo.to_string(), path.to_string(), line, rule.to_string());
         at.entry(key.clone())
             .or_insert_with(|| {
                 order.push(key.clone());
