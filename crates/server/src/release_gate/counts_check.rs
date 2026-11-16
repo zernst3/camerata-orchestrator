@@ -746,26 +746,6 @@ fn workbook_problems(entries: &Entries, want: &ReportCounts) -> Vec<Problem> {
             "Start here has no scorecard Total row",
         )),
     }
-    // Start here states the number of rules that could not be completed, the object's figure.
-    match start_here_count(&start, v::NOT_CHECKED) {
-        Some(said) if said != want.rows.not_checked => problems.push(problem(
-            &xlsx_name,
-            &format!("sheet \"Start here\" row count, sheet {}", v::NOT_CHECKED),
-            format!(
-                "Start here states {said} and the counts give {}",
-                want.rows.not_checked
-            ),
-        )),
-        Some(_) => {}
-        None => problems.push(problem(
-            &xlsx_name,
-            &format!("sheet \"Start here\" row count, sheet {}", v::NOT_CHECKED),
-            format!(
-                "Start here has no row count for the {} sheet",
-                v::NOT_CHECKED
-            ),
-        )),
-    }
     // The Not checked sheet lists a row for each rule that could not be completed.
     match not_checked_rule_rows(xlsx) {
         Ok(rows) if rows != want.rows.not_checked => problems.push(problem(

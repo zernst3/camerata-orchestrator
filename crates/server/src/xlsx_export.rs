@@ -922,12 +922,8 @@ fn site_list_cell_within(items: &[String], max_chars: usize) -> String {
     if total <= max_chars + 1 {
         return items.join("\n");
     }
-    let pointer = |left_out: usize| {
-        crate::report_export::counts_prose::more_line(
-            left_out,
-            &format!("more places, see {SOURCE_ROWS_SHEET} sheet"),
-        )
-    };
+    let pointer =
+        |left_out: usize| format!("and {left_out} more places, see {SOURCE_ROWS_SHEET} sheet");
     // The pointer is sized for the worst case (every site left out) so it always fits.
     let reserved = pointer(items.len()).chars().count() + 1;
     let mut shown: Vec<&str> = Vec::new();
@@ -2224,7 +2220,6 @@ pub fn build_workbook_with_counts(
             n if n == v::FIX_PLAN => report_counts.fixes.to_do,
             n if n == v::DEPENDENCIES => report_counts.rows.dependency,
             n if n == v::YOUR_CONVENTIONS => report_counts.rows.convention,
-            n if n == v::NOT_CHECKED => report_counts.rows.not_checked,
             _ => t.rows.len(),
         };
         counts.push((t.name.clone(), said));
@@ -2265,7 +2260,7 @@ pub fn build_workbook_with_counts(
             totals: report_counts,
             coverage_summary: coverage_summary_line(
                 &coverage_rows,
-                not_assessed_rows.len(),
+                report_counts.rows.not_checked,
                 multi_repo,
             ),
         },

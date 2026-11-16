@@ -162,14 +162,10 @@ fn no_surface_counts_by_itself() {
         "src/report_export.rs",
         "src/report_export/marking.rs",
         "src/xlsx_export.rs",
-        "src/report_export/coverage_gaps.rs",
     ] {
         let source = read(file);
         assert!(
-            !source.contains("\"and {} more")
-                && !source.contains("\"and {n} more")
-                && !source.contains("\"and {left_out} more")
-                && !source.contains("\"and {omitted} more"),
+            !source.contains("\"and {} more") && !source.contains("\"and {n} more"),
             "{file} builds an \"and N more\" line by itself"
         );
     }

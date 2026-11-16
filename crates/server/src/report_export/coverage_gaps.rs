@@ -142,13 +142,10 @@ pub(super) fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<S
 /// The "and K more" sentence for `omitted` skipped files that are named nowhere.
 pub fn skipped_beyond_cap_sentence(omitted: usize) -> Option<String> {
     (omitted > 0).then(|| {
-        super::counts_prose::more_line(
-            omitted,
-            &format!(
-                "more skipped {}, not listed (each list names the first {} per reason)",
-                if omitted == 1 { "file" } else { "files" },
-                SKIPPED_FILES_LISTED_PER_REASON
-            ),
+        format!(
+            "and {omitted} more skipped {}, not listed (each list names the first {} per reason)",
+            if omitted == 1 { "file" } else { "files" },
+            SKIPPED_FILES_LISTED_PER_REASON
         )
     })
 }
