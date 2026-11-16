@@ -417,3 +417,59 @@ async fn a_call_that_fails_without_a_timeout_records_no_spend() {
         .expect_err("the call failed");
     assert!(driver.spend_meter().turns().is_empty());
 }
+
+/// A local listener that accepts connections and, after optionally writing `reply`, never
+/// answers further. Returns its address; the accepted sockets are held open until the test ends.
+async fn stalled_listener(reply: &'static [u8]) -> std::net::SocketAddr {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((mut sock, _)) = listener.accept().await {
+            if !reply.is_empty() {
+                // Read the request first: a reply written before it is an unexpected message.
+                let mut buf = [0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+                let _ = sock.write_all(reply).await;
+                let _ = sock.flush().await;
+            }
+            held.push(sock);
+        }
+    });
+    addr
+}
+
+fn short_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(400))
+        .build()
+        .unwrap()
+}
+
+/// The REAL error of a stalled provider, wrapped exactly as the posts wrap it, reads as a
+/// timeout (reqwest's `Display` omits the source, so only the typed error in the chain carries it).
+#[tokio::test]
+async fn a_real_request_timeout_is_recognised_through_the_post_wrapping() {
+    let addr = stalled_listener(b"").await;
+    let builder = short_client().post(format!("http://{addr}/v1/messages"));
+    let err = send_and_read(builder, "Anthropic API")
+        .await
+        .expect_err("the provider never answers");
+    assert!(is_timeout_error(&err), "{err:#}");
+}
+
+/// Headers arrive, then the body stalls: the read-phase timeout must also read as a timeout,
+/// not as an empty body that fails to parse.
+#[tokio::test]
+async fn a_real_body_phase_timeout_is_recognised() {
+    let addr = stalled_listener(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{\"a\":",
+    )
+    .await;
+    let builder = short_client().post(format!("http://{addr}/v1/messages"));
+    let err = send_and_read(builder, "OpenRouter API")
+        .await
+        .expect_err("the body never completes");
+    assert!(is_timeout_error(&err), "{err:#}");
+}

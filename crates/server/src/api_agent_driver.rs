@@ -1050,6 +1050,26 @@ fn request_ceiling_usd(
     crate::llm::usage_cost_usd(model, &usage, crate::llm::PriceBasis::realtime())
 }
 
+/// Sends one provider request and reads the whole body. Both phases keep the typed `reqwest`
+/// error in the chain (the `Display` of a `reqwest::Error` omits its source, so flattening it to
+/// text loses the "timed out"), which is what `is_timeout_error` walks; a body that fails to read
+/// is an error, never an empty string.
+async fn send_and_read(
+    builder: reqwest::RequestBuilder,
+    what: &str,
+) -> anyhow::Result<(reqwest::StatusCode, String)> {
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context(format!("{what} request failed")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context(format!("{what} response body failed")))?;
+    Ok((status, text))
+}
+
 /// True when the call failed by timing out: a typed `reqwest` timeout anywhere in the chain, or
 /// the text of one (the OpenRouter path flattens the error to a string).
 fn is_timeout_error(e: &anyhow::Error) -> bool {
@@ -1390,14 +1410,7 @@ async fn call_openrouter_with_tools(
         builder = builder.header("X-OpenRouter-Cache-Clear", "true");
     }
 
-    let resp = builder
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("OpenRouter API request failed: {e}"))?;
-
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let (status, text) = send_and_read(builder.json(&body), "OpenRouter API").await?;
     if !status.is_success() {
         anyhow::bail!("OpenRouter API HTTP {status}: {text}");
     }
@@ -1616,14 +1629,7 @@ async fn call_anthropic_with_tools(
         builder = builder.header("anthropic-beta", "prompt-caching-2024-07-31");
     }
 
-    let resp = builder
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("Anthropic API request failed: {e}"))?;
-
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let (status, text) = send_and_read(builder.json(&body), "Anthropic API").await?;
     if !status.is_success() {
         anyhow::bail!("Anthropic API HTTP {status}: {text}");
     }
