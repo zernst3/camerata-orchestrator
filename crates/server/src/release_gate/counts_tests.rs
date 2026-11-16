@@ -28,16 +28,29 @@ fn package_with_dispositions(
     report: crate::onboard::ScanReport,
     dispositions: &HashMap<String, crate::report_export::DispositionWire>,
 ) -> ProductPackage {
+    package_with_dispositions_via(report, dispositions, true)
+}
+
+/// As [`package_with_dispositions`]; `unfold = false` is the backstop path, a reviewed report the
+/// overlay did not unfold (the carried places stay on the ruled-out row).
+fn package_with_dispositions_via(
+    report: crate::onboard::ScanReport,
+    dispositions: &HashMap<String, crate::report_export::DispositionWire>,
+    unfold: bool,
+) -> ProductPackage {
     let sealed = report.seal();
     let options = client_options();
-    let json = build_report_json(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, dispositions),
-        None,
-        &options,
-    );
+    let reviewed = || {
+        if unfold {
+            crate::report_export::ReviewedReport::unreviewed(&sealed, dispositions)
+        } else {
+            crate::report_export::ReviewedReport::unreviewed_without_unfold(&sealed, dispositions)
+        }
+    };
+    let json = build_report_json(&reviewed(), None, &options);
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, dispositions),
+        &reviewed(),
         None,
         &options,
         STEM,
@@ -449,7 +462,7 @@ fn ruled_out_host_carrying_another_rules_place() -> (BTreeMap<String, Vec<u8>>, 
             ..Default::default()
         },
     );
-    let package = package_with_dispositions(report, &dispositions);
+    let package = package_with_dispositions_via(report, &dispositions, false);
     let report_json = package.report_json.clone();
     let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
     (read_zip_entries(&bytes).unwrap(), report_json)

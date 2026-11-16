@@ -1263,7 +1263,7 @@ pub(crate) fn counting_view(
         })
         .collect();
     CountingView {
-        open_beside_ruled_out: open_beside_ruled_out(&all_rows),
+        open_beside_ruled_out: open_beside_ruled_out(reviewed),
         rows,
         dependency_rows: dep_rows.len(),
         fix_ids_to_do,
@@ -2332,6 +2332,9 @@ pub struct OpenSiteJson {
     pub rule_id: String,
     pub path: String,
     pub line: usize,
+    /// The severity of the ruled-out row that carries the place (its host's), never lower: the
+    /// counts file the place under it (fail closed).
+    pub severity: String,
 }
 
 /// The places of other rules (or other services) that ruled-out rows still carry: every absorbed
@@ -2360,6 +2363,7 @@ fn open_beside_ruled_out(reviewed: &ReviewedReport) -> Vec<OpenSiteJson> {
                     rule_id: site.rule_id.clone(),
                     path: site.path.clone(),
                     line: site.line,
+                    severity: row.severity.clone(),
                 });
             }
         }
@@ -2370,6 +2374,7 @@ fn open_beside_ruled_out(reviewed: &ReviewedReport) -> Vec<OpenSiteJson> {
                     rule_id: rule.clone(),
                     path: row.path.clone(),
                     line: row.line,
+                    severity: row.severity.clone(),
                 });
             }
         }

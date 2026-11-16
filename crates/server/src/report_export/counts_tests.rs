@@ -158,8 +158,13 @@ fn the_counts_ride_in_the_pdf_data_and_in_findings_json_whole() {
 
 // ── A place a ruled-out row carries ───────────────────────────────────────────────────────
 
-/// The counts of `findings` with the row of `host_rule` at src/a.rs ruled out by a reviewer.
-fn counts_with_host_ruled_out(findings: Vec<crate::onboard::Finding>) -> ReportCounts {
+/// The counts of `findings` with the row of `host_rule` at src/a.rs ruled out by a reviewer;
+/// `unfold` picks the normal path (the overlay splits each carried place into its own problem)
+/// or the backstop path (a reviewed report the overlay did not unfold).
+fn counts_with_host_ruled_out_via(
+    findings: Vec<crate::onboard::Finding>,
+    unfold: bool,
+) -> ReportCounts {
     let sealed = report_with(findings, vec!["SYN-A-1", "SYN-B-1"]).seal();
     let host = sealed
         .findings
@@ -175,11 +180,17 @@ fn counts_with_host_ruled_out(findings: Vec<crate::onboard::Finding>) -> ReportC
             ..Default::default()
         },
     );
-    report_counts(
-        &ReviewedReport::unreviewed(&sealed, &dispositions),
-        None,
-        &empty_opts(),
-    )
+    let reviewed = if unfold {
+        ReviewedReport::unreviewed(&sealed, &dispositions)
+    } else {
+        ReviewedReport::unreviewed_without_unfold(&sealed, &dispositions)
+    };
+    report_counts(&reviewed, None, &empty_opts())
+}
+
+/// The backstop path: the carried place stays on the ruled-out row.
+fn counts_with_host_ruled_out(findings: Vec<crate::onboard::Finding>) -> ReportCounts {
+    counts_with_host_ruled_out_via(findings, false)
 }
 
 fn host_also_matching_b() -> crate::onboard::Finding {
@@ -197,6 +208,30 @@ fn an_open_problem_carried_by_a_ruled_out_row_is_a_problem_that_needs_a_decision
     assert_eq!(c.problems.needs_decision, 1);
     assert_eq!(c.problems.beside_ruled_out, 1);
     assert_eq!(c.problems.for_action, 0);
+    assert_eq!(c.identity_failures(), Vec::<&str>::new());
+}
+
+#[test]
+fn on_the_normal_path_a_carried_place_is_counted_once_as_its_own_split_out_problem() {
+    let c = counts_with_host_ruled_out_via(vec![host_also_matching_b()], true);
+    assert_eq!(c.rows.ruled_out, 1, "anti-vacuity: the host is ruled out");
+    assert_eq!(c.rows.problem, 1, "the place is a row of its own");
+    assert_eq!(c.problems.total, 1, "counted exactly once");
+    assert_eq!(c.problems.beside_ruled_out, 0);
+    assert_eq!(c.identity_failures(), Vec::<&str>::new());
+}
+
+#[test]
+fn a_carried_place_counts_at_the_severity_of_the_ruled_out_host_not_the_lowest() {
+    let mut host = finding("SYN-A-1", "src/a.rs", 5, "critical");
+    host.also_matches = vec!["SYN-B-1".to_string()];
+    let c = counts_with_host_ruled_out(vec![host]);
+    assert_eq!(
+        c.problems.beside_ruled_out, 1,
+        "anti-vacuity: a carried place"
+    );
+    assert_eq!(c.problems.by_severity.critical, 1);
+    assert_eq!(c.problems.by_severity.low, 0);
     assert_eq!(c.identity_failures(), Vec::<&str>::new());
 }
 

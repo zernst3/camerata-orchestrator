@@ -16,8 +16,8 @@
 //!
 //! A place of another rule that a ruled-out row carries and that no problem row already holds
 //! (`open_beside_ruled_out`) is a problem that needs a decision (fail closed): it has no row of
-//! its own, so `problems.beside_ruled_out` counts it, and it counts at the lowest severity, the
-//! rank an unknown severity has everywhere.
+//! its own, so `problems.beside_ruled_out` counts it, at the severity of the ruled-out row that
+//! carries it (the host's), never at the lowest.
 //!
 //! A place needs a decision when ANY row there is held (fail closed); "information only" is its
 //! own class, apart from needs a decision. A place whose rows are accepted and information only
@@ -238,7 +238,12 @@ pub(crate) fn counts_of(
         if !held_places.contains(&key) && beside.insert(key) {
             p.total += 1;
             p.needs_decision += 1;
-            p.by_severity.low += 1;
+            match site.severity.as_str() {
+                "critical" => p.by_severity.critical += 1,
+                "high" => p.by_severity.high += 1,
+                "medium" => p.by_severity.medium += 1,
+                _ => p.by_severity.low += 1,
+            }
             p.beside_ruled_out += 1;
         }
     }

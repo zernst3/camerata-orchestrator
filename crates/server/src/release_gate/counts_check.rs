@@ -219,8 +219,8 @@ pub(super) fn recount(
     }
 
     // Fail closed: each open place of another rule that a ruled-out row carries, and that no
-    // problem row already holds, is a problem that needs a decision (low: the rank of a
-    // severity nobody gave).
+    // problem row already holds, is a problem that needs a decision, at the severity of
+    // the ruled-out row that carries it.
     let mut beside: BTreeSet<(String, String, String, String)> = BTreeSet::new();
     for site in findings_json
         .get("open_beside_ruled_out")
@@ -232,7 +232,12 @@ pub(super) fn recount(
         if !at.contains_key(&key) && beside.insert(key) {
             c.problems.total += 1;
             c.problems.needs_decision += 1;
-            c.problems.by_severity.low += 1;
+            match text(site, "severity").as_str() {
+                "critical" => c.problems.by_severity.critical += 1,
+                "high" => c.problems.by_severity.high += 1,
+                "medium" => c.problems.by_severity.medium += 1,
+                _ => c.problems.by_severity.low += 1,
+            }
             c.problems.beside_ruled_out += 1;
         }
     }
