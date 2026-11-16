@@ -54,6 +54,13 @@ const OVERLOADED_SCHEDULE_SECS: [u64; 4] = [5, 20, 60, 120];
 /// recover inside a run; the failure is recorded and the end-of-run second try picks it up.
 pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 
+/// The most one call spends WAITING between attempts, summed over its retries (run to completion:
+/// a call ends in bounded time, so a run of calls against a down provider reaches the outage stop
+/// in about a minute instead of several). A schedule step that would pass it is not taken and the
+/// call fails with what it has. A wait the provider named with `retry-after` is exempt: the
+/// provider asked for it, and the stage runner holds that pacing under its own deadline.
+pub(crate) const CALL_RETRY_WAIT_BUDGET: Duration = Duration::from_secs(60);
+
 /// Waits between attempts. Production sleeps for real; a test injects a recorder.
 pub trait Sleeper: Send + Sync {
     fn sleep<'a>(&'a self, d: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -200,6 +207,7 @@ where
 {
     let mut trail: Vec<AttemptRecord> = Vec::new();
     let mut attempt: u32 = 0;
+    let mut waited = Duration::ZERO;
     loop {
         match attempt_fn(attempt).await {
             Step::Done(value) => return Ok((value, trail)),
@@ -219,6 +227,11 @@ where
                     return Err((last, trail));
                 }
                 let delay = effective_delay(reason, attempt, retry_after);
+                if retry_after.is_none() && waited + delay > CALL_RETRY_WAIT_BUDGET {
+                    trail.push(record);
+                    return Err((last, trail));
+                }
+                waited += delay;
                 record.wait_secs = Some(delay.as_secs());
                 eprintln!(
                     "[camerata-llm] {} attempt {} failed ({}), retrying in {delay:?}",
@@ -998,7 +1011,8 @@ mod tests {
             "m",
         )
         .await;
-        assert_eq!(sleeper.waits(), vec![5, 20, 60, 120]);
+        // The schedule is 5, 20, 60, 120; the call's wait budget (60 s in all) stops it after 25.
+        assert_eq!(sleeper.waits(), vec![5, 20]);
 
         let sleeper = RecordingSleeper::default();
         let sends = AtomicUsize::new(0);
