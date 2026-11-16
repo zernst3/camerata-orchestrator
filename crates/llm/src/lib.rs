@@ -24,6 +24,7 @@
 //! `camerata-app-core` and `camerata-server` in the dependency graph so any adapter
 //! (Axum today, others later) can pull in the provider stack without a cycle.
 
+pub mod claude_version;
 pub mod credentials;
 pub mod failure;
 pub mod llm;

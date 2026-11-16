@@ -1057,6 +1057,17 @@ pub async fn run_inspect_pipeline_with(
         if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
             return Err(InspectError::Failed(why));
         }
+        // The cli backend launches the local Claude Code, which refuses a model it predates.
+        // Check every model the run will call against its version now, not after a round of
+        // failed calls. A scripted model (tests) launches no program, so nothing to check.
+        if let Some(why) = cli_version_refusal(
+            matches!(backend_resolution, BackendResolution::Cli),
+            seams.llm.is_some(),
+            &camerata_api_types::claude_cli::claude_program(),
+            &models,
+        ) {
+            return Err(InspectError::Failed(why));
+        }
     }
 
     // ── Pre-flight: the estimate, printed BEFORE the first model call ──────────────────────
@@ -2019,6 +2030,20 @@ mod redaction_tests;
 
 #[cfg(test)]
 mod exit_code_tests;
+
+/// The refusal message when the run is on the cli backend with a real Claude Code that is too
+/// old (or unreadable) for a model the run will call; `None` when nothing needs refusing.
+fn cli_version_refusal(
+    on_cli: bool,
+    scripted: bool,
+    program: &std::ffi::OsStr,
+    models: &[(String, String)],
+) -> Option<String> {
+    if !on_cli || scripted {
+        return None;
+    }
+    camerata_server::claude_version::check_models(program, models).err()
+}
 
 #[cfg(test)]
 mod tests {
@@ -3320,5 +3345,22 @@ mod tests {
         assert!(verbose.contains("PER-RULE DETAIL"), "{verbose}");
         assert!(verbose.contains("SEC-NO-HARDCODED-SECRETS-1"), "{verbose}");
         assert!(verbose.contains("files_evaluated=10"), "{verbose}");
+    }
+    #[test]
+    fn the_cli_version_check_runs_only_for_a_real_cli_run() {
+        let missing = std::ffi::OsString::from("/nonexistent/claude");
+        let models = vec![(
+            "the group reviewer".to_string(),
+            "claude-fable-5-2".to_string(),
+        )];
+        // A real cli run with an unreadable Claude Code is refused (fail closed).
+        let why = cli_version_refusal(true, false, &missing, &models).expect("refused");
+        assert!(why.contains("could not be read"), "{why}");
+        // The api backend and a scripted model launch no program: nothing to check.
+        assert!(cli_version_refusal(false, false, &missing, &models).is_none());
+        assert!(cli_version_refusal(true, true, &missing, &models).is_none());
+        // A run with no model that needs a minimum is not refused.
+        let other = vec![("the scan".to_string(), "claude-opus-5-5".to_string())];
+        assert!(cli_version_refusal(true, false, &missing, &other).is_none());
     }
 }

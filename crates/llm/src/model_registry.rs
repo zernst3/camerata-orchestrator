@@ -38,6 +38,22 @@ pub use camerata_api_types::model_registry::{
 
 // ── Static Claude catalog ────────────────────────────────────────────────────
 
+/// The oldest Claude Code that accepts a model on the cli backend, as (major, minor, patch).
+/// Claude Code refuses a model it predates ("does not support this model; version X or newer is
+/// required"), so the cli pre-flight ([`crate::claude_version`]) checks this table before any
+/// model call. A model not listed has no known minimum. Add a line when a model ships that needs
+/// a newer Claude Code.
+pub const CLAUDE_CODE_MIN_VERSIONS: &[(&str, (u32, u32, u32))] =
+    &[("claude-fable-5-2", (2, 1, 290))];
+
+/// The minimum Claude Code version for `model` on the cli backend, when one is known.
+pub fn min_claude_code_version(model: &str) -> Option<(u32, u32, u32)> {
+    CLAUDE_CODE_MIN_VERSIONS
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, v)| *v)
+}
+
 /// The curated static list of Claude (subscription-CLI) models.
 ///
 /// No list-models API exists for the Claude Code CLI, so this is data. Trivial to update

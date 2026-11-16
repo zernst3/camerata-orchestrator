@@ -78,6 +78,8 @@ pub use camerata_app_core::lifecycle;
 pub mod cost_cap;
 pub mod failure_report;
 pub mod rewrite_advisory;
+/// The cli backend's Claude Code version pre-flight, for callers of the server.
+pub use camerata_llm::claude_version;
 /// The failure classes and typed transport failure, re-exported for callers of the server.
 pub use camerata_llm::failure;
 pub mod dev_implement_run;
