@@ -773,6 +773,7 @@ pub async fn find_repo(
         .count();
     rows.extend(unresolved);
     rows.extend(conv.departures);
+    rows.extend(conv.undecided);
     let mut seen = HashSet::new();
     proposed.retain(|p| seen.insert(p.id.clone()));
 

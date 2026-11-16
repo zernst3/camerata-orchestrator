@@ -22,6 +22,8 @@ pub(super) struct ConventionResult {
     pub recommendations: Vec<RuleRecommendation>,
     /// One problem for each listed place of an option that is not the convention.
     pub departures: Vec<Finding>,
+    /// A problem needing a decision for each listed place that could not be checked.
+    pub undecided: Vec<Finding>,
     /// The defect problem of a rule whose majority option is marked `violates`.
     pub violates: Vec<Finding>,
     /// Operator-only remarks (a listed place that could not be checked).
@@ -221,6 +223,25 @@ pub(super) fn conventions_from_answers(
                         place.path,
                         place.line.map_or(String::new(), |l| format!(":{l}")),
                     ));
+                    let mut held = Finding {
+                        repo: repo.to_string(),
+                        path: place.path.trim_start_matches("./").to_string(),
+                        line: place.line.unwrap_or(0),
+                        rule_id: "AI-OPEN-QUESTION".to_string(),
+                        severity: "low".to_string(),
+                        snippet: "A listed place could not be checked".to_string(),
+                        detail: format!(
+                            "A place could not be checked{}A reviewer listed this place as using \"{}\" for {title} ({}), but it could not be found in the file. It needs a decision.",
+                            crate::ai_audit::digest_parse::HEADLINE_SEP,
+                            label_of(option),
+                            uc.rule,
+                        ),
+                        needs_review: true,
+                        located: false,
+                        ..Finding::default()
+                    };
+                    crate::onboard::redact::redact_finding(&mut held);
+                    result.undecided.push(held);
                     continue;
                 };
                 let mut finding = Finding {

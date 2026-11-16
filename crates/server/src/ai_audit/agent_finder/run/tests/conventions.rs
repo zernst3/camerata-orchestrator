@@ -196,6 +196,26 @@ async fn a_listed_place_that_does_not_exist_is_not_a_departure_and_is_noted() {
 }
 
 #[tokio::test]
+async fn a_listed_place_that_cannot_be_checked_becomes_a_problem_needing_a_decision() {
+    let (rows, _, _, _, _, _) = run_layer(script_with(
+        json!([
+            {"id": "repo", "count": 8, "places": ["src/a.rs:1"]},
+            {"id": "direct", "count": 2, "places": ["src/a.rs:2", "src/missing.rs:3"]}
+        ]),
+        vec![],
+        vec![],
+    ))
+    .await;
+    let held = rows
+        .iter()
+        .find(|f| f.path == "src/missing.rs")
+        .unwrap_or_else(|| panic!("the unchecked place was only a note: {rows:?}"));
+    assert!(held.needs_review);
+    assert!(held.detail.contains("needs a decision"), "{}", held.detail);
+    assert!(held.detail.contains("ARCH-LAYER-1"), "{}", held.detail);
+}
+
+#[tokio::test]
 async fn a_majority_option_marked_violates_gives_its_defect() {
     let agent = ScriptedAgent::new(script_with(
         json!([
