@@ -2033,7 +2033,7 @@ mod exit_code_tests;
 
 /// The refusal message when the run is on the cli backend with a real Claude Code that is too
 /// old (or unreadable) for a model the run will call; `None` when nothing needs refusing.
-fn cli_version_refusal(
+pub(crate) fn cli_version_refusal(
     on_cli: bool,
     scripted: bool,
     models: &[(String, String)],
