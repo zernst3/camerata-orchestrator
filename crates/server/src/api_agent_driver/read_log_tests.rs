@@ -105,7 +105,12 @@ async fn a_refused_read_is_logged_as_refused() {
     let f = fixture();
     let d = driver(&f);
     let asked = f.outside.join("secret.txt").display().to_string();
-    let _ = execute_tool(&d, &role(), &inv("Read", json!({"file_path": asked.clone()}))).await;
+    let _ = execute_tool(
+        &d,
+        &role(),
+        &inv("Read", json!({"file_path": asked.clone()})),
+    )
+    .await;
     let entries = d.read_log().entries();
     assert_eq!(entries.len(), 1);
     assert!(!entries[0].allowed, "{entries:?}");
@@ -121,8 +126,18 @@ async fn a_child_driver_sharing_the_handle_logs_into_the_parent_log() {
         ..DriverControls::default()
     };
     let child = apply_controls(driver(&f), &child_controls).with_agent_label("delegate-child");
-    let _ = execute_tool(&child, &role(), &inv("Read", json!({"file_path": "README.md"}))).await;
-    let _ = execute_tool(&parent, &role(), &inv("Read", json!({"file_path": "src/lib.rs"}))).await;
+    let _ = execute_tool(
+        &child,
+        &role(),
+        &inv("Read", json!({"file_path": "README.md"})),
+    )
+    .await;
+    let _ = execute_tool(
+        &parent,
+        &role(),
+        &inv("Read", json!({"file_path": "src/lib.rs"})),
+    )
+    .await;
     let entries = parent.read_log().entries();
     assert_eq!(entries.len(), 2, "{entries:?}");
     assert_eq!(entries[0].agent, "delegate-child");
@@ -153,7 +168,12 @@ async fn a_read_is_recorded_in_the_governance_log_with_path_bytes_and_outcome() 
             .unwrap(),
     );
     let d = driver(&f).with_governance(log.clone(), "run-read-1");
-    let (text, _) = execute_tool(&d, &role(), &inv("Read", json!({"file_path": "src/lib.rs"}))).await;
+    let (text, _) = execute_tool(
+        &d,
+        &role(),
+        &inv("Read", json!({"file_path": "src/lib.rs"})),
+    )
+    .await;
     let _ = execute_tool(
         &d,
         &role(),
@@ -172,5 +192,9 @@ async fn a_read_is_recorded_in_the_governance_log_with_path_bytes_and_outcome() 
     assert!(ok.contains(&format!("\"bytes\":{}", text.len())), "{ok}");
     assert!(ok.contains("\"allowed\":true"), "{ok}");
     assert_eq!(reads[1].severity, "warn", "a refused read is a warning");
-    assert!(reads[1].detail.clone().unwrap_or_default().contains("\"allowed\":false"));
+    assert!(reads[1]
+        .detail
+        .clone()
+        .unwrap_or_default()
+        .contains("\"allowed\":false"));
 }

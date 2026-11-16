@@ -47,7 +47,11 @@ fn layout() -> Layout {
 }
 
 fn driver(l: &Layout) -> ApiAgentDriver {
-    ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-sonnet-5", l.wt.clone())
+    ApiAgentDriver::new(
+        Arc::new(AnthropicNoopCompleter),
+        "claude-sonnet-5",
+        l.wt.clone(),
+    )
 }
 
 async fn call(d: &ApiAgentDriver, tool: &str, input: Value) -> String {
@@ -97,12 +101,7 @@ async fn a_dot_dot_escape_is_refused() {
 #[tokio::test]
 async fn a_symlink_that_leaves_the_jail_is_refused() {
     let l = layout();
-    let out = call(
-        &driver(&l),
-        "Read",
-        json!({"file_path": "link/secret.txt"}),
-    )
-    .await;
+    let out = call(&driver(&l), "Read", json!({"file_path": "link/secret.txt"})).await;
     assert_refused(&out);
 }
 

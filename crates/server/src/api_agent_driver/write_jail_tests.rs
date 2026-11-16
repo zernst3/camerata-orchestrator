@@ -121,6 +121,10 @@ fn both_loops_build_with_a_worktree() {
 fn the_driver_type_carries_its_worktree() {
     // `new` takes the worktree and the field is not optional: there is no way to make this
     // loop without one.
-    let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-sonnet-5", "/tmp/wt");
+    let d = ApiAgentDriver::new(
+        Arc::new(AnthropicNoopCompleter),
+        "claude-sonnet-5",
+        "/tmp/wt",
+    );
     let _: &PathBuf = &d.worktree;
 }
