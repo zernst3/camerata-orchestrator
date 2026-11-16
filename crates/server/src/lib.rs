@@ -124,6 +124,7 @@ pub mod run_store;
 mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;
+mod scan_cli_version;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
@@ -2364,6 +2365,20 @@ async fn onboard_audit(
     // This request has no job to record a batch id on, and a batch can run for hours: a dropped
     // connection would orphan a running, billed batch. Batch runs on the job path only.
     let mode = synchronous_scan_mode(mode, &mut notes);
+    // The cli backend launches the local Claude Code, which refuses a model it predates: check
+    // every model the run will call now, before any call. Same refusal shape as the lock above.
+    if let Some(why) = crate::scan_cli_version::cli_version_refusal_for_scan(
+        matches!(backend_resolution, crate::llm::BackendResolution::Cli),
+        run_ai_review,
+        model.as_deref(),
+        calibration_model.as_deref(),
+        req.deep,
+        &selected,
+        &run_controls,
+        crate::claude_version::check_run_models,
+    ) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
 
     // PANIC GUARD: this handler has no background job to fail into (unlike
     // `onboard_audit_start`'s spawned task) — a bare panic anywhere in the pipeline below
@@ -2877,6 +2892,21 @@ pub(crate) async fn start_audit_job(
                 },
                 &format!("{mode:?}").to_ascii_lowercase(),
             );
+            // The cli backend launches the local Claude Code, which refuses a model it predates:
+            // check every model the run will call before it is saved or called.
+            if let Some(why) = crate::scan_cli_version::cli_version_refusal_for_scan(
+                matches!(backend_resolution, crate::llm::BackendResolution::Cli),
+                run_ai_review,
+                model.as_deref(),
+                calibration_model.as_deref(),
+                deep,
+                &selected,
+                &run_controls,
+                crate::claude_version::check_run_models,
+            ) {
+                body_jobs.fail(&body_jid, why);
+                return;
+            }
             let mut prior = prior;
             let run_store = match &resume_run {
                 Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {
