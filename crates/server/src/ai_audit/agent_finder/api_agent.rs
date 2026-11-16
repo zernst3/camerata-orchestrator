@@ -589,6 +589,12 @@ impl PieceAgent for ApiPieceAgent {
     fn release(&self, conversation: &ConversationHandle) {
         self.forget(conversation);
     }
+
+    /// Every turn and every failure is recorded on the meter in [`Self::account`] and the send
+    /// loop; the runner must not record them again.
+    fn meters_its_own_turns(&self) -> bool {
+        self.meter.is_some()
+    }
 }
 
 fn usage_of(r: &LlmResponse) -> TurnUsage {

@@ -353,9 +353,13 @@ fn rules_message(view: &View) -> String {
     text
 }
 
-/// Record the turns of a run with the meter (and the health of the provider).
+/// Record the turns of a run with the meter (and the health of the provider), unless the agent
+/// already records its own turns and failures there (then each is counted once, by the agent).
 pub(super) fn meter_turns(shared: &Shared<'_>, run: &AgentRun) {
     let Some(m) = shared.meter else { return };
+    if shared.agent.meters_its_own_turns() {
+        return;
+    }
     for usage in &run.usage {
         m.record_stage(Stage::Finder, &response_of(shared.options, usage));
     }

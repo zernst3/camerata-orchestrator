@@ -285,6 +285,12 @@ pub trait PieceAgent: Send + Sync {
     /// on a released handle is an `Err` before anything is sent. The default keeps nothing, so
     /// there is nothing to release.
     fn release(&self, _conversation: &ConversationHandle) {}
+
+    /// True when the transport already records each of its turns (and failures) on the run's
+    /// meter, so the runner must not record them a second time. The default is false.
+    fn meters_its_own_turns(&self) -> bool {
+        false
+    }
 }
 
 /// Send the files the first run did not read (`unread`, repo-relative paths) once more (design
