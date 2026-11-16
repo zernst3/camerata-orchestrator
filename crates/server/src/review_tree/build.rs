@@ -260,7 +260,13 @@ pub fn build_tree(
     let mut budget = prev.as_ref().map(|t| t.budget).unwrap_or_default();
     // The candidates the group reviewer chose, for the rows that are still kept rows: a row the
     // seal threw out since is in a thrown-out node and is no longer asked about.
-    let kept_keys: BTreeSet<&str> = findings.iter().map(|f| f.site_key.as_str()).collect();
+    // A place of a lint rule group is never a candidate: the rule is decided as a batch.
+    let kept_keys: BTreeSet<&str> = findings
+        .iter()
+        .zip(&row_sub)
+        .filter(|(_, sub)| !super::lint::is_lint_sub_id(sub))
+        .map(|(f, _)| f.site_key.as_str())
+        .collect();
     let candidates: Vec<camerata_api_types::review::EscalationCandidate> = prev
         .as_ref()
         .map(|t| {
