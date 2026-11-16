@@ -464,7 +464,7 @@ fn content_match_lines_in(rule_id: &str, path: Option<&str>, content: &str) -> V
     }
 
     if rule_id == "SEC-NO-RAW-SQL-CONCAT-1" {
-        let mut lines: Vec<usize> = sql_concat_offsets(content)
+        let mut lines: Vec<usize> = sql_concat_offsets(path, content)
             .into_iter()
             .map(|at| content[..at].bytes().filter(|&b| b == b'\n').count() + 1)
             .collect();
@@ -1139,17 +1139,17 @@ fn sec_sql_template_regex() -> &'static Regex {
 static SEC_SQL_SINGLE_QUOTE_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// The single-quoted form (a Python f-string or `.format`, a `'...' + x` concatenation): inside
-/// ONE `'...'` literal, a DML word, a clause word, then `{name}` or the closing quote and `+`.
+/// ONE `'...'` literal (one line: a single-quoted string does not span lines), a DML word, a clause word, then `{name}` or the closing quote and `+`.
 fn sec_sql_single_quote_regex() -> &'static Regex {
     SEC_SQL_SINGLE_QUOTE_REGEX.get_or_init(|| {
         Regex::new(
             r#"(?ix)
             '
-            (?:[^'\\]|\\[\s\S])*?
+            (?:[^'\\\n]|\\[\s\S])*?
             \b(?:SELECT|INSERT|UPDATE|DELETE)\b
-            (?:[^'\\]|\\[\s\S])*?
+            (?:[^'\\\n]|\\[\s\S])*?
             \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b
-            (?:[^'\\]|\\[\s\S])*?
+            (?:[^'\\\n]|\\[\s\S])*?
             (?: \{\w*\} | '\s*\+ )
             "#,
         )
@@ -1217,7 +1217,7 @@ fn sql_concat_hits(
 
 /// Offsets of every raw-SQL concatenation hit in `content`, sorted: the double- and single-quoted
 /// forms at the match start, the template-literal form at its `${`.
-fn sql_concat_offsets(content: &str) -> Vec<usize> {
+fn sql_concat_offsets(path: Option<&str>, content: &str) -> Vec<usize> {
     let mut hits = sql_concat_hits(content, sec_sql_concat_regex(), '"', |m| m.start());
     hits.extend(sql_concat_hits(
         content,
@@ -1225,12 +1225,15 @@ fn sql_concat_offsets(content: &str) -> Vec<usize> {
         '`',
         |m| m.end() - 2,
     ));
-    hits.extend(sql_concat_hits(
-        content,
-        sec_sql_single_quote_regex(),
-        '\'',
-        |m| m.start(),
-    ));
+    // A Rust file has lifetimes and char literals, never a single-quoted string: skip the form.
+    if !path.is_some_and(|p| p.to_ascii_lowercase().ends_with(".rs")) {
+        hits.extend(sql_concat_hits(
+            content,
+            sec_sql_single_quote_regex(),
+            '\'',
+            |m| m.start(),
+        ));
+    }
     hits.sort_unstable();
     hits
 }
@@ -1238,7 +1241,7 @@ fn sql_concat_offsets(content: &str) -> Vec<usize> {
 /// SEC-NO-RAW-SQL-CONCAT-1: deny content that builds SQL by string
 /// concatenation or format-string interpolation.
 fn arm_sec_no_raw_sql_concat_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(&start) = sql_concat_offsets(content).first() {
+    if let Some(&start) = sql_concat_offsets(Some(path), content).first() {
         let match_line = content[..start].bytes().filter(|&b| b == b'\n').count() + 1;
         let in_test = is_test_or_fixture_path(path)
             || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));

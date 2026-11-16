@@ -84,3 +84,39 @@ fn a_verb_on_the_quote_line_keeps_a_multi_line_match_whose_quote_does_not_open()
     let text = "it\"s \"SELECT id\n FROM t\n WHERE n = '{n}'\"";
     assert_eq!(sql(text), vec![1]);
 }
+
+#[test]
+fn rust_lifetimes_and_prose_apostrophes_do_not_fire_the_single_quote_form() {
+    let lifetimes = "impl<'a> Insert for Batch<T> where T: Row {}\n";
+    assert!(
+        content_match_lines_in_file("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", lifetimes).is_empty()
+    );
+    // The form is skipped for a Rust file even when the text would otherwise match.
+    let rust_one_line = "let q = 'SELECT * FROM t WHERE id = {id}';\n";
+    assert!(
+        content_match_lines_in_file("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", rust_one_line)
+            .is_empty()
+    );
+    // A prose apostrophe on one line, then code with the words on later lines.
+    let prose = "// don't cache this\nlet x = update(set, {id});\n";
+    assert!(sql(prose).is_empty());
+    let prose2 = "# don't cache this\nupdate_rows()\nset_flag()\nwhere_clause = {id}\n";
+    assert!(sql(prose2).is_empty());
+    // Python forms still report line 2.
+    assert_eq!(
+        sql("log(\"ready\")\nq = f'SELECT * FROM users WHERE name = {name}'\n"),
+        vec![2]
+    );
+    assert_eq!(
+        content_match_lines_in_file(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/a.py",
+            "log(\"ready\")\nq = 'SELECT * FROM users WHERE name = {}'.format(name)\n"
+        ),
+        vec![2]
+    );
+    assert_eq!(
+        sql("log(\"ready\")\nq = 'SELECT * FROM users WHERE name = ' + name\n"),
+        vec![2]
+    );
+}
