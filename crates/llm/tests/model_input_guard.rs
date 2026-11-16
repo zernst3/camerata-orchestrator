@@ -141,6 +141,12 @@ const NOT_SENDERS: &[(&str, &str, &[&str])] = &[
         &["reqwest::", "Command::new"],
     ),
     (
+        "crates/server/src/ai_audit/agent_finder/api_agent_tests.rs",
+        "test module: mocks the Messages endpoint with a local server to exercise the finder's API \
+         transport; the production sender is api_agent.rs, which sends through the transports",
+        &["Command::new", "api.anthropic.com"],
+    ),
+    (
         "crates/server/src/cockpit_resume_tests.rs",
         "test module: runs its own fake `claude` script once to warm it, before the server under \
          test calls it through the transports",
