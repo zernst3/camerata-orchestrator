@@ -186,6 +186,7 @@ impl ProjectStore {
                 // `Project::client_engagement`); the operator turns it off for their own development.
                 client_engagement: true,
                 client_tooling_opt_in: false,
+                dev_run_spend_limit_cents: None,
                 // Stage 2 has a default of its own too; a new project seeds it (A15).
                 review: ReviewSettings {
                     group_review_model: camerata_api_types::project::STAGE2_DEFAULT_MODEL
@@ -308,6 +309,7 @@ impl ProjectStore {
                     // `Project::client_engagement`); the operator turns it off for their own development.
                     client_engagement: true,
                     client_tooling_opt_in: false,
+                    dev_run_spend_limit_cents: None,
                     review: ReviewSettings::default(),
                 };
                 s.projects.push(project.clone());
@@ -433,6 +435,19 @@ impl ProjectStore {
             p.client_engagement = client_engagement;
             p.client_tooling_opt_in = client_tooling_opt_in;
         })
+    }
+
+    /// Set the most one governed dev run of the project may spend, in whole cents (`None`
+    /// clears it). `None` when no project has that id; `Err` text when the amount is zero.
+    pub fn set_dev_run_spend_limit(
+        &self,
+        project_id: &str,
+        limit_cents: Option<u64>,
+    ) -> Result<Option<Project>, String> {
+        if limit_cents == Some(0) {
+            return Err("the dev run spend limit must be more than zero".to_string());
+        }
+        Ok(self.update(project_id, |p| p.dev_run_spend_limit_cents = limit_cents))
     }
 
     /// Write `chosen_option` onto `rule_id`'s selection for a single project by id — the
