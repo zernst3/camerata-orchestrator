@@ -1,0 +1,15 @@
+# A crate-level clippy.toml REPLACES the workspace one (clippy does not merge them), so this
+# is the root clippy.toml plus the reqwest ban. Keep the two in step.
+allow-unwrap-in-tests = true
+
+# Process-global environment mutation is a test-isolation hazard: cargo runs a binary's tests
+# on parallel threads of one process, so a raw set/remove races every other test (and every
+# reader) of that variable, and a panic skips the manual restore. Tests use
+# `camerata_test_env::EnvGuard` (RAII restore) plus `#[serial_test::serial(process_env)]`;
+# that crate is the only place allowed to call these.
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "use camerata_test_env::EnvGuard + #[serial_test::serial(process_env)] (tests), or inject the value (production)" },
+    { path = "std::env::remove_var", reason = "use camerata_test_env::EnvGuard + #[serial_test::serial(process_env)] (tests), or inject the value (production)" },
+    { path = "reqwest::Client::new", reason = "has no timeout and can hang a run forever; build one with Client::builder().timeout(..).connect_timeout(..)" },
+    { path = "reqwest::get", reason = "builds a throwaway client with no timeout; build one with Client::builder().timeout(..).connect_timeout(..)" },
+]

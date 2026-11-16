@@ -206,7 +206,7 @@ fn the_spend_limit_stopping_a_retry_is_a_spend_limit_failure_not_a_billing_one()
 /// operator is not told a spend limit was reached (there may be none).
 #[test]
 fn a_retry_refused_by_the_outage_stop_is_an_outage_stop_not_a_spend_limit() {
-    let meter = UsageMeter::default();
+    let meter = UsageMeter::default().with_health(crate::run_health::RunHealth::stepping(60));
     for _ in 0..crate::run_health::OUTAGE_STREAK {
         meter.health().note_failure(FailureClass::Transport, "x");
     }
@@ -333,7 +333,8 @@ async fn three_transport_failures_in_a_row_stop_the_run_and_mark_the_rest_outage
         FailureClass::Transport,
         "Anthropic API HTTP 529: overloaded",
     )]);
-    let meter = UsageMeter::default();
+    // Each failure lands a minute after the one before: a long outage, not one wave.
+    let meter = UsageMeter::default().with_health(crate::run_health::RunHealth::stepping(60));
     let (_f, _p, _r, ok, failures) = scan(&llm, 6, Some(&meter)).await;
     assert_eq!(ok, 0);
     assert_eq!(llm.calls(), 3, "nothing is sent after the third failure");

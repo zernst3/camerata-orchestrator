@@ -849,8 +849,28 @@ async fn run_loop(
                 break;
             }
             Err(e) => {
+                // A call that timed out may still have been billed, and nothing came back to
+                // price it from: it counts at its cost cap, the request ceiling. A failure that
+                // never reached the model (a 400, a refused connection) was not billed.
+                if is_timeout_error(&e) {
+                    let ceiling = request_ceiling_usd(
+                        &driver.model,
+                        system_prompt.as_deref(),
+                        &messages,
+                        &tool_schemas,
+                    );
+                    driver.spend.record(TurnCost {
+                        agent: driver.agent_label.clone(),
+                        model: driver.model.clone(),
+                        input_tokens: None,
+                        output_tokens: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cost_usd: ceiling,
+                    });
+                }
                 return Err(e)
-                    .with_context(|| format!("provider call failed on iteration {iteration}"))
+                    .with_context(|| format!("provider call failed on iteration {iteration}"));
             }
         };
         // Cache-bust is one-shot: reset after use so subsequent turns use cached responses.
@@ -1028,6 +1048,36 @@ fn request_ceiling_usd(
         cache_creation_1h: None,
     };
     crate::llm::usage_cost_usd(model, &usage, crate::llm::PriceBasis::realtime())
+}
+
+/// Sends one provider request and reads the whole body. Both phases keep the typed `reqwest`
+/// error in the chain (the `Display` of a `reqwest::Error` omits its source, so flattening it to
+/// text loses the "timed out"), which is what `is_timeout_error` walks; a body that fails to read
+/// is an error, never an empty string.
+async fn send_and_read(
+    builder: reqwest::RequestBuilder,
+    what: &str,
+) -> anyhow::Result<(reqwest::StatusCode, String)> {
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context(format!("{what} request failed")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context(format!("{what} response body failed")))?;
+    Ok((status, text))
+}
+
+/// True when the call failed by timing out: a typed `reqwest` timeout anywhere in the chain, or
+/// the text of one (the OpenRouter path flattens the error to a string).
+fn is_timeout_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+            || c.to_string().to_ascii_lowercase().contains("timed out")
+    })
 }
 
 /// The output cap both request bodies carry (`max_tokens`).
@@ -1348,7 +1398,7 @@ async fn call_openrouter_with_tools(
         provider_constraint,
     );
 
-    let mut builder = reqwest::Client::new()
+    let mut builder = agent_http_client()
         .post("https://openrouter.ai/api/v1/chat/completions")
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
@@ -1360,14 +1410,7 @@ async fn call_openrouter_with_tools(
         builder = builder.header("X-OpenRouter-Cache-Clear", "true");
     }
 
-    let resp = builder
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("OpenRouter API request failed: {e}"))?;
-
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let (status, text) = send_and_read(builder.json(&body), "OpenRouter API").await?;
     if !status.is_success() {
         anyhow::bail!("OpenRouter API HTTP {status}: {text}");
     }
@@ -1576,7 +1619,7 @@ async fn call_anthropic_with_tools(
 ) -> anyhow::Result<LlmResponse> {
     let (body, use_caching) = build_anthropic_request_body(model, system, messages, tool_schemas);
 
-    let mut builder = reqwest::Client::new()
+    let mut builder = agent_http_client()
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -1586,14 +1629,7 @@ async fn call_anthropic_with_tools(
         builder = builder.header("anthropic-beta", "prompt-caching-2024-07-31");
     }
 
-    let resp = builder
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("Anthropic API request failed: {e}"))?;
-
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let (status, text) = send_and_read(builder.json(&body), "Anthropic API").await?;
     if !status.is_success() {
         anyhow::bail!("Anthropic API HTTP {status}: {text}");
     }
@@ -3600,6 +3636,19 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
             }
         }
     }
+}
+
+/// The agent driver's HTTP client: a 600 s total and 10 s connect bound, so a stalled
+/// connection ends as an error instead of hanging the run.
+fn agent_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build the agent HTTP client")
+    })
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────

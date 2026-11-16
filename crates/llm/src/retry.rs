@@ -54,6 +54,15 @@ const OVERLOADED_SCHEDULE_SECS: [u64; 4] = [5, 20, 60, 120];
 /// recover inside a run; the failure is recorded and the end-of-run second try picks it up.
 pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 
+/// The most one call spends WAITING between attempts, summed over its retries (run to completion:
+/// a call ends in bounded time, so a run of calls against a down provider reaches the outage stop
+/// in about a minute instead of several). The schedule step that would pass it is clipped to what
+/// remains (overloaded: 5, 20, 35), and once it is spent the call fails with what it has. Only a
+/// 429 or a 529 that names a `retry-after` is exempt: the stage runner paces those (RateLimited)
+/// under its own deadline. A 500 to 504 is class Transport and is not paced, so its waits, named
+/// by `retry-after` or not, count against this budget.
+pub(crate) const CALL_RETRY_WAIT_BUDGET: Duration = Duration::from_secs(60);
+
 /// Waits between attempts. Production sleeps for real; a test injects a recorder.
 pub trait Sleeper: Send + Sync {
     fn sleep<'a>(&'a self, d: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -66,6 +75,39 @@ pub struct TokioSleeper;
 impl Sleeper for TokioSleeper {
     fn sleep<'a>(&'a self, d: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(tokio::time::sleep(d))
+    }
+}
+
+/// The sleeper every call without its own waits with. Production never sets it, so the call
+/// sleeps for real; an end-to-end test installs a recorder with [`set_process_sleeper`] because
+/// the `Llm` it exercises is built deep inside the server, out of the test's reach.
+static PROCESS_SLEEPER: std::sync::Mutex<Option<std::sync::Arc<dyn Sleeper>>> =
+    std::sync::Mutex::new(None);
+
+/// Install (or, with `None`, remove) the process-wide sleeper. TEST SUPPORT: a test that sets
+/// it must run serially and remove it again. Compiled only for tests and the `test-support`
+/// feature (enabled from dev-dependencies), so a production build does not contain it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_process_sleeper(sleeper: Option<std::sync::Arc<dyn Sleeper>>) {
+    *PROCESS_SLEEPER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = sleeper;
+}
+
+/// The default sleeper of an `Llm`: the process-wide one when a test installed it, else real.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProcessSleeper;
+
+impl Sleeper for ProcessSleeper {
+    fn sleep<'a>(&'a self, d: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let installed = PROCESS_SLEEPER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match installed {
+            Some(s) => Box::pin(async move { s.sleep(d).await }),
+            None => Box::pin(tokio::time::sleep(d)),
+        }
     }
 }
 
@@ -185,6 +227,17 @@ pub(crate) enum Step<T, E> {
     Stop { record: AttemptRecord, last: E },
 }
 
+/// True for a wait the stage runner paces itself and holds under its own deadline: a 429 or a 529
+/// that carries a `retry-after`. Every other wait (a 500 to 504 is class Transport and is not
+/// paced, with or without a `retry-after`) counts against [`CALL_RETRY_WAIT_BUDGET`].
+fn is_paced(reason: RetryReason, retry_after: Option<Duration>) -> bool {
+    retry_after.is_some()
+        && matches!(
+            reason,
+            RetryReason::HttpStatus(429) | RetryReason::HttpStatus(529)
+        )
+}
+
 /// THE retry loop. Runs `attempt_fn(n)` for n = 0, 1, ... until it succeeds, reports a failure
 /// that waiting cannot fix, or the schedule for that failure runs out. Returns the success with
 /// the trail of the failed attempts before it, or the last failure with the whole trail. Each
@@ -200,6 +253,7 @@ where
 {
     let mut trail: Vec<AttemptRecord> = Vec::new();
     let mut attempt: u32 = 0;
+    let mut waited = Duration::ZERO;
     loop {
         match attempt_fn(attempt).await {
             Step::Done(value) => return Ok((value, trail)),
@@ -218,7 +272,18 @@ where
                     trail.push(record);
                     return Err((last, trail));
                 }
-                let delay = effective_delay(reason, attempt, retry_after);
+                let mut delay = effective_delay(reason, attempt, retry_after);
+                if !is_paced(reason, retry_after) {
+                    // The step that would pass the budget is clipped to what remains; with
+                    // nothing left the call fails with what it has.
+                    let remaining = CALL_RETRY_WAIT_BUDGET.saturating_sub(waited);
+                    if remaining.is_zero() {
+                        trail.push(record);
+                        return Err((last, trail));
+                    }
+                    delay = delay.min(remaining);
+                }
+                waited += delay;
                 record.wait_secs = Some(delay.as_secs());
                 eprintln!(
                     "[camerata-llm] {} attempt {} failed ({}), retrying in {delay:?}",
@@ -998,7 +1063,9 @@ mod tests {
             "m",
         )
         .await;
-        assert_eq!(sleeper.waits(), vec![5, 20, 60, 120]);
+        // The schedule is 5, 20, 60, 120; the call's wait budget (60 s in all) clips the third
+        // wait to the 35 s that remain, then a fourth attempt runs and the budget is spent.
+        assert_eq!(sleeper.waits(), vec![5, 20, 35]);
 
         let sleeper = RecordingSleeper::default();
         let sends = AtomicUsize::new(0);
@@ -1018,5 +1085,66 @@ mod tests {
         .await;
         assert_eq!(sends.load(Ordering::SeqCst), 1, "not retried");
         assert!(sleeper.waits().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_503_with_a_long_retry_after_is_clipped_to_the_call_budget() {
+        let sleeper = RecordingSleeper::default();
+        let sends = AtomicUsize::new(0);
+        let out = execute_http(
+            || {
+                sends.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Ok(RawResponse {
+                        status: 503,
+                        body: "unavailable".to_string(),
+                        retry_after: Some(Duration::from_secs(300)),
+                        request_id: None,
+                    })
+                }
+            },
+            &sleeper,
+            "m",
+        )
+        .await
+        .expect("a terminal answer is returned");
+        assert_eq!(out.status, 503);
+        let total: u64 = sleeper.waits().iter().sum();
+        assert!(
+            total <= 60,
+            "waits {:?} pass the 60 s budget",
+            sleeper.waits()
+        );
+        assert_eq!(
+            sleeper.waits(),
+            vec![60],
+            "clipped to the budget, then spent"
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_429_and_a_529_retry_after_stay_exempt_from_the_budget() {
+        for status in [429u16, 529] {
+            let sleeper = RecordingSleeper::default();
+            let _ = execute_http(
+                || async move {
+                    Ok(RawResponse {
+                        status,
+                        body: "slow down".to_string(),
+                        retry_after: Some(Duration::from_secs(200)),
+                        request_id: None,
+                    })
+                },
+                &sleeper,
+                "m",
+            )
+            .await;
+            assert_eq!(
+                sleeper.waits()[0],
+                200,
+                "status {status} honours its retry-after"
+            );
+        }
     }
 }

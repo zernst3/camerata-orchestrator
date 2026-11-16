@@ -561,6 +561,10 @@ struct Env {
     _state: tempfile::TempDir,
     _g1: camerata_test_env::EnvGuard,
     _g2: camerata_test_env::EnvGuard,
+    /// The scripted provider fails instantly, so the outage stop's 120 s span could never pass:
+    /// these tests are about resuming after a stop, not about how long it takes to trip (the
+    /// span has its own tests in `run_health`).
+    _span: camerata_server::run_health::OutageSpanGuard,
 }
 
 fn env() -> Env {
@@ -571,6 +575,7 @@ fn env() -> Env {
         _state: state,
         _g1: g1,
         _g2: g2,
+        _span: camerata_server::run_health::OutageSpanGuard::set(std::time::Duration::ZERO),
     }
 }
 

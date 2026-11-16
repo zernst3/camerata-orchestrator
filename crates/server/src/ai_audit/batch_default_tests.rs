@@ -954,7 +954,8 @@ async fn submit_failures_in_batch_mode_trip_the_outage_stop() {
     let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
     api.submit_fails_always = true;
     api.realtime.fails = true;
-    let m = meter(eff(true), None);
+    // Each failure lands a minute after the one before: a long outage, not one wave.
+    let m = meter(eff(true), None).with_health(crate::run_health::RunHealth::stepping(60));
 
     let (_f, ok, failures) = run(&api, &m).await;
     assert_eq!(ok, 0);
@@ -1004,7 +1005,8 @@ async fn submit_failures_in_batch_mode_trip_the_outage_stop() {
 async fn poll_failures_in_batch_mode_trip_the_outage_stop() {
     let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
     api.poll_fails = true;
-    let m = meter(eff(true), None);
+    // Each failure lands a minute after the one before: a long outage, not one wave.
+    let m = meter(eff(true), None).with_health(crate::run_health::RunHealth::stepping(60));
     let (_f, _ok, failures) = run(&api, &m).await;
     assert_eq!(failures.len(), 4);
     assert!(m.outage_stopped(), "repeated poll failures are an outage");
