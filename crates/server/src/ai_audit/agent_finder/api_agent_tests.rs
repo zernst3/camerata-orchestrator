@@ -803,7 +803,11 @@ async fn a_refusal_ends_the_run_refused_and_keeps_the_billed_cost() {
         "got {:?}",
         run.stop
     );
-    assert_eq!(run.trace.len(), 1, "the trace so far is kept");
+    assert!(
+        run.trace.is_empty(),
+        "the refused request's tool events are dropped: {:?}",
+        run.trace
+    );
     assert_eq!(run.usage.len(), 2, "the refused call was billed too");
     // 2,000 input and 100 output tokens: $0.02.
     let refused_cost = run.usage[1].cost_usd.expect("priced");
@@ -1027,6 +1031,36 @@ fn other_agent_with_meter(
         .with_wire(wire)
         .with_pause(pause)
         .with_meter(meter)
+}
+
+#[tokio::test]
+async fn a_read_answered_by_a_refusal_is_not_in_the_trace_and_not_covered() {
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![call("r", "Read", json!({"file_path": "src/b.rs"}))]),
+        refusal(),
+    ]);
+    let piece = piece();
+    let room = room();
+    let run = run_ok(&agent(&wire), &room, &limits()).await;
+    assert!(matches!(run.stop, AgentStop::Refused(_)), "{:?}", run.stop);
+    assert!(
+        run.trace.is_empty(),
+        "the model reviewed nothing that turn: {:?}",
+        run.trace
+    );
+    let coverage = coverage_of(
+        &piece.key,
+        std::slice::from_ref(&run),
+        &room.piece_line_counts(),
+        &[],
+        room.context_files(),
+        None,
+    );
+    assert!(
+        coverage.still_unread.contains(&"src/b.rs".to_string()),
+        "{:?}",
+        coverage.still_unread
+    );
 }
 
 #[tokio::test]
@@ -1267,7 +1301,8 @@ async fn a_provider_that_never_answers_ends_the_piece_failed_with_the_usage_kept
         client: crate::api_agent_driver::agent_http_client_with(
             Duration::from_millis(300),
             Duration::from_millis(300),
-        ),
+        )
+        .expect("a client with timeouts"),
         first: Mutex::new(Some(tools_reply(vec![call(
             "a",
             "Glob",

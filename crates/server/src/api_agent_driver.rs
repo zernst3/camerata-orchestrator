@@ -1142,7 +1142,7 @@ const AGENT_HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 /// The HTTP client of the agent loops: the llm crate's timeouts (600 s total, 10 s connect), so a
 /// provider that stops answering ends the request as a network error, which the caller retries.
-pub(crate) fn agent_http_client() -> reqwest::Client {
+pub(crate) fn agent_http_client() -> Result<reqwest::Client, AnthropicPostError> {
     agent_http_client_with(AGENT_HTTP_TOTAL_TIMEOUT, AGENT_HTTP_CONNECT_TIMEOUT)
 }
 
@@ -1150,12 +1150,23 @@ pub(crate) fn agent_http_client() -> reqwest::Client {
 pub(crate) fn agent_http_client_with(
     total: std::time::Duration,
     connect: std::time::Duration,
-) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(total)
-        .connect_timeout(connect)
-        .build()
-        .unwrap_or_default()
+) -> Result<reqwest::Client, AnthropicPostError> {
+    require_client(
+        reqwest::Client::builder()
+            .timeout(total)
+            .connect_timeout(connect)
+            .build(),
+    )
+}
+
+/// The built client, or the failure to build it. Never a client without the timeouts: a hung
+/// provider must end the request, so a builder that fails fails the request.
+fn require_client<E: std::fmt::Display>(
+    built: Result<reqwest::Client, E>,
+) -> Result<reqwest::Client, AnthropicPostError> {
+    built.map_err(|e| {
+        AnthropicPostError::Network(format!("the HTTP client could not be built: {e}"))
+    })
 }
 
 /// POST an already built Messages `body` and read the reply: the second half of
@@ -1167,7 +1178,7 @@ pub(crate) async fn post_anthropic_body(
     use_caching: bool,
 ) -> Result<LlmResponse, AnthropicPostError> {
     post_anthropic_body_to(
-        &agent_http_client(),
+        &agent_http_client()?,
         "https://api.anthropic.com/v1/messages",
         api_key,
         body,
@@ -2924,6 +2935,21 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
 
 #[cfg(test)]
 mod tests {
+    /// A client that could not be built with its timeouts is an error, never a client without them.
+    #[test]
+    fn a_client_that_fails_to_build_is_an_error_not_a_default_client() {
+        let failed = super::require_client::<&str>(Err("tls backend missing"));
+        assert!(
+            matches!(&failed, Err(super::AnthropicPostError::Network(why)) if why.contains("tls backend missing")),
+            "got {failed:?}"
+        );
+        assert!(super::agent_http_client_with(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(1)
+        )
+        .is_ok());
+    }
+
     /// One credential read per driver build: the key that decides the resolution is the key
     /// that is returned (no second keychain read, so no second prompt).
     #[test]

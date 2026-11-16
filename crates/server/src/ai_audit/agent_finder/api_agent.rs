@@ -445,8 +445,9 @@ impl ApiPieceAgent {
             let reply = match self.send_with_retry(&body, use_caching).await {
                 Ok(reply) => reply,
                 Err(SendFailure::Refused(v)) => {
-                    // The provider answered this request, so it received the results in it.
-                    trace.append(&mut pending);
+                    // The model reviewed nothing that turn: coverage counts only reads that were
+                    // delivered and answered, so the turn's tool events are dropped.
+                    pending.clear();
                     let refusal = crate::llm::refusal_error_billed(
                         &v,
                         &self.model,
