@@ -4877,11 +4877,12 @@ mod tests {
             );
         }
 
-        // Expected shape for THIS fixture: 2 do_now (critical + high/low-effort), 1 do_next
-        // (high/no-effort), 1 plan (medium), 1 held (C5-4: the hedged low), 0 accepted, 0
-        // informational (a calibration hedge never lands there any more).
-        assert_eq!(json.matrix.do_now.len(), 2);
-        assert_eq!(json.matrix.do_next.len(), 1);
+        // Expected shape for THIS fixture: 3 do_now (critical, high/low-effort and high/no-effort:
+        // owner ruling 2026-11-16, a high problem with no estimate is First), 0 do_next, 1 plan
+        // (medium), 1 held (C5-4: the hedged low), 0 accepted, 0 informational (a calibration
+        // hedge never lands there any more).
+        assert_eq!(json.matrix.do_now.len(), 3);
+        assert_eq!(json.matrix.do_next.len(), 0);
         assert_eq!(json.matrix.plan.len(), 1);
         assert_eq!(json.matrix.accepted.len(), 0);
         assert_eq!(json.matrix.informational.len(), 0);

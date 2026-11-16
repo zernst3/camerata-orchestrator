@@ -220,6 +220,29 @@ pub const PDF_SECTIONS: [&str; 15] = [
 pub const FIX_ORDER_FIRST: &str = "First";
 pub const FIX_ORDER_NEXT: &str = "Next";
 pub const FIX_ORDER_LATER: &str = "Later";
+/// What a Fix or a place with nothing to act on prints in place of an order.
+pub const FIX_CLASS_NEEDS_DECISION: &str = NEEDS_A_DECISION;
+pub const FIX_CLASS_INFORMATION_ONLY: &str = "Information only";
+pub const FIX_CLASS_ACCEPTED: &str = "Accepted risk";
+
+/// The word a Fix prints in the Fix order column and in the PDF: its order, or its class when no
+/// place of it is for action.
+pub fn fix_class_label(class: crate::review_tree::FixClass) -> &'static str {
+    use crate::review_tree::{FixClass, FixOrder};
+    match class {
+        FixClass::Order(FixOrder::First) => FIX_ORDER_FIRST,
+        FixClass::Order(FixOrder::Next) => FIX_ORDER_NEXT,
+        FixClass::Order(FixOrder::Later) => FIX_ORDER_LATER,
+        FixClass::NeedsDecision => FIX_CLASS_NEEDS_DECISION,
+        FixClass::InformationOnly => FIX_CLASS_INFORMATION_ONLY,
+        FixClass::AcceptedRisk => FIX_CLASS_ACCEPTED,
+    }
+}
+
+/// The word a place prints in the Fix order column: its own class.
+pub fn place_class_label(class: crate::review_tree::PlaceClass) -> &'static str {
+    fix_class_label(crate::review_tree::FixClass::from(class))
+}
 
 // ── Column headers ──────────────────────────────────────────────────────────────────────
 

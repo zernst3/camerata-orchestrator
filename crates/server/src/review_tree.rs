@@ -35,9 +35,9 @@ pub use mapping::{
     UNCATEGORISED,
 };
 pub use places::{
-    class_of_place, is_place_row, merge_places, merge_places_where, place_id_of, place_key,
-    places_for, places_of, FixOrder, Place, PlaceClass, PlaceMergeBlock, PlaceNode, PlaceRow,
-    PLACE_MERGE_STAGE, PLACE_PREFIX,
+    class_of_fix, class_of_place, is_place_row, merge_places, merge_places_where, place_id_of,
+    place_key, places_for, places_of, FixClass, FixOrder, Place, PlaceClass, PlaceMergeBlock,
+    PlaceNode, PlaceRow, PLACE_MERGE_STAGE, PLACE_PREFIX,
 };
 pub use types::{
     DuplicateLink, FlaggedBy, GroupRole, NodeCounts, NodeEscalation, NodeKind, NodeLevel, Outlier,

@@ -1186,3 +1186,151 @@ fn the_gate_refuses_an_and_n_more_line_that_disagrees_with_the_counts() {
     let text = messages(&counts_problems(&entries, &wrong));
     assert!(text.contains("conventions.more_line"), "{text}");
 }
+
+// Single counts D, round 1: one order rule on every surface.
+
+/// One fix with a high place that has no effort estimate and a medium place, a low place held for
+/// a decision (a fix of its own), one accepted place and one ruled out place.
+fn order_rule_package() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    let row = |rule: &str, path: &str, line: usize, severity: &str| Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: severity.to_string(),
+        snippet: format!("let x{line} = 1;"),
+        detail: format!("detail {rule}"),
+        ..Finding::default()
+    };
+    let mut held = row("SYN-H-1", "src/h.rs", 3, "low");
+    held.needs_review = true;
+    let mut report = scan_report();
+    report.findings = vec![
+        row("SYN-A-1", "src/a.rs", 5, "high"),
+        row("SYN-A-1", "src/b.rs", 9, "medium"),
+        held,
+        row("SYN-I-1", "src/i.rs", 2, "medium"),
+        row("SYN-F-1", "src/f.rs", 4, "medium"),
+    ];
+    let sealed = report.clone().seal();
+    let key_of = |rule: &str| {
+        crate::report_export::finding_key(
+            sealed.findings.iter().find(|f| f.rule_id == rule).unwrap(),
+        )
+    };
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        key_of("SYN-I-1"),
+        crate::report_export::DispositionWire {
+            state: "Ignored".to_string(),
+            reason: "we accept this one".to_string(),
+            ..Default::default()
+        },
+    );
+    dispositions.insert(
+        key_of("SYN-F-1"),
+        crate::report_export::DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "a constant".to_string(),
+            ..Default::default()
+        },
+    );
+    let package = package_with_dispositions(report, &dispositions);
+    let report_json = package.report_json.clone();
+    let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
+    (read_zip_entries(&bytes).unwrap(), report_json)
+}
+
+#[test]
+fn every_surface_gives_a_fix_the_one_order_and_the_gate_passes() {
+    let (entries, report) = order_rule_package();
+    let p = &report.counts.problems;
+    // Anti-vacuity: the high place with no estimate is First, the medium one Later, the held one
+    // needs a decision, one is accepted.
+    assert_eq!(
+        (p.first, p.next, p.later, p.needs_decision, p.accepted),
+        (1, 0, 1, 1, 1),
+        "{p:?}"
+    );
+    // The summary, the box of three things and the fix lines say First for the one fix to do.
+    assert!(
+        report
+            .executive_summary
+            .narrative
+            .contains("1 First, 0 Next, 1 Later"),
+        "{}",
+        report.executive_summary.narrative
+    );
+    assert_eq!(report.three_things.items.len(), 1);
+    let lines: Vec<_> = report
+        .other_fixes
+        .groups
+        .iter()
+        .flat_map(|g| &g.lines)
+        .collect();
+    assert_eq!(lines.len(), 1, "the held fix is not a fix to do: {lines:?}");
+    assert_eq!(lines[0].fix_order, "First");
+    assert!(!lines[0].fix_id.is_empty());
+    // The workbook: one Fix plan row, First; All problems says each place's own word.
+    let xlsx = &entries[&xlsx_name()];
+    let plan = super::archive::xlsx_sheet_grid(xlsx, "Fix plan").unwrap();
+    let order = plan[0].iter().position(|h| h == "Fix order").unwrap();
+    assert_eq!(plan.len(), 2, "{plan:?}");
+    assert_eq!(plan[1][order], "First");
+    let all = super::archive::xlsx_sheet_grid(xlsx, "All problems").unwrap();
+    let order = all[0].iter().position(|h| h == "Fix order").unwrap();
+    let mut words: Vec<&str> = all.iter().skip(1).map(|r| r[order].as_str()).collect();
+    words.sort_unstable();
+    assert_eq!(
+        words,
+        ["Accepted risk", "First", "Later", "Needs a decision"]
+    );
+    // The tickets file lists the one fix.
+    let tickets = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice())
+        .records()
+        .count();
+    assert_eq!(tickets, 1);
+    assert_eq!(report.counts.fixes.to_do, 1);
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}
+
+#[test]
+fn the_gate_refuses_a_forged_fix_plan_order_and_a_forged_fix_line() {
+    let (entries, report) = order_rule_package();
+    let baseline = located(&counts_problems(&entries, &report));
+    let name = xlsx_name();
+    let mut tampered = entries.clone();
+    tampered.insert(
+        name.clone(),
+        rewrite_xlsx_part(&tampered[&name], "xl/sharedStrings.xml", |xml| {
+            assert!(xml.contains("<t>First</t>"), "anti-vacuity");
+            xml.replace("<t>First</t>", "<t>Later</t>")
+        }),
+    );
+    let new = new_problems(&tampered, &report, &baseline);
+    assert!(
+        new.iter()
+            .any(|(f, l)| f == &name && l.starts_with("sheet \"Fix plan\", fix ")),
+        "{new:?}"
+    );
+    assert!(
+        new.iter()
+            .any(|(f, l)| f == &name && l.starts_with("sheet \"All problems\" Fix order")),
+        "{new:?}"
+    );
+    // A fix line in the PDF data that says another order than the places give.
+    let mut forged = report.clone();
+    forged.other_fixes.groups[0].lines[0].fix_order = "Next".to_string();
+    let new = new_problems(&entries, &forged, &baseline);
+    assert!(
+        new.iter()
+            .any(|(f, l)| f == "PDF data" && l.starts_with("other_fixes, fix ")),
+        "{new:?}"
+    );
+    // A box of three things that is empty while a problem is First.
+    let mut empty_box = report.clone();
+    empty_box.three_things.items.clear();
+    let new = new_problems(&entries, &empty_box, &baseline);
+    assert!(has(&new, "PDF data", "three_things"), "{new:?}");
+}

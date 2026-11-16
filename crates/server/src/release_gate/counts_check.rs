@@ -179,7 +179,8 @@ pub(super) fn recount(
         at.entry(place_key_of(r)).or_default().push(r);
     }
     c.problems.total = at.len();
-    for members in at.values() {
+    let mut waiting_places: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+    for (place, members) in &at {
         c.rows.folded += members.len() - 1;
         let worst = members
             .iter()
@@ -192,6 +193,7 @@ pub(super) fn recount(
         let known = ["do_now", "do_next", "plan", "informational", "accepted"];
         // Fail closed: a held row, or a bucket nobody knows, needs a decision.
         if buckets.iter().any(|b| !known.contains(&b.as_str())) {
+            waiting_places.insert(place.clone());
             c.problems.needs_decision += 1;
             c.problems.needs_decision_by_severity.add(sev);
         } else if buckets.iter().any(|b| b == "do_now") {
@@ -241,7 +243,8 @@ pub(super) fn recount(
 
     c.fixes.total = fixes.len();
     // A Fix is to do while a place of it is still to change: a problem row a reviewer, a baseline
-    // record or a waiver has not accepted, or any dependency advisory.
+    // record or a waiver has not accepted, at a place that does not wait for a decision, or any
+    // dependency advisory. A Fix whose only places wait for a decision is not yet a change to make.
     let to_do: BTreeSet<String> = problem_rows
         .iter()
         .copied()
@@ -249,7 +252,7 @@ pub(super) fn recount(
             !matches!(
                 text(r, "disposition_kind").as_str(),
                 "Ignored" | "BaselineAccepted" | "WaivedInline"
-            )
+            ) && !waiting_places.contains(&place_key_of(r))
         })
         .chain(deps.iter())
         .map(|r| text(r, "fix_id"))
@@ -579,6 +582,7 @@ pub(super) fn counts_problems_with(
         }
     }
     problems.extend(workbook_problems(entries, want));
+    problems.extend(order_problems(entries, report, want));
     if let Some(csv) = entries.get("csv/tickets.csv") {
         let tickets = csv::Reader::from_reader(csv.as_slice()).records().count();
         if tickets != want.fixes.to_do {
@@ -990,6 +994,223 @@ fn folded_rows_problems(entries: &Entries) -> Vec<Problem> {
                     uncarried.saturating_sub(1)
                 ),
             ));
+        }
+    }
+    out
+}
+
+// ── Fix order: the gate's own tally of the order words ─────────────────────────────────────
+
+const ORDER_WORDS: [&str; 6] = [
+    v::FIX_ORDER_FIRST,
+    v::FIX_ORDER_NEXT,
+    v::FIX_ORDER_LATER,
+    v::FIX_CLASS_NEEDS_DECISION,
+    v::FIX_CLASS_INFORMATION_ONLY,
+    v::FIX_CLASS_ACCEPTED,
+];
+
+/// The rank of an order word in print order (First is 0). `None` for a word nobody prints.
+fn word_rank(word: &str) -> Option<usize> {
+    ORDER_WORDS.iter().position(|w| *w == word)
+}
+
+/// The rank of a place from the buckets of its rows: a held row or an unknown bucket needs a
+/// decision whatever else is there, then the earliest row for action, then information only, then
+/// accepted risk. Written here for the gate alone.
+fn place_rank(buckets: &[String]) -> usize {
+    let known = ["do_now", "do_next", "plan", "informational", "accepted"];
+    if buckets.iter().any(|b| !known.contains(&b.as_str())) {
+        return 3;
+    }
+    for (bucket, rank) in [("do_now", 0), ("do_next", 1), ("plan", 2)] {
+        if buckets.iter().any(|b| b == bucket) {
+            return rank;
+        }
+    }
+    if buckets.iter().any(|b| b == "informational") {
+        4
+    } else {
+        5
+    }
+}
+
+/// The order rank each Fix should print, from the rows of the package alone: the earliest place
+/// for action among the places of its problem rows, else the earliest of the other classes.
+/// An advisory is a place for action, First when critical or high, otherwise Later (the order of a row
+/// with no effort estimate and no decision).
+fn expected_fix_ranks(live: &[Value], deps: &[Value]) -> BTreeMap<String, usize> {
+    let mut at: BTreeMap<(String, String, String, String), Vec<&Value>> = BTreeMap::new();
+    for r in live.iter().filter(|r| {
+        crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&text(r, "kind").as_str())
+    }) {
+        at.entry(place_key_of(r)).or_default().push(r);
+    }
+    let mut out: BTreeMap<String, usize> = BTreeMap::new();
+    let mut note = |fix: String, rank: usize| {
+        if !fix.is_empty() {
+            let slot = out.entry(fix).or_insert(rank);
+            *slot = (*slot).min(rank);
+        }
+    };
+    for members in at.values() {
+        let buckets: Vec<String> = members.iter().map(|m| text(m, "bucket")).collect();
+        let rank = place_rank(&buckets);
+        // A row a reviewer, a baseline record or a waiver accepted is not a change of its Fix.
+        for m in members.iter().filter(|m| {
+            !matches!(
+                text(m, "disposition_kind").as_str(),
+                "Ignored" | "BaselineAccepted" | "WaivedInline"
+            )
+        }) {
+            note(text(m, "fix_id"), rank);
+        }
+    }
+    for d in deps {
+        let rank = match text(d, "severity").to_ascii_lowercase().as_str() {
+            "critical" | "high" => 0,
+            _ => 2,
+        };
+        note(text(d, "fix_id"), rank);
+    }
+    out
+}
+
+/// The column of `header` in a sheet grid.
+fn column_of(grid: &[Vec<String>], header: &str) -> Option<usize> {
+    grid.first()?.iter().position(|h| h == header)
+}
+
+/// Fix order, recounted. All surfaces take their order words from the rows: the All problems
+/// column tallies to the problems counts, each Fix plan row and each "other fixes" line carries
+/// the order its places give, and the three-things box is empty exactly when nothing is First.
+fn order_problems(
+    entries: &Entries,
+    report: &AuditReportJson,
+    want: &ReportCounts,
+) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let (Ok(live), Ok(deps)) = (
+        array_of(entries, "json/all-findings.json"),
+        array_of(entries, "json/dependencies.json"),
+    ) else {
+        // The recount has already refused a package it cannot read.
+        return out;
+    };
+    let ranks = expected_fix_ranks(&live, &deps);
+
+    // The three-things box is empty exactly when no problem is First.
+    if report.three_things.items.is_empty() != (want.problems.first == 0) {
+        out.push(problem(
+            "PDF data",
+            "three_things",
+            format!(
+                "the box lists {} things and the counts give {} problems First",
+                report.three_things.items.len(),
+                want.problems.first
+            ),
+        ));
+    }
+
+    // Each "other fixes" line.
+    for line in report.other_fixes.groups.iter().flat_map(|g| &g.lines) {
+        match ranks.get(&line.fix_id) {
+            Some(rank) if word_rank(&line.fix_order) == Some(*rank) => {}
+            Some(rank) => out.push(problem(
+                "PDF data",
+                &format!("other_fixes, fix {}", line.fix_id),
+                format!(
+                    "the line says {:?} and the places of the fix give {:?}",
+                    line.fix_order, ORDER_WORDS[*rank]
+                ),
+            )),
+            None => out.push(problem(
+                "PDF data",
+                &format!("other_fixes, fix {:?}", line.fix_id),
+                "the line names a fix that has no place in the package",
+            )),
+        }
+    }
+
+    // The workbook: the All problems column and each Fix plan row.
+    let Some(stem) = super::consistency::package_stem(entries) else {
+        return out;
+    };
+    let xlsx_name = format!("{stem}-findings.xlsx");
+    let Some(xlsx) = entries.get(&xlsx_name) else {
+        return out;
+    };
+    if let Ok(grid) = super::archive::xlsx_sheet_grid(xlsx, v::ALL_PROBLEMS) {
+        if let (Some(order), Some(sev)) = (
+            column_of(&grid, v::H_FIX_ORDER),
+            column_of(&grid, v::H_SEVERITY),
+        ) {
+            let mut tally = [0usize; 6];
+            for row in grid
+                .iter()
+                .skip(1)
+                .filter(|r| r.get(sev).is_some_and(|c| !c.is_empty()))
+            {
+                match row.get(order).and_then(|w| word_rank(w)) {
+                    Some(rank) => tally[rank] += 1,
+                    None => out.push(problem(
+                        &xlsx_name,
+                        "sheet \"All problems\" Fix order",
+                        format!(
+                            "a row says {:?}, which is no order or class",
+                            row.get(order)
+                        ),
+                    )),
+                }
+            }
+            let p = &want.problems;
+            for (word, got, w) in [
+                (v::FIX_ORDER_FIRST, tally[0], p.first),
+                (v::FIX_ORDER_NEXT, tally[1], p.next),
+                (v::FIX_ORDER_LATER, tally[2], p.later),
+                (v::FIX_CLASS_NEEDS_DECISION, tally[3], p.needs_decision),
+                (v::FIX_CLASS_INFORMATION_ONLY, tally[4], p.information_only),
+                (v::FIX_CLASS_ACCEPTED, tally[5], p.accepted),
+            ] {
+                if got != w {
+                    out.push(problem(
+                        &xlsx_name,
+                        &format!("sheet \"All problems\" Fix order {word:?}"),
+                        format!("the column says {word:?} {got} times and the counts give {w}"),
+                    ));
+                }
+            }
+        }
+    }
+    if let Ok(grid) = super::archive::xlsx_sheet_grid(xlsx, v::FIX_PLAN) {
+        if let (Some(order), Some(id)) = (
+            column_of(&grid, v::H_FIX_ORDER),
+            column_of(&grid, v::H_FIX_ID),
+        ) {
+            for row in grid
+                .iter()
+                .skip(1)
+                .filter(|r| r.get(id).is_some_and(|c| !c.is_empty()))
+            {
+                let fix = &row[id];
+                let said = row.get(order).map_or("", String::as_str);
+                match ranks.get(fix) {
+                    Some(rank) if word_rank(said) == Some(*rank) => {}
+                    Some(rank) => out.push(problem(
+                        &xlsx_name,
+                        &format!("sheet \"Fix plan\", fix {fix}"),
+                        format!(
+                            "the row says {said:?} and the places of the fix give {:?}",
+                            ORDER_WORDS[*rank]
+                        ),
+                    )),
+                    None => out.push(problem(
+                        &xlsx_name,
+                        &format!("sheet \"Fix plan\", fix {fix}"),
+                        "the row is a fix that has no place in the package",
+                    )),
+                }
+            }
         }
     }
     out

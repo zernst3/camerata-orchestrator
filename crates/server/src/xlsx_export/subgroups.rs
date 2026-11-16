@@ -4,7 +4,8 @@
 //! A sub-group is one rule's places with one cause ([`SubgroupFacts`]). A Fix ([`FixFacts`]) is
 //! the sub-groups whose places are one change (`review_tree::merge_fixes`), folded: every rule it
 //! satisfies is listed with its citation, the effort is the largest band once, the severity the
-//! worst, the fix order the earliest any member would have had alone. Nothing is dropped: a rule
+//! worst, the fix order the earliest order among its places that are for
+//! action (one rule, [`class_of_fix`]). Nothing is dropped: a rule
 //! that covers only some of the Fix's places says which.
 //!
 //! Everything here is worked out ONCE from the same rows the other sheets are written from
@@ -24,7 +25,9 @@ use std::collections::BTreeMap;
 use super::{severity_rank, title_case, vocabulary, DepRow, FindingRow};
 use crate::report_export::prose_checks::client_text;
 use crate::report_export::{Disposition, ReviewedReport};
-use crate::review_tree::{is_thrown_out_id, NodeLevel};
+use crate::review_tree::{
+    class_of_fix, class_of_place, is_thrown_out_id, FixClass, NodeLevel, PlaceClass,
+};
 
 /// What the plan, the tickets and the PDF's patterns say for a report that has findings and no
 /// review tree (one stored before the tree existed): there are no sub-groups to plan, and
@@ -71,6 +74,9 @@ pub(crate) struct SiteFact {
     /// Other rules that flagged this place and were collapsed into the row: `(rule id, title,
     /// citation)`. A Fix lists them as rules of its own, so a collapse never hides a rule.
     pub also_rules: Vec<(String, String, String, bool)>,
+    /// The class of the place by the one place rule: every row at the place, whatever the rule or
+    /// the Fix, decides it.
+    pub class: PlaceClass,
 }
 
 impl SiteFact {
@@ -96,35 +102,6 @@ impl SiteFact {
         } else {
             at
         }
-    }
-}
-
-/// When a sub-group's fix is scheduled (design 3B item 2, from the severity x effort matrix).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Sequence {
-    /// Critical, high, or medium at low effort.
-    First,
-    /// The rest of medium.
-    Next,
-    /// Low and informational.
-    Later,
-}
-
-impl Sequence {
-    /// The fix order word, from the vocabulary.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::First => vocabulary::FIX_ORDER_FIRST,
-            Self::Next => vocabulary::FIX_ORDER_NEXT,
-            Self::Later => vocabulary::FIX_ORDER_LATER,
-        }
-    }
-
-    /// The fix order of a fix whose worst problem has `severity` and whose usual effort is
-    /// `effort`: critical and high first, medium at low effort first, the rest of medium next,
-    /// everything else later.
-    pub fn of(severity: &str, effort: &str) -> Self {
-        sequence_of(severity, effort)
     }
 }
 
@@ -155,7 +132,8 @@ pub(crate) struct SubgroupFacts {
     pub fix: String,
     /// The primary row's own fix for its code, as the worked example.
     pub worked_example: String,
-    pub sequence: Sequence,
+    /// The Fix order of the sub-group, by the one Fix rule ([`class_of_fix`]).
+    pub class: FixClass,
     pub is_dependency: bool,
 }
 
@@ -215,13 +193,15 @@ fn top_folders<'a>(
         .collect()
 }
 
-fn sequence_of(severity: &str, effort: &str) -> Sequence {
-    match severity.to_ascii_lowercase().as_str() {
-        "critical" | "high" => Sequence::First,
-        "medium" if effort == "low" => Sequence::First,
-        "medium" => Sequence::Next,
-        _ => Sequence::Later,
-    }
+/// The class of a dependency advisory: a place that is for action, ordered by the one rule from
+/// its severity (an advisory has no effort estimate and no decision).
+fn dependency_class(severity: &str) -> PlaceClass {
+    let bucket = crate::report_export::matrix_bucket(
+        Disposition::Unresolved,
+        &severity.to_ascii_lowercase(),
+        None,
+    );
+    class_of_place([bucket])
 }
 
 fn severity_title(rank: u8) -> &'static str {
@@ -251,6 +231,7 @@ fn subgroup_facts_with(
     let Some(tree) = report.tree.as_ref() else {
         return Vec::new();
     };
+    let place_classes = super::sheets::place_classes(rows);
     // Which row is the sub-group's primary: the row the grouping put first.
     let primary_ids: std::collections::HashSet<String> = report
         .findings
@@ -306,6 +287,7 @@ fn subgroup_facts_with(
                     rule_known: true,
                     citation: String::new(),
                     also_rules: Vec::new(),
+                    class: dependency_class(&d.severity),
                 })
                 .collect();
             sites.sort_by(|a, b| {
@@ -329,7 +311,7 @@ fn subgroup_facts_with(
                 rule_title: "Known vulnerable dependency".to_string(),
                 citation: String::new(),
                 category: "Dependencies".to_string(),
-                sequence: sequence_of(&severity, ""),
+                class: class_of_fix(sites.iter().map(|s| s.class)),
                 severity,
                 live: sites.clone(),
                 open: sites,
@@ -398,6 +380,15 @@ fn subgroup_facts_with(
             rule_known: own_name(&r.rule_id, corpus).1,
             citation: r.citation_label.clone(),
             also_rules: also_rules_of(r, corpus),
+            class: {
+                let (repo, path, line, rule) =
+                    crate::review_tree::place_key(&r.repo, &r.path, r.line, &r.rule_id);
+                place_classes
+                    .get(&(repo.to_string(), path.to_string(), line, rule.to_string()))
+                    .copied()
+                    // Fail closed: a row whose place is unknown is not settled.
+                    .unwrap_or(PlaceClass::NeedsDecision)
+            },
         };
         let by_place = |a: &SiteFact, b: &SiteFact| {
             (&a.repo, &a.path, a.line, &a.site_id).cmp(&(&b.repo, &b.path, b.line, &b.site_id))
@@ -416,7 +407,15 @@ fn subgroup_facts_with(
             rule_title: own_name(&primary.rule_id, corpus).0,
             citation: primary.citation_label.clone(),
             category: primary.category.clone(),
-            sequence: sequence_of(&severity, &effort),
+            class: class_of_fix(
+                if sites.is_empty() {
+                    &live_sites
+                } else {
+                    &sites
+                }
+                .iter()
+                .map(|s| s.class),
+            ),
             severity,
             open: sites,
             live: live_sites,
@@ -560,7 +559,9 @@ pub(crate) struct FixFacts {
     pub worked_example: String,
     /// The three folders holding most of the open places, with their counts.
     pub folders: Vec<String>,
-    pub sequence: Sequence,
+    /// The Fix order, or the class when no place of it is for action: [`class_of_fix`] over the
+    /// places still to fix (every live place when none is).
+    pub class: FixClass,
     pub is_dependency: bool,
     /// Where the Fix stands with the reviewer, in words: Open with counts, the state all its
     /// rules share, or Mixed. Empty when there is nothing to decide.
@@ -633,7 +634,7 @@ fn fold_fix(
     members.sort_by_key(|m| {
         (
             severity_rank(&m.severity.to_ascii_lowercase()),
-            m.sequence,
+            m.class,
             m.id.clone(),
         )
     });
@@ -669,11 +670,17 @@ fn fold_fix(
         .max_by_key(|e| effort_rank(e))
         .unwrap_or_default()
         .to_string();
-    let sequence = members
+    // The Fix's order is the one Fix rule over its own places, not the earliest of its members:
+    // a place two members share counts once, as it does everywhere else.
+    let class = class_of_fix(
+        if open_all.is_empty() {
+            &live_all
+        } else {
+            &open_all
+        }
         .iter()
-        .map(|m| m.sequence)
-        .min()
-        .unwrap_or(Sequence::Later);
+        .map(|s| s.class),
+    );
 
     // Every rule, once, with the places it covers.
     struct Acc {
@@ -858,7 +865,7 @@ fn fold_fix(
                 .map(|s| (s.repo.as_str(), s.path.as_str())),
             multi_repo,
         ),
-        sequence,
+        class,
         is_dependency,
         decision,
         shares,
@@ -1008,7 +1015,7 @@ pub(crate) fn in_plan_order(facts: Vec<FixFacts>) -> Vec<FixFacts> {
     ordered.extend(by_id.into_values());
     // Fix first, then next, then later; the plan's order (worst severity, biggest) holds inside
     // each.
-    ordered.sort_by_key(|g| g.sequence);
+    ordered.sort_by_key(|g| g.class);
     ordered
 }
 
@@ -1130,7 +1137,7 @@ pub(crate) fn pdf_sections(
     let (rows, deps) = super::partition_rows_for(reviewed, corpus, chosen_options, false);
     let mut escalated = escalated_places(&rows);
     let mut facts = fix_facts(reviewed, &rows, &deps, corpus, true);
-    facts.sort_by_key(|g| (g.open.is_empty(), g.sequence));
+    facts.sort_by_key(|g| (g.open.is_empty(), g.class));
     // What each escalated place's Fix asks of the reader, in two sentences, and its effort.
     for entry in &mut escalated {
         if let Some(g) = facts.iter().find(|g| g.id == entry.fix_id) {
@@ -1203,7 +1210,12 @@ pub(crate) fn pdf_sections(
             fix: g.fix,
             worked_example: g.worked_example,
             folders: g.folders,
-            sequence: g.sequence.label().to_string(),
+            // A Fix with every place accepted has no order to print.
+            sequence: if g.class == FixClass::AcceptedRisk {
+                String::new()
+            } else {
+                vocabulary::fix_class_label(g.class).to_string()
+            },
         })
         .collect();
     PdfSections {

@@ -656,7 +656,14 @@ fn an_ai_row_in_a_fix_is_named_by_its_own_rule_never_by_the_rule_that_grounds_it
     ai.confidence = Some("high".to_string());
     ai.detail =
         "The service-role key bypasses row level security and sits in a client bundle.".to_string();
-    report.findings = vec![ai, secret_row(RULES_AT_LINE[0], "Universal", "critical", 6)];
+    // The AI row has no citation in the corpus, so it is held and its place waits for a decision.
+    // A second place of the secret rule keeps the Fix one to do, and the plan row still names the
+    // AI rule among the rules of the Fix.
+    report.findings = vec![
+        ai,
+        secret_row(RULES_AT_LINE[0], "Universal", "critical", 6),
+        secret_row(RULES_AT_LINE[0], "Universal", "critical", 9),
+    ];
     let reviewed = reviewed_of(&report.seal(), &[]);
 
     let xlsx = crate::xlsx_export::build_workbook(&reviewed, Some(&corpus), &options()).unwrap();

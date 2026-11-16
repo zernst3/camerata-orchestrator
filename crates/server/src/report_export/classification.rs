@@ -215,9 +215,8 @@ pub(crate) fn category_for_finding(
 /// (`normalize_severity`) — a `critical` finding is ALWAYS `do_now` regardless of effort (a
 /// deterministic-floor/preview finding never gets calibrated effort, and the worst finding in
 /// the report must never sit un-actioned in "Do next" just because no one estimated the fix
-/// time). `high` severity still needs `effort == Some("low")` for `do_now`; missing effort is
-/// treated as "not low" there — conservative, so an uncalibrated high finding never gets
-/// silently downgraded to a same-day fix. `medium`/`low` always land in `Plan`.
+/// time). `high` severity is `do_now` at low effort or with no estimate (owner ruling 2026-11-16)
+/// and `do_next` at medium or high effort. `medium`/`low` always land in `Plan`.
 pub(crate) fn matrix_bucket(
     disposition: Disposition,
     severity: &str,
@@ -238,10 +237,12 @@ pub(crate) fn matrix_bucket(
             if severity == "critical" {
                 return "do_now";
             }
-            let low_effort = matches!(effort, Some("low"));
-            match (severity == "high", low_effort) {
-                (true, true) => "do_now",
-                (true, false) => "do_next",
+            // Owner ruling 2026-11-16: a high problem with no estimate is First, like one at
+            // low effort; only a medium or high estimate puts it Next.
+            let slow = matches!(effort, Some("medium" | "high"));
+            match (severity == "high", slow) {
+                (true, false) => "do_now",
+                (true, true) => "do_next",
                 (false, _) => "plan",
             }
         }

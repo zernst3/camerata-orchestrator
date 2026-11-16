@@ -1692,9 +1692,43 @@ pub fn build_report_json_with_counts(
     // The files of chosen line places: a whole-file row of such a file is skipped too.
     let mut selected_line_files: std::collections::HashSet<(&str, &str)> =
         std::collections::HashSet::new();
+    // The box lists only places that are First by the one place rule: a do-now row at a place
+    // another row holds for a decision is not First, so the box is empty exactly when no problem
+    // is First.
+    let mut buckets_at: std::collections::HashMap<(&str, &str, usize, &str), Vec<&str>> =
+        std::collections::HashMap::new();
+    for f in matrix
+        .do_now
+        .iter()
+        .chain(&matrix.do_next)
+        .chain(&matrix.plan)
+        .chain(&matrix.accepted)
+        .chain(&matrix.informational)
+        .chain(&matrix.held)
+    {
+        buckets_at
+            .entry(crate::review_tree::place_key(
+                &f.repo, &f.path, f.line, &f.rule_id,
+            ))
+            .or_default()
+            .push(f.bucket.as_str());
+    }
     for f in &do_now_sorted {
         if top3_do_now.len() >= 3 {
             break;
+        }
+        let first_place = buckets_at
+            .get(&crate::review_tree::place_key(
+                &f.repo, &f.path, f.line, &f.rule_id,
+            ))
+            .is_some_and(|b| {
+                crate::review_tree::class_of_place(b.iter().copied())
+                    == crate::review_tree::PlaceClass::ForAction(
+                        crate::review_tree::FixOrder::First,
+                    )
+            });
+        if !first_place {
+            continue;
         }
         if selected_places.contains(&(f.repo.as_str(), f.path.as_str(), f.line))
             || (f.line > 0 && selected_files.contains(&(f.repo.as_str(), f.path.as_str())))
@@ -2209,6 +2243,7 @@ fn other_fixes_of(
     let mut groups: Vec<OtherFixGroupJson> = Vec::new();
     for p in remaining.iter().take(PDF_MAX_OTHER_FIXES) {
         let line = OtherFixLineJson {
+            fix_id: p.group.clone(),
             name: p.name.clone(),
             severity: p.severity.clone(),
             places: crate::xlsx_export::vocabulary::places_count(p.open_sites),
@@ -2556,6 +2591,8 @@ pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFacts
 mod addition_tests;
 #[cfg(test)]
 mod counts_surfaces_tests;
+#[cfg(test)]
+mod order_rule_tests;
 #[cfg(test)]
 mod status_word_tests;
 
