@@ -158,17 +158,27 @@ fn no_surface_counts_by_itself() {
         body.contains("counts_prose::more_line("),
         "more_in_sheet builds its own sentence: {body}"
     );
-    for file in [
-        "src/report_export.rs",
-        "src/report_export/marking.rs",
-        "src/xlsx_export.rs",
-    ] {
-        let source = read(file);
-        assert!(
-            !source.contains("\"and {} more") && !source.contains("\"and {n} more"),
-            "{file} builds an \"and N more\" line by itself"
-        );
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for file in ["src/report_export.rs", "src/xlsx_export.rs"] {
+        sources.push((file.to_string(), read(file)));
     }
+    let dir = format!("{root}/src/report_export");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("src/report_export is readable")
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".rs"))
+        .collect();
+    names.sort();
+    for name in names {
+        let path = format!("src/report_export/{name}");
+        sources.push((path.clone(), read(&path)));
+    }
+    let offenders = more_line_offenders(&sources);
+    assert!(
+        offenders.is_empty(),
+        "an \"and N more\" line is built outside `counts_prose::more_line`:\n{}",
+        offenders.join("\n")
+    );
     // The old builders that took loose integers are gone.
     for (file, name) in [
         (
@@ -273,4 +283,78 @@ fn a_decision_on_an_old_whole_file_place_survives_the_re_merge_on_load() {
             .is_some_and(|t| t.places.is_empty()),
         "the places were merged again"
     );
+}
+
+/// The two sentences that may build an "and N more" line themselves, by file and function, each
+/// with its reason. Everything else goes through `counts_prose::more_line`.
+const MORE_LINE_ALLOWLIST: [(&str, &str, &str); 2] = [
+    (
+        "src/report_export/coverage_gaps.rs",
+        "skipped_beyond_cap_sentence",
+        "a sentence about files skipped, with a clause after it, not a list tail",
+    ),
+    (
+        "src/xlsx_export.rs",
+        "site_list_cell_within",
+        "a pointer inside a cell that must fit a character budget, so it is built beside the fit",
+    ),
+];
+
+/// Every line of `sources` (path, text) that writes `"and {` and later ` more`, outside
+/// `counts_prose.rs` (which owns `more_line`), this test file and the allowlist.
+fn more_line_offenders(sources: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (path, text) in sources {
+        if path.ends_with("counts_prose.rs") || path.ends_with("counts_surfaces_tests.rs") {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(at) = line.find("\"and {") else {
+                continue;
+            };
+            if !line[at..].contains(" more") {
+                continue;
+            }
+            // The function the line is in: the nearest `fn name(` above it.
+            let function = lines[..=i]
+                .iter()
+                .rev()
+                .find_map(|l| {
+                    let rest = &l[l.find("fn ")? + 3..];
+                    Some(rest[..rest.find('(')?].trim().to_string())
+                })
+                .unwrap_or_default();
+            if MORE_LINE_ALLOWLIST
+                .iter()
+                .any(|(file, name, _)| path.ends_with(file) && function == *name)
+            {
+                continue;
+            }
+            out.push(format!(
+                "{path} line {} in `{function}`: {}",
+                i + 1,
+                line.trim()
+            ));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_more_line_scan_catches_a_planted_line_and_passes_the_allowed_two() {
+    let planted = vec![(
+        "src/report_export/planted.rs".to_string(),
+        "fn rest(n: usize) -> String {\n    format!(\"and {n} more things\")\n}\n".to_string(),
+    )];
+    let found = more_line_offenders(&planted);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("in `rest`"), "{found:?}");
+    // The same line inside an allowed function is let through.
+    let allowed = vec![(
+        "src/report_export/coverage_gaps.rs".to_string(),
+        "pub fn skipped_beyond_cap_sentence(n: usize) {\n    format!(\"and {n} more x\")\n}\n"
+            .to_string(),
+    )];
+    assert!(more_line_offenders(&allowed).is_empty());
 }
