@@ -160,6 +160,9 @@ fn selected() -> Vec<SelectedRule> {
 
 fn controls() -> RunControls {
     RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),

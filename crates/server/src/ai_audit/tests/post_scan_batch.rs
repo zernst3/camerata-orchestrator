@@ -15,6 +15,9 @@ const ALTERNATIVES_REPLY: &str = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1
 
 fn capped(cap: f64) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: Default::default(),

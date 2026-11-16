@@ -284,6 +284,10 @@ impl InspectArgs {
             fix_model: self.fix_model.clone(),
             clone_judge_model: self.clone_judge_model.clone(),
             consensus: self.consensus,
+            // The finder flags are wired by the agent finder runner build.
+            finder: camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
+            finder_model: None,
+            finder_force_pieces: None,
         })
     }
 }

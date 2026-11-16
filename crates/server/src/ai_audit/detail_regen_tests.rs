@@ -317,6 +317,9 @@ fn selected() -> Vec<(String, String)> {
 
 fn meter_with(config: EfficiencyConfig) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: config,
@@ -769,6 +772,9 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
     let llm = RoleLlm::new(&terse_scan(1), Regen::Writes);
     // Cap already exhausted by the scan pass (each stub call costs 0.01).
     let meter = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
@@ -841,6 +847,9 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
     // One refusal is $0.60 against a $0.50 cap: the cap trips on the first, so the repeat round
     // is not started.
     let meter = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
@@ -1576,6 +1585,9 @@ async fn the_third_round_is_still_bounded_by_the_spend_limit() {
     // spend to the limit, and the two singles after it are refused before they are sent.
     let llm = RoleLlm::new("{}", Regen::Garbage);
     let meter = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
@@ -3122,6 +3134,9 @@ mod batch_route {
 
     fn capped(cap: f64) -> UsageMeter {
         UsageMeter::with_controls(RunControls {
+            finder: Default::default(),
+            finder_model: None,
+            finder_force_pieces: None,
             stored_spend_usd: 0.0,
             review: Default::default(),
             efficiency: EfficiencyConfig::default(),

@@ -100,6 +100,9 @@ fn efficiency(applies_to_routing: bool) -> EfficiencyConfig {
 
 fn meter(applies_to_routing: bool) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: efficiency(applies_to_routing),
@@ -676,6 +679,9 @@ async fn run_routed_batch_default_off(
     let mut config = efficiency(applies_to_routing);
     config.batch_default = false;
     let m = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: config,

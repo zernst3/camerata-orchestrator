@@ -834,6 +834,9 @@ fn a_batch_run_reaches_every_post_scan_stage_with_its_job() {
 
 fn capped_meter(cap: f64, hint: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(crate::cost_cap::RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: crate::efficiency::EfficiencyConfig::default(),

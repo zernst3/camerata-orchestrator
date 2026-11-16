@@ -122,6 +122,9 @@ async fn surfaces() -> (Vec<(String, String)>, Vec<Finding>) {
     let mut efficiency = EfficiencyConfig::default();
     efficiency.set("terse_output", false).unwrap();
     let meter = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,

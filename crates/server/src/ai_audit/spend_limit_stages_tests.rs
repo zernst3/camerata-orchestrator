@@ -111,7 +111,8 @@ fn the_table_names_every_stage_the_meter_counts() {
             "group-review",
             "fix",
             "deep",
-            "clone-judge"
+            "clone-judge",
+            "finder"
         ]
     );
 }
@@ -288,6 +289,8 @@ async fn run_stage_once(stage: Stage, llm: &Counting, meter: &UsageMeter) {
             )
             .await;
         }
+        // Driven by the agent finder's runner; nothing to run for it here.
+        Stage::Finder => {}
         Stage::CloneJudge => {
             use crate::onboard::clone_advisory::{
                 judge_clone_candidates, JudgeRequest, VerdictCache,
@@ -318,7 +321,9 @@ async fn run_stage_once(stage: Stage, llm: &Counting, meter: &UsageMeter) {
 #[tokio::test]
 async fn a_run_that_starts_past_the_limit_sends_no_call_in_any_stage() {
     let mut sent: Vec<String> = Vec::new();
-    for stage in Stage::ALL {
+    // The finder has no entry to drive here; its admission and spend limit are tested with the
+    // runner (agent finder build 3).
+    for stage in Stage::ALL.into_iter().filter(|s| *s != Stage::Finder) {
         let llm = Counting::new();
         let meter = past_the_limit();
         run_stage_once(stage, &llm, &meter).await;
@@ -337,7 +342,7 @@ async fn the_same_stages_do_send_when_the_limit_is_not_reached() {
     // The control for the test above: each stage fixture really reaches its model, so a count of
     // zero past the limit is the limit's doing and not an input that sends nothing.
     let mut silent: Vec<&str> = Vec::new();
-    for stage in Stage::ALL {
+    for stage in Stage::ALL.into_iter().filter(|s| *s != Stage::Finder) {
         let llm = Counting::new();
         let meter = UsageMeter::with_controls(RunControls {
             max_cost_usd: Some(LIMIT),

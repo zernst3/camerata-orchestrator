@@ -115,6 +115,14 @@ pub struct RunControls {
     /// `camerata inspect --group-review-model`, `--escalation-rate` and `--escalation-floor`).
     /// A blank `group_review_model` means the built-in default. Never the environment.
     pub review: camerata_api_types::project::ReviewSettings,
+    /// `--finder agent|engine`: which finder the run uses. `Engine` (the existing scan passes) is
+    /// the default until the graded comparison decides.
+    pub finder: crate::ai_audit::agent_finder::FinderChoice,
+    /// `--finder-model`: the agent finder's model. `None` or blank = the built-in default
+    /// ([`crate::ai_audit::agent_finder::DEFAULT_FINDER_MODEL`]). Never the environment.
+    pub finder_model: Option<String>,
+    /// `--finder-force-pieces K` (internal runs only): split every unit into at least K pieces.
+    pub finder_force_pieces: Option<usize>,
 }
 
 impl RunControls {
@@ -145,6 +153,18 @@ impl RunControls {
         crate::ai_audit::group_review::resolve_group_review_model(Some(
             self.review.group_review_model.as_str(),
         ))
+    }
+
+    /// The model this run's agent finder calls: the explicit pick, else the built-in default.
+    pub fn finder_model_for(&self) -> String {
+        self.finder_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or_else(
+                || crate::ai_audit::agent_finder::DEFAULT_FINDER_MODEL.to_string(),
+                str::to_string,
+            )
     }
 
     /// The model this run's clone judge calls: the explicit pick, else the built-in fast default.
@@ -188,12 +208,23 @@ pub fn models_the_run_will_use(
     let calibration = crate::ai_audit::resolve_calibration_model(calibration_model, &scan);
     let fix =
         crate::ai_audit::resolve_audit_model(controls.fix_model_for(model, calibration_model));
-    let mut roles: Vec<(&str, String)> = vec![
-        ("the scan", scan.clone()),
-        ("calibration", calibration),
-        ("group review", controls.group_review_model_for()),
-        ("fix generation", fix),
-    ];
+    let agent_finder = controls.finder == crate::ai_audit::agent_finder::FinderChoice::Agent;
+    // The agent finder replaces the scan passes, the alternatives stage and calibration, so those
+    // roles are not listed (and not price-checked) when it is on; the finder is.
+    let mut roles: Vec<(&str, String)> = if agent_finder {
+        vec![
+            ("the finder", controls.finder_model_for()),
+            ("group review", controls.group_review_model_for()),
+            ("fix generation", fix),
+        ]
+    } else {
+        vec![
+            ("the scan", scan.clone()),
+            ("calibration", calibration),
+            ("group review", controls.group_review_model_for()),
+            ("fix generation", fix),
+        ]
+    };
     if deep {
         roles.push(("the deep tier", scan));
     }

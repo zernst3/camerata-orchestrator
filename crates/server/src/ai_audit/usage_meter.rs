@@ -577,6 +577,7 @@ pub const STAGE_DETAIL: &str = "detail regeneration";
 pub const STAGE_FIX: &str = "fix-specific generation";
 pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
 pub const STAGE_DEEP: &str = "deep compliance tier";
+pub const STAGE_FINDER: &str = "agent finder";
 
 /// The run estimate's whole-run dollars for a batch scan over `chunks` and `batches`, priced at
 /// `model` (scan and calibration alike; `camerata_ui_core::scan::estimate_run_cost_bounds`, the

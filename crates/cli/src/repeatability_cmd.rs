@@ -425,6 +425,10 @@ pub async fn run_repeatability_with(
         // Repeatability measures the drift of the default configuration.
         clone_judge_model: None,
         consensus: false,
+        // Repeatability measures the default (engine) finder.
+        finder: camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
+        finder_model: None,
+        finder_force_pieces: None,
     };
     let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
     let models = camerata_server::cost_cap::models_the_run_will_use(
