@@ -388,7 +388,7 @@ pub fn build_agent_finder(inputs: &PreflightInputs<'_>, force_pieces: Option<usi
     let total = sum_agent_finder(&parts);
     writeln!(
         out,
-        "  finder: agent. Estimated cost of the finder stage: about ${:.2}, most likely between ${:.2} and ${:.2}",
+        "  finder: agent. Estimated cost of the finder stage only: about ${:.2}, most likely between ${:.2} and ${:.2} (the group review and the fix stage are extra and are not in this figure)",
         total.expected_usd, total.low_usd, total.high_usd
     )
     .ok();
@@ -880,6 +880,16 @@ mod tests {
             p.text
         );
         assert!(p.text.contains("finder: agent"), "{}", p.text);
+        // The headline figure says in plain words what it covers.
+        let headline = p
+            .text
+            .lines()
+            .find(|l| l.contains("finder: agent"))
+            .expect("a headline");
+        assert!(
+            headline.contains("finder stage only") && headline.contains("group review"),
+            "{headline}"
+        );
         assert!(p.text.contains("0.6 to 1.8 times"), "{}", p.text);
         assert!(
             p.text.contains("unit")
