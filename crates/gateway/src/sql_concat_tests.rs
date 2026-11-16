@@ -63,3 +63,24 @@ fn the_gate_arm_reads_the_same_matches() {
     let real = "log(\"ready\");\nconst q = `select * from orders where id = ${id}`;\n";
     assert!(arm_sec_no_raw_sql_concat_1("src/a.ts", real).is_err());
 }
+
+#[test]
+fn single_quoted_sql_after_an_earlier_double_quote_fires() {
+    let fstring = "log(\"ready\")\nq = f'SELECT * FROM users WHERE name = {name}'\n";
+    assert_eq!(sql(fstring), vec![2]);
+    let format = "log(\"ready\")\nq = 'SELECT * FROM users WHERE name = {}'.format(name)\n";
+    assert_eq!(sql(format), vec![2]);
+    let concat = "log(\"ready\")\nq = 'SELECT * FROM users WHERE name = ' + name\n";
+    assert_eq!(sql(concat), vec![2]);
+    // Quiet: a parameterized single-quoted query, and prose with an apostrophe.
+    assert!(sql("log(\"ready\")\nq = 'SELECT * FROM users WHERE name = %s'\n").is_empty());
+    assert!(sql("log(\"ready\")\n// don't update it\nconst a = `${x}`;\n").is_empty());
+}
+
+#[test]
+fn a_verb_on_the_quote_line_keeps_a_multi_line_match_whose_quote_does_not_open() {
+    // The quote before SELECT follows one stray quote on its line, so it does not "open" a
+    // string; the verb right after it is what keeps the match.
+    let text = "it\"s \"SELECT id\n FROM t\n WHERE n = '{n}'\"";
+    assert_eq!(sql(text), vec![1]);
+}

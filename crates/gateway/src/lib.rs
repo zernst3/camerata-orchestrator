@@ -584,7 +584,7 @@ fn is_write_tool(tool: &str) -> bool {
 ///
 /// Matching rules (all comparisons are case-insensitive):
 /// - Any **path segment** (directory component) equals one of:
-///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `benches`, `cypress`, `e2e`
+///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `benches`, `cypress`
 ///   (`examples` is intentionally excluded — see GATE-F7 note in the body).
 /// - The **filename** (last segment) matches one of:
 ///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `*.cy.<ext>`, `*.e2e.<ext>`, `test_*.py`,
@@ -615,8 +615,7 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
             // test artefact. Treating an examples path as test scope let an
             // agent disable floor rules by filename. Examples now get full
             // production enforcement.
-            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "benches" | "cypress"
-            | "e2e" => {
+            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "benches" | "cypress" => {
                 return true;
             }
             _ => {}
@@ -1137,6 +1136,27 @@ fn sec_sql_template_regex() -> &'static Regex {
     })
 }
 
+static SEC_SQL_SINGLE_QUOTE_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The single-quoted form (a Python f-string or `.format`, a `'...' + x` concatenation): inside
+/// ONE `'...'` literal, a DML word, a clause word, then `{name}` or the closing quote and `+`.
+fn sec_sql_single_quote_regex() -> &'static Regex {
+    SEC_SQL_SINGLE_QUOTE_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            '
+            (?:[^'\\]|\\[\s\S])*?
+            \b(?:SELECT|INSERT|UPDATE|DELETE)\b
+            (?:[^'\\]|\\[\s\S])*?
+            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b
+            (?:[^'\\]|\\[\s\S])*?
+            (?: \{\w*\} | '\s*\+ )
+            "#,
+        )
+        .expect("SEC-NO-RAW-SQL-CONCAT-1 single-quote regex must compile")
+    })
+}
+
 /// Whether the quote at `at` opens a string: an even number of unescaped `quote` characters
 /// precede it on its line.
 fn quote_opens_a_string(content: &str, at: usize, quote: char) -> bool {
@@ -1195,8 +1215,8 @@ fn sql_concat_hits(
     hits
 }
 
-/// Offsets of every raw-SQL concatenation hit in `content`, sorted: the double-quoted form at the
-/// match start, the template-literal form at its `${`.
+/// Offsets of every raw-SQL concatenation hit in `content`, sorted: the double- and single-quoted
+/// forms at the match start, the template-literal form at its `${`.
 fn sql_concat_offsets(content: &str) -> Vec<usize> {
     let mut hits = sql_concat_hits(content, sec_sql_concat_regex(), '"', |m| m.start());
     hits.extend(sql_concat_hits(
@@ -1204,6 +1224,12 @@ fn sql_concat_offsets(content: &str) -> Vec<usize> {
         sec_sql_template_regex(),
         '`',
         |m| m.end() - 2,
+    ));
+    hits.extend(sql_concat_hits(
+        content,
+        sec_sql_single_quote_regex(),
+        '\'',
+        |m| m.start(),
     ));
     hits.sort_unstable();
     hits

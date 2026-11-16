@@ -182,12 +182,21 @@ fn ui_and_end_to_end_test_paths_are_test_paths() {
     for p in [
         "apps/web/cypress/support/commands.ts",
         "src/login.cy.tsx",
-        "packages/auth/e2e/login.ts",
         "src/flow.e2e.ts",
     ] {
         assert!(is_test_or_fixture_path(p), "{p}");
     }
-    for p in ["src/services/cypress_client.ts", "src/e2eReport.ts"] {
+    for p in [
+        "src/services/cypress_client.ts",
+        "src/e2eReport.ts",
+        "src/crypto/e2e/session.ts",
+    ] {
         assert!(!is_test_or_fixture_path(p), "{p}");
     }
+}
+
+#[test]
+fn a_bare_e2e_folder_is_production_code_for_the_sql_arm() {
+    let content = "const q = \"SELECT * FROM users WHERE name = '\" + name + \"'\";";
+    assert!(arm_sec_no_raw_sql_concat_1("src/crypto/e2e/session.ts", content).is_err());
 }
