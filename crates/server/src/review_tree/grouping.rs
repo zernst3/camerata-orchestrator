@@ -139,7 +139,7 @@ pub fn group_semantic(
         .zip(&placements)
         .map(|(f, p)| {
             super::lint::is_style_lint_row(f, tools)
-                .then(|| super::lint::lint_sub_id(&p.rule, &f.repo))
+                .then(|| super::lint::lint_sub_id(&p.rule, &f.repo, &f.rule_id))
         })
         .collect();
     let mut members_by_rule_component: BTreeMap<(&str, usize), Vec<usize>> = BTreeMap::new();

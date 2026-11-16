@@ -211,7 +211,7 @@ pub fn build_tree(
                 } else {
                     rule.strip_prefix("rule:").unwrap_or(rule).to_string()
                 };
-                row_sub.push(super::lint::lint_sub_id(rule, &f.repo));
+                row_sub.push(super::lint::lint_sub_id(rule, &f.repo, &f.rule_id));
                 placements.push(RulePlacement {
                     category: category.clone(),
                     rule: rule.clone(),
@@ -219,7 +219,7 @@ pub fn build_tree(
                 });
             }
             None if lint => {
-                row_sub.push(super::lint::lint_sub_id(&fresh.rule, &f.repo));
+                row_sub.push(super::lint::lint_sub_id(&fresh.rule, &f.repo, &f.rule_id));
                 placements.push(fresh);
             }
             Some([category, rule, sub]) => {

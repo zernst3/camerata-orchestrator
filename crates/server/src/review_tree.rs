@@ -586,6 +586,8 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
 #[cfg(test)]
 mod fixes_tests;
 #[cfg(test)]
+mod lint_review_tests;
+#[cfg(test)]
 mod lint_tests;
 #[cfg(test)]
 mod lint_urgent_tests;

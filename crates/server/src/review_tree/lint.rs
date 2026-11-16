@@ -27,7 +27,7 @@ pub const STYLE_LINTERS: &[&str] = &["eslint", "clippy", "ruff"];
 /// The last path segment of a lint rule group's id starts with this (`sub:<rule>/lint-<repo>`).
 pub const LINT_SEGMENT_PREFIX: &str = "lint-";
 
-/// How many hex digits of the repository's digest name its lint group.
+/// How many hex digits of the (repository, rule) digest name a lint group.
 const REPO_DIGITS: usize = 12;
 
 /// Whether `tool` (a row's `preview_tool`) is a style linter.
@@ -98,11 +98,12 @@ pub(super) fn rule_node_is_security(f: &Finding, rule_node: &str) -> bool {
     bare != own && is_security_rule_id(bare)
 }
 
-/// The id of the lint rule group of `repo` under `rule_node_id`: `sub:<rule>/lint-<digest>`. The
-/// same rule and repository give the same id on every run.
-pub fn lint_sub_id(rule_node_id: &str, repo: &str) -> String {
+/// The id of the lint rule group of `rule_id` in `repo` under `rule_node_id`:
+/// `sub:<rule node>/lint-<digest of the repository and the rule id>`. Two lint rules under one
+/// native rule node are two groups. The same rule and repository give the same id on every run.
+pub fn lint_sub_id(rule_node_id: &str, repo: &str, rule_id: &str) -> String {
     use sha2::{Digest, Sha256};
-    let digest: String = Sha256::digest(repo.as_bytes())
+    let digest: String = Sha256::digest(format!("{repo}\n{rule_id}").as_bytes())
         .iter()
         .take(REPO_DIGITS / 2)
         .map(|b| format!("{b:02x}"))

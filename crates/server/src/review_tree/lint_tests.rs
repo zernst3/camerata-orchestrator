@@ -100,7 +100,7 @@ fn reviewer_splits(rows: &mut [Finding], tree: ReviewTree, rule: &str, n: usize)
 }
 
 /// The rule groups (sub-group nodes) that hold a row of `rule` in `repo`.
-fn rule_groups_of<'a>(
+pub(super) fn rule_groups_of<'a>(
     tree: &'a ReviewTree,
     rows: &[Finding],
     rule: &str,
@@ -135,7 +135,7 @@ fn fixes_of<'a>(
         .collect()
 }
 
-fn keys_of(rows: &[Finding], rule: &str, repo: &str) -> Vec<String> {
+pub(super) fn keys_of(rows: &[Finding], rule: &str, repo: &str) -> Vec<String> {
     let mut keys: Vec<String> = rows
         .iter()
         .filter(|f| f.rule_id == rule && f.repo == repo)
