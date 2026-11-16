@@ -2417,7 +2417,12 @@ fn execute_grep(inv: &ToolInvocation, jail: &ReadJail) -> String {
     };
 
     let mut findings: Vec<String> = Vec::new();
-    grep_dir(&resolved_dir, &re, &mut findings, 0);
+    if resolved_dir.is_file() {
+        // The schema says `path` is a file or a directory: a file is searched on its own.
+        grep_file(&resolved_dir, &re, &mut findings);
+    } else {
+        grep_dir(&resolved_dir, &re, &mut findings, 0);
+    }
     if findings.is_empty() {
         format!("No matches for `{search_pattern}` in `{search_dir}`")
     } else {
@@ -2455,16 +2460,25 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
         if kind.is_dir() {
             grep_dir(&path, re, out, depth + 1);
         } else if kind.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                for (lineno, line) in text.lines().enumerate() {
-                    if re.is_match(line) {
-                        out.push(format!("{}:{}:{}", path.display(), lineno + 1, line));
-                        if out.len() > 2000 {
-                            // Safety cap: avoid unbounded output.
-                            out.push("... (truncated at 2000 matches)".to_string());
-                            return;
-                        }
-                    }
+            grep_file(&path, re, out);
+            if out.len() > 2000 {
+                return;
+            }
+        }
+    }
+}
+
+/// Collect the `file:line:text` entries of one file's matching lines, capped as the directory
+/// walk is.
+fn grep_file(path: &Path, re: &regex::Regex, out: &mut Vec<String>) {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        for (lineno, line) in text.lines().enumerate() {
+            if re.is_match(line) {
+                out.push(format!("{}:{}:{}", path.display(), lineno + 1, line));
+                if out.len() > 2000 {
+                    // Safety cap: avoid unbounded output.
+                    out.push("... (truncated at 2000 matches)".to_string());
+                    return;
                 }
             }
         }

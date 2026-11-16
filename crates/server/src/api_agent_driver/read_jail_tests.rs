@@ -315,3 +315,17 @@ async fn an_empty_or_relative_read_folder_opens_nothing() {
     .await;
     assert_refused(&out);
 }
+
+#[tokio::test]
+async fn grep_on_a_single_file_path_searches_that_file() {
+    let l = layout();
+    let d = driver(&l);
+    let out = call(
+        &d,
+        "Grep",
+        json!({"pattern": "inside", "path": "src/lib.rs"}),
+    )
+    .await;
+    assert!(out.contains("pub fn inside"), "{out}");
+    assert!(out.contains("lib.rs:1:"), "{out}");
+}
