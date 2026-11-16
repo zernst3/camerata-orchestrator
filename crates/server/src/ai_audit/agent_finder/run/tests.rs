@@ -234,6 +234,7 @@ mod metering;
 mod no_convention;
 mod one_piece;
 mod resume;
+mod setup;
 mod severity;
 mod switch;
 mod vocabulary;

@@ -2,15 +2,14 @@
 //! refuse a bad combination before any spend, the agent a run uses and the comparison of two runs.
 //!
 //! The agent finder itself lives in `camerata_server::ai_audit::agent_finder`. This module is the
-//! command line glue only: it carries the flags, builds the run's piece agent from the saved key
-//! and the run's backend, records a run's problems beside its ledger, and reads an earlier run's
+//! command line glue only: it carries the flags, builds the finder setup (rooms folder, saved key,
+//! engagement kind) the run builds its piece agent from, records a run's problems beside its ledger, and reads an earlier run's
 //! problems back for `--compare-with`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use camerata_server::ai_audit::agent_finder::run_diff::{self, RunDiff};
-use camerata_server::ai_audit::agent_finder::{FinderChoice, PieceAgent};
+use camerata_server::ai_audit::agent_finder::FinderChoice;
 use camerata_server::onboard::Finding;
 
 /// The finder flags of `camerata inspect`. Saved with the run, so a resume uses the same finder.
@@ -141,25 +140,31 @@ pub fn comparison_note_path(ledger_file: &Path) -> PathBuf {
     ledger_file.with_file_name(format!("{stem}.run-difference.md"))
 }
 
-/// Build the run's piece agent from the run's backend and the saved key. `Err` before anything
-/// is spent when the API backend has no key. The command line transport writes its rooms under
-/// `rooms_dir`, an engine-owned folder, never inside the client's repository.
-pub fn build_agent(
-    controls: &camerata_server::cost_cap::RunControls,
+/// The finder setup the command line hands the run: the rooms folder (an engine-owned folder,
+/// never inside the client's repository), the saved Anthropic key and the kind of engagement,
+/// built once here and carried into the audit. The command line never builds the agent itself:
+/// the run builds it on the run's own shared meter. `Err` before anything is spent when the API
+/// backend has no key.
+pub fn finder_setup(
     backend: camerata_server::llm::Backend,
-    api_key: Option<&str>,
-    rooms_dir: &Path,
-) -> Result<Arc<dyn PieceAgent>, String> {
-    // FLAG: this meter is the agent's own, not the scan run's shared meter (which is built inside
-    // the audit call). An API agent built here counts its spend on this meter only; see the
-    // build report. The production path (`find_repo_for_run`) builds its agent with the run's
-    // meter.
-    let meter = Arc::new(camerata_server::ai_audit::UsageMeter::with_controls(
-        controls.clone(),
-    ));
-    camerata_server::ai_audit::agent_finder::piece_agent_for(
-        controls, backend, api_key, rooms_dir, meter,
-    )
-    .map(Arc::from)
-    .map_err(|e| e.to_string())
+    api_key: Option<String>,
+    rooms_dir: PathBuf,
+    client_engagement: bool,
+) -> Result<camerata_server::ai_audit::agent_finder::run::FinderSetup, String> {
+    use camerata_server::ai_audit::agent_finder::run::{EngagementKind, FinderSetup};
+    let api_key = api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty());
+    if backend == camerata_server::llm::Backend::Api && api_key.is_none() {
+        return Err("the API backend needs an Anthropic key".to_string());
+    }
+    Ok(FinderSetup {
+        rooms_dir,
+        api_key,
+        engagement: if client_engagement {
+            EngagementKind::Client
+        } else {
+            EngagementKind::Internal
+        },
+    })
 }

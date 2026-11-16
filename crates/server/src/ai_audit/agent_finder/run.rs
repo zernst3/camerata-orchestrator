@@ -996,10 +996,88 @@ pub fn agent_override_is_set() -> bool {
     AGENT_OVERRIDE.try_with(|_| ()).is_ok()
 }
 
+/// The kind of engagement a run is for. A client engagement is the strict side; a run with no
+/// setup is treated as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EngagementKind {
+    /// A client engagement (the default, strict).
+    #[default]
+    Client,
+    /// An internal (maintainer) run.
+    Internal,
+}
+
+/// Everything the command line decides about the run's finder agent, as one value built once
+/// before the audit starts and carried into it ([`with_finder_setup`]). The command line never
+/// builds a finder agent itself: the run builds it, on the run's own shared meter, from this.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FinderSetup {
+    /// The run's folder for the command line transport's rooms (never inside the client's repo).
+    pub rooms_dir: std::path::PathBuf,
+    /// The Anthropic key from the credential store. `None` when there is none.
+    pub api_key: Option<String>,
+    /// The kind of engagement the run is for.
+    pub engagement: EngagementKind,
+}
+
+impl std::fmt::Debug for FinderSetup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FinderSetup")
+            .field("rooms_dir", &self.rooms_dir)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("engagement", &self.engagement)
+            .finish()
+    }
+}
+
+tokio::task_local! {
+    static FINDER_SETUP: std::sync::Arc<FinderSetup>;
+}
+
+/// Run `fut` with `setup` as the run's finder setup, carried with the future like the test seam
+/// [`with_agent_override`] and the run's checkpoint folder: never global.
+pub async fn with_finder_setup<F: std::future::Future>(setup: FinderSetup, fut: F) -> F::Output {
+    FINDER_SETUP.scope(std::sync::Arc::new(setup), fut).await
+}
+
+/// What the run needs to build its piece agent, resolved from the setup.
+pub(crate) struct AgentBuild {
+    pub backend: crate::llm::Backend,
+    pub api_key: Option<String>,
+    pub work_dir: std::path::PathBuf,
+    pub engagement: EngagementKind,
+}
+
+/// Resolve the agent build from the run's setup. With no setup the command line backend is an
+/// error (its rooms never go under the system temp folder), the key falls back to the one the
+/// run's model client holds, and the engagement kind is the strict one (client).
+pub(crate) fn resolve_agent_build(
+    setup: Option<&FinderSetup>,
+    llm_key: Option<&str>,
+    backend: crate::llm::Backend,
+) -> anyhow::Result<AgentBuild> {
+    let work_dir = match (setup, backend) {
+        (Some(s), _) => s.rooms_dir.clone(),
+        (None, crate::llm::Backend::Cli) => anyhow::bail!(
+            "the command line backend needs a finder setup naming a folder for its rooms; none \
+             was given, so nothing was run"
+        ),
+        (None, crate::llm::Backend::Api) => std::path::PathBuf::new(),
+    };
+    Ok(AgentBuild {
+        backend,
+        api_key: setup
+            .and_then(|s| s.api_key.clone())
+            .or_else(|| llm_key.map(str::to_string)),
+        work_dir,
+        engagement: setup.map_or(EngagementKind::Client, |s| s.engagement),
+    })
+}
+
 /// Find the problems of one repository for the scan loop: build the run's piece agent (the test
-/// override, else the factory [`super::piece_agent_for`] with the key of the run's `Llm`) and call
-/// [`find_repo`]. The model, the force-pieces setting and the pieces in flight come from the
-/// run's controls and backend, never from the environment.
+/// override, else the factory [`super::piece_agent_for`] from the run's finder setup, on the
+/// run's shared meter) and call [`find_repo`]. The model, the force-pieces setting and the pieces
+/// in flight come from the run's controls and backend, never from the environment.
 #[allow(clippy::too_many_arguments)]
 pub async fn find_repo_for_run(
     llm: &dyn crate::llm::LlmPort,
@@ -1011,6 +1089,52 @@ pub async fn find_repo_for_run(
     chosen_options: &HashMap<String, String>,
     backend_resolution: &crate::llm::BackendResolution,
     meter: Option<&std::sync::Arc<UsageMeter>>,
+) -> anyhow::Result<FinderResult> {
+    find_repo_for_run_with(
+        llm,
+        repo,
+        files,
+        selected,
+        corpus,
+        controls,
+        chosen_options,
+        backend_resolution,
+        meter,
+        &|controls, build, meter| {
+            // Build 4 passes the engagement kind to the factory here; this is its one real caller.
+            let engagement = build.engagement;
+            let _ = engagement;
+            super::piece_agent_for(
+                controls,
+                build.backend,
+                build.api_key.as_deref(),
+                &build.work_dir,
+                meter,
+            )
+        },
+    )
+    .await
+}
+
+/// The agent factory [`find_repo_for_run_with`] calls once: the run's controls, what the setup
+/// resolved to and the run's shared meter.
+pub(crate) type AgentFactory<'a> = dyn Fn(&RunControls, &AgentBuild, std::sync::Arc<UsageMeter>) -> anyhow::Result<Box<dyn PieceAgent>>
+    + Sync
+    + 'a;
+
+/// [`find_repo_for_run`] with the factory a test can replace.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn find_repo_for_run_with(
+    llm: &dyn crate::llm::LlmPort,
+    repo: &str,
+    files: &[(String, String)],
+    selected: &[AuditRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+    controls: &RunControls,
+    chosen_options: &HashMap<String, String>,
+    backend_resolution: &crate::llm::BackendResolution,
+    meter: Option<&std::sync::Arc<UsageMeter>>,
+    factory: &AgentFactory<'_>,
 ) -> anyhow::Result<FinderResult> {
     let backend = match backend_resolution {
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
@@ -1044,18 +1168,18 @@ pub async fn find_repo_for_run(
         )
         .await;
     }
-    let key = llm
+    let setup = FINDER_SETUP.try_with(std::sync::Arc::clone).ok();
+    let llm_key = llm
         .as_any()
         .downcast_ref::<crate::llm::Llm>()
         .and_then(crate::llm::Llm::api_key);
-    // The command line transport writes its rooms here, never inside the client's repository.
-    let work_dir = std::env::temp_dir().join("camerata-finder-rooms");
+    let build = resolve_agent_build(setup.as_deref(), llm_key, backend)?;
     // The agent is built with the run's shared meter (an agent with no meter refuses to send).
     let shared_meter = meter.map_or_else(
         || std::sync::Arc::new(UsageMeter::with_controls(controls.clone())),
         std::sync::Arc::clone,
     );
-    let agent = super::piece_agent_for(controls, backend, key, &work_dir, shared_meter)?;
+    let agent = factory(controls, &build, shared_meter)?;
     find_repo(
         &*agent,
         repo,

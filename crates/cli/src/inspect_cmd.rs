@@ -1228,10 +1228,10 @@ pub async fn run_inspect_pipeline_with(
         Some(j) => j.as_ref(),
         None => base,
     };
-    // The agent finder's piece agent: built here from the run's backend and the saved key, with
-    // its rooms under the run's own folder. A test that already stands an agent in
+    // The agent finder's setup: one value, built once here and carried into the audit. The run
+    // builds the agent from it on its own shared meter. A test that already stands an agent in
     // (`with_agent_override`) keeps its own. A missing key stops the run before the first call.
-    let finder_agent: Option<Arc<dyn camerata_server::ai_audit::agent_finder::PieceAgent>> =
+    let finder_setup: Option<camerata_server::ai_audit::agent_finder::run::FinderSetup> =
         if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent
             && !ai_review_blocked
             && !camerata_server::ai_audit::agent_finder::run::agent_override_is_set()
@@ -1240,10 +1240,14 @@ pub async fn run_inspect_pipeline_with(
                 .as_ref()
                 .map_or_else(camerata_state_dir, |s| s.dir().to_path_buf())
                 .join("finder-rooms");
-            let key = camerata_server::credentials::anthropic_api_key(creds);
             Some(
-                finder::build_agent(&controls, llm_backend, key.as_deref(), &rooms_dir)
-                    .map_err(InspectError::Failed)?,
+                finder::finder_setup(
+                    llm_backend,
+                    camerata_server::credentials::anthropic_api_key(creds),
+                    rooms_dir,
+                    args.client_engagement,
+                )
+                .map_err(InspectError::Failed)?,
             )
         } else {
             None
@@ -1277,10 +1281,9 @@ pub async fn run_inspect_pipeline_with(
                 ),
             ),
         ));
-        let (mut report, manifest) = match finder_agent {
-            Some(agent) => {
-                camerata_server::ai_audit::agent_finder::run::with_agent_override(agent, audit)
-                    .await
+        let (mut report, manifest) = match finder_setup {
+            Some(setup) => {
+                camerata_server::ai_audit::agent_finder::run::with_finder_setup(setup, audit).await
             }
             None => audit.await,
         };

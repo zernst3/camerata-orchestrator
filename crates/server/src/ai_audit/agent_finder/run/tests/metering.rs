@@ -5,9 +5,9 @@ use super::*;
 use crate::ai_audit::UsageMeter;
 
 /// A stand-in that records every turn and failure on the shared meter itself, like the API agent.
-struct SelfMetering {
-    inner: ScriptedAgent,
-    meter: Arc<UsageMeter>,
+pub(super) struct SelfMetering {
+    pub(super) inner: ScriptedAgent,
+    pub(super) meter: Arc<UsageMeter>,
 }
 
 impl SelfMetering {

@@ -462,6 +462,61 @@ fn a_rule_a_problem_was_also_cited_to_is_never_verified_clean() {
     })
 }
 
+/// No agent stands in: the command line hands the run its finder setup and the run builds the
+/// real API agent from it on the run's own meter. A model with no price stops that agent before
+/// any request (so nothing is sent and nothing is spent), and the reason it gives shows both that
+/// the key reached it through the setup (an agent with no key is never built) and that it holds
+/// the run's meter (an agent with no meter says so instead).
+#[test]
+#[serial_test::serial(process_env)]
+fn the_run_builds_its_own_agent_from_the_setup_with_the_key_and_the_meter() {
+    on_a_big_stack(async {
+        if !typst_available("the_run_builds_its_own_agent_from_the_setup") {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let repo = tempfile::tempdir().unwrap();
+        stage_fixture(repo.path());
+        let out = tempfile::tempdir().unwrap();
+        let export = out.path().join("inspect.zip");
+        let llm = Scripted {
+            calls: AtomicUsize::new(0),
+        };
+        let creds = camerata_server::credentials::MemoryCredentialStore::new();
+        camerata_server::credentials::CredentialStore::set(
+            &creds,
+            camerata_server::credentials::ANTHROPIC_API_KEY,
+            "sk-ant-test-only",
+        )
+        .unwrap();
+        let mut a = args(repo.path(), &export, false);
+        a.finder.model = Some("unpriced-test-model".to_string());
+        let result = Box::pin(run_inspect_pipeline_with(
+            a,
+            true,
+            &creds,
+            Seams {
+                resume: None,
+                llm: Some(&llm),
+                preflight_sink: &|_| {},
+            },
+        ))
+        .await;
+        let outcome = result.expect("an internal export is written");
+        let lines = outcome.failure_lines.join("\n");
+        assert!(
+            lines.contains("no price in the model registry"),
+            "the run's own agent refused the unpriced model: {lines}"
+        );
+        assert!(
+            !lines.contains("no usage meter") && !lines.contains("needs an Anthropic key"),
+            "{lines}"
+        );
+    })
+}
+
 #[test]
 #[serial_test::serial(process_env)]
 fn a_failed_agent_part_refuses_a_client_export_and_marks_an_internal_one() {

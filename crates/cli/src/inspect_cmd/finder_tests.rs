@@ -199,23 +199,49 @@ fn the_comparison_goes_through_the_two_functions_it_is_given() {
 }
 
 #[test]
-fn the_agent_cannot_be_built_without_a_key_on_the_api_backend() {
-    let controls = camerata_server::cost_cap::RunControls::default();
+fn the_setup_cannot_be_built_without_a_key_on_the_api_backend() {
     let rooms = tempfile::tempdir().unwrap();
-    let why = build_agent(
-        &controls,
-        camerata_server::llm::Backend::Api,
+    for key in [None, Some("  ".to_string())] {
+        let why = finder_setup(
+            camerata_server::llm::Backend::Api,
+            key,
+            rooms.path().to_path_buf(),
+            true,
+        )
+        .err()
+        .expect("no key, no setup");
+        assert!(why.contains("key"), "{why}");
+    }
+    // The command line backend needs no key.
+    assert!(finder_setup(
+        camerata_server::llm::Backend::Cli,
         None,
-        rooms.path(),
-    )
-    .err()
-    .expect("no key, no agent");
-    assert!(why.contains("key"), "{why}");
-    assert!(build_agent(
-        &controls,
-        camerata_server::llm::Backend::Api,
-        Some("test-key"),
-        rooms.path()
+        rooms.path().to_path_buf(),
+        true,
     )
     .is_ok());
+}
+
+#[test]
+fn the_setup_carries_the_key_the_rooms_folder_and_the_engagement_flag() {
+    use camerata_server::ai_audit::agent_finder::run::EngagementKind;
+    let rooms = tempfile::tempdir().unwrap();
+    let client = finder_setup(
+        camerata_server::llm::Backend::Api,
+        Some(" test-key ".to_string()),
+        rooms.path().to_path_buf(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(client.api_key.as_deref(), Some("test-key"));
+    assert_eq!(client.rooms_dir, rooms.path());
+    assert_eq!(client.engagement, EngagementKind::Client);
+    let internal = finder_setup(
+        camerata_server::llm::Backend::Api,
+        Some("test-key".to_string()),
+        rooms.path().to_path_buf(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(internal.engagement, EngagementKind::Internal);
 }
