@@ -28,6 +28,12 @@ pub const MAX_WRITE_FILES: usize = 200;
 /// served (see [`NotServed`]), so a client file can never shadow or replace a room file.
 pub const RESERVED_DIR: &str = "_camerata";
 
+/// The folder, below the root of a room on disk, that holds the repository's files (see
+/// [`Room::materialize_under_code`]).
+pub const CODE_DIR: &str = "code";
+/// The longest line, in characters, the Read tool returns whole. Claude Code cuts a longer line.
+pub const MAX_READ_LINE_CHARS: usize = 2_000;
+
 /// Why a tool call was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RoomError {
@@ -532,6 +538,60 @@ impl Room {
     /// The files written so far: path to text.
     pub fn outputs(&self) -> BTreeMap<String, String> {
         self.out_lock().clone()
+    }
+
+    /// The lines of each served file that are longer than [`MAX_READ_LINE_CHARS`] characters:
+    /// path to the 1-based line numbers. The command line tool cuts such a line, so a Read that
+    /// returned it did not show it whole.
+    pub fn long_lines(&self) -> BTreeMap<String, Vec<usize>> {
+        let mut out = BTreeMap::new();
+        for path in self.paths() {
+            let Some(text) = self.text_of(&path) else {
+                continue;
+            };
+            let long: Vec<usize> = text
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.chars().count() > MAX_READ_LINE_CHARS)
+                .map(|(i, _)| i + 1)
+                .collect();
+            if !long.is_empty() {
+                out.insert(path, long);
+            }
+        }
+        out
+    }
+
+    /// Where a path of the room lands on disk under [`Room::materialize_under_code`]: the room's
+    /// own files (`_camerata/...`) stay at the root and every other file goes under `code/`.
+    pub fn disk_path(path: &str) -> String {
+        if path.starts_with(&format!("{RESERVED_DIR}/")) {
+            path.to_string()
+        } else {
+            format!("{CODE_DIR}/{path}")
+        }
+    }
+
+    /// Write the room to `dir` for the command line transport, the repository's files under
+    /// `dir/code/` and the room's own files (`_camerata/`) at `dir`. The session runs with `dir`
+    /// as its working directory, so a client's own `.claude/` folder or `.mcp.json`, now under
+    /// `code/`, is read like any other file and never loads as project settings, hooks or an MCP
+    /// server. Returns the room paths written.
+    pub fn materialize_under_code(&self, dir: &Path) -> std::io::Result<Vec<String>> {
+        let mut written = Vec::new();
+        for path in self.paths() {
+            let Some(text) = self.text_of(&path) else {
+                continue;
+            };
+            let target = dir.join(Self::disk_path(&path));
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, text)?;
+            written.push(path);
+        }
+        std::fs::create_dir_all(dir.join(OUT_DIR))?;
+        Ok(written)
     }
 
     /// Write the room to `dir` for the command line transport. Returns the paths written.

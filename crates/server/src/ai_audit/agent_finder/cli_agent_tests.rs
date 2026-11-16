@@ -1,6 +1,6 @@
 //! The command line transport, against a stand-in program that replays a recorded trace. No
-//! model is called: the stand-in writes canned files into the room and a canned session file,
-//! then prints a canned result line.
+//! model is called: the stand-in writes canned files into the room, prints a canned stream of
+//! tool-call records on stdout (the call keeps no session file) and then a canned result line.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use super::super::{
     send_again, AgentRun, AgentStop, PieceAgent, PieceLimits, Room, ScriptStep, ScriptedAgent,
     ToolEvent,
 };
-use super::CliPieceAgent;
+use super::{parse_session, CliPieceAgent, EngagementKind};
 
 const MODEL: &str = "claude-fable-5-2";
 
@@ -97,7 +97,7 @@ fn checklist_json() -> String {
     .to_string()
 }
 
-/// The standard recorded piece: every kind of call, a denied write and a read outside the room.
+/// The standard recorded piece: every kind of call and a denied write.
 fn full_replay() -> String {
     replay(&[
         call("t1", "Glob", json!({"pattern": "**/*.rs"})),
@@ -126,12 +126,6 @@ fn full_replay() -> String {
             json!({"file_path": "@ROOM@/src/a.rs", "content": "x"}),
         ),
         answer("t7", "permission denied", None, true),
-        call(
-            "t8",
-            "Read",
-            json!({"file_path": "/Users/auditor/other.rs"}),
-        ),
-        answer("t8", "no such file", None, true),
     ])
 }
 
@@ -149,7 +143,7 @@ impl Rig {
         let rig = Self {
             dir: tempfile::tempdir().expect("temp dir"),
         };
-        for d in ["log", "projects", "work"] {
+        for d in ["log", "work"] {
             std::fs::create_dir_all(rig.path().join(d)).unwrap();
         }
         rig
@@ -159,8 +153,8 @@ impl Rig {
         self.dir.path()
     }
 
-    /// Call number `n` (1-based) replays `trace`, drops `outputs` into the room's out folder and
-    /// prints `result`.
+    /// Call number `n` (1-based) prints `trace` (when given) on stdout, drops `outputs` into the
+    /// room's out folder and then prints `result`.
     fn call(
         self,
         n: usize,
@@ -177,6 +171,18 @@ impl Rig {
             std::fs::write(out.join(name), text).unwrap();
         }
         std::fs::write(self.path().join(format!("result-{n}.json")), result).unwrap();
+        self
+    }
+
+    /// Call number `n` exits with `code` after its trace, printing no result.
+    fn exit(self, n: usize, code: i32) -> Self {
+        std::fs::write(self.path().join(format!("exit-{n}")), code.to_string()).unwrap();
+        self
+    }
+
+    /// Call number `n` sleeps `secs` seconds after its trace, printing no result.
+    fn sleep(self, n: usize, secs: u64) -> Self {
+        std::fs::write(self.path().join(format!("sleep-{n}")), secs.to_string()).unwrap();
         self
     }
 
@@ -199,14 +205,15 @@ for a in "$@"; do
   prev="$a"
 done
 printf '%s\n' "$sid" > "$LOG/sid-$n.txt"
-if [ -f "{d}/replay-$n.jsonl" ]; then
-  mkdir -p "{d}/projects/-room"
-  sed "s#@ROOM@#$(pwd -P)#g" "{d}/replay-$n.jsonl" > "{d}/projects/-room/$sid.jsonl"
-fi
 if [ -d "{d}/out-$n" ]; then
   mkdir -p _camerata/out
   cp -R "{d}/out-$n/." _camerata/out/
 fi
+if [ -f "{d}/replay-$n.jsonl" ]; then
+  sed "s#@ROOM@#$(pwd -P)#g" "{d}/replay-$n.jsonl"
+fi
+if [ -f "{d}/sleep-$n" ]; then exec sleep "$(cat "{d}/sleep-$n")"; fi
+if [ -f "{d}/exit-$n" ]; then exit "$(cat "{d}/exit-$n")"; fi
 cat "{d}/result-$n.json"
 exit 0
 "#
@@ -218,9 +225,8 @@ exit 0
     }
 
     fn agent(&self) -> CliPieceAgent {
-        CliPieceAgent::new(MODEL, self.path().join("work"))
+        CliPieceAgent::new(MODEL, self.path().join("work"), EngagementKind::Internal)
             .with_claude_program(self.program())
-            .with_claude_projects_dir(self.path().join("projects"))
     }
 
     fn log(&self, name: &str) -> String {
@@ -288,12 +294,6 @@ async fn outputs_and_trace_come_back_as_scripted() {
             ToolEvent::Write {
                 path: "_camerata/out/problems-1.json".into()
             },
-            ToolEvent::Read {
-                path: "/Users/auditor/other.rs".into(),
-                first_line: 1,
-                line_count: 2000,
-                lines_returned: 0
-            },
         ]
     );
     let keys: Vec<&String> = run.outputs.keys().collect();
@@ -332,8 +332,8 @@ async fn a_read_with_offset_and_limit_is_recorded_as_a_partial_read() {
 }
 
 #[tokio::test]
-async fn a_missing_session_file_fails_the_piece_and_coverage_is_never_assumed() {
-    // The stand-in writes the output files and prints a good result, but no session file.
+async fn a_missing_stream_fails_the_piece_and_coverage_is_never_assumed() {
+    // The stand-in writes the output files and prints a good result, but no tool-call record.
     let rig = Rig::new().call(
         1,
         None,
@@ -347,7 +347,7 @@ async fn a_missing_session_file_fails_the_piece_and_coverage_is_never_assumed() 
         .await
         .expect("a failed run, not an error");
     match &run.stop {
-        AgentStop::Failed(why) => assert!(why.contains("session"), "{why}"),
+        AgentStop::Failed(why) => assert!(why.contains("stream"), "{why}"),
         other => panic!("expected Failed, got {other:?}"),
     }
     assert!(run.trace.is_empty());
@@ -387,9 +387,8 @@ async fn a_call_that_fails_after_it_was_paid_for_still_reports_its_usage() {
 async fn a_program_that_cannot_start_is_an_error_before_anything_was_sent_or_a_failed_run_with_no_usage(
 ) {
     let rig = Rig::new();
-    let agent = CliPieceAgent::new(MODEL, rig.path().join("work"))
-        .with_claude_program(rig.path().join("no-such-program"))
-        .with_claude_projects_dir(rig.path().join("projects"));
+    let agent = CliPieceAgent::new(MODEL, rig.path().join("work"), EngagementKind::Internal)
+        .with_claude_program(rig.path().join("no-such-program"));
     let room = room_for(&["src/a.rs"], &repo());
     match agent.run(&room, "b", &limits()).await {
         Err(_) => {}
@@ -429,11 +428,19 @@ async fn the_clean_room_holds_only_the_piece_its_context_and_the_rooms_own_files
         .lines()
         .map(|l| l.trim_start_matches("./").to_string())
         .collect();
-    let mut allowed: Vec<String> = room.paths();
+    let mut allowed: Vec<String> = room.paths().iter().map(|p| Room::disk_path(p)).collect();
     allowed.sort();
     assert_eq!(listed, allowed, "nothing but the room's own files");
+    // The repository's files sit under `code/`, the room's own beside it.
+    assert!(listed.iter().any(|p| p == "code/src/a.rs"), "{listed:?}");
     assert!(
-        !listed.iter().any(|p| p == "src/b.rs" || p == "README.md"),
+        listed.iter().any(|p| p == "_camerata/checklist.md"),
+        "{listed:?}"
+    );
+    assert!(
+        !listed
+            .iter()
+            .any(|p| p == "code/src/b.rs" || p == "code/README.md"),
         "{listed:?}"
     );
 }
@@ -444,6 +451,10 @@ async fn the_session_runs_in_isolation_with_the_room_as_its_folder() {
     let room = room_for(&["src/a.rs"], &repo());
     let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
     let args = rig.log("args-1.txt");
+    assert_eq!(
+        args_after(&args, "--setting-sources").as_deref(),
+        Some("project")
+    );
     for flag in [
         "--strict-mcp-config",
         "--disable-slash-commands",
@@ -507,8 +518,8 @@ async fn send_again_is_a_second_call_on_a_room_holding_only_the_unread_files() {
         .unwrap();
     assert_eq!(again.stop, AgentStop::Finished);
     let listed = rig.log("files-2.txt");
-    assert!(listed.contains("./src/b.rs"), "{listed}");
-    assert!(!listed.contains("./src/a.rs"), "{listed}");
+    assert!(listed.contains("./code/src/b.rs"), "{listed}");
+    assert!(!listed.contains("./code/src/a.rs"), "{listed}");
     assert!(listed.contains("_camerata/checklist.md"), "{listed}");
     // Only this step's work comes back.
     let keys: Vec<&String> = again.outputs.keys().collect();
@@ -720,4 +731,414 @@ async fn the_command_line_transport_and_the_scripted_agent_give_the_same_parsed_
     let got = parity_summary(&cli_room, &parity_checklist(), &cli);
     assert_eq!(want.problems.len(), 1);
     assert_eq!(got, want);
+}
+
+// ── Round 1 fixes ───────────────────────────────────────────────────────────────────────────────
+
+fn args_after(args: &str, flag: &str) -> Option<String> {
+    let lines: Vec<&str> = args.lines().collect();
+    let at = lines.iter().position(|l| *l == flag)?;
+    lines.get(at + 1).map(|l| (*l).to_string())
+}
+
+/// A one-call replay, answered, for the outside-the-room cases.
+fn one_call(name: &str, input: Value) -> String {
+    replay(&[call("o1", name, input), answer("o1", "denied", None, true)])
+}
+
+#[tokio::test]
+async fn the_session_loads_project_settings_only_and_a_pieces_own_claude_files_are_just_files() {
+    let mut files = repo();
+    files.push(f(".claude/settings.json", "{\"hooks\": {}}\n"));
+    files.push(f(".mcp.json", "{\"mcpServers\": {}}\n"));
+    let rig = Rig::new().call(1, Some(full_replay()), &[], OK_RESULT);
+    let room = room_for(&["src/a.rs", ".claude/settings.json", ".mcp.json"], &files);
+    assert!(room
+        .piece_files()
+        .iter()
+        .any(|p| p == ".claude/settings.json"));
+    assert!(room.piece_files().iter().any(|p| p == ".mcp.json"));
+    assert!(room.contains(".claude/settings.json") && room.contains(".mcp.json"));
+    rig.agent().run(&room, "b", &limits()).await.unwrap();
+    let args = rig.log("args-1.txt");
+    assert_eq!(
+        args_after(&args, "--setting-sources").as_deref(),
+        Some("project"),
+        "{args}"
+    );
+    assert!(!args.lines().any(|l| l == "user"), "{args}");
+    assert!(args.lines().any(|l| l == "--strict-mcp-config"), "{args}");
+    assert!(
+        args.lines().any(|l| l == "--disable-slash-commands"),
+        "{args}"
+    );
+    // The client's files are under `code/`; nothing of them is at the working directory.
+    let listed = rig.log("files-1.txt");
+    assert!(listed.contains("./code/.claude/settings.json"), "{listed}");
+    assert!(listed.contains("./code/.mcp.json"), "{listed}");
+    assert!(!listed.lines().any(|l| l == "./.mcp.json"), "{listed}");
+    assert!(
+        !listed.lines().any(|l| l.starts_with("./.claude/")),
+        "{listed}"
+    );
+    // The working directory is the room's root, the folder that holds `code/`.
+    let cwd = PathBuf::from(rig.log("cwd-1.txt").trim());
+    assert!(cwd.join("code").is_dir() && cwd.join("_camerata").is_dir());
+}
+
+#[tokio::test]
+async fn the_agent_is_told_where_the_files_are() {
+    let rig = Rig::new().call(1, Some(full_replay()), &[], OK_RESULT);
+    let room = room_for(&["src/a.rs"], &repo());
+    rig.agent()
+        .run(&room, "THE BRIEF", &limits())
+        .await
+        .unwrap();
+    let args = rig.log("args-1.txt");
+    assert!(args.contains("THE BRIEF"), "{args}");
+    assert!(args.contains("`code/`"), "{args}");
+}
+
+#[tokio::test]
+async fn a_read_outside_the_room_fails_the_piece() {
+    for (name, input) in [
+        ("Read", json!({"file_path": "/Users/auditor/other/x"})),
+        (
+            "Grep",
+            json!({"pattern": "k", "path": "/Users/auditor/other"}),
+        ),
+        (
+            "Glob",
+            json!({"pattern": "*.rs", "path": "/Users/auditor/other"}),
+        ),
+        ("LS", json!({"path": "/Users/auditor/other"})),
+        ("Read", json!({"file_path": "@ROOM@/../outside.txt"})),
+        ("Read", json!({"file_path": "../outside.txt"})),
+        (
+            "Write",
+            json!({"file_path": "/Users/auditor/x", "content": "x"}),
+        ),
+    ] {
+        let rig = Rig::new().call(1, Some(one_call(name, input.clone())), &[], OK_RESULT);
+        let room = room_for(&["src/a.rs"], &repo());
+        let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+        match &run.stop {
+            AgentStop::Failed(why) => assert!(why.contains("outside"), "{name} {input}: {why}"),
+            other => panic!("{name} {input}: expected Failed, got {other:?}"),
+        }
+        assert!(
+            !run.trace
+                .iter()
+                .any(|e| matches!(e, ToolEvent::Read { path, .. } if path.contains("auditor"))),
+            "{name}: an outside path is not kept as written"
+        );
+    }
+}
+
+#[tokio::test]
+async fn paths_inside_the_room_are_not_outside() {
+    let rig = Rig::new().call(
+        1,
+        Some(replay(&[
+            call("i1", "Read", json!({"file_path": "@ROOM@/code/src/a.rs"})),
+            answer("i1", "1\tx", Some(30), false),
+            call("i2", "Grep", json!({"pattern": "k", "path": "@ROOM@/code"})),
+            answer("i2", "none", None, false),
+            call(
+                "i3",
+                "Read",
+                json!({"file_path": "@ROOM@/_camerata/checklist.md"}),
+            ),
+            answer("i3", "1\tx", Some(1), false),
+            call(
+                "i4",
+                "Read",
+                json!({"file_path": "@ROOM@/code/../_camerata/checklist.md"}),
+            ),
+            answer("i4", "1\tx", Some(1), false),
+        ])),
+        &[],
+        OK_RESULT,
+    );
+    let room = room_for(&["src/a.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert_eq!(run.stop, AgentStop::Finished, "{:?}", run.stop);
+    let reads: Vec<&str> = run
+        .trace
+        .iter()
+        .filter_map(|e| match e {
+            ToolEvent::Read { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reads,
+        [
+            "src/a.rs",
+            "_camerata/checklist.md",
+            "_camerata/checklist.md"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_client_engagement_is_refused_before_a_room_is_written_or_the_program_started() {
+    let rig = Rig::new().call(1, Some(full_replay()), &[], OK_RESULT);
+    let agent = CliPieceAgent::new(MODEL, rig.path().join("work"), EngagementKind::Client)
+        .with_claude_program(rig.program());
+    let room = room_for(&["src/a.rs"], &repo());
+    let err = agent.run(&room, "b", &limits()).await.expect_err("refused");
+    assert!(err.to_string().contains("internal"), "{err}");
+    let prior = AgentRun::empty(AgentStop::Finished);
+    let err = agent
+        .follow_up(
+            &room,
+            &prior,
+            &super::super::FollowUp::text("again"),
+            &limits(),
+        )
+        .await
+        .expect_err("refused");
+    assert!(err.to_string().contains("internal"), "{err}");
+    let work = rig.path().join("work");
+    assert_eq!(
+        std::fs::read_dir(&work).unwrap().count(),
+        0,
+        "no room folder was created"
+    );
+    assert_eq!(
+        std::fs::read_dir(rig.path().join("log")).unwrap().count(),
+        0,
+        "the program was never started"
+    );
+}
+
+#[tokio::test]
+async fn the_call_is_bounded_in_turns_and_keeps_no_session_file() {
+    let rig = Rig::new().call(1, Some(full_replay()), &[], OK_RESULT);
+    let room = room_for(&["src/a.rs"], &repo());
+    let lim = limits();
+    rig.agent().run(&room, "b", &lim).await.unwrap();
+    let args = rig.log("args-1.txt");
+    assert_eq!(
+        args_after(&args, "--max-turns"),
+        Some(lim.max_turns.to_string()),
+        "{args}"
+    );
+    assert!(
+        args.lines().any(|l| l == "--no-session-persistence"),
+        "{args}"
+    );
+}
+
+#[tokio::test]
+async fn the_transport_works_with_no_session_file_anywhere() {
+    // The stand-in writes no session file; the trace comes from stdout alone.
+    let rig = Rig::new().call(1, Some(full_replay()), &[], OK_RESULT);
+    let room = room_for(&["src/a.rs", "src/b.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert_eq!(run.stop, AgentStop::Finished, "{:?}", run.stop);
+    assert!(!run.trace.is_empty());
+}
+
+#[tokio::test]
+async fn a_call_that_passes_the_wall_clock_bound_fails_inside_it_with_the_trace_usage() {
+    let rig = Rig::new()
+        .call(1, Some(full_replay()), &[], OK_RESULT)
+        .sleep(1, 30);
+    let room = room_for(&["src/a.rs"], &repo());
+    let started = std::time::Instant::now();
+    let run = rig
+        .agent()
+        .with_wall_clock(std::time::Duration::from_secs(2))
+        .run(&room, "b", &limits())
+        .await
+        .expect("a failed run, not an error");
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    match &run.stop {
+        AgentStop::Failed(why) => assert!(why.contains("wall-clock"), "{why}"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert!(!run.trace.is_empty(), "the work done is kept");
+    assert!(
+        run.usage.iter().map(|u| u.input_tokens).sum::<u64>() > 0,
+        "usage comes from the trace: {:?}",
+        run.usage
+    );
+}
+
+#[test]
+fn the_wall_clock_bound_follows_the_turn_limit_within_fixed_bounds() {
+    use std::time::Duration;
+    assert_eq!(
+        PieceLimits::for_piece(2, 1.0).wall_clock(),
+        Duration::from_secs(3600)
+    );
+    assert_eq!(
+        PieceLimits::for_piece(1000, 1.0).wall_clock(),
+        Duration::from_secs(4 * 3600)
+    );
+    let mut small = PieceLimits::for_piece(2, 1.0);
+    small.max_turns = 3;
+    assert_eq!(small.wall_clock(), Duration::from_secs(900));
+}
+
+/// Coverage (a): when the reply is good, only the last attempt's reads count. The first attempt
+/// read src/a.rs and then failed; the retry that answered read src/b.rs only.
+#[tokio::test]
+async fn a_failed_attempts_reads_never_count_toward_the_retrys_reply() {
+    let first = replay(&[
+        call("a1", "Read", json!({"file_path": "@ROOM@/code/src/a.rs"})),
+        answer("a1", "1\tx", Some(30), false),
+    ]);
+    let second = replay(&[
+        call("b1", "Read", json!({"file_path": "@ROOM@/code/src/b.rs"})),
+        answer("b1", "1\tx", Some(3), false),
+    ]);
+    let rig = Rig::new()
+        .call(1, Some(first), &[], OK_RESULT)
+        .exit(1, 1)
+        .call(2, Some(second), &[], OK_RESULT);
+    let room = room_for(&["src/a.rs", "src/b.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert_eq!(run.stop, AgentStop::Finished, "{:?}", run.stop);
+    let cov = coverage_of(
+        "k",
+        &[run],
+        &room.piece_line_counts(),
+        &[],
+        room.context_files(),
+        None,
+    );
+    assert_eq!(
+        cov.files["src/b.rs"],
+        super::super::coverage::FileState::ReadInFull
+    );
+    assert_eq!(
+        cov.files["src/a.rs"],
+        super::super::coverage::FileState::NotReviewed,
+        "the failed attempt's read does not count"
+    );
+}
+
+/// Coverage (b): a read before a context compaction is gone from the agent's context.
+#[tokio::test]
+async fn reads_before_a_context_compaction_do_not_count() {
+    let rig = Rig::new().call(
+        1,
+        Some(replay(&[
+            call("c1", "Read", json!({"file_path": "@ROOM@/code/src/a.rs"})),
+            answer("c1", "1\tx", Some(30), false),
+            json!({"type": "system", "subtype": "compact_boundary"}).to_string(),
+            call("c2", "Read", json!({"file_path": "@ROOM@/code/src/b.rs"})),
+            answer("c2", "1\tx", Some(3), false),
+        ])),
+        &[],
+        OK_RESULT,
+    );
+    let room = room_for(&["src/a.rs", "src/b.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert_eq!(
+        run.trace,
+        vec![ToolEvent::Read {
+            path: "src/b.rs".into(),
+            first_line: 1,
+            line_count: 2000,
+            lines_returned: 3
+        }]
+    );
+}
+
+/// Coverage (c): Claude Code cuts a line over 2,000 characters, so a read that returned such a
+/// line did not show it whole.
+#[tokio::test]
+async fn a_file_with_a_line_over_two_thousand_characters_is_never_read_in_full_by_trace() {
+    let mut text = numbered(10, "w");
+    text = text.replacen("// w line 5\n", &format!("// {}\n", "x".repeat(2_500)), 1);
+    let files = vec![f("src/w.rs", &text)];
+    let rig = Rig::new().call(
+        1,
+        Some(replay(&[
+            call("w1", "Read", json!({"file_path": "@ROOM@/code/src/w.rs"})),
+            answer("w1", "1\tx", Some(10), false),
+        ])),
+        &[],
+        OK_RESULT,
+    );
+    let room = room_for(&["src/w.rs"], &files);
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    let cov = coverage_of(
+        "k",
+        &[run],
+        &room.piece_line_counts(),
+        &[],
+        room.context_files(),
+        None,
+    );
+    assert_eq!(
+        cov.files["src/w.rs"],
+        super::super::coverage::FileState::ReadInPart(vec![(1, 4), (6, 10)])
+    );
+    assert_eq!(cov.still_unread, vec!["src/w.rs".to_string()]);
+}
+
+/// A refusal is detected from the result record's stop reason, never from the words of the error.
+#[tokio::test]
+async fn a_refusal_comes_from_the_structured_stop_reason_not_from_a_word() {
+    let refusal = r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"refusal","result":"no","total_cost_usd":0.5,"usage":{"input_tokens":10,"output_tokens":5}}"#;
+    let rig = Rig::new().call(1, Some(full_replay()), &[], refusal);
+    let room = room_for(&["src/a.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert!(matches!(run.stop, AgentStop::Refused(_)), "{:?}", run.stop);
+
+    // The word alone, in an ordinary failure, is a failure.
+    let wordy = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"the refusal handler crashed","total_cost_usd":0.5,"usage":{"input_tokens":10,"output_tokens":5}}"#;
+    let rig = Rig::new().call(1, Some(full_replay()), &[], wordy);
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+}
+
+#[tokio::test]
+async fn running_out_of_turns_is_a_turn_limit_stop() {
+    let max_turns = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"partial","total_cost_usd":0.5,"usage":{"input_tokens":10,"output_tokens":5}}"#;
+    let rig = Rig::new().call(1, Some(full_replay()), &[], max_turns);
+    let room = room_for(&["src/a.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert!(
+        matches!(run.stop, AgentStop::TurnLimit(_)),
+        "{:?}",
+        run.stop
+    );
+}
+
+/// A failed call's tokens come from the result record on stdout when it printed one.
+#[tokio::test]
+async fn a_failed_calls_usage_comes_from_its_result_record() {
+    let rig = Rig::new().call(1, Some(full_replay()), &[], ERR_RESULT);
+    let room = room_for(&["src/a.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert_eq!(run.usage.len(), 1, "{:?}", run.usage);
+    let u = &run.usage[0];
+    assert_eq!(u.output_tokens, 5);
+    assert_eq!(u.cache_read_input_tokens, 100);
+    assert_eq!(u.cache_creation_input_tokens, 50);
+    assert_eq!(u.input_tokens, 10 + 100 + 50);
+    assert_eq!(u.cost_usd, Some(0.5));
+}
+
+/// The session file spells the request id `requestId`: two records of one request are one turn.
+#[test]
+fn a_session_file_request_id_is_read_in_its_own_spelling() {
+    let rec = |out: u64| {
+        json!({"type": "assistant", "requestId": "req_1", "message": {"role": "assistant",
+            "usage": {"input_tokens": 1, "output_tokens": out}, "content": []}})
+        .to_string()
+    };
+    let parsed = parse_session(
+        &format!("{}\n{}\n", rec(3), rec(9)),
+        &[PathBuf::from("/room")],
+        &BTreeMap::new(),
+    );
+    assert_eq!(parsed.usage.len(), 1, "{:?}", parsed.usage);
+    assert_eq!(parsed.usage[0].output_tokens, 9);
 }

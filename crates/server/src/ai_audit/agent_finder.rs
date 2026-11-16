@@ -243,6 +243,12 @@ impl PieceLimits {
         (2 * files + 30).clamp(60, 400)
     }
 
+    /// The longest one call may run on the clock: 60 seconds for each turn, at least 15 minutes
+    /// and at most 4 hours. A call that passes it is stopped and the piece fails.
+    pub fn wall_clock(&self) -> std::time::Duration {
+        std::time::Duration::from_secs((self.max_turns as u64 * 60).clamp(900, 4 * 3600))
+    }
+
     /// The limits for a piece of `files` files whose estimated cost is `estimate_usd`: the
     /// turn limit above, 32,000 tokens a turn and four times the estimate (at least $3).
     pub fn for_piece(files: usize, estimate_usd: f64) -> Self {
@@ -325,13 +331,15 @@ pub fn finder_model_for(controls: &crate::cost_cap::RunControls) -> String {
 /// The one factory for a run's piece agent. `api_key` is needed (and checked) only for the API
 /// backend: a missing key is an error, never a quiet switch to the command line. `work_dir` is an
 /// engine-owned folder under the run's state folder where the command line transport writes its
-/// rooms; it is never inside a client's repository. Build 3 calls this; builds 2 and 4 fill in
+/// rooms; it is never inside a client's repository. `engagement` is whose run it is: the command
+/// line transport refuses a client engagement itself. Build 3 calls this; builds 2 and 4 fill in
 /// [`api_agent::ApiPieceAgent`] and [`cli_agent::CliPieceAgent`].
 pub fn piece_agent_for(
     controls: &crate::cost_cap::RunControls,
     backend: crate::llm::Backend,
     api_key: Option<&str>,
     work_dir: &std::path::Path,
+    engagement: cli_agent::EngagementKind,
 ) -> anyhow::Result<Box<dyn PieceAgent>> {
     let model = finder_model_for(controls);
     match backend {
@@ -345,6 +353,7 @@ pub fn piece_agent_for(
         crate::llm::Backend::Cli => Ok(Box::new(cli_agent::CliPieceAgent::new(
             model,
             work_dir.to_path_buf(),
+            engagement,
         ))),
     }
 }

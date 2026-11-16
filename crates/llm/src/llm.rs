@@ -566,6 +566,7 @@ fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
 ///
 /// Standalone from any `claude`-specific spawn setup so it is exercisable in a unit test
 /// against ANY child process that writes stream-json lines, not just a live `claude` CLI.
+#[cfg(test)]
 async fn read_cli_stream(
     child: tokio::process::Child,
     model: &str,

@@ -487,3 +487,39 @@ fn piece_line_counts_use_the_rule_the_read_tool_numbers_by() {
         .contains("three"));
     assert!(r.piece_file_text("_camerata/checklist.md").is_none());
 }
+
+#[test]
+fn materialize_under_code_puts_the_repository_under_code_and_the_rooms_files_beside_it() {
+    let files = vec![
+        f("src/main.rs", "fn main() {}\n"),
+        f(".claude/settings.json", "{}\n"),
+        f(".mcp.json", "{}\n"),
+    ];
+    let r = Room::build(
+        &piece(&["src/main.rs", ".claude/settings.json", ".mcp.json"]),
+        &files,
+        "# checklist\n",
+    )
+    .room;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = r.materialize_under_code(dir.path()).expect("materializes");
+    assert_eq!(written.len(), r.paths().len());
+    for p in ["src/main.rs", ".claude/settings.json", ".mcp.json"] {
+        assert!(dir.path().join("code").join(p).is_file(), "{p}");
+        assert!(r.contains(p), "{p} is served");
+    }
+    assert!(dir.path().join("_camerata/checklist.md").is_file());
+    assert!(dir.path().join("_camerata/out").is_dir());
+    assert!(!dir.path().join(".claude").exists());
+    assert!(!dir.path().join(".mcp.json").exists());
+    assert!(!dir.path().join("src").exists());
+}
+
+#[test]
+fn long_lines_are_found_by_character_count() {
+    let long = "x".repeat(2_001);
+    let ok = "y".repeat(2_000);
+    let files = vec![f("a.rs", &format!("short\n{ok}\n{long}\n"))];
+    let r = Room::build(&piece(&["a.rs"]), &files, "").room;
+    assert_eq!(r.long_lines().get("a.rs"), Some(&vec![3]));
+}

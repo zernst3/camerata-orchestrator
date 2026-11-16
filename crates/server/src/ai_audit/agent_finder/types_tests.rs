@@ -1,5 +1,6 @@
 //! The shared types, the limits and the scripted stand-in agent.
 
+use super::cli_agent::EngagementKind;
 use super::*;
 
 fn room() -> Room {
@@ -246,12 +247,32 @@ fn the_stop_reasons_carry_text_and_the_run_carries_a_serialisable_conversation_h
 fn the_factory_builds_each_backend_and_never_falls_back_quietly() {
     let controls = crate::cost_cap::RunControls::default();
     let dir = std::path::Path::new("/Users/auditor/.camerata/runs/r1");
-    assert!(piece_agent_for(&controls, crate::llm::Backend::Cli, None, dir).is_ok());
-    assert!(piece_agent_for(&controls, crate::llm::Backend::Api, Some("sk-test"), dir).is_ok());
+    assert!(piece_agent_for(
+        &controls,
+        crate::llm::Backend::Cli,
+        None,
+        dir,
+        EngagementKind::Internal
+    )
+    .is_ok());
+    assert!(piece_agent_for(
+        &controls,
+        crate::llm::Backend::Api,
+        Some("sk-test"),
+        dir,
+        EngagementKind::Internal
+    )
+    .is_ok());
     for key in [None, Some(""), Some("   ")] {
-        let err = piece_agent_for(&controls, crate::llm::Backend::Api, key, dir)
-            .err()
-            .expect("an API run without a key is refused");
+        let err = piece_agent_for(
+            &controls,
+            crate::llm::Backend::Api,
+            key,
+            dir,
+            EngagementKind::Internal,
+        )
+        .err()
+        .expect("an API run without a key is refused");
         assert!(err.to_string().contains("key"), "{err}");
     }
     assert_eq!(finder_model_for(&controls), DEFAULT_FINDER_MODEL);
@@ -280,7 +301,7 @@ fn the_stub_signatures_exist_for_later_builds() {
     let _: fn(String, &str) -> api_agent::ApiPieceAgent =
         |m, k| api_agent::ApiPieceAgent::new(m, k);
     let _: fn(String, std::path::PathBuf) -> cli_agent::CliPieceAgent =
-        |m, d| cli_agent::CliPieceAgent::new(m, d);
+        |m, d| cli_agent::CliPieceAgent::new(m, d, cli_agent::EngagementKind::Internal);
     let _ = run::find_repo;
     let _: fn(&[crate::onboard::Finding], &[crate::onboard::Finding]) -> run_diff::RunDiff =
         run_diff::diff_runs;
