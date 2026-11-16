@@ -238,9 +238,10 @@ impl CliPieceAgent {
                      counted as reviewed",
                     outside.join(", ")
                 ));
-            } else if !parsed
+            } else if parsed
                 .last()
-                .is_some_and(|p| p.as_ref().is_some_and(|p| p.assistant_records > 0))
+                .and_then(Option::as_ref)
+                .is_none_or(|p| p.assistant_records == 0)
             {
                 let id = sessions
                     .last()
