@@ -1,16 +1,40 @@
-//! The agent finder's runner: one piece end to end, send again, the follow-up, joints,
-//! conventions from answers, severity steps, failed parts, checkpoint and resume. Build 3 fills
-//! in the body of [`find_repo`]; its signature is the contract with the call site.
+//! The agent finder's runner: one repository into problems, returning exactly what
+//! `ai_audit::audit_repo` returns, so everything after the call is unchanged. It plans the pieces,
+//! runs each one (build the room and the checklist, admit it with the meter, run the agent, send
+//! unread files again once, ask once for the rules with no usable answer), runs the joints call
+//! for a repository with two or more pieces, derives the conventions from the checklist answers,
+//! rates the problems, and records every finished piece for a resume.
+//!
+//! Coverage is read from the tool trace only ([`super::coverage`]); nothing the model says about
+//! its own work changes a state.
 
+mod conventions;
+mod joints;
+mod piece;
+mod rating;
+#[cfg(test)]
+mod tests;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use futures::StreamExt;
+
+use super::checklist;
 use super::coverage::PieceCoverage;
-use super::PieceAgent;
-use crate::ai_audit::{FailedPass, RuleRecommendation, UsageMeter};
+use super::pieces::{plan_pieces, units_for, TARGET_BYTES};
+use super::reply::{FINDER_PIECE_CAPTURE, FINDER_SURE_CAPTURE};
+use super::room::Room;
+use super::{Piece, PieceAgent};
+use crate::ai_audit::{FailedPass, FailureClass, RuleRecommendation, UsageMeter};
+use crate::checkpoint::AbsorbedLine;
 use crate::cost_cap::RunControls;
 use crate::onboard::{Finding, ProposedRule};
-use crate::scan_ledger::StageSample;
+use crate::scan_ledger::{ScanLedger, StageAccounting, StageSample};
 use crate::scan_routing::AuditRule;
+use crate::stage_telemetry::Stage;
+use piece::{PieceReport, Shared, StoredPiece};
 
-/// Settings of one finder run that are not on [`RunControls`]. Build 3 may add fields.
+/// Settings of one finder run that are not on [`RunControls`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct FinderOptions {
     /// The finder's model (resolved: the explicit pick, else [`super::DEFAULT_FINDER_MODEL`]).
@@ -21,6 +45,25 @@ pub struct FinderOptions {
     pub applies_to_routing: bool,
     /// Pieces in flight at once (3 on the API, 1 on the command line backend).
     pub pieces_in_flight: usize,
+    /// The project's chosen option for each multi-option rule (upper-cased rule id to option id),
+    /// the way the alternatives stage is given it. Empty when the project chose none.
+    pub chosen_options: HashMap<String, String>,
+    /// `api` or `cli`: the label the turns are metered under.
+    pub backend: String,
+}
+
+impl FinderOptions {
+    /// Options for `model` with every other setting at its default (one piece in flight).
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            force_pieces: None,
+            applies_to_routing: true,
+            pieces_in_flight: 1,
+            chosen_options: HashMap::new(),
+            backend: "api".to_string(),
+        }
+    }
 }
 
 /// A rule the finder could not complete for a unit, so the unit's answer for it is partial.
@@ -38,6 +81,58 @@ pub struct FinderExtras {
     pub coverage: Vec<PieceCoverage>,
     /// Rules recorded as not completed for a unit.
     pub partial_rules: Vec<PartialRule>,
+    /// Rules every piece that was asked answered "not applicable" (and none was left partial).
+    pub not_applicable_rules: Vec<String>,
+    /// Operator-only remarks: stray files an agent wrote, listed places that could not be checked.
+    pub notes: Vec<String>,
+    /// How many problems the agents wrote, and how many of them cite no rule. The share with no
+    /// rule drives the needs a decision count, so every run records it.
+    pub problems_total: usize,
+    pub problems_without_rule: usize,
+}
+
+impl FinderExtras {
+    /// Queue the "judged not applicable" fact for the rules every piece answered so. Call it
+    /// BEFORE the rules of the repository are recorded in the ledger (it is consumed by
+    /// `record_rule`).
+    pub fn note_before_rules(&self, ledger: &mut ScanLedger, repo: &str) {
+        for rule in &self.not_applicable_rules {
+            ledger.note_not_applicable_rule(repo, rule.to_ascii_uppercase());
+        }
+    }
+
+    /// Record the coverage block and mark the rules left partial. Call it AFTER the rules of the
+    /// repository are recorded (a partial mark needs the rule's entry).
+    pub fn note_after_rules(&self, ledger: &mut ScanLedger, repo: &str) {
+        ledger.record_finder_coverage(repo, self.coverage.iter().map(finder_coverage_record));
+        for p in &self.partial_rules {
+            ledger.note_partial_rule(&p.rule_id, repo, p.reason.clone());
+        }
+    }
+}
+
+/// One piece's coverage in the shape the ledger keeps.
+fn finder_coverage_record(c: &PieceCoverage) -> crate::scan_ledger::FinderPieceCoverage {
+    use super::coverage::FileState;
+    let mut r = crate::scan_ledger::FinderPieceCoverage {
+        piece: c.piece_key.clone(),
+        files_owed: c.files.len(),
+        context_files_read: c.context_read.len(),
+        agent_list_matched: c.claim_matched,
+        ..Default::default()
+    };
+    for (path, state) in &c.files {
+        match state {
+            FileState::ReadInFull => r.read_in_full += 1,
+            FileState::ReadInPart(_) => r.read_in_part += 1,
+            FileState::SentAgain => r.sent_again += 1,
+            FileState::NotReviewed => r.not_reviewed += 1,
+        }
+        if matches!(state, FileState::NotReviewed | FileState::ReadInPart(_)) {
+            r.not_reviewed_files.push(path.clone());
+        }
+    }
+    r
 }
 
 /// The same five values as `ai_audit::audit_repo` plus [`FinderExtras`].
@@ -50,8 +145,288 @@ pub type FinderResult = (
     FinderExtras,
 );
 
+/// Refuse a combination of finder settings before anything is read or spent. `incremental` is true
+/// when the run would re-inspect only what changed since an earlier inspection; `internal` is
+/// true for the maintainer's own (`--internal`) runs. The messages are for the operator at the
+/// command line.
+pub fn refuse_unsupported_finder_settings(
+    controls: &RunControls,
+    incremental: bool,
+    internal: bool,
+) -> Result<(), String> {
+    use super::FinderChoice;
+    if controls.finder_force_pieces.is_some() && !internal {
+        return Err(
+            "--finder-force-pieces is for internal runs only. Pass --internal if this is your own \
+             development and not client work."
+                .to_string(),
+        );
+    }
+    if controls.finder_force_pieces.is_some() && controls.finder != FinderChoice::Agent {
+        return Err("--finder-force-pieces needs --finder agent.".to_string());
+    }
+    if controls.finder != FinderChoice::Agent {
+        return Ok(());
+    }
+    if controls.consensus {
+        return Err(
+            "--finder agent cannot be combined with --consensus. The agent finder reviews each part \
+             once; the consensus option repeats the scan passes it replaces."
+                .to_string(),
+        );
+    }
+    if incremental {
+        return Err(
+            "--finder agent needs a full inspection; it cannot re-inspect only the files that \
+             changed. Pass --full to inspect everything."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// One unit of work: a piece to run, a piece to replay or a piece that cannot be tried again.
+enum Work {
+    Fresh(Piece),
+    Stored(Piece, StoredPiece),
+    /// A single file the model refused on an earlier attempt and again after the split.
+    RefusedFinal(Piece, AbsorbedLine),
+}
+
+impl Work {
+    fn piece(&self) -> &Piece {
+        match self {
+            Work::Fresh(p) | Work::Stored(p, _) | Work::RefusedFinal(p, _) => p,
+        }
+    }
+}
+
+fn refused_key(key: &str) -> String {
+    format!("{key}#refused")
+}
+
+/// Expand a planned piece against the stored lines of an earlier attempt: a finished piece is
+/// replayed, a refused piece is run in two halves (by path order), and anything else runs.
+fn expand(piece: Piece, lines: &HashMap<String, AbsorbedLine>, out: &mut Vec<Work>) {
+    if let Some(line) = lines.get(&piece.key) {
+        if let Ok(stored) = serde_json::from_str::<StoredPiece>(&line.text) {
+            out.push(Work::Stored(piece, stored));
+            return;
+        }
+    }
+    if let Some(line) = lines.get(&refused_key(&piece.key)) {
+        if piece.files.len() >= 2 {
+            let mid = piece.files.len() / 2;
+            for (suffix, files) in [("a", &piece.files[..mid]), ("b", &piece.files[mid..])] {
+                expand(
+                    Piece {
+                        key: format!("{}/{suffix}", piece.key),
+                        unit: piece.unit.clone(),
+                        files: files.to_vec(),
+                    },
+                    lines,
+                    out,
+                );
+            }
+        } else {
+            out.push(Work::RefusedFinal(piece, line.clone()));
+        }
+        return;
+    }
+    out.push(Work::Fresh(piece));
+}
+
+/// The checkpoint line of a finished piece (or of a refused one, under its `#refused` key).
+fn checkpoint_line(
+    options: &FinderOptions,
+    key: String,
+    usage: &[super::TurnUsage],
+    text: String,
+) -> AbsorbedLine {
+    let cost: Option<f64> = usage
+        .iter()
+        .map(|u| u.cost_usd)
+        .try_fold(0.0, |acc, c| c.map(|c| acc + c));
+    AbsorbedLine {
+        key,
+        model: options.model.clone(),
+        backend: options.backend.clone(),
+        cost_usd: cost,
+        input_tokens: Some(usage.iter().map(|u| u.input_tokens).sum()),
+        output_tokens: Some(usage.iter().map(|u| u.output_tokens).sum()),
+        cache_read_input_tokens: usage.iter().map(|u| u.cache_read_input_tokens).sum(),
+        cache_creation_input_tokens: usage.iter().map(|u| u.cache_creation_input_tokens).sum(),
+        text,
+        members: Vec::new(),
+        batch_id: None,
+    }
+}
+
+fn store(shared: &Shared<'_>, line: &AbsorbedLine) {
+    let Some(cp) = crate::checkpoint::stage_checkpoint(&format!("finder_{}", shared.repo)) else {
+        return;
+    };
+    if let Err(e) = cp.record_absorbed(line) {
+        if let Some(m) = shared.meter {
+            m.record_note(format!(
+                "The agent finder's checkpoint could not be written ({e}); a resume will review \
+                 the part again."
+            ));
+        }
+    }
+}
+
+/// Run one unit of work to its report.
+async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport {
+    let piece = work.piece().clone();
+    let pairs: Vec<(String, String)> = shared
+        .files
+        .iter()
+        .filter(|(p, _)| piece.files.contains(p))
+        .cloned()
+        .collect();
+    let list = checklist::build(
+        shared.selected,
+        shared.corpus,
+        &pairs,
+        shared.options.applies_to_routing,
+    );
+    let built = Room::build(&piece, shared.files, &list.render());
+    let room = built.room;
+    let not_served = built.not_served;
+    match work {
+        Work::Stored(_, stored) => {
+            if let Some(m) = shared.meter {
+                for run in &stored.runs {
+                    for usage in &run.usage {
+                        m.record_resumed(Stage::Finder, &piece::response_of(shared.options, usage));
+                    }
+                }
+            }
+            let mut report = piece::report_of(
+                shared,
+                index,
+                &piece,
+                &room,
+                &not_served,
+                &list,
+                stored.runs,
+            );
+            report.replayed = true;
+            report
+        }
+        Work::RefusedFinal(_, line) => {
+            if let Some(m) = shared.meter {
+                let usage = super::TurnUsage {
+                    input_tokens: line.input_tokens.unwrap_or(0),
+                    output_tokens: line.output_tokens.unwrap_or(0),
+                    cache_read_input_tokens: line.cache_read_input_tokens,
+                    cache_creation_input_tokens: line.cache_creation_input_tokens,
+                    cost_usd: line.cost_usd,
+                };
+                m.record_resumed(Stage::Finder, &piece::response_of(shared.options, &usage));
+            }
+            let mut report = piece::unstarted_report(
+                shared,
+                index,
+                &piece,
+                &list,
+                FailureClass::Content,
+                "the model refused to review this file on an earlier attempt and again when the \
+                 file was reviewed on its own, so it was not tried again"
+                    .to_string(),
+                Vec::new(),
+            );
+            report.refused = true;
+            report.replayed = true;
+            report
+        }
+        Work::Fresh(_) => {
+            let _permit = match shared.meter {
+                Some(m) => match m.admit().await {
+                    Ok(p) => Some(p),
+                    Err(crate::ai_audit::CapReached) => {
+                        m.record_not_run(crate::cost_cap::NotRunPass {
+                            repo: shared.repo.to_string(),
+                            group: "agent finder".to_string(),
+                            chunk: index + 1,
+                            n_chunks: shared.n_pieces,
+                            rule_batch: 1,
+                            n_rule_batches: 1,
+                            rule_ids: list.rule_ids().iter().map(|r| (*r).to_string()).collect(),
+                            files: piece.files.clone(),
+                            class: FailureClass::SpendLimit,
+                        });
+                        return piece::not_run_report(
+                            shared,
+                            index,
+                            &piece,
+                            &list,
+                            m.outage_stopped(),
+                        );
+                    }
+                },
+                None => None,
+            };
+            let lines: usize = piece::lines_of(shared.files, &piece.files);
+            let limits =
+                super::PieceLimits::for_piece(piece.files.len(), piece::estimate_usd(lines));
+            let runs =
+                match piece::converse(shared, index, &piece, &room, &not_served, &list, &limits)
+                    .await
+                {
+                    Ok(runs) => runs,
+                    Err(e) => {
+                        if let Some(m) = shared.meter {
+                            m.record_failed(Stage::Finder, &e);
+                        }
+                        return piece::unstarted_report(
+                            shared,
+                            index,
+                            &piece,
+                            &list,
+                            crate::ai_audit::classify_pass_error(&e),
+                            e.to_string(),
+                            camerata_llm::failure::attempts_of(&e),
+                        );
+                    }
+                };
+            let report = piece::report_of(shared, index, &piece, &room, &not_served, &list, runs);
+            if report.failures.is_empty() {
+                if let Ok(text) = serde_json::to_string(&StoredPiece {
+                    runs: report.runs.clone(),
+                }) {
+                    store(
+                        shared,
+                        &checkpoint_line(shared.options, piece.key.clone(), &report.usage, text),
+                    );
+                }
+            } else {
+                // Its turns bought nothing that is kept: a resume starts the piece again.
+                if let Some(m) = shared.meter {
+                    for usage in &report.usage {
+                        m.record_wasted(Stage::Finder, &piece::response_of(shared.options, usage));
+                    }
+                }
+                if report.refused {
+                    store(
+                        shared,
+                        &checkpoint_line(
+                            shared.options,
+                            refused_key(&piece.key),
+                            &report.usage,
+                            String::from("refused"),
+                        ),
+                    );
+                }
+            }
+            report
+        }
+    }
+}
+
 /// Find the problems of one repository with the agent finder.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn find_repo(
     agent: &dyn PieceAgent,
     repo: &str,
@@ -62,8 +437,487 @@ pub async fn find_repo(
     options: &FinderOptions,
     meter: Option<&UsageMeter>,
 ) -> anyhow::Result<FinderResult> {
-    let _ = (
-        agent, repo, files, selected, corpus, controls, options, meter,
+    let _ = controls;
+    if files.is_empty() {
+        return Ok((
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            FinderExtras::default(),
+        ));
+    }
+    // Redact BEFORE any code reaches a model, in one canonical order.
+    let mut model_files = crate::onboard::redact::files_for_model(files);
+    model_files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut selected: Vec<AuditRule> = selected.to_vec();
+    selected.sort_by(|a, b| a.id.cmp(&b.id));
+    let adopted_all: HashSet<String> = selected.iter().map(|r| r.id.to_ascii_uppercase()).collect();
+
+    // Plan, then read what an earlier attempt kept.
+    let units = units_for(repo, &model_files);
+    let planned = plan_pieces(&units, &model_files, TARGET_BYTES, options.force_pieces);
+    let stored_lines: HashMap<String, AbsorbedLine> =
+        crate::checkpoint::stage_checkpoint(&format!("finder_{repo}"))
+            .map(|cp| {
+                cp.absorbed()
+                    .into_iter()
+                    .map(|l| (l.key.clone(), l))
+                    .collect()
+            })
+            .unwrap_or_default();
+    let mut works: Vec<Work> = Vec::new();
+    for p in planned {
+        expand(p, &stored_lines, &mut works);
+    }
+    let shared = Shared {
+        agent,
+        repo,
+        files: &model_files,
+        selected: &selected,
+        corpus,
+        options,
+        meter,
+        n_pieces: works.len(),
+    };
+
+    // Run the pieces, a few at a time, keeping their order.
+    let in_flight = options.pieces_in_flight.max(1);
+    let shared_ref = &shared;
+    let mut reports: Vec<PieceReport> = futures::stream::iter(works.into_iter().enumerate())
+        .map(|(i, w)| Box::pin(run_work(shared_ref, i, w)))
+        .buffered(in_flight)
+        .collect()
+        .await;
+    reports.sort_by_key(|r| r.index);
+
+    let mut failed: Vec<FailedPass> = Vec::new();
+    let mut extras = FinderExtras::default();
+    for r in &mut reports {
+        failed.append(&mut r.failures);
+        extras.notes.append(&mut r.notes);
+    }
+
+    // The joints between the parts, and every lead answered.
+    let input = joints::gather(&reports);
+    let mut joints_findings: Vec<Finding> = Vec::new();
+    let mut joints_proposed: Vec<ProposedRule> = Vec::new();
+    let unresolved: Vec<Finding>;
+    let any_run = reports.iter().any(|r| !r.runs.is_empty());
+    if reports.len() >= 2 && any_run {
+        let key = format!("joints:{}", input.digest());
+        let stored = stored_lines
+            .get(&key)
+            .and_then(|l| serde_json::from_str::<StoredPiece>(&l.text).ok());
+        let (runs, replayed) = match stored {
+            Some(s) => {
+                if let Some(m) = meter {
+                    for run in &s.runs {
+                        for usage in &run.usage {
+                            m.record_resumed(Stage::Finder, &piece::response_of(options, usage));
+                        }
+                    }
+                }
+                (Ok(s.runs), true)
+            }
+            None => {
+                let admitted = match meter {
+                    Some(m) => m.admit().await.map(Some),
+                    None => Ok(None),
+                };
+                match admitted {
+                    Err(crate::ai_audit::CapReached) => {
+                        let outage = meter.is_some_and(UsageMeter::outage_stopped);
+                        let cause = meter.map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| {
+                            crate::cost_cap::cause_for(m.cost_unknown())
+                        });
+                        failed.push(FailedPass {
+                            repo: repo.to_string(),
+                            pass: "agent finder, joints between parts".to_string(),
+                            reason: if outage {
+                                "NOT RUN: the run stopped because the model provider could not be reached before the joints between the parts were reviewed. This inspection is incomplete.".to_string()
+                            } else {
+                                format!("NOT RUN: {cause} before the joints between the parts were reviewed. This inspection is incomplete.")
+                            },
+                            files_not_reviewed: 0,
+                            class: if outage {
+                                FailureClass::OutageStop
+                            } else {
+                                FailureClass::SpendLimit
+                            },
+                            files: Vec::new(),
+                            attempts: Vec::new(),
+                            scope_note: false,
+                        });
+                        (Ok(Vec::new()), false)
+                    }
+                    Ok(_permit) => (
+                        joints::run_joints(&shared, &input, &adopted_all).await,
+                        false,
+                    ),
+                }
+            }
+        };
+        match runs {
+            Ok(runs) if runs.is_empty() => {
+                unresolved = joints::unresolved_findings(
+                    repo,
+                    &input.leads,
+                    &input.leads.iter().map(|l| l.n).collect::<Vec<_>>(),
+                    &model_files,
+                );
+            }
+            Ok(runs) => {
+                let mut jr = joints::report_of(&shared, &input, runs, &adopted_all);
+                jr.replayed = replayed;
+                let clean = jr.failures.is_empty();
+                failed.append(&mut jr.failures);
+                extras.notes.append(&mut jr.notes);
+                joints_findings = std::mem::take(&mut jr.findings);
+                joints_proposed = std::mem::take(&mut jr.proposed);
+                unresolved = std::mem::take(&mut jr.unresolved);
+                if !replayed {
+                    if clean {
+                        if let Ok(text) = serde_json::to_string(&StoredPiece {
+                            runs: jr.runs.clone(),
+                        }) {
+                            store(&shared, &checkpoint_line(options, key, &jr.usage, text));
+                        }
+                    } else if let Some(m) = meter {
+                        for usage in &jr.usage {
+                            m.record_wasted(Stage::Finder, &piece::response_of(options, usage));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(m) = meter {
+                    m.record_failed(Stage::Finder, &e);
+                }
+                let mut record =
+                    crate::ai_audit::AttemptRecord::new(&options.backend, &options.model);
+                record.message = camerata_llm::failure::scrub_message(
+                    &e.to_string(),
+                    camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+                );
+                failed.push(FailedPass {
+                    repo: repo.to_string(),
+                    pass: "agent finder, joints between parts".to_string(),
+                    reason: e.to_string(),
+                    files_not_reviewed: 0,
+                    class: crate::ai_audit::classify_pass_error(&e),
+                    files: Vec::new(),
+                    attempts: camerata_llm::failure::attempts_of(&e),
+                    scope_note: false,
+                });
+                unresolved = joints::unresolved_findings(
+                    repo,
+                    &input.leads,
+                    &input.leads.iter().map(|l| l.n).collect::<Vec<_>>(),
+                    &model_files,
+                );
+            }
+        }
+    } else {
+        // A repository that is one piece makes no joints call. A lead it still holds (a place
+        // outside every file it was given) is never dropped.
+        unresolved = joints::unresolved_findings(
+            repo,
+            &input.leads,
+            &input.leads.iter().map(|l| l.n).collect::<Vec<_>>(),
+            &model_files,
+        );
+    }
+
+    // Conventions from the answers.
+    let alternatives = crate::onboard::build_rule_alternatives(
+        corpus,
+        selected.iter().map(|r| r.id.as_str()),
+        &options.chosen_options,
     );
-    unimplemented!("build 3")
+    let piece_answers: Vec<Vec<checklist::EffectiveAnswer>> = reports
+        .iter()
+        .filter(|r| !r.effective.is_empty())
+        .map(|r| r.effective.clone())
+        .collect();
+    let conv = conventions::conventions_from_answers(
+        repo,
+        &alternatives,
+        &piece_answers,
+        &model_files,
+        &selected,
+        corpus,
+    );
+    extras.notes.extend(conv.notes.iter().cloned());
+
+    // Every problem so far, in piece order.
+    let mut rows: Vec<Finding> = Vec::new();
+    let mut proposed: Vec<ProposedRule> = Vec::new();
+    for r in &mut reports {
+        rows.append(&mut r.findings);
+        proposed.append(&mut r.proposed);
+    }
+    extras.problems_total = rows.len() + joints_findings.len();
+    rows.append(&mut joints_findings);
+    proposed.append(&mut joints_proposed);
+    extras.problems_without_rule = rows
+        .iter()
+        .filter(|f| !adopted_all.contains(&f.rule_id.to_ascii_uppercase()))
+        .count();
+    rows.extend(unresolved);
+    rows.extend(conv.departures);
+    let mut seen = HashSet::new();
+    proposed.retain(|p| seen.insert(p.id.clone()));
+
+    let mut stage_samples: Vec<StageSample> = Vec::new();
+    stage_samples.push(StageSample {
+        stage: "agent-finder".to_string(),
+        rows_in: rows.len(),
+        rows_out: rows.len(),
+        accounting: StageAccounting::default(),
+        model: Some(options.model.clone()),
+    });
+
+    // Anchor, set aside what the parser threw out, same-rule same-place dedup and merge.
+    crate::ai_audit::resolve_finding_lines(&mut rows, &model_files);
+    let (thrown_out, kept) = crate::engine_discard::split_discarded(rows);
+    let mut parked = thrown_out;
+    let mut rows = kept;
+    {
+        let rows_in = rows.len();
+        crate::ai_audit::dedup_findings_keep_max_severity(&mut rows);
+        let rows_after_dedup = rows.len();
+        crate::review_tree::mark_located(&mut rows, &model_files);
+        let collapse =
+            crate::review_tree::collapse_identical(rows, &crate::review_tree::ToolMap::builtin());
+        let mut acc = collapse.accounting();
+        acc.deduped = rows_in.saturating_sub(rows_after_dedup);
+        rows = collapse.rows;
+        stage_samples.push(StageSample {
+            stage: "ai-location-merge".to_string(),
+            rows_in,
+            rows_out: rows.len(),
+            accounting: acc,
+            model: None,
+        });
+    }
+
+    // The wording floors and ceilings, which run after the agent's own rating.
+    rows = crate::ai_audit::apply_severity_ceiling_rules(
+        crate::ai_audit::apply_severity_calibration_rules(rows),
+    );
+
+    // A rule with no convention emits no per-site problems: any stray problem under it is set
+    // aside, and exactly one information row stands for the rule.
+    let recs = conv.recommendations;
+    let no_convention: HashSet<String> = recs
+        .iter()
+        .filter(|r| r.no_convention)
+        .map(|r| r.rule_id.to_ascii_uppercase())
+        .collect();
+    let mut dropped_no_convention = 0usize;
+    if !no_convention.is_empty() {
+        for f in &mut rows {
+            let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
+            if no_convention.contains(&bare) && !crate::engine_discard::is_discarded(f) {
+                crate::engine_discard::mark(f, crate::engine_discard::NO_CONVENTION);
+                dropped_no_convention += 1;
+            }
+        }
+    }
+    let (thrown_out, kept) = crate::engine_discard::split_discarded(std::mem::take(&mut rows));
+    parked.extend(thrown_out);
+    let mut verified = kept;
+    if dropped_no_convention > 0 {
+        let mut acc = StageAccounting::default();
+        acc.other.push((
+            "no_convention_rule_filtered".to_string(),
+            dropped_no_convention,
+        ));
+        stage_samples.push(StageSample {
+            stage: "agent-finder-no-convention-filter".to_string(),
+            rows_in: verified.len() + dropped_no_convention,
+            rows_out: verified.len(),
+            accounting: acc,
+            model: None,
+        });
+    }
+    if !conv.violates.is_empty() {
+        let rows_in = verified.len();
+        verified.extend(conv.violates);
+        let mut acc = StageAccounting::default();
+        acc.push_added("violates_option_emitted", verified.len() - rows_in);
+        stage_samples.push(StageSample {
+            stage: "violates-option-emission".to_string(),
+            rows_in,
+            rows_out: verified.len(),
+            accounting: acc,
+            model: None,
+        });
+    }
+    // Tag every problem under a rule judged against one option with that option.
+    if !recs.is_empty() {
+        let by_rule: HashMap<&str, &str> = recs
+            .iter()
+            .filter(|r| !r.no_convention)
+            .map(|r| (r.rule_id.as_str(), r.recommended_option_id.as_str()))
+            .collect();
+        for f in &mut verified {
+            if let Some(id) = by_rule.get(f.rule_id.to_ascii_uppercase().as_str()) {
+                f.evaluated_option_id = Some((*id).to_string());
+            }
+        }
+    }
+    // Kinds, then the three information rows, as the engine writes them.
+    crate::ai_audit::assign_deviation_kinds(&mut verified, &recs, &alternatives);
+    let mut skipped_rules: Vec<(String, String)> = Vec::new();
+    {
+        let plan =
+            crate::scan_routing::plan_routes(&selected, &model_files, options.applies_to_routing);
+        let _ =
+            crate::ai_audit::routing::runnable_units(&model_files, &plan, None, &mut skipped_rules);
+    }
+    for (stage, new_rows) in [
+        (
+            "convention-observed-emission",
+            crate::ai_audit::conventions_observed_findings(repo, &verified, &recs, &alternatives),
+        ),
+        (
+            "no-convention-emission",
+            crate::ai_audit::no_convention_findings(repo, &recs),
+        ),
+        (
+            "not-assessed-emission",
+            crate::ai_audit::not_assessed_findings(repo, &skipped_rules),
+        ),
+    ] {
+        if new_rows.is_empty() {
+            continue;
+        }
+        let rows_in = verified.len();
+        verified.extend(new_rows);
+        let mut acc = StageAccounting::default();
+        acc.push_added(stage, verified.len() - rows_in);
+        stage_samples.push(StageSample {
+            stage: stage.to_string(),
+            rows_in,
+            rows_out: verified.len(),
+            accounting: acc,
+            model: None,
+        });
+    }
+    verified.extend(parked);
+
+    // The extras: coverage, partial rules, rules every piece found not applicable.
+    let mut rule_pieces: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for r in &reports {
+        for rule in &r.checklist_rules {
+            let entry = rule_pieces.entry(rule.to_ascii_uppercase()).or_default();
+            entry.0 += 1;
+            if r.not_applicable
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(rule))
+            {
+                entry.1 += 1;
+            }
+        }
+    }
+    for r in &mut reports {
+        if let Some(c) = r.coverage.take() {
+            extras.coverage.push(c);
+        }
+        extras.partial_rules.append(&mut r.partial_rules);
+    }
+    let partial_ids: HashSet<String> = extras
+        .partial_rules
+        .iter()
+        .map(|p| p.rule_id.to_ascii_uppercase())
+        .collect();
+    extras.not_applicable_rules = rule_pieces
+        .into_iter()
+        .filter(|(rule, (asked, na))| *asked > 0 && asked == na && !partial_ids.contains(rule))
+        .map(|(rule, _)| rule)
+        .collect();
+    Ok((verified, proposed, recs, failed, stage_samples, extras))
 }
+
+tokio::task_local! {
+    static AGENT_OVERRIDE: std::sync::Arc<dyn PieceAgent>;
+}
+
+/// Run `fut` with `agent` standing in for the run's piece agent. The one test seam of the finder,
+/// carried with the future the way the run's checkpoint folder is
+/// ([`crate::checkpoint::with_run_checkpoints`]): never global, so two runs in one process cannot
+/// see each other's agent. Production never sets it.
+pub async fn with_agent_override<F: std::future::Future>(
+    agent: std::sync::Arc<dyn PieceAgent>,
+    fut: F,
+) -> F::Output {
+    AGENT_OVERRIDE.scope(agent, fut).await
+}
+
+/// Whether a test agent stands in for the run's piece agent (see [`with_agent_override`]).
+pub fn agent_override_is_set() -> bool {
+    AGENT_OVERRIDE.try_with(|_| ()).is_ok()
+}
+
+/// Find the problems of one repository for the scan loop: build the run's piece agent (the test
+/// override, else the factory [`super::piece_agent_for`] with the key of the run's `Llm`) and call
+/// [`find_repo`]. The model, the force-pieces setting and the pieces in flight come from the
+/// run's controls and backend, never from the environment.
+#[allow(clippy::too_many_arguments)]
+pub async fn find_repo_for_run(
+    llm: &dyn crate::llm::LlmPort,
+    repo: &str,
+    files: &[(String, String)],
+    selected: &[AuditRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+    controls: &RunControls,
+    chosen_options: &HashMap<String, String>,
+    backend_resolution: &crate::llm::BackendResolution,
+    meter: Option<&UsageMeter>,
+) -> anyhow::Result<FinderResult> {
+    let backend = match backend_resolution {
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        crate::llm::BackendResolution::Cli | crate::llm::BackendResolution::Blocked { .. } => {
+            crate::llm::Backend::Cli
+        }
+    };
+    let options = FinderOptions {
+        model: super::finder_model_for(controls),
+        force_pieces: controls.finder_force_pieces,
+        applies_to_routing: controls.efficiency.applies_to_routing,
+        pieces_in_flight: super::pieces_in_flight_for(backend),
+        chosen_options: chosen_options.clone(),
+        backend: match backend {
+            crate::llm::Backend::Api => "api".to_string(),
+            crate::llm::Backend::Cli => "cli".to_string(),
+        },
+    };
+    let empty = camerata_rules::RuleSet::default();
+    let corpus = corpus.unwrap_or(&empty);
+    if let Ok(agent) = AGENT_OVERRIDE.try_with(std::sync::Arc::clone) {
+        return find_repo(
+            &*agent, repo, files, selected, corpus, controls, &options, meter,
+        )
+        .await;
+    }
+    let key = llm
+        .as_any()
+        .downcast_ref::<crate::llm::Llm>()
+        .and_then(crate::llm::Llm::api_key);
+    // The command line transport writes its rooms here, never inside the client's repository.
+    let work_dir = std::env::temp_dir().join("camerata-finder-rooms");
+    let agent = super::piece_agent_for(controls, backend, key, &work_dir)?;
+    find_repo(
+        &*agent, repo, files, selected, corpus, controls, &options, meter,
+    )
+    .await
+}
+
+/// The captures every agent problem carries, for tests that look for one.
+#[allow(dead_code)]
+pub(crate) const PIECE_CAPTURE: &str = FINDER_PIECE_CAPTURE;
+#[allow(dead_code)]
+pub(crate) const SURE_CAPTURE: &str = FINDER_SURE_CAPTURE;

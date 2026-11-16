@@ -91,6 +91,7 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     };
 
     let err = run_inspect_with_key_presence(args, false)

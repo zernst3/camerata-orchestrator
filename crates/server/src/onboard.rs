@@ -3142,7 +3142,36 @@ pub async fn audit_repos_with_llm_controlled(
                         let no_forced = std::collections::HashMap::new();
                         // H5: with the consensus option on, the whole audit runs three times
                         // and only what two runs agree on comes back (see `crate::consensus`).
-                        let audited =
+                        // `--finder agent` replaces everything inside `audit_repo` with one
+                        // agent for each piece of code; what comes back has the same shape, so
+                        // everything after this call is unchanged. The finder's extras (coverage,
+                        // rules left partial) are recorded with the rules below.
+                        let mut finder_extras: Option<
+                            crate::ai_audit::agent_finder::run::FinderExtras,
+                        > = None;
+                        let audited = if controls.finder
+                            == crate::ai_audit::agent_finder::FinderChoice::Agent
+                        {
+                            match Box::pin(crate::ai_audit::agent_finder::run::find_repo_for_run(
+                                llm,
+                                spec,
+                                &part.changed,
+                                &audit_rules,
+                                corpus,
+                                &controls,
+                                chosen_options,
+                                &backend_resolution,
+                                Some(&meter),
+                            ))
+                            .await
+                            {
+                                Ok((found, rules, recs, failed_parts, samples, extras)) => {
+                                    finder_extras = Some(extras);
+                                    Ok((found, rules, recs, failed_parts, samples))
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
                             crate::consensus::run_audit_passes(spec, controls.consensus, || {
                                 crate::ai_audit::audit_repo(
                                     llm,
@@ -3161,7 +3190,8 @@ pub async fn audit_repos_with_llm_controlled(
                                     Some(&files),
                                 )
                             })
-                            .await;
+                            .await
+                        };
                         match audited {
                             Ok((
                                 mut ai_findings,
@@ -3214,6 +3244,11 @@ pub async fn audit_repos_with_llm_controlled(
                                             rec.rule_id.to_ascii_uppercase(),
                                         );
                                     }
+                                }
+                                // The agent finder: rules every piece found not applicable are
+                                // queued before the rules are recorded, like the ones above.
+                                if let Some(extras) = &finder_extras {
+                                    extras.note_before_rules(&mut pipeline_ledger, spec);
                                 }
                                 // SPEND CAP: a rule the cap left unchecked on part of the code
                                 // is NOT recorded as having run, so the integrity ledger cannot
@@ -3296,6 +3331,19 @@ pub async fn audit_repos_with_llm_controlled(
                                         files.len(),
                                         emitted,
                                     );
+                                }
+                                // The agent finder's coverage block, and the rules it could not
+                                // complete (a rule with no answer, a file nobody reviewed): marked
+                                // partial now that their entries exist, so none reads clean.
+                                if let Some(extras) = &finder_extras {
+                                    extras.note_after_rules(&mut pipeline_ledger, spec);
+                                    for note in &extras.notes {
+                                        meter.record_note(format!("{spec}: {note}"));
+                                    }
+                                    meter.record_note(format!(
+                                        "{spec}: the agent finder wrote {} problems, {} of them citing no rule",
+                                        extras.problems_total, extras.problems_without_rule
+                                    ));
                                 }
                                 // H10: a rule whose scope held back part of the files says so. The
                                 // routing is recomputed here from the same rules and files the

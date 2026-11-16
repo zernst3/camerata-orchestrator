@@ -240,6 +240,26 @@ enum Command {
         /// dropped.
         #[arg(long)]
         consensus: bool,
+        /// Which finder reviews the code: `engine` (the default: the scan passes, then the
+        /// calibration stage) or `agent` (one review agent for each piece of code, with the rules
+        /// as its checklist; the files it read come from its tool trace). The agent finder
+        /// needs a full inspection (it cannot be combined with `--consensus`, and it needs
+        /// `--full` when an earlier inspection of the same code exists).
+        #[arg(long, default_value = "engine", value_parser = camerata::inspect_cmd::finder::parse_finder)]
+        finder: camerata_server::ai_audit::agent_finder::FinderChoice,
+        /// The agent finder's model. Unset: the built-in default (Fable 5.2). Set only here or in
+        /// a project's settings, never by the environment.
+        #[arg(long = "finder-model")]
+        finder_model: Option<String>,
+        /// Internal runs only: cut every unit of code into at least this many pieces, so the
+        /// joints step runs on small code too. Needs `--internal` and `--finder agent`.
+        #[arg(long = "finder-force-pieces", value_name = "K")]
+        finder_force_pieces: Option<usize>,
+        /// After the run, compare its problems with the ones an earlier agent finder run left in
+        /// this state folder (the folder `CAMERATA_STATE_DIR` named for that run) and write the
+        /// difference as an operator note beside the ledger. Never in the export.
+        #[arg(long = "compare-with", value_name = "STATE-FOLDER")]
+        compare_with: Option<PathBuf>,
         /// Run only what remains of a saved run: `--resume <RUN-ID>` or `--resume latest` (the
         /// newest run with work left; with `--repo`, the newest of those repos). Every inspection
         /// is saved part by part, so a part that failed (the AI service was down) or a run that
@@ -543,6 +563,10 @@ async fn main() -> anyhow::Result<()> {
             internal,
             run_client_tooling,
             consensus,
+            finder,
+            finder_model,
+            finder_force_pieces,
+            compare_with,
             resume,
         } => {
             if let Some(run) = resume {
@@ -574,6 +598,12 @@ async fn main() -> anyhow::Result<()> {
                 client_engagement: !internal,
                 run_client_tooling,
                 consensus,
+                finder: camerata::inspect_cmd::finder::FinderArgs {
+                    finder,
+                    model: finder_model,
+                    force_pieces: finder_force_pieces,
+                    compare_with,
+                },
             })
             .await
         }
@@ -1283,9 +1313,20 @@ mod cli_parse_tests {
                 internal,
                 run_client_tooling,
                 consensus,
+                finder,
+                finder_model,
+                finder_force_pieces,
+                compare_with,
                 resume,
             } => {
                 assert!(resume.is_none(), "a new run unless --resume is given");
+                assert_eq!(
+                    finder,
+                    camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
+                    "the scan passes unless the agent finder is asked for"
+                );
+                assert!(finder_model.is_none() && finder_force_pieces.is_none());
+                assert!(compare_with.is_none());
                 assert!(
                     group_review_model.is_none(),
                     "the default group reviewer unless asked for"
@@ -1337,6 +1378,62 @@ mod cli_parse_tests {
                 ..
             }
         ));
+    }
+
+    /// The finder flags parse: `--finder agent`, its model, the forced pieces and the comparison.
+    #[test]
+    fn inspect_parses_the_finder_flags() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+            "--internal",
+            "--finder",
+            "agent",
+            "--finder-model",
+            "claude-fable-5-2",
+            "--finder-force-pieces",
+            "4",
+            "--compare-with",
+            "/tmp/earlier",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                finder,
+                finder_model,
+                finder_force_pieces,
+                compare_with,
+                ..
+            } => {
+                assert_eq!(
+                    finder,
+                    camerata_server::ai_audit::agent_finder::FinderChoice::Agent
+                );
+                assert_eq!(finder_model.as_deref(), Some("claude-fable-5-2"));
+                assert_eq!(finder_force_pieces, Some(4));
+                assert_eq!(compare_with, Some(PathBuf::from("/tmp/earlier")));
+            }
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        let bad = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+            "--finder",
+            "both",
+        ]);
+        assert!(bad.is_err(), "an unknown finder is a usage error");
     }
 
     /// `--resume` stands in for the repo, export and client, which the saved run holds; without
