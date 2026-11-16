@@ -608,8 +608,17 @@ mod tests {
 
     #[test]
     fn a_uuid_under_a_token_id_field_is_scrubbed() {
-        let id = "3f2a9c1e-7b4d-4e86-9a15-c0de5eed1234";
+        use camerata_secrets::fixtures::body;
+        let hex = "0123456789abcdef";
+        let id = [
+            body(8, hex, 31),
+            body(4, hex, 32),
+            body(4, hex, 33),
+            body(4, hex, 34),
+            body(12, hex, 35),
+        ]
+        .join("-");
         let out = scrub(&format!("token_id: {id}\n"));
-        assert!(!out.scrubbed.contains(id));
+        assert!(!out.scrubbed.contains(&id));
     }
 }
