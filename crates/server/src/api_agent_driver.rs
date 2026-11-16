@@ -1847,13 +1847,20 @@ fn resolve_path(raw: &str, worktree: Option<&Path>) -> PathBuf {
 }
 
 /// Truncate a string to at most `max_bytes`, appending a note when truncated.
+///
+/// The cut backs off to the nearest character boundary at or below `max_bytes`: slicing a
+/// `str` inside a multi-byte character panics, and tool output is whatever the repository
+/// holds (any file can put a non-ASCII character across the budget).
 fn truncate_output(s: String, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
-        s
-    } else {
-        let truncated = &s[..max_bytes];
-        format!("{truncated}\n... (output truncated at {max_bytes} bytes)")
+        return s;
     }
+    let mut cut = max_bytes;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let truncated = &s[..cut];
+    format!("{truncated}\n... (output truncated at {max_bytes} bytes)")
 }
 
 // ─── tool schema definitions ──────────────────────────────────────────────────
@@ -5049,3 +5056,6 @@ mod tests {
 
 #[cfg(test)]
 mod model_input_tests;
+
+#[cfg(test)]
+mod truncate_tests;
