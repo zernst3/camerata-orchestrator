@@ -451,32 +451,41 @@ pub(crate) fn grid_effort_key(effort: Option<&str>) -> &'static str {
 /// grid, the executive summary's counts, the cover and the scorecard all count these, so the PDF
 /// states one number of problems.
 pub(crate) fn problem_heads(matrix: &MatrixJson) -> Vec<&FindingRefJson> {
-    let mut order: Vec<(&str, &str, usize)> = Vec::new();
-    let mut best: std::collections::HashMap<(&str, &str, usize), &FindingRefJson> =
-        std::collections::HashMap::new();
-    for f in matrix
-        .do_now
-        .iter()
-        .chain(&matrix.do_next)
-        .chain(&matrix.plan)
-        .chain(&matrix.accepted)
-        .chain(&matrix.informational)
-        .chain(&matrix.held)
-        .filter(|f| crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&f.kind.tag()))
-    {
-        let key = (f.repo.as_str(), f.path.as_str(), f.line);
-        match best.get(&key) {
-            None => {
-                order.push(key);
-                best.insert(key, f);
-            }
-            Some(kept) if severity_rank(&f.severity) < severity_rank(&kept.severity) => {
-                best.insert(key, f);
-            }
-            Some(_) => {}
-        }
+    crate::review_tree::places_of(
+        matrix
+            .do_now
+            .iter()
+            .chain(&matrix.do_next)
+            .chain(&matrix.plan)
+            .chain(&matrix.accepted)
+            .chain(&matrix.informational)
+            .chain(&matrix.held)
+            .filter(|f| crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&f.kind.tag())),
+    )
+    .into_iter()
+    .map(|p| p.head)
+    .collect()
+}
+
+impl crate::review_tree::PlaceRow for FindingRefJson {
+    fn place_repo(&self) -> &str {
+        &self.repo
     }
-    order.into_iter().filter_map(|k| best.remove(&k)).collect()
+    fn place_path(&self) -> &str {
+        &self.path
+    }
+    fn place_line(&self) -> usize {
+        self.line
+    }
+    fn place_rule_id(&self) -> &str {
+        &self.rule_id
+    }
+    fn place_severity(&self) -> &str {
+        &self.severity
+    }
+    fn place_bucket(&self) -> &str {
+        &self.bucket
+    }
 }
 
 /// The grid's note on the places it leaves out, by severity, so the grid closes to the cover.
@@ -1128,6 +1137,9 @@ impl PdfWordsJson {
 /// `docs/design/2026-07-23_brownfield-audit-report.md` in order.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditReportJson {
+    /// Every count of the package, worked out once (`report_counts`). Beside the old fields,
+    /// which stay for one release.
+    pub counts: super::counts::ReportCounts,
     /// The package is for the operator's own review. Not part of the PDF's data: the exporters
     /// that build from this value beside the PDF (`findings.json`) read it to decide whether the
     /// group reviewer's triage columns go in.

@@ -18,6 +18,11 @@
 
 mod archive;
 mod consistency;
+#[allow(
+    dead_code,
+    reason = "built but not yet enforced: work order C wires the counts check into gate_report"
+)]
+mod counts_check;
 pub mod engine_check;
 pub mod evidence;
 pub mod held;
@@ -137,7 +142,10 @@ pub async fn build_product_package_with_stem(
     crate::report_export::require_all_repos(report, options)?;
     // And no client package for a run that did not run to completion.
     crate::report_export::require_complete_run(report, options)?;
-    let report_json = crate::report_export::build_report_json(reviewed, corpus, options);
+    // The counts are worked out ONCE here and handed to the report builder by reference.
+    let counts = crate::report_export::report_counts(reviewed, corpus, options);
+    let report_json =
+        crate::report_export::build_report_json_with_counts(reviewed, corpus, options, &counts);
     let data_json = crate::report_export::render_data_json(&report_json)?;
     // Everything but the PDF, then every check that needs no Typst (the secrets in every file,
     // the held rows, the counts, the marking, the row parity), then the compile. The refusal is
@@ -791,6 +799,9 @@ pub(crate) fn test_scan_report() -> crate::onboard::ScanReport {
 pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
     run_complete_tests::internal_incomplete_package()
 }
+
+#[cfg(test)]
+mod counts_tests;
 
 #[cfg(test)]
 mod patterns_tests;

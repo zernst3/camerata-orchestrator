@@ -505,17 +505,13 @@ fn places_tally(entries: &Entries, kinds: &[&str]) -> Tally {
     };
     // Each place: the row that carries the others heads it (the first row there when none does),
     // at the worst severity of any row at the place, as the All problems sheet prints it.
-    let mut places: BTreeMap<(String, String, String), Vec<&Value>> = BTreeMap::new();
+    let mut places: BTreeMap<(String, String, String, String), Vec<&Value>> = BTreeMap::new();
     for row in &rows {
         if !kinds.contains(&cell_text(row, "kind").as_str()) {
             continue;
         }
         places
-            .entry((
-                cell_text(row, "repo"),
-                cell_text(row, "path"),
-                cell_text(row, "line"),
-            ))
+            .entry(super::counts_check::place_key_of(row))
             .or_default()
             .push(row);
     }
@@ -818,6 +814,26 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
     problems
+}
+
+/// Every count in the package, held to the files in it (single counts, design 5.7): the object in
+/// `findings.json` and the PDF data equals an independent recount, the four identities hold,
+/// every surface equals the object, every count sentence equals the one the counts give and an
+/// executive summary override states no number that is no count.
+///
+/// BUILT BUT NOT YET ENFORCED: the surfaces still count on their own, so this refuses today's
+/// package. It is not in `gate_report`; work order C makes the surfaces read the object and then
+/// wires it in. See [`super::counts_check`].
+#[allow(
+    dead_code,
+    reason = "built but not yet enforced: work order C wires it into gate_report"
+)]
+pub fn counts_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
+    super::counts_check::counts_problems_with(
+        entries,
+        report,
+        super::counts_check::CountsChecks::default(),
+    )
 }
 
 const PATTERNS: &str = "patterns across services";
@@ -1936,13 +1952,7 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
         .map(|r| (cell_text(r, "site_id"), r))
         .filter(|(id, _)| !id.is_empty())
         .collect();
-    let place_of = |r: &Value| {
-        (
-            cell_text(r, "repo"),
-            cell_text(r, "path"),
-            cell_text(r, "line"),
-        )
-    };
+    let place_of = super::counts_check::place_key_of;
     // Rows the reviewer ruled out are no problem: they neither carry nor are carried.
     let ruled_out: BTreeSet<String> = entries
         .get("json/false-positives.json")
@@ -2046,7 +2056,8 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
         })
         .filter(|r| cell_text(r, "is_fp") != "true")
         .collect();
-    let places: BTreeSet<(String, String, String)> = listed.iter().map(|r| place_of(r)).collect();
+    let places: BTreeSet<(String, String, String, String)> =
+        listed.iter().map(|r| place_of(r)).collect();
     if shown.len() != places.len() {
         problems.push(problem(
             "(workbook)",

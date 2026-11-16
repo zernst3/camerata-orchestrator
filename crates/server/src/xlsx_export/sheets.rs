@@ -53,13 +53,17 @@ pub(super) struct PlaceRows<'a> {
 /// (repo, file and line), listing every row there. A committed secret that six rules flag at one
 /// line is one place, one row, six rules. Only All source rows repeats a problem.
 pub(super) fn place_rows(rows: &[FindingRow]) -> Vec<PlaceRows<'_>> {
-    let mut order: Vec<(String, String, usize)> = Vec::new();
-    let mut at: HashMap<(String, String, usize), Vec<&FindingRow>> = HashMap::new();
+    type Key = (String, String, usize, String);
+    let mut order: Vec<Key> = Vec::new();
+    let mut at: HashMap<Key, Vec<&FindingRow>> = HashMap::new();
     for r in rows
         .iter()
         .filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
     {
-        let key = (r.repo.clone(), r.path.clone(), r.line);
+        // The one place key: a whole-file problem (line 0) is a place of its own rule.
+        let (repo, path, line, rule) =
+            crate::review_tree::place_key(&r.repo, &r.path, r.line, &r.rule_id);
+        let key = (repo.to_string(), path.to_string(), line, rule.to_string());
         at.entry(key.clone())
             .or_insert_with(|| {
                 order.push(key.clone());
@@ -1698,9 +1702,9 @@ pub(super) fn code_volume_label(report: &crate::onboard::ScanReport) -> Option<S
 /// completed), the first row there. The scorecard, the PDF cover and the All problems sheet count
 /// these and no others, so the three agree by construction.
 pub(super) fn problem_heads<'a>(rows: impl Iterator<Item = &'a FindingRow>) -> Vec<&'a FindingRow> {
-    let mut seen: std::collections::HashSet<(&str, &str, usize)> = std::collections::HashSet::new();
-    rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
-        .filter(|r| seen.insert((r.repo.as_str(), r.path.as_str(), r.line)))
+    crate::review_tree::places_of(rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings))
+        .into_iter()
+        .map(|p| p.head)
         .collect()
 }
 
