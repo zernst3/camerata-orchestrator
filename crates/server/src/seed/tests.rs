@@ -738,6 +738,7 @@ fn reason_of(check: CheckId) -> Option<HoldReason> {
         CheckId::Content => Some(HoldReason::JunkContent),
         CheckId::EvidenceUnverified => Some(HoldReason::EvidenceUnverified),
         CheckId::RestoredWithoutDecision => Some(HoldReason::RestoredWithoutDecision),
+        CheckId::SplitOutWithoutDecision => Some(HoldReason::SplitOutWithoutDecision),
         CheckId::MergedWithoutDecision => Some(HoldReason::MergedWithoutDecision),
         CheckId::EngineCheckNoWithoutCorrection => Some(HoldReason::EngineCheckNoWithoutCorrection),
         _ => None,
