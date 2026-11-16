@@ -224,3 +224,81 @@ async fn a_piece_file_under_the_reserved_folder_stays_owed_and_is_reported_plain
         FileState::NotReviewed
     );
 }
+
+#[tokio::test]
+async fn a_send_again_that_rewrites_the_problems_file_loses_no_earlier_problem() {
+    // Run 1 writes problems 1 and 2 and skips b.rs; the send again rewrites problems-1.json
+    // with problem 3 only. All three problems must survive, and the rewrite is noted.
+    let script = full_script(
+        &[("src/a.rs", 6)],
+        vec![
+            problem(1, "src/a.rs", 2, "high", "fn item_2() { run(2); }"),
+            problem(2, "src/a.rs", 3, "low", "fn item_3() { run(3); }"),
+        ],
+        vec![],
+        vec![
+            answer_clean("ARCH-ONE-1", "src/a.rs", 1),
+            answer_clean("SEC-TWO-1", "src/a.rs", 2),
+        ],
+    );
+    let agent = ScriptedAgent::new(script).with_follow_up(
+        vec![out(
+            "problems-1.json",
+            &json!([problem(3, "src/b.rs", 2, "low", "fn item_2() { run(2); }")]),
+        )],
+        AgentStop::Finished,
+    );
+    let (rows, _, _, failed, _, extras) = run(&agent).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(
+        extras.notes.iter().any(|n| n.contains("problems-1.json")),
+        "the rewrite is an operator note: {:?}",
+        extras.notes
+    );
+}
+
+#[tokio::test]
+async fn a_later_version_of_a_problem_number_wins() {
+    let script = full_script(
+        &[("src/a.rs", 6)],
+        vec![problem(1, "src/a.rs", 2, "high", "fn item_2() { run(2); }")],
+        vec![],
+        vec![
+            answer_clean("ARCH-ONE-1", "src/a.rs", 1),
+            answer_clean("SEC-TWO-1", "src/a.rs", 2),
+        ],
+    );
+    let agent = ScriptedAgent::new(script).with_follow_up(
+        vec![out(
+            "problems-1.json",
+            &json!([problem(1, "src/a.rs", 4, "low", "fn item_4() { run(4); }")]),
+        )],
+        AgentStop::Finished,
+    );
+    let (rows, _, _, _, _, _) = run(&agent).await;
+    let lines: Vec<usize> = rows.iter().map(|f| f.line).collect();
+    assert_eq!(lines, vec![4], "{rows:?}");
+}
+
+#[tokio::test]
+async fn a_stray_problems_file_name_is_a_known_output_repaired_then_a_failed_part() {
+    for name in ["problems_2.json", "problems-2a.json", "problems.json"] {
+        let mut script = good_script(vec![], vec![]);
+        script.push(out(name, &json!([])));
+        let agent = ScriptedAgent::new(script);
+        let (_, _, _, failed, _, _) = run(&agent).await;
+        assert_eq!(agent.messages().len(), 1, "{name}: one repair turn");
+        assert!(
+            agent.messages()[0].contains(name),
+            "{name}: {:?}",
+            agent.messages()
+        );
+        assert_eq!(failed.len(), 1, "{name}: {failed:?}");
+        assert!(
+            failed[0].reason.contains(name),
+            "{name}: {}",
+            failed[0].reason
+        );
+    }
+}

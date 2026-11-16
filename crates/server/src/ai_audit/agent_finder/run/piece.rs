@@ -94,18 +94,86 @@ fn is_known_output(file: &str) -> bool {
     name == "checklist.json"
         || name == "leads.json"
         || name == "unread.json"
-        || name
-            .strip_prefix("problems-")
-            .and_then(|r| r.strip_suffix(".json"))
-            .is_some_and(|n| n.parse::<u64>().is_ok())
+        // Any file named like a problems file is one the agent meant as such, so a stray name
+        // (`problems_2.json`, `problems-2a.json`) is repaired and then a failed part.
+        || name.starts_with("problems")
+}
+
+fn is_problems_file(key: &str) -> bool {
+    let name = key.strip_prefix(super::super::room::OUT_DIR).unwrap_or(key);
+    name.strip_prefix("problems-")
+        .and_then(|r| r.strip_suffix(".json"))
+        .is_some_and(|n| n.parse::<u64>().is_ok())
+}
+
+/// Whether `text` is a problems file the reader accepts.
+fn problems_text_is_usable(key: &str, text: &str) -> bool {
+    let one: BTreeMap<String, String> = [(key.to_string(), text.to_string())].into();
+    reply::parse_outputs(&one, &[]).unusable.is_empty()
+}
+
+/// The items of a problems file's text (a list, or an object holding `problems`).
+fn problem_items(text: &str) -> Option<Vec<serde_json::Value>> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v.as_array()
+        .or_else(|| v.get("problems").and_then(serde_json::Value::as_array))
+        .cloned()
+}
+
+fn item_number(item: &serde_json::Value) -> Option<u64> {
+    item.get("n").and_then(serde_json::Value::as_u64)
+}
+
+/// Join a later version of a problems file onto an earlier one: a number the later version holds
+/// is the later version's, a number only the earlier version holds stays. `None` when either
+/// version cannot be used (the later one then simply replaces the earlier).
+fn join_problem_versions(key: &str, earlier: &str, later: &str) -> Option<String> {
+    if !problems_text_is_usable(key, earlier) || !problems_text_is_usable(key, later) {
+        return None;
+    }
+    let later_items = problem_items(later)?;
+    let later_numbers: HashSet<u64> = later_items.iter().filter_map(item_number).collect();
+    let mut joined: Vec<serde_json::Value> = problem_items(earlier)?
+        .into_iter()
+        .filter(|i| item_number(i).is_some_and(|n| !later_numbers.contains(&n)))
+        .collect();
+    joined.extend(later_items);
+    Some(serde_json::Value::Array(joined).to_string())
+}
+
+/// The problems files a later step wrote again over an earlier usable version, in path order.
+pub(super) fn rewritten_problem_files(runs: &[AgentRun]) -> Vec<String> {
+    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut rewritten: Vec<String> = Vec::new();
+    for run in runs {
+        for (k, v) in &run.outputs {
+            if !is_problems_file(k) {
+                continue;
+            }
+            if let Some(prev) = seen.get(k.as_str()) {
+                if problems_text_is_usable(k, prev) && !rewritten.contains(k) {
+                    rewritten.push(k.clone());
+                }
+            }
+            seen.insert(k, v);
+        }
+    }
+    rewritten.sort();
+    rewritten
 }
 
 /// The outputs of every run, later runs replacing earlier ones that wrote the same file.
 pub(super) fn merged_outputs(runs: &[AgentRun]) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
     for run in runs {
         for (k, v) in &run.outputs {
-            out.insert(k.clone(), v.clone());
+            let text = match out.get(k) {
+                Some(earlier) if is_problems_file(k) => {
+                    join_problem_versions(k, earlier, v).unwrap_or_else(|| v.clone())
+                }
+                _ => v.clone(),
+            };
+            out.insert(k.clone(), text);
         }
     }
     out
@@ -411,6 +479,12 @@ pub(super) fn report_of(
         report
             .notes
             .push(format!("{}: the file {} {}", piece.key, u.file, u.reason));
+    }
+    for file in rewritten_problem_files(&runs) {
+        report.notes.push(format!(
+            "{}: a later step wrote {file} again; the problems only the earlier version held were kept",
+            piece.key
+        ));
     }
 
     // The findings: whatever problems were usable, even when the piece failed.
