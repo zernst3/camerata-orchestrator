@@ -385,17 +385,29 @@ fn the_client_readme_has_no_serial_comma() {
 /// numbers, so the printed sentence is scanned too.
 #[test]
 fn the_executive_summary_sentence_has_no_serial_comma() {
-    use crate::report_export::{classification::default_narrative, ReviewState};
+    use crate::report_export::{counts_prose, ReportCounts, ReviewState};
     for state in [ReviewState::Raw, ReviewState::Reviewed] {
         for (held, info, ruled_out, advisories) in [(14, 6, 0, 0), (1, 1, 1, 3), (0, 0, 7, 0)] {
-            let sentence = default_narrative(
-                state, 120, 40, ruled_out, 12, held, advisories, 3, 4, 5, 0, info,
-            );
-            assert!(
-                serial_commas(&sentence).is_empty(),
-                "{state:?}: {sentence}\n{:?}",
-                serial_commas(&sentence)
-            );
+            let mut c = ReportCounts::default();
+            c.other.files_scanned = 120;
+            c.problems.total = 12 + held + info;
+            c.problems.for_action = 12;
+            c.problems.needs_decision = held;
+            c.problems.information_only = info;
+            c.rows.ruled_out = ruled_out;
+            c.rows.dependency = advisories;
+            for sentence in [
+                counts_prose::narrative(&c, state),
+                counts_prose::methodology_line(&c, state),
+                counts_prose::next_steps(&c, false, state),
+                counts_prose::grid_left_out(&c),
+            ] {
+                assert!(
+                    serial_commas(&sentence).is_empty(),
+                    "{state:?}: {sentence}\n{:?}",
+                    serial_commas(&sentence)
+                );
+            }
         }
     }
 }

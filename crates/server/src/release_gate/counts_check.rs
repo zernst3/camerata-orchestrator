@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 
 use super::report::Problem;
+use crate::report_export::counts_prose;
 use crate::report_export::{AuditReportJson, ReportCounts};
 use crate::xlsx_export::vocabulary as v;
 
@@ -185,17 +186,14 @@ pub(super) fn recount(
             .map(|m| severity_slot(&text(m, "severity")))
             .min()
             .unwrap_or(3);
-        match worst {
-            0 => c.problems.by_severity.critical += 1,
-            1 => c.problems.by_severity.high += 1,
-            2 => c.problems.by_severity.medium += 1,
-            _ => c.problems.by_severity.low += 1,
-        }
+        let sev = ["critical", "high", "medium", "low"][worst.min(3)];
+        c.problems.by_severity.add(sev);
         let buckets: Vec<String> = members.iter().map(|m| text(m, "bucket")).collect();
         let known = ["do_now", "do_next", "plan", "informational", "accepted"];
         // Fail closed: a held row, or a bucket nobody knows, needs a decision.
         if buckets.iter().any(|b| !known.contains(&b.as_str())) {
             c.problems.needs_decision += 1;
+            c.problems.needs_decision_by_severity.add(sev);
         } else if buckets.iter().any(|b| b == "do_now") {
             c.problems.for_action += 1;
             c.problems.first += 1;
@@ -207,6 +205,7 @@ pub(super) fn recount(
             c.problems.later += 1;
         } else if buckets.iter().any(|b| b == "informational") {
             c.problems.information_only += 1;
+            c.problems.information_only_by_severity.add(sev);
         } else {
             c.problems.accepted += 1;
         }
@@ -232,20 +231,26 @@ pub(super) fn recount(
         if !at.contains_key(&key) && beside.insert(key) {
             c.problems.total += 1;
             c.problems.needs_decision += 1;
-            match text(site, "severity").as_str() {
-                "critical" => c.problems.by_severity.critical += 1,
-                "high" => c.problems.by_severity.high += 1,
-                "medium" => c.problems.by_severity.medium += 1,
-                _ => c.problems.by_severity.low += 1,
-            }
+            c.problems.by_severity.add(&text(site, "severity"));
+            c.problems
+                .needs_decision_by_severity
+                .add(&text(site, "severity"));
             c.problems.beside_ruled_out += 1;
         }
     }
 
     c.fixes.total = fixes.len();
+    // A Fix is to do while a place of it is still to change: a problem row a reviewer, a baseline
+    // record or a waiver has not accepted, or any dependency advisory.
     let to_do: BTreeSet<String> = problem_rows
         .iter()
         .copied()
+        .filter(|r| {
+            !matches!(
+                text(r, "disposition_kind").as_str(),
+                "Ignored" | "BaselineAccepted" | "WaivedInline"
+            )
+        })
         .chain(deps.iter())
         .map(|r| text(r, "fix_id"))
         .filter(|id| !id.is_empty())
@@ -332,83 +337,6 @@ fn differences(left: &ReportCounts, right: &ReportCounts) -> Vec<(String, u64, u
             (a != b).then_some((k, a, b))
         })
         .collect()
-}
-
-fn n(x: usize) -> String {
-    let digits = x.to_string();
-    let mut out = String::new();
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-fn noun(count: usize, one: &str, many: &str) -> String {
-    format!("{} {}", n(count), if count == 1 { one } else { many })
-}
-
-fn is_are(count: usize) -> &'static str {
-    if count == 1 {
-        "is"
-    } else {
-        "are"
-    }
-}
-
-/// The narrative the executive summary states (design 5.6), built from the counts alone. Work
-/// order C moves this into `report_export/counts_prose.rs` and the surfaces call it; until then
-/// the gate holds the printed narrative to this wording.
-pub(crate) fn expected_narrative(c: &ReportCounts) -> String {
-    let p = &c.problems;
-    let found = if p.total == 0 {
-        "no problems".to_string()
-    } else {
-        noun(p.total, "problem", "problems")
-    };
-    let mut s = format!(
-        "The engine analyzed {} and found {found}.",
-        noun(c.other.files_scanned, "file", "files")
-    );
-    if p.total > 0 {
-        s.push_str(&format!(
-            " {} {} for action (First, Next, Later), {} {} a reviewer's decision, {} {} information only and {} {} accepted risk.",
-            n(p.for_action),
-            is_are(p.for_action),
-            n(p.needs_decision),
-            if p.needs_decision == 1 { "needs" } else { "need" },
-            n(p.information_only),
-            is_are(p.information_only),
-            n(p.accepted),
-            is_are(p.accepted),
-        ));
-    }
-    s.push_str(&format!(
-        " {} {} listed separately.",
-        noun(
-            c.rows.dependency,
-            "dependency advisory",
-            "dependency advisories"
-        ),
-        is_are(c.rows.dependency),
-    ));
-    s
-}
-
-/// The sentence in the next steps that states how many problems need a decision.
-pub(crate) fn expected_decision_sentence(c: &ReportCounts) -> String {
-    format!(
-        "{} of {} {} a reviewer's decision",
-        n(c.problems.needs_decision),
-        noun(c.problems.total, "problem", "problems"),
-        if c.problems.needs_decision == 1 {
-            "needs"
-        } else {
-            "need"
-        },
-    )
 }
 
 /// Every integer written in `sentence`, with thousands commas removed.
@@ -587,24 +515,60 @@ pub(super) fn counts_problems_with(
             ),
         ));
     }
-    // The methodology line prints these two fields as "problems" and "need a decision".
-    for (name, printed, w) in [
+    // The cover strip, the grid's notes and the grid's counts are the sentences rebuilt from the
+    // recount, string for string.
+    for (location, printed, expected) in [
         (
-            "candidates_reviewed",
-            report.methodology.candidates_reviewed,
-            want.problems.total,
+            "cover.strip",
+            report.cover.strip.clone(),
+            counts_prose::cover_strip(want),
         ),
         (
-            "held_for_review",
-            report.methodology.held_for_review,
+            "priority_grid.accepted_line",
+            report.priority_grid.accepted_line.clone(),
+            counts_prose::grid_accepted_line(want),
+        ),
+        (
+            "priority_grid.left_out",
+            report.priority_grid.left_out.clone(),
+            counts_prose::grid_left_out(want),
+        ),
+        (
+            "methodology.reconciliation",
+            report.methodology.reconciliation.clone(),
+            counts_prose::methodology_line(want, report.review_state),
+        ),
+    ] {
+        if printed != expected {
+            problems.push(problem(
+                "PDF data",
+                location,
+                format!("the PDF data reads {printed:?} and the counts give {expected:?}"),
+            ));
+        }
+    }
+    for (name, printed, w) in [
+        (
+            "accepted_count",
+            report.priority_grid.accepted_count,
+            want.problems.accepted,
+        ),
+        (
+            "informational_count",
+            report.priority_grid.informational_count,
+            want.problems.information_only,
+        ),
+        (
+            "held_count",
+            report.priority_grid.held_count,
             want.problems.needs_decision,
         ),
     ] {
         if printed != w {
             problems.push(problem(
                 "PDF data",
-                &format!("methodology.{name}"),
-                format!("the methodology line states {printed} and the counts give {w}"),
+                &format!("priority_grid.{name}"),
+                format!("the grid states {printed} and the counts give {w}"),
             ));
         }
     }
@@ -632,7 +596,7 @@ pub(super) fn counts_problems_with(
     // 4. Count sentences equal the ones rebuilt from the recount.
     let summary = &report.executive_summary;
     if !summary.is_override {
-        let expected = expected_narrative(want);
+        let expected = counts_prose::narrative(want, report.review_state);
         if summary.narrative != expected {
             problems.push(problem(
                 "PDF data",
@@ -645,7 +609,7 @@ pub(super) fn counts_problems_with(
         }
     }
     let next_steps = &report.methodology.next_steps;
-    let expected = expected_decision_sentence(want);
+    let expected = counts_prose::decision_sentence(want);
     if !next_steps.contains(&expected) {
         problems.push(problem(
             "PDF data",
@@ -739,7 +703,78 @@ fn workbook_problems(entries: &Entries, want: &ReportCounts) -> Vec<Problem> {
             )),
         }
     }
+    // The scorecard's Total row on Start here: the problems by severity and in all.
+    let sev = &want.problems.by_severity;
+    let total_row: Option<Vec<usize>> = start
+        .iter()
+        .find(|row| row.first().is_some_and(|c| c == "Total"))
+        .map(|row| {
+            (1..=5)
+                .map(|i| {
+                    row.get(i)
+                        .and_then(|t| t.parse::<f64>().ok())
+                        .map_or(usize::MAX, |x| x as usize)
+                })
+                .collect()
+        });
+    let wanted = vec![
+        sev.critical,
+        sev.high,
+        sev.medium,
+        sev.low,
+        want.problems.total,
+    ];
+    match total_row {
+        Some(printed) if printed != wanted => problems.push(problem(
+            &xlsx_name,
+            "sheet \"Start here\" scorecard Total",
+            format!("the scorecard Total states {printed:?} and the counts give {wanted:?}"),
+        )),
+        Some(_) => {}
+        None => problems.push(problem(
+            &xlsx_name,
+            "sheet \"Start here\" scorecard Total",
+            "Start here has no scorecard Total row",
+        )),
+    }
+    // The Not checked sheet lists a row for each rule that could not be completed.
+    match not_checked_rule_rows(xlsx) {
+        Ok(rows) if rows != want.rows.not_checked => problems.push(problem(
+            &xlsx_name,
+            &format!("sheet \"{}\" rows", v::NOT_CHECKED),
+            format!(
+                "the sheet lists {rows} rules that could not be completed and the counts give {}",
+                want.rows.not_checked
+            ),
+        )),
+        Ok(_) => {}
+        Err(e) => problems.push(problem(
+            &xlsx_name,
+            &format!("sheet \"{}\" rows", v::NOT_CHECKED),
+            format!("the rows of the sheet cannot be counted: {e}"),
+        )),
+    }
     problems
+}
+
+/// The rows of the Not checked sheet that stand for a rule that could not be completed.
+fn not_checked_rule_rows(xlsx: &[u8]) -> Result<usize, String> {
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::NOT_CHECKED)?;
+    let header = grid
+        .first()
+        .ok_or_else(|| format!("the {} sheet is empty", v::NOT_CHECKED))?;
+    let col = header
+        .iter()
+        .position(|h| h == v::H_GAP)
+        .ok_or_else(|| format!("the {} sheet has no {:?} column", v::NOT_CHECKED, v::H_GAP))?;
+    Ok(grid
+        .iter()
+        .skip(1)
+        .filter(|r| {
+            r.get(col)
+                .is_some_and(|c| c == v::GAP_RULE_COULD_NOT_COMPLETE)
+        })
+        .count())
 }
 
 /// Check 7: in every place with more than one problem row, all rows but the head carry

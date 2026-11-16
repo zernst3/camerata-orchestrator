@@ -429,7 +429,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      list) and picks the places the architect should read in person, each with one reason from a
      closed list. It never removes a place, never overwrites stage 1's answer (a disagreement is
      stored beside it) and never writes a count: the numbers come from the tree. The review screens call a place a "site". Its model is
-     Claude Fable 5.1 by default, changed only by `--group-review-model` or the project's review
+     Claude Fable 5.2 by default, changed only by `--group-review-model` or the project's review
      settings. In a client engagement it must be an Anthropic API model like every other stage.
    - **Tree.** The operator works through areas (categories), rules and rule groups. A node is either
      an escalation node (it holds a security-class place or a critical or high one, so the operator expects
@@ -2496,7 +2496,7 @@ does and where it runs:
 | Escalation | Translating escalation decisions into prose |
 | Clarification | Generating structured clarification questions |
 
-Every step defaults to Sonnet 5.5 when a project is created, except calibration (Opus 5.5), the group reviewer (Fable 5.1) and the fix wording and the duplicate-code judge (Haiku 5.5). A change to one project never
+Every step defaults to Sonnet 5.5 when a project is created, except calibration (Opus 5.5), the group reviewer (Fable 5.2) and the fix wording and the duplicate-code judge (Haiku 5.5). A change to one project never
 touches another project's step models.
 
 For steps where the operator also picks a model per run (audit, calibration, research chat), the operator's per-run
@@ -2505,7 +2505,7 @@ choice wins over the project default for that run only.
 **Where a model comes from.** A model comes from the project's settings in the app or from `--model`,
 `--calibration-model`, `--group-review-model`, `--fix-model` and `--clone-judge-model` on the command
 line and from nowhere else (no environment variable picks one). The built-in defaults are Claude
-Sonnet 5.5 for the scan, Claude Opus 5.5 for calibration, Claude Fable 5.1 for the group reviewer and
+Sonnet 5.5 for the scan, Claude Opus 5.5 for calibration, Claude Fable 5.2 for the group reviewer and
 Claude Haiku 5.5 for the fix wording and the duplicate-code judge. Camerata never reads a model from the environment or from a `.env`
 file, so a stray line in a local file cannot change which model a run uses or what it costs. A
 project saved before a model setting existed opens with these built-in defaults. In the app the

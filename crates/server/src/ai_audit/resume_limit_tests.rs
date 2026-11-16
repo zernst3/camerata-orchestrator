@@ -118,6 +118,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
             backend: "api".to_string(),
             mode: "parallel".to_string(),
             resolved: true,
+            group_review: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: "claude-a".to_string(),

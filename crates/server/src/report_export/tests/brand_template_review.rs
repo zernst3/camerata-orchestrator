@@ -294,10 +294,11 @@ fn methodology_next_steps_reports_no_fix_rate_for_a_zero_candidate_run() {
 }
 
 /// Public promise 2 ("the fix rate is written into the report before the client decides"):
-/// the next-steps paragraph must contain a real NUMBER, never the old placeholder sentence
-/// ("at the rate set out in the engagement").
+/// the next-steps paragraph must contain real NUMBERS, never the old placeholder sentence
+/// ("at the rate set out in the engagement"). The numbers are the counts object's: the problems
+/// that need a decision out of all the problems, and the source rows ruled out.
 #[test]
-fn methodology_next_steps_contains_a_numeric_fix_rate_not_the_placeholder_sentence() {
+fn methodology_next_steps_states_the_decision_count_not_the_placeholder_sentence() {
     let f1 = finding("SEC-1", "a.rs", 1, "critical");
     let f2 = finding("SEC-2", "b.rs", 2, "high");
     let f3 = finding("SEC-3", "c.rs", 3, "medium");
@@ -322,14 +323,14 @@ fn methodology_next_steps_contains_a_numeric_fix_rate_not_the_placeholder_senten
         !notes.contains("at the rate set out in the engagement"),
         "the old placeholder sentence must be gone: {notes}"
     );
-    // 3 of 4 kept -> 75% fix rate.
+    // Three problems remain, none needs a decision, one source row was ruled out.
     assert!(
-        notes.contains("kept 3 of 4 problems"),
-        "the paragraph must state the real kept/total counts: {notes}"
+        notes.contains("0 of 3 problems need a reviewer's decision"),
+        "the paragraph must state the real counts: {notes}"
     );
     assert!(
-        notes.contains("75% fix rate"),
-        "the paragraph must state the computed numeric fix rate: {notes}"
+        notes.contains("1 source row is ruled out so far"),
+        "the paragraph must state the rows ruled out: {notes}"
     );
     let has_digit = notes.chars().any(|c| c.is_ascii_digit());
     assert!(
@@ -338,22 +339,37 @@ fn methodology_next_steps_contains_a_numeric_fix_rate_not_the_placeholder_senten
     );
 }
 
+/// The counts of a report with `total` problems, `needs` of them needing a decision and
+/// `ruled_out` source rows ruled out.
+fn counts_of_problems(total: usize, needs: usize, ruled_out: usize) -> ReportCounts {
+    let mut c = ReportCounts::default();
+    c.problems.total = total;
+    c.problems.needs_decision = needs;
+    c.problems.for_action = total - needs;
+    c.problems.later = total - needs;
+    c.rows.problem = total;
+    c.rows.ruled_out = ruled_out;
+    c.rows.total = total + ruled_out;
+    c
+}
+
 #[test]
 fn next_steps_note_singular_finding_noun_at_exactly_one_candidate() {
-    let note = next_steps_note(ReviewState::Reviewed, 1, 1, 0, 0);
+    let note = counts_prose::next_steps(&counts_of_problems(1, 0, 0), false, ReviewState::Reviewed);
     assert!(
-        note.contains("kept 1 of 1 problem as"),
+        note.contains("0 of 1 problem need a reviewer's decision")
+            || note.contains("0 of 1 problem needs a reviewer's decision"),
         "a single problem must use the singular noun, not 'problems': {note}"
     );
 }
 
 // ── C5-6 (REG-6): fix-rate sentence must be true or absent ─────────────────────────
 
-/// Draft export, nothing excluded yet, some rows held for review: no percentage must ever
-/// appear, and the held count must be named so the backlog isn't invisible.
+/// Draft export, some problems held for review: no percentage must ever appear, and the count
+/// of problems that need a decision must be named so the backlog isn't invisible.
 #[test]
 fn next_steps_note_draft_with_held_rows_names_the_held_count_with_no_percentage() {
-    let note = next_steps_note(ReviewState::Raw, 23, 0, 23, 0);
+    let note = counts_prose::next_steps(&counts_of_problems(23, 23, 0), false, ReviewState::Raw);
     assert!(
         !note.contains('%'),
         "a draft export must never print a fix-rate percentage: {note}"
@@ -363,46 +379,34 @@ fn next_steps_note_draft_with_held_rows_names_the_held_count_with_no_percentage(
         "held rows on a draft export must never be called real, actionable items: {note}"
     );
     assert!(
-        note.contains("Fix rate not yet established"),
-        "a draft export must say the fix rate is not yet established: {note}"
-    );
-    assert!(
         note.contains("23 of 23 problems need a reviewer's decision"),
         "the held count must be named plainly: {note}"
     );
-    assert!(
-        note.contains("0 ruled out so far"),
-        "a draft export has excluded nothing yet, and must say so: {note}"
-    );
 }
 
-/// Reviewed export, 17 curated and 3 excluded (0 held): the fix rate is curated / (curated
-/// + excluded) = 85%, and the exclusion clause appears because something was excluded.
+/// Reviewed export with source rows ruled out: the count of rows ruled out is stated, and no
+/// percentage is (a rate over places and rows would mix the two units).
 #[test]
-fn next_steps_note_reviewed_with_exclusions_shows_percentage_and_exclusion_clause() {
-    let note = next_steps_note(ReviewState::Reviewed, 20, 17, 0, 3);
+fn next_steps_note_reviewed_with_exclusions_states_the_rows_ruled_out() {
+    let note =
+        counts_prose::next_steps(&counts_of_problems(17, 0, 3), false, ReviewState::Reviewed);
     assert!(
-        note.contains("17 of 20") && note.contains("85%"),
-        "the fix rate must be curated/(curated+excluded) = 17/20 = 85%: {note}"
+        note.contains("0 of 17 problems need a reviewer's decision")
+            && note.contains("3 source rows are ruled out so far"),
+        "{note}"
     );
-    assert!(
-        note.contains("ruling out the rest"),
-        "excluded > 0 must surface the exclusion clause: {note}"
-    );
+    assert!(!note.contains('%'), "{note}");
 }
 
-/// Reviewed export, 20 curated and 0 excluded: still a percentage (100%), but the
-/// "excluding the rest" clause must not appear since nothing was excluded.
+/// Reviewed export with nothing ruled out: the ruled out clause does not appear.
 #[test]
-fn next_steps_note_reviewed_with_no_exclusions_omits_the_exclusion_clause() {
-    let note = next_steps_note(ReviewState::Reviewed, 20, 20, 0, 0);
+fn next_steps_note_reviewed_with_no_exclusions_omits_the_ruled_out_clause() {
+    let note =
+        counts_prose::next_steps(&counts_of_problems(20, 0, 0), false, ReviewState::Reviewed);
+    assert!(note.contains("0 of 20 problems"), "{note}");
     assert!(
-        note.contains("20 of 20") && note.contains("100%"),
-        "zero excluded still yields a (100%) fix rate over curated candidates: {note}"
-    );
-    assert!(
-        !note.contains("ruling out the rest"),
-        "excluded == 0 must never print the exclusion clause: {note}"
+        !note.contains("ruled out so far"),
+        "nothing ruled out must never print the clause: {note}"
     );
 }
 
@@ -742,14 +746,14 @@ fn shipped_template_priority_grid_counts_findings_instead_of_listing_them_again(
         );
     }
     assert!(
-        body.contains("cell.findings.len()"),
-        "the grid cell must count its findings"
+        body.contains("cell.count"),
+        "the grid cell must print the count it is given"
     );
     assert!(
         template.contains("d.priority_grid.footnote"),
         "the grid must say where the problems are listed"
     );
-    let footnote = build_priority_grid(&MatrixJson::default()).footnote;
+    let footnote = build_priority_grid(&MatrixJson::default(), &ReportCounts::default()).footnote;
     assert!(
         footnote.contains(crate::xlsx_export::vocabulary::ALL_PROBLEMS),
         "{footnote}"
@@ -1115,9 +1119,16 @@ fn raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narra
 
     // Every one of those numbers is actually visible in the prose, not just the JSON.
     let n = &json.executive_summary.narrative;
-    assert!(n.contains("2 problems"), "{n}");
-    assert!(n.contains('1'), "{n}"); // curated_total / held_for_review both literally "1"
-    assert!(n.contains("0 were ruled out automatically"), "{n}");
+    assert!(n.contains("found 2 problems"), "{n}");
+    assert!(
+        n.contains("1 is for action (1 First, 0 Next, 0 Later), 1 needs a reviewer's decision"),
+        "{n}"
+    );
+    assert!(
+        json.methodology.reconciliation.contains("0 ruled out"),
+        "{}",
+        json.methodology.reconciliation
+    );
 
     // Never claims a human reviewed or dispositioned anything.
     assert!(!n.contains("reviewed by a human reviewer"), "{n}");
@@ -1189,13 +1200,20 @@ fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
     ));
 
     let n = &json.executive_summary.narrative;
+    assert!(n.contains("found 2 problems"), "{n}");
+    assert!(n.contains("1 is accepted risk"), "{n}");
+    assert!(n.contains("1 needs a reviewer's decision"), "{n}");
     assert!(
-        n.contains("3 problems were reviewed by a human reviewer"),
+        n.contains("1 source row was ruled out by a reviewer and left out of this report"),
         "{n}"
     );
-    assert!(n.contains("1 was ruled out"), "{n}");
-    assert!(n.contains("1 accepted as risk"), "{n}");
-    assert!(n.contains("a further decision"), "{n}");
+    assert!(
+        json.methodology
+            .reconciliation
+            .contains("Reviewed by a human reviewer"),
+        "{}",
+        json.methodology.reconciliation
+    );
     assert!(
         json.methodology
             .ai_tier_note
@@ -1299,18 +1317,25 @@ fn shipped_template_renders_an_empty_matrix_cell_as_blank_not_the_word_none() {
 /// dispositioned as false positives by the auditor and excluded" no matter what.
 #[test]
 fn shipped_template_methodology_line_is_gated_on_review_state() {
+    // The template prints the line the counts object builds; the line itself branches on the
+    // review state in `counts_prose::methodology_line`.
     let template = include_str!("../../../templates/audit_report.typ");
     assert!(
-        template.contains("if d.review_state == \"reviewed\""),
-        "the methodology reconciling line must branch on review_state"
+        template.contains("d.methodology.reconciliation"),
+        "the template must print the reconciling line it is given"
+    );
+    let counts = counts_of_problems(3, 1, 0);
+    let raw = counts_prose::methodology_line(&counts, ReviewState::Raw);
+    assert!(raw.contains("has not yet had a human review"), "{raw}");
+    assert!(!raw.contains("Reviewed by a human reviewer"), "{raw}");
+    let reviewed = counts_prose::methodology_line(&counts, ReviewState::Reviewed);
+    assert!(
+        reviewed.contains("Reviewed by a human reviewer"),
+        "{reviewed}"
     );
     assert!(
-        template.contains("has not yet had a human review"),
-        "the raw branch must say so explicitly"
-    );
-    assert!(
-        template.contains("a human reviewer's decision"),
-        "the raw branch must surface held_for_review, not just candidates/excluded"
+        !reviewed.contains("has not yet had a human review"),
+        "{reviewed}"
     );
 }
 
@@ -1525,14 +1550,14 @@ fn shipped_template_client_facing_text_has_no_audit_word() {
 fn no_client_facing_authored_string_contains_the_word_audit() {
     let candidates: Vec<String> = vec![
         AUDIT_REPORT_DISCLAIMER.to_string(),
-        next_steps_note(ReviewState::Reviewed, 10, 7, 0, 3),
-        next_steps_note(ReviewState::Raw, 0, 0, 0, 0),
+        counts_prose::next_steps(&counts_of_problems(7, 0, 3), false, ReviewState::Reviewed),
+        counts_prose::next_steps(&counts_of_problems(0, 0, 0), false, ReviewState::Raw),
         ai_tier_note_for(ReviewState::Raw, 0, 1),
         ai_tier_note_for(ReviewState::Reviewed, 0, 1),
         ai_tier_note_for(ReviewState::Raw, 1, 2),
         ai_tier_note_for(ReviewState::Reviewed, 2, 2),
-        default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0, 0),
-        default_narrative(ReviewState::Reviewed, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0, 0),
+        counts_prose::narrative(&counts_of_problems(3, 1, 1), ReviewState::Raw),
+        counts_prose::narrative(&counts_of_problems(3, 1, 1), ReviewState::Reviewed),
         disposition_label(Disposition::Ignored, "some reason", "accepted", false),
         disposition_label(Disposition::Ignored, "some reason", "accepted", true),
         disposition_label(Disposition::Unresolved, "", "do_now", false),

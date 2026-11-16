@@ -1108,11 +1108,11 @@ fn the_stage_defaults_move_together_stage1_opus_stage2_fable() {
         "the scan default is kept as it is"
     );
     assert_eq!(resolve_calibration_model(None, &scan), "claude-opus-5-5");
-    assert_eq!(resolve_group_review_model(None), "claude-fable-5-1");
+    assert_eq!(resolve_group_review_model(None), "claude-fable-5-2");
     // The pick wins; a blank pick is none.
     assert_eq!(resolve_calibration_model(Some("picked"), &scan), "picked");
     assert_eq!(resolve_group_review_model(Some("picked")), "picked");
-    assert_eq!(resolve_group_review_model(Some("  ")), "claude-fable-5-1");
+    assert_eq!(resolve_group_review_model(Some("  ")), "claude-fable-5-2");
 }
 
 #[test]
@@ -1125,13 +1125,13 @@ fn group_review_model_comes_from_project_setting_or_flag_only() {
         "ANTHROPIC_MODEL",
     ]
     .map(|name| camerata_test_env::EnvGuard::set(name, "env-picked-model"));
-    assert_eq!(resolve_group_review_model(None), "claude-fable-5-1");
+    assert_eq!(resolve_group_review_model(None), "claude-fable-5-2");
     assert_eq!(resolve_group_review_model(Some("flag-model")), "flag-model");
     // The project setting is the pick the cockpit passes; unset means the default.
     let settings = camerata_api_types::project::ReviewSettings::default();
     assert_eq!(
         resolve_group_review_model(Some(settings.group_review_model.as_str())),
-        "claude-fable-5-1"
+        "claude-fable-5-2"
     );
     let set = camerata_api_types::project::ReviewSettings {
         group_review_model: "claude-opus-5-5".to_string(),
@@ -1179,10 +1179,10 @@ async fn each_calibration_stage_records_its_model_in_the_ledger() {
         .map(|s| (s.stage.as_str(), s.model.as_deref()))
         .collect();
     assert_eq!(by_stage["ai-calibration"], Some("claude-opus-5-5"));
-    assert_eq!(by_stage[STAGE_SAMPLE_NAME], Some("claude-fable-5-1"));
+    assert_eq!(by_stage[STAGE_SAMPLE_NAME], Some("claude-fable-5-2"));
     for req in llm.requests() {
         assert_eq!(
-            req.model, "claude-fable-5-1",
+            req.model, "claude-fable-5-2",
             "the model asked is the model recorded"
         );
     }
@@ -1197,7 +1197,7 @@ async fn each_calibration_stage_records_its_model_in_the_ledger() {
     assert!(entry.is_integral());
     assert_eq!(
         report.ledger.escalation().unwrap().model.as_deref(),
-        Some("claude-fable-5-1")
+        Some("claude-fable-5-2")
     );
 }
 

@@ -86,6 +86,13 @@ pub struct ProblemCounts {
     pub information_only: usize,
     /// Problems where any row was sent for review in person.
     pub escalated: usize,
+    /// Problems that need a decision, by the worst severity at the place (they add up to
+    /// `needs_decision`). The grid names them when it leaves them out.
+    #[serde(default)]
+    pub needs_decision_by_severity: SeverityCounts,
+    /// Problems that are information only, by the worst severity at the place.
+    #[serde(default)]
+    pub information_only_by_severity: SeverityCounts,
     /// Problems with no row of their own: a place of another rule that a ruled-out row carries
     /// and that stays open. Each is also counted in `needs_decision`.
     #[serde(default)]
@@ -108,6 +115,23 @@ pub struct OtherCounts {
     pub rules_checked: usize,
     /// Distinct rules with at least one problem row.
     pub rules_with_problems: usize,
+}
+
+impl SeverityCounts {
+    /// One more problem of `severity` (anything but critical, high and medium is low).
+    pub fn add(&mut self, severity: &str) {
+        match severity {
+            "critical" => self.critical += 1,
+            "high" => self.high += 1,
+            "medium" => self.medium += 1,
+            _ => self.low += 1,
+        }
+    }
+
+    /// The sum of the four.
+    pub fn sum(&self) -> usize {
+        self.critical + self.high + self.medium + self.low
+    }
 }
 
 impl ReportCounts {
@@ -202,14 +226,12 @@ pub(crate) fn counts_of(
         ..ProblemCounts::default()
     };
     for place in &places {
-        match place.head.severity.as_str() {
-            "critical" => p.by_severity.critical += 1,
-            "high" => p.by_severity.high += 1,
-            "medium" => p.by_severity.medium += 1,
-            _ => p.by_severity.low += 1,
-        }
+        p.by_severity.add(&place.head.severity);
         match place.class {
-            PlaceClass::NeedsDecision => p.needs_decision += 1,
+            PlaceClass::NeedsDecision => {
+                p.needs_decision += 1;
+                p.needs_decision_by_severity.add(&place.head.severity);
+            }
             PlaceClass::ForAction(order) => {
                 p.for_action += 1;
                 match order {
@@ -218,7 +240,10 @@ pub(crate) fn counts_of(
                     crate::review_tree::FixOrder::Later => p.later += 1,
                 }
             }
-            PlaceClass::InformationOnly => p.information_only += 1,
+            PlaceClass::InformationOnly => {
+                p.information_only += 1;
+                p.information_only_by_severity.add(&place.head.severity);
+            }
             PlaceClass::AcceptedRisk => p.accepted += 1,
         }
         if place.members.iter().any(|m| m.escalated) {
@@ -238,12 +263,8 @@ pub(crate) fn counts_of(
         if !held_places.contains(&key) && beside.insert(key) {
             p.total += 1;
             p.needs_decision += 1;
-            match site.severity.as_str() {
-                "critical" => p.by_severity.critical += 1,
-                "high" => p.by_severity.high += 1,
-                "medium" => p.by_severity.medium += 1,
-                _ => p.by_severity.low += 1,
-            }
+            p.by_severity.add(&site.severity);
+            p.needs_decision_by_severity.add(&site.severity);
             p.beside_ruled_out += 1;
         }
     }

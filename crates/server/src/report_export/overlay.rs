@@ -363,6 +363,15 @@ pub fn apply_overlay(
                 r.ledger.record_place_merge(places);
             }
         }
+        // A tree sealed before the per-rule key of a whole-file place stores places the rows no
+        // longer give. They are worked out again, so the cockpit (which reads the stored places)
+        // and the export (which counts by the one place rule) agree.
+        if let Some(tree) = r.tree.as_mut() {
+            if tree.places_are_stale(&r.findings) {
+                let block = tree.refresh_places(&r.findings);
+                r.ledger.record_place_merge(block);
+            }
+        }
         // The reviewer's node summaries replace the model's, after the tree is in its final
         // shape (a rebuild or a split would otherwise carry the model's text over them).
         if !summary_edits.is_empty() {

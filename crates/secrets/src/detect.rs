@@ -9,7 +9,7 @@ use regex::Regex;
 
 use crate::firebase::{TwinContext, LINE_PREFIX_CAP, WINDOW};
 use crate::shapes::{self, is_supabase_dsn, shapes_for_rule, SecretShape};
-use crate::twins::{classify, Twin};
+use crate::twins::{classify, is_sealed_ciphertext, names_a_secret, Twin};
 
 /// How far past a PEM header the matching footer is searched for.
 const PEM_FOOTER_WINDOW: usize = 8000;
@@ -38,8 +38,24 @@ impl SecretMatch {
 
     /// True when the match should still be listed as a finding row: a secret, or a twin the floor
     /// keeps (a committed placeholder key is still worth a row; a public anon key is not).
-    pub fn counts_as_finding(&self) -> bool {
+    fn counts_as_finding(&self) -> bool {
         self.twin.as_ref().is_none_or(Twin::counts_as_line)
+    }
+
+    /// [`Self::counts_as_finding`] with the text the match came from. An environment variable
+    /// name in quotes is a variable name, not a value, unless the identifier before it is
+    /// password-like (there the same shape is a passphrase), so only that case keeps its row.
+    pub fn counts_as_finding_in(&self, text: &str) -> bool {
+        if self.twin == Some(Twin::EnvNameLiteral) {
+            // A readable name has at most two digits (`DEPLOY_KEY_V2`); a run of digits mixed
+            // into capitals is a real key that happens to be shouted.
+            let digits = text[self.value.clone()]
+                .bytes()
+                .filter(u8::is_ascii_digit)
+                .count();
+            return digits > 2 || names_a_secret(&text[self.start..self.value.start]);
+        }
+        self.counts_as_finding()
     }
 }
 
@@ -71,13 +87,20 @@ fn push(
     // The text of the match before the value: for a context shape it holds the identifier.
     let before_value = &text[span.start..value.start];
     let context = twin_context(text, value.start);
-    let twin = classify(
+    let mut twin = classify(
         shape,
         &text[value.clone()],
         before_value,
         jwt_role.as_deref(),
         &context,
     );
+    // The sealed-secret check reads the whole document, which the bounded context cannot hold.
+    if twin.is_none()
+        && shape == SecretShape::NamedSecretLiteral
+        && is_sealed_ciphertext(text, &value)
+    {
+        twin = Some(Twin::SealedCiphertext);
+    }
     out.push(SecretMatch {
         start: span.start,
         end: span.end,
@@ -347,7 +370,48 @@ fn collect_pem(out: &mut Vec<SecretMatch>, text: &str) {
 
 // ---- driver -------------------------------------------------------------------------------
 
-fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape]) {
+/// Whether `path` is a Terraform or HCL file. There an unquoted right side is usually an
+/// expression (a reference, a function call); a string literal must be quoted. A heredoc body is
+/// the exception, so the unquoted form still runs and only a dotted reference is cleared.
+fn is_expression_language(path: Option<&str>) -> bool {
+    path.is_some_and(|p| {
+        let lower = p.to_ascii_lowercase();
+        [".tf", ".hcl", ".tfvars"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+    })
+}
+
+/// Identifier segments joined by dots (`var.X`, `random_password.x.result`); a segment starts
+/// with a letter or underscore, so a digits-only run is not one.
+/// A value over 60 characters, or a segment that looks base64url-encoded (starts `eyJ`, or is
+/// 16+ characters of mixed case with a digit), is a token (a JWT), not a reference.
+fn is_dotted_reference(value: &str) -> bool {
+    if value.len() > 60 {
+        return false;
+    }
+    let mut segments = 0;
+    for segment in value.split('.') {
+        let encoded = segment.starts_with("eyJ")
+            || (segment.len() >= 16
+                && segment.bytes().any(|b| b.is_ascii_uppercase())
+                && segment.bytes().any(|b| b.is_ascii_digit()));
+        if encoded {
+            return false;
+        }
+        let mut chars = segment.chars();
+        let starts_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !starts_ok || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 2
+}
+
+fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape], path: Option<&str>) {
     let mut jwt_done = false;
     for &shape in shapes {
         match shape {
@@ -402,7 +466,18 @@ fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape]) {
             }
             SecretShape::NamedSecretLiteral => {
                 collect_group(out, text, shape, shapes::re_named_literal(), false);
+                let from = out.len();
                 collect_group(out, text, shape, shapes::re_named_literal_unquoted(), false);
+                if is_expression_language(path) {
+                    // Unquoted is an expression there, but a heredoc body is plain text: only a
+                    // dotted reference (`var.x`, `random_password.x.result`) is cleared.
+                    let mut index = from;
+                    out.retain(|m| {
+                        let keep = index < from || !is_dotted_reference(&text[m.value.clone()]);
+                        index += 1;
+                        keep
+                    });
+                }
             }
             SecretShape::BearerToken => collect_group(out, text, shape, shapes::re_bearer(), true),
             SecretShape::BasicAuthCredential => {
@@ -464,15 +539,29 @@ pub fn first_secret(text: &str) -> Option<SecretMatch> {
 
 /// `detect_all` restricted to `shapes`, twins included.
 pub fn detect_shapes(text: &str, shapes: &[SecretShape]) -> Vec<SecretMatch> {
+    detect_shapes_in(text, shapes, None)
+}
+
+fn detect_shapes_in(text: &str, shapes: &[SecretShape], path: Option<&str>) -> Vec<SecretMatch> {
     let mut candidates = Vec::new();
-    collect(&mut candidates, text, shapes);
+    collect(&mut candidates, text, shapes, path);
     resolve(candidates)
 }
 
 /// The matches a corpus rule governs: `detect_shapes` over `shapes_for_rule`, plus the
 /// `SEC-NO-VENDOR-TOKEN-1` rule's Supabase-host filter on connection strings.
 pub fn detect_for_rule(text: &str, rule_id: &str) -> Vec<SecretMatch> {
-    let mut matches = detect_shapes(text, shapes_for_rule(rule_id));
+    detect_for_rule_in(text, rule_id, None)
+}
+
+/// [`detect_for_rule`] for the content of the file at `path`: the path tells the detector which
+/// language the text is, so a form that only makes sense in another one is not read.
+pub fn detect_for_rule_in_file(text: &str, rule_id: &str, path: &str) -> Vec<SecretMatch> {
+    detect_for_rule_in(text, rule_id, Some(path))
+}
+
+fn detect_for_rule_in(text: &str, rule_id: &str, path: Option<&str>) -> Vec<SecretMatch> {
+    let mut matches = detect_shapes_in(text, shapes_for_rule(rule_id), path);
     if rule_id == "SEC-NO-VENDOR-TOKEN-1" {
         matches.retain(|m| {
             m.shape != SecretShape::ConnectionStringPassword
@@ -487,7 +576,7 @@ fn lines_of(text: &str, matches: Vec<SecretMatch>, twins_count: bool) -> Vec<usi
         .iter()
         .filter(|m| {
             if twins_count {
-                m.counts_as_finding()
+                m.counts_as_finding_in(text)
             } else {
                 m.is_secret()
             }
@@ -508,4 +597,18 @@ pub fn match_lines(text: &str, shapes: &[SecretShape], twins_count: bool) -> Vec
 /// [`match_lines`] for a corpus rule id, with the rule's host filter applied.
 pub fn match_lines_for_rule(text: &str, rule_id: &str, twins_count: bool) -> Vec<usize> {
     lines_of(text, detect_for_rule(text, rule_id), twins_count)
+}
+
+/// [`match_lines_for_rule`] for the content of the file at `path` (see [`detect_for_rule_in_file`]).
+pub fn match_lines_for_rule_in_file(
+    text: &str,
+    rule_id: &str,
+    path: &str,
+    twins_count: bool,
+) -> Vec<usize> {
+    lines_of(
+        text,
+        detect_for_rule_in_file(text, rule_id, path),
+        twins_count,
+    )
 }

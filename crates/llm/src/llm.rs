@@ -4167,6 +4167,31 @@ mod tests {
         );
     }
 
+    /// Fable 5.2 reads cache at $0.20/M (0.025x of $8).
+    #[test]
+    fn fable_5_2_cache_reads_bill_at_its_own_rate() {
+        let c = usd(
+            "claude-fable-5-2",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            rt(),
+        );
+        assert!((c - 0.20).abs() < 1e-9, "got {c}");
+    }
+
+    /// The 5.2 batch row: $0.20 cache read, then the 0.5x batch discount.
+    #[test]
+    fn a_fable_5_2_batch_row_prices_cache_reads_then_halves() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-fable-5-2","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":0,"cache_read_input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let cost = rows[0].response.as_ref().unwrap().cost_usd.unwrap();
+        assert!((cost - 0.10).abs() < 1e-9, "$0.20 x 0.5, got {cost}");
+    }
+
     /// A batch RESULT row (the JSONL the batch path really parses) for Fable 5.1 with cache
     /// reads: per-model cache-read rate, then the 0.5x batch discount.
     #[test]

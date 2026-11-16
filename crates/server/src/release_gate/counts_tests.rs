@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{json, Value};
 
 use super::consistency::counts_problems;
-use super::counts_check::{counts_problems_with, expected_narrative, CountsChecks};
+use super::counts_check::{counts_problems_with, CountsChecks};
 use super::tests::{client_options, drop_sheet_rows_with_text, rewrite_xlsx_part, scan_report};
 use super::*;
 use crate::onboard::Finding;
@@ -68,12 +68,9 @@ fn entries_of(package: ProductPackage) -> (BTreeMap<String, Vec<u8>>, AuditRepor
     )
 }
 
-/// A package whose surfaces all agree with the counts: today's one-row package, with the one
-/// sentence the surfaces word differently (the narrative) set to the wording the counts give.
+/// A package whose surfaces all agree with the counts: today's one-row package.
 fn consistent() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
-    let (entries, mut report) = entries_of(package_for(scan_report()));
-    report.executive_summary.narrative = expected_narrative(&report.counts);
-    (entries, report)
+    entries_of(package_for(scan_report()))
 }
 
 fn edit_json(entries: &mut BTreeMap<String, Vec<u8>>, name: &str, f: impl FnOnce(&mut Value)) {
@@ -201,13 +198,18 @@ fn the_gate_refuses_a_pdf_data_object_that_is_not_findings_jsons() {
 fn the_gate_refuses_a_cover_or_methodology_figure_that_is_not_a_count() {
     let (entries, mut report) = consistent();
     report.cover.stats.medium += 3;
-    report.methodology.candidates_reviewed += 441;
-    report.methodology.held_for_review += 1;
+    report
+        .methodology
+        .reconciliation
+        .push_str(" Plus 441 more.");
+    report.cover.strip = report.cover.strip.replacen("0 low", "3 low", 1);
+    report.priority_grid.left_out = "Not in this grid: 3 high places.".to_string();
     let problems = counts_problems(&entries, &report);
     for location in [
         "cover.stats.medium",
-        "methodology.candidates_reviewed",
-        "methodology.held_for_review",
+        "cover.strip",
+        "methodology.reconciliation",
+        "priority_grid.left_out",
     ] {
         assert!(
             problems.iter().any(|p| p.location == location),
@@ -349,7 +351,9 @@ fn mixed_report() -> crate::onboard::ScanReport {
 }
 
 #[test]
-fn the_counts_check_against_a_package_built_by_todays_code_records_the_to_do_list() {
+fn a_package_built_by_todays_code_passes_the_counts_check() {
+    // Work order B recorded the to-do list of the surfaces that counted on their own; work order C
+    // made them read the object, so the list is empty.
     let sealed = mixed_report().seal();
     let options = client_options();
     let json = build_report_json(
@@ -379,21 +383,7 @@ fn the_counts_check_against_a_package_built_by_todays_code_records_the_to_do_lis
     assert_eq!(c.identity_failures(), Vec::<&str>::new());
 
     let problems = counts_problems(&entries, &report_json);
-    let list = messages(&problems);
-    // The to-do list for work order C: what the surfaces say that the counts do not.
-    let out = std::env::var("COUNTS_TODO_OUT").ok();
-    if let Some(path) = out {
-        std::fs::write(path, &list).unwrap();
-    }
-    assert!(
-        !problems.is_empty(),
-        "the surfaces still count on their own, so the check must refuse today's package"
-    );
-    // The object and the files agree (work order A did that); what is left is the surfaces.
-    assert!(
-        !problems.iter().any(|p| p.location.starts_with("counts.")),
-        "{list}"
-    );
+    assert!(problems.is_empty(), "{}", messages(&problems));
 }
 
 // ── Round 1 fixes ─────────────────────────────────────────────────────────────────────────
@@ -776,4 +766,214 @@ fn the_gate_recount_counts_whole_file_problems_of_three_rules_as_three_places() 
         "the recount agrees: {}",
         messages(&honest)
     );
+}
+
+// ── Needs a decision is one number on every surface ──────────────────────────────────────
+
+/// Three places: one with a row to act on and a held row of lower severity (the head row is the
+/// one to act on), one to act on, one held.
+fn decision_report() -> crate::onboard::ScanReport {
+    let row = |rule: &str, path: &str, line: usize, severity: &str| Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: severity.to_string(),
+        snippet: format!("let x{line} = 1;"),
+        detail: format!("detail {rule}"),
+        ..Finding::default()
+    };
+    let mut held_beside = row("SYN-B-1", "src/a.rs", 5, "medium");
+    held_beside.needs_review = true;
+    let mut held_alone = row("SYN-A-1", "src/c.rs", 3, "medium");
+    held_alone.needs_review = true;
+    let mut report = scan_report();
+    report.findings = vec![
+        row("SYN-A-1", "src/a.rs", 5, "high"),
+        held_beside,
+        row("SYN-A-1", "src/b.rs", 9, "high"),
+        held_alone,
+    ];
+    report
+}
+
+/// The integer written just before `marker` in `text`.
+fn integer_before(text: &str, marker: &str) -> Option<usize> {
+    let at = text.find(marker)?;
+    text[..at]
+        .trim_end()
+        .rsplit(' ')
+        .next()?
+        .replace(',', "")
+        .parse()
+        .ok()
+}
+
+#[test]
+fn needs_a_decision_is_one_number_on_every_surface() {
+    let sealed = decision_report().seal();
+    let options = client_options();
+    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new());
+    let json = build_report_json(&reviewed, None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &reviewed,
+        None,
+        &options,
+        STEM,
+        (json, data, b"%PDF-1.7 stand-in for the gate tests".to_vec()),
+    )
+    .expect("the package assembles");
+    let report = package.report_json.clone();
+    let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
+    let entries = read_zip_entries(&bytes).unwrap();
+
+    // The object: any held row makes the place need a decision.
+    let n = report.counts.problems.needs_decision;
+    assert_eq!((n, report.counts.problems.total), (2, 3), "anti-vacuity");
+
+    // The narrative.
+    let narrative = &report.executive_summary.narrative;
+    assert_eq!(
+        integer_before(narrative, " need a"),
+        Some(n),
+        "narrative: {narrative:?}"
+    );
+    // The next steps sentence.
+    let sentence = format!("{n} of 3 problems need a reviewer's decision");
+    assert!(
+        report.methodology.next_steps.contains(&sentence),
+        "next steps: {:?}",
+        report.methodology.next_steps
+    );
+    // The grid's count of problems it leaves out for a decision.
+    assert_eq!(report.priority_grid.held_count, n, "the grid");
+    // The sheet, the Start here count and findings.json.
+    let xlsx = &entries[&xlsx_name()];
+    assert_eq!(
+        super::counts_check::sheet_rows(xlsx, "Needs a decision"),
+        Ok(n),
+        "the Needs a decision sheet"
+    );
+    let start = super::archive::xlsx_sheet_grid(xlsx, "Start here").unwrap();
+    let said = start
+        .iter()
+        .find(|r| r.first().is_some_and(|c| c == "Needs a decision"))
+        .and_then(|r| r.get(2))
+        .and_then(|c| c.parse::<f64>().ok())
+        .map(|x| x as usize);
+    assert_eq!(said, Some(n), "Start here");
+    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    assert_eq!(
+        findings["counts"]["problems"]["needs_decision"],
+        json!(n),
+        "findings.json counts"
+    );
+    // The summary's sentence states the same number.
+    let summary = findings["summary"]["narrative"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(
+        integer_before(summary, " need a"),
+        Some(n),
+        "findings.json summary: {summary:?}"
+    );
+    // And the gate agrees with all of them.
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}
+
+// ── Work order C: the gate is on the release path, and it holds the rest of the surfaces ──
+
+#[test]
+fn a_package_whose_printed_numbers_differ_from_its_files_is_refused_on_the_release_path() {
+    let mut package = package_for(scan_report());
+    // One digit of the narrative changed after the package was built.
+    package.report_json.executive_summary.narrative = package
+        .report_json
+        .executive_summary
+        .narrative
+        .replacen("10 files", "11 files", 1);
+    match release(package) {
+        Err(ReleaseError::Blocked(failure)) => {
+            let counts = failure
+                .report
+                .checks
+                .iter()
+                .find(|c| c.check == CheckId::Counts)
+                .expect("the counts check ran");
+            assert!(
+                counts
+                    .problems
+                    .iter()
+                    .any(|p| p.location == "executive_summary.narrative"),
+                "{:?}",
+                counts.problems
+            );
+        }
+        other => panic!("a package whose numbers differ must be refused: {other:?}"),
+    }
+}
+
+/// Set the number in `column` of the Start here row whose first cell is `label`.
+fn set_start_here_cell(xlsx: &[u8], label: &str, column: char, to: usize) -> Vec<u8> {
+    let grid = super::archive::xlsx_sheet_grid(xlsx, "Start here").unwrap();
+    let row = grid
+        .iter()
+        .position(|r| r.first().is_some_and(|c| c == label))
+        .unwrap_or_else(|| panic!("Start here has no row for {label}"))
+        + 1;
+    let cell = format!("r=\"{column}{row}\"");
+    rewrite_xlsx_part(xlsx, "xl/worksheets/sheet1.xml", |xml| {
+        let at = xml.find(&cell).expect("the cell");
+        let v0 = xml[at..].find("<v>").expect("a value") + at + 3;
+        let v1 = xml[v0..].find("</v>").expect("a closed value") + v0;
+        format!("{}{to}{}", &xml[..v0], &xml[v1..])
+    })
+}
+
+#[test]
+fn the_gate_refuses_a_scorecard_total_that_was_changed() {
+    let (entries, report) = mixed_entries();
+    let baseline = located(&counts_problems(&entries, &report));
+    let mut tampered = entries.clone();
+    let name = xlsx_name();
+    tampered.insert(
+        name.clone(),
+        set_start_here_cell(&tampered[&name], "Total", 'F', 99),
+    );
+    let new = new_problems(&tampered, &report, &baseline);
+    assert!(
+        has(&new, &name, "sheet \"Start here\" scorecard Total"),
+        "{new:?}"
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_not_checked_sheet_that_lost_the_row_of_a_rule_that_could_not_be_completed() {
+    let (entries, report) = mixed_entries();
+    assert_eq!(report.counts.rows.not_checked, 1, "anti-vacuity");
+    let baseline = located(&counts_problems(&entries, &report));
+    let mut tampered = entries.clone();
+    let name = xlsx_name();
+    tampered.insert(
+        name.clone(),
+        drop_sheet_rows_with_text(&tampered[&name], "SYN-D-1"),
+    );
+    let new = new_problems(&tampered, &report, &baseline);
+    assert!(has(&new, &name, "sheet \"Not checked\" rows"), "{new:?}");
+}
+
+#[test]
+fn the_gate_refuses_a_grid_note_that_states_other_counts() {
+    let (entries, mut report) = mixed_entries();
+    let baseline = located(&counts_problems(&entries, &report));
+    report.priority_grid.accepted_line = "5 problems are accepted risk.".to_string();
+    report.priority_grid.held_count += 4;
+    let new = new_problems(&entries, &report, &baseline);
+    assert!(
+        has(&new, "PDF data", "priority_grid.accepted_line"),
+        "{new:?}"
+    );
+    assert!(has(&new, "PDF data", "priority_grid.held_count"), "{new:?}");
 }

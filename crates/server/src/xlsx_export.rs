@@ -1229,7 +1229,7 @@ pub(crate) struct CountingView {
     /// and that stay open ([`open_beside_ruled_out`]). The counts read them here and nowhere
     /// else, so a place a ruling already split into a problem of its own is never counted twice.
     pub open_beside_ruled_out: Vec<OpenSiteJson>,
-    /// Fixes with a problem on All problems or an advisory on Dependencies.
+    /// Fixes with a place still to change: the Fix plan rows and the tickets.
     pub fix_ids_to_do: std::collections::HashSet<String>,
 }
 
@@ -1242,7 +1242,13 @@ pub(crate) fn counting_view(
     internal: bool,
 ) -> CountingView {
     let (all_rows, dep_rows) = partition_rows_for(reviewed, corpus, chosen_options, internal);
-    let fix_ids_to_do = sheets::fixes_with_problems(&all_rows, &dep_rows);
+    // The Fixes of the plan: those with a place still to change (not ruled out, not accepted).
+    // The Fix plan sheet and the ticket file are this same list.
+    let fix_ids_to_do: std::collections::HashSet<String> =
+        subgroups::plan_facts(reviewed, &all_rows, &dep_rows, corpus)
+            .into_iter()
+            .map(|g| g.id)
+            .collect();
     let rows = all_rows
         .iter()
         .map(|r| CountRow {
@@ -2011,6 +2017,18 @@ pub fn build_workbook(
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<u8>> {
+    let counts = crate::report_export::report_counts(reviewed, corpus, opts);
+    build_workbook_with_counts(reviewed, corpus, opts, &counts)
+}
+
+/// [`build_workbook`] with the package's counts worked out once by the caller. Start here and
+/// the scorecard print the object's numbers; the release gate holds each sheet's rows to them.
+pub fn build_workbook_with_counts(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    opts: &ReportOptions,
+    report_counts: &crate::report_export::ReportCounts,
+) -> anyhow::Result<Vec<u8>> {
     use vocabulary as v;
     let report = reviewed.report();
     let (rows, dep_rows) =
@@ -2194,7 +2212,17 @@ pub fn build_workbook(
             }
             continue;
         }
-        counts.push((t.name.clone(), t.rows.len()));
+        // The sheets the counts object names print its number; the gate holds each sheet's rows
+        // to it. The others print the rows of their table.
+        let said = match t.name.as_str() {
+            n if n == v::ALL_PROBLEMS => report_counts.problems.total,
+            n if n == v::NEEDS_A_DECISION => report_counts.problems.needs_decision,
+            n if n == v::FIX_PLAN => report_counts.fixes.to_do,
+            n if n == v::DEPENDENCIES => report_counts.rows.dependency,
+            n if n == v::YOUR_CONVENTIONS => report_counts.rows.convention,
+            _ => t.rows.len(),
+        };
+        counts.push((t.name.clone(), said));
     }
 
     let mut wb = Workbook::new();
@@ -2229,6 +2257,7 @@ pub fn build_workbook(
             live_rows: &live_rows,
             corpus,
             counts,
+            totals: report_counts,
             coverage_summary: coverage_summary_line(
                 &coverage_rows,
                 not_assessed_rows.len(),

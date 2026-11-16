@@ -821,13 +821,8 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
 /// every surface equals the object, every count sentence equals the one the counts give and an
 /// executive summary override states no number that is no count.
 ///
-/// BUILT BUT NOT YET ENFORCED: the surfaces still count on their own, so this refuses today's
-/// package. It is not in `gate_report`; work order C makes the surfaces read the object and then
-/// wires it in. See [`super::counts_check`].
-#[allow(
-    dead_code,
-    reason = "built but not yet enforced: work order C wires it into gate_report"
-)]
+/// ENFORCED: `gate_report` records it under the counts check, so a package whose printed numbers
+/// differ from the files in it is refused. See [`super::counts_check`].
 pub fn counts_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
     super::counts_check::counts_problems_with(
         entries,
@@ -1236,7 +1231,7 @@ pub fn pdf_count_reconciliation_problems(
     }
     // The grid counts the places the cover counts, minus those whose bucket the grid leaves out
     // (accepted, informational, held): its total by severity equals the cover's less those.
-    let heads = crate::report_export::problem_heads(&report.matrix);
+    let heads = crate::report_export::problem_places(&report.matrix);
     for (severity, printed) in [
         ("critical", stats.critical),
         ("high", stats.high),
@@ -1245,8 +1240,8 @@ pub fn pdf_count_reconciliation_problems(
     ] {
         let left_out = heads
             .iter()
-            .filter(|f| severity_bucket(&f.severity) == severity)
-            .filter(|f| !matches!(f.bucket.as_str(), "do_now" | "do_next" | "plan"))
+            .filter(|p| severity_bucket(&p.head.severity) == severity)
+            .filter(|p| !matches!(p.class, crate::review_tree::PlaceClass::ForAction(_)))
             .count();
         let grid: usize = report
             .priority_grid

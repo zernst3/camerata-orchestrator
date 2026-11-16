@@ -52,10 +52,18 @@ elif "first reviewer of an automated audit" in system:
                           "effort": "low"})
 elif "architect's first reader of this rule group" in system:
     note("group_review")
+    model_log = os.environ.get("FAKE_MODEL_LOG")
+    if model_log:
+        with open(model_log, "a") as f:
+            f.write("group_review " + args[args.index("--model") + 1] + "\n")
+    gr_flag = os.environ.get("FAKE_GROUP_REVIEW_DOWN", "")
     idx = [int(m) for m in re.findall(r'^(\d+): ', prompt, re.M)]
-    out = json.dumps({"summary": "The fixture's sites share one cause.",
-                      "subgroups": [{"label": "All", "cause": "one shared cause", "summary": "One cause.", "members": idx}],
-                      "outliers": [], "escalations": [], "disagreements": []})
+    if gr_flag and os.path.exists(gr_flag):
+        out = "I cannot review this group right now."
+    else:
+        out = json.dumps({"summary": "The fixture's sites share one cause.",
+                          "subgroups": [{"label": "All", "cause": "one shared cause", "summary": "One cause.", "members": idx}],
+                          "outliers": [], "escalations": [], "disagreements": []})
 elif "ONE concrete, codebase-specific fix" in system:
     note("fix")
     out = json.dumps({"fixes": [{"id": l[len("finding "):], "fix": "Check the input before it is used."}
@@ -401,6 +409,7 @@ fn saved_cockpit_run(
             backend: "cli".to_string(),
             mode: "parallel".to_string(),
             resolved: true,
+            group_review: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
         args,
@@ -432,6 +441,7 @@ fn saved_cockpit_run_in(
             backend: "cli".to_string(),
             mode: "parallel".to_string(),
             resolved: true,
+            group_review: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
         args: serde_json::to_value(audit_request()).unwrap(),
@@ -943,4 +953,264 @@ async fn a_cockpit_scan_killed_mid_run_is_interrupted_and_run_what_remains_compl
         .unwrap();
     assert_eq!(row["status"], "complete", "{row}");
     assert_eq!(row["resumable_here"], false, "{row}");
+}
+
+// ---- the kept group review model on a cockpit resume ----
+
+/// A cockpit scan of the fixture whose group review part failed (the provider was down for it), and
+/// the paths a test needs to resume it. The fake `claude` plays the model, so a test sees every
+/// call in `log` and the model each group review call asked for in `model_log`.
+struct InterruptedScan {
+    _root: tempfile::TempDir,
+    _guards: Vec<camerata_test_env::EnvGuard>,
+    state: AppState,
+    project_id: String,
+    run_id: String,
+    log: std::path::PathBuf,
+    model_log: std::path::PathBuf,
+    /// While this file exists the fake group review call fails.
+    group_review_down: std::path::PathBuf,
+}
+
+async fn interrupted_scan() -> InterruptedScan {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    let state_dir = root.path().join("state");
+    let repo = root.path().join("repo");
+    for d in [&bin, &state_dir, &repo] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let claude = bin.join("claude");
+        std::fs::write(&claude, FAKE_CLAUDE).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::process::Command::new(&claude)
+            .env("CAMERATA_FAKE_WARM", "1")
+            .status();
+    }
+    stage_fixture(&repo);
+    let log = root.path().join("calls.log");
+    let model_log = root.path().join("models.log");
+    // The calibration answer is fine here; the group review call is what is down.
+    let group_review_down = root.path().join("group-review-down");
+    std::fs::write(&group_review_down, "down").unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let guards = vec![
+        camerata_test_env::EnvGuard::set("FAKE_GROUP_REVIEW_DOWN", &group_review_down),
+        camerata_test_env::EnvGuard::set("PATH", &path),
+        camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &state_dir),
+        camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1"),
+        camerata_test_env::EnvGuard::set(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1"),
+        camerata_test_env::EnvGuard::set("FAKE_LOG", &log),
+        camerata_test_env::EnvGuard::set("FAKE_MODEL_LOG", &model_log),
+        camerata_test_env::EnvGuard::set(
+            crate::efficiency::EFFICIENCY_ENV,
+            "terse_output=off,warm_schedule=off",
+        ),
+        // Anything that would leave the machine goes to a closed local port instead.
+        camerata_test_env::EnvGuard::set("HTTPS_PROXY", "http://127.0.0.1:9"),
+        camerata_test_env::EnvGuard::set("ALL_PROXY", "http://127.0.0.1:9"),
+    ];
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Resume", vec!["acme/one".to_string()])
+        .unwrap();
+    state
+        .projects
+        .set_backend(&project.id, crate::project::ProjectBackend::Cli)
+        .unwrap();
+    state
+        .projects
+        .set_client_engagement(&project.id, false, false)
+        .unwrap();
+    state
+        .settings
+        .set_repo_path("acme/one", Some(repo.to_string_lossy().into_owned()));
+    let job_id = start_audit_job(&state, audit_request(), AuditJobOptions::default()).await;
+    let job = finished(&state, &job_id).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+    let first = state.get_last_scan(&project.id).unwrap();
+    let run_id = first.run_id.clone().expect("the scan was saved as a run");
+    assert_eq!(
+        crate::run_store::read_record(&run_id).unwrap().status,
+        crate::run_store::RunStatus::Incomplete
+    );
+    InterruptedScan {
+        _root: root,
+        _guards: guards,
+        state,
+        project_id: project.id,
+        run_id,
+        log,
+        model_log,
+        group_review_down,
+    }
+}
+
+/// Rewrite the saved record of `run_id` the way an earlier build, or a hand edit, could have
+/// left it.
+fn patch_saved_run(run_id: &str, patch: impl FnOnce(&mut serde_json::Value)) {
+    let path = crate::run_store::runs_dir().join(run_id).join("run.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("the record is JSON");
+    patch(&mut value);
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+/// A client engagement checks the group review model a cockpit resume keeps. A run recorded on
+/// `vendor/x` (started as the maintainer's own development) resumed in a project that is now a
+/// client engagement on the API is refused before any model call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_resume_is_refused_when_the_kept_group_review_model_is_not_allowed_for_client_work(
+) {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_resume_is_refused_when_the_kept_group") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    patch_saved_run(&rig.run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("vendor/x");
+        v["models"]["backend"] = serde_json::json!("api");
+    });
+    // The project is a client engagement on the API now, with a key (a test value that never
+    // leaves the machine).
+    rig.state
+        .credential_store
+        .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-value")
+        .unwrap();
+    rig.state
+        .projects
+        .set_backend(&rig.project_id, crate::project::ProjectBackend::Api)
+        .unwrap();
+    rig.state
+        .projects
+        .set_client_engagement(&rig.project_id, true, false)
+        .unwrap();
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let calls_before = stage_calls(&rig.log).len();
+
+    let resume = run_resume_start(State(rig.state.clone()), Path(rig.run_id.clone()))
+        .await
+        .into_response();
+    assert_eq!(resume.status(), StatusCode::OK);
+    let job_id = body_json(resume).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let job = finished(&rig.state, &job_id).await;
+    assert_eq!(
+        job.status, "failed",
+        "a client engagement must not send client code to the kept model: {:?}",
+        job.message
+    );
+    let why = job.message.clone().unwrap_or_default();
+    assert!(why.contains("client engagement"), "{why}");
+    assert!(why.contains("vendor/x"), "{why}");
+    assert_eq!(
+        stage_calls(&rig.log).len(),
+        calls_before,
+        "no model call was made"
+    );
+}
+
+/// The group review calls the fake `claude` answered, as the models they asked for.
+fn group_review_models(model_log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(model_log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("group_review "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Run what remains for `rig`'s run; the job's final state.
+async fn resume_job(rig: &InterruptedScan) -> crate::jobs::JobState {
+    let resume = run_resume_start(State(rig.state.clone()), Path(rig.run_id.clone()))
+        .await
+        .into_response();
+    assert_eq!(resume.status(), StatusCode::OK);
+    let job_id = body_json(resume).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    finished(&rig.state, &job_id).await
+}
+
+/// A run recorded on Fable 5.1, resumed in a project that has no pick of its own (it holds the
+/// built-in default, Fable 5.2), asks Fable 5.1 for its group review and says so on the run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_resume_with_no_group_review_pick_stays_on_the_recorded_model_and_says_so() {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_resume_with_no_group_review_pick") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    patch_saved_run(&rig.run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("claude-fable-5-1");
+    });
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let asked_before = group_review_models(&rig.model_log).len();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+    let asked = group_review_models(&rig.model_log);
+    assert!(
+        asked.len() > asked_before,
+        "the resume asked the group reviewer"
+    );
+    for model in &asked[asked_before..] {
+        assert_eq!(model, "claude-fable-5-1");
+    }
+    let notice = "Group review stays on claude-fable-5-1, the model this run started with.";
+    let record = crate::run_store::read_record(&rig.run_id).unwrap();
+    assert_eq!(
+        record.notes.iter().filter(|n| n.as_str() == notice).count(),
+        1,
+        "{:?}",
+        record.notes
+    );
+}
+
+/// A project whose saved group review model differs from the one the run started on is an
+/// explicit different pick: the resume is refused before any model call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_resume_with_a_different_group_review") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    patch_saved_run(&rig.run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("claude-fable-5-1");
+    });
+    rig.state
+        .projects
+        .set_review_settings(
+            &rig.project_id,
+            camerata_api_types::project::ReviewSettings {
+                group_review_model: "claude-opus-5-5".to_string(),
+                ..camerata_api_types::project::ReviewSettings::default()
+            },
+        )
+        .expect("the project exists")
+        .expect("the setting is accepted");
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let calls_before = stage_calls(&rig.log).len();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "failed", "{:?}", job.message);
+    let why = job.message.clone().unwrap_or_default();
+    assert!(
+        why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
+        "{why}"
+    );
+    assert_eq!(
+        stage_calls(&rig.log).len(),
+        calls_before,
+        "no model call was made"
+    );
 }

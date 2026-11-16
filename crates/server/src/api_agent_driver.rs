@@ -1136,14 +1136,42 @@ fn get_policy_and_registry_from_completer(
 /// assistant turns with their tool calls, tool results) with each secret value replaced by its
 /// redacted form. This direct-HTTP path does not pass the transports in `camerata-llm`, so it
 /// passes the same chokepoint (`camerata_llm::model_input`) here, in both body builders. Text
-/// that holds no secret is unchanged.
-fn redact_conversation(system: Option<&str>, messages: &[Value]) -> (Option<String>, Vec<Value>) {
+/// that holds no secret is unchanged. Also returns, per message, whether redaction rewrote an
+/// ASSISTANT turn: that is an edit to what the model wrote. A user turn or tool result that is
+/// redacted was redacted on its first send too, and on every send since, so the model has only
+/// ever seen the redacted text and nothing it holds changed between turns.
+fn redact_conversation(
+    system: Option<&str>,
+    messages: &[Value],
+) -> (Option<String>, Vec<Value>, Vec<bool>) {
     let system = system.map(|s| camerata_llm::model_input::redact_for_model(s).into_owned());
     let mut messages = messages.to_vec();
+    let mut edited = Vec::with_capacity(messages.len());
     for message in &mut messages {
-        camerata_llm::model_input::redact_json_for_model(message);
+        let assistant = message["role"] == "assistant";
+        edited.push(camerata_llm::model_input::redact_json_for_model(message) > 0 && assistant);
     }
-    (system, messages)
+    (system, messages, edited)
+}
+
+/// Drop the thinking blocks (`thinking` and `redacted_thinking`) from every assistant turn at or
+/// after the first message `edited` marks. Fable 5.2 answers a request that sends a thinking block
+/// back after any edit to an earlier message with HTTP 400 ("The block is bound to a different
+/// conversation"), and sending the same body again does not clear it. Turns before the first edit
+/// are sent as the model wrote them.
+fn drop_thinking_after_edit(messages: &mut [Value], edited: &[bool]) {
+    let Some(first) = edited.iter().position(|e| *e) else {
+        return;
+    };
+    for message in messages.iter_mut().skip(first) {
+        if message["role"] != "assistant" {
+            continue;
+        }
+        if let Some(blocks) = message["content"].as_array_mut() {
+            blocks
+                .retain(|b| !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")));
+        }
+    }
 }
 
 /// The OpenRouter chat-completions body for one turn of the agentic loop (pure, no HTTP): an
@@ -1161,7 +1189,8 @@ fn build_openrouter_agent_body(
     session_id: &str,
     provider_constraint: Option<Value>,
 ) -> Value {
-    let (system, messages) = redact_conversation(system, messages);
+    let (system, mut messages, edited) = redact_conversation(system, messages);
+    drop_thinking_after_edit(&mut messages, &edited);
     let (system, messages) = (system.as_deref(), messages.as_slice());
     // Build the full messages array with an optional system message prepended.
     // The system message gets a `cache_control` breakpoint so Anthropic-compatible
@@ -1391,7 +1420,8 @@ fn build_anthropic_request_body(
     messages: &[Value],
     tool_schemas: &[Value],
 ) -> (Value, bool) {
-    let (system, messages) = redact_conversation(system, messages);
+    let (system, mut messages, edited) = redact_conversation(system, messages);
+    drop_thinking_after_edit(&mut messages, &edited);
     let (system, messages) = (system.as_deref(), messages.as_slice());
     // Place the Layer-2 grounding breakpoint on the FIRST user message when it carries a
     // grounding block. Every other message is passed through untouched.

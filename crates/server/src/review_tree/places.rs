@@ -191,6 +191,14 @@ impl ReviewTree {
         PlaceMergeBlock::of(findings, &self.places)
     }
 
+    /// Whether the stored places are not the ones `findings` give today. A tree sealed before the
+    /// per-rule key for a whole-file place stores one place for a file whatever the rules that
+    /// flag it; the places are worked out from the rows and the tree alone, so a stored list that
+    /// differs from the fresh one is old and is worked out again on load.
+    pub fn places_are_stale(&self, findings: &[Finding]) -> bool {
+        merge_places(self, findings) != self.places
+    }
+
     /// The carrying as the ledger records it: the problem rows in, the stored places out.
     pub fn place_merge_block(&self, findings: &[Finding]) -> PlaceMergeBlock {
         PlaceMergeBlock::of(findings, &self.places)
