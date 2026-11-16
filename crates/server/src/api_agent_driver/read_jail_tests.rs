@@ -47,8 +47,7 @@ fn layout() -> Layout {
 }
 
 fn driver(l: &Layout) -> ApiAgentDriver {
-    ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-sonnet-5")
-        .with_worktree(l.wt.clone())
+    ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-sonnet-5", l.wt.clone())
 }
 
 async fn call(d: &ApiAgentDriver, tool: &str, input: Value) -> String {
@@ -213,7 +212,7 @@ async fn the_jail_is_the_only_reading_the_loop_does_end_to_end() {
         path: l.outside.join("secret.txt").display().to_string(),
         seen: std::sync::Mutex::new(Vec::new()),
     });
-    let d = ApiAgentDriver::new(completer.clone(), "stub").with_worktree(l.wt.clone());
+    let d = ApiAgentDriver::new(completer.clone(), "stub", l.wt.clone());
     let role = camerata_core::Role {
         name: "t".to_string(),
         rule_subset: vec![],

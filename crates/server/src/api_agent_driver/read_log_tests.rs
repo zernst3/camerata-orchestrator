@@ -48,7 +48,7 @@ fn fixture() -> Fixture {
 }
 
 fn driver(f: &Fixture) -> ApiAgentDriver {
-    ApiAgentDriver::new(Arc::new(StubOnly), "stub").with_worktree(f.wt.clone())
+    ApiAgentDriver::new(Arc::new(StubOnly), "stub", f.wt.clone())
 }
 
 struct StubOnly;
