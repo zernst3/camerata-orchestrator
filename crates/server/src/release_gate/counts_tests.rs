@@ -1334,3 +1334,72 @@ fn the_gate_refuses_a_forged_fix_plan_order_and_a_forged_fix_line() {
     let new = new_problems(&entries, &empty_box, &baseline);
     assert!(has(&new, "PDF data", "three_things"), "{new:?}");
 }
+
+// Single counts D, round 2.
+
+/// One synthetic package from `rows`, with the given reviewer states by rule id.
+fn package_of_rows(
+    rows: Vec<Finding>,
+    states: &[(&str, &str)],
+) -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    // `states` pairs a path with the reviewer's state for the row there.
+    let mut report = scan_report();
+    report.findings = rows;
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    for (rule, state) in states {
+        let f = sealed.findings.iter().find(|f| f.path == *rule).unwrap();
+        dispositions.insert(
+            crate::report_export::finding_key(f),
+            crate::report_export::DispositionWire {
+                state: (*state).to_string(),
+                reason: "decided".to_string(),
+                ..Default::default()
+            },
+        );
+    }
+    let package = package_with_dispositions(report, &dispositions);
+    let report_json = package.report_json.clone();
+    let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
+    (read_zip_entries(&bytes).unwrap(), report_json)
+}
+
+fn plain_row(rule: &str, path: &str, line: usize, severity: &str) -> Finding {
+    Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: severity.to_string(),
+        snippet: format!("let x{line} = 1;"),
+        detail: format!("detail {rule}"),
+        ..Finding::default()
+    }
+}
+
+#[test]
+fn a_fix_with_one_accepted_place_and_one_held_place_is_not_a_fix_to_do() {
+    let mut held = plain_row("SYN-A-1", "src/b.rs", 9, "medium");
+    held.needs_review = true;
+    let (entries, report) = package_of_rows(
+        vec![plain_row("SYN-A-1", "src/a.rs", 5, "medium"), held],
+        &[("src/a.rs", "Ignored")],
+    );
+    let p = &report.counts.problems;
+    assert_eq!(
+        (p.accepted, p.needs_decision),
+        (1, 1),
+        "anti-vacuity: {p:?}"
+    );
+    assert_eq!(report.counts.fixes.to_do, 0, "{:?}", report.counts.fixes);
+    let plan = super::archive::xlsx_sheet_grid(&entries[&xlsx_name()], "Fix plan").unwrap();
+    let id = plan[0].iter().position(|h| h == "Fix id").unwrap();
+    let rows = plan.iter().skip(1).filter(|r| !r[id].is_empty()).count();
+    assert_eq!(rows, 0, "{plan:?}");
+    let tickets = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice())
+        .records()
+        .count();
+    assert_eq!(tickets, 0);
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}

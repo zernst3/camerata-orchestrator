@@ -103,24 +103,34 @@ pub(super) fn place_classes(
         .collect()
 }
 
-/// The Fixes that are fixes: those with a problem on All problems or an advisory on Dependencies.
-/// A Fix that holds only conventions, or only rules that could not be completed, is no fix. A Fix
-/// whose places are all held for a decision is no fix to do yet: its places wait on Needs a
-/// decision. The
-/// Fix plan, the tickets and the PDF's top three all keep the Fixes in this set and no others, so
-/// a ticket is a plan row.
+/// THE predicate for "this row is a change still to make": no reviewer, baseline record or waiver
+/// accepted it, and the place it is at does not wait for a decision. A Fix is to do when any of its
+/// rows is (or it has a dependency advisory). The release gate mirrors it once, from the rows.
+pub(super) fn row_is_to_do(row: &FindingRow, place: crate::review_tree::PlaceClass) -> bool {
+    !matches!(
+        row.disposition_kind,
+        Some(Disposition::Ignored | Disposition::BaselineAccepted | Disposition::WaivedInline)
+    ) && place != crate::review_tree::PlaceClass::NeedsDecision
+}
+
+/// The Fixes that are fixes to do: those with a row to do ([`row_is_to_do`]) on All problems or an
+/// advisory on Dependencies. A Fix that holds only conventions, or only rules that could not be
+/// completed, is no fix; nor is one whose places are all accepted or all waiting for a decision.
+/// The Fix plan, the tickets, the PDF's top three and the counts all keep the Fixes in this set and
+/// no others, so a ticket is a plan row.
 pub(super) fn fixes_with_problems(
     rows: &[FindingRow],
     sorted_deps: &[DepRow],
 ) -> std::collections::HashSet<String> {
     let mut ids: std::collections::HashSet<String> = place_rows(rows)
         .into_iter()
-        // A place that needs a decision is not a change to make yet.
-        .filter(|p| {
-            crate::review_tree::class_of_place(p.members.iter().map(|m| m.bucket))
-                != crate::review_tree::PlaceClass::NeedsDecision
+        .flat_map(|p| {
+            let place = crate::review_tree::class_of_place(p.members.iter().map(|m| m.bucket));
+            p.members
+                .into_iter()
+                .filter(move |r| row_is_to_do(r, place))
+                .map(|r| r.facts.fix_id.clone())
         })
-        .flat_map(|p| p.members.into_iter().map(|r| r.facts.fix_id.clone()))
         .filter(|id| !id.is_empty())
         .collect();
     ids.extend(
