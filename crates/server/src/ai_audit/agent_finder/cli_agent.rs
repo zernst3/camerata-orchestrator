@@ -19,7 +19,7 @@ use super::{
     AgentRun, AgentStop, ConversationHandle, FollowUp, PieceAgent, PieceLimits, Room, ToolEvent,
     TurnUsage,
 };
-use crate::llm::{Backend, Llm, LlmRequest, SessionSink};
+use crate::llm::{Llm, LlmRequest, SessionSink};
 
 /// The lines a Read returns when the call names no `limit` (the tool's own default).
 const DEFAULT_READ_LINES: usize = 2_000;
@@ -106,7 +106,8 @@ impl CliPieceAgent {
         let resolved = std::fs::canonicalize(&dir)?;
 
         let sink = SessionSink::new();
-        let llm = Llm::for_backend(Backend::Cli, None).with_session_sink(sink.clone());
+        // The command line transport never uses an API key: the keyless command line constructor.
+        let llm = Llm::from_env().with_session_sink(sink.clone());
         let request = LlmRequest::new(prompt)
             .with_model(self.model.clone())
             .with_repo_read(&resolved)
