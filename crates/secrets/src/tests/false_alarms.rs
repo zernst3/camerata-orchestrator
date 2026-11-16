@@ -154,7 +154,11 @@ fn a_jwt_in_a_terraform_heredoc_still_fires() {
     let tf = format!("resource \"vm\" \"web\" {{\n  user_data = <<EOT\nTOKEN={token}\nEOT\n}}\n");
     assert_eq!(in_file("infra/main.tf", &tf), vec![3]);
     // A long dotted value with base64url-looking segments is no reference either.
-    let long = format!("DB_PASSWORD=Ab1{}.Cd2{}.tail", "x".repeat(30), "y".repeat(30));
+    let long = format!(
+        "DB_PASSWORD=Ab1{}.Cd2{}.tail",
+        "x".repeat(30),
+        "y".repeat(30)
+    );
     let tf = format!("resource \"vm\" \"web\" {{\n  user_data = <<EOT\n{long}\nEOT\n}}\n");
     assert_eq!(in_file("infra/main.tf", &tf), vec![3]);
 }
