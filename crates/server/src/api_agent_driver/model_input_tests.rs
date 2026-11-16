@@ -186,3 +186,49 @@ fn an_unedited_conversation_sends_its_thinking_blocks_back_untouched() {
     let (body, _) = build_anthropic_request_body("claude-fable-5-2", None, &messages, &[]);
     assert_eq!(body["messages"], json!(messages));
 }
+
+/// A tool result that carries a secret is redacted on its first send, the model answers the
+/// redacted text, and every later request redacts it the same way: nothing the model saw changed
+/// between turns, so its thinking blocks stay valid and are sent back.
+#[test]
+fn a_tool_result_redacted_on_its_first_send_does_not_cost_the_later_turns_their_thinking() {
+    let leaked = planted(SecretShape::SupabaseSecretKey);
+    let messages = vec![
+        json!({ "role": "user", "content": "Read the file." }),
+        thinking_turn("clean"),
+        json!({ "role": "user", "content": [
+            { "type": "tool_result", "tool_use_id": "toolu_1", "content": leaked.text }
+        ]}),
+        thinking_turn("clean"),
+        tool_result(),
+    ];
+    let (body, _) = build_anthropic_request_body("claude-fable-5-2", None, &messages, &[]);
+    assert!(!body.to_string().contains(&leaked.value), "still redacted");
+    for turn in [1, 3] {
+        assert_eq!(
+            block_types(&body["messages"][turn]),
+            ["thinking", "redacted_thinking", "text", "tool_use"],
+            "turn {turn} keeps its thinking blocks"
+        );
+    }
+}
+
+/// The same holds for the OpenRouter body builder.
+#[test]
+fn the_openrouter_body_keeps_thinking_after_a_redacted_tool_result_too() {
+    let leaked = planted(SecretShape::GitHubToken);
+    let messages = vec![
+        json!({ "role": "user", "content": "Read the file." }),
+        thinking_turn("clean"),
+        json!({ "role": "user", "content": [
+            { "type": "tool_result", "tool_use_id": "toolu_1", "content": leaked.text }
+        ]}),
+        thinking_turn("clean"),
+    ];
+    let body = build_openrouter_agent_body("some/model", None, &messages, &[], "session", None);
+    assert!(!body.to_string().contains(&leaked.value), "still redacted");
+    assert_eq!(
+        block_types(&body["messages"][3]),
+        ["thinking", "redacted_thinking", "text", "tool_use"]
+    );
+}

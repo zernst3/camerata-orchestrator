@@ -712,7 +712,10 @@ fn get_policy_and_registry_from_completer(
 /// assistant turns with their tool calls, tool results) with each secret value replaced by its
 /// redacted form. This direct-HTTP path does not pass the transports in `camerata-llm`, so it
 /// passes the same chokepoint (`camerata_llm::model_input`) here, in both body builders. Text
-/// that holds no secret is unchanged. Also returns, per message, whether redaction rewrote it.
+/// that holds no secret is unchanged. Also returns, per message, whether redaction rewrote an
+/// ASSISTANT turn: that is an edit to what the model wrote. A user turn or tool result that is
+/// redacted was redacted on its first send too, and on every send since, so the model has only
+/// ever seen the redacted text and nothing it holds changed between turns.
 fn redact_conversation(
     system: Option<&str>,
     messages: &[Value],
@@ -721,7 +724,8 @@ fn redact_conversation(
     let mut messages = messages.to_vec();
     let mut edited = Vec::with_capacity(messages.len());
     for message in &mut messages {
-        edited.push(camerata_llm::model_input::redact_json_for_model(message) > 0);
+        let assistant = message["role"] == "assistant";
+        edited.push(camerata_llm::model_input::redact_json_for_model(message) > 0 && assistant);
     }
     (system, messages, edited)
 }
