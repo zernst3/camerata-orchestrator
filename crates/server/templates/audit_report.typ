@@ -403,7 +403,7 @@
 // Nice-to-have: a cover stat strip so the story starts on page 1, not page 2.
 #v(0.3cm)
 #text(size: 9.5pt, fill: ink_soft)[
-  #d.cover.stats.critical critical · #d.cover.stats.high high · #d.cover.stats.medium medium · #d.cover.stats.accepted accepted · #d.cover.stats.dependency_advisories #plural(d.cover.stats.dependency_advisories, "dependency advisory", "dependency advisories")
+  #d.cover.strip
 ]
 
 // H11: an incremental run says so on the first page, with how much it re-audited and how much it
@@ -466,8 +466,8 @@
     #for note in d.executive_summary.failed_passes.slice(0, calc.min(d.executive_summary.failed_passes.len(), W.failed_passes_cap)) [
       - #note
     ]
-    #if d.executive_summary.failed_passes.len() > W.failed_passes_cap [
-      #text(size: 9pt, fill: ink_soft)[and #str(d.executive_summary.failed_passes.len() - W.failed_passes_cap) #W.failed_passes_more]
+    #if d.executive_summary.failed_passes_more_line != "" [
+      #text(size: 9pt, fill: ink_soft)[#d.executive_summary.failed_passes_more_line]
     ]
   ]
 ]
@@ -558,9 +558,8 @@
 }
 
 #let grid_cell_content(cell) = {
-  let n = cell.findings.len()
-  if n == 0 [] else [
-    #text(size: 9pt, weight: 600, fill: ink)[#str(n)] #text(size: 8pt, fill: ink_faint)[#plural(n, "problem", "problems")]
+  if cell.count == 0 [] else [
+    #text(size: 9pt, weight: 600, fill: ink)[#str(cell.count)] #text(size: 8pt, fill: ink_faint)[#plural(cell.count, "problem", "problems")]
   ]
 }
 
@@ -584,11 +583,11 @@
   #text(size: 8.5pt, fill: ink_faint)[#d.priority_grid.footnote]
 ]
 
-#if d.priority_grid.accepted_count > 0 or d.priority_grid.left_out != "" [
+#if d.priority_grid.accepted_line != "" or d.priority_grid.left_out != "" [
   #v(0.3cm)
   #text(size: 8.5pt, fill: ink_faint)[
-    #if d.priority_grid.accepted_count > 0 [
-      #str(d.priority_grid.accepted_count) #plural(d.priority_grid.accepted_count, "problem is", "problems are") accepted risk and out of scope for this grid.
+    #if d.priority_grid.accepted_line != "" [
+      #d.priority_grid.accepted_line
     ]
     #if d.priority_grid.left_out != "" [
       #d.priority_grid.left_out
@@ -777,15 +776,9 @@
 // here: a reader of this report has no use for them.
 Inspection model: #or_na(d.cover.audit_model).
 
-// P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
-// unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
-// auditor disposition — see `report_export::ReviewState`'s doc comment). The two branches also
-// each show EVERY number in the partition, so `candidates_reviewed` always reconciles on the page.
-#if d.review_state == "reviewed" [
-  *#str(d.methodology.candidates_reviewed) #plural(d.methodology.candidates_reviewed, "problem", "problems") reviewed by a human reviewer; #str(d.methodology.excluded_false_positive) ruled out and left out of this report; #str(d.methodology.held_for_review) #plural(d.methodology.held_for_review, "needs", "need") a further decision.*
-] else [
-  *#str(d.methodology.candidates_reviewed) #plural(d.methodology.candidates_reviewed, "problem", "problems") produced by the engine; #str(d.methodology.held_for_review) #plural(d.methodology.held_for_review, "needs", "need") a human reviewer's decision; #str(d.methodology.excluded_false_positive) ruled out automatically. This export has not yet had a human review.*
-]
+// The reconciling line is built from the counts object (`counts_prose::methodology_line`); it
+// says a human reviewed the report only when the review state is "reviewed".
+*#d.methodology.reconciliation*
 
 #d.methodology.severity_scale_note
 
@@ -803,8 +796,8 @@ Not performed in this engagement:
   #for note in d.methodology.failed_passes.slice(0, calc.min(d.methodology.failed_passes.len(), W.failed_passes_cap)) [
     - #note
   ]
-  #if d.methodology.failed_passes.len() > W.failed_passes_cap [
-    #text(size: 9pt, fill: ink_soft)[and #str(d.methodology.failed_passes.len() - W.failed_passes_cap) #W.failed_passes_more]
+  #if d.methodology.failed_passes_more_line != "" [
+    #text(size: 9pt, fill: ink_soft)[#d.methodology.failed_passes_more_line]
   ]
 ]
 
@@ -839,8 +832,8 @@ Not performed in this engagement:
     #for skipped in gaps.skipped_files.slice(0, shown) [
       - #skipped.repo, #breakable(skipped.path, n: 50)#if skipped.size != "" [ (#skipped.size)]: #skipped.reason
     ]
-    #if gaps.skipped_files.len() > shown [
-      - and #str(gaps.skipped_files.len() - shown) #W.skipped_files_more
+    #if gaps.skipped_files_more_line != "" [
+      - #gaps.skipped_files_more_line
     ]
     #if "skipped_beyond_cap_note" in gaps [
       - #gaps.skipped_beyond_cap_note

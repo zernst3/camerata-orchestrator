@@ -71,6 +71,10 @@ pub struct CoverageGapsJson {
     /// The auditable files the scan did not read, in walk order per repo: at most
     /// [`SKIPPED_FILES_LISTED_PER_REASON`] per reason.
     pub skipped_files: Vec<SkippedFileJson>,
+    /// The line under the PDF's list of skipped files when the list is longer than the PDF shows
+    /// ("and 3 more ..."); empty when the PDF shows them all.
+    #[serde(default)]
+    pub skipped_files_more_line: String,
     /// Skipped files past that bound, counted but not named.
     pub skipped_beyond_cap_total: usize,
     /// One sentence counting every file the scan did not read, by reason, named or not ("12 files
@@ -321,7 +325,7 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
     }
     let dependency_gaps = dependency_gaps(report);
     let input = report.ledger.input();
-    let skipped_files = input
+    let skipped_files: Vec<SkippedFileJson> = input
         .skipped_files
         .iter()
         .map(|s| SkippedFileJson {
@@ -349,10 +353,17 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             scope: scope.kind.clone(),
         })
         .collect();
+    let skipped_files_more_line = super::counts_prose::more_line(
+        skipped_files
+            .len()
+            .saturating_sub(super::marking::PDF_MAX_SKIPPED_FILES),
+        &super::PdfWordsJson::new().skipped_files_more,
+    );
     CoverageGapsJson {
         failed_ai_passes,
         dependency_gaps,
         skipped_files,
+        skipped_files_more_line,
         skipped_beyond_cap_total: input.skipped_beyond_cap_total,
         skipped_beyond_cap_note: skipped_beyond_cap_sentence(input.skipped_beyond_cap_total),
         skipped_summary: skipped_summary_sentence(&input.skipped_totals, &input.file_cap_hits),
