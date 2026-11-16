@@ -261,11 +261,17 @@ pub(super) fn interpret(
         .filter(|r| r.stop.is_finished())
         .flat_map(|r| r.trace.iter().cloned())
         .collect();
-    let outcome = checklist.check(
+    let shown: Vec<String> = runs
+        .iter()
+        .filter(|r| r.stop.is_finished())
+        .flat_map(|r| r.shown_in_full.iter().cloned())
+        .collect();
+    let outcome = checklist.check_with_shown(
         &file.clone().unwrap_or_default(),
         &output.problems,
         &trace,
         &room.piece_line_counts(),
+        &shown,
     );
     let coverage = coverage_of(
         &piece.key,

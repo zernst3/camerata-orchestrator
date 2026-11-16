@@ -117,16 +117,16 @@ async fn a_clean_answer_with_no_valid_checked_place_is_never_clean() {
 }
 
 #[tokio::test]
-async fn a_clean_answer_naming_a_file_that_was_never_read_is_not_clean() {
-    // b.rs is shown again in full, but never read through a tool: a clean answer that points at
-    // it names no place the trace shows was read.
+async fn a_clean_answer_naming_a_file_that_was_neither_read_nor_shown_is_not_clean() {
+    // A place in a file outside the part was neither read through a tool nor shown in full (a
+    // file shown in full by the send again step does count, see the coverage tests).
     let script = full_script(
         &[("src/a.rs", 6)],
         vec![],
         vec![],
         vec![
             answer_clean("ARCH-ONE-1", "src/a.rs", 1),
-            answer_clean("SEC-TWO-1", "src/b.rs", 1),
+            answer_clean("SEC-TWO-1", "src/elsewhere.rs", 1),
         ],
     );
     let agent = ScriptedAgent::new(script);

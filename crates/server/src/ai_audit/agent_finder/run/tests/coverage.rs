@@ -124,3 +124,27 @@ async fn a_file_read_in_part_is_sent_again_in_full() {
     assert_eq!(agent.messages().len(), 1);
     assert_eq!(extras.coverage[0].files["src/b.rs"], FileState::SentAgain);
 }
+
+#[tokio::test]
+async fn a_clean_place_in_a_file_that_was_shown_in_full_in_the_send_again_step_is_accepted() {
+    // The agent never read b.rs, yet answered SEC-TWO-1 clean at src/b.rs:2. The send again step
+    // shows b.rs in full, which is as good as a read: the answer holds up, with no rules turn.
+    let agent = ScriptedAgent::new(full_script(
+        &[("src/a.rs", 6)],
+        vec![],
+        vec![],
+        vec![
+            answer_clean("ARCH-ONE-1", "src/a.rs", 1),
+            answer_clean("SEC-TWO-1", "src/b.rs", 2),
+        ],
+    ));
+    let (_, _, _, failed, _, extras) = run(&agent).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let sent = agent.messages();
+    assert_eq!(sent.len(), 1, "only the send again turn: {sent:?}");
+    assert!(
+        extras.partial_rules.is_empty(),
+        "the clean answer holds: {:?}",
+        extras.partial_rules
+    );
+}
