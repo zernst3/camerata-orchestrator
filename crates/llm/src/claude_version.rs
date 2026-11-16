@@ -21,15 +21,8 @@ fn show(v: Version) -> String {
     format!("{}.{}.{}", v.0, v.1, v.2)
 }
 
-/// The version in `claude --version` output, such as `2.1.285 (Claude Code)`: the first
-/// whitespace-separated word of the form `major.minor.patch` on the line that says
-/// `Claude Code`, else on the first line (a notice line printed before the real one must not be
-/// read as the version).
-pub fn parse_version(output: &str) -> Option<Version> {
-    let line = output
-        .lines()
-        .find(|l| l.contains("Claude Code"))
-        .or_else(|| output.lines().next())?;
+/// The first whitespace-separated word of the form `major.minor.patch` in `line`.
+fn version_in_line(line: &str) -> Option<Version> {
     line.split_whitespace().find_map(|word| {
         let word = word.trim_start_matches('v');
         let mut parts = word.split('.');
@@ -44,6 +37,28 @@ pub fn parse_version(output: &str) -> Option<Version> {
         let patch = digits.parse().ok()?;
         Some((major, minor, patch))
     })
+}
+
+/// The version in `claude --version` output. The real line has the shape
+/// `2.1.285 (Claude Code)`: the last line of that shape wins, so a notice that also says
+/// `Claude Code` or holds another version number is not read as the version. With no line of
+/// that shape, the line that says `Claude Code` is read, else the first line.
+pub fn parse_version(output: &str) -> Option<Version> {
+    let real = output.lines().rev().find(|l| {
+        let l = l.trim();
+        l.ends_with("(Claude Code)")
+            && l.split_whitespace()
+                .next()
+                .is_some_and(|w| version_in_line(w).is_some())
+    });
+    if let Some(line) = real {
+        return version_in_line(line);
+    }
+    let line = output
+        .lines()
+        .find(|l| l.contains("Claude Code"))
+        .or_else(|| output.lines().next())?;
+    version_in_line(line)
 }
 
 /// The probe command: `<program> --version` and nothing else, stdin closed. It carries no model
@@ -248,6 +263,11 @@ mod tests {
     fn a_notice_line_with_another_version_does_not_hide_the_real_version_line() {
         assert_eq!(
             parse_version("Update available: 9.9.9\n2.1.285 (Claude Code)\n"),
+            Some((2, 1, 285))
+        );
+        // A notice that says Claude Code and holds another version, ahead of the real line.
+        assert_eq!(
+            parse_version("Claude Code update 9.9.9 is available\n2.1.285 (Claude Code)\n"),
             Some((2, 1, 285))
         );
         // No Claude Code line: the first line is the one read.
