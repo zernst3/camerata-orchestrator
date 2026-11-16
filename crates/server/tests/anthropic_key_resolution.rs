@@ -389,7 +389,17 @@ fn every_production_claude_spawn_scrubs_the_anthropic_key() {
     let mut offenders = Vec::new();
     for (path, lines) in scan_all() {
         for (idx, (n, line)) in lines.iter().enumerate() {
-            if !line.contains("Command::new(\"claude\")") {
+            // No production spawn names the binary itself: the program comes from the one
+            // resolver, so `CAMERATA_CLAUDE_PROGRAM` reaches every cli call.
+            if line.contains("Command::new(\"claude\")") {
+                offenders.push(format!(
+                    "{}:{n}: names `claude` directly, use claude_cli::claude_program(): {}",
+                    path.display(),
+                    line.trim()
+                ));
+                continue;
+            }
+            if !line.contains("= camerata_api_types::claude_cli::claude_program();") {
                 continue;
             }
             spawns += 1;
@@ -411,7 +421,7 @@ fn every_production_claude_spawn_scrubs_the_anthropic_key() {
         offenders.is_empty(),
         "a `claude` subprocess inherits ANTHROPIC_API_KEY; call \
          `camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut())` right after \
-         `Command::new(\"claude\")`:\n{}",
+         `claude_program()`:\n{}",
         offenders.join("\n")
     );
 }

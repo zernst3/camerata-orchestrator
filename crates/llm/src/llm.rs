@@ -156,7 +156,8 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     // The model-input chokepoint: the prompt and the system prompt go out redacted.
     let req = crate::model_input::guarded(req);
     let req = &*req;
-    let mut cmd = tokio::process::Command::new("claude");
+    let program = camerata_api_types::claude_cli::claude_program();
+    let mut cmd = tokio::process::Command::new(program);
     // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
     // leaving a stalled `claude` running in the background.
     // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before

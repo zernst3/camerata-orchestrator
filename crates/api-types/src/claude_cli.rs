@@ -21,6 +21,23 @@ pub fn scrub_anthropic_key_env(cmd: &mut std::process::Command) {
     cmd.env_remove(ANTHROPIC_API_KEY_ENV);
 }
 
+/// The env var that names the `claude` binary every cli call launches (an absolute path).
+/// Same name as the agent finder's cli transport reads, so the two agree.
+pub const CLAUDE_PROGRAM_ENV: &str = "CAMERATA_CLAUDE_PROGRAM";
+
+/// The `claude` program every cli call launches: `CAMERATA_CLAUDE_PROGRAM` when set and not
+/// blank, else `claude` found on PATH. The one resolver; no spawn names the binary itself.
+pub fn claude_program() -> std::ffi::OsString {
+    program_from(std::env::var_os(CLAUDE_PROGRAM_ENV))
+}
+
+fn program_from(env: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    match env {
+        Some(v) if !v.to_string_lossy().trim().is_empty() => v,
+        _ => std::ffi::OsString::from("claude"),
+    }
+}
+
 /// An empty directory the engine owns, for `claude -p` calls that read no repo.
 ///
 /// Claude Code loads the agent instruction files and the operator's own auto-memory that belong
@@ -71,6 +88,20 @@ pub fn isolate_claude_call(cmd: &mut std::process::Command, repo_dir: Option<&st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_program_is_the_env_value_when_set_else_claude_on_path() {
+        assert_eq!(
+            program_from(Some("/opt/claude/bin/claude".into())),
+            std::ffi::OsString::from("/opt/claude/bin/claude")
+        );
+        assert_eq!(program_from(None), std::ffi::OsString::from("claude"));
+        assert_eq!(
+            program_from(Some("  ".into())),
+            std::ffi::OsString::from("claude")
+        );
+        assert_eq!(CLAUDE_PROGRAM_ENV, "CAMERATA_CLAUDE_PROGRAM");
+    }
 
     #[test]
     fn the_key_is_explicitly_removed_from_the_child_environment() {

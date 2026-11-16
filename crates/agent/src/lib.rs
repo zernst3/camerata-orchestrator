@@ -508,7 +508,8 @@ impl ClaudeCliDriver {
     /// invocations Claude makes write into the shared artifact store. See the module-level
     /// note in `crates/agent/src/generic.rs` for the full disk-safety design.
     fn build_command(&self, role: &Role, task: &str) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("claude");
+        let program = camerata_api_types::claude_cli::claude_program();
+        let mut cmd = tokio::process::Command::new(program);
         // The subscription CLI must never inherit an API key from the parent's `.env`.
         camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         cmd.args(self.build_args(role, task));
