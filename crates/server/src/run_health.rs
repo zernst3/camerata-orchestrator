@@ -275,7 +275,10 @@ mod tests {
         // The blip goes on: the streak now spans two minutes, and the next failure stops the run.
         now.fetch_add(OUTAGE_SPAN.as_secs(), Ordering::SeqCst);
         h.note_failure(FailureClass::Transport, "late");
-        assert!(h.is_stopped(), "a streak that outlasts the span is an outage");
+        assert!(
+            h.is_stopped(),
+            "a streak that outlasts the span is an outage"
+        );
     }
 
     #[test]
@@ -285,7 +288,10 @@ mod tests {
         h.note_success();
         now.fetch_add(600, Ordering::SeqCst);
         transport_failures(&h, &now, 3, 5);
-        assert!(!h.is_stopped(), "the span is counted from the new streak's first failure");
+        assert!(
+            !h.is_stopped(),
+            "the span is counted from the new streak's first failure"
+        );
     }
 
     /// Zach 2026-11-02 (design 6.1): a 429 streak is a pause, not an outage. Rate-limited failures
@@ -414,7 +420,10 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        assert!(!h.is_stopped(), "400 failures within milliseconds are one wave");
+        assert!(
+            !h.is_stopped(),
+            "400 failures within milliseconds are one wave"
+        );
         assert_eq!(h.streak(), 400, "no increment was lost");
     }
 }

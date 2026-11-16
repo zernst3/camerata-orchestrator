@@ -1348,7 +1348,10 @@ async fn group_review_outage_ends_in_bounded_time(mode: &str) {
         &[5, 20, 35]
     };
     for w in &waits {
-        assert!(allowed.contains(w), "wait {w} is not a step of {allowed:?}: {waits:?}");
+        assert!(
+            allowed.contains(w),
+            "wait {w} is not a step of {allowed:?}: {waits:?}"
+        );
     }
     let per_call: u64 = if mode == "transport" { 40 } else { 60 };
     assert_eq!(

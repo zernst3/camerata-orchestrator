@@ -1108,8 +1108,16 @@ mod tests {
         .expect("a terminal answer is returned");
         assert_eq!(out.status, 503);
         let total: u64 = sleeper.waits().iter().sum();
-        assert!(total <= 60, "waits {:?} pass the 60 s budget", sleeper.waits());
-        assert_eq!(sleeper.waits(), vec![60], "clipped to the budget, then spent");
+        assert!(
+            total <= 60,
+            "waits {:?} pass the 60 s budget",
+            sleeper.waits()
+        );
+        assert_eq!(
+            sleeper.waits(),
+            vec![60],
+            "clipped to the budget, then spent"
+        );
         assert_eq!(sends.load(Ordering::SeqCst), 2);
     }
 
@@ -1130,7 +1138,11 @@ mod tests {
                 "m",
             )
             .await;
-            assert_eq!(sleeper.waits()[0], 200, "status {status} honours its retry-after");
+            assert_eq!(
+                sleeper.waits()[0],
+                200,
+                "status {status} honours its retry-after"
+            );
         }
     }
 }

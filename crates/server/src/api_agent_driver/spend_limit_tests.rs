@@ -365,12 +365,21 @@ async fn a_call_that_times_out_is_recorded_at_its_cost_cap() {
     let driver =
         ApiAgentDriver::new(Arc::new(TimesOut), PRICED_MODEL, tmp.path()).with_spend_limit(5.0);
 
-    let err = driver.run(&role(), "go").await.expect_err("the call failed");
+    let err = driver
+        .run(&role(), "go")
+        .await
+        .expect_err("the call failed");
     assert!(format!("{err:#}").contains("timed out"), "{err:#}");
 
     let turns = driver.spend_meter().turns();
-    assert_eq!(turns.len(), 1, "the timed-out call is on the record: {turns:?}");
-    let cost = turns[0].cost_usd.expect("recorded at a figure, not unknown");
+    assert_eq!(
+        turns.len(),
+        1,
+        "the timed-out call is on the record: {turns:?}"
+    );
+    let cost = turns[0]
+        .cost_usd
+        .expect("recorded at a figure, not unknown");
     // The 8,192-token output cap at $50 per million is $0.4096; the prompt and tool schemas add a few cents.
     assert!(
         (0.4096..0.5).contains(&cost),
@@ -402,6 +411,9 @@ async fn a_call_that_fails_without_a_timeout_records_no_spend() {
     let tmp = wt();
     let driver =
         ApiAgentDriver::new(Arc::new(Refused), PRICED_MODEL, tmp.path()).with_spend_limit(5.0);
-    driver.run(&role(), "go").await.expect_err("the call failed");
+    driver
+        .run(&role(), "go")
+        .await
+        .expect_err("the call failed");
     assert!(driver.spend_meter().turns().is_empty());
 }
