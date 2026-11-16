@@ -410,6 +410,15 @@ fn room_path(path: &str, roots: &[PathBuf]) -> Option<String> {
     })
 }
 
+/// Whether any segment of a path or glob argument is `..`, or starts with `~` or `$`. Segments
+/// are split on `/` and also on `{`, `}` and `,`, so brace alternatives are seen. The argument is
+/// outside the room whatever else it holds.
+fn escapes(value: &str) -> bool {
+    value
+        .split(['/', '{', '}', ','])
+        .any(|seg| seg == ".." || seg.starts_with('~') || seg.starts_with('$'))
+}
+
 /// How many lines a tool result returned: the tool's own count when the record carries it, else
 /// the numbered lines of the text.
 fn lines_returned(record: &Value, result: &Value) -> usize {
@@ -563,8 +572,12 @@ pub(crate) fn parse_session(
         let (failed, returned) = results.get(id).copied().unwrap_or((false, 0));
         let text_of = |key: &str| u.input[key].as_str().unwrap_or("").to_string();
         // A path argument the call named, checked against the room. `None` = outside.
-        let mut place = |raw: String| -> Option<String> {
-            let placed = room_path(&raw, roots);
+        let mut place = |raw: String, strict: bool| -> Option<String> {
+            let placed = if strict && escapes(&raw) {
+                None
+            } else {
+                room_path(&raw, roots)
+            };
             if placed.is_none() {
                 outside.push(raw);
             }
@@ -578,7 +591,7 @@ pub(crate) fn parse_session(
         }
         match u.name.as_str() {
             "Read" => {
-                let Some(path) = place(text_of("file_path")) else {
+                let Some(path) = place(text_of("file_path"), false) else {
                     continue;
                 };
                 // Reads before the last compaction were dropped from the agent's context (the
@@ -600,7 +613,7 @@ pub(crate) fn parse_session(
             "Glob" => {
                 let path_arg = text_of("path");
                 if !path_arg.is_empty() {
-                    place(path_arg.clone());
+                    place(path_arg.clone(), true);
                 }
                 let pattern = text_of("pattern");
                 // The literal part of the pattern before its first wildcard is a path: checked
@@ -610,10 +623,11 @@ pub(crate) fn parse_session(
                     .chars()
                     .take_while(|c| !matches!(c, '*' | '?' | '[' | '{'))
                     .collect();
+                place(pattern.clone(), true);
                 if !prefix.is_empty() {
-                    place(prefix.clone());
+                    place(prefix.clone(), true);
                     if !path_arg.is_empty() {
-                        place(format!("{}/{prefix}", path_arg.trim_end_matches('/')));
+                        place(format!("{}/{prefix}", path_arg.trim_end_matches('/')), true);
                     }
                 }
                 if !failed {
@@ -622,8 +636,12 @@ pub(crate) fn parse_session(
             }
             "Grep" => {
                 let path_arg = text_of("path");
+                let glob_arg = text_of("glob");
+                if !glob_arg.is_empty() {
+                    place(glob_arg, true);
+                }
                 if !path_arg.is_empty() {
-                    place(path_arg);
+                    place(path_arg, true);
                 }
                 if !failed {
                     trace.push(ToolEvent::Grep {
@@ -632,24 +650,24 @@ pub(crate) fn parse_session(
                 }
             }
             "LS" => {
-                if let Some(path) = place(text_of("path")) {
+                if let Some(path) = place(text_of("path"), false) {
                     trace.push(ToolEvent::Ls { path });
                 }
             }
             // A refused write left nothing behind and is not recorded, but a write aimed
             // outside the room is still a path outside the room.
             "Write" => {
-                if let Some(path) = place(text_of("file_path")) {
+                if let Some(path) = place(text_of("file_path"), false) {
                     if !failed {
                         trace.push(ToolEvent::Write { path });
                     }
                 }
             }
             "Edit" | "MultiEdit" => {
-                place(text_of("file_path"));
+                place(text_of("file_path"), false);
             }
             "NotebookEdit" => {
-                place(text_of("notebook_path"));
+                place(text_of("notebook_path"), false);
             }
             _ => {}
         }
