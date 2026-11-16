@@ -831,3 +831,79 @@ async fn the_needed_me_route_answers_the_updated_record_and_refuses_what_it_cann
         "a body that is not a flag is refused"
     );
 }
+
+// ── a problem split out of a ruled-out one ────────────────────────────────────────────────
+
+#[test]
+fn a_split_out_problem_is_held_and_a_group_decision_leaves_it_undecided() {
+    let mut host = row("SEC-1", "src/a.rs", 10, "let a = x();");
+    host.also_locations = vec![crate::onboard::MergedLocation::site(
+        "acme/app",
+        "src/b.rs",
+        3,
+        "SEC-2",
+        "let b = y();",
+        false,
+    )];
+    let plain = row("SEC-2", "src/c.rs", 5, "let c = z();");
+    let sealed = report_of(vec![host, plain]).seal();
+    let host_key = sealed
+        .findings
+        .iter()
+        .find(|f| f.rule_id == "SEC-1")
+        .unwrap()
+        .site_key
+        .clone();
+    let store = DecisionStore::new();
+    store
+        .record_site(
+            "p",
+            &req(&host_key, DecisionState::FalsePositive, "a constant"),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let reviewed = crate::report_export::apply_overlay(&sealed, &store.list("p"), &[], &[]);
+    let split = reviewed
+        .report()
+        .findings
+        .iter()
+        .find(|f| {
+            f.captures
+                .contains_key(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE)
+        })
+        .expect("the split-out problem")
+        .clone();
+    let plain_key = reviewed
+        .report()
+        .findings
+        .iter()
+        .find(|f| f.path == "src/c.rs")
+        .unwrap()
+        .site_key
+        .clone();
+
+    // Held from every batch decision.
+    let held = held_keys(&reviewed.report().findings, &store.active("p"), &none());
+    assert!(held.contains(&split.site_key), "{held:?}");
+    assert!(!held.contains(&plain_key));
+
+    // A group decision on rule SEC-2 covers the plain row and leaves the split-out one alone.
+    let members = vec![split.site_key.clone(), plain_key.clone()];
+    let mut group = node_req("rule:SEC-2", DecisionState::Confirmed, "pattern");
+    group.except = held.iter().cloned().collect();
+    let (record, written) = store
+        .record_node("p", "rule:SEC-2", &members, &group, ctx("insp-1"))
+        .unwrap();
+    assert_eq!(written, 1);
+    assert_eq!(record.applies_to, vec![plain_key]);
+    let after = crate::report_export::apply_overlay(&sealed, &store.list("p"), &[], &[]);
+    assert!(
+        !StoreDecisions::for_project(&store, "p").has_decision(&split),
+        "the group decision did not decide it"
+    );
+    assert_eq!(
+        crate::release_gate::held::split_out_without_decision(&after.report().findings, &after)
+            .len(),
+        1
+    );
+}

@@ -110,14 +110,17 @@ pub enum HoldReason {
     EngineCheckNoWithoutCorrection,
     /// The row exports as merged and no merge decision with a reason stands behind it.
     MergedWithoutDecision,
+    /// The problem was split out of one a reviewer ruled out, and has no decision of its own.
+    SplitOutWithoutDecision,
 }
 
 impl HoldReason {
     /// Every reason, in the order the release gate runs its checks.
-    pub const ALL: [HoldReason; 5] = [
+    pub const ALL: [HoldReason; 6] = [
         Self::JunkContent,
         Self::EvidenceUnverified,
         Self::RestoredWithoutDecision,
+        Self::SplitOutWithoutDecision,
         Self::MergedWithoutDecision,
         Self::EngineCheckNoWithoutCorrection,
     ];
@@ -130,6 +133,7 @@ impl HoldReason {
             Self::RestoredWithoutDecision => "put back after the engine threw it out, no decision",
             Self::EngineCheckNoWithoutCorrection => "Engine Check said No, no correction yet",
             Self::MergedWithoutDecision => "merged with no decision record",
+            Self::SplitOutWithoutDecision => "split out of a ruled-out problem, no decision",
         }
     }
 }

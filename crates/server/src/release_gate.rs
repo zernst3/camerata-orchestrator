@@ -81,6 +81,9 @@ pub struct ProductPackage {
     /// Findings the reviewer restored after the engine threw them out that carry no decision
     /// since, one problem each (A12 item 2).
     pub restored_without_decision: Vec<Problem>,
+    /// Problems split out of one the reviewer ruled out that carry no decision of their own, one
+    /// problem each.
+    pub split_out_without_decision: Vec<Problem>,
     /// Sites the Engine Check said No to that carry no correction, one problem each, and one
     /// problem when the Engine Check file cannot be read (design A2b).
     pub engine_check_no_without_correction: Vec<Problem>,
@@ -265,6 +268,7 @@ pub(crate) fn assemble_package(
         ),
         unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
         restored_without_decision: held::restored_without_decision(&report.findings, reviewed),
+        split_out_without_decision: held::split_out_without_decision(&report.findings, reviewed),
         engine_check_no_without_correction: engine_check::problems(
             &report.findings,
             &report.discarded,
@@ -713,6 +717,14 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
             Vec::new()
         } else {
             package.restored_without_decision.clone()
+        },
+    );
+    report.record(
+        CheckId::SplitOutWithoutDecision,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.split_out_without_decision.clone()
         },
     );
     report.record(

@@ -296,6 +296,30 @@ fn a_package_whose_clean_cell_has_only_a_ruled_out_problem_clears_the_gate() {
 
 const RULE_B: &str = "SEC-OTHER-RULE-1";
 
+/// The report reviewed with `dispositions`, and with the problem the ruling split out of the
+/// ruled-out row confirmed too: a split-out problem needs a decision of its own to ship.
+fn decided_split_out(
+    sealed: &crate::onboard::SealedReport,
+    mut dispositions: HashMap<String, crate::report_export::DispositionWire>,
+) -> crate::report_export::ReviewedReport {
+    let first = crate::report_export::ReviewedReport::unreviewed(sealed, &dispositions);
+    for f in &first.report().findings {
+        if f.captures
+            .contains_key(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE)
+        {
+            dispositions.insert(
+                f.site_key.clone(),
+                crate::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    reason: "a real problem".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    crate::report_export::ReviewedReport::unreviewed(sealed, &dispositions)
+}
+
 /// A package where the portal's only row (rule `RULE`) absorbed a rule B site in the web and the
 /// reviewer ruled that row out. Rule B's cell for the web must stay open.
 fn package_with_ruled_out_host_absorbing_another_rules_site(
@@ -326,7 +350,7 @@ fn package_with_ruled_out_host_absorbing_another_rules_site(
             ..Default::default()
         },
     );
-    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &dispositions);
+    let reviewed = decided_split_out(&sealed, dispositions);
     let options = client_options();
     let json = build_report_json(&reviewed, None, &options);
     let data = render_data_json(&json).expect("data.json renders");
@@ -344,6 +368,18 @@ fn package_with_ruled_out_host_absorbing_another_rules_site(
 #[test]
 fn a_clean_cell_beside_a_site_a_ruled_out_row_absorbed_for_another_rule_is_refused() {
     let (mut entries, report) = package_with_ruled_out_host_absorbing_another_rules_site();
+    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    assert_eq!(
+        findings["findings"].as_array().unwrap().len(),
+        1,
+        "anti-vacuity: the ruled-out host is not a finding, and its absorbed site is: {findings}"
+    );
+    assert_eq!(findings["findings"][0]["rule_id"], RULE_B);
+    assert_eq!(findings["findings"][0]["repo"], "acme/web");
+    assert!(
+        findings.get("open_beside_ruled_out").is_none(),
+        "the site has a row of its own, so nothing is open beside the ruled-out row"
+    );
     let section = report.patterns_across_services.as_ref().unwrap();
     assert_eq!(section.rows.len(), 1, "anti-vacuity: rule B differs");
     assert_eq!(section.rows[0].rule_id, RULE_B);
@@ -393,7 +429,7 @@ fn package_with_ruled_out_host_also_matching_another_rule(
             ..Default::default()
         },
     );
-    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &dispositions);
+    let reviewed = decided_split_out(&sealed, dispositions);
     let options = client_options();
     let json = build_report_json(&reviewed, None, &options);
     let data = render_data_json(&json).expect("data.json renders");
@@ -414,13 +450,15 @@ fn a_clean_cell_beside_a_rule_a_ruled_out_row_also_matches_is_refused() {
     let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
     assert_eq!(
         findings["findings"].as_array().unwrap().len(),
-        0,
-        "anti-vacuity: the ruled-out row is not among the findings"
+        1,
+        "anti-vacuity: the ruled-out row is not a finding, the rule it also matched is: {findings}"
     );
-    assert_eq!(
-        findings["open_beside_ruled_out"],
-        json!([{"repo": "acme/portal", "rule_id": RULE_B, "path": "src/db.rs", "line": 12}]),
-        "anti-vacuity: the rule it also matches is listed as open"
+    assert_eq!(findings["findings"][0]["rule_id"], RULE_B);
+    assert_eq!(findings["findings"][0]["path"], "src/db.rs");
+    assert_eq!(findings["findings"][0]["line"], 12);
+    assert!(
+        findings.get("open_beside_ruled_out").is_none(),
+        "the rule it also matched has a row of its own"
     );
     let section = report.patterns_across_services.as_ref().unwrap();
     assert_eq!(section.rows.len(), 1, "anti-vacuity: rule B differs");
@@ -433,6 +471,32 @@ fn a_clean_cell_beside_a_rule_a_ruled_out_row_also_matches_is_refused() {
             && p.message.contains("acme/portal")
             && p.message.contains(RULE_B)
             && p.message.contains("clean")),
+        "{problems:?}"
+    );
+}
+
+/// The gate's backstop: a package whose `open_beside_ruled_out` lists a place is refused, with or
+/// without a clean cell beside it, because every such place should have a row of its own.
+#[test]
+fn the_gate_refuses_a_package_whose_open_beside_ruled_out_is_not_empty() {
+    let (mut entries, report) = entries_of(package_for(two_repo_report()));
+    assert!(
+        patterns_section_problems(&entries, &report).is_empty(),
+        "anti-vacuity: the package as built is consistent"
+    );
+    let mut findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    findings["open_beside_ruled_out"] =
+        json!([{"repo": "acme/web", "rule_id": RULE_B, "path": "src/query.rs", "line": 7}]);
+    entries.insert(
+        "findings.json".to_string(),
+        serde_json::to_vec(&findings).unwrap(),
+    );
+    let problems = patterns_section_problems(&entries, &report);
+    assert!(
+        problems.iter().any(|p| p.file == "findings.json"
+            && p.message.contains("src/query.rs")
+            && p.message.contains(RULE_B)
+            && p.message.contains("ruled-out row")),
         "{problems:?}"
     );
 }

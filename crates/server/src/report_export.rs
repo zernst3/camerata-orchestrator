@@ -2562,6 +2562,7 @@ pub mod overlay;
 pub mod prose_checks;
 pub mod row_facts;
 pub mod tree_view;
+pub mod unfold;
 pub use overlay::{
     apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, re_mark_line,
     summary_fingerprint, AppliedEdit, MergeNote, ReviewedReport, StaleEditNote, SupersededNote,
@@ -2573,6 +2574,9 @@ mod coverage_gaps_tests;
 
 #[cfg(test)]
 mod patterns_open_tests;
+
+#[cfg(test)]
+mod unfold_tests;
 
 #[cfg(test)]
 mod wo9 {
