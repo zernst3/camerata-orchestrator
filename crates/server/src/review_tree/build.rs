@@ -172,6 +172,16 @@ fn sub_ordinal(sub: &str) -> u32 {
     }
 }
 
+/// The label of a stored rule node: the fresh placement's label when the row would be placed
+/// under the same node today, else the node's bare id.
+fn stored_rule_label(fresh: &RulePlacement, rule: &str) -> String {
+    if fresh.rule == rule {
+        fresh.rule_label.clone()
+    } else {
+        rule.strip_prefix("rule:").unwrap_or(rule).to_string()
+    }
+}
+
 /// Build the tree of `findings`, and write each row's `group_path` and `group_role` so they
 /// agree with it. `discarded` is [`crate::onboard::ScanReport::discarded`] (A12): the rows the
 /// engine threw out and kept. They are not findings and no export reads them, but they are in the
@@ -199,18 +209,14 @@ pub fn build_tree(
     for f in findings.iter() {
         let fresh = place_row(f, tools);
         // A style linter's rule is one rule group per repository (see [`super::lint`]), whatever
-        // sub-group the scan or the group reviewer gave the row. A lint the scan mapped to a
-        // security rule (with the corpus loaded) keeps its place.
-        let lint = super::lint::is_style_lint_row(f, tools)
-            && valid_path(f)
-                .is_none_or(|[_, rule, _]| !super::lint::rule_node_is_security(f, rule));
-        match valid_path(f) {
+        // sub-group the scan or the group reviewer gave the row. The stored rule node is read too:
+        // a lint the scan mapped (with the corpus loaded) to a security rule keeps its place, and
+        // one it mapped to another rule stays grouped without the corpus.
+        let stored = valid_path(f);
+        let lint = super::lint::is_style_lint_row_at(f, tools, stored.map(|p| p[1].as_str()));
+        match stored {
             Some([category, rule, _]) if lint => {
-                let rule_label = if fresh.rule == *rule {
-                    fresh.rule_label
-                } else {
-                    rule.strip_prefix("rule:").unwrap_or(rule).to_string()
-                };
+                let rule_label = stored_rule_label(&fresh, rule);
                 row_sub.push(super::lint::lint_sub_id(rule, &f.repo, &f.rule_id));
                 placements.push(RulePlacement {
                     category: category.clone(),
@@ -223,11 +229,7 @@ pub fn build_tree(
                 placements.push(fresh);
             }
             Some([category, rule, sub]) => {
-                let rule_label = if fresh.rule == *rule {
-                    fresh.rule_label
-                } else {
-                    rule.strip_prefix("rule:").unwrap_or(rule).to_string()
-                };
+                let rule_label = stored_rule_label(&fresh, rule);
                 placements.push(RulePlacement {
                     category: category.clone(),
                     rule: rule.clone(),

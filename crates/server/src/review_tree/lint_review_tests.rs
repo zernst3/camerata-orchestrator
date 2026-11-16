@@ -4,9 +4,103 @@
 //! Synthetic fixtures only.
 
 use camerata_api_types::decisions::{DecisionState, NewDecisionReq, Scope};
+use camerata_api_types::review::EscalationReason;
 
 use super::lint_tests::{grouped, keys_of, lint_row, lint_rows, rule_groups_of};
+use super::*;
 use crate::decisions::{apply_to, DecisionCtx, DecisionStore};
+use crate::onboard::Finding;
+
+/// Whether every place of `rule` in `repo` keeps per-place handling: none is in a lint group, and a
+/// group reviewer's nomination of one of them reaches the candidate list.
+fn assert_per_place(rows: &[Finding], tree: &ReviewTree, rule: &str, repo: &str) {
+    let keys = keys_of(rows, rule, repo);
+    assert!(!keys.is_empty(), "{rule} has places");
+    for f in rows.iter().filter(|f| f.rule_id == rule && f.repo == repo) {
+        assert!(
+            !in_lint_group(f),
+            "{rule} stays per place, but it is in {:?}",
+            f.group_path
+        );
+    }
+    for g in rule_groups_of(tree, rows, rule, repo) {
+        assert!(
+            !is_lint_sub_id(&g.id),
+            "{rule} is in the lint group {}",
+            g.id
+        );
+    }
+    let f = rows
+        .iter()
+        .find(|f| f.rule_id == rule && f.repo == repo)
+        .unwrap();
+    let mut nodes = tree.nodes.clone();
+    nodes
+        .iter_mut()
+        .find(|n| n.id == f.group_path[1])
+        .unwrap()
+        .escalations
+        .push(NodeEscalation {
+            key: f.site_key.clone(),
+            reason: EscalationReason::Injection,
+            rank: 1,
+            why: "Code is run from a string.".to_string(),
+        });
+    let ranked = rank_candidates(&nodes, rows, &RankSettings::default());
+    assert!(
+        ranked.candidates.iter().any(|c| c.key == f.site_key),
+        "{rule} can take an urgent slot"
+    );
+}
+
+// ── Fix 1: an unknown lint id stays per place ─────────────────────────────────────────────────
+
+#[test]
+fn an_eslint_rule_no_table_knows_stays_per_place_and_can_be_urgent() {
+    let mut input = Vec::new();
+    for rule in [
+        "no-eval",
+        "no-implied-eval",
+        "no-new-func",
+        "react/no-danger",
+        "no-unsanitized/property",
+        "no-secrets/no-secrets",
+        "@microsoft/sdl/no-inner-html",
+    ] {
+        input.extend(lint_rows("acme/web", "eslint", rule, 3));
+    }
+    let (rows, tree) = grouped(input);
+    for rule in [
+        "no-eval",
+        "no-implied-eval",
+        "no-new-func",
+        "react/no-danger",
+        "no-unsanitized/property",
+        "no-secrets/no-secrets",
+        "@microsoft/sdl/no-inner-html",
+    ] {
+        assert_per_place(&rows, &tree, rule, "acme/web");
+    }
+}
+
+#[test]
+fn an_unmapped_clippy_lint_stays_per_place_and_can_be_urgent() {
+    let (rows, tree) = grouped(lint_rows("acme/core", "clippy", "clippy::unwrap_used", 6));
+    assert_per_place(&rows, &tree, "clippy::unwrap_used", "acme/core");
+}
+
+#[test]
+fn a_style_lint_row_whose_own_category_is_security_stays_per_place() {
+    // `no-var` is a style rule, but this row was classified as an injection problem.
+    let input: Vec<Finding> = (0..4)
+        .map(|i| Finding {
+            category: Some("injection".to_string()),
+            ..lint_row("acme/web", "eslint", "no-var", i)
+        })
+        .collect();
+    let (rows, tree) = grouped(input);
+    assert_per_place(&rows, &tree, "no-var", "acme/web");
+}
 
 // ── Fix 3: two lint rules never share a group ─────────────────────────────────────────────────
 
