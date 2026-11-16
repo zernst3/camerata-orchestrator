@@ -382,7 +382,8 @@ fn every_production_llm_build_gets_its_key_from_the_resolver() {
 
 /// Files that may name `claude_program()` without spawning: the resolver's definition and the
 /// version probe (which runs `--version` only and carries no environment-sensitive input).
-const RESOLVER_NON_SPAWNERS: [&str; 2] = ["api-types/src/claude_cli.rs", "llm/src/claude_version.rs"];
+const RESOLVER_NON_SPAWNERS: [&str; 2] =
+    ["api-types/src/claude_cli.rs", "llm/src/claude_version.rs"];
 
 /// Every production use of `claude_program(` (a direct `Command::new(claude_program())`, a
 /// `let p = claude_program();`, an imported bare call) counted, with the ones that do not scrub
@@ -468,6 +469,7 @@ fn a_planted_unscrubbed_spawn_through_an_imported_resolver_is_caught() {
     assert_eq!((spawns, offenders.len()), (1, 0));
     // The definition file and the version probe are excluded by name.
     let def = lines("pub fn claude_program() -> OsString { x }");
-    let (spawns, _) = claude_spawn_scan(&[(PathBuf::from("crates/api-types/src/claude_cli.rs"), def)]);
+    let (spawns, _) =
+        claude_spawn_scan(&[(PathBuf::from("crates/api-types/src/claude_cli.rs"), def)]);
     assert_eq!(spawns, 0);
 }

@@ -22,20 +22,48 @@ pub fn scrub_anthropic_key_env(cmd: &mut std::process::Command) {
 }
 
 /// The env var that names the `claude` binary every cli call launches (an absolute path).
-/// Same name as the agent finder's cli transport reads, so the two agree.
 pub const CLAUDE_PROGRAM_ENV: &str = "CAMERATA_CLAUDE_PROGRAM";
 
-/// The `claude` program every cli call launches: `CAMERATA_CLAUDE_PROGRAM` when set and not
-/// blank, else `claude` found on PATH. The one resolver; no spawn names the binary itself.
+/// The `claude` program every cli call launches: `CAMERATA_CLAUDE_PROGRAM` (surrounding
+/// whitespace trimmed) when set and not blank, else `claude` found on PATH. The one resolver; no
+/// spawn names the binary itself. It does not judge the value: [`validated_claude_program`] does,
+/// and the cli pre-flight calls that before any model call.
 pub fn claude_program() -> std::ffi::OsString {
     program_from(std::env::var_os(CLAUDE_PROGRAM_ENV))
 }
 
+/// [`claude_program`], refused when `CAMERATA_CLAUDE_PROGRAM` is set to something that is not an
+/// absolute path (a relative name would be looked up from whatever directory the run starts in).
+pub fn validated_claude_program() -> Result<std::ffi::OsString, String> {
+    validated_from(std::env::var_os(CLAUDE_PROGRAM_ENV))
+}
+
 fn program_from(env: Option<std::ffi::OsString>) -> std::ffi::OsString {
     match env {
-        Some(v) if !v.to_string_lossy().trim().is_empty() => v,
-        _ => std::ffi::OsString::from("claude"),
+        Some(v) => match v.to_str().map(str::trim) {
+            Some("") => std::ffi::OsString::from("claude"),
+            Some(trimmed) => std::ffi::OsString::from(trimmed),
+            // Not valid UTF-8: kept as it is, there is nothing safe to trim.
+            None => v,
+        },
+        None => std::ffi::OsString::from("claude"),
     }
+}
+
+fn validated_from(env: Option<std::ffi::OsString>) -> Result<std::ffi::OsString, String> {
+    let set = env
+        .as_ref()
+        .is_some_and(|v| !v.to_string_lossy().trim().is_empty());
+    let program = program_from(env);
+    if set && !std::path::Path::new(&program).is_absolute() {
+        return Err(format!(
+            "{CLAUDE_PROGRAM_ENV} is set to `{}`, which is not an absolute path. Set it to the \
+             full path of the `claude` binary, such as /usr/local/bin/claude, or unset it to use \
+             `claude` from PATH.",
+            program.to_string_lossy()
+        ));
+    }
+    Ok(program)
 }
 
 /// An empty directory the engine owns, for `claude -p` calls that read no repo.
@@ -101,6 +129,41 @@ mod tests {
             std::ffi::OsString::from("claude")
         );
         assert_eq!(CLAUDE_PROGRAM_ENV, "CAMERATA_CLAUDE_PROGRAM");
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed_from_the_program() {
+        assert_eq!(
+            program_from(Some("  /opt/claude/bin/claude\n".into())),
+            std::ffi::OsString::from("/opt/claude/bin/claude")
+        );
+    }
+
+    #[test]
+    fn a_relative_program_is_refused_with_a_clear_message() {
+        let err = validated_from(Some("bin/claude".into())).unwrap_err();
+        assert!(err.contains("CAMERATA_CLAUDE_PROGRAM"), "{err}");
+        assert!(err.contains("`bin/claude`"), "{err}");
+        assert!(err.contains("absolute path"), "{err}");
+        assert!(
+            !err.contains('\u{2014}') && !err.contains('\u{2013}'),
+            "{err}"
+        );
+        // A bare name is relative too.
+        assert!(validated_from(Some("claude".into())).is_err());
+        // Absolute, unset and blank pass; the absolute one is trimmed.
+        assert_eq!(
+            validated_from(Some(" /opt/claude ".into())).unwrap(),
+            std::ffi::OsString::from("/opt/claude")
+        );
+        assert_eq!(
+            validated_from(None).unwrap(),
+            std::ffi::OsString::from("claude")
+        );
+        assert_eq!(
+            validated_from(Some("   ".into())).unwrap(),
+            std::ffi::OsString::from("claude")
+        );
     }
 
     #[test]

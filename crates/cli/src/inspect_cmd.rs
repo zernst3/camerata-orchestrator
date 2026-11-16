@@ -3349,9 +3349,8 @@ mod tests {
     #[test]
     fn the_cli_version_check_runs_only_for_a_real_cli_run() {
         let missing = std::ffi::OsString::from("/nonexistent/claude");
-        let check = |m: &[(String, String)]| {
-            camerata_server::claude_version::check_models(&missing, m)
-        };
+        let check =
+            |m: &[(String, String)]| camerata_server::claude_version::check_models(&missing, m);
         let models = vec![(
             "the group reviewer".to_string(),
             "claude-fable-5-2".to_string(),
