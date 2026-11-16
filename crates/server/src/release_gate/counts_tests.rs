@@ -1455,3 +1455,85 @@ fn an_empty_box_with_no_dependency_fix_first_keeps_the_old_sentence() {
     let problems = counts_problems(&entries, &report);
     assert!(problems.is_empty(), "{}", messages(&problems));
 }
+
+// Single counts D, round 2, item 3: the order check fails closed.
+
+fn fix_order_problems(
+    entries: &BTreeMap<String, Vec<u8>>,
+    report: &AuditReportJson,
+) -> Vec<super::report::Problem> {
+    counts_problems(entries, report)
+        .into_iter()
+        .filter(|p| p.location.contains("fix order"))
+        .collect()
+}
+
+#[test]
+fn the_order_check_pushes_a_problem_for_a_missing_workbook() {
+    let (mut entries, report) = consistent();
+    assert!(
+        fix_order_problems(&entries, &report).is_empty(),
+        "anti-vacuity"
+    );
+    entries.remove(&xlsx_name());
+    let found = fix_order_problems(&entries, &report);
+    assert!(
+        found.iter().any(|p| p.file == xlsx_name()),
+        "{}",
+        messages(&found)
+    );
+}
+
+#[test]
+fn the_order_check_pushes_a_problem_for_an_unreadable_sheet() {
+    for sheet in ["Fix plan", "All problems"] {
+        let (mut entries, report) = consistent();
+        let name = xlsx_name();
+        entries.insert(
+            name.clone(),
+            rewrite_xlsx_part(&entries[&name], "xl/workbook.xml", |xml| {
+                assert!(xml.contains(&format!("name=\"{sheet}\"")), "anti-vacuity");
+                xml.replace(&format!("name=\"{sheet}\""), &format!("name=\"{sheet} x\""))
+            }),
+        );
+        let found = fix_order_problems(&entries, &report);
+        assert!(
+            found
+                .iter()
+                .any(|p| p.location == format!("sheet \"{sheet}\" fix order")),
+            "{sheet}: {}",
+            messages(&found)
+        );
+    }
+}
+
+#[test]
+fn the_order_check_pushes_a_problem_for_a_missing_column() {
+    // (the header renamed, the sheet whose check must notice)
+    for (header, sheet) in [
+        ("Fix order", "All problems"),
+        ("Fix order", "Fix plan"),
+        ("Severity", "All problems"),
+        ("Fix id", "Fix plan"),
+    ] {
+        let (mut entries, report) = consistent();
+        let name = xlsx_name();
+        entries.insert(
+            name.clone(),
+            rewrite_xlsx_part(&entries[&name], "xl/sharedStrings.xml", |xml| {
+                let cell = format!(">{header}<");
+                assert!(xml.contains(&cell), "anti-vacuity: {header}");
+                xml.replace(&cell, &format!(">{header} renamed<"))
+            }),
+        );
+        let found = fix_order_problems(&entries, &report);
+        assert!(
+            found
+                .iter()
+                .any(|p| p.location == format!("sheet \"{sheet}\" fix order")
+                    && p.message.contains(header)),
+            "{header} on {sheet}: {}",
+            messages(&found)
+        );
+    }
+}
