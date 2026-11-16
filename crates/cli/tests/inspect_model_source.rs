@@ -176,7 +176,7 @@ async fn with_no_flags_the_built_in_default_runs_and_the_environment_is_ignored(
     };
     assert!(!requested.is_empty(), "the scan called the scripted model");
     // The scan, the fix stage and the clone judge keep their defaults; the two reviewers have
-    // defaults of their own (stage 1 on Opus 5.5, stage 2 on Fable 5.1).
+    // defaults of their own (stage 1 on Opus 5.5, stage 2 on Fable 5.2).
     let allowed = [
         camerata_server::llm::DEFAULT_MODEL.to_string(),
         camerata_api_types::project::FIX_STAGE_HAIKU_MODEL.to_string(),

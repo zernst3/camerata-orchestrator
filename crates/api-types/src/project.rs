@@ -258,7 +258,7 @@ pub const STAGE1_DEFAULT_MODEL: &str = "claude-opus-5-5";
 
 /// The model stage 2 (the group reviewer) runs on when no group review model is set by the
 /// `--group-review-model` flag or the project setting (A13).
-pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-1";
+pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-2";
 
 /// The project's review-tree settings (design D3, D5 and A3): how many escalations a run may put
 /// in the architect's queue, which reasons may exceed that number, and the group reviewer's
@@ -422,9 +422,9 @@ mod review_settings_tests {
     }
 
     #[test]
-    fn the_stage_defaults_are_opus_5_5_and_fable_5_1() {
+    fn the_stage_defaults_are_opus_5_5_and_fable_5_2() {
         assert_eq!(STAGE1_DEFAULT_MODEL, "claude-opus-5-5");
-        assert_eq!(STAGE2_DEFAULT_MODEL, "claude-fable-5-1");
+        assert_eq!(STAGE2_DEFAULT_MODEL, "claude-fable-5-2");
         assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
     }
 }

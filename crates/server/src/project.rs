@@ -879,7 +879,7 @@ mod tests {
         let p = store.create("Stages", vec![]).unwrap();
         // Stage 1 is the calibration step; stage 2 is the review settings' group review model.
         assert_eq!(p.step_models.calibration, "claude-opus-5-5");
-        assert_eq!(p.review.group_review_model, "claude-fable-5-1");
+        assert_eq!(p.review.group_review_model, "claude-fable-5-2");
         // The scan keeps its own default.
         assert_eq!(p.step_models.audit, DEFAULT_MODEL);
         // The rest of the review settings are the design values.
@@ -993,7 +993,7 @@ mod tests {
             let b = store.create("B", vec![]).unwrap();
             // A new project carries the design values, and stage 2's own default model.
             let seeded = ReviewSettings {
-                group_review_model: "claude-fable-5-1".to_string(),
+                group_review_model: "claude-fable-5-2".to_string(),
                 ..ReviewSettings::default()
             };
             assert_eq!(a.review, seeded);
@@ -1034,7 +1034,7 @@ mod tests {
         assert_eq!(a.review.group_review_model, "claude-opus-5-5");
         assert_eq!(
             reloaded.get(&b_id).unwrap().review.group_review_model,
-            "claude-fable-5-1"
+            "claude-fable-5-2"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

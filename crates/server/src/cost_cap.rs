@@ -615,7 +615,7 @@ mod tests {
     fn the_models_a_run_uses_are_listed_by_role_and_deduplicated() {
         let off = fix_follows_calibration();
         let all = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &["ARCH-1"], &off);
-        // A13: stage 1 and stage 2 have defaults of their own now (Opus 5.5 and Fable 5.1), so
+        // A13: stage 1 and stage 2 have defaults of their own now (Opus 5.5 and Fable 5.2), so
         // the scan and the fix pass share a model and the two reviewers each have theirs.
         let by_model: std::collections::BTreeMap<&str, &str> = all
             .iter()
@@ -625,7 +625,7 @@ mod tests {
         assert!(by_model["claude-sonnet-5"].contains("the scan"));
         assert!(by_model["claude-sonnet-5"].contains("fix generation"));
         assert_eq!(by_model["claude-opus-5-5"], "calibration");
-        assert_eq!(by_model["claude-fable-5-1"], "group review");
+        assert_eq!(by_model["claude-fable-5-2"], "group review");
         assert!(!all
             .iter()
             .any(|(roles, _)| roles.contains("clone judge") || roles.contains("deep")));
