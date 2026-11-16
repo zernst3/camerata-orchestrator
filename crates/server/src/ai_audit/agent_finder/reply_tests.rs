@@ -703,3 +703,41 @@ fn the_finding_takes_its_rule_from_the_strictest_citation() {
     assert_eq!(findings[0].rule_id, "B-FLOOR-1");
     assert_eq!(findings[0].also_matches, vec!["A-CAPPED-1".to_string()]);
 }
+
+#[test]
+fn the_word_for_sure_is_read_tolerantly_and_anything_else_is_unusable() {
+    for (word, expected) in [
+        ("yes", true),
+        ("true", true),
+        ("High", true),
+        ("sure", true),
+        (" certain ", true),
+        ("unsure", false),
+        ("no", false),
+        ("false", false),
+        ("low", false),
+        ("medium", false),
+        ("unclear", false),
+    ] {
+        let mut e = entry(1, "src/a.rs");
+        e["sure"] = serde_json::json!(word);
+        let out = parse_outputs(
+            &outputs(&[("problems-1.json", serde_json::json!([e]).to_string())]),
+            &piece_files(),
+        );
+        assert!(out.unusable.is_empty(), "{word}: {:?}", out.unusable);
+        assert_eq!(out.problems[0].sure, expected, "{word}");
+    }
+    let mut e = entry(1, "src/a.rs");
+    e["sure"] = serde_json::json!("banana");
+    let out = parse_outputs(
+        &outputs(&[("problems-1.json", serde_json::json!([e]).to_string())]),
+        &piece_files(),
+    );
+    assert_eq!(out.unusable.len(), 1);
+    assert!(
+        out.unusable[0].reason.contains("yes or unsure"),
+        "{}",
+        out.unusable[0].reason
+    );
+}

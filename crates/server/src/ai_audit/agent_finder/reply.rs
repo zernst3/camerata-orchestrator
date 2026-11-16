@@ -179,8 +179,8 @@ fn parse_problem(v: &serde_json::Value) -> Result<Problem, String> {
     let sure = match field(v, "sure")? {
         serde_json::Value::Bool(b) => *b,
         serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
-            "yes" => true,
-            "unsure" => false,
+            "yes" | "true" | "high" | "sure" | "certain" => true,
+            "unsure" | "no" | "false" | "low" | "medium" | "unclear" => false,
             other => return Err(format!("has sure `{other}`; use yes or unsure")),
         },
         _ => return Err("has a `sure` that is not yes or unsure".to_string()),

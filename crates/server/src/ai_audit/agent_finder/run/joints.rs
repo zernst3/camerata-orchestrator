@@ -11,10 +11,11 @@ use sha2::{Digest, Sha256};
 use super::super::brief_text::JOINTS_BRIEF;
 use super::super::reply::{self, Lead, Problem};
 use super::super::room::Room;
-use super::super::{AgentRun, AgentStop, Piece, PieceLimits};
+use super::super::{AgentRun, AgentStop, FollowUp, Piece, PieceLimits};
 use super::piece::{merged_outputs, meter_turns, PieceReport, Shared};
 use crate::ai_audit::{AttemptRecord, FailedPass, FailureClass};
 use crate::onboard::{Finding, ProposedRule};
+use crate::stage_telemetry::Stage;
 
 const CARDS_PATH: &str = "_camerata/joints/cards.md";
 const LEADS_PATH: &str = "_camerata/joints/leads.md";
@@ -244,16 +245,9 @@ pub(super) fn report_of(
         };
         fail(why, class);
     }
-    let (known, stray): (Vec<_>, Vec<_>) =
-        std::mem::take(&mut out.unusable)
-            .into_iter()
-            .partition(|u| {
-                let name = u
-                    .file
-                    .strip_prefix(super::super::room::OUT_DIR)
-                    .unwrap_or(&u.file);
-                name.starts_with("problems-") || name == "leads-answers.json"
-            });
+    let (known, stray): (Vec<_>, Vec<_>) = std::mem::take(&mut out.unusable)
+        .into_iter()
+        .partition(is_known_file);
     for u in &stray {
         report
             .notes
@@ -426,8 +420,55 @@ pub(super) async fn run_joints(
         "{JOINTS_BRIEF}\n\nThe cards are in {CARDS_PATH}, the leads in {LEADS_PATH} and the problems already reported in {PROBLEMS_PATH}. {numbering}"
     );
     let _ = adopted;
-    let run = shared.agent.run(&room, &brief, &limits).await?;
-    meter_turns(shared, &run);
-    shared.agent.release(&run.conversation);
-    Ok(vec![run])
+    let first = shared.agent.run(&room, &brief, &limits).await?;
+    meter_turns(shared, &first);
+    let mut runs = vec![first];
+    // One repair turn for an output that could not be used, as the parts get; a second failure
+    // is a failed part.
+    let unusable = known_unusable(&runs, &all_files);
+    if runs[0].stop.is_finished() && !unusable.is_empty() {
+        let turn = FollowUp::text(repair_message(&unusable));
+        let prior = runs[0].clone();
+        match shared.agent.follow_up(&room, &prior, &turn, &limits).await {
+            Ok(run) => {
+                meter_turns(shared, &run);
+                runs.push(run);
+            }
+            Err(e) => {
+                if let Some(m) = shared.meter {
+                    m.record_failed(Stage::Finder, &e);
+                }
+                runs.push(AgentRun::empty(AgentStop::Failed(e.to_string())));
+            }
+        }
+    }
+    if let Some(last) = runs.last() {
+        shared.agent.release(&last.conversation);
+    }
+    Ok(runs)
+}
+
+/// The output files of the joints call that the reader refuses and that the call is to write.
+fn known_unusable(runs: &[AgentRun], all_files: &[String]) -> Vec<reply::Unusable> {
+    let (outputs, joined_files) = merged_outputs(runs);
+    let out = reply::parse_outputs_joined(&outputs, all_files, &joined_files);
+    out.unusable.into_iter().filter(is_known_file).collect()
+}
+
+fn is_known_file(u: &reply::Unusable) -> bool {
+    let name = u
+        .file
+        .strip_prefix(super::super::room::OUT_DIR)
+        .unwrap_or(&u.file);
+    name.starts_with("problems-") || name == "leads-answers.json"
+}
+
+fn repair_message(unusable: &[reply::Unusable]) -> String {
+    let mut text = String::from(
+        "Some of your output files could not be used. Write each one again in full.\n",
+    );
+    for u in unusable {
+        text.push_str(&format!("- {} {}\n", u.file, u.reason));
+    }
+    text
 }

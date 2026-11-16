@@ -370,3 +370,61 @@ async fn joints_skipped_because_a_part_failed_leave_an_operator_note() {
         extras.notes
     );
 }
+
+fn joints_problem() -> Value {
+    problem(2, "src/a.rs", 3, "medium", "fn item_3() { run(3); }")
+}
+
+#[tokio::test]
+async fn a_joints_problem_with_sure_high_is_kept_as_sure_and_the_run_completes() {
+    let (a, b) = parts(a_own(), vec![]);
+    let mut bad = joints_problem();
+    bad["sure"] = json!("high");
+    let joints = ScriptedAgent::new(vec![out("problems-1.json", &json!([bad]))]);
+    let (_, rows, failed, _) = two_part_run(a, b, joints.clone()).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(joints.messages().is_empty(), "no repair turn was needed");
+    assert!(
+        rows.iter().any(|f| f.path == "src/a.rs" && f.line == 3),
+        "{rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unusable_joints_file_gets_one_repair_turn_and_the_run_completes() {
+    let (a, b) = parts(a_own(), vec![]);
+    let mut bad = joints_problem();
+    bad["severity"] = json!("catastrophic");
+    let joints = ScriptedAgent::new(vec![out("problems-1.json", &json!([bad]))]).with_follow_up(
+        vec![out("problems-1.json", &json!([joints_problem()]))],
+        AgentStop::Finished,
+    );
+    let (_, rows, failed, _) = two_part_run(a, b, joints.clone()).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let sent = joints.messages();
+    assert_eq!(sent.len(), 1, "one repair turn: {sent:?}");
+    assert!(
+        sent[0].contains("problems-1.json") && sent[0].contains("catastrophic"),
+        "the turn names the file and the value: {}",
+        sent[0]
+    );
+    assert!(
+        rows.iter().any(|f| f.path == "src/a.rs" && f.line == 3),
+        "{rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_joints_file_broken_twice_gets_one_repair_turn_then_a_failed_part() {
+    let (a, b) = parts(a_own(), vec![]);
+    let broken = ScriptStep::Write {
+        path: "_camerata/out/problems-1.json".to_string(),
+        text: "{not json".to_string(),
+    };
+    let joints =
+        ScriptedAgent::new(vec![broken.clone()]).with_follow_up(vec![broken], AgentStop::Finished);
+    let (_, _, failed, _) = two_part_run(a, b, joints.clone()).await;
+    assert_eq!(joints.messages().len(), 1, "exactly one repair turn");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].pass.contains("joints"), "{failed:?}");
+}
