@@ -51,6 +51,8 @@ struct Cli {
     command: Command,
 }
 
+// `Inspect` carries every flag of the command, so it is far larger than the other commands.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run the in-process planted-violation acceptance scenario.

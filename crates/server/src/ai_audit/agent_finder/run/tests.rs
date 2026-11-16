@@ -103,10 +103,6 @@ pub(super) fn answer_clean(rule: &str, path: &str, line: usize) -> Value {
     json!({"rule": rule, "answer": "clean", "places": [{"path": path, "line": line}]})
 }
 
-pub(super) fn answer_problems(rule: &str, numbers: &[u32]) -> Value {
-    json!({"rule": rule, "answer": "problems", "problems": numbers})
-}
-
 /// A whole review of `paths` (each with its line count): the reads, the problems, the checklist,
 /// the card and an honest empty list of unread files.
 pub(super) fn full_script(

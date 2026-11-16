@@ -284,12 +284,12 @@ pub(super) fn report_of(
 
     // Problems the joints agent put in files outside the repository are leads again.
     let mut leads = input.leads.clone();
-    let mut next_lead = leads.iter().map(|l| l.n).max().unwrap_or(0);
-    let mut extra_leads: Vec<Lead> = Vec::new();
-    for l in std::mem::take(&mut out.leads) {
-        next_lead += 1;
-        extra_leads.push(Lead { n: next_lead, ..l });
-    }
+    let first_new = leads.iter().map(|l| l.n).max().unwrap_or(0) + 1;
+    let extra_leads: Vec<Lead> = std::mem::take(&mut out.leads)
+        .into_iter()
+        .zip(first_new..)
+        .map(|(l, n)| Lead { n, ..l })
+        .collect();
     leads.extend(extra_leads.iter().cloned());
 
     let answers_text = out.leads_answers.take().map(|t| {

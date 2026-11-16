@@ -14,13 +14,7 @@ fn two_pieces() -> FinderOptions {
 fn part(path: &str, lines: usize, cost: f64) -> ScriptedAgent {
     ScriptedAgent::new(full_script(
         &[(path, lines)],
-        vec![problem(
-            1,
-            path,
-            2,
-            "medium",
-            &format!("fn item_2() {{ run(2); }}"),
-        )],
+        vec![problem(1, path, 2, "medium", "fn item_2() { run(2); }")],
         vec![],
         vec![
             answer_clean("ARCH-ONE-1", path, 1),

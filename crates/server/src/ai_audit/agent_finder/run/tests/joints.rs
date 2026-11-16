@@ -219,7 +219,8 @@ async fn the_same_place_is_never_reported_by_two_pieces() {
 
 #[tokio::test]
 async fn the_joints_room_holds_every_file_the_cards_the_leads_and_the_problems() {
-    struct Spy(std::sync::Mutex<Option<(Vec<String>, Vec<String>, String)>>);
+    type Seen = (Vec<String>, Vec<String>, String);
+    struct Spy(std::sync::Mutex<Option<Seen>>);
     #[async_trait::async_trait]
     impl PieceAgent for Spy {
         async fn run(
