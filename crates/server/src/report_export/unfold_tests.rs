@@ -706,3 +706,42 @@ fn the_backstop_key_lists_a_place_a_ruled_out_host_still_carries() {
     assert_eq!(export_key[0].path, "src/query.ts");
     assert_eq!(export_key[0].line, 7);
 }
+
+#[test]
+fn a_split_out_problem_with_a_cited_rule_leaves_needs_a_decision_once_confirmed() {
+    // A cited corpus rule, so the only reason the problem waits is the split-out hold.
+    let mut rule = camerata_rules::ruleset_with_unauthored_rule(RULE_B)
+        .get_by_id(RULE_B)
+        .expect("the fixture rule")
+        .clone();
+    rule.options[0].remediation = Some("Pass the value as a bound parameter.".to_string());
+    let mut set = camerata_rules::RuleSet::default();
+    set.push(rule);
+    let (sealed, _reviewed, key) = ruled_out_host(api_host_absorbing_a_web_site());
+    let ruled_out = decision(&key, DecisionState::FalsePositive);
+    let held_of = |reviewed: &ReviewedReport| {
+        let json = build_report_json(reviewed, Some(&set), &ReportOptions::default());
+        json.matrix
+            .held
+            .iter()
+            .filter(|r| r.rule_id == RULE_B)
+            .count()
+    };
+    let undecided = apply_overlay(&sealed, std::slice::from_ref(&ruled_out), &[], &[]);
+    assert_eq!(held_of(&undecided), 1, "waits for a decision");
+    let split = unfolded(&undecided, RULE_B)[0].site_key.clone();
+    let confirmed = apply_overlay(
+        &sealed,
+        &[ruled_out, decision(&split, DecisionState::Confirmed)],
+        &[],
+        &[],
+    );
+    assert_eq!(held_of(&confirmed), 0, "Confirmed, so it no longer waits");
+    let json = build_report_json(&confirmed, Some(&set), &ReportOptions::default());
+    let export = build_findings_export(&confirmed, Some(&set), &json, &HashMap::new());
+    let rows = rows_of(&serde_json::to_value(&export).unwrap());
+    assert!(
+        row_for(&rows, RULE_B).is_some(),
+        "anti-vacuity: the confirmed problem is still a problem: {rows:?}"
+    );
+}
