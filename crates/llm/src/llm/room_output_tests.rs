@@ -275,3 +275,37 @@ fn a_room_call_carries_its_turn_limit_and_keeps_no_session_file() {
         .iter()
         .any(|a| a == "--max-turns" || a == "--no-session-persistence"));
 }
+
+#[test]
+fn a_room_call_offers_exactly_the_room_tools() {
+    let args = args_of(&build(&room_call()));
+    let at = args
+        .iter()
+        .position(|a| a == "--tools")
+        .expect("--tools on a room call");
+    assert_eq!(args[at + 1], "Read,Glob,Grep,LS,Write,Edit", "{args:?}");
+    assert_eq!(args.iter().filter(|a| *a == "--tools").count(), 1);
+}
+
+#[test]
+fn an_extra_folder_never_widens_a_room_call() {
+    let mut req = room_call();
+    req.repo_read_extra_dirs = vec![std::path::PathBuf::from("/Users/auditor/other-repo")];
+    let args = args_of(&build(&req));
+    let dirs: Vec<&String> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| *a == "--add-dir")
+        .map(|(i, _)| &args[i + 1])
+        .collect();
+    assert_eq!(dirs, vec![ROOM], "{args:?}");
+    // A call that is not a room call keeps its extra folders.
+    let mut plain = read_only();
+    plain.repo_read_extra_dirs = vec![std::path::PathBuf::from("/Users/auditor/other-repo")];
+    let plain_args = args_of(&build(&plain));
+    assert_eq!(
+        plain_args.iter().filter(|a| *a == "--add-dir").count(),
+        2,
+        "{plain_args:?}"
+    );
+}

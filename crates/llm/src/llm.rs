@@ -234,11 +234,21 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
                 cmd.arg("--allowedTools").arg(READ_ONLY_TOOLS.join(" "));
             }
             cmd.arg("--add-dir").arg(dir);
+            if req.room_output.is_some() {
+                // The set of tools a room call has is closed: these and no others, so a tool
+                // the program adds later is not offered either.
+                cmd.arg("--tools").arg(ROOM_TOOLS.join(","));
+            }
             // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
             // added as its own read-only `--add-dir` so a project-level model can scan across
             // all of them. READ-only — no write/exec tool is offered either way. Skip any that
             // duplicate the cwd dir.
-            for extra in &req.repo_read_extra_dirs {
+            // A room call never takes an extra folder: it reads the room and nothing else.
+            for extra in req
+                .repo_read_extra_dirs
+                .iter()
+                .filter(|_| req.room_output.is_none())
+            {
                 if extra != dir {
                     cmd.arg("--add-dir").arg(extra);
                 }
@@ -268,6 +278,11 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
         cmd.arg("--no-session-persistence");
     }
 }
+
+/// The only tools a clean-room call is offered (`--tools`). The transport fails a piece whose
+/// stream shows a successful call to any other tool (see `TodoWrite` there, which writes
+/// nothing to disk).
+pub const ROOM_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS", "Write", "Edit"];
 
 /// Tools a clean-room call never has: a shell, the web, and anything that starts another agent.
 const ROOM_DENIED_TOOLS: &[&str] = &["Bash", "WebFetch", "WebSearch", "Task", "Agent"];
