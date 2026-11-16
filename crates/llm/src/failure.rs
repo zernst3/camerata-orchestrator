@@ -400,6 +400,33 @@ pub fn classify_http(status: u16, error_type: Option<&str>, message: &str) -> (F
     (FailureClass::Content, false)
 }
 
+/// Whether `lower` carries one of `codes` as an HTTP status: after "http", "status" or "error",
+/// or followed by a reason phrase. A bare number in the text (a token count, an id) does not count.
+fn mentions_status(lower: &str, codes: &[&str]) -> bool {
+    const PREFIXES: [&str; 6] = [
+        "http ",
+        "status ",
+        "status: ",
+        "status code ",
+        "error: ",
+        "error ",
+    ];
+    const PHRASES: [&str; 8] = [
+        " internal",
+        " too many",
+        " bad gateway",
+        " service unavailable",
+        " gateway timeout",
+        " overloaded",
+        " server error",
+        " rate limit",
+    ];
+    codes.iter().any(|c| {
+        PREFIXES.iter().any(|p| lower.contains(&format!("{p}{c}")))
+            || PHRASES.iter().any(|p| lower.contains(&format!("{c}{p}")))
+    })
+}
+
 /// Classify the text a CLI or a stub reported: `(class, whether another attempt could help)`.
 /// Used for a CLI's stderr and in-band error text, and as the fallback for an error that carries
 /// no typed failure (a stub in a test, a provider without a typed transport).
@@ -409,27 +436,34 @@ pub fn classify_text(text: &str) -> (FailureClass, bool) {
         return (FailureClass::AuthOrBilling, false);
     }
     // Checked before the transport words. An overload is the same kind of pause as a 429.
+    // The fallback reads a whole error chain, so a bare number would match a token count or an
+    // id inside wrapped text: a status counts only in a status-shaped phrase.
     if [
         "rate limit",
         "rate_limit",
         "too many requests",
-        "429",
         "overloaded",
-        "529",
     ]
     .iter()
     .any(|p| lower.contains(p))
+        || mentions_status(&lower, &["429", "529"])
     {
         return (FailureClass::RateLimited, true);
     }
     let transport = [
-        "503",
-        "502",
-        "500",
         "timed out",
-        "timeout",
-        "connection",
-        "network",
+        "gateway timeout",
+        "request timeout",
+        "read timeout",
+        "connect timeout",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "connection error",
+        "connection aborted",
+        "network error",
+        "network is unreachable",
+        "network unreachable",
         "econnreset",
         "produced no model output",
         "backstop",
@@ -437,7 +471,9 @@ pub fn classify_text(text: &str) -> (FailureClass, bool) {
         "service unavailable",
         "bad gateway",
     ];
-    if transport.iter().any(|p| lower.contains(p)) {
+    if transport.iter().any(|p| lower.contains(p))
+        || mentions_status(&lower, &["500", "502", "503"])
+    {
         return (FailureClass::Transport, true);
     }
     (FailureClass::Content, false)
@@ -702,6 +738,30 @@ mod tests {
         // Context wrapped around a typed failure still finds it.
         let wrapped = typed.context("while scanning");
         assert_eq!(classify_error(&wrapped), FailureClass::Io);
+    }
+
+    /// The fallback reads the whole chain, so a wrapped content error that merely mentions a
+    /// number or a word must not read as a transport failure.
+    #[test]
+    fn a_wrapped_400_that_mentions_a_token_count_is_content_and_real_transport_text_is_not() {
+        let inner = anyhow::anyhow!(
+            "HTTP 400 invalid_request_error: prompt is too long: 215000 tokens > 200000 maximum"
+        );
+        let wrapped = inner.context("while reviewing the group");
+        assert_eq!(classify_error(&wrapped), FailureClass::Content);
+        for t in [
+            "HTTP 500 internal server error",
+            "status 503 from the provider",
+            "request timed out",
+            "operation timed out",
+            "connection refused",
+        ] {
+            let e = anyhow::anyhow!("{t}").context("while reviewing the group");
+            assert_eq!(classify_error(&e), FailureClass::Transport, "{t}");
+        }
+        // A wrapped 400 that talks about a timeout setting or a connection pool is still content.
+        let e = anyhow::anyhow!("HTTP 400 bad request: field timeout_seconds must be positive");
+        assert_eq!(classify_error(&e), FailureClass::Content);
     }
 
     #[test]
