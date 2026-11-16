@@ -552,6 +552,17 @@ pub(crate) fn open_every_row_on_first_inspection(
     }
 }
 
+/// The first inspection of one repository: [`open_every_row_on_first_inspection`], and the count
+/// of what it found written to the scan ledger, which the package prints.
+pub(crate) fn record_first_inspection(
+    findings: &mut [Finding],
+    files: &[(String, String)],
+    ledger: &mut crate::scan_ledger::ScanLedger,
+) {
+    let found = open_every_row_on_first_inspection(findings, files);
+    ledger.add_client_suppressions(found.total());
+}
+
 /// Classify a repo's findings against its suppressions (inline `camerata:allow` waivers
 /// parsed from the files + the committed `.camerata/baseline.json`), setting each
 /// finding's `status`. Also appends a `CAM-WAIVER-NEEDS-REASON` finding for every
@@ -720,6 +731,10 @@ mod classify_tests {
             finding("R-ONE", "a.rs", 1, &[]),
             finding("R-TWO", "a.rs", 2, &[]),
         ];
+        // Anti-vacuity: the rows start closed by the client's files, so the assertion below can
+        // only pass when the function itself reopens them.
+        rows[0].status = crate::finding_status::CARRIED_BASELINE.to_string();
+        rows[1].status = crate::finding_status::WAIVED_INLINE.to_string();
         let found = open_every_row_on_first_inspection(&mut rows, &files);
         assert_eq!(found.waivers, 1, "anti-vacuity: the waiver was parsed");
         assert_eq!(found.baseline_entries, 1);
@@ -729,6 +744,19 @@ mod classify_tests {
             "no client file closes a row on a first inspection: {rows:?}"
         );
         assert_eq!(rows.len(), 2, "no problem of its own is added");
+    }
+
+    #[test]
+    fn the_ledger_carries_the_count_of_client_suppressions_found() {
+        let files = vec![(
+            "a.rs".to_string(),
+            "// camerata:allow R-TWO -- we know\nlet x = 1;\n".to_string(),
+        )];
+        let mut rows = vec![finding("R-TWO", "a.rs", 2, &[])];
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        assert_eq!(ledger.client_suppressions_found(), 0);
+        record_first_inspection(&mut rows, &files, &mut ledger);
+        assert_eq!(ledger.client_suppressions_found(), 1);
     }
 }
 

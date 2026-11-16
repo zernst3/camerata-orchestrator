@@ -56,7 +56,7 @@ pub use self_ref::{
 pub(crate) use audit::classify_repo_findings;
 pub(crate) use audit::{
     build_rule_alternatives, is_ci_tier_rule, is_semantic_multi_option_rule,
-    open_every_row_on_first_inspection,
+    record_first_inspection,
 };
 // Re-export camerata_gateway test-scope primitives so the test module's `use super::*`
 // can reach them directly (they're used in inline test assertions).
@@ -3546,8 +3546,7 @@ pub async fn audit_repos_with_llm_controlled(
                 // Zach's ruling: a first inspection does not honour a baseline file or waiver
                 // comments found in the client's repository. The rows stay open and the package
                 // prints how many it found.
-                let found = open_every_row_on_first_inspection(&mut repo_findings, &files);
-                pipeline_ledger.add_client_suppressions(found.total());
+                record_first_inspection(&mut repo_findings, &files, &mut pipeline_ledger);
                 // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
                 // `deviation_ceiling`), applied to the LIVE findings so the triage view shows
                 // the same severity the PDF/xlsx will bill. Before this, the bounds ran only at
