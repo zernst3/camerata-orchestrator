@@ -449,7 +449,19 @@ pub fn classify_text(text: &str) -> (FailureClass, bool) {
 pub fn classify_error(e: &anyhow::Error) -> FailureClass {
     match call_failure_of(e) {
         Some(f) => f.class,
-        None => classify_text(&e.to_string()).0,
+        None => {
+            // A typed `reqwest` timeout or connect failure anywhere in the chain is transport:
+            // its `Display` omits the cause, so the text alone would read as content.
+            let transport = e.chain().any(|c| {
+                c.downcast_ref::<reqwest::Error>()
+                    .is_some_and(|r| r.is_timeout() || r.is_connect())
+            });
+            if transport {
+                FailureClass::Transport
+            } else {
+                classify_text(&format!("{e:#}")).0
+            }
+        }
     }
 }
 
