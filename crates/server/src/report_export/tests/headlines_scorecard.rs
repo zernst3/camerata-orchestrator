@@ -213,7 +213,7 @@ fn narrative_bucket_counts_are_a_one_pass_partition_with_no_subset_restatement()
     assert!(
         json.executive_summary
             .narrative
-            .contains("1 First, 0 Next, 1 Later, 0 already carried as accepted risk"),
+            .contains("2 are for action (1 First, 0 Next, 1 Later), 0 need a reviewer's decision, 0 are information only and 0 are accepted risk"),
         "{}",
         json.executive_summary.narrative
     );

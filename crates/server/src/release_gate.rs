@@ -44,7 +44,7 @@ pub use archive::{
     xlsx_strings, XlsxCell, XlsxHeaderFooter,
 };
 pub use consistency::{
-    client_readme_problems, compare_csv_to_json, count_reconciliation_problems,
+    client_readme_problems, compare_csv_to_json, count_reconciliation_problems, counts_problems,
     dataset_parity_problems, dataset_set_problems, fix_archive_problems, fix_report_problems,
     marking_problems, package_stem, parse_readme_provenance, patterns_clean_cell_problems,
     patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems,
@@ -198,8 +198,13 @@ pub(crate) fn assemble_package(
     (report_json, data_json, pdf): (AuditReportJson, String, Vec<u8>),
 ) -> anyhow::Result<ProductPackage> {
     let report = reviewed.report();
-    let xlsx = crate::xlsx_export::build_workbook(reviewed, corpus, options)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let xlsx = crate::xlsx_export::build_workbook_with_counts(
+        reviewed,
+        corpus,
+        options,
+        &report_json.counts,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // `findings.json`: the machine-readable sibling of the workbook's "All Findings" sheet,
     // built from the SAME reviewed report/corpus pass (and `report_json`'s cover and
@@ -697,6 +702,12 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
         report.record(
             CheckId::Counts,
             pdf_count_reconciliation_problems(&entries, &package.report_json),
+        );
+        // Every printed number held to an independent recount of the files in the package
+        // (single counts, design 5.7): a package whose numbers differ is refused.
+        report.record(
+            CheckId::Counts,
+            counts_problems(&entries, &package.report_json),
         );
         report.record(
             CheckId::Marking,

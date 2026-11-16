@@ -53,47 +53,35 @@ pub(super) struct PlaceRows<'a> {
 /// (repo, file and line), listing every row there. A committed secret that six rules flag at one
 /// line is one place, one row, six rules. Only All source rows repeats a problem.
 pub(super) fn place_rows(rows: &[FindingRow]) -> Vec<PlaceRows<'_>> {
-    type Key = (String, String, usize, String);
-    let mut order: Vec<Key> = Vec::new();
-    let mut at: HashMap<Key, Vec<&FindingRow>> = HashMap::new();
-    for r in rows
-        .iter()
-        .filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
-    {
-        // The one place key: a whole-file problem (line 0) is a place of its own rule.
-        let (repo, path, line, rule) =
-            crate::review_tree::place_key(&r.repo, &r.path, r.line, &r.rule_id);
-        let key = (repo.to_string(), path.to_string(), line, rule.to_string());
-        at.entry(key.clone())
-            .or_insert_with(|| {
-                order.push(key.clone());
-                Vec::new()
-            })
-            .push(r);
-    }
-    order
-        .into_iter()
-        .filter_map(|key| at.remove(&key))
-        .map(|mut members| {
-            // The row that heads the place is the one the engine ranks first (D2): the row the
-            // others name in `carried_by`, so All problems, the review and the machine files agree
-            // on who carries what. A place with no carrier keeps its first row.
-            let carrier = members.iter().position(|r| {
-                r.facts.carried_by.is_empty()
-                    && members
-                        .iter()
-                        .any(|o| o.facts.carried_by == r.facts.site_id)
-            });
-            if let Some(at) = carrier {
-                let head = members.remove(at);
-                members.insert(0, head);
-            }
-            PlaceRows {
-                rep: members[0],
-                members,
-            }
-        })
-        .collect()
+    // THE place rule groups the rows: the same function the counts object and the PDF's grid use.
+    // Only which row STANDS for the place differs here.
+    crate::review_tree::places_of(
+        rows.iter()
+            .filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings),
+    )
+    .into_iter()
+    .map(|p| {
+        let mut members = p.members;
+        // The row that stands for the place is the one the engine ranks first (D2): the row the
+        // others name in `carried_by`, so All problems, the review and the machine files agree
+        // on who carries what. A place with no carrier keeps its first row. The place is as
+        // severe as its worst row whichever row carries it.
+        let carrier = members.iter().position(|r| {
+            r.facts.carried_by.is_empty()
+                && members
+                    .iter()
+                    .any(|o| o.facts.carried_by == r.facts.site_id)
+        });
+        if let Some(at) = carrier {
+            let head = members.remove(at);
+            members.insert(0, head);
+        }
+        PlaceRows {
+            rep: members[0],
+            members,
+        }
+    })
+    .collect()
 }
 
 /// The Fixes that are fixes: those with a problem on All problems or an advisory on Dependencies.
@@ -814,9 +802,12 @@ pub(super) fn needs_a_decision_table(lay: &Layout) -> Table {
         .iter()
         .copied()
         .filter(|r| {
-            lay.place_members
-                .get(&r.facts.site_id)
-                .is_some_and(|m| m.iter().any(|x| x.needs_review))
+            // A place needs a decision when ANY row there is held, whatever heads it. A place
+            // that is only information only is its own class and is not listed here.
+            lay.place_members.get(&r.facts.site_id).is_some_and(|m| {
+                crate::review_tree::class_of_place(m.iter().map(|x| x.bucket))
+                    == crate::review_tree::PlaceClass::NeedsDecision
+            })
         })
         .collect();
     problems_table(v::NEEDS_A_DECISION, &waiting, lay, true)
@@ -1642,6 +1633,8 @@ pub(super) struct StartFacts<'a> {
     pub corpus: Option<&'a camerata_rules::RuleSet>,
     /// How many rows each sheet holds, in reading order.
     pub counts: Vec<(String, usize)>,
+    /// The counts object: the scorecard's Total prints its figures.
+    pub totals: &'a crate::report_export::ReportCounts,
     /// The one line that says what the rules checked came to.
     pub coverage_summary: String,
 }
@@ -1697,17 +1690,6 @@ pub(super) fn code_volume_label(report: &crate::onboard::ScanReport) -> Option<S
     Some(base)
 }
 
-/// The rows that head the places of the problem sheets: for each (repo, file, line) of a row that
-/// is not ruled out and is a problem (not a convention and not a rule that could not be
-/// completed), the first row there. The scorecard, the PDF cover and the All problems sheet count
-/// these and no others, so the three agree by construction.
-pub(super) fn problem_heads<'a>(rows: impl Iterator<Item = &'a FindingRow>) -> Vec<&'a FindingRow> {
-    crate::review_tree::places_of(rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings))
-        .into_iter()
-        .map(|p| p.head)
-        .collect()
-}
-
 /// The scorecard: one row for each area, its problems by severity. A problem is a place: the
 /// place counts once, at the severity and in the area of the row that heads it, which is the row
 /// All problems prints. The PDF scorecard and cover count the same places the same way, so the
@@ -1729,7 +1711,7 @@ pub(super) fn scorecard(
 
 /// Problems by area and severity (critical, high, medium, low): each place is counted in every
 /// area where a rule fired at it, at the worst severity of that area's rules there. A place with
-/// rules from several areas is in each of them; [`problem_totals`] counts each place once.
+/// rules from several areas is in each of them; the counts object counts each place once.
 pub(crate) fn problem_counts<'a>(
     rows: impl Iterator<Item = &'a FindingRow>,
 ) -> BTreeMap<String, [usize; 4]> {
@@ -1739,33 +1721,28 @@ pub(crate) fn problem_counts<'a>(
         "medium" => 2,
         _ => 3,
     };
-    let mut worst: BTreeMap<(String, String, usize, String), usize> = BTreeMap::new();
+    // The place is the one place key (a whole-file problem is a place of its own rule).
+    type Key = (String, String, usize, String, String);
+    let mut worst: BTreeMap<Key, usize> = BTreeMap::new();
     for r in rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings) {
-        let key = (r.repo.clone(), r.path.clone(), r.line, r.category.clone());
+        let (repo, path, line, rule) =
+            crate::review_tree::place_key(&r.repo, &r.path, r.line, &r.rule_id);
+        let key = (
+            repo.to_string(),
+            path.to_string(),
+            line,
+            rule.to_string(),
+            r.category.clone(),
+        );
         let s = slot(&r.severity);
         let e = worst.entry(key).or_insert(s);
         *e = (*e).min(s);
     }
     let mut by_area: BTreeMap<String, [usize; 4]> = BTreeMap::new();
-    for ((_, _, _, area), s) in worst {
+    for ((_, _, _, _, area), s) in worst {
         by_area.entry(area).or_insert([0; 4])[s] += 1;
     }
     by_area
-}
-
-/// Problems by severity (critical, high, medium, low), each place once, at the severity of the
-/// row that heads it: the cover's counts and the scorecard's Total.
-pub(crate) fn problem_totals<'a>(rows: impl Iterator<Item = &'a FindingRow>) -> [usize; 4] {
-    let mut totals = [0usize; 4];
-    for row in problem_heads(rows) {
-        match row.severity.as_str() {
-            "critical" => totals[0] += 1,
-            "high" => totals[1] += 1,
-            "medium" => totals[2] += 1,
-            _ => totals[3] += 1,
-        }
-    }
-    totals
 }
 
 pub(super) fn write_start_here(
@@ -1856,7 +1833,10 @@ pub(super) fn write_start_here(
     }
     r += 1;
     let by_area = scorecard(facts.live_rows, facts.report, facts.corpus);
-    let totals = problem_totals(facts.live_rows.iter().copied());
+    let totals = {
+        let by = &facts.totals.problems.by_severity;
+        [by.critical, by.high, by.medium, by.low]
+    };
     for (area, counts) in &by_area {
         ws.write_text(r, 0, area)?;
         for (i, count) in counts.iter().enumerate() {
