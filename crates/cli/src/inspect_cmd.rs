@@ -99,7 +99,7 @@ pub struct InspectArgs {
     /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
     pub fix_model: Option<String>,
     /// `--group-review-model`: the group reviewer's (stage 2) model. `None`/blank = the built-in
-    /// default, Fable 5.1 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
+    /// default, Fable 5.2 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
     /// Never the environment.
     #[serde(default)]
     pub group_review_model: Option<String>,
@@ -1012,6 +1012,8 @@ pub async fn run_inspect_pipeline_with(
     // checkpoint replays onto it, so a stored dollar is counted once, at every moment.
     if let Some((store, _)) = &resumed {
         controls.stored_spend_usd = store.stored_usd();
+        // The group reviewer stays on the model the run started with, whatever the default is now.
+        store.record().models.keep_group_review_model(&mut controls);
     }
     let incremental_prior = match &resumed {
         // The baseline the run started from, not the one an attempt since may have replaced.
@@ -2940,7 +2942,7 @@ mod tests {
         let defaults = args.run_controls().unwrap();
         assert!((defaults.review.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
         assert_eq!(defaults.review.escalation_floor, 20);
-        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-1");
+        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-2");
         // The flags win.
         args.group_review_model = Some("claude-opus-5-5".to_string());
         args.escalation_rate = Some(0.5);
@@ -2953,7 +2955,7 @@ mod tests {
         args.group_review_model = Some("  ".to_string());
         assert_eq!(
             args.run_controls().unwrap().group_review_model_for(),
-            "claude-fable-5-1"
+            "claude-fable-5-2"
         );
     }
 

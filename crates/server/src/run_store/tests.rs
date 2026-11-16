@@ -114,6 +114,7 @@ fn models() -> ModelsRecord {
         backend: "api".to_string(),
         mode: "parallel".to_string(),
         resolved: true,
+        group_review: String::new(),
     }
 }
 
@@ -2217,4 +2218,87 @@ async fn the_model_the_backend_reported_is_stored_beside_the_requested_one() {
         assert_eq!(replayed.reported_model.as_deref(), Some("claude-opus-5-5"));
     })
     .await;
+}
+
+// ---- a resumed run keeps the group review model it started on ----
+
+fn controls_with_group_review(model: &str) -> crate::cost_cap::RunControls {
+    crate::cost_cap::RunControls {
+        review: camerata_api_types::project::ReviewSettings {
+            group_review_model: model.to_string(),
+            ..camerata_api_types::project::ReviewSettings::default()
+        },
+        ..crate::cost_cap::RunControls::default()
+    }
+}
+
+/// The record names the group reviewer's resolved id, defaults included.
+#[test]
+fn the_models_record_stores_the_resolved_group_review_model() {
+    let started = ModelsRecord::from_picks(
+        None,
+        None,
+        &controls_with_group_review("claude-fable-5-1"),
+        "api",
+        "parallel",
+    );
+    assert_eq!(started.group_review, "claude-fable-5-1");
+    let default = ModelsRecord::from_picks(
+        None,
+        None,
+        &crate::cost_cap::RunControls::default(),
+        "api",
+        "parallel",
+    );
+    assert_eq!(
+        default.group_review,
+        camerata_api_types::project::STAGE2_DEFAULT_MODEL
+    );
+}
+
+/// A run started on Fable 5.1 and resumed with no model flag (the default is now Fable 5.2)
+/// makes its remaining group review calls on Fable 5.1: no mixed models in one run.
+#[test]
+fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on() {
+    let started = ModelsRecord::from_picks(
+        None,
+        None,
+        &controls_with_group_review("claude-fable-5-1"),
+        "api",
+        "parallel",
+    );
+    let mut resumed = crate::cost_cap::RunControls::default();
+    assert_eq!(
+        resumed.group_review_model_for(),
+        "claude-fable-5-2",
+        "the default has moved on"
+    );
+    started.keep_group_review_model(&mut resumed);
+    assert_eq!(resumed.group_review_model_for(), "claude-fable-5-1");
+}
+
+/// A run saved before the group reviewer was recorded has nothing to keep: the current pick stands.
+#[test]
+fn a_record_without_a_group_review_model_leaves_the_pick_alone() {
+    let mut old = models();
+    old.group_review = String::new();
+    let mut resumed = controls_with_group_review("claude-opus-5-5");
+    old.keep_group_review_model(&mut resumed);
+    assert_eq!(resumed.group_review_model_for(), "claude-opus-5-5");
+}
+
+/// A moved built-in default is kept, not refused: a resolved record whose only difference is the
+/// group review model still allows the resume.
+#[test]
+fn a_resume_is_not_refused_because_the_group_review_default_moved() {
+    let mut saved = models();
+    saved.group_review = "claude-fable-5-1".to_string();
+    let mut now = models();
+    now.group_review = "claude-fable-5-2".to_string();
+    assert!(saved.matches_for_resume(&now));
+    now.audit = "some-other-model".to_string();
+    assert!(
+        !saved.matches_for_resume(&now),
+        "the other models still count"
+    );
 }

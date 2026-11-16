@@ -233,6 +233,12 @@ pub struct ModelsRecord {
     /// saved before they did.
     #[serde(default)]
     pub resolved: bool,
+    /// The group reviewer's resolved id, so a resume keeps the model the run started on (no mixed
+    /// models in one run's group review) even after the built-in default moves. Empty for a run
+    /// saved before it was recorded; such a resume uses the current pick. Not part of
+    /// [`Self::matches_for_resume`]: a changed default is kept, not refused.
+    #[serde(default)]
+    pub group_review: String,
 }
 
 impl ModelsRecord {
@@ -258,6 +264,14 @@ impl ModelsRecord {
             backend: backend.to_string(),
             mode: mode.to_string(),
             resolved: true,
+            group_review: controls.group_review_model_for(),
+        }
+    }
+
+    /// Hold a resumed run to the group review model it started with.
+    pub fn keep_group_review_model(&self, controls: &mut crate::cost_cap::RunControls) {
+        if !self.group_review.trim().is_empty() {
+            controls.review.group_review_model = self.group_review.clone();
         }
     }
 
@@ -267,7 +281,12 @@ impl ModelsRecord {
     /// empty raw pick said nothing about what ran).
     pub fn matches_for_resume(&self, now: &ModelsRecord) -> bool {
         if self.resolved {
-            return self == now;
+            // The group review model is kept on resume, not compared (see `group_review`).
+            return self.audit == now.audit
+                && self.calibration == now.calibration
+                && self.fix == now.fix
+                && self.backend == now.backend
+                && self.mode == now.mode;
         }
         let same_or_unrecorded = |saved: &str, now: &str| saved.is_empty() || saved == now;
         self.audit == now.audit

@@ -2879,6 +2879,11 @@ pub(crate) async fn start_audit_job(
                         prior = store.load_prior_manifest();
                         // The spend limit counts the whole run: the stored replies' cost joins it.
                         run_controls.stored_spend_usd = store.stored_usd();
+                        // The group reviewer stays on the model the run started with.
+                        store
+                            .record()
+                            .models
+                            .keep_group_review_model(&mut run_controls);
                         Some(store)
                     }
                     Err(e) => {
