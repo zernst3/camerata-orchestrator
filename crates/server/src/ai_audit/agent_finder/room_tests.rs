@@ -525,6 +525,15 @@ fn long_lines_are_found_by_character_count() {
 }
 
 #[test]
+fn long_lines_count_characters_not_bytes() {
+    // 1,500 two-byte characters are 3,000 bytes but 1,500 characters: not a long line.
+    let wide = "\u{e9}".repeat(1_500);
+    let files = vec![f("a.rs", &format!("{wide}\n"))];
+    let r = Room::build(&piece(&["a.rs"]), &files, "").room;
+    assert!(r.long_lines().is_empty(), "{:?}", r.long_lines());
+}
+
+#[test]
 fn disk_path_compares_the_rooms_folder_without_regard_to_case() {
     assert_eq!(Room::disk_path("_camerata/x.md"), "_camerata/x.md");
     assert_eq!(Room::disk_path("_CAMERATA/x.md"), "_CAMERATA/x.md");
