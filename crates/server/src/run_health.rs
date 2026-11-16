@@ -9,7 +9,10 @@
 //!
 //! * a success resets the streak;
 //! * a transport failure (after the transport's own retries) adds to the streak, and the run
-//!   stops at [`OUTAGE_STREAK`] in a row;
+//!   stops at [`OUTAGE_STREAK`] in a row that span at least [`OUTAGE_SPAN`] (owner call,
+//!   2026-11-16: an unattended run rides out a short provider blip, so one wave of concurrent
+//!   failures within seconds does not stop it; a long outage still does, and a resume retries
+//!   the failed parts);
 //! * an auth or billing failure stops the run at once (waiting does not fix a key or a balance);
 //! * a rate limit (a 429 that outlasted the transport's retries) neither counts nor resets: it
 //!   is a pause, and the batch runner waits it out under its own deadline;
@@ -20,8 +23,9 @@
 //! admission refuses every new part ([`crate::ai_audit::UsageMeter::admit`]); calls already in
 //! flight finish. Each refused part is recorded as not run with class `OutageStop`.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use camerata_llm::failure::FailureClass;
 use serde::{Deserialize, Serialize};
@@ -30,6 +34,21 @@ use crate::cost_cap::{NotRunPass, NotRunStage};
 
 /// How many transport failures in a row stop the run.
 pub const OUTAGE_STREAK: u32 = 3;
+
+/// How long the failures of a streak must span before the run stops. A wave of concurrent calls
+/// failing within seconds of one another is a blip the run rides out.
+pub const OUTAGE_SPAN: Duration = Duration::from_secs(120);
+
+/// Time as the health counter sees it: the time since some fixed origin. Production reads the
+/// monotonic clock; a test injects its own.
+type Clock = Arc<dyn Fn() -> Duration + Send + Sync>;
+
+/// The failures of the current streak: how many, and when the first came.
+#[derive(Debug, Default, Clone, Copy)]
+struct Streak {
+    count: u32,
+    first_at: Duration,
+}
 
 /// What stopped the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,17 +62,62 @@ pub struct OutageTrigger {
 }
 
 /// The run-wide health counter. See the module docs for the rules.
-#[derive(Debug, Default)]
 pub struct RunHealth {
-    streak: AtomicU32,
+    streak: Mutex<Streak>,
     stopped: AtomicBool,
     trigger: Mutex<Option<OutageTrigger>>,
+    clock: Clock,
+}
+
+impl std::fmt::Debug for RunHealth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunHealth")
+            .field("streak", &self.streak)
+            .field("stopped", &self.stopped)
+            .field("trigger", &self.trigger)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for RunHealth {
+    fn default() -> Self {
+        // tokio's clock, so a test that pauses time sees the run's waits count.
+        let origin = tokio::time::Instant::now();
+        Self::with_clock(Arc::new(move || origin.elapsed()))
+    }
 }
 
 impl RunHealth {
+    /// A counter that reads time from `clock` (the time since any fixed origin). Tests inject
+    /// one so a streak's span is set, not waited for.
+    pub fn with_clock(clock: Clock) -> Self {
+        Self {
+            streak: Mutex::new(Streak::default()),
+            stopped: AtomicBool::new(false),
+            trigger: Mutex::new(None),
+            clock,
+        }
+    }
+
+    /// TEST SUPPORT: a counter whose clock moves `step` seconds on every reading, so each failure
+    /// lands `step` seconds after the one before it.
+    #[cfg(test)]
+    pub(crate) fn stepping(step: u64) -> Self {
+        let ticks = std::sync::atomic::AtomicU64::new(0);
+        Self::with_clock(Arc::new(move || {
+            Duration::from_secs(ticks.fetch_add(step, Ordering::SeqCst))
+        }))
+    }
+
+    fn streak_lock(&self) -> std::sync::MutexGuard<'_, Streak> {
+        self.streak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// A model call succeeded: the provider is reachable, so the streak starts over.
     pub fn note_success(&self) {
-        self.streak.store(0, Ordering::SeqCst);
+        *self.streak_lock() = Streak::default();
     }
 
     /// A model call failed after its retries, with `class`. `detail` is a short note for the
@@ -61,13 +125,22 @@ impl RunHealth {
     pub fn note_failure(&self, class: FailureClass, detail: &str) {
         match class {
             FailureClass::Transport => {
-                let streak = self.streak.fetch_add(1, Ordering::SeqCst) + 1;
-                if streak >= OUTAGE_STREAK {
+                let now = (self.clock)();
+                let (streak, span) = {
+                    let mut s = self.streak_lock();
+                    if s.count == 0 {
+                        s.first_at = now;
+                    }
+                    s.count += 1;
+                    (s.count, now.saturating_sub(s.first_at))
+                };
+                if streak >= OUTAGE_STREAK && span >= OUTAGE_SPAN {
                     self.trip(
                         FailureClass::Transport,
                         format!(
-                            "{streak} model calls in a row could not reach the provider \
-                             (last: {detail})"
+                            "{streak} model calls in a row, over {} s, could not reach the \
+                             provider (last: {detail})",
+                            span.as_secs()
                         ),
                     );
                 }
@@ -117,7 +190,7 @@ impl RunHealth {
 
     /// The current streak, for tests and the operator log.
     pub fn streak(&self) -> u32 {
-        self.streak.load(Ordering::SeqCst)
+        self.streak_lock().count
     }
 }
 
@@ -157,23 +230,69 @@ impl OutageRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    /// A health counter on a clock the test moves, and that clock (seconds).
+    fn health() -> (RunHealth, Arc<AtomicU64>) {
+        let now = Arc::new(AtomicU64::new(0));
+        let clock = now.clone();
+        let h = RunHealth::with_clock(Arc::new(move || {
+            Duration::from_secs(clock.load(Ordering::SeqCst))
+        }));
+        (h, now)
+    }
+
+    /// `n` transport failures, `gap` seconds apart, the first at the clock's current time.
+    fn transport_failures(h: &RunHealth, now: &AtomicU64, n: u32, gap: u64) {
+        for i in 0..n {
+            if i > 0 {
+                now.fetch_add(gap, Ordering::SeqCst);
+            }
+            h.note_failure(FailureClass::Transport, "x");
+        }
+    }
 
     #[test]
-    fn three_transport_failures_in_a_row_stop_the_run() {
-        let h = RunHealth::default();
+    fn three_transport_failures_in_a_row_over_three_minutes_stop_the_run() {
+        let (h, now) = health();
         h.note_failure(FailureClass::Transport, "a");
+        now.fetch_add(90, Ordering::SeqCst);
         h.note_failure(FailureClass::Transport, "b");
         assert!(!h.is_stopped(), "two is not an outage");
+        now.fetch_add(90, Ordering::SeqCst);
         h.note_failure(FailureClass::Transport, "c");
-        assert!(h.is_stopped());
+        assert!(h.is_stopped(), "three over 180 s is an outage");
         assert_eq!(h.trigger().unwrap().class, FailureClass::Transport);
+    }
+
+    /// Owner call 2026-11-16: an unattended run rides out a short provider blip.
+    #[test]
+    fn three_transport_failures_within_ten_seconds_do_not_stop_the_run() {
+        let (h, now) = health();
+        transport_failures(&h, &now, 3, 5);
+        assert!(!h.is_stopped(), "one wave of failures is a blip");
+        assert_eq!(h.streak(), 3);
+        // The blip goes on: the streak now spans two minutes, and the next failure stops the run.
+        now.fetch_add(OUTAGE_SPAN.as_secs(), Ordering::SeqCst);
+        h.note_failure(FailureClass::Transport, "late");
+        assert!(h.is_stopped(), "a streak that outlasts the span is an outage");
+    }
+
+    #[test]
+    fn a_success_inside_the_blip_starts_the_span_over() {
+        let (h, now) = health();
+        transport_failures(&h, &now, 3, 5);
+        h.note_success();
+        now.fetch_add(600, Ordering::SeqCst);
+        transport_failures(&h, &now, 3, 5);
+        assert!(!h.is_stopped(), "the span is counted from the new streak's first failure");
     }
 
     /// Zach 2026-11-02 (design 6.1): a 429 streak is a pause, not an outage. Rate-limited failures
     /// neither count toward the streak nor reset it, however many arrive.
     #[test]
     fn rate_limited_streak_does_not_trip_the_outage_stop() {
-        let h = RunHealth::default();
+        let (h, now) = health();
         for _ in 0..50 {
             h.note_failure(FailureClass::RateLimited, "HTTP 429");
         }
@@ -182,9 +301,11 @@ mod tests {
         // They do not reset a transport streak either: two transport failures, then 429s, then a
         // third transport failure is still an outage.
         h.note_failure(FailureClass::Transport, "a");
+        now.fetch_add(100, Ordering::SeqCst);
         h.note_failure(FailureClass::Transport, "b");
         h.note_failure(FailureClass::RateLimited, "HTTP 429");
         assert_eq!(h.streak(), 2);
+        now.fetch_add(100, Ordering::SeqCst);
         h.note_failure(FailureClass::Transport, "c");
         assert!(h.is_stopped());
     }
@@ -221,9 +342,10 @@ mod tests {
             anyhow::anyhow!("connection reset by peer"),
             anyhow::anyhow!("request timed out"),
         ] {
-            let h = RunHealth::default();
+            let (h, now) = health();
             for _ in 0..OUTAGE_STREAK {
                 h.note_failure(classify_error(&outage), &outage.to_string());
+                now.fetch_add(OUTAGE_SPAN.as_secs(), Ordering::SeqCst);
             }
             assert!(h.is_stopped(), "{outage} three times is an outage");
         }
@@ -231,7 +353,7 @@ mod tests {
 
     #[test]
     fn any_success_resets_the_streak() {
-        let h = RunHealth::default();
+        let (h, _now) = health();
         h.note_failure(FailureClass::Transport, "a");
         h.note_failure(FailureClass::Transport, "b");
         h.note_success();
@@ -243,14 +365,16 @@ mod tests {
 
     #[test]
     fn content_failures_never_count_and_never_reset() {
-        let h = RunHealth::default();
+        let (h, now) = health();
         for _ in 0..10 {
             h.note_failure(FailureClass::Content, "malformed");
         }
         assert!(!h.is_stopped(), "content failures are not an outage");
         h.note_failure(FailureClass::Transport, "a");
         h.note_failure(FailureClass::Content, "malformed");
+        now.fetch_add(100, Ordering::SeqCst);
         h.note_failure(FailureClass::Transport, "b");
+        now.fetch_add(100, Ordering::SeqCst);
         h.note_failure(FailureClass::Transport, "c");
         assert!(
             h.is_stopped(),
@@ -268,11 +392,9 @@ mod tests {
 
     #[test]
     fn the_first_trigger_is_kept() {
-        let h = RunHealth::default();
+        let (h, now) = health();
         h.note_failure(FailureClass::AuthOrBilling, "first");
-        h.note_failure(FailureClass::Transport, "x");
-        h.note_failure(FailureClass::Transport, "y");
-        h.note_failure(FailureClass::Transport, "z");
+        transport_failures(&h, &now, 3, OUTAGE_SPAN.as_secs());
         assert_eq!(h.trigger().unwrap().class, FailureClass::AuthOrBilling);
     }
 
@@ -292,7 +414,7 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        assert!(h.is_stopped());
+        assert!(!h.is_stopped(), "400 failures within milliseconds are one wave");
         assert_eq!(h.streak(), 400, "no increment was lost");
     }
 }
