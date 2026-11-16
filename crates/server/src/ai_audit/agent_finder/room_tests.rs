@@ -523,3 +523,12 @@ fn long_lines_are_found_by_character_count() {
     let r = Room::build(&piece(&["a.rs"]), &files, "").room;
     assert_eq!(r.long_lines().get("a.rs"), Some(&vec![3]));
 }
+
+#[test]
+fn disk_path_compares_the_rooms_folder_without_regard_to_case() {
+    assert_eq!(Room::disk_path("_camerata/x.md"), "_camerata/x.md");
+    assert_eq!(Room::disk_path("_CAMERATA/x.md"), "_CAMERATA/x.md");
+    assert_eq!(Room::disk_path("_Camerata/out/y"), "_Camerata/out/y");
+    assert_eq!(Room::disk_path("src/a.rs"), "code/src/a.rs");
+    assert_eq!(Room::disk_path("_camerata_x/a"), "code/_camerata_x/a");
+}

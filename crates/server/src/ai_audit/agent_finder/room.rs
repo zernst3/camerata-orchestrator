@@ -565,7 +565,11 @@ impl Room {
     /// Where a path of the room lands on disk under [`Room::materialize_under_code`]: the room's
     /// own files (`_camerata/...`) stay at the root and every other file goes under `code/`.
     pub fn disk_path(path: &str) -> String {
-        if path.starts_with(&format!("{RESERVED_DIR}/")) {
+        let own = path.len() > RESERVED_DIR.len()
+            && path.is_char_boundary(RESERVED_DIR.len())
+            && path[..RESERVED_DIR.len()].eq_ignore_ascii_case(RESERVED_DIR)
+            && path.as_bytes()[RESERVED_DIR.len()] == b'/';
+        if own {
             path.to_string()
         } else {
             format!("{CODE_DIR}/{path}")
