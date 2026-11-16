@@ -266,3 +266,71 @@ fn a_limit_must_be_a_positive_dollar_amount() {
     }
     assert!(SpendMeter::with_limit(0.01).is_ok());
 }
+
+/// Like [`Spendthrift`], but each reply takes a moment, so concurrent drivers overlap.
+struct SlowSpendthrift {
+    inner: Arc<Spendthrift>,
+}
+
+#[async_trait::async_trait]
+impl LlmPort for SlowSpendthrift {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        self.inner.complete(req).await
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _d: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn concurrent_children_cannot_each_pass_the_limit_by_one_request() {
+    let tmp = wt();
+    // A request could cost up to about $0.41 (the 8,192-token output cap at $50 per million), so
+    // a $0.20 limit admits only the very first request of the run.
+    let meter = SpendMeter::with_limit(0.20).unwrap();
+    let completer = Spendthrift::new(1_000, 0);
+    let slow = Arc::new(SlowSpendthrift {
+        inner: completer.clone(),
+    });
+    let mut runs = Vec::new();
+    for i in 0..6 {
+        let driver = ApiAgentDriver::new(slow.clone(), PRICED_MODEL, tmp.path())
+            .with_spend_meter(meter.clone());
+        runs.push(async move { driver.run(&role(), &format!("child {i}")).await.unwrap() });
+    }
+    let outcomes = futures::future::join_all(runs).await;
+
+    assert_eq!(
+        completer.calls(),
+        1,
+        "six children against a limit that admits one request sent more than one in total"
+    );
+    let refused = outcomes
+        .iter()
+        .filter(|o| o.result.starts_with("INCOMPLETE") && o.result.contains("spend limit"))
+        .count();
+    assert_eq!(refused, 6, "every child ends on the limit");
+}
+
+#[tokio::test]
+async fn a_reservation_is_released_when_the_turn_ends() {
+    let tmp = wt();
+    // A roomy limit: two children one after the other both get through, so a finished
+    // request does not keep its reservation.
+    let meter = SpendMeter::with_limit(100.0).unwrap();
+    for _ in 0..2 {
+        let completer = Spendthrift::new(1_000, 0);
+        let driver = ApiAgentDriver::new(completer.clone(), PRICED_MODEL, tmp.path())
+            .with_spend_meter(meter.clone());
+        let _ = driver.run(&role(), "go").await.unwrap();
+        assert!(completer.calls() >= 2, "{}", completer.calls());
+    }
+}

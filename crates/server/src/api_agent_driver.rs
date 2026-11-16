@@ -265,6 +265,11 @@ struct SpendState {
     /// A turn came back with a cost that could not be worked out: a limit can no longer be
     /// enforced, so a limited run admits nothing more.
     cost_unknown: bool,
+    /// The ceilings of the requests admitted and not yet recorded: what could still be spent by
+    /// requests in flight. Counted against the limit so concurrent drivers cannot each pass it.
+    reserved_usd: f64,
+    /// How many admitted requests are still in flight.
+    in_flight: usize,
 }
 
 #[derive(Debug)]
@@ -342,20 +347,29 @@ impl SpendMeter {
 
     /// May the next request be sent? `Ok` with no limit. With a limit the answer is no when the
     /// model has no list price, when an earlier turn could not be costed, when the limit is
-    /// already spent, or when what is spent plus `ceiling_usd` (the most this one request could
-    /// cost) would pass it. The very first request of a run (nothing spent) is always admitted
-    /// once the model is priced, as the inspection's meter does, so a limit smaller than one
-    /// request still lets that one finish. The text is the reason, ready for the run's result.
+    /// already spent, or when what is spent, plus what the requests still in flight could cost,
+    /// plus `ceiling_usd` (the most this one request could cost) would pass it. The very first
+    /// request of a run (nothing spent, nothing in flight) is always admitted once the model is
+    /// priced, as the inspection's meter does, so a limit smaller than one request still lets
+    /// that one finish. The text is the reason, ready for the run's result.
+    ///
+    /// Admission is atomic: the check and the reservation of this request's ceiling happen under
+    /// one lock, so drivers sharing the meter cannot each pass the limit by one request. The
+    /// reservation is released when the returned guard is dropped; the caller records the turn
+    /// first and then drops it.
     pub fn admit(
         &self,
         model: &str,
         ceiling_usd: impl FnOnce() -> Option<f64>,
-    ) -> Result<(), String> {
+    ) -> Result<SpendReservation, String> {
         if let Some(why) = &self.0.invalid {
             return Err(why.clone());
         }
         let Some(limit) = self.0.limit_usd else {
-            return Ok(());
+            return Ok(SpendReservation {
+                inner: None,
+                usd: 0.0,
+            });
         };
         if !crate::llm::is_priced(model) {
             return Err(format!(
@@ -363,7 +377,7 @@ impl SpendMeter {
                  model registry, so what its requests cost cannot be counted"
             ));
         }
-        let st = self.state();
+        let mut st = self.state();
         if st.cost_unknown {
             return Err(format!(
                 "the spend limit of ${limit:.2} cannot be enforced: the cost of a turn could not be \
@@ -377,17 +391,18 @@ impl SpendMeter {
                 st.spent_usd
             ));
         }
-        if st.spent_usd > 0.0 {
-            let spent = st.spent_usd;
-            drop(st);
-            match ceiling_usd() {
-                Some(c) if spent + c > limit => {
+        let ceiling = ceiling_usd();
+        let reserve = if st.spent_usd > 0.0 || st.in_flight > 0 {
+            match ceiling {
+                Some(c) if st.spent_usd + st.reserved_usd + c > limit => {
                     return Err(format!(
                         "the next request could cost up to ${c:.2}, which would pass the spend \
-                         limit of ${limit:.2} (${spent:.2} spent over {turns} turns)"
+                         limit of ${limit:.2} (${:.2} spent over {turns} turns, ${:.2} reserved \
+                         for {} requests in flight)",
+                        st.spent_usd, st.reserved_usd, st.in_flight
                     ));
                 }
-                Some(_) => {}
+                Some(c) => c,
                 None => {
                     return Err(format!(
                         "the spend limit of ${limit:.2} cannot be enforced: the next request \
@@ -395,8 +410,43 @@ impl SpendMeter {
                     ));
                 }
             }
-        }
-        Ok(())
+        } else {
+            // The first request of the run: admitted, and its ceiling held back so a request
+            // that starts while it is in flight is checked against it.
+            ceiling.unwrap_or(0.0)
+        };
+        st.reserved_usd += reserve;
+        st.in_flight += 1;
+        drop(st);
+        Ok(SpendReservation {
+            inner: Some(self.0.clone()),
+            usd: reserve,
+        })
+    }
+}
+
+/// The ceiling of one admitted request, held against the spend limit until the request's turn is
+/// recorded. Dropping it releases the hold, so a request that fails or is refused part-way never
+/// leaves the limit reserved.
+#[derive(Debug)]
+#[must_use = "dropping the reservation releases it; hold it until the turn is recorded"]
+pub struct SpendReservation {
+    /// `None` for an unlimited meter, which reserves nothing.
+    inner: Option<Arc<SpendInner>>,
+    usd: f64,
+}
+
+impl Drop for SpendReservation {
+    fn drop(&mut self) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        let mut st = inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        st.reserved_usd = (st.reserved_usd - self.usd).max(0.0);
+        st.in_flight = st.in_flight.saturating_sub(1);
     }
 }
 
@@ -737,7 +787,9 @@ async fn run_loop(
 
         // The spend limit: asked BEFORE every request, so a run that has spent its limit (or
         // whose next request could pass it) sends nothing more.
-        if let Err(reason) = driver.spend.admit(&driver.model, || {
+        // The reservation it returns holds this request's ceiling against the limit until the
+        // turn is recorded below (atomic admission: concurrent children share the meter).
+        let reservation = match driver.spend.admit(&driver.model, || {
             request_ceiling_usd(
                 &driver.model,
                 system_prompt.as_deref(),
@@ -745,12 +797,15 @@ async fn run_loop(
                 &tool_schemas,
             )
         }) {
-            final_result = format!(
-                "INCOMPLETE: {reason}; the run stopped before turn {iteration}, so the work may be \
-                 unfinished."
-            );
-            break;
-        }
+            Ok(reservation) => reservation,
+            Err(reason) => {
+                final_result = format!(
+                    "INCOMPLETE: {reason}; the run stopped before turn {iteration}, so the work \
+                     may be unfinished."
+                );
+                break;
+            }
+        };
 
         // LIFECYCLE-7: beat the liveness heartbeat once per turn. The API loop has no
         // per-line output stream (unlike the CLI driver), so a multi-turn run that is
@@ -815,6 +870,9 @@ async fn run_loop(
         // and add it to this driver's total.
         let turn = price_turn(driver, &resp);
         driver.spend.record(turn_cost(driver, &resp, turn));
+        // Recorded: the real cost now stands where the reserved ceiling was. Released before
+        // the tools run, so a long delegate does not hold the limit against its own children.
+        drop(reservation);
         if let Some(c) = turn {
             total_cost_usd += c;
         }
