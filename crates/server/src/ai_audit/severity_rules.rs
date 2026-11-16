@@ -63,6 +63,44 @@ pub(super) const CROSS_TENANT_PHRASES: &[&str] = &[
     "belonging to a different organization",
     "data from another account",
 ];
+/// Wording that makes an unauthenticated access problem from the agent finder critical: a write
+/// or personal data (owner ruling R-8). The sensitive-data tables and the full-compromise phrases
+/// above count too.
+pub(super) const FINDER_WRITE_OR_PERSONAL_DATA_PHRASES: &[&str] = &[
+    "writes",
+    "write access",
+    "can write",
+    "personal data",
+    "personal information",
+];
+
+/// The phrases in [`UNAUTHENTICATED_OR_FULL_COMPROMISE_PHRASES`] that assert a full compromise,
+/// not only a missing check.
+const FULL_COMPROMISE_PHRASES: &[&str] = &[
+    "full account compromise",
+    "full account takeover",
+    "complete account takeover",
+    "complete account compromise",
+    "account takeover",
+    "take over any account",
+    "take over any user's account",
+    "impersonate any user",
+    "assume any user's identity",
+];
+
+/// Owner ruling R-8: an agent finder problem (it carries the `finder-problem` capture) that only
+/// says access needs no authentication is High; Critical needs sensitive data, a write or a full
+/// compromise in its wording (or the agent rating it Critical, which this floor never lowers).
+fn finder_unauthenticated_is_only_high(f: &Finding, text: &str) -> bool {
+    f.captures
+        .contains_key(super::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
+        && !mentions_escalating_data_class(text)
+        && !FULL_COMPROMISE_PHRASES
+            .iter()
+            .chain(FINDER_WRITE_OR_PERSONAL_DATA_PHRASES)
+            .any(|p| contains_phrase_as_word(text, p))
+}
+
 pub(super) const READ_VERBS: &[&str] = &[
     "read", "view", "fetch", "access", "download", "list", "see", "retrieve",
 ];
@@ -308,12 +346,21 @@ pub(crate) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, S
     }
     let text = calibration_floor_scan_text(f);
     let mut floor = if mentions_unauthenticated_or_full_compromise(&text) {
-        Some((
-            "critical",
-            "Severity floor: unauthenticated access or a path to full-account compromise is \
+        if finder_unauthenticated_is_only_high(f, &text) {
+            Some((
+                "high",
+                "Severity floor: unauthenticated access is High by default; it is Critical \
+                 only when it reaches sensitive data, allows a write or is a full compromise."
+                    .to_string(),
+            ))
+        } else {
+            Some((
+                "critical",
+                "Severity floor: unauthenticated access or a path to full-account compromise is \
              always Critical."
-                .to_string(),
-        ))
+                    .to_string(),
+            ))
+        }
     } else if mentions_authenticated_cross_tenant_read(&text) {
         if mentions_escalating_data_class(&text) {
             Some((

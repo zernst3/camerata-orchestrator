@@ -305,24 +305,53 @@ async fn a_medium_uncited_agent_problem_is_held_and_a_low_one_is_informational()
     );
 }
 
-#[tokio::test]
-async fn pin_what_the_code_does_today_with_an_unauthenticated_access_problem_ruling_r8() {
-    // R-8 says unauthenticated access is high by default and critical only when it reaches
-    // sensitive data or allows a write. The wording floor in `severity_rules.rs` still reads
-    // "always Critical", so today an agent problem rated high whose text says the route needs no
-    // authentication is raised to critical. This pins that, and changes nothing.
+async fn rated_text(rating: &str, what: &str) -> String {
     let rows = rows_for(
         repo_files(),
         vec![worded(
-            problem(1, "src/a.rs", 2, "high", "fn item_2() { run(2); }"),
-            "The route is reachable without authentication and returns a public page.",
+            problem(1, "src/a.rs", 2, rating, "fn item_2() { run(2); }"),
+            what,
         )],
         vec![],
     )
     .await;
     assert_eq!(rows.len(), 1);
+    rows[0].severity.clone()
+}
+
+// R-8 (owner call, 2026-11-16): for an agent problem, unauthenticated access is high by default;
+// critical only when the agent rated it critical or the text names sensitive data, a write or a
+// full compromise. This flips the earlier pin test (which pinned "always critical") on purpose.
+#[tokio::test]
+async fn an_unauthenticated_access_problem_rated_high_stays_high_r8() {
     assert_eq!(
-        rows[0].severity, "critical",
-        "today's code: the wording floor raises it (R-8 is not applied here)"
+        rated_text(
+            "high",
+            "The route is reachable without authentication and returns a public page."
+        )
+        .await,
+        "high"
+    );
+}
+
+#[tokio::test]
+async fn an_unauthenticated_access_problem_that_writes_or_exposes_personal_data_is_critical_r8() {
+    for what in [
+        "The route is reachable without authentication and writes to the orders table.",
+        "The route is reachable without authentication and returns personal data.",
+    ] {
+        assert_eq!(rated_text("high", what).await, "critical", "{what}");
+    }
+}
+
+#[tokio::test]
+async fn an_unauthenticated_access_problem_the_agent_rated_critical_stays_critical_r8() {
+    assert_eq!(
+        rated_text(
+            "critical",
+            "The route is reachable without authentication and returns a public page."
+        )
+        .await,
+        "critical"
     );
 }
