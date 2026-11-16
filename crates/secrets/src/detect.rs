@@ -38,7 +38,7 @@ impl SecretMatch {
 
     /// True when the match should still be listed as a finding row: a secret, or a twin the floor
     /// keeps (a committed placeholder key is still worth a row; a public anon key is not).
-    pub fn counts_as_finding(&self) -> bool {
+    fn counts_as_finding(&self) -> bool {
         self.twin.as_ref().is_none_or(Twin::counts_as_line)
     }
 
@@ -47,7 +47,13 @@ impl SecretMatch {
     /// password-like (there the same shape is a passphrase), so only that case keeps its row.
     pub fn counts_as_finding_in(&self, text: &str) -> bool {
         if self.twin == Some(Twin::EnvNameLiteral) {
-            return names_a_secret(&text[self.start..self.value.start]);
+            // A readable name has at most two digits (`DEPLOY_KEY_V2`); a run of digits mixed
+            // into capitals is a real key that happens to be shouted.
+            let digits = text[self.value.clone()]
+                .bytes()
+                .filter(u8::is_ascii_digit)
+                .count();
+            return digits > 2 || names_a_secret(&text[self.start..self.value.start]);
         }
         self.counts_as_finding()
     }
@@ -364,9 +370,9 @@ fn collect_pem(out: &mut Vec<SecretMatch>, text: &str) {
 
 // ---- driver -------------------------------------------------------------------------------
 
-/// Whether `path` is a Terraform or HCL file. There an unquoted right side is an expression (a
-/// reference, a function call), never a literal: a string literal must be quoted, so the quoted
-/// form still reads every literal.
+/// Whether `path` is a Terraform or HCL file. There an unquoted right side is usually an
+/// expression (a reference, a function call); a string literal must be quoted. A heredoc body is
+/// the exception, so the unquoted form still runs and only a dotted reference is cleared.
 fn is_expression_language(path: Option<&str>) -> bool {
     path.is_some_and(|p| {
         let lower = p.to_ascii_lowercase();
@@ -374,6 +380,23 @@ fn is_expression_language(path: Option<&str>) -> bool {
             .iter()
             .any(|ext| lower.ends_with(ext))
     })
+}
+
+/// Identifier segments joined by dots (`var.X`, `random_password.x.result`); a segment starts
+/// with a letter or underscore, so a digits-only run is not one.
+fn is_dotted_reference(value: &str) -> bool {
+    let mut segments = 0;
+    for segment in value.split('.') {
+        let mut chars = segment.chars();
+        let starts_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !starts_ok || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 2
 }
 
 fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape], path: Option<&str>) {
@@ -431,8 +454,17 @@ fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape], path:
             }
             SecretShape::NamedSecretLiteral => {
                 collect_group(out, text, shape, shapes::re_named_literal(), false);
-                if !is_expression_language(path) {
-                    collect_group(out, text, shape, shapes::re_named_literal_unquoted(), false);
+                let from = out.len();
+                collect_group(out, text, shape, shapes::re_named_literal_unquoted(), false);
+                if is_expression_language(path) {
+                    // Unquoted is an expression there, but a heredoc body is plain text: only a
+                    // dotted reference (`var.x`, `random_password.x.result`) is cleared.
+                    let mut index = from;
+                    out.retain(|m| {
+                        let keep = index < from || !is_dotted_reference(&text[m.value.clone()]);
+                        index += 1;
+                        keep
+                    });
                 }
             }
             SecretShape::BearerToken => collect_group(out, text, shape, shapes::re_bearer(), true),

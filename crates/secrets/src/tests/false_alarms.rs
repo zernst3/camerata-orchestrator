@@ -132,3 +132,50 @@ fn an_environment_variable_name_is_not_a_row() {
         vec![1]
     );
 }
+
+#[test]
+fn a_terraform_heredoc_keeps_the_unquoted_form() {
+    let opaque = body(32, ALNUM, 31);
+    let tf =
+        format!("resource \"vm\" \"web\" {{\n  user_data = <<EOT\nDB_PASSWORD={opaque}\nEOT\n}}\n");
+    assert_eq!(in_file("infra/main.tf", &tf), vec![3]);
+    // A dotted reference on the right of the same key is still an expression.
+    let reference = "resource \"vm\" \"web\" {\n  user_data = <<EOT\nDB_PASSWORD=random_password.web.result\nEOT\n}\n";
+    assert!(in_file("infra/main.tf", reference).is_empty());
+}
+
+#[test]
+fn an_all_caps_real_key_is_not_an_env_name() {
+    let key = ["LIVE_9A8B7C6D5E4F3G2H1J0K", "9L8M"].concat();
+    assert_eq!(lines(&format!("api_key: \"{key}\"")), vec![1]);
+    // Two digits or fewer is a readable name.
+    assert!(lines("api_key: \"CLOUD_PRODUCTION_DEPLOY_KEY_V2\"").is_empty());
+}
+
+#[test]
+fn a_one_line_resource_block_with_a_password_still_fires() {
+    let opaque = body(32, ALNUM, 32);
+    let tf = format!("resource \"a\" \"b\" {{ password = \"{opaque}\" }}\n");
+    assert_eq!(in_file("main.tf", &tf), vec![1]);
+}
+
+#[test]
+fn a_base64_key_with_one_slash_and_no_dotted_domain_still_fires() {
+    let opaque = format!("{}/{}", body(20, ALNUM, 33), body(20, ALNUM, 34));
+    assert_eq!(lines(&format!("settings:\n  key: {opaque}\n")), vec![2]);
+}
+
+#[test]
+fn a_word_ending_in_from_is_not_a_module_import() {
+    let opaque = body(32, ALNUM, 35);
+    assert_eq!(
+        lines(&format!("token_fromage = \"{opaque}/{opaque}\"")),
+        vec![1]
+    );
+    assert_eq!(
+        lines(&format!("tokenimport \"{opaque}/{opaque}\"")),
+        vec![1]
+    );
+    assert_eq!(lines(&format!("tokenfrom \"{opaque}/{opaque}\"")), vec![1]);
+    assert!(lines("import TokenListPanel from './components/TokenListPanel';").is_empty());
+}

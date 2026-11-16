@@ -321,8 +321,19 @@ fn opens_a_module_specifier(before_value: &str) -> bool {
     let head = head.trim_end();
     head.ends_with("require(")
         || head.ends_with("import(")
-        || head.ends_with("import")
-        || head.ends_with("from")
+        || ends_with_word(head, "import")
+        || ends_with_word(head, "from")
+}
+
+/// `text` ends with `word` and the character before it is not part of an identifier
+/// (`fromage` and `tokenfrom` do not end with the word `from`).
+fn ends_with_word(text: &str, word: &str) -> bool {
+    text.strip_suffix(word).is_some_and(|rest| {
+        !rest
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 /// A canonical UUID: 8-4-4-4-12 hexadecimal digits.
