@@ -5,7 +5,9 @@
 //! everywhere" or "rule it out everywhere". So every place a style linter flags under one rule in
 //! one repository is ONE rule group ([`lint_sub_id`]), and that group is one Fix of its own (it
 //! never folds into another Fix and nothing folds into it). A decision on it is written to every
-//! place it holds, as any group decision is. Two lint rules under one native rule node are two groups: the group's id digests the repository and the rule.
+//! place it holds, as any group decision is, except a place held for its own decision (the release
+//! gate refuses such a place without a ruling by name, so a batch leaves it out). Two lint rules
+//! under one native rule node are two groups: the group's id digests the repository and the rule.
 //!
 //! Nothing hides. Every place stays a row, in All problems and in `findings.json`, counted in the
 //! totals. A place of a lint group never takes an urgent (escalation) slot: the rule is decided
@@ -248,16 +250,20 @@ pub(super) fn lint_label(rule_id: &str, repo: &str) -> String {
 }
 
 /// The cause of every lint rule group.
-pub(super) const LINT_CAUSE: &str = "one style rule, decided once for every place";
+pub(super) const LINT_CAUSE: &str = "one style rule, decided once as a group";
 
 /// The summary of a lint rule group: a fixed sentence naming how many places it holds, so it
-/// always agrees with the rows.
+/// always agrees with the rows. A place held for its own decision (the release gate refuses it
+/// without one) is left out of a group decision, and the sentence says so.
 pub(super) fn lint_summary(places: usize) -> String {
     if places == 1 {
-        "1 place of this style rule. A decision on this group applies to it.".to_string()
+        "1 place of this style rule. A decision on this group applies to it unless it is held for \
+         its own decision."
+            .to_string()
     } else {
         format!(
-            "{places} places of this style rule. A decision on this group applies to every place."
+            "{places} places of this style rule. A decision on this group applies to every place \
+             not held for its own decision."
         )
     }
 }

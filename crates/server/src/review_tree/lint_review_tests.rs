@@ -184,3 +184,23 @@ fn two_lint_rules_under_one_native_rule_are_two_groups_decided_apart() {
         );
     }
 }
+
+// ── The summary never claims a held place ─────────────────────────────────────────────────────
+
+#[test]
+fn the_lint_group_summary_leaves_out_the_places_held_for_their_own_decision() {
+    let (rows, tree) = grouped(lint_rows("acme/web", "eslint", "no-var", 3));
+    let group = rule_groups_of(&tree, &rows, "no-var", "acme/web")[0];
+    let summary = group.summary.clone().unwrap_or_default();
+    assert!(
+        summary.contains("every place not held for its own decision"),
+        "{summary}"
+    );
+    let (rows, tree) = grouped(lint_rows("acme/web", "eslint", "no-var", 1));
+    let group = rule_groups_of(&tree, &rows, "no-var", "acme/web")[0];
+    let summary = group.summary.clone().unwrap_or_default();
+    assert!(
+        summary.contains("unless it is held for its own decision"),
+        "{summary}"
+    );
+}
