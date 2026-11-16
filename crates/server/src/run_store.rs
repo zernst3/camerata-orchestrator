@@ -306,9 +306,11 @@ impl ModelsRecord {
     }
 
     /// Whether a resume with `now` may reuse a run saved with `self`. A resolved record must be
-    /// equal. A record from before ids were resolved is compared on the audit model, the backend
-    /// and the mode it recorded, and on a calibration or fix pick only when it recorded one (an
-    /// empty raw pick said nothing about what ran).
+    /// equal to `now` in its audit, calibration and fix models, its backend and its mode; the
+    /// group review model is not compared here ([`Self::hold_group_review_model`] keeps it, and
+    /// refuses an explicit different one). A record from before ids were resolved is compared on
+    /// the audit model, the backend and the mode it recorded, and on a calibration or fix pick
+    /// only when it recorded one (an empty raw pick said nothing about what ran).
     pub fn matches_for_resume(&self, now: &ModelsRecord) -> bool {
         if self.resolved {
             // The group review model is kept on resume, not compared (see `group_review`).
