@@ -60,7 +60,7 @@ use camerata_core::{AgentDriver, RuleId};
 use camerata_fleet::locate_gateway_bin;
 use camerata_worktracker::investigation::DecisionRecord;
 
-use crate::api_agent_driver::build_agent_driver;
+use crate::api_agent_driver::build_agent_driver_with;
 use crate::llm::LlmPort;
 use crate::project::ReviewOnError;
 use crate::review_agent::{run_l3_review, L3ReviewInput, L3Verdict, ReviewSeverity};
@@ -1404,7 +1404,7 @@ pub async fn execute_dev_implement_run(
         fail(&runs, &uow, why);
         return;
     }
-    let driver: Arc<dyn AgentDriver> = match build_agent_driver(
+    let driver: Arc<dyn AgentDriver> = match build_agent_driver_with(
         &model,
         &registry,
         &policy,
@@ -1427,6 +1427,12 @@ pub async fn execute_dev_implement_run(
         // allow/deny + agent_step this driver executes lands under `run_id`.
         governance_log.clone().map(|log| (log, run_id.clone())),
         backend,
+        // The sibling project repos are declared read folders: the read tools may read them
+        // (beside the worktree) and nothing else; every read is logged under this run.
+        &crate::api_agent_driver::DriverControls {
+            read_roots: sibling_read_dirs.clone(),
+            ..Default::default()
+        },
     ) {
         Ok(d) => d,
         Err(e) => {

@@ -133,6 +133,99 @@ struct ToolInvocation {
     input: Value,
 }
 
+// ─── read log + driver controls ───────────────────────────────────────────────
+
+/// One read tool call: which tool, what path (relative to the jail when it was allowed, as
+/// asked when it was refused), how many bytes went back to the model, and whether it was allowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadLogEntry {
+    /// The agent that read: `agent` for the run's own driver, `delegate-child` for a child.
+    pub agent: String,
+    pub tool: String,
+    pub path: String,
+    pub bytes: usize,
+    pub allowed: bool,
+}
+
+/// The reads of one run, shared by handle: a clone writes into the same list, so a child agent
+/// or a lead given the run's handle logs into the parent run's log.
+#[derive(Debug, Clone, Default)]
+pub struct ReadLog(Arc<std::sync::Mutex<Vec<ReadLogEntry>>>);
+
+impl ReadLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&self, entry: ReadLogEntry) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(entry);
+    }
+
+    /// A copy of every read logged so far, in order.
+    pub fn entries(&self) -> Vec<ReadLogEntry> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// True when both handles write into the same list.
+    pub fn same_log(&self, other: &ReadLog) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// What a run hands to every driver it builds so they act as one run: the shared read log, the
+/// declared read folders and the governance trail.
+#[derive(Clone, Default)]
+pub struct DriverControls {
+    /// The run's read log. `None` = the driver keeps a log of its own.
+    pub read_log: Option<ReadLog>,
+    /// Folders the read tools may read besides the worktree (declared sibling repos).
+    pub read_roots: Vec<PathBuf>,
+    /// The governance trail and the run id every event is tagged with.
+    pub governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
+    /// Name for the read log's `agent` column. `None` = `agent`.
+    pub agent_label: Option<String>,
+}
+
+/// Apply a run's controls to a driver.
+fn apply_controls(mut driver: ApiAgentDriver, controls: &DriverControls) -> ApiAgentDriver {
+    if let Some(log) = &controls.read_log {
+        driver = driver.with_read_log(log.clone());
+    }
+    if !controls.read_roots.is_empty() {
+        driver = driver.with_read_roots(controls.read_roots.clone());
+    }
+    if let Some((log, run_id)) = &controls.governance {
+        driver = driver.with_governance(log.clone(), run_id.clone());
+    }
+    if let Some(label) = &controls.agent_label {
+        driver = driver.with_agent_label(label.clone());
+    }
+    driver
+}
+
+/// The controls the lead gets: the run's, with the lead named in the read log.
+fn lead_controls(run: &DriverControls) -> DriverControls {
+    DriverControls {
+        agent_label: Some("lead".to_string()),
+        ..run.clone()
+    }
+}
+
+/// The controls a child agent gets from its parent's: the same read log, read folders and
+/// governance trail, so what a child reads lands in the parent run's record.
+fn child_controls_from(parent: &DriverControls) -> DriverControls {
+    DriverControls {
+        agent_label: Some("delegate-child".to_string()),
+        ..parent.clone()
+    }
+}
+
 // ─── ApiAgentDriver ──────────────────────────────────────────────────────────
 
 /// A native, provider-agnostic agentic driver.
@@ -204,6 +297,10 @@ pub struct ApiAgentDriver {
     run_id: Option<String>,
     /// Extra folders the read tools may read besides the worktree (declared sibling repos).
     read_roots: Vec<PathBuf>,
+    /// Every read tool call this driver makes (and, by shared handle, its children's).
+    read_log: ReadLog,
+    /// Who the read log names as the reader.
+    agent_label: String,
 }
 
 impl ApiAgentDriver {
@@ -244,7 +341,26 @@ impl ApiAgentDriver {
             governance_log: None,
             run_id: None,
             read_roots: Vec::new(),
+            read_log: ReadLog::new(),
+            agent_label: "agent".to_string(),
         }
+    }
+
+    /// Log reads into `log` (the run's shared handle) instead of a log of this driver's own.
+    pub fn with_read_log(mut self, log: ReadLog) -> Self {
+        self.read_log = log;
+        self
+    }
+
+    /// The handle to this driver's read log.
+    pub fn read_log(&self) -> ReadLog {
+        self.read_log.clone()
+    }
+
+    /// Name this driver in the read log (`delegate-child` for a child).
+    pub fn with_agent_label(mut self, label: impl Into<String>) -> Self {
+        self.agent_label = label.into();
+        self
     }
 
     /// Wire the LIFECYCLE-7 liveness heartbeat. Builder form. The callback fires once per
@@ -1274,10 +1390,17 @@ async fn execute_tool(
             }
             (text, denial.map(|d| d.message))
         }
-        TOOL_READ => (execute_read(inv, &read_jail(driver)), None),
-        TOOL_GLOB => (execute_glob(inv, &read_jail(driver)), None),
-        TOOL_GREP => (execute_grep(inv, &read_jail(driver)), None),
-        TOOL_LS => (execute_ls(inv, &read_jail(driver)), None),
+        TOOL_READ | TOOL_GLOB | TOOL_GREP | TOOL_LS => {
+            let jail = read_jail(driver);
+            let text = match inv.name.as_str() {
+                TOOL_READ => execute_read(inv, &jail),
+                TOOL_GLOB => execute_glob(inv, &jail),
+                TOOL_GREP => execute_grep(inv, &jail),
+                _ => execute_ls(inv, &jail),
+            };
+            record_read(driver, &jail, inv, &text).await;
+            (text, None)
+        }
         TOOL_DELEGATE if driver.orchestrator => {
             // Native orchestrator delegation. The gate is NOT reimplemented here: we
             // dispatch through the SAME gated `run_delegated` primitive the CLI
@@ -1332,6 +1455,72 @@ async fn record_agent_step(driver: &ApiAgentDriver, tool_name: &str) {
         .with_reason(format!("called tool `{tool_name}`"));
     if let Err(e) = log.record(event).await {
         tracing::warn!(error = %e, run_id = %run_id, "failed to record agent_step governance event");
+    }
+}
+
+/// The path (or pattern) a read tool call asked for, as the model wrote it.
+fn requested_read_path(inv: &ToolInvocation) -> String {
+    let input = &inv.input;
+    let first = |keys: &[&str], default: &str| {
+        keys.iter()
+            .find_map(|k| input[*k].as_str())
+            .unwrap_or(default)
+            .to_string()
+    };
+    match inv.name.as_str() {
+        TOOL_READ => first(&["file_path", "path"], ""),
+        TOOL_GLOB => first(&["pattern", "glob"], ""),
+        _ => first(&["path", "directory"], "."),
+    }
+}
+
+/// Log one read tool call: into the run's read log, and into the governance log when one is
+/// wired (a refused read is a warning). The path is relative to the worktree when the read was
+/// allowed and as asked when it was refused, so the trail never claims a place the read did not
+/// reach.
+async fn record_read(driver: &ApiAgentDriver, jail: &ReadJail, inv: &ToolInvocation, text: &str) {
+    let asked = requested_read_path(inv);
+    let allowed = !text.starts_with("DENIED");
+    let path = if allowed {
+        jail.logged_path(&asked)
+    } else {
+        asked
+    };
+    let entry = ReadLogEntry {
+        agent: driver.agent_label.clone(),
+        tool: inv.name.clone(),
+        path,
+        bytes: text.len(),
+        allowed,
+    };
+    driver.read_log.record(entry.clone());
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref()) else {
+        return;
+    };
+    let reason = format!(
+        "{} {} ({} bytes, {})",
+        entry.tool,
+        entry.path,
+        entry.bytes,
+        if allowed { "allowed" } else { "refused" }
+    );
+    let detail = serde_json::json!({
+        "agent": entry.agent,
+        "tool": entry.tool,
+        "path": entry.path,
+        "bytes": entry.bytes,
+        "allowed": allowed,
+    })
+    .to_string();
+    let event = if allowed {
+        camerata_persistence::GovernanceEvent::info(run_id.clone(), "read", "agent")
+    } else {
+        camerata_persistence::GovernanceEvent::warn(run_id.clone(), "read", "agent")
+    }
+    .with_reason(reason)
+    .with_detail(detail);
+    if let Err(e) = log.record(event).await {
+        tracing::warn!(error = %e, run_id = %run_id, "failed to record read governance event");
     }
 }
 
@@ -1715,6 +1904,24 @@ impl ReadJail {
             "DENIED: `{raw}` {why}. Reads are limited to the worktree and the read folders \
              declared for this run. Nothing was read."
         )
+    }
+
+    /// The path to put in the read log for an allowed read: relative to the worktree when it is
+    /// under it, else the full path inside the declared read folder.
+    fn logged_path(&self, raw: &str) -> String {
+        let Ok(canonical) = self.resolve(raw) else {
+            return raw.to_string();
+        };
+        let relative = self
+            .roots
+            .first()
+            .filter(|_| self.base.is_some())
+            .and_then(|wt| canonical.strip_prefix(wt).ok());
+        match relative {
+            Some(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+            Some(rel) => rel.display().to_string(),
+            None => canonical.display().to_string(),
+        }
     }
 
     fn contains(&self, canonical: &Path) -> bool {
@@ -2302,6 +2509,8 @@ fn build_claude_driver(
     governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
     // The calling project's (or chat's) resolved backend setting. See the fn doc.
     backend: crate::llm::ProjectBackend,
+    // The run's shared read log, declared read folders and governance trail.
+    controls: &DriverControls,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let key = resolve_claude_backend(creds, backend)?;
     if let Some(key) = key {
@@ -2321,7 +2530,7 @@ fn build_claude_driver(
         if let Some((log, run_id)) = governance {
             driver = driver.with_governance(log, run_id);
         }
-        Ok(Arc::new(driver))
+        Ok(Arc::new(apply_controls(driver, controls)))
     } else {
         let mut cli_driver = camerata_agent::ClaudeCliDriver::new(mcp_config_path)
             .as_orchestrator(orchestrator)
@@ -2367,6 +2576,44 @@ fn build_claude_driver(
 pub fn build_agent_driver(
     model_id: &str,
     registry: &crate::model_registry::ModelRegistry,
+    policy: &crate::provider_policy::ProviderPolicy,
+    creds: &dyn crate::credentials::CredentialStore,
+    mcp_config_path: &str,
+    rule_subset: Vec<RuleId>,
+    worktree: Option<PathBuf>,
+    orchestrator: bool,
+    limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+    run_session_id: Option<&str>,
+    escalation: bool,
+    on_activity: Option<HeartbeatFn>,
+    governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
+    backend: crate::llm::ProjectBackend,
+) -> anyhow::Result<Arc<dyn AgentDriver>> {
+    build_agent_driver_with(
+        model_id,
+        registry,
+        policy,
+        creds,
+        mcp_config_path,
+        rule_subset,
+        worktree,
+        orchestrator,
+        limiter,
+        run_session_id,
+        escalation,
+        on_activity,
+        governance,
+        backend,
+        &DriverControls::default(),
+    )
+}
+
+/// [`build_agent_driver`] with the run's shared [`DriverControls`] (read log, declared read
+/// folders): the entry point a run uses so every driver it builds acts as one run.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_driver_with(
+    model_id: &str,
+    registry: &crate::model_registry::ModelRegistry,
     // THE TRUST CORE: the OpenRouter provider-safety policy (see
     // `crate::provider_policy`) — resolve from `state.settings().provider_policy()` at
     // the call site (safe by default) and pass it in. Threaded through to the
@@ -2404,6 +2651,7 @@ pub fn build_agent_driver(
     // ignored for `openrouter`, which has its own independent key-presence-or-error gate
     // above and no CLI transport to guard against.
     backend: crate::llm::ProjectBackend,
+    controls: &DriverControls,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -2444,7 +2692,7 @@ pub fn build_agent_driver(
             if let Some((log, run_id)) = governance {
                 driver = driver.with_governance(log, run_id);
             }
-            Ok(Arc::new(driver))
+            Ok(Arc::new(apply_controls(driver, controls)))
         }
         // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
         // API agent when the resolved backend is `Api` and an Anthropic API key is configured.
@@ -2461,6 +2709,7 @@ pub fn build_agent_driver(
             on_activity,
             governance,
             backend,
+            controls,
         ),
     }
 }
@@ -2519,6 +2768,8 @@ pub struct ServerChildDriverFactory {
     /// choice — same principle as `policy` above for the OpenRouter safety policy). See
     /// `docs/design/2026-09-22_per-project-backend.md`.
     backend: crate::llm::ProjectBackend,
+    /// The run's shared read log, read folders and governance trail, handed to every child.
+    controls: DriverControls,
 }
 
 impl ServerChildDriverFactory {
@@ -2545,7 +2796,15 @@ impl ServerChildDriverFactory {
             run_session_id,
             gate_events_file,
             backend,
+            controls: DriverControls::default(),
         }
+    }
+
+    /// Give every child the run's [`DriverControls`] (builder form): a child's reads then land in
+    /// the parent run's read log and governance trail.
+    pub fn with_controls(mut self, controls: DriverControls) -> Self {
+        self.controls = controls;
+        self
     }
 }
 
@@ -2600,7 +2859,8 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
 
         // Route the model to its OWN provider; build a WORKER (orchestrator = false),
         // jailed to `worktree`, under the orchestrator's rule subset.
-        let inner = build_agent_driver(
+        let child_controls = child_controls_from(&self.controls);
+        let inner = build_agent_driver_with(
             model,
             &self.registry,
             &self.policy,
@@ -2613,15 +2873,13 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             self.run_session_id.as_deref(),
             false, // workers do not self-escalate (the governed dev-implement agent does)
             None,  // child driver: heartbeat is owned by the parent run's supervised path
-            // Phase H2: delegated/fanned-out children are NOT individually wired into the
-            // governance log — threading it here would also require adding a governance field
-            // to `ServerChildDriverFactory` (and its own construction call sites), and a
-            // child's denials already surface in the parent's `delegate`/`fan_out` result text
-            // (visible to the parent's own agent_step trail). Documented skip; the top-level
-            // implementer driver (built directly in `dev_implement_run.rs`) IS wired.
+            // Governance: a child's trail comes from the run's `DriverControls` (applied below),
+            // so its reads and writes are recorded under the parent run's id.
             None,
             // Children inherit the parent run's project backend setting.
             self.backend,
+            // And the parent run's read log, read folders and governance trail.
+            &child_controls,
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2680,6 +2938,9 @@ pub struct ServerOrchestratorDriverFactory {
     /// [`ServerChildDriverFactory`] this builds for delegated/fanned-out children. See
     /// `docs/design/2026-09-22_per-project-backend.md`.
     backend: crate::llm::ProjectBackend,
+    /// The run's shared read log, read folders and governance trail: applied to the lead and
+    /// handed to every child its embedded [`ServerChildDriverFactory`] builds.
+    controls: DriverControls,
 }
 
 impl ServerOrchestratorDriverFactory {
@@ -2704,7 +2965,14 @@ impl ServerOrchestratorDriverFactory {
             run_session_id,
             gate_events_file,
             backend,
+            controls: DriverControls::default(),
         }
+    }
+
+    /// Give the lead and every child the run's [`DriverControls`] (builder form).
+    pub fn with_controls(mut self, controls: DriverControls) -> Self {
+        self.controls = controls;
+        self
     }
 
     /// Resolve a model id's provider, defaulting to `"claude"` for unknown ids (mirrors
@@ -2791,7 +3059,8 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     self.run_session_id.clone(),
                     self.gate_events_file.clone(),
                     self.backend,
-                );
+                )
+                .with_controls(self.controls.clone());
 
                 let orch_config = camerata_gateway::delegate::OrchestratorConfig {
                     models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
@@ -2808,6 +3077,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     // ORCHESTRATOR-ONLY: only the lead is ever built here.
                     .as_orchestrator(true)
                     .with_orchestrator_config(orch_config);
+                let driver = apply_controls(driver, &lead_controls(&self.controls));
                 Ok(Box::new(driver))
             }
             // "claude" or any unrecognised provider: the Anthropic Messages API native
@@ -2838,7 +3108,8 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         self.run_session_id.clone(),
                         self.gate_events_file.clone(),
                         self.backend,
-                    );
+                    )
+                    .with_controls(self.controls.clone());
 
                     let orch_config = camerata_gateway::delegate::OrchestratorConfig {
                         models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
@@ -2858,6 +3129,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                             // ORCHESTRATOR-ONLY: only the lead is ever built here.
                             .as_orchestrator(true)
                             .with_orchestrator_config(orch_config);
+                    let driver = apply_controls(driver, &lead_controls(&self.controls));
                     return Ok(Box::new(driver));
                 }
 
@@ -4968,6 +5240,7 @@ mod tests {
             None,  // on_activity — no heartbeat in this unit test
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Api,
+            &DriverControls::default(),
         )
         .expect("building must not panic / spawn"); // Result — the compliance gate can fail-closed
 
@@ -4984,6 +5257,7 @@ mod tests {
             None,  // on_activity — no heartbeat in this unit test
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli,
+            &DriverControls::default(),
         )
         .expect("building must not panic / spawn");
     }
@@ -5008,6 +5282,7 @@ mod tests {
             None,                            // on_activity
             None,                            // governance
             crate::llm::ProjectBackend::Api, // Api backend, and no key is configured
+            &DriverControls::default(),
         );
         let err = result
             .err()
@@ -5169,3 +5444,5 @@ mod model_input_tests;
 mod truncate_tests;
 #[cfg(test)]
 mod read_jail_tests;
+#[cfg(test)]
+mod read_log_tests;

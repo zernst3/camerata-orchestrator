@@ -19,7 +19,6 @@ const SECRET: &str = "synthetic-outside-secret-body";
 
 struct Layout {
     _tmp: tempfile::TempDir,
-    root: PathBuf,
     wt: PathBuf,
     outside: PathBuf,
     sibling: PathBuf,
@@ -41,7 +40,6 @@ fn layout() -> Layout {
     std::os::unix::fs::symlink(&outside, wt.join("link")).unwrap();
     Layout {
         _tmp: tmp,
-        root,
         wt,
         outside,
         sibling,
