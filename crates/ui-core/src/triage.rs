@@ -1123,7 +1123,11 @@ fn deviation_ratio_ppm(f: &FindingView) -> u64 {
 /// The default is opinionated; the table is not locked — chorale's column headers still
 /// re-sort on demand.
 pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, String, usize) {
-    let enforced = if f.status == "active" { 0 } else { 1 };
+    let enforced = if f.status == "active" && !f.preview {
+        0
+    } else {
+        1
+    };
     (
         enforced,
         severity_rank(&f.severity),

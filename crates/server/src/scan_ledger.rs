@@ -587,6 +587,10 @@ pub struct ScanLedger {
     /// `None` for a full scan.
     #[serde(default)]
     incremental: Option<IncrementalCarry>,
+    /// Waiver comments and baseline entries found in the client's repositories and not honoured
+    /// by this first inspection. Added up over the repos. Printed once, in the counts.
+    #[serde(default)]
+    client_suppressions_found: usize,
     /// The repos each selected rule is bound to, by upper-cased rule id. An empty list is a
     /// project-level rule, which applies to every repo. A rule with no record here is read as
     /// applying everywhere, so a repo with nothing recorded for it is "not reviewed", never
@@ -1378,6 +1382,16 @@ impl ScanLedger {
     /// Record the engagement this scan ran under. Overwrites: one scan, one record.
     pub fn record_engagement(&mut self, record: crate::client_lock::EngagementRecord) {
         self.engagement = Some(record);
+    }
+
+    /// Add what one repository held: waiver comments and baseline entries that were not honoured.
+    pub fn add_client_suppressions(&mut self, found: usize) {
+        self.client_suppressions_found += found;
+    }
+
+    /// Waivers and baseline entries found in the client's repositories and not honoured.
+    pub fn client_suppressions_found(&self) -> usize {
+        self.client_suppressions_found
     }
 
     /// Record that this run was incremental (H11). Overwrites: one scan, one record.

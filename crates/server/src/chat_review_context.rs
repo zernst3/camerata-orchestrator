@@ -101,7 +101,9 @@ fn rows_in_order<'a>(
     rest.sort_by(|a, b| {
         severity_rank(&a.severity)
             .cmp(&severity_rank(&b.severity))
-            .then_with(|| (b.status == "active").cmp(&(a.status == "active")))
+            .then_with(|| {
+                (b.status == "active" && !b.preview).cmp(&(a.status == "active" && !a.preview))
+            })
             .then_with(|| a.repo.cmp(&b.repo))
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.line.cmp(&b.line))

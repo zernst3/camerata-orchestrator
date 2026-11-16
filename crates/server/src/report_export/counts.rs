@@ -115,6 +115,10 @@ pub struct OtherCounts {
     pub rules_checked: usize,
     /// Distinct rules with at least one problem row.
     pub rules_with_problems: usize,
+    /// Waiver comments and baseline entries found in the client's repository and not honoured
+    /// by a first inspection. The problems they cover are open.
+    #[serde(default)]
+    pub client_suppressions_found: usize,
 }
 
 impl SeverityCounts {
@@ -194,6 +198,7 @@ pub fn report_counts(
             repositories: report.repos.len(),
             rules_checked: report.provenance.audited_rule_ids.len(),
             rules_with_problems: 0,
+            client_suppressions_found: report.ledger.client_suppressions_found(),
         },
     )
 }

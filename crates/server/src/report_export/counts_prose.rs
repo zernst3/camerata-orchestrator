@@ -154,11 +154,25 @@ pub(crate) fn methodology_line(c: &ReportCounts, state: ReviewState) -> String {
         noun(r.total, "source row", "source rows"),
         join_and(&parts)
     );
-    if state.is_draft() {
-        format!("{core} This export has not yet had a human review.")
+    let review = if state.is_draft() {
+        "This export has not yet had a human review."
     } else {
-        format!("{core} Reviewed by a human reviewer.")
+        "Reviewed by a human reviewer."
+    };
+    format!("{core} {review}{}", suppressions_sentence(c))
+}
+
+/// The sentence that says how many waivers and baseline entries the client's repository held and
+/// that none was honoured; empty when it held none.
+pub(crate) fn suppressions_sentence(c: &ReportCounts) -> String {
+    let found = c.other.client_suppressions_found;
+    if found == 0 {
+        return String::new();
     }
+    format!(
+        " The inspected code held {}; this first inspection did not honour them, so every problem they cover is open.",
+        noun(found, "waiver or baseline entry", "waivers and baseline entries"),
+    )
 }
 
 /// The three steps from here, with the decision sentence in the first.

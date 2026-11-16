@@ -265,6 +265,8 @@ pub(super) fn recount(
     // Rules checked is a fact of the scan, not of any row: it cannot be recounted from the
     // archive, so the recount takes the object's own figure and the check compares the rest.
     c.other.rules_checked = report.counts.other.rules_checked;
+    // Found in the client's repository at scan time; no row in the package can recount it.
+    c.other.client_suppressions_found = report.counts.other.client_suppressions_found;
     c.other.rules_with_problems = problem_rows
         .iter()
         .map(|r| text(r, "rule_id"))
@@ -632,6 +634,9 @@ pub(super) fn counts_problems_with(
         }
     }
 
+    // 6. (work order D) A row a baseline record or a waiver closed needs a reviewer's decision.
+    problems.extend(accepted_rows_without_a_decision_problems(entries));
+
     // 7. (work order D) Every folded row names its head.
     if checks.folded_rows_name_their_head {
         problems.extend(folded_rows_problems(entries));
@@ -779,6 +784,45 @@ fn not_checked_rule_rows(xlsx: &[u8]) -> Result<usize, String> {
 
 /// Check 7: in every place with more than one problem row, all rows but the head carry
 /// `carried_by` naming the head's `site_id`.
+/// Check 6: every row with status `carried-baseline` or `waived-inline` has a reviewer's decision
+/// this session. A row nobody decided is still read as accepted by its baseline record or waiver
+/// alone, which closes a problem without anyone ruling on it. The row's disposition says which:
+/// `BaselineAccepted` and `WaivedInline` are the dispositions with no decision behind them.
+fn accepted_rows_without_a_decision_problems(entries: &Entries) -> Vec<Problem> {
+    let Ok(live) = array_of(entries, "json/all-findings.json") else {
+        // The recount has already refused a package it cannot read.
+        return Vec::new();
+    };
+    live.iter()
+        .filter(|r| {
+            let status = text(r, "status");
+            crate::finding_status::is_carried_baseline(&status)
+                || crate::finding_status::is_waived_inline(&status)
+        })
+        .filter(|r| {
+            matches!(
+                text(r, "disposition_kind").as_str(),
+                "BaselineAccepted" | "WaivedInline"
+            )
+        })
+        .map(|r| {
+            problem(
+                "json/all-findings.json",
+                &format!("place {}:{}", text(r, "path"), text(r, "line")),
+                format!(
+                    "{} is closed by {} and no reviewer has decided it this session",
+                    text(r, "rule_id"),
+                    if crate::finding_status::is_waived_inline(&text(r, "status")) {
+                        "a waiver comment"
+                    } else {
+                        "a baseline record"
+                    },
+                ),
+            )
+        })
+        .collect()
+}
+
 fn folded_rows_problems(entries: &Entries) -> Vec<Problem> {
     let Ok(live) = array_of(entries, "json/all-findings.json") else {
         // The recount has already refused a package it cannot read.

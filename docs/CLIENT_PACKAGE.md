@@ -161,7 +161,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Carried from an earlier inspection | A problem carried forward unchanged because only changed files were inspected again. The column holds the earlier commit. | The Carried from column |
 | Carried from | The commit of the earlier inspection a problem was carried forward from. Blank when it was found this time. | The technical columns of All problems |
 | Dependency advisory | A published vulnerability in a package you depend on. | The Dependencies sheet |
-| Status | The state the engine holds a problem in, for example suppressed by an earlier baseline. For tools. | The technical columns of All problems |
+| Status | The state the engine holds a problem in: active, carried-baseline (matched to a baseline record Cantus wrote) or waived-inline (covered by a waiver comment). Whether a tool in preview found it is in the Source column. For tools. | The technical columns of All problems |
 | Place id | A short code that names one place. It is the same in every file of this package. | The technical columns |
 | Fix id | A code that names one fix. It matches a row of the Fix plan. | The technical columns |
 | Rule ids | Every rule id behind a problem: its own rule and any rule that flagged the same place. | The technical columns of All problems |

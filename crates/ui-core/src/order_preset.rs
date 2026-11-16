@@ -155,7 +155,7 @@ impl OrderPreset {
 
 /// A finding's enforcement rank: active before suppressed, the first term of every order.
 fn enforced(f: &FindingView) -> u8 {
-    u8::from(f.status != "active")
+    u8::from(f.status != "active" || f.preview)
 }
 
 /// Compare two findings under `preset`. Total and stable: ties fall through to the curated key,

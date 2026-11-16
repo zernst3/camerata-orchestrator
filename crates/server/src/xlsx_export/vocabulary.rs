@@ -727,7 +727,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Status",
-        "The state the engine holds a problem in, for example suppressed by an earlier baseline. For tools.",
+        "The state the engine holds a problem in: active, carried-baseline (matched to a baseline record Cantus wrote) or waived-inline (covered by a waiver comment). Whether a tool in preview found it is in the Source column. For tools.",
         "The technical columns of All problems",
     ),
     e(

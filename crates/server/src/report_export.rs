@@ -337,6 +337,8 @@ pub(crate) fn sanitize_report_findings(report: &ScanReport) -> ScanReport {
     let mut report = report.clone();
     for f in report.findings.iter_mut() {
         *f = sanitize_finding_text(f);
+        // A report built in this process can still hold an old word; no client surface prints one.
+        crate::finding_status::normalize(f);
     }
     report
 }
@@ -453,8 +455,10 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
     // W28: what the row's OWN STATUS implies, with no triage decision in play. Used both when
     // there is no wire entry and when there is one this version cannot read — see below.
     let from_status = || match finding.status.as_str() {
-        "suppressed-baseline" if !finding.preview => Disposition::BaselineAccepted,
-        "suppressed-inline" => Disposition::WaivedInline,
+        s if crate::finding_status::is_carried_baseline(s) && !finding.preview => {
+            Disposition::BaselineAccepted
+        }
+        s if crate::finding_status::is_waived_inline(s) => Disposition::WaivedInline,
         _ => Disposition::Unresolved,
     };
 
@@ -2550,6 +2554,8 @@ pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFacts
 
 #[cfg(test)]
 mod counts_surfaces_tests;
+#[cfg(test)]
+mod status_word_tests;
 
 #[cfg(test)]
 mod counts_tests;

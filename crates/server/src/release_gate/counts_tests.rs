@@ -977,3 +977,37 @@ fn the_gate_refuses_a_grid_note_that_states_other_counts() {
     );
     assert!(has(&new, "PDF data", "priority_grid.held_count"), "{new:?}");
 }
+
+/// Test 9 (single counts): a row a baseline record closed, with no reviewer's decision.
+fn with_a_baseline_row(disposition_kind: &str) -> Vec<super::report::Problem> {
+    let (mut entries, report) = consistent();
+    edit_json(&mut entries, "json/all-findings.json", |v| {
+        v[0]["status"] = json!("carried-baseline");
+        v[0]["disposition_kind"] = json!(disposition_kind);
+    });
+    counts_problems(&entries, &report)
+}
+
+#[test]
+fn an_accepted_baseline_row_without_a_decision_blocks_release() {
+    let problems = with_a_baseline_row("BaselineAccepted");
+    assert!(
+        problems.iter().any(|p| p
+            .message
+            .contains("no reviewer has decided it this session")),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn a_baseline_row_a_reviewer_decided_does_not_block_release() {
+    let problems = with_a_baseline_row("Confirmed");
+    assert!(
+        !problems.iter().any(|p| p
+            .message
+            .contains("no reviewer has decided it this session")),
+        "{}",
+        messages(&problems)
+    );
+}

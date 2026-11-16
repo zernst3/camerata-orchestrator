@@ -123,7 +123,7 @@ fn is_problem(f: &Finding) -> bool {
 pub fn is_place_row(f: &Finding) -> bool {
     is_problem(f)
         && !f.site_key.is_empty()
-        && !f.status.starts_with("suppressed")
+        && !crate::finding_status::is_suppressed(&f.status)
         && !crate::engine_discard::is_discarded(f)
         && !f.group_path.iter().any(|g| is_thrown_out_id(g))
 }

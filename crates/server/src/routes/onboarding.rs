@@ -290,6 +290,9 @@ pub(crate) struct ArmFinding {
     pub(crate) snippet: String,
     #[serde(default)]
     pub(crate) status: String,
+    /// A row found by a tool in preview is never snapshotted into a baseline.
+    #[serde(default)]
+    pub(crate) preview: bool,
 }
 
 /// Build the per-repo `.camerata/baseline.json` contents from the armed findings:
@@ -305,7 +308,8 @@ pub(crate) fn baselines_from_findings(
     for f in findings {
         // Only snapshot real, currently-enforced violations — not the require-reason
         // meta-finding, not already-suppressed ones.
-        if f.status != "active" || f.rule_id == crate::suppression::REASONLESS_RULE_ID {
+        if f.status != "active" || f.preview || f.rule_id == crate::suppression::REASONLESS_RULE_ID
+        {
             continue;
         }
         let fr = FindingRef {
