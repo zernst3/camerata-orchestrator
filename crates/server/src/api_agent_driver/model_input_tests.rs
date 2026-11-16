@@ -86,3 +86,103 @@ fn a_conversation_with_no_secret_makes_the_same_body_as_before() {
         build_anthropic_request_body("claude-opus-5", Some("You are governed."), &messages, &[]);
     assert_eq!(body["messages"], json!(messages));
 }
+
+// ---- a thinking block is never sent back after an edit to the conversation ----
+//
+// Fable 5.2 answers a request that returns a thinking block after an edit to `system`, `tools` or
+// an earlier message with HTTP 400 ("The block is bound to a different conversation"), and a
+// retry of the same body does not clear it. The loop replays each assistant turn exactly as the
+// model wrote it, and the redaction above rewrites a secret the model put in that turn; the
+// rewritten turn can no longer carry its thinking block.
+
+fn thinking_turn(tool_note: &str) -> Value {
+    json!({ "role": "assistant", "content": [
+        { "type": "thinking", "thinking": "plan the read", "signature": "sig-abc" },
+        { "type": "redacted_thinking", "data": "opaque" },
+        { "type": "text", "text": "Reading the file." },
+        { "type": "tool_use", "id": "toolu_1", "name": "read_file",
+          "input": { "path": ".env", "note": tool_note } }
+    ]})
+}
+
+fn tool_result() -> Value {
+    json!({ "role": "user", "content": [
+        { "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" }
+    ]})
+}
+
+fn block_types(message: &Value) -> Vec<&str> {
+    message["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn a_turn_redaction_rewrites_goes_back_without_its_thinking_blocks() {
+    let leaked = planted(SecretShape::SupabaseSecretKey);
+    let messages = vec![
+        json!({ "role": "user", "content": "Read the file." }),
+        thinking_turn(&leaked.text),
+        tool_result(),
+    ];
+    let (body, _) = build_anthropic_request_body(
+        "claude-fable-5-2",
+        Some("You are governed."),
+        &messages,
+        &[],
+    );
+    assert!(!body.to_string().contains(&leaked.value), "still redacted");
+    assert_eq!(
+        block_types(&body["messages"][1]),
+        ["text", "tool_use"],
+        "the rewritten turn keeps its text and tool call and drops the thinking blocks"
+    );
+    assert_eq!(body["messages"][1]["content"][1]["id"], "toolu_1");
+}
+
+#[test]
+fn every_turn_after_an_edited_one_drops_its_thinking_blocks_too() {
+    let leaked = planted(SecretShape::GitHubToken);
+    let messages = vec![
+        json!({ "role": "user", "content": "Read the file." }),
+        thinking_turn(&leaked.text),
+        tool_result(),
+        thinking_turn("clean"),
+        tool_result(),
+    ];
+    let (body, _) = build_anthropic_request_body("claude-fable-5-2", None, &messages, &[]);
+    assert_eq!(block_types(&body["messages"][1]), ["text", "tool_use"]);
+    assert_eq!(block_types(&body["messages"][3]), ["text", "tool_use"]);
+}
+
+#[test]
+fn a_turn_before_the_edit_keeps_its_thinking_blocks() {
+    let leaked = planted(SecretShape::GitHubToken);
+    let messages = vec![
+        json!({ "role": "user", "content": "Read the file." }),
+        thinking_turn("clean"),
+        tool_result(),
+        thinking_turn(&leaked.text),
+        tool_result(),
+    ];
+    let (body, _) = build_anthropic_request_body("claude-fable-5-2", None, &messages, &[]);
+    assert_eq!(
+        block_types(&body["messages"][1]),
+        ["thinking", "redacted_thinking", "text", "tool_use"]
+    );
+    assert_eq!(block_types(&body["messages"][3]), ["text", "tool_use"]);
+}
+
+#[test]
+fn an_unedited_conversation_sends_its_thinking_blocks_back_untouched() {
+    let messages = vec![
+        json!({ "role": "user", "content": "Read the file." }),
+        thinking_turn("clean"),
+        tool_result(),
+    ];
+    let (body, _) = build_anthropic_request_body("claude-fable-5-2", None, &messages, &[]);
+    assert_eq!(body["messages"], json!(messages));
+}
