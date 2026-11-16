@@ -26,9 +26,19 @@
 //!    final arbiter.
 //! 3. **`shell` / `Task` are never exposed.** The tool schema list is an explicit allowlist;
 //!    any tool not in it is not callable.
-//! 4. **Worktree jail.** When `worktree` is set, `gated_write` paths that escape the jail
-//!    (via the existing gateway rules: `SEC-NO-PATH-ESCAPE-1` + the worktree prefix check)
-//!    are denied before the file is written.
+//! 4. **Worktree jail for writes.** `gated_write` paths that escape the worktree (via the
+//!    existing gateway rules: `SEC-NO-PATH-ESCAPE-1` + the symlink-resolving worktree prefix
+//!    check) are denied before the file is written.
+//! 5. **Read jail for reads.** `Read`, `Glob`, `Grep` and `LS` may read only the worktree and
+//!    the read folders the run declared. Symlinks are resolved before the check, and a root
+//!    that would open (nearly) everything (empty, relative, the filesystem root) is dropped,
+//!    so with no usable root every read is refused.
+//! 6. **Every read is logged.** Each read tool call lands in the run's [`ReadLog`] (shared with
+//!    the lead and its children) and, when wired, the governance log, with whether the jail
+//!    allowed it.
+//! 7. **Spend limit.** A run given a [`SpendMeter`] with a limit sends no request that could
+//!    pass it; the meter is shared by handle with children, and admission reserves each
+//!    request's ceiling atomically so concurrent children cannot overshoot together.
 //!
 //! # Tool-call normalization
 //!
@@ -50,9 +60,10 @@
 //!
 //! # Read tools
 //!
-//! `Read`, `Glob`, `Grep`, `LS` are executed in-process directly on the filesystem.
-//! They carry no write authority and are safe to execute without gate evaluation. The
-//! results are fed back to the model as tool-result messages.
+//! `Read`, `Glob`, `Grep`, `LS` are executed in-process directly on the filesystem, inside
+//! the read jail (invariant 5) and the read log (invariant 6). They carry no write authority,
+//! so they need no gate evaluation. The results are fed back to the model as tool-result
+//! messages.
 //!
 //! # Iteration cap
 //!
@@ -2762,7 +2773,9 @@ fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
         camerata_app_core::kernel_for(model)
     };
     let paths = if role.allowed_paths.is_empty() {
-        "<unrestricted>".to_string()
+        // The jail limits every read and write to the worktree (and, for reads, the declared
+        // read folders), so "no list" means the worktree and nothing else.
+        "only the worktree".to_string()
     } else {
         role.allowed_paths.join(", ")
     };
@@ -5872,6 +5885,8 @@ mod read_jail_tests;
 mod read_log_tests;
 #[cfg(test)]
 mod spend_limit_tests;
+#[cfg(test)]
+mod system_prompt_tests;
 #[cfg(test)]
 mod tool_list_tests;
 #[cfg(test)]
