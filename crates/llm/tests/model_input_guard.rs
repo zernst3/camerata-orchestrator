@@ -28,6 +28,9 @@ const SEND_MARKERS: &[&str] = &[
     "Command::new(&self.program)",
     // The one resolver of the `claude` program: whatever calls it launches a model CLI.
     "claude_program(",
+    // The variable that names that program: a file reading it picks the program itself.
+    "CLAUDE_PROGRAM_ENV",
+    "CAMERATA_CLAUDE_PROGRAM",
     // The paths of the model APIs, whatever host a config or a test points them at.
     "/v1/messages",
     "/chat/completions",
@@ -422,6 +425,25 @@ fn a_new_spawn_through_the_claude_resolver_is_caught() {
         let found = violations(&files);
         assert_eq!(found.len(), 1, "{planted}: {found:?}");
         assert!(found[0].contains("resolver_spawn.rs"), "{found:?}");
+    }
+}
+
+/// A file that reads the program variable itself (by constant or by name) is a send marker: it
+/// is choosing the `claude` program without the one resolver.
+#[test]
+fn a_new_file_reading_the_program_variable_and_spawning_is_caught() {
+    for planted in [
+        "fn go() { let p = std::env::var_os(\"CAMERATA_CLAUDE_PROGRAM\"); let _ = std::process::Command::new(p.unwrap()); }",
+        "use camerata_api_types::claude_cli::CLAUDE_PROGRAM_ENV;\nfn go() { let p = std::env::var_os(CLAUDE_PROGRAM_ENV); let _ = std::process::Command::new(p.unwrap()); }",
+    ] {
+        let mut files = workspace_sources();
+        files.push((
+            "crates/somewhere/src/env_spawn.rs".to_string(),
+            planted.to_string(),
+        ));
+        let found = violations(&files);
+        assert_eq!(found.len(), 1, "{planted}: {found:?}");
+        assert!(found[0].contains("env_spawn.rs"), "{found:?}");
     }
 }
 
