@@ -15,6 +15,7 @@ mod build;
 mod collapse;
 mod fixes;
 mod grouping;
+mod lint;
 mod mapping;
 mod places;
 mod types;
@@ -30,6 +31,10 @@ pub use fixes::{
     FIX_PREFIX,
 };
 pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};
+pub use lint::{
+    in_lint_group, is_lint_sub_id, is_security_family_lint, is_security_lint_id, is_style_lint_row,
+    is_style_linter, lint_sub_id, LINT_SEGMENT_PREFIX, STYLE_LINTERS,
+};
 pub use mapping::{
     family_of, is_external_tool_row, rule_node_for, RulePlacement, ToolMap, OTHER_TOOLS,
     UNCATEGORISED,
@@ -336,13 +341,18 @@ impl RankedSite {
 ///    a top reason never outranks a high row), then interleaved across nodes inside one severity
 ///    and reason (rank 1 of every node before rank 2 of any), so one noisy rule cannot take the
 ///    whole budget (D6). The same candidates always give the same list.
-/// 5. The first `budget` slots are escalated; past it only the D5 reasons at their severity and
+/// 5. A place of a style linter's rule group ([`lint`]) is never a candidate: the rule is one
+///    decision, made as a batch.
+/// 6. The first `budget` slots are escalated; past it only the D5 reasons at their severity and
 ///    `evidence_unverified` are, each recording why. The rest stay, in order, below the line.
 pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSettings) -> Ranked {
     use std::collections::{BTreeMap, HashMap};
 
     let site_of = |f: &Finding| (f.repo.clone(), f.path.clone(), f.line);
-    let by_key: HashMap<&str, &Finding> = rows.iter().map(|f| (f.site_key.as_str(), f)).collect();
+    // A place of a style linter's rule group never takes a slot (see [`lint`]): the rule is one
+    // decision, made as a batch. It is not a candidate of any kind.
+    let rows: Vec<&Finding> = rows.iter().filter(|f| !in_lint_group(f)).collect();
+    let by_key: HashMap<&str, &Finding> = rows.iter().map(|f| (f.site_key.as_str(), *f)).collect();
     let mut raw: BTreeMap<String, RawEscalation> = BTreeMap::new();
     for node in nodes {
         for e in &node.escalations {
@@ -372,7 +382,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
             }
         }
     }
-    for f in rows {
+    for &f in &rows {
         if !f
             .captures
             .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
@@ -412,7 +422,7 @@ pub fn rank_candidates(nodes: &[TreeNode], rows: &[Finding], settings: &RankSett
     // candidate of the same severity. At a site stage 2 nominated, the row joins that slot with
     // its own reason and does not move it. A run saved before stage 1's rating was kept has no
     // rating to compare, and yields none.
-    for f in rows {
+    for &f in &rows {
         if raw.contains_key(&f.site_key) {
             continue;
         }
@@ -575,6 +585,12 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
 
 #[cfg(test)]
 mod fixes_tests;
+#[cfg(test)]
+mod lint_review_tests;
+#[cfg(test)]
+mod lint_tests;
+#[cfg(test)]
+mod lint_urgent_tests;
 #[cfg(test)]
 mod outlier_tests;
 #[cfg(test)]

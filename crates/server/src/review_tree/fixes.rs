@@ -15,7 +15,8 @@
 //! swallow it and nothing chains through a shared place. A sub-group with two containing sets that
 //! do not contain each other stays its own Fix (fail closed toward duplicates). A dependency
 //! sub-group and a sub-group of observations (conventions, rules that could not be completed)
-//! never merge.
+//! never merge, and neither does a style linter's rule group ([`super::lint`]): it is one Fix of
+//! its own.
 //!
 //! A whole-file place (line 0) of a file contains every line place of that file, but only when the
 //! sub-group of the whole file is at least as severe as the worst row of the sub-group of lines: a
@@ -220,7 +221,9 @@ pub fn merge_fixes(tree: &ReviewTree, findings: &[Finding]) -> Vec<FixNode> {
                 .map(|f| severity_rank(&f.severity))
                 .min()
                 .unwrap_or(3),
-            mergeable: !is_dependency && !places.is_empty(),
+            // A lint rule group is one Fix of its own: a style rule never absorbs another rule's
+            // problem at a shared place, and never folds into one.
+            mergeable: !is_dependency && !super::lint::is_lint_sub_id(id) && !places.is_empty(),
             places,
             rules: rows.iter().map(|f| f.rule_id.clone()).collect(),
         });

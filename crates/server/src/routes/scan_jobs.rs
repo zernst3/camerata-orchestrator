@@ -601,11 +601,12 @@ pub(crate) fn dedup_scan_previews_with(
     out
 }
 
-/// The tools whose severity is a strictness preference about style, not a judgement about
-/// harm: a project fails its build on an ESLint, Clippy or Ruff "error" by choice (W24, see
-/// `scan_tools::capped_preview_severity`). Semgrep is not on the list: it is a security scanner.
-/// The security family inside a style linter is exempt, row by row ([`is_security_family_lint`]).
-const STYLE_LINTERS: &[&str] = &["eslint", "clippy", "ruff"];
+// The tools whose severity is a strictness preference about style, not a judgement about
+// harm: a project fails its build on an ESLint, Clippy or Ruff "error" by choice (W24, see
+// `scan_tools::capped_preview_severity`). Semgrep is not on the list: it is a security scanner.
+// The security family inside a style linter is exempt, row by row (`is_security_family_lint`).
+// The list is the review tree's (`crate::review_tree::STYLE_LINTERS`), which groups the same
+// tools' rules one decision per rule.
 
 /// Whether `preview`, a style linter's row, is one of the linter's security checks, which a
 /// reviewed severity does not outrank: an `eslint-plugin-security` id (`security/...`), a Ruff `S`
@@ -616,25 +617,15 @@ fn is_security_family_lint(
     existing: &crate::onboard::Finding,
     selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> bool {
-    let id = preview.rule_id.to_ascii_lowercase();
-    let last = id.rsplit(['/', ':']).next().unwrap_or(&id);
-    let is_ruff_s = last.len() == 4
-        && last.starts_with('s')
-        && last[1..].bytes().all(|b| b.is_ascii_digit())
-        && preview
-            .preview_tool
-            .as_deref()
-            .is_some_and(|t| t.eq_ignore_ascii_case("ruff"));
-    let is_security_plugin = id
-        .split('/')
-        .rev()
-        .skip(1)
-        .any(|segment| segment.contains("security"));
+    let named_security = crate::review_tree::is_security_lint_id(
+        preview.preview_tool.as_deref().unwrap_or_default(),
+        &preview.rule_id,
+    );
     let mapped_to_security_rule = crate::ai_audit::finding_class(existing)
         == crate::ai_audit::FindingClass::Security
         && (preview.rule_id == existing.rule_id
             || preview_is_native_rule_tool(&preview.rule_id, &existing.rule_id, selectors));
-    is_ruff_s || is_security_plugin || mapped_to_security_rule
+    named_security || mapped_to_security_rule
 }
 
 /// Whether `f` is a style linter's preview row.
@@ -642,7 +633,7 @@ fn is_style_linter_row(f: &crate::onboard::Finding) -> bool {
     f.preview
         && f.preview_tool
             .as_deref()
-            .is_some_and(|t| STYLE_LINTERS.iter().any(|s| t.eq_ignore_ascii_case(s)))
+            .is_some_and(crate::review_tree::is_style_linter)
 }
 
 /// What a preview collapse does to the merged row's severity: the severity it ends at and the
