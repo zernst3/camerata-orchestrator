@@ -270,6 +270,20 @@ impl Checklist {
         trace: &[ToolEvent],
         piece_files: &[(String, usize)],
     ) -> CheckOutcome {
+        self.check_with_shown(answers, problems, trace, piece_files, &[])
+    }
+
+    /// [`Self::check`] where `shown_in_full` are the files a completed step showed the model in
+    /// full ([`crate::ai_audit::agent_finder::AgentRun::shown_in_full`]). Every line of such a
+    /// file counts as read, so a `clean` place in it holds up.
+    pub fn check_with_shown(
+        &self,
+        answers: &ChecklistFile,
+        problems: &[Problem],
+        trace: &[ToolEvent],
+        piece_files: &[(String, usize)],
+        shown_in_full: &[String],
+    ) -> CheckOutcome {
         let numbers: Vec<u32> = problems.iter().map(|p| p.n).collect();
         let line_counts: BTreeMap<String, usize> = piece_files
             .iter()
@@ -293,7 +307,14 @@ impl Checklist {
                 }
             }
         }
-        // A place is valid when it names a file of the piece and a line a Read returned.
+        for shown in shown_in_full {
+            let path = plain_path(shown);
+            if let Some(&lines) = line_counts.get(&path) {
+                returned.entry(path).or_default().push((1, lines.max(1)));
+            }
+        }
+        // A place is valid when it names a file of the piece and a line a Read returned (or a
+        // file a completed step showed in full).
         let place_is_valid = |p: &Place| -> bool {
             let path = plain_path(&p.path);
             let (Some(&lines), Some(line)) = (line_counts.get(&path), p.line) else {

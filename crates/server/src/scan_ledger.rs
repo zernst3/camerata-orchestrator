@@ -602,6 +602,44 @@ pub struct ScanLedger {
     /// alone. Operator-only. Empty for a ledger written before the field existed.
     #[serde(default)]
     runner_notes: Vec<String>,
+    /// The agent finder's coverage block: for each piece of code one agent reviewed, how many of
+    /// its files were read in full, read in part, sent again or not reviewed (from the agent's
+    /// tool trace, never from what it said). Empty for a run of the other finder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    finder_coverage: Vec<FinderRepoCoverage>,
+}
+
+/// The agent finder's coverage for one repository: one record for each piece.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinderRepoCoverage {
+    pub repo: String,
+    pub pieces: Vec<FinderPieceCoverage>,
+}
+
+/// One piece's coverage, taken from the tool trace only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinderPieceCoverage {
+    /// The piece's key (unit, number and a digest of its file list).
+    pub piece: String,
+    /// Files the piece owes a full review.
+    pub files_owed: usize,
+    pub read_in_full: usize,
+    pub read_in_part: usize,
+    pub sent_again: usize,
+    pub not_reviewed: usize,
+    /// Files outside the piece that were read (this covers nothing).
+    pub context_files_read: usize,
+    /// Whether the agent's own list of unread files matched the trace; `None` when it wrote none.
+    pub agent_list_matched: Option<bool>,
+    /// The files left not reviewed or read only in part, in path order.
+    pub not_reviewed_files: Vec<String>,
+}
+
+impl FinderPieceCoverage {
+    /// Whether every file the piece owes was read in full or sent again in full.
+    pub fn complete(&self) -> bool {
+        self.not_reviewed == 0 && self.read_in_part == 0
+    }
 }
 
 /// What the escalation formula did in one run (design 4.4 and 4.7). The counts are the tree's,
@@ -1358,6 +1396,26 @@ impl ScanLedger {
     /// first, with or without a spend limit.
     pub fn runner_notes(&self) -> &[String] {
         &self.runner_notes
+    }
+
+    /// Record the agent finder's coverage of `repo`, one record for each piece (replacing an
+    /// earlier record of the same repository).
+    pub fn record_finder_coverage(
+        &mut self,
+        repo: &str,
+        pieces: impl IntoIterator<Item = FinderPieceCoverage>,
+    ) {
+        self.finder_coverage.retain(|r| r.repo != repo);
+        self.finder_coverage.push(FinderRepoCoverage {
+            repo: repo.to_string(),
+            pieces: pieces.into_iter().collect(),
+        });
+    }
+
+    /// The agent finder's coverage block, one entry for each repository. Empty for a run of the
+    /// other finder.
+    pub fn finder_coverage(&self) -> &[FinderRepoCoverage] {
+        &self.finder_coverage
     }
 
     /// Record that the run stopped on an outage. Overwrites: one scan, one record.

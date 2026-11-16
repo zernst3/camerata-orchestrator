@@ -114,6 +114,7 @@ fn args(
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     }
 }
 

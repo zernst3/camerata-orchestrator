@@ -212,6 +212,7 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     };
     // The export needs `typst`; either outcome is fine here (see the module doc).
     let _ = run_inspect_pipeline_with(

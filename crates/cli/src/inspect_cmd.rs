@@ -38,6 +38,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod finder;
 pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
@@ -143,6 +144,10 @@ pub struct InspectArgs {
     /// `--consensus`: run the AI audit three times and keep what two runs agree on (see
     /// [`camerata_server::consensus`]). Off by default.
     pub consensus: bool,
+    /// `--finder`, `--finder-model`, `--finder-force-pieces` and `--compare-with`. The default is
+    /// the scan passes (`engine`); a run saved before the flags existed loads with the default.
+    #[serde(default)]
+    pub finder: finder::FinderArgs,
 }
 
 impl InspectArgs {
@@ -284,10 +289,9 @@ impl InspectArgs {
             fix_model: self.fix_model.clone(),
             clone_judge_model: self.clone_judge_model.clone(),
             consensus: self.consensus,
-            // The finder flags are wired by the agent finder runner build.
-            finder: camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
-            finder_model: None,
-            finder_force_pieces: None,
+            finder: self.finder.finder,
+            finder_model: self.finder.model.clone(),
+            finder_force_pieces: self.finder.force_pieces,
         })
     }
 }
@@ -503,7 +507,14 @@ impl From<String> for InspectError {
 /// production caller, and it passes the presence the shared resolver finds (the key saved in
 /// the app first, `ANTHROPIC_API_KEY` as the fallback; see [`api_key_present`]).
 pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String> {
-    args.run_controls()?;
+    let controls = args.run_controls()?;
+    // The finder settings that cannot go together are refused here, before anything is read or
+    // spent. A re-inspection of only what changed is checked once the run's baseline is known.
+    camerata_server::ai_audit::agent_finder::run::refuse_unsupported_finder_settings(
+        &controls,
+        false,
+        !args.client_engagement,
+    )?;
     require_client_lock(args)?;
     let probe = ReportOptions {
         client_name: args.client.clone(),
@@ -1026,6 +1037,15 @@ pub async fn run_inspect_pipeline_with(
         None => load_prior_manifest(&manifest_path),
     };
 
+    // The agent finder reviews every file; it does not build on an earlier inspection. Refused
+    // before the estimate, so before anything is spent.
+    camerata_server::ai_audit::agent_finder::run::refuse_unsupported_finder_settings(
+        &controls,
+        incremental_prior.is_some(),
+        !args.client_engagement,
+    )
+    .map_err(InspectError::Failed)?;
+
     // A spend limit needs every model priced; refuse before the estimate, before any model call.
     if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
@@ -1208,8 +1228,33 @@ pub async fn run_inspect_pipeline_with(
         Some(j) => j.as_ref(),
         None => base,
     };
+    // The agent finder's setup: one value, built once here and carried into the audit. The run
+    // builds the agent from it on its own shared meter. A test that already stands an agent in
+    // (`with_agent_override`) keeps its own. A missing key stops the run before the first call.
+    let finder_setup: Option<camerata_server::ai_audit::agent_finder::run::FinderSetup> =
+        if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent
+            && !ai_review_blocked
+            && !camerata_server::ai_audit::agent_finder::run::agent_override_is_set()
+        {
+            let rooms_dir = store
+                .as_ref()
+                .map_or_else(camerata_state_dir, |s| s.dir().to_path_buf())
+                .join("finder-rooms");
+            Some(
+                finder::finder_setup(
+                    llm_backend,
+                    camerata_server::credentials::anthropic_api_key(creds),
+                    rooms_dir,
+                    args.client_engagement,
+                )
+                .map_err(InspectError::Failed)?,
+            )
+        } else {
+            None
+        };
+    let no_chosen_options: HashMap<String, String> = HashMap::new();
     let (mut report, manifest) = {
-        let (mut report, manifest) = camerata_server::checkpoint::with_run_checkpoints(
+        let audit = Box::pin(camerata_server::checkpoint::with_run_checkpoints(
             store.as_ref().map(|s| s.checkpoint_dir()),
             camerata_server::prompt_frame::with_seed(
                 token_seed,
@@ -1231,12 +1276,17 @@ pub async fn run_inspect_pipeline_with(
                     true,  // run_deterministic
                     backend_resolution,
                     corpus.as_ref(),
-                    &HashMap::new(),
+                    &no_chosen_options,
                     controls.clone(),
                 ),
             ),
-        )
-        .await;
+        ));
+        let (mut report, manifest) = match finder_setup {
+            Some(setup) => {
+                camerata_server::ai_audit::agent_finder::run::with_finder_setup(setup, audit).await
+            }
+            None => audit.await,
+        };
         if seams.llm.is_none() {
             report.provenance.model_sessions = sessions.snapshot();
         }
@@ -1342,7 +1392,11 @@ pub async fn run_inspect_pipeline_with(
     // The incremental baseline becomes reusable only when the scan is complete: a run with a
     // failed or unrun part leaves the previous baseline in place, and its own stored replies are
     // what a resume uses.
-    if report.incomplete_reasons().is_empty() {
+    // The agent finder's problems are not an incremental baseline for the other finder; they are
+    // recorded for `--compare-with` instead (below, beside the ledger).
+    if report.incomplete_reasons().is_empty()
+        && controls.finder != camerata_server::ai_audit::agent_finder::FinderChoice::Agent
+    {
         save_manifest(&manifest_path, &manifest);
     }
     // The scan's own tools (a build) can leave files in the checkout. Record the tree as it stands
@@ -1422,6 +1476,40 @@ pub async fn run_inspect_pipeline_with(
             ledger_summary
         }
     };
+
+    // The agent finder's problems, recorded beside the ledger for a later `--compare-with`, and
+    // the comparison with the earlier run the operator named. Operator side only: neither is in
+    // any file the client reads.
+    let ledger_summary =
+        if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent {
+            let mut summary = ledger_summary;
+            if let Err(e) =
+                finder::write_finder_run(&finder::finder_run_path(&ledger_file), &report.findings)
+            {
+                eprintln!("camerata inspect: could not record the run for a later comparison: {e}");
+            }
+            if let Some(folder) = &args.finder.compare_with {
+                match finder::compare_with_earlier_run(folder, &report.findings) {
+                    Ok(note) => {
+                        let path = finder::comparison_note_path(&ledger_file);
+                        match std::fs::write(&path, &note) {
+                            Ok(()) => summary.push_str(&format!(
+                                "\ncomparison with {} (never exported): {}",
+                                folder.display(),
+                                path.display()
+                            )),
+                            Err(e) => eprintln!(
+                                "camerata inspect: could not write the comparison note: {e}"
+                            ),
+                        }
+                    }
+                    Err(e) => eprintln!("camerata inspect: {e}"),
+                }
+            }
+            summary
+        } else {
+            ledger_summary
+        };
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
@@ -1999,6 +2087,9 @@ mod redaction_tests;
 mod exit_code_tests;
 
 #[cfg(test)]
+mod finder_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use camerata_server::scan_ledger::StageAccounting;
@@ -2028,6 +2119,7 @@ mod tests {
             client_engagement: false,
             run_client_tooling: false,
             consensus: false,
+            finder: Default::default(),
         }
     }
 

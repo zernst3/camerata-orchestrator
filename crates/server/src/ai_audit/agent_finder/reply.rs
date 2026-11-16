@@ -4,7 +4,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use super::checklist::{AnswerKind, ChecklistFile, Citation, OptionCount, Place, RuleAnswer};
+use super::checklist::{
+    AnswerKind, Checklist, ChecklistFile, Citation, OptionCount, Place, RuleAnswer,
+};
 use crate::onboard::{Finding, ProposedRule};
 
 /// One problem as the agent wrote it.
@@ -37,7 +39,7 @@ pub const FINDER_EFFORT_CAPTURE: &str = "finder-effort";
 pub const FINDER_FIX_CAPTURE: &str = "finder-fix";
 pub const FINDER_PROBLEM_CAPTURE: &str = "finder-problem";
 pub const FINDER_END_LINE_CAPTURE: &str = "finder-end-line";
-/// Every checklist rule id the problem was cited to, comma separated, in the order cited.
+/// Every checklist rule id the problem was cited to, comma separated, strictest first.
 pub const FINDER_RULES_CAPTURE: &str = "finder-rules";
 
 /// A problem the agent saw in a file outside its piece (a lead). Numbered within the piece's
@@ -52,6 +54,8 @@ pub struct Lead {
     /// The number of the agent's problem this lead was made from, when it was a problem written
     /// for a file outside the piece. `None` for an entry of `leads.json`.
     pub source_problem: Option<u32>,
+    /// The severity of the problem this lead was made from; `None` for an entry of `leads.json`.
+    pub severity: Option<String>,
 }
 
 /// An output file that could not be used, and why.
@@ -108,6 +112,22 @@ fn problems_file_number(name: &str) -> Option<u64> {
         .strip_suffix(".json")?
         .parse()
         .ok()
+}
+
+/// Whether `name` is a stray problems file name (`problems_2.json`, `problems.json`) whose `text`
+/// parses as a problems list. The agent has no delete tool, so a stray file it already wrote could
+/// never be repaired; one that holds a usable list is read as a problems file.
+fn stray_problems_list(name: &str, text: &str) -> bool {
+    if !(name.starts_with("problems") && name.ends_with(".json")) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Ok(items) = array_of(&value, "problems") else {
+        return false;
+    };
+    items.len() <= MAX_PROBLEMS_PER_FILE && items.iter().all(|item| parse_problem(item).is_ok())
 }
 
 fn field<'a>(v: &'a serde_json::Value, name: &str) -> Result<&'a serde_json::Value, String> {
@@ -323,6 +343,7 @@ fn parse_leads(v: &serde_json::Value) -> Result<Vec<Lead>, String> {
                 &text_field(l, "what", false).map_err(|e| format!("lead {} {e}", i + 1))?,
             ),
             source_problem: None,
+            severity: None,
         });
     }
     Ok(out)
@@ -360,7 +381,7 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
             file: key.clone(),
             reason,
         };
-        if problems_file_number(name).is_some() {
+        if problems_file_number(name).is_some() || stray_problems_list(name, text) {
             out.problems_files += 1;
             let value: serde_json::Value = match serde_json::from_str(text) {
                 Ok(v) => v,
@@ -419,6 +440,7 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
                         line: p.line,
                         what: lead_text(&format!("{}. {}", p.title, p.what)),
                         source_problem: Some(p.n),
+                        severity: Some(p.severity),
                     });
                 }
             }
@@ -486,7 +508,7 @@ fn rule_for<'a>(
 }
 
 /// The scan reply (`{"findings": [...]}`) for `parse_ai_findings`. `citations` maps a problem
-/// number to the checklist rules it breaks, first cited first; a problem without one is keyed by
+/// number to the checklist rules it breaks, strictest first (see [`citation_map`]); a problem without one is keyed by
 /// its label. The detail is what is wrong, then why it matters.
 pub fn scan_reply(problems: &[Problem], citations: &BTreeMap<u32, Vec<String>>) -> String {
     let findings: Vec<serde_json::Value> = problems
@@ -513,9 +535,38 @@ pub fn scan_reply(problems: &[Problem], citations: &BTreeMap<u32, Vec<String>>) 
     serde_json::json!({ "findings": findings }).to_string()
 }
 
+/// How strict a rule's severity range is, for ordering a problem's cited rules: a rule with no
+/// maximum before one with a maximum, then the higher minimum, then the id. A rule that is not
+/// on the checklist sorts after every listed one.
+fn strictness_key(rule: &str, checklist: &Checklist) -> (u8, u8, u8, String) {
+    let min_rank = |s: &Option<String>| match s.as_deref().map(str::to_ascii_lowercase) {
+        Some(m) if m == "critical" => 4,
+        Some(m) if m == "high" => 3,
+        Some(m) if m == "medium" => 2,
+        Some(m) if m == "low" => 1,
+        _ => 0,
+    };
+    match checklist
+        .rules
+        .iter()
+        .find(|r| r.id.eq_ignore_ascii_case(rule))
+    {
+        Some(r) => (
+            0,
+            u8::from(r.max_severity.is_some()),
+            5 - min_rank(&r.min_severity),
+            rule.to_string(),
+        ),
+        None => (1, 0, 0, rule.to_string()),
+    }
+}
+
 /// The citations of a checked piece as `scan_reply` wants them: for each problem the rule ids it
-/// was cited to (uppercase, in the order cited, none twice).
-pub fn citation_map(citations: &[Citation]) -> BTreeMap<u32, Vec<String>> {
+/// was cited to (uppercase, none twice), strictest first, so the first rule (the finding's rule,
+/// the one `severity_bounds` reads) never depends on the order the model wrote its citations in.
+/// Strictest is: a rule with no maximum before one with a maximum, then the higher minimum, then
+/// the id.
+pub fn citation_map(checklist: &Checklist, citations: &[Citation]) -> BTreeMap<u32, Vec<String>> {
     let mut map: BTreeMap<u32, Vec<String>> = BTreeMap::new();
     for c in citations {
         let rule = c.rule.trim().to_ascii_uppercase();
@@ -523,6 +574,9 @@ pub fn citation_map(citations: &[Citation]) -> BTreeMap<u32, Vec<String>> {
         if !list.contains(&rule) {
             list.push(rule);
         }
+    }
+    for list in map.values_mut() {
+        list.sort_by_cached_key(|r| strictness_key(r, checklist));
     }
     map
 }

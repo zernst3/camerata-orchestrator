@@ -291,6 +291,12 @@ pub trait PieceAgent: Send + Sync {
     /// on a released handle is an `Err` before anything is sent. The default keeps nothing, so
     /// there is nothing to release.
     fn release(&self, _conversation: &ConversationHandle) {}
+
+    /// True when the transport already records each of its turns (and failures) on the run's
+    /// meter, so the runner must not record them a second time. The default is false.
+    fn meters_its_own_turns(&self) -> bool {
+        false
+    }
 }
 
 /// Send the files the first run did not read (`unread`, repo-relative paths) once more (design
@@ -406,7 +412,11 @@ pub struct ScriptedAgent {
     pub usage_per_turn: TurnUsage,
     queued: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ScriptedTurn>>>,
     received: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// The conversations this stand-in still keeps (a real transport holds file text for each).
+    kept: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
+
+static SCRIPTED_HANDLES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
 impl ScriptedAgent {
     pub fn new(first: Vec<ScriptStep>) -> Self {
@@ -418,7 +428,18 @@ impl ScriptedAgent {
             usage_per_turn: TurnUsage::default(),
             queued: std::sync::Arc::default(),
             received: std::sync::Arc::default(),
+            kept: std::sync::Arc::default(),
         }
+    }
+
+    /// How many conversations are still kept: one for each run or follow-up whose handle was not
+    /// released (by [`PieceAgent::release`], or by the follow-up that continued from it). Zero at
+    /// the end of a run.
+    pub fn kept(&self) -> usize {
+        self.kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     #[must_use]
@@ -527,7 +548,17 @@ impl ScriptedAgent {
             usage: vec![self.usage_per_turn.clone()],
             stop,
             shown_in_full,
-            conversation: ConversationHandle::new("scripted"),
+            conversation: {
+                let id = format!(
+                    "scripted-{}",
+                    SCRIPTED_HANDLES.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                );
+                self.kept
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id.clone());
+                ConversationHandle::new(id)
+            },
         }
     }
 }
@@ -546,10 +577,12 @@ impl PieceAgent for ScriptedAgent {
     async fn follow_up(
         &self,
         room: &Room,
-        _prior: &AgentRun,
+        prior: &AgentRun,
         turn: &FollowUp,
         _limits: &PieceLimits,
     ) -> anyhow::Result<AgentRun> {
+        // A follow-up continues from the handle of `prior` and releases it.
+        self.release(&prior.conversation);
         let (text, shown) = turn.render(room);
         self.received
             .lock()
@@ -564,5 +597,12 @@ impl PieceAgent for ScriptedAgent {
             Some(t) => self.play(room, &t.steps, t.stop, shown),
             None => self.play(room, &self.again, self.again_stop.clone(), shown),
         })
+    }
+
+    fn release(&self, handle: &ConversationHandle) {
+        self.kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(handle.as_str());
     }
 }

@@ -309,6 +309,7 @@ fn args(repos: &[&Path], names: &[&str], export: &Path) -> InspectArgs {
         client_engagement: true,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     }
 }
 

@@ -98,6 +98,7 @@ fn args(a: &Path, b: &Path, export: &Path) -> InspectArgs {
         client_engagement: true,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     }
 }
 
