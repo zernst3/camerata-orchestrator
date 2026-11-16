@@ -625,8 +625,9 @@ fn two_places_with_no_snippet_in_one_file_are_two_problems() {
 #[test]
 fn a_split_out_problem_takes_the_higher_of_its_own_severity_and_the_hosts() {
     // The place was rated critical on its own; the host was high. The place keeps its rating.
-    let mut r = host_carrying(vec![b_site_at(7, "query(a)")
-        .with_rating("critical", "Query built from user input")]);
+    let mut r = host_carrying(vec![
+        b_site_at(7, "query(a)").with_rating("critical", "Query built from user input")
+    ]);
     r.findings[0].severity = "high".to_string();
     let (_sealed, reviewed, _key) = ruled_out_host(r);
     let row = unfolded(&reviewed, RULE_B);
@@ -634,8 +635,9 @@ fn a_split_out_problem_takes_the_higher_of_its_own_severity_and_the_hosts() {
     assert_eq!(row[0].severity, "critical");
 
     // The place was rated low; the host was high. The host's rating stands.
-    let mut r = host_carrying(vec![b_site_at(7, "query(a)")
-        .with_rating("low", "Query built from user input")]);
+    let mut r = host_carrying(vec![
+        b_site_at(7, "query(a)").with_rating("low", "Query built from user input")
+    ]);
     r.findings[0].severity = "high".to_string();
     let (_sealed, reviewed, _key) = ruled_out_host(r);
     assert_eq!(unfolded(&reviewed, RULE_B)[0].severity, "high");

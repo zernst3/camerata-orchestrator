@@ -1471,7 +1471,9 @@ fn the_gate_refuses_a_package_until_each_split_out_problem_has_its_own_decision(
         &[],
         &[],
     );
-    assert!(super::held::split_out_without_decision(&decided.report().findings, &decided).is_empty());
+    assert!(
+        super::held::split_out_without_decision(&decided.report().findings, &decided).is_empty()
+    );
     assert!(release(package_of(&decided)).is_ok());
 }
 
@@ -1501,7 +1503,11 @@ fn a_package_with_a_decided_split_out_problem_goes_through_the_gate_and_builds_t
     let package = package_of(&decided);
     let xlsx = package.xlsx.clone();
     let released = release(package);
-    assert!(released.is_ok(), "released once decided: {:?}", released.err());
+    assert!(
+        released.is_ok(),
+        "released once decided: {:?}",
+        released.err()
+    );
 
     // The client workbook carries the problem and the neutral note, and never the internal
     // bookkeeping key.

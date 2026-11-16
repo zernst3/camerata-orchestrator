@@ -867,7 +867,10 @@ fn a_split_out_problem_is_held_and_a_group_decision_leaves_it_undecided() {
         .report()
         .findings
         .iter()
-        .find(|f| f.captures.contains_key(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE))
+        .find(|f| {
+            f.captures
+                .contains_key(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE)
+        })
         .expect("the split-out problem")
         .clone();
     let plain_key = reviewed

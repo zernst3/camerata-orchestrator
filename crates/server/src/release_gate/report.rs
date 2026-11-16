@@ -68,7 +68,7 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 17] = [
+    pub const ALL: [CheckId; 18] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,

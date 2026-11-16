@@ -25,8 +25,8 @@ use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::engine_discard::ENGINE_RESTORED_CAPTURE;
 use crate::onboard::Finding;
-use crate::report_export::unfold::UNFOLDED_FROM_CAPTURE;
 use crate::report_export::decisions_file::{DecisionRowJson, DECISIONS_FILE};
+use crate::report_export::unfold::UNFOLDED_FROM_CAPTURE;
 
 /// One problem per merged row that has no decision record naming it, that state and a reason,
 /// and one per site a live group decision covers that has no per-site record. Read from the
