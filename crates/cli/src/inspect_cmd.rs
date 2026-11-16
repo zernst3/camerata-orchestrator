@@ -1014,6 +1014,24 @@ pub async fn run_inspect_pipeline_with(
         controls.stored_spend_usd = store.stored_usd();
         // The group reviewer stays on the model the run started with, whatever the default is now.
         store.record().models.keep_group_review_model(&mut controls);
+        // The kept model was not part of the pick the client lock checked at the top of this
+        // run, so it is checked here, on every model the resumed run will call, before any call.
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        if let Some(why) = camerata_server::client_lock::refusal_for_run_models(
+            args.client_engagement,
+            args.backend,
+            model,
+            calibration_model,
+            false,
+            &ids,
+            &controls,
+        ) {
+            return Err(InspectError::Failed(format!(
+                "{why} The run being resumed keeps the group review model it started on. Start \
+                 a new run with `--backend api` and Anthropic models, or pass `--internal` if \
+                 this is your own development and not client work."
+            )));
+        }
     }
     let incremental_prior = match &resumed {
         // The baseline the run started from, not the one an attempt since may have replaced.

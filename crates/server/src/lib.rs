@@ -2884,6 +2884,27 @@ pub(crate) async fn start_audit_job(
                             .record()
                             .models
                             .keep_group_review_model(&mut run_controls);
+                        // The kept model was not part of the pick the lock checked before the
+                        // job started: check every model the resumed run will call, before any
+                        // call.
+                        let (client_engagement, lock_backend) =
+                            engagement_project.as_ref().map_or(
+                                (true, crate::project::ProjectBackend::Cli),
+                                |p| (p.client_engagement, p.backend),
+                            );
+                        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+                        if let Some(why) = crate::client_lock::refusal_for_run_models(
+                            client_engagement,
+                            lock_backend,
+                            model.as_deref(),
+                            calibration_model.as_deref(),
+                            deep,
+                            &ids,
+                            &run_controls,
+                        ) {
+                            body_jobs.fail(&body_jid, format!("{why} {APP_CLIENT_LOCK_FIX}"));
+                            return;
+                        }
                         Some(store)
                     }
                     Err(e) => {

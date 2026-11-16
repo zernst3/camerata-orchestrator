@@ -39,7 +39,7 @@ struct Outage {
 struct Scripted {
     down: Mutex<Outage>,
     calls: AtomicUsize,
-    /// `kind:digest` of every request sent, in order.
+    /// The kind and the requested model of every request sent, in order.
     sent: Mutex<Vec<(PartKind, String)>>,
 }
 
@@ -66,11 +66,22 @@ impl Scripted {
             .count()
     }
 
+    /// The model each request of `kind` was sent to, in order.
+    fn models_of(&self, kind: PartKind) -> Vec<String> {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| *k == kind)
+            .map(|(_, m)| m.clone())
+            .collect()
+    }
+
     fn answer(&self, req: &LlmRequest) -> anyhow::Result<LlmResponse> {
         let (kind, _repo, files) = classify(req);
         let down = *self.down.lock().unwrap();
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.sent.lock().unwrap().push((kind, String::new()));
+        self.sent.lock().unwrap().push((kind, req.model.clone()));
         let unreachable = (kind == PartKind::Fix && down.fix_stage)
             || (kind == PartKind::Scan
                 && down
@@ -1293,4 +1304,62 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
     assert_eq!(llm.calls(), 0, "nothing was sent to the model");
     let after = std::fs::read(rs::runs_dir().join(&run_id).join("run.json")).unwrap();
     assert_eq!(before, after, "the refusal leaves the saved run untouched");
+}
+
+/// Rewrite the saved record of `run_id` the way an earlier build, or a hand edit, could have
+/// left it.
+fn patch_saved_run(run_id: &str, patch: impl FnOnce(&mut serde_json::Value)) {
+    let path = camerata_server::run_store::runs_dir()
+        .join(run_id)
+        .join("run.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap())
+        .expect("the record is JSON");
+    patch(&mut value);
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+/// A run with the fix stage down, saved and incomplete, plus the scripted model that is back up.
+async fn interrupted_run(repo: &Path, export: &Path) -> (Scripted, String) {
+    let llm = Scripted::new(Outage {
+        fix_stage: true,
+        ..Outage::default()
+    });
+    let err = run(&llm, &[repo], &["acme/one"], export)
+        .await
+        .expect_err("the run with a failed part is not exported");
+    let run_id = the_run_id(&err);
+    llm.set(Outage::default());
+    (llm, run_id)
+}
+
+/// A client engagement checks the group review model the resume keeps, not only the pick it was
+/// handed. A record naming `vendor/x` (a run started with `--internal`) resumed as a client
+/// engagement is refused before any model call.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_kept_group_review_model_that_the_client_lock_refuses_refuses_the_resume() {
+    if !typst_available("a_kept_group_review_model_that_the_client_lock_refuses") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let (llm, run_id) = interrupted_run(repo.path(), &export).await;
+    patch_saved_run(&run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("vendor/x");
+    });
+    let calls_before = llm.calls();
+    let result = resume(&llm, &run_id, Some(export.clone())).await;
+    let Err(err) = result else {
+        panic!("a client engagement must not send client code to the kept model");
+    };
+    let InspectError::Failed(why) = &err else {
+        panic!("expected a plain refusal, got {err}");
+    };
+    assert!(why.contains("client engagement"), "{why}");
+    assert!(why.contains("vendor/x"), "{why}");
+    assert_eq!(llm.calls(), calls_before, "no model call was made");
+    assert!(!export.exists());
 }
