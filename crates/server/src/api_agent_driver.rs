@@ -2794,8 +2794,6 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
     }
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────────
-
 /// The agent driver's HTTP client: a 600 s total and 10 s connect bound, so a stalled
 /// connection ends as an error instead of hanging the run.
 fn agent_http_client() -> &'static reqwest::Client {
@@ -2808,6 +2806,8 @@ fn agent_http_client() -> &'static reqwest::Client {
             .expect("failed to build the agent HTTP client")
     })
 }
+
+// ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

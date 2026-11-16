@@ -1421,10 +1421,15 @@ async fn fetch_model_endpoints(
 /// A client for the registry lookups: bounded, so a stalled connection fails (a retryable
 /// network error to the caller) instead of hanging the run.
 fn bounded_client() -> reqwest::Client {
-    bounded_client_with(
-        std::time::Duration::from_secs(60),
-        std::time::Duration::from_secs(10),
-    )
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            bounded_client_with(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(10),
+            )
+        })
+        .clone()
 }
 
 fn bounded_client_with(
@@ -1435,7 +1440,7 @@ fn bounded_client_with(
         .timeout(total)
         .connect_timeout(connect)
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .expect("building a reqwest client with only timeouts set cannot fail")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1452,6 +1457,8 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
 
+            // Deliberately unbounded: the test shows what a client with no timeout does.
+            #[allow(clippy::disallowed_methods)]
             let unbounded = reqwest::Client::new().get(&url).send();
             let hung = tokio::time::timeout(std::time::Duration::from_secs(3), unbounded).await;
             assert!(
