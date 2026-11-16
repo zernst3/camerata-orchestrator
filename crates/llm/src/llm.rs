@@ -201,10 +201,15 @@ fn spawn_dir(req: &LlmRequest) -> std::path::PathBuf {
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
     // Isolation first: the working directory (the repo, or an empty engine-owned one, never the
     // launcher's) and the flags that keep project settings and the operator's memory out.
-    camerata_api_types::claude_cli::isolate_claude_call(
-        cmd.as_std_mut(),
-        req.repo_read_dir.as_deref(),
-    );
+    match (&req.room_output, &req.repo_read_dir) {
+        (Some(_), Some(dir)) => {
+            camerata_api_types::claude_cli::isolate_room_call(cmd.as_std_mut(), dir);
+        }
+        _ => camerata_api_types::claude_cli::isolate_claude_call(
+            cmd.as_std_mut(),
+            req.repo_read_dir.as_deref(),
+        ),
+    }
     cmd.arg("--strict-mcp-config")
         .arg("--disable-slash-commands")
         .arg("--permission-mode")
@@ -215,11 +220,18 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
         // `--add-dir`. Still non-agentic: slash-commands off, NO write/exec tool offered, so
         // this grants READ only — it cannot mutate the repo, spawn, or run shell.
         Some(dir) => {
-            cmd.arg("--allowedTools").arg(READ_ONLY_TOOLS.join(" "));
-            // The clean-room write: one more value of the allow list (a separate value, so a
-            // room path with a space stays whole), the room's out folder and nothing wider.
             if let Some(room) = &req.room_output {
+                // A clean room reads only inside the room: each read tool is its own value of
+                // the allow list (so a room path with a space stays whole), scoped to the room.
+                // Under `dontAsk` a read of any other path is refused. Then the clean-room write:
+                // the room's out folder and nothing wider.
+                cmd.arg("--allowedTools");
+                for tool in READ_ONLY_TOOLS {
+                    cmd.arg(room_read_rule(tool, &room.room_dir));
+                }
                 cmd.arg(room_output_rule(&room.room_dir));
+            } else {
+                cmd.arg("--allowedTools").arg(READ_ONLY_TOOLS.join(" "));
             }
             cmd.arg("--add-dir").arg(dir);
             // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
@@ -248,6 +260,12 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
     if req.repo_read_dir.is_some() && req.room_output.is_some() {
         cmd.env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1");
         cmd.arg("--disallowedTools").args(ROOM_DENIED_TOOLS);
+        // The run is bounded in turns, and keeps no session file: the transport reads its trace
+        // from stdout, and a client's code is not left in the operator's session folder.
+        if let Some(turns) = req.room_output.as_ref().and_then(|r| r.max_turns) {
+            cmd.arg("--max-turns").arg(turns.to_string());
+        }
+        cmd.arg("--no-session-persistence");
     }
 }
 
@@ -267,6 +285,12 @@ const OUT_FOLDER: &str = "_camerata/out";
 /// mode `dontAsk`, anything no rule allows is refused, so a write anywhere else (the room's
 /// other files, the repository, the home folder) is denied.
 pub fn room_output_rule(room_dir: &std::path::Path) -> String {
+    format!("Edit(/{}/{OUT_FOLDER}/**)", escaped_room_path(room_dir))
+}
+
+/// The room's path with gitignore pattern characters escaped so they match themselves, and no
+/// trailing slash.
+fn escaped_room_path(room_dir: &std::path::Path) -> String {
     let mut path = String::new();
     for c in room_dir.to_string_lossy().chars() {
         if matches!(c, '\\' | '*' | '?' | '[' | ']') {
@@ -274,8 +298,16 @@ pub fn room_output_rule(room_dir: &std::path::Path) -> String {
         }
         path.push(c);
     }
-    let path = path.trim_end_matches('/');
-    format!("Edit(/{path}/{OUT_FOLDER}/**)")
+    path.trim_end_matches('/').to_string()
+}
+
+/// The allow rule that lets `tool` (Read, Glob, Grep or LS) work on files under `room_dir` only.
+///
+/// Anchored with `//` (an absolute path from the filesystem root) like the write rule, with the
+/// room path escaped the same way. Under the permission mode `dontAsk`, a call on any path no
+/// rule allows is refused.
+pub fn room_read_rule(tool: &str, room_dir: &std::path::Path) -> String {
+    format!("{tool}(/{}/**)", escaped_room_path(room_dir))
 }
 
 /// The read-only built-in tools granted on the CLI backend when a request opts into
@@ -1038,6 +1070,8 @@ pub struct RoomOutput {
     /// The `claude` program to run instead of the one found on `PATH` (the desktop app ships a
     /// newer one than a terminal install). `None` = `claude` from `PATH`.
     pub program: Option<std::path::PathBuf>,
+    /// The most turns the run may take (`--max-turns`). `None` = no turn limit is passed.
+    pub max_turns: Option<usize>,
 }
 
 impl LlmRequest {
@@ -1071,7 +1105,17 @@ impl LlmRequest {
         self.room_output = Some(RoomOutput {
             room_dir: room_dir.into(),
             program,
+            max_turns: None,
         });
+        self
+    }
+
+    /// Bound a clean-room call to `turns` turns (`--max-turns`). Does nothing on a request with
+    /// no [`Self::with_room_output`].
+    pub fn with_room_max_turns(mut self, turns: usize) -> Self {
+        if let Some(room) = self.room_output.as_mut() {
+            room.max_turns = Some(turns);
+        }
         self
     }
 
