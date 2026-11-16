@@ -19,7 +19,7 @@ import json, os, re, sys, time
 args = sys.argv[1:]
 # The run's pre-flight reads the Claude Code version before any model call; it is not a call.
 if args == ["--version"]:
-    print("2.1.321 (Claude Code)")
+    print(os.environ.get("FAKE_VERSION", "2.1.321 (Claude Code)"))
     sys.exit(0)
 prompt = args[args.index("-p") + 1] if "-p" in args else ""
 system = args[args.index("--system-prompt") + 1] if "--system-prompt" in args else ""
@@ -1217,4 +1217,45 @@ async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
         calls_before,
         "no model call was made"
     );
+}
+
+/// The version check follows the kept group review model: a run recorded on a model with no
+/// minimum resumes on an old Claude Code even though the project's current default model needs a
+/// newer one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_resume_checks_the_version_for_the_kept_group_review_model() {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_resume_checks_the_version_for_the_kept") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    patch_saved_run(&rig.run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("claude-fable-5-1");
+    });
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let _old = camerata_test_env::EnvGuard::set("FAKE_VERSION", "2.1.285 (Claude Code)");
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+}
+
+/// A resume whose kept group review model needs a newer Claude Code than the one installed is
+/// refused before any model call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_resume_on_a_kept_model_needing_a_newer_claude_code_is_refused() {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_resume_on_a_kept_model_needing") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    patch_saved_run(&rig.run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("claude-fable-5-2");
+    });
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let _old = camerata_test_env::EnvGuard::set("FAKE_VERSION", "2.1.285 (Claude Code)");
+    let calls_before = stage_calls(&rig.log).len();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "failed", "{:?}", job.message);
+    let why = job.message.clone().unwrap_or_default();
+    assert!(why.contains("2.1.285") && why.contains("2.1.290"), "{why}");
+    assert_eq!(stage_calls(&rig.log).len(), calls_before, "no model call");
 }
