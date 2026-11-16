@@ -176,3 +176,18 @@ fn a_terraform_reference_is_quiet_through_the_file_entry_and_loud_in_a_dotenv_fi
         vec![1]
     );
 }
+
+#[test]
+fn ui_and_end_to_end_test_paths_are_test_paths() {
+    for p in [
+        "apps/web/cypress/support/commands.ts",
+        "src/login.cy.tsx",
+        "packages/auth/e2e/login.ts",
+        "src/flow.e2e.ts",
+    ] {
+        assert!(is_test_or_fixture_path(p), "{p}");
+    }
+    for p in ["src/services/cypress_client.ts", "src/e2eReport.ts"] {
+        assert!(!is_test_or_fixture_path(p), "{p}");
+    }
+}

@@ -380,7 +380,7 @@ const SECRET_IDENTIFIER_WORDS: &[&str] = &[
 
 /// Whether `before_value` (the identifier and what sits between it and the value) names a
 /// password-like thing.
-fn names_a_secret(before_value: &str) -> bool {
+pub(crate) fn names_a_secret(before_value: &str) -> bool {
     let lower = before_value.to_ascii_lowercase();
     SECRET_IDENTIFIER_WORDS
         .iter()

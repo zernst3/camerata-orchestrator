@@ -584,10 +584,11 @@ fn is_write_tool(tool: &str) -> bool {
 ///
 /// Matching rules (all comparisons are case-insensitive):
 /// - Any **path segment** (directory component) equals one of:
-///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `benches`
+///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `benches`, `cypress`, `e2e`
 ///   (`examples` is intentionally excluded — see GATE-F7 note in the body).
 /// - The **filename** (last segment) matches one of:
-///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `test_*.py`, `conftest.py`
+///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `*.cy.<ext>`, `*.e2e.<ext>`, `test_*.py`,
+///   `conftest.py`
 ///
 /// Production paths are unchanged — only test/fixture paths are down-ranked.
 pub fn is_test_or_fixture_path(path: &str) -> bool {
@@ -614,7 +615,8 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
             // test artefact. Treating an examples path as test scope let an
             // agent disable floor rules by filename. Examples now get full
             // production enforcement.
-            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "benches" => {
+            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "benches" | "cypress"
+            | "e2e" => {
                 return true;
             }
             _ => {}
@@ -639,7 +641,12 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
         // the stem ends with "_test", ".test", or ".spec".
         if let Some(dot_pos) = filename.rfind('.') {
             let stem = &filename[..dot_pos];
-            if stem.ends_with("_test") || stem.ends_with(".test") || stem.ends_with(".spec") {
+            if stem.ends_with("_test")
+                || stem.ends_with(".test")
+                || stem.ends_with(".spec")
+                || stem.ends_with(".cy")
+                || stem.ends_with(".e2e")
+            {
                 return true;
             }
         }
@@ -982,7 +989,7 @@ fn deny_on_secret_shape(
 ) -> Result<(), String> {
     let Some(m) = camerata_secrets::detect_for_rule_in_file(content, rule_id, path)
         .into_iter()
-        .find(camerata_secrets::SecretMatch::counts_as_finding)
+        .find(|m| m.counts_as_finding_in(content))
     else {
         return Ok(());
     };

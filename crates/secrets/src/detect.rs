@@ -9,7 +9,7 @@ use regex::Regex;
 
 use crate::firebase::{TwinContext, LINE_PREFIX_CAP, WINDOW};
 use crate::shapes::{self, is_supabase_dsn, shapes_for_rule, SecretShape};
-use crate::twins::{classify, is_sealed_ciphertext, Twin};
+use crate::twins::{classify, is_sealed_ciphertext, names_a_secret, Twin};
 
 /// How far past a PEM header the matching footer is searched for.
 const PEM_FOOTER_WINDOW: usize = 8000;
@@ -40,6 +40,16 @@ impl SecretMatch {
     /// keeps (a committed placeholder key is still worth a row; a public anon key is not).
     pub fn counts_as_finding(&self) -> bool {
         self.twin.as_ref().is_none_or(Twin::counts_as_line)
+    }
+
+    /// [`Self::counts_as_finding`] with the text the match came from. An environment variable
+    /// name in quotes is a variable name, not a value, unless the identifier before it is
+    /// password-like (there the same shape is a passphrase), so only that case keeps its row.
+    pub fn counts_as_finding_in(&self, text: &str) -> bool {
+        if self.twin == Some(Twin::EnvNameLiteral) {
+            return names_a_secret(&text[self.start..self.value.start]);
+        }
+        self.counts_as_finding()
     }
 }
 
@@ -522,7 +532,7 @@ fn lines_of(text: &str, matches: Vec<SecretMatch>, twins_count: bool) -> Vec<usi
         .iter()
         .filter(|m| {
             if twins_count {
-                m.counts_as_finding()
+                m.counts_as_finding_in(text)
             } else {
                 m.is_secret()
             }

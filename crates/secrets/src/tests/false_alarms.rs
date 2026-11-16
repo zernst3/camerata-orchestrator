@@ -119,3 +119,16 @@ fn sealed_secret_ciphertext_is_not_a_hardcoded_value() {
     let stream = format!("{head}  encryptedData:\n    password: {blob}\n---\nkind: Secret\nstringData:\n  password: {blob}\n");
     assert_eq!(lines(&stream), vec![9]);
 }
+
+#[test]
+fn an_environment_variable_name_is_not_a_row() {
+    // On a key or token identifier, an all-capitals name is a variable name.
+    let quiet = "const deployToken = pick({ prod: 'CLOUD_PRODUCTION_DEPLOY_TOKEN' });";
+    assert!(lines(quiet).is_empty());
+    assert!(lines("api_key: \"CLOUD_PRODUCTION_DEPLOY_KEY\"").is_empty());
+    // On a password identifier the same shape is still a row.
+    assert_eq!(
+        lines("password = \"CLOUD_PRODUCTION_DEPLOY_TOKEN\""),
+        vec![1]
+    );
+}
