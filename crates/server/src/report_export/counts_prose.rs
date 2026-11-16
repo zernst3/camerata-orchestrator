@@ -284,6 +284,20 @@ pub(crate) fn grid_left_out(c: &ReportCounts) -> String {
     out
 }
 
+/// What the three things box says when it is empty. With no dependency fix First nothing is due
+/// first; otherwise no code problem is, and the dependency fixes that are say so.
+pub(crate) fn nothing_first_sentence(dependency_fixes_first: usize) -> String {
+    match dependency_fixes_first {
+        0 => "No fix is due first this run.".to_string(),
+        1 => "No code problem is due first this run. 1 dependency fix is due first; see Dependencies."
+            .to_string(),
+        k => format!(
+            "No code problem is due first this run. {} dependency fixes are due first; see Dependencies.",
+            n(k)
+        ),
+    }
+}
+
 /// "and 3 more": the line under a list that shows only its first entries. `more` is the number of
 /// entries left out and `words` what the template adds after the number.
 pub(crate) fn more_line(more: usize, words: &str) -> String {
@@ -322,5 +336,30 @@ mod grid_note_tests {
             "Not in this grid: 2 low problems that need a decision first and 1 medium problem that is information only. The cover counts all of them."
         );
         assert!(!note.contains(", and") && !note.contains(['\u{2014}', '\u{2013}']));
+    }
+
+    /// What the box says when it is empty: nothing is due first, or only dependency fixes are.
+    #[test]
+    fn the_empty_box_sentence_names_the_dependency_fixes_that_are_due_first() {
+        use crate::report_export::classification::total_hours_label_of;
+        assert_eq!(
+            total_hours_label_of(&[], 0),
+            "No fix is due first this run."
+        );
+        assert_eq!(
+            total_hours_label_of(&[], 1),
+            "No code problem is due first this run. 1 dependency fix is due first; see Dependencies."
+        );
+        assert_eq!(
+            total_hours_label_of(&[], 2),
+            "No code problem is due first this run. 2 dependency fixes are due first; see Dependencies."
+        );
+        for n in 0..3 {
+            let s = total_hours_label_of(&[], n);
+            assert!(
+                !s.contains(['\u{2014}', '\u{2013}']) && !s.contains(", and"),
+                "{s}"
+            );
+        }
     }
 }

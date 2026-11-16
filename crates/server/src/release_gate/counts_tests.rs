@@ -1403,3 +1403,55 @@ fn a_fix_with_one_accepted_place_and_one_held_place_is_not_a_fix_to_do() {
     let problems = counts_problems(&entries, &report);
     assert!(problems.is_empty(), "{}", messages(&problems));
 }
+
+const ONE_DEPENDENCY_FIRST: &str =
+    "No code problem is due first this run. 1 dependency fix is due first; see Dependencies.";
+
+/// A medium code problem (Later) and a high advisory (First): the box is empty, one dependency fix
+/// is due first.
+fn dependency_first_package() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    package_of_rows(
+        vec![
+            plain_row("SYN-A-1", "src/a.rs", 5, "medium"),
+            plain_row(crate::dep_audit::DEP_AUDIT_RULE_ID, "Cargo.lock", 0, "high"),
+        ],
+        &[],
+    )
+}
+
+#[test]
+fn an_empty_box_names_the_dependency_fix_due_first_and_the_gate_checks_the_number() {
+    let (entries, report) = dependency_first_package();
+    assert!(report.three_things.items.is_empty(), "anti-vacuity");
+    assert_eq!(report.three_things.total_hours_label, ONE_DEPENDENCY_FIRST);
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+    // The old sentence, with a dependency fix First, is refused; so is a wrong number.
+    for forged in [
+        "No fix is due first this run.",
+        "No code problem is due first this run. 2 dependency fixes are due first; see Dependencies.",
+    ] {
+        let mut tampered = report.clone();
+        tampered.three_things.total_hours_label = forged.to_string();
+        let problems = counts_problems(&entries, &tampered);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.file == "PDF data" && p.location == "three_things.total_hours_label"),
+            "{forged}: {}",
+            messages(&problems)
+        );
+    }
+}
+
+#[test]
+fn an_empty_box_with_no_dependency_fix_first_keeps_the_old_sentence() {
+    let (entries, report) =
+        package_of_rows(vec![plain_row("SYN-A-1", "src/a.rs", 5, "medium")], &[]);
+    assert_eq!(
+        report.three_things.total_hours_label,
+        "No fix is due first this run."
+    );
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}

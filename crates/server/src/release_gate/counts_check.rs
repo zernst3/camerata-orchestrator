@@ -1132,84 +1132,140 @@ fn order_problems(
         }
     }
 
-    // The workbook: the All problems column and each Fix plan row.
+    // The workbook: the All problems column and each Fix plan row. Fail closed: a workbook,
+    // sheet or column that cannot be read is a problem, never a skip.
     let Some(stem) = super::consistency::package_stem(entries) else {
+        out.push(problem(
+            "package",
+            "fix order",
+            "the package does not hold exactly one PDF, so its workbook cannot be found to check the fix order",
+        ));
         return out;
     };
     let xlsx_name = format!("{stem}-findings.xlsx");
     let Some(xlsx) = entries.get(&xlsx_name) else {
+        out.push(problem(
+            &xlsx_name,
+            "fix order",
+            "the workbook is missing, so its fix order cannot be checked",
+        ));
         return out;
     };
-    if let Ok(grid) = super::archive::xlsx_sheet_grid(xlsx, v::ALL_PROBLEMS) {
-        if let (Some(order), Some(sev)) = (
-            column_of(&grid, v::H_FIX_ORDER),
-            column_of(&grid, v::H_SEVERITY),
-        ) {
-            let mut tally = [0usize; 6];
-            for row in grid
-                .iter()
-                .skip(1)
-                .filter(|r| r.get(sev).is_some_and(|c| !c.is_empty()))
-            {
-                match row.get(order).and_then(|w| word_rank(w)) {
-                    Some(rank) => tally[rank] += 1,
-                    None => out.push(problem(
-                        &xlsx_name,
-                        "sheet \"All problems\" Fix order",
-                        format!(
-                            "a row says {:?}, which is no order or class",
-                            row.get(order)
-                        ),
-                    )),
-                }
+    // A sheet's grid and the columns of it that the check reads.
+    let mut sheet = |name: &str, headers: [&str; 2]| -> Option<(Vec<Vec<String>>, [usize; 2])> {
+        let grid = match super::archive::xlsx_sheet_grid(xlsx, name) {
+            Ok(g) => g,
+            Err(e) => {
+                out.push(problem(
+                    &xlsx_name,
+                    &format!("sheet \"{name}\" fix order"),
+                    format!("the sheet cannot be read to check the fix order: {e}"),
+                ));
+                return None;
             }
-            let p = &want.problems;
-            for (word, got, w) in [
-                (v::FIX_ORDER_FIRST, tally[0], p.first),
-                (v::FIX_ORDER_NEXT, tally[1], p.next),
-                (v::FIX_ORDER_LATER, tally[2], p.later),
-                (v::FIX_CLASS_NEEDS_DECISION, tally[3], p.needs_decision),
-                (v::FIX_CLASS_INFORMATION_ONLY, tally[4], p.information_only),
-                (v::FIX_CLASS_ACCEPTED, tally[5], p.accepted),
-            ] {
-                if got != w {
+        };
+        let mut at = [0usize; 2];
+        for (slot, header) in at.iter_mut().zip(headers) {
+            match column_of(&grid, header) {
+                Some(c) => *slot = c,
+                None => {
                     out.push(problem(
                         &xlsx_name,
-                        &format!("sheet \"All problems\" Fix order {word:?}"),
-                        format!("the column says {word:?} {got} times and the counts give {w}"),
+                        &format!("sheet \"{name}\" fix order"),
+                        format!("the sheet has no {header:?} column, so its fix order cannot be checked"),
                     ));
+                    return None;
                 }
             }
         }
+        Some((grid, at))
+    };
+    let all = sheet(v::ALL_PROBLEMS, [v::H_FIX_ORDER, v::H_SEVERITY]);
+    let plan = sheet(v::FIX_PLAN, [v::H_FIX_ORDER, v::H_FIX_ID]);
+    if let Some((grid, [order, sev])) = all {
+        let mut tally = [0usize; 6];
+        for row in grid
+            .iter()
+            .skip(1)
+            .filter(|r| r.get(sev).is_some_and(|c| !c.is_empty()))
+        {
+            match row.get(order).and_then(|w| word_rank(w)) {
+                Some(rank) => tally[rank] += 1,
+                None => out.push(problem(
+                    &xlsx_name,
+                    "sheet \"All problems\" Fix order",
+                    format!(
+                        "a row says {:?}, which is no order or class",
+                        row.get(order)
+                    ),
+                )),
+            }
+        }
+        let p = &want.problems;
+        for (word, got, w) in [
+            (v::FIX_ORDER_FIRST, tally[0], p.first),
+            (v::FIX_ORDER_NEXT, tally[1], p.next),
+            (v::FIX_ORDER_LATER, tally[2], p.later),
+            (v::FIX_CLASS_NEEDS_DECISION, tally[3], p.needs_decision),
+            (v::FIX_CLASS_INFORMATION_ONLY, tally[4], p.information_only),
+            (v::FIX_CLASS_ACCEPTED, tally[5], p.accepted),
+        ] {
+            if got != w {
+                out.push(problem(
+                    &xlsx_name,
+                    &format!("sheet \"All problems\" Fix order {word:?}"),
+                    format!("the column says {word:?} {got} times and the counts give {w}"),
+                ));
+            }
+        }
     }
-    if let Ok(grid) = super::archive::xlsx_sheet_grid(xlsx, v::FIX_PLAN) {
-        if let (Some(order), Some(id)) = (
-            column_of(&grid, v::H_FIX_ORDER),
-            column_of(&grid, v::H_FIX_ID),
-        ) {
-            for row in grid
-                .iter()
-                .skip(1)
-                .filter(|r| r.get(id).is_some_and(|c| !c.is_empty()))
-            {
-                let fix = &row[id];
-                let said = row.get(order).map_or("", String::as_str);
-                match ranks.get(fix) {
-                    Some(rank) if word_rank(said) == Some(*rank) => {}
-                    Some(rank) => out.push(problem(
-                        &xlsx_name,
-                        &format!("sheet \"Fix plan\", fix {fix}"),
-                        format!(
-                            "the row says {said:?} and the places of the fix give {:?}",
-                            ORDER_WORDS[*rank]
-                        ),
-                    )),
-                    None => out.push(problem(
-                        &xlsx_name,
-                        &format!("sheet \"Fix plan\", fix {fix}"),
-                        "the row is a fix that has no place in the package",
-                    )),
-                }
+    if let Some((grid, [order, id])) = plan {
+        let dependency_fixes: BTreeSet<String> = deps
+            .iter()
+            .map(|d| text(d, "fix_id"))
+            .filter(|f| !f.is_empty())
+            .collect();
+        let mut dependency_fixes_first = 0usize;
+        for row in grid
+            .iter()
+            .skip(1)
+            .filter(|r| r.get(id).is_some_and(|c| !c.is_empty()))
+        {
+            let fix = &row[id];
+            let said = row.get(order).map_or("", String::as_str);
+            if said == v::FIX_ORDER_FIRST && dependency_fixes.contains(fix) {
+                dependency_fixes_first += 1;
+            }
+            match ranks.get(fix) {
+                Some(rank) if word_rank(said) == Some(*rank) => {}
+                Some(rank) => out.push(problem(
+                    &xlsx_name,
+                    &format!("sheet \"Fix plan\", fix {fix}"),
+                    format!(
+                        "the row says {said:?} and the places of the fix give {:?}",
+                        ORDER_WORDS[*rank]
+                    ),
+                )),
+                None => out.push(problem(
+                    &xlsx_name,
+                    &format!("sheet \"Fix plan\", fix {fix}"),
+                    "the row is a fix that has no place in the package",
+                )),
+            }
+        }
+        // An empty box says which dependency fixes are due first: the number is the First
+        // dependency fixes on the Fix plan.
+        if report.three_things.items.is_empty() {
+            let expected = counts_prose::nothing_first_sentence(dependency_fixes_first);
+            if report.three_things.total_hours_label != expected {
+                out.push(problem(
+                    "PDF data",
+                    "three_things.total_hours_label",
+                    format!(
+                        "the empty box reads {:?} and the Fix plan gives {expected:?}",
+                        report.three_things.total_hours_label
+                    ),
+                ));
             }
         }
     }

@@ -71,6 +71,8 @@ pub const PDF_MAX_DEPARTURES: usize = 5;
 pub struct PatternJson {
     /// The Fix id; the All problems filter is `Fix id = <id>`.
     pub group: String,
+    /// Whether the Fix is a dependency upgrade.
+    pub is_dependency: bool,
     pub rule_id: String,
     pub rule_title: String,
     /// The Fix's area (the first when its rules span several).

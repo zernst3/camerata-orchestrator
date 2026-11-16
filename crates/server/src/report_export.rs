@@ -1912,7 +1912,17 @@ pub fn build_report_json_with_counts(
             }
         })
         .collect();
-    let total_hours_label = classification::total_hours_label_of(&top3_efforts);
+    // The dependency fixes the Fix plan lists as First: the empty box says so.
+    let dependency_fixes_first = sub_group_patterns
+        .iter()
+        .filter(|p| {
+            p.is_dependency
+                && p.open_sites > 0
+                && p.sequence == crate::xlsx_export::vocabulary::FIX_ORDER_FIRST
+        })
+        .count();
+    let total_hours_label =
+        classification::total_hours_label_of(&top3_efforts, dependency_fixes_first);
     let three_things = ThreeThingsJson {
         items: three_things_items,
         total_hours_label,

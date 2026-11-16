@@ -1194,6 +1194,7 @@ pub(crate) fn pdf_sections(
             } else {
                 g.label.clone()
             },
+            is_dependency: g.is_dependency,
             group: g.id,
             rule_id: g.rule_id,
             rule_title: g.rule_title,

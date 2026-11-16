@@ -1058,12 +1058,18 @@ pub(crate) fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, 
     }
 }
 
+/// `dependency_fixes_first` is the number of dependency fixes on the Fix plan that are First: when the
+/// box is empty the sentence says so, because a high advisory is due first although no code problem is.
+///
 /// Sum the rough hour ranges across item 7's (up to 3) do-now items, one effort for each Fix. Only sums items with a
 /// calibrated effort; when one or more items have none, the total says so explicitly rather
 /// than folding a guessed number into the sum.
-pub(crate) fn total_hours_label_of(efforts: &[Option<String>]) -> String {
+pub(crate) fn total_hours_label_of(
+    efforts: &[Option<String>],
+    dependency_fixes_first: usize,
+) -> String {
     if efforts.is_empty() {
-        return "No fix is due first this run.".to_string();
+        return super::counts_prose::nothing_first_sentence(dependency_fixes_first);
     }
     let mut lo_sum = 0u32;
     let mut hi_sum = 0u32;
