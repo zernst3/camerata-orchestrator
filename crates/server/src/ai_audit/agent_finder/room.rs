@@ -24,7 +24,7 @@ pub const MAX_READ_BYTES: usize = 100_000;
 /// The most distinct files the agent may write. Writing a path again replaces it and does not
 /// count twice.
 pub const MAX_WRITE_FILES: usize = 200;
-/// The folder the room keeps for its own files. A repository file under this name cannot be
+/// The folder the room keeps for its own files. A repository file under this name (in any case) cannot be
 /// served (see [`NotServed`]), so a client file can never shadow or replace a room file.
 pub const RESERVED_DIR: &str = "_camerata";
 
@@ -127,7 +127,15 @@ impl Room {
     /// the rendered checklist text. The files are redacted once more here, so a room built from
     /// raw text still serves no credential value.
     pub fn build(piece: &Piece, repo_files: &[(String, String)], checklist_md: &str) -> BuiltRoom {
-        let reserved = |p: &str| p == RESERVED_DIR || p.starts_with(&format!("{RESERVED_DIR}/"));
+        // Compared without regard to case: on a case-insensitive disk a client folder `_Camerata/`
+        // is the room's own `_camerata/` folder.
+        let reserved = |p: &str| {
+            p.eq_ignore_ascii_case(RESERVED_DIR)
+                || (p.len() > RESERVED_DIR.len()
+                    && p.is_char_boundary(RESERVED_DIR.len())
+                    && p[..RESERVED_DIR.len()].eq_ignore_ascii_case(RESERVED_DIR)
+                    && p.as_bytes()[RESERVED_DIR.len()] == b'/')
+        };
         // A repository file named like the room's own files is left out of the room entirely: it
         // is neither served nor listed, so it cannot shadow a room file. A piece file among them
         // stays owed and is reported below.
