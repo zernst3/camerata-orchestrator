@@ -99,6 +99,9 @@ const TOOL_FAN_OUT: &str = "fan_out";
 /// Anthropic Messages API version header value, shared with `llm.rs::complete_api`.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// The output limit of one Anthropic agent turn when the caller sets none.
+pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8192;
+
 // ─── provider wire shape ─────────────────────────────────────────────────────
 
 /// The HTTP wire shape the `ApiAgentDriver` speaks. Decides the request URL + headers,
@@ -124,13 +127,13 @@ pub enum ApiShape {
 
 /// One tool call the model has requested, normalized out of provider-specific shapes.
 #[derive(Debug, Clone)]
-struct ToolInvocation {
+pub(crate) struct ToolInvocation {
     /// Provider-assigned call id (used to build the tool-result message).
-    id: String,
+    pub(crate) id: String,
     /// Tool name as the model emitted it.
-    name: String,
+    pub(crate) name: String,
     /// Parsed JSON input (Anthropic sends this as an object; OpenAI as a string we parse).
-    input: Value,
+    pub(crate) input: Value,
 }
 
 // ─── ApiAgentDriver ──────────────────────────────────────────────────────────
@@ -573,7 +576,11 @@ fn refused_result(turn: usize, messages: &[Value]) -> String {
 ///   blocks. The Anthropic Messages API requires every tool_use from the preceding
 ///   assistant turn to be answered by a tool_result in the immediately following user
 ///   message; a `role:"tool"` message or split user messages are rejected.
-fn append_tool_results(messages: &mut Vec<Value>, shape: ApiShape, results: &[(String, String)]) {
+pub(crate) fn append_tool_results(
+    messages: &mut Vec<Value>,
+    shape: ApiShape,
+    results: &[(String, String)],
+) {
     match shape {
         ApiShape::OpenRouter => {
             for (id, text) in results {
@@ -713,7 +720,7 @@ fn get_policy_and_registry_from_completer(
 /// redacted form. This direct-HTTP path does not pass the transports in `camerata-llm`, so it
 /// passes the same chokepoint (`camerata_llm::model_input`) here, in both body builders. Text
 /// that holds no secret is unchanged. Also returns, per message, whether redaction rewrote it.
-fn redact_conversation(
+pub(crate) fn redact_conversation(
     system: Option<&str>,
     messages: &[Value],
 ) -> (Option<String>, Vec<Value>, Vec<bool>) {
@@ -984,7 +991,7 @@ fn apply_grounding_cache_breakpoint(first_user_msg: &Value) -> Value {
 ///   - the end of the Layer-2 grounding block INSIDE the first user message (detected via the
 ///     grounding terminator marker), so Layer 2 is cached too and only the volatile Layer-3 tail
 ///     is billed at full price on each turn.
-fn build_anthropic_request_body(
+pub(crate) fn build_anthropic_request_body(
     model: &str,
     system: Option<&str>,
     messages: &[Value],
@@ -1016,7 +1023,7 @@ fn build_anthropic_request_body(
 
     let mut body = serde_json::json!({
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": DEFAULT_MAX_TOKENS,
         "messages": shaped_messages,
     });
 
@@ -1044,6 +1051,22 @@ fn build_anthropic_request_body(
     (body, use_caching)
 }
 
+/// [`build_anthropic_request_body`] with the caller's output limit for the turn instead of
+/// [`DEFAULT_MAX_TOKENS`]. Everything else (redaction of the whole conversation, the dropped
+/// thinking blocks after an edit, the model's conforming) is the one builder above.
+pub(crate) fn build_anthropic_request_body_with_limit(
+    model: &str,
+    system: Option<&str>,
+    messages: &[Value],
+    tool_schemas: &[Value],
+    max_tokens: u32,
+) -> (Value, bool) {
+    let (mut body, use_caching) =
+        build_anthropic_request_body(model, system, messages, tool_schemas);
+    body["max_tokens"] = serde_json::json!(max_tokens);
+    (body, use_caching)
+}
+
 /// POST directly to the Anthropic Messages API (`/v1/messages`) with tool schemas in
 /// Anthropic format.
 ///
@@ -1068,7 +1091,59 @@ async fn call_anthropic_with_tools(
     tool_schemas: &[Value],
 ) -> anyhow::Result<LlmResponse> {
     let (body, use_caching) = build_anthropic_request_body(model, system, messages, tool_schemas);
+    post_anthropic_body(api_key, &body, use_caching)
+        .await
+        .map_err(AnthropicPostError::into_anyhow)
+}
 
+/// Why one POST of a Messages body did not give a usable reply. The finder loop needs the parts
+/// (status, body, `retry-after`, the whole refused reply); [`Self::into_anyhow`] gives the
+/// plain errors the agent loop has always returned.
+#[derive(Debug)]
+pub(crate) enum AnthropicPostError {
+    /// The API answered with a non-success status.
+    Http {
+        status: u16,
+        body: String,
+        retry_after: Option<std::time::Duration>,
+    },
+    /// The request never got an answer (connect, timeout, dropped connection).
+    Network(String),
+    /// HTTP 200 with `stop_reason: "refusal"`: the whole reply, usage included.
+    Refusal(Value),
+    /// A success status with a body that is not JSON.
+    BadReply(String),
+}
+
+impl AnthropicPostError {
+    /// The error the agent loop returns for this failure (the same texts as ever).
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Http { status, body, .. } => {
+                anyhow::anyhow!("Anthropic API HTTP {}: {body}", status_text(status))
+            }
+            Self::Network(e) => anyhow::anyhow!("Anthropic API request failed: {e}"),
+            Self::Refusal(v) => crate::llm::refusal_error(&v)
+                .unwrap_or_else(|| anyhow::anyhow!("the model refused the request")),
+            Self::BadReply(e) => anyhow::anyhow!("parse Anthropic response JSON: {e}"),
+        }
+    }
+}
+
+/// The status as `reqwest::StatusCode` prints it ("429 Too Many Requests").
+fn status_text(status: u16) -> String {
+    reqwest::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string())
+}
+
+/// POST an already built Messages `body` and read the reply: the second half of
+/// [`call_anthropic_with_tools`], reachable on its own so a caller that builds the body itself
+/// (the finder loop) sees the typed failure.
+pub(crate) async fn post_anthropic_body(
+    api_key: &str,
+    body: &Value,
+    use_caching: bool,
+) -> Result<LlmResponse, AnthropicPostError> {
+    let model = body["model"].as_str().unwrap_or_default().to_string();
     let mut builder = reqwest::Client::new()
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
@@ -1080,23 +1155,33 @@ async fn call_anthropic_with_tools(
     }
 
     let resp = builder
-        .json(&body)
+        .json(body)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Anthropic API request failed: {e}"))?;
+        .map_err(|e| AnthropicPostError::Network(e.to_string()))?;
 
     let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs);
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("Anthropic API HTTP {status}: {text}");
+        return Err(AnthropicPostError::Http {
+            status: status.as_u16(),
+            body: text,
+            retry_after,
+        });
     }
 
-    let v: Value = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("parse Anthropic response JSON: {e}"))?;
+    let v: Value =
+        serde_json::from_str(&text).map_err(|e| AnthropicPostError::BadReply(e.to_string()))?;
     // `stop_reason: "refusal"` arrives with HTTP 200 and no usable content. Parsed as a
     // normal turn it would be an empty final answer; fail the turn instead.
-    if let Some(refusal) = crate::llm::refusal_error(&v) {
-        return Err(refusal);
+    if v["stop_reason"].as_str() == Some("refusal") {
+        return Err(AnthropicPostError::Refusal(v));
     }
 
     // Pass the FULL response object through as `text`: it has the `content` array the
@@ -1108,7 +1193,7 @@ async fn call_anthropic_with_tools(
     let cache_creation = v["usage"]["cache_creation_input_tokens"]
         .as_u64()
         .unwrap_or(0);
-    let model_returned = v["model"].as_str().unwrap_or(model).to_string();
+    let model_returned = v["model"].as_str().unwrap_or(&model).to_string();
 
     Ok(LlmResponse {
         reported_model: None,
@@ -1147,7 +1232,7 @@ fn messages_to_text_prompt(messages: &[Value]) -> String {
 // ─── response normalization ───────────────────────────────────────────────────
 
 /// The normalized result of one provider response turn.
-enum ParsedResponse {
+pub(crate) enum ParsedResponse {
     /// The model emitted a text completion with no further tool calls (final turn).
     FinalText(String),
     /// The model wants to call one or more tools.
@@ -1170,7 +1255,7 @@ enum ParsedResponse {
 ///
 /// The `LlmResponse.text` field carries the raw JSON of the choice/message, as produced
 /// by `call_openrouter_with_tools`. For non-tool fallback completers it is a plain string.
-fn parse_response(resp: &LlmResponse) -> ParsedResponse {
+pub(crate) fn parse_response(resp: &LlmResponse) -> ParsedResponse {
     // First try: interpret `text` as a JSON object (the raw choice from our tool-aware call).
     if let Ok(choice) = serde_json::from_str::<Value>(&resp.text) {
         // ── OpenAI / OpenRouter format ────────────────────────────────────
