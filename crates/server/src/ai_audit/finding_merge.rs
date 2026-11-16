@@ -1006,6 +1006,17 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::report_export::overlay::PROVENANCE_CAPTURE,
     crate::report_export::overlay::MERGED_INTO_CAPTURE,
     crate::report_export::overlay::MERGED_LABEL_CAPTURE,
+    // The agent finder's operator-only marks on a problem: the piece it came from, its own
+    // sureness and effort, its fix text, its problem number, its end line and every rule it was
+    // cited to. None of them names an object, and the same value on two problems (the same
+    // piece, `yes`, `low`) says only that they came from one run, never that they are one cause.
+    crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_SURE_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_EFFORT_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_END_LINE_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_RULES_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.

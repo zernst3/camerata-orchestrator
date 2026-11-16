@@ -3,7 +3,11 @@
 use std::collections::{BTreeMap, HashSet};
 
 use super::checklist::AnswerKind;
-use super::reply::{parse_outputs, scan_reply, to_findings, Problem};
+use super::reply::{
+    citation_map, parse_leads_answers, parse_outputs, scan_reply, to_findings, LeadOutcome,
+    Problem, FINDER_EFFORT_CAPTURE, FINDER_END_LINE_CAPTURE, FINDER_FIX_CAPTURE,
+    FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE, FINDER_RULES_CAPTURE, FINDER_SURE_CAPTURE,
+};
 
 fn entry(n: u32, path: &str) -> serde_json::Value {
     serde_json::json!({
@@ -223,7 +227,8 @@ fn a_bad_checklist_answer_makes_checklist_json_unusable() {
 #[test]
 fn a_cited_problem_carries_the_corpus_rule_id() {
     let adopted: HashSet<String> = ["ARCH-STRICT-LAYERING-1".to_string()].into();
-    let citations: BTreeMap<u32, String> = [(1, "ARCH-STRICT-LAYERING-1".to_string())].into();
+    let citations: BTreeMap<u32, Vec<String>> =
+        [(1, vec!["ARCH-STRICT-LAYERING-1".to_string()])].into();
     let (findings, _) = to_findings(
         "acme/app",
         "acme/app#1:abcd1234",
@@ -307,7 +312,7 @@ fn an_em_dash_in_model_prose_does_not_survive() {
 
 #[test]
 fn the_scan_reply_names_the_cited_rule_or_the_label() {
-    let citations: BTreeMap<u32, String> = [(1, "RUST-ZED-1".to_string())].into();
+    let citations: BTreeMap<u32, Vec<String>> = [(1, vec!["RUST-ZED-1".to_string()])].into();
     let reply = scan_reply(
         &[problem_for(1, "ignored label"), problem_for(2, "own label")],
         &citations,
@@ -331,4 +336,296 @@ fn a_secret_in_the_models_quote_is_redacted_by_the_parser() {
     assert!(!serde_json::to_string(&findings[0])
         .expect("serializes")
         .contains(secret));
+}
+
+const ALL_FINDER_KEYS: [&str; 7] = [
+    FINDER_PIECE_CAPTURE,
+    FINDER_SURE_CAPTURE,
+    FINDER_EFFORT_CAPTURE,
+    FINDER_FIX_CAPTURE,
+    FINDER_PROBLEM_CAPTURE,
+    FINDER_END_LINE_CAPTURE,
+    FINDER_RULES_CAPTURE,
+];
+
+#[test]
+fn every_finder_capture_key_is_named_once_and_listed_as_bookkeeping() {
+    let names = [
+        "finder-piece",
+        "finder-sure",
+        "finder-effort",
+        "finder-fix",
+        "finder-problem",
+        "finder-end-line",
+        "finder-rules",
+    ];
+    assert_eq!(ALL_FINDER_KEYS, names);
+    for key in ALL_FINDER_KEYS {
+        assert!(
+            crate::ai_audit::BOOKKEEPING_CAPTURE_KEYS.contains(&key),
+            "{key} is not a bookkeeping key"
+        );
+    }
+}
+
+#[test]
+fn two_unrelated_problems_from_one_piece_are_not_one_cause() {
+    let mut a = problem_for(1, "missing authorization");
+    a.path = "src/a.rs".into();
+    let mut b = problem_for(2, "weak hashing");
+    b.path = "src/b.rs".into();
+    b.title = "Passwords are hashed with MD5".into();
+    b.what = "The hash is fast and unsalted.".into();
+    b.why = "Stolen hashes fall quickly.".into();
+    b.code = "md5(password)".into();
+    b.fix = "Use a slow salted hash.".into();
+    let (findings, _) = to_findings(
+        "acme/app",
+        "acme/app#1:abcd1234",
+        &[a, b],
+        &BTreeMap::new(),
+        &HashSet::new(),
+    );
+    assert_eq!(findings.len(), 2);
+    // Both carry the same piece, sureness and effort: that is bookkeeping, not an object.
+    assert_eq!(
+        findings[0].captures.get(FINDER_PIECE_CAPTURE),
+        findings[1].captures.get(FINDER_PIECE_CAPTURE)
+    );
+    assert!(
+        !crate::ai_audit::finding_merge::shared_captured_object(&findings[0], &findings[1]),
+        "the finder captures linked two problems"
+    );
+    assert!(
+        crate::ai_audit::finding_merge::same_cause_signal(&findings[0], &findings[1], None)
+            .is_none(),
+        "two unrelated agent problems were read as one cause"
+    );
+}
+
+#[test]
+fn a_problems_json_file_is_unusable_never_ignored_and_counted_files_are_exact() {
+    let one = serde_json::json!([entry(1, "src/a.rs")]).to_string();
+    let out = parse_outputs(&outputs(&[("problems.json", one.clone())]), &piece_files());
+    assert!(out.problems.is_empty());
+    assert_eq!(out.unusable.len(), 1, "{:?}", out.unusable);
+    assert!(out.unusable[0].file.ends_with("problems.json"));
+    assert_eq!(
+        out.problems_files, 0,
+        "problems.json is not a problems file"
+    );
+
+    // A file nobody reads, in a folder or at the top, is visible too.
+    let out = parse_outputs(
+        &outputs(&[
+            ("notes.txt", "x".to_string()),
+            ("sub/problems-1.json", one.clone()),
+            ("card.md", "c".to_string()),
+        ]),
+        &piece_files(),
+    );
+    assert_eq!(out.unusable.len(), 2, "{:?}", out.unusable);
+    assert!(out.card.is_some());
+    assert_eq!(out.problems_files, 0);
+
+    // No output at all: zero problems files, so the runner can fail the piece.
+    let none = parse_outputs(&BTreeMap::new(), &piece_files());
+    assert_eq!(none.problems_files, 0);
+    assert!(none.unusable.is_empty());
+
+    // Two problems files, one of them unusable: both were seen.
+    let two = parse_outputs(
+        &outputs(&[
+            ("problems-1.json", one),
+            ("problems-2.json", "{not json".to_string()),
+        ]),
+        &piece_files(),
+    );
+    assert_eq!(two.problems_files, 2);
+    assert_eq!(two.unusable.len(), 1);
+}
+
+#[test]
+fn leads_are_numbered_keep_their_source_problem_and_are_cleaned() {
+    let secret = "sk_live_4eC39HqLyjWDarjtT1zdp7dcAbCdEfGhIjKl";
+    let mut moved = entry(2, "src/context_only.rs");
+    moved["what"] = serde_json::json!("It skips the check \u{2014} always.");
+    let problems = serde_json::json!([entry(1, "src/a.rs"), moved]).to_string();
+    let leads = serde_json::json!([
+        {"path": "lib/x.rs", "line": 5, "what": format!("Key {secret} \u{2013} in the open")},
+        {"path": "lib/y.rs", "what": "no line given"}
+    ])
+    .to_string();
+    let out = parse_outputs(
+        &outputs(&[("problems-1.json", problems), ("leads.json", leads)]),
+        &piece_files(),
+    );
+    assert_eq!(out.leads.len(), 3);
+    assert_eq!(
+        out.leads.iter().map(|l| l.n).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(out.leads[0].source_problem, Some(2));
+    assert_eq!(out.leads[1].source_problem, None);
+    for lead in &out.leads {
+        assert!(
+            !lead.what.contains('\u{2014}') && !lead.what.contains('\u{2013}'),
+            "{lead:?}"
+        );
+        assert!(!lead.what.contains(secret), "{lead:?}");
+    }
+    assert!(out.leads[1].what.contains("Key"), "{:?}", out.leads[1]);
+}
+
+fn free_text_adopted() -> HashSet<String> {
+    [
+        "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1".to_string(),
+        "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+        "ARCH-STRICT-LAYERING-1".to_string(),
+    ]
+    .into()
+}
+
+#[test]
+fn a_free_text_label_is_never_matched_to_a_rule_however_close() {
+    let adopted = free_text_adopted();
+    for label in [
+        // A typo of an adopted id.
+        "JAVASCRIPT-TYPESRIPT-NO-NON-NULL-ASSERTION-1",
+        // An adopted id without its version suffix.
+        "SEC-NO-RAW-SQL-CONCAT",
+        // Words that spell an adopted id.
+        "sec no raw sql concat 1",
+    ] {
+        let (findings, _) = to_findings(
+            "acme/app",
+            "k",
+            &[problem_for(1, label)],
+            &BTreeMap::new(),
+            &adopted,
+        );
+        assert!(
+            findings[0].rule_id.starts_with("AI-"),
+            "label {label:?} cited {}",
+            findings[0].rule_id
+        );
+        assert!(!adopted.contains(&findings[0].rule_id), "{label:?}");
+    }
+}
+
+#[test]
+fn only_an_exact_rule_id_as_the_label_cites_a_rule() {
+    let adopted = free_text_adopted();
+    for label in ["ARCH-STRICT-LAYERING-1", "arch-strict-layering-1"] {
+        let (findings, _) = to_findings(
+            "acme/app",
+            "k",
+            &[problem_for(1, label)],
+            &BTreeMap::new(),
+            &adopted,
+        );
+        assert_eq!(findings[0].rule_id, "ARCH-STRICT-LAYERING-1", "{label:?}");
+    }
+}
+
+#[test]
+fn every_rule_a_problem_cites_is_recorded_not_only_the_first() {
+    let adopted: HashSet<String> = [
+        "ARCH-STRICT-LAYERING-1".to_string(),
+        "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+    ]
+    .into();
+    let cites = vec![
+        super::checklist::Citation {
+            problem: 1,
+            rule: "ARCH-STRICT-LAYERING-1".into(),
+        },
+        super::checklist::Citation {
+            problem: 1,
+            rule: "SEC-NO-RAW-SQL-CONCAT-1".into(),
+        },
+        super::checklist::Citation {
+            problem: 1,
+            rule: "arch-strict-layering-1".into(),
+        },
+    ];
+    let map = citation_map(&cites);
+    assert_eq!(
+        map[&1],
+        vec![
+            "ARCH-STRICT-LAYERING-1".to_string(),
+            "SEC-NO-RAW-SQL-CONCAT-1".to_string()
+        ],
+        "in the order cited, none twice"
+    );
+    let (findings, _) = to_findings("acme/app", "k", &[problem_for(1, "x y")], &map, &adopted);
+    let f = &findings[0];
+    assert_eq!(f.rule_id, "ARCH-STRICT-LAYERING-1");
+    assert_eq!(f.also_matches, vec!["SEC-NO-RAW-SQL-CONCAT-1".to_string()]);
+    assert_eq!(
+        f.captures.get(FINDER_RULES_CAPTURE).map(String::as_str),
+        Some("ARCH-STRICT-LAYERING-1,SEC-NO-RAW-SQL-CONCAT-1")
+    );
+}
+
+fn lead(n: u32, path: &str) -> super::reply::Lead {
+    super::reply::Lead {
+        n,
+        path: path.into(),
+        line: 5,
+        what: "w".into(),
+        source_problem: None,
+    }
+}
+
+#[test]
+fn every_lead_must_be_answered_and_an_unanswered_one_is_reported() {
+    let leads = vec![
+        lead(1, "lib/x.rs"),
+        lead(2, "lib/y.rs"),
+        lead(3, "lib/z.rs"),
+    ];
+    let problems = vec![(10, "lib/x.rs".to_string()), (11, "lib/y.rs".to_string())];
+    let text = serde_json::json!([
+        {"lead": 1, "covered_by": 10},
+        {"lead": 2, "new_problem": 11}
+    ])
+    .to_string();
+    let a = parse_leads_answers(Some(&text), &leads, &problems);
+    assert_eq!(a.answered.len(), 2);
+    assert_eq!(a.answered[0].outcome, LeadOutcome::CoveredBy(10));
+    assert_eq!(a.answered[1].outcome, LeadOutcome::NewProblem(11));
+    assert_eq!(a.unanswered, vec![3]);
+    assert_eq!(a.unresolved(), vec![3]);
+    assert!(a.unusable.is_none());
+
+    // No file at all: every lead is unanswered.
+    let none = parse_leads_answers(None, &leads, &problems);
+    assert_eq!(none.unanswered, vec![1, 2, 3]);
+    // Not JSON: every lead is unanswered and the reason is kept.
+    let bad = parse_leads_answers(Some("{nope"), &leads, &problems);
+    assert_eq!(bad.unanswered, vec![1, 2, 3]);
+    assert!(bad.unusable.is_some());
+}
+
+#[test]
+fn a_covered_by_answer_must_name_a_problem_at_the_leads_file() {
+    let leads = vec![
+        lead(1, "lib/x.rs"),
+        lead(2, "lib/y.rs"),
+        lead(3, "lib/z.rs"),
+    ];
+    let problems = vec![(10, "lib/other.rs".to_string())];
+    let text = serde_json::json!({"answers": [
+        {"lead": 1, "covered_by": 10},
+        {"lead": 2, "covered_by": 99},
+        {"lead": 3},
+        {"lead": 7, "covered_by": 10}
+    ]})
+    .to_string();
+    let a = parse_leads_answers(Some(&text), &leads, &problems);
+    assert!(a.answered.is_empty());
+    assert_eq!(a.invalid.len(), 3, "{:?}", a.invalid);
+    assert_eq!(a.unknown_leads, vec![7]);
+    assert_eq!(a.unresolved(), vec![1, 2, 3]);
 }

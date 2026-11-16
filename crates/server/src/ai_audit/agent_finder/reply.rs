@@ -28,12 +28,30 @@ pub struct Problem {
     pub label: String,
 }
 
-/// A problem the agent saw in a file outside its piece.
+/// The captures a finder problem carries for the operator. All of them are bookkeeping keys
+/// (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`): none names an object, and the same value on two
+/// problems (the same piece, the same `sure`) must never read as one cause.
+pub const FINDER_PIECE_CAPTURE: &str = "finder-piece";
+pub const FINDER_SURE_CAPTURE: &str = "finder-sure";
+pub const FINDER_EFFORT_CAPTURE: &str = "finder-effort";
+pub const FINDER_FIX_CAPTURE: &str = "finder-fix";
+pub const FINDER_PROBLEM_CAPTURE: &str = "finder-problem";
+pub const FINDER_END_LINE_CAPTURE: &str = "finder-end-line";
+/// Every checklist rule id the problem was cited to, comma separated, in the order cited.
+pub const FINDER_RULES_CAPTURE: &str = "finder-rules";
+
+/// A problem the agent saw in a file outside its piece (a lead). Numbered within the piece's
+/// output, from 1, in the order found: the problems moved from a problems file first, then
+/// `leads.json`. A joints call that gathers the leads of several pieces numbers them again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lead {
+    pub n: u32,
     pub path: String,
     pub line: usize,
     pub what: String,
+    /// The number of the agent's problem this lead was made from, when it was a problem written
+    /// for a file outside the piece. `None` for an entry of `leads.json`.
+    pub source_problem: Option<u32>,
 }
 
 /// An output file that could not be used, and why.
@@ -54,6 +72,11 @@ pub struct PieceOutput {
     /// The agent's own list of files it did not read in full. Never used for coverage.
     pub unread: Option<Vec<String>>,
     pub unusable: Vec<Unusable>,
+    /// How many `problems-<n>.json` files were seen, usable or not. A run that wrote none has
+    /// nothing to report and the runner fails the piece (output never vanishes silently).
+    pub problems_files: usize,
+    /// The text of `leads-answers.json` (the joints call), read by [`parse_leads_answers`].
+    pub leads_answers: Option<String>,
 }
 
 /// The most problems one file may hold.
@@ -65,6 +88,13 @@ const EFFORTS: [&str; 3] = ["low", "medium", "high"];
 /// A path the way the room names it.
 fn plain_path(path: &str) -> String {
     path.trim_start_matches("./").to_string()
+}
+
+/// Text of a lead the way problem text is treated: dashes rewritten, then redacted.
+fn lead_text(raw: &str) -> String {
+    let mut text = crate::client_text::plain(raw.trim()).into_owned();
+    crate::onboard::redact::redact_string(&mut text);
+    text
 }
 
 /// The file name of an output path (`_camerata/out/card.md` and `card.md` both give `card.md`).
@@ -282,13 +312,17 @@ fn parse_leads(v: &serde_json::Value) -> Result<Vec<Lead>, String> {
     for (i, l) in items.iter().enumerate() {
         let at = |e: String| format!("lead {} {e}", i + 1);
         out.push(Lead {
+            n: 0,
             path: plain_path(text_field(l, "path", false).map_err(at)?.trim()),
             line: l
                 .get("line")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|n| usize::try_from(n).ok())
                 .unwrap_or(0),
-            what: text_field(l, "what", false).map_err(|e| format!("lead {} {e}", i + 1))?,
+            what: lead_text(
+                &text_field(l, "what", false).map_err(|e| format!("lead {} {e}", i + 1))?,
+            ),
+            source_problem: None,
         });
     }
     Ok(out)
@@ -327,6 +361,7 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
             reason,
         };
         if problems_file_number(name).is_some() {
+            out.problems_files += 1;
             let value: serde_json::Value = match serde_json::from_str(text) {
                 Ok(v) => v,
                 Err(e) => {
@@ -379,9 +414,11 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
                     out.problems.push(p);
                 } else {
                     out.leads.push(Lead {
+                        n: 0,
                         path: p.path,
                         line: p.line,
-                        what: format!("{}. {}", p.title, p.what),
+                        what: lead_text(&format!("{}. {}", p.title, p.what)),
+                        source_problem: Some(p.n),
                     });
                 }
             }
@@ -415,21 +452,47 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
                     .unusable
                     .push(unusable(format!("is not valid JSON: {e}"))),
             },
+            "leads-answers.json" => out.leads_answers = Some(text.clone()),
             "card.md" => out.card = Some(crate::client_text::plain(text).into_owned()),
-            _ => {}
+            // A file nobody reads is visible, never ignored: the agent may have meant it as its
+            // problems file (`problems.json`).
+            _ => out.unusable.push(unusable(format!(
+                "is not a file this review uses; write problems to {}problems-1.json, then problems-2.json and so on",
+                super::room::OUT_DIR
+            ))),
         }
+    }
+    for (i, lead) in out.leads.iter_mut().enumerate() {
+        lead.n = u32::try_from(i + 1).unwrap_or(u32::MAX);
     }
     out
 }
 
+/// The rule text a problem is keyed by in the scan reply. Only an exact rule id cites a rule: a
+/// citation from the checklist step, else a label that is exactly an adopted rule id (the
+/// checklist asks the agent to write the rule id as the label of a problem a rule turned up).
+/// Any other label is free text and stays free text.
+fn rule_for<'a>(
+    p: &'a Problem,
+    citations: &'a BTreeMap<u32, Vec<String>>,
+    adopted: Option<&HashSet<String>>,
+) -> (&'a str, bool) {
+    if let Some(first) = citations.get(&p.n).and_then(|c| c.first()) {
+        return (first.as_str(), true);
+    }
+    let label = p.label.trim();
+    let exact = adopted.is_some_and(|a| a.contains(&label.to_ascii_uppercase()));
+    (label, exact)
+}
+
 /// The scan reply (`{"findings": [...]}`) for `parse_ai_findings`. `citations` maps a problem
-/// number to the checklist rule it breaks; a problem without one is keyed by its label. The
-/// detail is what is wrong, then why it matters.
-pub fn scan_reply(problems: &[Problem], citations: &BTreeMap<u32, String>) -> String {
+/// number to the checklist rules it breaks, first cited first; a problem without one is keyed by
+/// its label. The detail is what is wrong, then why it matters.
+pub fn scan_reply(problems: &[Problem], citations: &BTreeMap<u32, Vec<String>>) -> String {
     let findings: Vec<serde_json::Value> = problems
         .iter()
         .map(|p| {
-            let rule = citations.get(&p.n).map_or(p.label.as_str(), String::as_str);
+            let (rule, _) = rule_for(p, citations, None);
             let detail = [p.what.trim(), p.why.trim()]
                 .iter()
                 .filter(|s| !s.is_empty())
@@ -450,34 +513,220 @@ pub fn scan_reply(problems: &[Problem], citations: &BTreeMap<u32, String>) -> St
     serde_json::json!({ "findings": findings }).to_string()
 }
 
+/// The citations of a checked piece as `scan_reply` wants them: for each problem the rule ids it
+/// was cited to (uppercase, in the order cited, none twice).
+pub fn citation_map(citations: &[Citation]) -> BTreeMap<u32, Vec<String>> {
+    let mut map: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+    for c in citations {
+        let rule = c.rule.trim().to_ascii_uppercase();
+        let list = map.entry(c.problem).or_default();
+        if !list.contains(&rule) {
+            list.push(rule);
+        }
+    }
+    map
+}
+
 /// Turn problems into findings. `adopted` are the checklist's rule ids (uppercase). The fix, the
-/// end line, the piece key, `sure`, `effort` and the problem number ride on each finding as
-/// operator-only captures (`finder-*`); no report template reads them.
+/// end line, the piece key, `sure`, `effort`, the problem number and every cited rule id ride on
+/// each finding as operator-only captures (`finder-*`, all bookkeeping keys); no report template
+/// reads them. The first cited rule is the finding's rule and the others are its
+/// `also_matches`. A label that is free text is never matched to a rule, however close it is to
+/// one: the shared parser's near-match is undone for it and the finding keeps an `AI-` id.
 pub fn to_findings(
     repo: &str,
     piece_key: &str,
     problems: &[Problem],
-    citations: &BTreeMap<u32, String>,
+    citations: &BTreeMap<u32, Vec<String>>,
     adopted: &HashSet<String>,
 ) -> (Vec<Finding>, Vec<ProposedRule>) {
     let reply = scan_reply(problems, citations);
     let (mut findings, proposed) = crate::ai_audit::parse_ai_findings(repo, &reply, adopted);
     for (finding, p) in findings.iter_mut().zip(problems) {
+        let (_, cites) = rule_for(p, citations, Some(adopted));
+        if !cites && adopted.contains(&finding.rule_id) {
+            let label = crate::ai_audit::digest_parse::normalize_model_rule_label(&p.label);
+            finding.rule_id = format!(
+                "AI-{}",
+                if label.is_empty() {
+                    "ARCHITECTURE"
+                } else {
+                    &label
+                }
+            );
+        }
+        let cited = citations.get(&p.n).cloned().unwrap_or_default();
+        if cites && cited.len() > 1 {
+            for other in cited.iter().skip(1) {
+                if *other != finding.rule_id && !finding.also_matches.contains(other) {
+                    finding.also_matches.push(other.clone());
+                }
+            }
+        }
         let c = &mut finding.captures;
         let fix = crate::client_text::plain(p.fix.trim()).into_owned();
         if !fix.is_empty() {
-            c.insert("finder-fix".to_string(), fix);
+            c.insert(FINDER_FIX_CAPTURE.to_string(), fix);
         }
         if let Some(end) = p.end_line {
-            c.insert("finder-end-line".to_string(), end.to_string());
+            c.insert(FINDER_END_LINE_CAPTURE.to_string(), end.to_string());
         }
-        c.insert("finder-piece".to_string(), piece_key.to_string());
+        c.insert(FINDER_PIECE_CAPTURE.to_string(), piece_key.to_string());
         c.insert(
-            "finder-sure".to_string(),
+            FINDER_SURE_CAPTURE.to_string(),
             if p.sure { "yes" } else { "unsure" }.to_string(),
         );
-        c.insert("finder-effort".to_string(), p.effort.clone());
-        c.insert("finder-problem".to_string(), p.n.to_string());
+        c.insert(FINDER_EFFORT_CAPTURE.to_string(), p.effort.clone());
+        c.insert(FINDER_PROBLEM_CAPTURE.to_string(), p.n.to_string());
+        if !cited.is_empty() {
+            c.insert(FINDER_RULES_CAPTURE.to_string(), cited.join(","));
+        }
     }
     (findings, proposed)
+}
+
+/// How the joints agent answered one lead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeadOutcome {
+    /// A problem already reported covers it (and that problem is at the lead's file).
+    CoveredBy(u32),
+    /// The agent wrote this new problem for it (and it exists).
+    NewProblem(u32),
+}
+
+/// One answer of `leads-answers.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeadAnswer {
+    pub lead: u32,
+    pub outcome: LeadOutcome,
+}
+
+/// `leads-answers.json` checked against the leads and the problems.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LeadAnswers {
+    /// Answers that hold up.
+    pub answered: Vec<LeadAnswer>,
+    /// Leads with no answer at all.
+    pub unanswered: Vec<u32>,
+    /// Leads whose answer does not hold up, with the reason (a `covered_by` problem that does
+    /// not exist or is at another file, a `new_problem` that does not exist, neither field).
+    pub invalid: Vec<(u32, String)>,
+    /// Answers that name no lead, with the number they gave.
+    pub unknown_leads: Vec<u32>,
+    /// Why the whole file could not be read (not JSON, not a list); every lead is then
+    /// unanswered.
+    pub unusable: Option<String>,
+}
+
+impl LeadAnswers {
+    /// The leads the runner turns into a problem needing a decision: those with no answer and
+    /// those whose answer is invalid, sorted and without repeats.
+    pub fn unresolved(&self) -> Vec<u32> {
+        let mut all: Vec<u32> = self
+            .unanswered
+            .iter()
+            .copied()
+            .chain(self.invalid.iter().map(|(n, _)| *n))
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+}
+
+/// Read `leads-answers.json` (`text`; `None` when the agent wrote none). Every lead must be
+/// answered, in one of two ways: `covered_by` a problem number (that problem must exist and be
+/// at the lead's file) or `new_problem` (that problem must exist). `problems` are those the
+/// joints agent wrote together with the ones already reported.
+pub fn parse_leads_answers(
+    text: Option<&str>,
+    leads: &[Lead],
+    problems: &[(u32, String)],
+) -> LeadAnswers {
+    let mut out = LeadAnswers::default();
+    let all_unanswered = |out: &mut LeadAnswers, why: Option<String>| {
+        out.unanswered = leads.iter().map(|l| l.n).collect();
+        out.unusable = why;
+    };
+    let Some(text) = text else {
+        all_unanswered(&mut out, None);
+        return out;
+    };
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => {
+            all_unanswered(&mut out, Some(format!("is not valid JSON: {e}")));
+            return out;
+        }
+    };
+    let items = match array_of(&value, "answers") {
+        Ok(items) => items,
+        Err(e) => {
+            all_unanswered(&mut out, Some(e));
+            return out;
+        }
+    };
+    let mut answered_leads: HashSet<u32> = HashSet::new();
+    for item in items {
+        let Some(lead_n) = item
+            .get("lead")
+            .or_else(|| item.get("n"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+        else {
+            out.invalid
+                .push((0, "an answer has no lead number".to_string()));
+            continue;
+        };
+        let Some(lead) = leads.iter().find(|l| l.n == lead_n) else {
+            out.unknown_leads.push(lead_n);
+            continue;
+        };
+        let number = |key: &str| {
+            item.get(key)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+        };
+        let outcome = match (number("covered_by"), number("new_problem")) {
+            (Some(p), None) => match problems.iter().find(|(n, _)| *n == p) {
+                Some((_, path)) if plain_path(path) == plain_path(&lead.path) => {
+                    Ok(LeadOutcome::CoveredBy(p))
+                }
+                Some(_) => Err(format!(
+                    "covered_by problem {p}, which is not at {}",
+                    lead.path
+                )),
+                None => Err(format!("covered_by problem {p}, which does not exist")),
+            },
+            (None, Some(p)) => {
+                if problems.iter().any(|(n, _)| *n == p) {
+                    Ok(LeadOutcome::NewProblem(p))
+                } else {
+                    Err(format!("new_problem {p}, which does not exist"))
+                }
+            }
+            (Some(_), Some(_)) => Err("gives both covered_by and new_problem".to_string()),
+            (None, None) => Err("gives neither covered_by nor new_problem".to_string()),
+        };
+        match outcome {
+            Ok(outcome) => {
+                if answered_leads.insert(lead_n) {
+                    out.answered.push(LeadAnswer {
+                        lead: lead_n,
+                        outcome,
+                    });
+                }
+            }
+            Err(reason) => out.invalid.push((lead_n, reason)),
+        }
+    }
+    // A lead that got a good answer after a bad one is answered.
+    out.invalid.retain(|(n, _)| !answered_leads.contains(n));
+    let invalid_leads: HashSet<u32> = out.invalid.iter().map(|(n, _)| *n).collect();
+    out.unanswered = leads
+        .iter()
+        .map(|l| l.n)
+        .filter(|n| !answered_leads.contains(n) && !invalid_leads.contains(n))
+        .collect();
+    out
 }
