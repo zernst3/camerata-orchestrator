@@ -299,14 +299,22 @@ impl ApiPieceAgent {
                     None,
                     false,
                 ),
-                Err(AnthropicPostError::Network(e)) => (
-                    FailureClass::Transport,
-                    format!("Anthropic API request failed: {e}"),
-                    None,
-                    true,
-                    None,
-                    false,
-                ),
+                Err(AnthropicPostError::Network(e)) => {
+                    // A call that timed out may still have been billed and nothing came back to
+                    // price it from: it counts once, at the request's cost ceiling. A failure
+                    // that never reached the model counts nothing.
+                    if e.to_ascii_lowercase().contains("timed out") {
+                        self.count_timed_out_call(body);
+                    }
+                    (
+                        FailureClass::Transport,
+                        format!("Anthropic API request failed: {e}"),
+                        None,
+                        true,
+                        None,
+                        false,
+                    )
+                }
                 Err(AnthropicPostError::Http {
                     status,
                     body: text,
@@ -364,6 +372,30 @@ impl ApiPieceAgent {
             failure.http = status;
             return Err(SendFailure::Failed(Box::new(failure)));
         }
+    }
+
+    /// Record a call that timed out on the meter at the request's cost ceiling (the most it
+    /// could have cost). The agent meters its own turns, so this is the only place it is counted.
+    fn count_timed_out_call(&self, body: &Value) {
+        let Some(meter) = &self.meter else { return };
+        let cost = crate::api_agent_driver::request_ceiling_usd_for_body(&self.model, body);
+        meter.record_unanswered(
+            Stage::Finder,
+            &LlmResponse {
+                reported_model: None,
+                cli_cost_usd: None,
+                text: String::new(),
+                model: self.model.clone(),
+                backend: "anthropic/api/agentic".to_string(),
+                cost_usd: cost,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            },
+        );
     }
 
     /// Price one reply, record it on the meter and return what the turn used. The Messages

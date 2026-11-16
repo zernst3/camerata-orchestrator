@@ -1040,9 +1040,22 @@ fn request_ceiling_usd(
             .iter()
             .map(|t| t.to_string().len())
             .sum::<usize>();
+    ceiling_usd_for(model, bytes, AGENT_MAX_OUTPUT_TOKENS)
+}
+
+/// [`request_ceiling_usd`] for a Messages body already built: its whole text is the input and its
+/// own `max_tokens` the output cap. The finder's API agent counts a timed-out call at this.
+pub(crate) fn request_ceiling_usd_for_body(model: &str, body: &Value) -> Option<f64> {
+    let output = body["max_tokens"]
+        .as_u64()
+        .unwrap_or(AGENT_MAX_OUTPUT_TOKENS);
+    ceiling_usd_for(model, body.to_string().len(), output)
+}
+
+fn ceiling_usd_for(model: &str, input_bytes: usize, output_tokens: u64) -> Option<f64> {
     let usage = crate::llm::CallUsage {
-        input: Some(bytes as u64 / 3 + 1),
-        output: Some(AGENT_MAX_OUTPUT_TOKENS),
+        input: Some(input_bytes as u64 / 3 + 1),
+        output: Some(output_tokens),
         cache_read: 0,
         cache_creation: 0,
         cache_creation_1h: None,

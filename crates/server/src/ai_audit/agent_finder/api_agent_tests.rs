@@ -1471,3 +1471,48 @@ async fn a_file_that_tells_the_reader_to_stop_and_write_elsewhere_changes_nothin
     );
     assert!(!coverage.still_unread.contains(&"src/a.rs".to_string()));
 }
+
+// ─── a call that timed out may have been billed ──────────────────────────────────────────────
+
+fn network_timeout() -> Reply {
+    Err(AnthropicPostError::Network(
+        "Anthropic API request failed: error sending request: operation timed out".to_string(),
+    ))
+}
+
+/// What the meter holds after one run whose script is `script`, plus the bodies sent.
+async fn spend_after(script: Vec<Reply>) -> (f64, Vec<Value>) {
+    let wire = ScriptedWire::new(script);
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, _) = metered(&wire, &meter);
+    let _ = agent.run(&room(), "Review.", &limits()).await;
+    (meter.snapshot().cost_usd, wire.bodies())
+}
+
+#[tokio::test]
+async fn a_timed_out_call_is_counted_once_at_the_request_ceiling_and_then_retried() {
+    let (baseline, _) = spend_after(vec![text_reply("done")]).await;
+    let (with_timeout, bodies) = spend_after(vec![network_timeout(), text_reply("done")]).await;
+    assert_eq!(bodies.len(), 2, "the timeout is retried");
+    let ceiling = crate::api_agent_driver::request_ceiling_usd_for_body(MODEL, &bodies[0])
+        .expect("the finder model is priced");
+    assert!(ceiling > 0.0);
+    assert!(
+        (with_timeout - baseline - ceiling).abs() < 1e-6,
+        "timed-out call counts once at its ceiling: {with_timeout} - {baseline} vs {ceiling}"
+    );
+}
+
+#[tokio::test]
+async fn a_call_that_never_reached_the_model_counts_nothing() {
+    let (baseline, _) = spend_after(vec![text_reply("done")]).await;
+    let (spent, bodies) = spend_after(vec![
+        http(400, "invalid_request_error", "bad request", None),
+        text_reply("done"),
+    ])
+    .await;
+    // A 400 is not retried: the piece fails and nothing was billed.
+    assert_eq!(bodies.len(), 1);
+    assert!(spent.abs() < 1e-12, "a 400 costs nothing, got {spent}");
+    assert!(baseline > 0.0);
+}

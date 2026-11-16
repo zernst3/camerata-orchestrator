@@ -672,6 +672,14 @@ impl UsageMeter {
         self.health.note_success();
     }
 
+    /// Count a call that got no answer but may have been billed (it timed out): `r` carries the
+    /// cost it counts at. Unlike [`Self::record_stage`] it proves nothing about the provider
+    /// being reachable, so the outage streak is left alone.
+    pub fn record_unanswered(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+        self.stages.record(stage, r);
+        self.record(stage, r);
+    }
+
     /// [`Self::record_stage`] for a reply a checkpoint holds from an earlier attempt of this run:
     /// its usage joins the meter like any call's, and its cost is also counted as RESUMED, so the
     /// spend limit (which adds the whole stored spend up front) does not count it twice.
