@@ -156,7 +156,10 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     // The model-input chokepoint: the prompt and the system prompt go out redacted.
     let req = crate::model_input::guarded(req);
     let req = &*req;
-    let mut cmd = tokio::process::Command::new("claude");
+    let mut cmd = match req.room_output.as_ref().and_then(|r| r.program.as_ref()) {
+        Some(program) => tokio::process::Command::new(program),
+        None => tokio::process::Command::new("claude"),
+    };
     // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
     // leaving a stalled `claude` running in the background.
     // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
@@ -212,10 +215,13 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
         // `--add-dir`. Still non-agentic: slash-commands off, NO write/exec tool offered, so
         // this grants READ only — it cannot mutate the repo, spawn, or run shell.
         Some(dir) => {
-            cmd.arg("--allowedTools")
-                .arg(READ_ONLY_TOOLS.join(" "))
-                .arg("--add-dir")
-                .arg(dir);
+            cmd.arg("--allowedTools").arg(READ_ONLY_TOOLS.join(" "));
+            // The clean-room write: one more value of the allow list (a separate value, so a
+            // room path with a space stays whole), the room's out folder and nothing wider.
+            if let Some(room) = &req.room_output {
+                cmd.arg(room_output_rule(&room.room_dir));
+            }
+            cmd.arg("--add-dir").arg(dir);
             // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
             // added as its own read-only `--add-dir` so a project-level model can scan across
             // all of them. READ-only — no write/exec tool is offered either way. Skip any that
@@ -236,6 +242,40 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
     if let Some(system) = &req.system {
         cmd.arg("--system-prompt").arg(nul_safe(system));
     }
+    // A clean-room call (see [`RoomOutput`]): no instruction file is read, and the tools that
+    // could run code, reach the web or hand the work to another agent are denied by name. The
+    // bare names `Edit` and `Write` are never denied here: a deny wins over the allow rule above.
+    if req.repo_read_dir.is_some() && req.room_output.is_some() {
+        cmd.env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1");
+        cmd.arg("--disallowedTools").args(ROOM_DENIED_TOOLS);
+    }
+}
+
+/// Tools a clean-room call never has: a shell, the web, and anything that starts another agent.
+const ROOM_DENIED_TOOLS: &[&str] = &["Bash", "WebFetch", "WebSearch", "Task", "Agent"];
+
+/// The room folder a clean-room call may write into, below the room.
+const OUT_FOLDER: &str = "_camerata/out";
+
+/// The allow rule that lets the Write tool create files under `<room_dir>/_camerata/out/`.
+///
+/// Claude Code checks file edits against `Edit(path)` rules, and its Write tool is one of the
+/// tools they cover; a rule written `Write(path)` with a path is accepted and then never
+/// matches. The path is anchored with `//` (an absolute path from the filesystem root), so the
+/// rule means exactly this folder whatever the working directory is, and gitignore pattern
+/// characters in the room's own path are escaped so they match themselves. With the permission
+/// mode `dontAsk`, anything no rule allows is refused, so a write anywhere else (the room's
+/// other files, the repository, the home folder) is denied.
+pub fn room_output_rule(room_dir: &std::path::Path) -> String {
+    let mut path = String::new();
+    for c in room_dir.to_string_lossy().chars() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']') {
+            path.push('\\');
+        }
+        path.push(c);
+    }
+    let path = path.trim_end_matches('/');
+    format!("Edit(/{path}/{OUT_FOLDER}/**)")
 }
 
 /// The read-only built-in tools granted on the CLI backend when a request opts into
@@ -983,6 +1023,21 @@ pub struct LlmRequest {
     /// and the API caches a prompt per schema, so a stage that wants a cached prefix reused
     /// across requests keeps one schema for all of them.
     pub response_schema: Option<serde_json::Value>,
+    /// A clean review room the CLI backend may also WRITE into, and only there (see
+    /// [`RoomOutput`] and [`LlmRequest::with_room_output`]). `None` = today's read-only grant,
+    /// byte for byte. Ignored by the API backend and by a request with no repo-read folder.
+    pub room_output: Option<RoomOutput>,
+}
+
+/// The one write a clean-room call may make: files under `<room_dir>/_camerata/out/`, nowhere
+/// else. Used by the agent finder's command line transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomOutput {
+    /// The room folder (absolute and resolved: a symlink in it would not match the rule).
+    pub room_dir: std::path::PathBuf,
+    /// The `claude` program to run instead of the one found on `PATH` (the desktop app ships a
+    /// newer one than a terminal install). `None` = `claude` from `PATH`.
+    pub program: Option<std::path::PathBuf>,
 }
 
 impl LlmRequest {
@@ -999,7 +1054,25 @@ impl LlmRequest {
             effort: None,
             temperature: None,
             response_schema: None,
+            room_output: None,
         }
+    }
+
+    /// Let the CLI-backend model write into `room_dir/_camerata/out/` and nowhere else, run
+    /// `program` (when given) in place of `claude` from `PATH`, and run as a clean room: no
+    /// instruction file is read, and no shell, web, task or agent tool is available. Needs
+    /// repo read on `room_dir` ([`Self::with_repo_read`]); without it the option does nothing.
+    /// The API backend ignores it.
+    pub fn with_room_output(
+        mut self,
+        room_dir: impl Into<std::path::PathBuf>,
+        program: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.room_output = Some(RoomOutput {
+            room_dir: room_dir.into(),
+            program,
+        });
+        self
     }
 
     /// Ask for a reply that satisfies `schema` (see [`LlmRequest::response_schema`]).
@@ -3626,6 +3699,8 @@ mod cli_isolation_tests;
 mod cli_pricing_tests;
 #[cfg(test)]
 mod model_input_tests;
+#[cfg(test)]
+mod room_output_tests;
 
 // The streamed API leg against a local mock server: SSE folding, salvage, cut-off at the cap.
 #[cfg(test)]

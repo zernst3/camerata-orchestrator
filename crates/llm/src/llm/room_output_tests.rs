@@ -1,0 +1,198 @@
+//! The clean-room write grant: a call that reviews a room folder may also write into that room's
+//! `_camerata/out/` and nowhere else. Tests read the argument list and the environment the
+//! command is built with, so no `claude` program is needed.
+
+use super::*;
+
+fn args_of(cmd: &tokio::process::Command) -> Vec<String> {
+    cmd.as_std()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn env_of(cmd: &tokio::process::Command, key: &str) -> Option<String> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(k, _)| *k == key)
+        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+}
+
+const ROOM: &str = "/Users/auditor/state/rooms/room-1";
+
+fn read_only() -> LlmRequest {
+    LlmRequest::new("hi").with_repo_read(ROOM)
+}
+
+fn room_call() -> LlmRequest {
+    read_only().with_room_output(ROOM, None)
+}
+
+fn build(req: &LlmRequest) -> tokio::process::Command {
+    build_cli_command(req, "claude-fable-5-2", "sid")
+}
+
+#[test]
+fn without_the_option_the_argument_list_is_what_it_always_was() {
+    let args = args_of(&build(&read_only()));
+    let expected: Vec<String> = [
+        "-p",
+        "hi",
+        "--model",
+        "claude-fable-5-2",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--session-id",
+        "sid",
+        "--setting-sources",
+        "user",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--permission-mode",
+        "dontAsk",
+        "--allowedTools",
+        "Read Glob Grep LS",
+        "--add-dir",
+        ROOM,
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    assert_eq!(args, expected);
+    assert_eq!(
+        env_of(&build(&read_only()), "CLAUDE_CODE_DISABLE_CLAUDE_MDS"),
+        None
+    );
+    assert_eq!(
+        build(&read_only()).as_std().get_program(),
+        std::ffi::OsStr::new("claude")
+    );
+}
+
+#[test]
+fn with_the_option_write_is_allowed_for_the_out_folder_of_the_room_only() {
+    let args = args_of(&build(&room_call()));
+    eprintln!("ARGV {}", args.join(" \\\n     "));
+    let rule = format!("Edit/{ROOM}/_camerata/out/**").replacen("Edit/", "Edit(/", 1) + ")";
+    assert_eq!(
+        rule,
+        "Edit(//Users/auditor/state/rooms/room-1/_camerata/out/**)"
+    );
+    assert!(args.contains(&rule), "{args:?}");
+    // The rule is a separate value of the allow list, so a room path with a space stays whole.
+    let at = args.iter().position(|a| a == "--allowedTools").unwrap();
+    assert_eq!(args[at + 1], "Read Glob Grep LS");
+    assert_eq!(args[at + 2], rule);
+    // No grant wider than the folder: neither a bare Write or Edit nor a pattern above it.
+    for a in &args {
+        assert_ne!(a, "Write");
+        assert_ne!(a, "Edit");
+        assert!(!a.starts_with("Write("), "{a}");
+        if a.starts_with("Edit(") {
+            assert!(a.contains("/_camerata/out/"), "{a}");
+        }
+    }
+}
+
+#[test]
+fn only_the_read_tools_and_the_scoped_write_are_ever_allowed() {
+    let args = args_of(&build(&room_call()));
+    let at = args.iter().position(|a| a == "--allowedTools").unwrap();
+    let allowed: Vec<&String> = args[at + 1..]
+        .iter()
+        .take_while(|a| !a.starts_with("--"))
+        .collect();
+    assert_eq!(allowed.len(), 2, "{allowed:?}");
+    for banned in [
+        "Bash",
+        "WebFetch",
+        "WebSearch",
+        "Task",
+        "Agent",
+        "NotebookEdit",
+    ] {
+        assert!(
+            !allowed
+                .iter()
+                .any(|a| a.split_whitespace().any(|w| w == banned)),
+            "{banned} is allowed: {allowed:?}"
+        );
+    }
+}
+
+#[test]
+fn shell_web_task_and_agent_tools_are_denied_outright() {
+    let args = args_of(&build(&room_call()));
+    let d = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    let denied: Vec<&String> = args[d + 1..]
+        .iter()
+        .take_while(|a| !a.starts_with("--"))
+        .collect();
+    for tool in ["Bash", "WebFetch", "WebSearch", "Task", "Agent"] {
+        assert!(
+            denied.iter().any(|a| *a == tool),
+            "{tool} not denied: {denied:?}"
+        );
+    }
+    // Denying the bare name Edit would deny the Write tool as well; it is never in the list.
+    assert!(
+        !denied.iter().any(|a| *a == "Edit" || *a == "Write"),
+        "{denied:?}"
+    );
+}
+
+#[test]
+fn the_room_call_runs_without_any_instruction_file() {
+    assert_eq!(
+        env_of(&build(&room_call()), "CLAUDE_CODE_DISABLE_CLAUDE_MDS").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        env_of(&build(&room_call()), "CLAUDE_CODE_DISABLE_AUTO_MEMORY").as_deref(),
+        Some("1")
+    );
+}
+
+#[test]
+fn the_program_can_be_named_and_defaults_to_claude_on_the_path() {
+    let named = LlmRequest::new("hi")
+        .with_repo_read(ROOM)
+        .with_room_output(ROOM, Some("/Users/auditor/app/claude".into()));
+    assert_eq!(
+        build(&named).as_std().get_program(),
+        std::ffi::OsStr::new("/Users/auditor/app/claude")
+    );
+    assert_eq!(
+        build(&room_call()).as_std().get_program(),
+        std::ffi::OsStr::new("claude")
+    );
+}
+
+#[test]
+fn a_request_with_no_repo_read_folder_gets_no_write() {
+    let args = args_of(&build(&LlmRequest::new("hi").with_room_output(ROOM, None)));
+    assert!(!args.iter().any(|a| a.starts_with("Edit(")), "{args:?}");
+    assert!(args.windows(2).any(|w| w == ["--tools", ""]));
+}
+
+#[test]
+fn a_room_path_with_pattern_characters_matches_only_itself() {
+    let rule = room_output_rule(std::path::Path::new("/Users/auditor/a[1]/b*/room"));
+    assert_eq!(
+        rule,
+        r"Edit(//Users/auditor/a\[1\]/b\*/room/_camerata/out/**)"
+    );
+}
+
+#[test]
+fn the_api_backend_ignores_the_option() {
+    let plain = read_only().with_model("claude-fable-5-2");
+    let room = room_call().with_model("claude-fable-5-2");
+    let basis = PriceBasis::realtime();
+    assert_eq!(
+        messages_request_body(&plain, "claude-fable-5-2", basis.cache_ttl),
+        messages_request_body(&room, "claude-fable-5-2", basis.cache_ttl)
+    );
+}
