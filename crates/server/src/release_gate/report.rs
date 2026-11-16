@@ -60,6 +60,10 @@ pub enum CheckId {
     /// No em dash, en dash or multiplication sign in any file a client receives: the PDF's text,
     /// every workbook string, every CSV and JSON file and the README.
     ClientTextStyle,
+    /// No package, client or internal, carries the operator's rewrite advisory or one of its
+    /// names (`camerata_api_types::rewrite_advisory`): owner ruling, fix or rewrite is the
+    /// architect's call alone. Its label says neither, because the README a client reads lists it.
+    InternalNotes,
 }
 
 impl CheckId {
@@ -82,6 +86,7 @@ impl CheckId {
         CheckId::UnsyncedReviewerChanges,
         CheckId::FixParity,
         CheckId::ClientTextStyle,
+        CheckId::InternalNotes,
     ];
 
     /// The name the operator reads (`[secrets]`, and the README's "Release checks" line).
@@ -104,6 +109,7 @@ impl CheckId {
             CheckId::UnsyncedReviewerChanges => "unsynced reviewer changes",
             CheckId::FixParity => "one fix per row",
             CheckId::ClientTextStyle => "client text style",
+            CheckId::InternalNotes => "internal notes kept out",
         }
     }
 }

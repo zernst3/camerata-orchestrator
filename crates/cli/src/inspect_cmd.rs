@@ -1326,6 +1326,7 @@ pub async fn run_inspect_pipeline_with(
                     &rules,
                     llm_backend == camerata_server::llm::Backend::Cli,
                     None,
+                    corpus.as_ref(),
                 ),
             ),
         )
@@ -1399,6 +1400,22 @@ pub async fn run_inspect_pipeline_with(
     // establishes).
     report.run_id.clone_from(&run_id);
     let report = report.seal();
+
+    // The operator's rewrite advisory, beside the failure report in the state directory and never
+    // in any zip (owner ruling: fix or rewrite is the architect's call alone). Computed from the
+    // sealed report, whose review tree holds the Fixes, and written before the export so a run the
+    // gate refuses still leaves its note. A failed write is said and never stops the run.
+    let advisory = camerata_server::rewrite_advisory::compute(&report, corpus.as_ref());
+    let ledger_summary = match camerata_server::rewrite_advisory::write(&ledger_file, &advisory) {
+        Ok((_json, md)) => format!(
+            "{ledger_summary}\noperator note (never exported): {}",
+            md.display()
+        ),
+        Err(e) => {
+            eprintln!("camerata inspect: could not write the operator note: {e}");
+            ledger_summary
+        }
+    };
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check

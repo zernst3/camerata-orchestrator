@@ -2487,7 +2487,7 @@ mod sheets;
 mod subgroups;
 mod tables;
 pub mod vocabulary;
-pub(crate) use subgroups::{no_tree_note, pdf_sections, PdfSections};
+pub(crate) use subgroups::{effort_majority, no_tree_note, pdf_sections, PdfSections};
 pub mod tickets;
 pub mod triage_log;
 

@@ -421,7 +421,13 @@ pub fn pdf_text(bytes: &[u8]) -> PdfText {
 /// A compiled PDF's text, located by page. A real PDF whose text cannot be read is itself a
 /// problem: the export fails closed.
 pub fn pdf_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
-    let pages = match pdf_text(bytes) {
+    pdf_problems_of(file, &pdf_text(bytes))
+}
+
+/// [`pdf_problems`] over text already read, so the archive pass reads a PDF once for every check
+/// that needs its text.
+pub fn pdf_problems_of(file: &str, read: &PdfText) -> Vec<Problem> {
+    let pages = match read {
         PdfText::Pages(pages) => pages,
         PdfText::NotJudged => return Vec::new(),
         PdfText::Unreadable(why) => {
@@ -444,10 +450,12 @@ pub fn pdf_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
 }
 
 /// Every member of the archive, by kind. `pdf_text` is the PDF's text when the caller already
-/// extracted it (the CLI's `release-gate`); otherwise the PDF is read here.
+/// extracted it (the CLI's `release-gate`); otherwise `pdf_pages` holds each PDF member's text as
+/// the archive pass read it, and a member it does not hold is read here.
 pub fn archive_problems(
     entries: &BTreeMap<String, Vec<u8>>,
     pdf_text: Option<&str>,
+    pdf_pages: &BTreeMap<String, PdfText>,
 ) -> Vec<Problem> {
     let mut problems = Vec::new();
     for (name, bytes) in entries {
@@ -461,9 +469,10 @@ pub fn archive_problems(
         } else if name.ends_with(".csv") {
             problems.extend(csv_problems(name, bytes));
         } else if name.ends_with(".pdf") {
-            match pdf_text {
-                Some(text) => problems.extend(text_problems(name, text)),
-                None => problems.extend(pdf_problems(name, bytes)),
+            match (pdf_text, pdf_pages.get(name)) {
+                (Some(text), _) => problems.extend(text_problems(name, text)),
+                (None, Some(read)) => problems.extend(pdf_problems_of(name, read)),
+                (None, None) => problems.extend(pdf_problems(name, bytes)),
             }
         } else {
             problems.extend(text_problems(name, &String::from_utf8_lossy(bytes)));
