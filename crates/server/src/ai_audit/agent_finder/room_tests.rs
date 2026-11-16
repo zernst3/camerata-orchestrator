@@ -487,3 +487,57 @@ fn piece_line_counts_use_the_rule_the_read_tool_numbers_by() {
         .contains("three"));
     assert!(r.piece_file_text("_camerata/checklist.md").is_none());
 }
+
+#[test]
+fn materialize_under_code_puts_the_repository_under_code_and_the_rooms_files_beside_it() {
+    let files = vec![
+        f("src/main.rs", "fn main() {}\n"),
+        f(".claude/settings.json", "{}\n"),
+        f(".mcp.json", "{}\n"),
+    ];
+    let r = Room::build(
+        &piece(&["src/main.rs", ".claude/settings.json", ".mcp.json"]),
+        &files,
+        "# checklist\n",
+    )
+    .room;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = r.materialize_under_code(dir.path()).expect("materializes");
+    assert_eq!(written.len(), r.paths().len());
+    for p in ["src/main.rs", ".claude/settings.json", ".mcp.json"] {
+        assert!(dir.path().join("code").join(p).is_file(), "{p}");
+        assert!(r.contains(p), "{p} is served");
+    }
+    assert!(dir.path().join("_camerata/checklist.md").is_file());
+    assert!(dir.path().join("_camerata/out").is_dir());
+    assert!(!dir.path().join(".claude").exists());
+    assert!(!dir.path().join(".mcp.json").exists());
+    assert!(!dir.path().join("src").exists());
+}
+
+#[test]
+fn long_lines_are_found_by_character_count() {
+    let long = "x".repeat(2_001);
+    let ok = "y".repeat(2_000);
+    let files = vec![f("a.rs", &format!("short\n{ok}\n{long}\n"))];
+    let r = Room::build(&piece(&["a.rs"]), &files, "").room;
+    assert_eq!(r.long_lines().get("a.rs"), Some(&vec![3]));
+}
+
+#[test]
+fn long_lines_count_characters_not_bytes() {
+    // 1,500 two-byte characters are 3,000 bytes but 1,500 characters: not a long line.
+    let wide = "\u{e9}".repeat(1_500);
+    let files = vec![f("a.rs", &format!("{wide}\n"))];
+    let r = Room::build(&piece(&["a.rs"]), &files, "").room;
+    assert!(r.long_lines().is_empty(), "{:?}", r.long_lines());
+}
+
+#[test]
+fn disk_path_compares_the_rooms_folder_without_regard_to_case() {
+    assert_eq!(Room::disk_path("_camerata/x.md"), "_camerata/x.md");
+    assert_eq!(Room::disk_path("_CAMERATA/x.md"), "_CAMERATA/x.md");
+    assert_eq!(Room::disk_path("_Camerata/out/y"), "_Camerata/out/y");
+    assert_eq!(Room::disk_path("src/a.rs"), "code/src/a.rs");
+    assert_eq!(Room::disk_path("_camerata_x/a"), "code/_camerata_x/a");
+}

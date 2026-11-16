@@ -156,7 +156,10 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     // The model-input chokepoint: the prompt and the system prompt go out redacted.
     let req = crate::model_input::guarded(req);
     let req = &*req;
-    let mut cmd = tokio::process::Command::new("claude");
+    let mut cmd = match req.room_output.as_ref().and_then(|r| r.program.as_ref()) {
+        Some(program) => tokio::process::Command::new(program),
+        None => tokio::process::Command::new("claude"),
+    };
     // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
     // leaving a stalled `claude` running in the background.
     // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
@@ -198,10 +201,15 @@ fn spawn_dir(req: &LlmRequest) -> std::path::PathBuf {
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
     // Isolation first: the working directory (the repo, or an empty engine-owned one, never the
     // launcher's) and the flags that keep project settings and the operator's memory out.
-    camerata_api_types::claude_cli::isolate_claude_call(
-        cmd.as_std_mut(),
-        req.repo_read_dir.as_deref(),
-    );
+    match (&req.room_output, &req.repo_read_dir) {
+        (Some(_), Some(dir)) => {
+            camerata_api_types::claude_cli::isolate_room_call(cmd.as_std_mut(), dir);
+        }
+        _ => camerata_api_types::claude_cli::isolate_claude_call(
+            cmd.as_std_mut(),
+            req.repo_read_dir.as_deref(),
+        ),
+    }
     cmd.arg("--strict-mcp-config")
         .arg("--disable-slash-commands")
         .arg("--permission-mode")
@@ -212,15 +220,35 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
         // `--add-dir`. Still non-agentic: slash-commands off, NO write/exec tool offered, so
         // this grants READ only — it cannot mutate the repo, spawn, or run shell.
         Some(dir) => {
-            cmd.arg("--allowedTools")
-                .arg(READ_ONLY_TOOLS.join(" "))
-                .arg("--add-dir")
-                .arg(dir);
+            if let Some(room) = &req.room_output {
+                // A clean room reads only inside the room: each read tool is its own value of
+                // the allow list (so a room path with a space stays whole), scoped to the room.
+                // Under `dontAsk` a read of any other path is refused. Then the clean-room write:
+                // the room's out folder and nothing wider.
+                cmd.arg("--allowedTools");
+                for tool in READ_ONLY_TOOLS {
+                    cmd.arg(room_read_rule(tool, &room.room_dir));
+                }
+                cmd.arg(room_output_rule(&room.room_dir));
+            } else {
+                cmd.arg("--allowedTools").arg(READ_ONLY_TOOLS.join(" "));
+            }
+            cmd.arg("--add-dir").arg(dir);
+            if req.room_output.is_some() {
+                // The set of tools a room call has is closed: these and no others, so a tool
+                // the program adds later is not offered either.
+                cmd.arg("--tools").arg(ROOM_TOOLS.join(","));
+            }
             // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
             // added as its own read-only `--add-dir` so a project-level model can scan across
             // all of them. READ-only — no write/exec tool is offered either way. Skip any that
             // duplicate the cwd dir.
-            for extra in &req.repo_read_extra_dirs {
+            // A room call never takes an extra folder: it reads the room and nothing else.
+            for extra in req
+                .repo_read_extra_dirs
+                .iter()
+                .filter(|_| req.room_output.is_none())
+            {
                 if extra != dir {
                     cmd.arg("--add-dir").arg(extra);
                 }
@@ -236,6 +264,65 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
     if let Some(system) = &req.system {
         cmd.arg("--system-prompt").arg(nul_safe(system));
     }
+    // A clean-room call (see [`RoomOutput`]): no instruction file is read, and the tools that
+    // could run code, reach the web or hand the work to another agent are denied by name. The
+    // bare names `Edit` and `Write` are never denied here: a deny wins over the allow rule above.
+    if req.repo_read_dir.is_some() && req.room_output.is_some() {
+        cmd.env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1");
+        cmd.arg("--disallowedTools").args(ROOM_DENIED_TOOLS);
+        // The run is bounded in turns, and keeps no session file: the transport reads its trace
+        // from stdout, and a client's code is not left in the operator's session folder.
+        if let Some(turns) = req.room_output.as_ref().and_then(|r| r.max_turns) {
+            cmd.arg("--max-turns").arg(turns.to_string());
+        }
+        cmd.arg("--no-session-persistence");
+    }
+}
+
+/// The only tools a clean-room call is offered (`--tools`). The transport fails a piece whose
+/// stream shows a successful call to any other tool (see `TodoWrite` there, which writes
+/// nothing to disk).
+pub const ROOM_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS", "Write", "Edit"];
+
+/// Tools a clean-room call never has: a shell, the web, and anything that starts another agent.
+const ROOM_DENIED_TOOLS: &[&str] = &["Bash", "WebFetch", "WebSearch", "Task", "Agent"];
+
+/// The room folder a clean-room call may write into, below the room.
+const OUT_FOLDER: &str = "_camerata/out";
+
+/// The allow rule that lets the Write tool create files under `<room_dir>/_camerata/out/`.
+///
+/// Claude Code checks file edits against `Edit(path)` rules, and its Write tool is one of the
+/// tools they cover; a rule written `Write(path)` with a path is accepted and then never
+/// matches. The path is anchored with `//` (an absolute path from the filesystem root), so the
+/// rule means exactly this folder whatever the working directory is, and gitignore pattern
+/// characters in the room's own path are escaped so they match themselves. With the permission
+/// mode `dontAsk`, anything no rule allows is refused, so a write anywhere else (the room's
+/// other files, the repository, the home folder) is denied.
+pub fn room_output_rule(room_dir: &std::path::Path) -> String {
+    format!("Edit(/{}/{OUT_FOLDER}/**)", escaped_room_path(room_dir))
+}
+
+/// The room's path with gitignore pattern characters escaped so they match themselves, and no
+/// trailing slash.
+fn escaped_room_path(room_dir: &std::path::Path) -> String {
+    let mut path = String::new();
+    for c in room_dir.to_string_lossy().chars() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']') {
+            path.push('\\');
+        }
+        path.push(c);
+    }
+    path.trim_end_matches('/').to_string()
+}
+
+/// The allow rule that lets `tool` (Read, Glob, Grep or LS) work on files under `room_dir` only.
+///
+/// Anchored with `//` (an absolute path from the filesystem root) like the write rule, with the
+/// room path escaped the same way. Under the permission mode `dontAsk`, a call on any path no
+/// rule allows is refused.
+pub fn room_read_rule(tool: &str, room_dir: &std::path::Path) -> String {
+    format!("{tool}(/{}/**)", escaped_room_path(room_dir))
 }
 
 /// The read-only built-in tools granted on the CLI backend when a request opts into
@@ -494,12 +581,28 @@ fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
 ///
 /// Standalone from any `claude`-specific spawn setup so it is exercisable in a unit test
 /// against ANY child process that writes stream-json lines, not just a live `claude` CLI.
+#[cfg(test)]
 async fn read_cli_stream(
+    child: tokio::process::Child,
+    model: &str,
+    idle: std::time::Duration,
+    overall_timeout: std::time::Duration,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<LlmResponse> {
+    read_cli_stream_capturing(child, model, idle, overall_timeout, on_delta, None).await
+}
+
+/// [`read_cli_stream`] that also hands every record of the stream except the partial-message
+/// events (the assistant and user records with their tool calls and results, the system records
+/// and the final result) to `capture`, as the raw line, in order. The record is handed over as it
+/// arrives, so a call that is later killed or abandoned has still left what it printed.
+async fn read_cli_stream_capturing(
     mut child: tokio::process::Child,
     model: &str,
     idle: std::time::Duration,
     overall_timeout: std::time::Duration,
     on_delta: &mut (dyn FnMut(&str) + Send),
+    mut capture: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> anyhow::Result<LlmResponse> {
     use tokio::io::AsyncBufReadExt;
     let stdout = child
@@ -579,6 +682,11 @@ async fn read_cli_stream(
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
+                if v["type"].as_str() != Some("stream_event") {
+                    if let Some(capture) = capture.as_deref_mut() {
+                        capture(&line);
+                    }
+                }
                 // Real model progress extends the deadline; status/keepalive lines do not.
                 let mut progressed = false;
                 match v["type"].as_str() {
@@ -983,6 +1091,23 @@ pub struct LlmRequest {
     /// and the API caches a prompt per schema, so a stage that wants a cached prefix reused
     /// across requests keeps one schema for all of them.
     pub response_schema: Option<serde_json::Value>,
+    /// A clean review room the CLI backend may also WRITE into, and only there (see
+    /// [`RoomOutput`] and [`LlmRequest::with_room_output`]). `None` = today's read-only grant,
+    /// byte for byte. Ignored by the API backend and by a request with no repo-read folder.
+    pub room_output: Option<RoomOutput>,
+}
+
+/// The one write a clean-room call may make: files under `<room_dir>/_camerata/out/`, nowhere
+/// else. Used by the agent finder's command line transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomOutput {
+    /// The room folder (absolute and resolved: a symlink in it would not match the rule).
+    pub room_dir: std::path::PathBuf,
+    /// The `claude` program to run instead of the one found on `PATH` (the desktop app ships a
+    /// newer one than a terminal install). `None` = `claude` from `PATH`.
+    pub program: Option<std::path::PathBuf>,
+    /// The most turns the run may take (`--max-turns`). `None` = no turn limit is passed.
+    pub max_turns: Option<usize>,
 }
 
 impl LlmRequest {
@@ -999,7 +1124,35 @@ impl LlmRequest {
             effort: None,
             temperature: None,
             response_schema: None,
+            room_output: None,
         }
+    }
+
+    /// Let the CLI-backend model write into `room_dir/_camerata/out/` and nowhere else, run
+    /// `program` (when given) in place of `claude` from `PATH`, and run as a clean room: no
+    /// instruction file is read, and no shell, web, task or agent tool is available. Needs
+    /// repo read on `room_dir` ([`Self::with_repo_read`]); without it the option does nothing.
+    /// The API backend ignores it.
+    pub fn with_room_output(
+        mut self,
+        room_dir: impl Into<std::path::PathBuf>,
+        program: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.room_output = Some(RoomOutput {
+            room_dir: room_dir.into(),
+            program,
+            max_turns: None,
+        });
+        self
+    }
+
+    /// Bound a clean-room call to `turns` turns (`--max-turns`). Does nothing on a request with
+    /// no [`Self::with_room_output`].
+    pub fn with_room_max_turns(mut self, turns: usize) -> Self {
+        if let Some(room) = self.room_output.as_mut() {
+            room.max_turns = Some(turns);
+        }
+        self
     }
 
     /// Ask for a reply that satisfies `schema` (see [`LlmRequest::response_schema`]).
@@ -2195,7 +2348,22 @@ impl Llm {
         // long-but-live call is never killed merely for running past this window.
         let overall_timeout = cli_overall_timeout();
 
-        match read_cli_stream(child, model, idle, overall_timeout, on_delta).await {
+        // A sink that keeps the stream gets each record as it arrives (see
+        // [`SessionSink::with_stream_capture`]); everyone else reads exactly as before.
+        let capture_sink = self.sessions.as_ref().filter(|s| s.captures_streams());
+        let mut keep = |line: &str| {
+            if let Some(sink) = capture_sink {
+                sink.record_stream_line(&session_id, line);
+            }
+        };
+        let capture: Option<&mut (dyn FnMut(&str) + Send)> = if capture_sink.is_some() {
+            Some(&mut keep)
+        } else {
+            None
+        };
+        match read_cli_stream_capturing(child, model, idle, overall_timeout, on_delta, capture)
+            .await
+        {
             Ok(resp) => Step::Done(resp),
             Err(e) => {
                 let Some(failure) = crate::failure::call_failure_of(&e) else {
@@ -3626,6 +3794,8 @@ mod cli_isolation_tests;
 mod cli_pricing_tests;
 #[cfg(test)]
 mod model_input_tests;
+#[cfg(test)]
+mod room_output_tests;
 
 // The streamed API leg against a local mock server: SSE folding, salvage, cut-off at the cap.
 #[cfg(test)]
@@ -6039,6 +6209,39 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
             camerata_api_types::claude_cli::engine_empty_cwd().to_string_lossy()
         );
         assert!(!recorded[0].created_at.is_empty());
+    }
+
+    /// A sink built to capture keeps the records the call printed on stdout (not the partial
+    /// message events), under the call's session id; a plain sink keeps nothing.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_capturing_sink_keeps_the_stdout_records_of_each_call() {
+        let fake = FakeClaude::new(
+            "capture-ok",
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init"}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}'
+printf '%s\n' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}}]}}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sink = SessionSink::with_stream_capture();
+        let plain = SessionSink::new();
+        for s in [&sink, &plain] {
+            cli_llm()
+                .with_session_sink(s.clone())
+                .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+                .await
+                .expect("fake claude answers");
+        }
+        let id = sink.snapshot()[0].session_id.clone();
+        let lines = sink.stream_lines(&id).expect("the stream was kept");
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("init") && lines[1].contains("tool_use"));
+        assert!(lines[2].contains("\"type\":\"result\""));
+        assert!(!lines.iter().any(|l| l.contains("stream_event")));
+        assert_eq!(plain.stream_lines(&plain.snapshot()[0].session_id), None);
     }
 
     /// A call that fails still wrote (part of) a session file, so it is still recorded.

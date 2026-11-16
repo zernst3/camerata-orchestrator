@@ -107,7 +107,7 @@ fn unreadable(spec: &str, why: &str) -> RepoScanFacts {
 
 /// One repo's size as the cockpit's estimate needs it: what the scan will read from it, or why
 /// it cannot be read. The wire form of [`RepoScanFacts`] without the file bodies.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RepoSizeWire {
     pub repo: String,
     pub files: usize,
@@ -115,6 +115,22 @@ pub struct RepoSizeWire {
     /// Set when the repo could not be read (no folder, not a git clone, read failure).
     #[serde(default)]
     pub error: Option<String>,
+    /// The agent finder's figures for this repo, so the cockpit shows the same numbers as the
+    /// command line. `None` for a repo that could not be read.
+    #[serde(default)]
+    pub agent_finder: Option<AgentFinderWire>,
+}
+
+/// The agent finder's pre-flight figures for one repo (the same function the command line
+/// prints from: `camerata_ui_core::scan::estimate_agent_finder`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AgentFinderWire {
+    pub pieces: usize,
+    pub lines: usize,
+    pub joints_calls: usize,
+    pub expected_usd: f64,
+    pub low_usd: f64,
+    pub high_usd: f64,
 }
 
 /// The request body of `POST /api/onboard/preflight`.
@@ -144,6 +160,7 @@ pub fn repo_sizes(
                 files: f.files.len(),
                 code_chars: f.code_chars,
                 error: f.read_error.clone(),
+                agent_finder: f.read_error.is_none().then(|| agent_finder_wire(f)),
             },
             None => RepoSizeWire {
                 repo: spec.to_string(),
@@ -157,9 +174,71 @@ pub fn repo_sizes(
                         .unwrap_or("no local folder is set for this repo")
                         .to_string(),
                 ),
+                agent_finder: None,
             },
         })
         .collect()
+}
+
+/// The pieces the agent finder would cut a repo into, with each piece's line count: build 1's
+/// planner over the same model-facing (redacted) text the room is built from.
+pub fn agent_finder_pieces(
+    facts: &RepoScanFacts,
+    force_pieces: Option<usize>,
+) -> Vec<(crate::ai_audit::agent_finder::Piece, usize)> {
+    let files = crate::onboard::redact::files_for_model(&facts.files);
+    let units = crate::ai_audit::agent_finder::pieces::units_for(&facts.repo, &files);
+    let lines: std::collections::HashMap<&str, usize> = files
+        .iter()
+        .map(|(p, text)| (p.as_str(), text.lines().count()))
+        .collect();
+    crate::ai_audit::agent_finder::pieces::plan_pieces(
+        &units,
+        &files,
+        crate::ai_audit::agent_finder::pieces::TARGET_BYTES,
+        force_pieces,
+    )
+    .into_iter()
+    .map(|piece| {
+        let n = piece
+            .files
+            .iter()
+            .map(|p| lines.get(p.as_str()).copied().unwrap_or(0))
+            .sum();
+        (piece, n)
+    })
+    .collect()
+}
+
+/// The agent finder's estimate for one repo (the finder stage only).
+pub fn agent_finder_estimate(
+    facts: &RepoScanFacts,
+    force_pieces: Option<usize>,
+) -> camerata_ui_core::scan::AgentFinderEstimate {
+    let sizes: Vec<camerata_ui_core::scan::AgentFinderPieceSize> =
+        agent_finder_pieces(facts, force_pieces)
+            .into_iter()
+            .map(
+                |(piece, lines)| camerata_ui_core::scan::AgentFinderPieceSize {
+                    unit: piece.unit,
+                    files: piece.files.len(),
+                    lines,
+                },
+            )
+            .collect();
+    camerata_ui_core::scan::estimate_agent_finder(&sizes)
+}
+
+fn agent_finder_wire(facts: &RepoScanFacts) -> AgentFinderWire {
+    let e = agent_finder_estimate(facts, None);
+    AgentFinderWire {
+        pieces: e.pieces,
+        lines: e.rows.iter().map(|r| r.lines).sum(),
+        joints_calls: e.joints_calls,
+        expected_usd: e.expected_usd,
+        low_usd: e.low_usd,
+        high_usd: e.high_usd,
+    }
 }
 
 /// `POST /api/onboard/preflight`: what each repo would be fed to the scan, for the pre-audit cost

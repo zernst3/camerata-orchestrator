@@ -1612,8 +1612,126 @@ pub fn unreadable_repo_line(repo: &str, why: &str) -> String {
     format!("{repo}: could not be read ({why}). It is not in this estimate.")
 }
 
+// ── The agent finder's estimate (design section 7) ─────────────────────────────────────────────
+//
+// STARTING GUESSES taken from the raw runs, to be REFIT from the recorded fixture runs (which
+// keep every turn's tokens) before any larger run. They live here and nowhere else: the
+// command line estimate, the cockpit and the tests all read these names.
+
+/// Dollars for each 1,000 lines of code in a piece.
+pub const AGENT_FINDER_USD_PER_1000_LINES: f64 = 1.00;
+/// Dollars of fixed cost for each piece (the checklist, the context, the opening turns).
+pub const AGENT_FINDER_USD_PER_PIECE: f64 = 0.80;
+/// Dollars for each joints call (one for a repository that was cut into two or more pieces).
+pub const AGENT_FINDER_USD_PER_JOINTS_CALL: f64 = 1.50;
+/// The low end of the shown range, as a multiple of the expected figure.
+pub const AGENT_FINDER_LOW_FACTOR: f64 = 0.6;
+/// The high end of the shown range, as a multiple of the expected figure.
+pub const AGENT_FINDER_HIGH_FACTOR: f64 = 1.8;
+
+/// One piece as the estimate needs it: its unit, how many files and how many lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentFinderPieceSize {
+    pub unit: String,
+    pub files: usize,
+    pub lines: usize,
+}
+
+/// One row of the pieces table: a unit with its pieces, files and lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentFinderUnitRow {
+    pub unit: String,
+    pub pieces: usize,
+    pub files: usize,
+    pub lines: usize,
+}
+
+/// The agent finder's pre-flight figures for one repository.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentFinderEstimate {
+    /// One row for each unit, in the order the units first appear.
+    pub rows: Vec<AgentFinderUnitRow>,
+    pub pieces: usize,
+    /// 1 when the repository is cut into two or more pieces, else 0.
+    pub joints_calls: usize,
+    pub expected_usd: f64,
+    pub low_usd: f64,
+    pub high_usd: f64,
+}
+
+/// The agent finder's estimate for the pieces of ONE repository: for each 1,000 lines, for each
+/// piece, and for the joints call a repository cut into two or more pieces needs.
+pub fn estimate_agent_finder(pieces: &[AgentFinderPieceSize]) -> AgentFinderEstimate {
+    let mut rows: Vec<AgentFinderUnitRow> = Vec::new();
+    for p in pieces {
+        match rows.iter_mut().find(|r| r.unit == p.unit) {
+            Some(row) => {
+                row.pieces += 1;
+                row.files += p.files;
+                row.lines += p.lines;
+            }
+            None => rows.push(AgentFinderUnitRow {
+                unit: p.unit.clone(),
+                pieces: 1,
+                files: p.files,
+                lines: p.lines,
+            }),
+        }
+    }
+    let lines: usize = pieces.iter().map(|p| p.lines).sum();
+    let joints_calls = usize::from(pieces.len() >= 2);
+    let expected_usd = lines as f64 / 1_000.0 * AGENT_FINDER_USD_PER_1000_LINES
+        + pieces.len() as f64 * AGENT_FINDER_USD_PER_PIECE
+        + joints_calls as f64 * AGENT_FINDER_USD_PER_JOINTS_CALL;
+    AgentFinderEstimate {
+        rows,
+        pieces: pieces.len(),
+        joints_calls,
+        expected_usd,
+        low_usd: expected_usd * AGENT_FINDER_LOW_FACTOR,
+        high_usd: expected_usd * AGENT_FINDER_HIGH_FACTOR,
+    }
+}
+
+/// The sum of several repositories' estimates (rows are kept apart; the figures add).
+pub fn sum_agent_finder(parts: &[AgentFinderEstimate]) -> AgentFinderEstimate {
+    AgentFinderEstimate {
+        rows: parts.iter().flat_map(|p| p.rows.clone()).collect(),
+        pieces: parts.iter().map(|p| p.pieces).sum(),
+        joints_calls: parts.iter().map(|p| p.joints_calls).sum(),
+        expected_usd: parts.iter().map(|p| p.expected_usd).sum(),
+        low_usd: parts.iter().map(|p| p.low_usd).sum(),
+        high_usd: parts.iter().map(|p| p.high_usd).sum(),
+    }
+}
+
+/// The pieces table as lines of text: a heading, then one line for each unit.
+pub fn agent_finder_table_lines(estimate: &AgentFinderEstimate) -> Vec<String> {
+    let width = estimate
+        .rows
+        .iter()
+        .map(|r| r.unit.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("unit".len());
+    let mut lines = vec![format!(
+        "{:<width$}  {:>6}  {:>6}  {:>8}",
+        "unit", "pieces", "files", "lines"
+    )];
+    for r in &estimate.rows {
+        lines.push(format!(
+            "{:<width$}  {:>6}  {:>6}  {:>8}",
+            r.unit, r.pieces, r.files, r.lines
+        ));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod saved_runs_tests;
+
+#[cfg(test)]
+mod agent_finder_estimate_tests;
 
 #[cfg(test)]
 mod tests {

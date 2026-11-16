@@ -24,9 +24,15 @@ pub const MAX_READ_BYTES: usize = 100_000;
 /// The most distinct files the agent may write. Writing a path again replaces it and does not
 /// count twice.
 pub const MAX_WRITE_FILES: usize = 200;
-/// The folder the room keeps for its own files. A repository file under this name cannot be
+/// The folder the room keeps for its own files. A repository file under this name (in any case) cannot be
 /// served (see [`NotServed`]), so a client file can never shadow or replace a room file.
 pub const RESERVED_DIR: &str = "_camerata";
+
+/// The folder, below the root of a room on disk, that holds the repository's files (see
+/// [`Room::materialize_under_code`]).
+pub const CODE_DIR: &str = "code";
+/// The longest line, in characters, the Read tool returns whole. Claude Code cuts a longer line.
+pub const MAX_READ_LINE_CHARS: usize = 2_000;
 
 /// Why a tool call was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -127,7 +133,15 @@ impl Room {
     /// the rendered checklist text. The files are redacted once more here, so a room built from
     /// raw text still serves no credential value.
     pub fn build(piece: &Piece, repo_files: &[(String, String)], checklist_md: &str) -> BuiltRoom {
-        let reserved = |p: &str| p == RESERVED_DIR || p.starts_with(&format!("{RESERVED_DIR}/"));
+        // Compared without regard to case: on a case-insensitive disk a client folder `_Camerata/`
+        // is the room's own `_camerata/` folder.
+        let reserved = |p: &str| {
+            p.eq_ignore_ascii_case(RESERVED_DIR)
+                || (p.len() > RESERVED_DIR.len()
+                    && p.is_char_boundary(RESERVED_DIR.len())
+                    && p[..RESERVED_DIR.len()].eq_ignore_ascii_case(RESERVED_DIR)
+                    && p.as_bytes()[RESERVED_DIR.len()] == b'/')
+        };
         // A repository file named like the room's own files is left out of the room entirely: it
         // is neither served nor listed, so it cannot shadow a room file. A piece file among them
         // stays owed and is reported below.
@@ -524,6 +538,64 @@ impl Room {
     /// The files written so far: path to text.
     pub fn outputs(&self) -> BTreeMap<String, String> {
         self.out_lock().clone()
+    }
+
+    /// The lines of each served file that are longer than [`MAX_READ_LINE_CHARS`] characters:
+    /// path to the 1-based line numbers. The command line tool cuts such a line, so a Read that
+    /// returned it did not show it whole.
+    pub fn long_lines(&self) -> BTreeMap<String, Vec<usize>> {
+        let mut out = BTreeMap::new();
+        for path in self.paths() {
+            let Some(text) = self.text_of(&path) else {
+                continue;
+            };
+            let long: Vec<usize> = text
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.chars().count() > MAX_READ_LINE_CHARS)
+                .map(|(i, _)| i + 1)
+                .collect();
+            if !long.is_empty() {
+                out.insert(path, long);
+            }
+        }
+        out
+    }
+
+    /// Where a path of the room lands on disk under [`Room::materialize_under_code`]: the room's
+    /// own files (`_camerata/...`) stay at the root and every other file goes under `code/`.
+    pub fn disk_path(path: &str) -> String {
+        let own = path.len() > RESERVED_DIR.len()
+            && path.is_char_boundary(RESERVED_DIR.len())
+            && path[..RESERVED_DIR.len()].eq_ignore_ascii_case(RESERVED_DIR)
+            && path.as_bytes()[RESERVED_DIR.len()] == b'/';
+        if own {
+            path.to_string()
+        } else {
+            format!("{CODE_DIR}/{path}")
+        }
+    }
+
+    /// Write the room to `dir` for the command line transport, the repository's files under
+    /// `dir/code/` and the room's own files (`_camerata/`) at `dir`. The session runs with `dir`
+    /// as its working directory, so a client's own `.claude/` folder or `.mcp.json`, now under
+    /// `code/`, is read like any other file and never loads as project settings, hooks or an MCP
+    /// server. Returns the room paths written.
+    pub fn materialize_under_code(&self, dir: &Path) -> std::io::Result<Vec<String>> {
+        let mut written = Vec::new();
+        for path in self.paths() {
+            let Some(text) = self.text_of(&path) else {
+                continue;
+            };
+            let target = dir.join(Self::disk_path(&path));
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, text)?;
+            written.push(path);
+        }
+        std::fs::create_dir_all(dir.join(OUT_DIR))?;
+        Ok(written)
     }
 
     /// Write the room to `dir` for the command line transport. Returns the paths written.

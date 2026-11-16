@@ -68,6 +68,23 @@ pub fn isolate_claude_call(cmd: &mut std::process::Command, repo_dir: Option<&st
     }
 }
 
+/// Isolation for a clean-room review call (the agent finder's command line transport).
+///
+/// Like [`isolate_claude_call`], but the settings that load are the PROJECT's only
+/// (`--setting-sources project`), never the operator's own: the operator's user settings carry
+/// broad allow rules (bare Read, Edit, Write, Bash, WebFetch) and extra directories that would
+/// let the reviewer read outside its room. The working directory is `room_dir`, the room's root;
+/// a client's own `.claude/` and `.mcp.json` sit in a subfolder of it, so they are reviewed like
+/// any other file and never load as project settings or hooks. No instruction file and no
+/// auto-memory are read.
+pub fn isolate_room_call(cmd: &mut std::process::Command, room_dir: &std::path::Path) {
+    cmd.arg("--setting-sources")
+        .arg("project")
+        .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+        .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
+        .current_dir(room_dir);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
