@@ -1157,6 +1157,27 @@ fn sec_sql_single_quote_regex() -> &'static Regex {
     })
 }
 
+static SEC_SQL_TRIPLE_SINGLE_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The triple-single-quoted form (a Python `'''...'''` f-string): a DML word, a clause word, then
+/// `{name}`, with no `'''` between the opening quotes and the interpolation. It spans lines.
+fn sec_sql_triple_single_regex() -> &'static Regex {
+    SEC_SQL_TRIPLE_SINGLE_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            '''
+            (?:[^'\\]|\\[\s\S]|'[^']|''[^'])*?
+            \b(?:SELECT|INSERT|UPDATE|DELETE)\b
+            (?:[^'\\]|\\[\s\S]|'[^']|''[^'])*?
+            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b
+            (?:[^'\\]|\\[\s\S]|'[^']|''[^'])*?
+            '{0,2} \{\w*\}
+            "#,
+        )
+        .expect("SEC-NO-RAW-SQL-CONCAT-1 triple-single-quote regex must compile")
+    })
+}
+
 /// Whether the quote at `at` opens a string: an even number of unescaped `quote` characters
 /// precede it on its line.
 fn quote_opens_a_string(content: &str, at: usize, quote: char) -> bool {
@@ -1233,6 +1254,12 @@ fn sql_concat_offsets(path: Option<&str>, content: &str) -> Vec<usize> {
             '\'',
             |m| m.start(),
         ));
+        // Every triple-quoted match is kept: a `'''` opens a string wherever it sits.
+        hits.extend(
+            sec_sql_triple_single_regex()
+                .find_iter(content)
+                .map(|m| m.start()),
+        );
     }
     hits.sort_unstable();
     hits
@@ -1794,6 +1821,26 @@ mod tests {
         assert!(
             d.is_err(),
             "a long opaque literal on a *_KEY const must be flagged"
+        );
+    }
+
+    #[test]
+    fn sql_concat_catches_triple_single_quoted_fstring() {
+        let text = "log(\"ready\")\nq = f'''\nSELECT id FROM users\nWHERE name = '{name}'\n'''\n";
+        assert_eq!(
+            content_match_lines_in_file("SEC-NO-RAW-SQL-CONCAT-1", "app/db.py", text),
+            vec![2]
+        );
+        // A parameterised triple-quoted query stays quiet.
+        assert!(content_match_lines_in_file(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "app/db.py",
+            "'''SELECT id FROM users WHERE id = %s'''"
+        )
+        .is_empty());
+        // A Rust file has no triple-quoted string: the form is skipped.
+        assert!(
+            content_match_lines_in_file("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", text).is_empty()
         );
     }
 
