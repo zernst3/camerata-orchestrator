@@ -1935,7 +1935,7 @@ impl Llm {
     fn sleeper(&self) -> &dyn crate::retry::Sleeper {
         match &self.sleeper {
             Some(s) => s.as_ref(),
-            None => &crate::retry::TokioSleeper,
+            None => &crate::retry::ProcessSleeper,
         }
     }
 

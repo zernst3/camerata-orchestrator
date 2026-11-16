@@ -78,6 +78,37 @@ impl Sleeper for TokioSleeper {
     }
 }
 
+/// The sleeper every call without its own waits with. Production never sets it, so the call
+/// sleeps for real; an end-to-end test installs a recorder with [`set_process_sleeper`] because
+/// the `Llm` it exercises is built deep inside the server, out of the test's reach.
+static PROCESS_SLEEPER: std::sync::Mutex<Option<std::sync::Arc<dyn Sleeper>>> =
+    std::sync::Mutex::new(None);
+
+/// Install (or, with `None`, remove) the process-wide sleeper. TEST SUPPORT: a test that sets
+/// it must run serially and remove it again.
+pub fn set_process_sleeper(sleeper: Option<std::sync::Arc<dyn Sleeper>>) {
+    *PROCESS_SLEEPER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = sleeper;
+}
+
+/// The default sleeper of an `Llm`: the process-wide one when a test installed it, else real.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProcessSleeper;
+
+impl Sleeper for ProcessSleeper {
+    fn sleep<'a>(&'a self, d: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let installed = PROCESS_SLEEPER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match installed {
+            Some(s) => Box::pin(async move { s.sleep(d).await }),
+            None => Box::pin(tokio::time::sleep(d)),
+        }
+    }
+}
+
 /// The kind of failure being classified: an HTTP status, a transport-level error with no status
 /// (network/connect/timeout), or an overloaded answer reported as text (a CLI's stderr).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -980,6 +980,9 @@ struct InterruptedScan {
     model_log: std::path::PathBuf,
     /// While this file exists the fake group review call fails.
     group_review_down: std::path::PathBuf,
+    /// The file whose presence is the outage this scan ran under (the group review's, or the
+    /// stage 503 file); removing it ends the outage.
+    outage_flag: std::path::PathBuf,
 }
 
 async fn interrupted_scan() -> InterruptedScan {
@@ -1012,11 +1015,13 @@ async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
     let group_review_down = root.path().join("group-review-down");
     // `stage503:<stage>` takes that stage's calls down with a 503 instead of the group review's.
     let stage_down = root.path().join("stage-503");
-    if let Some(stage) = mode.strip_prefix("stage503:") {
+    let outage_flag = if let Some(stage) = mode.strip_prefix("stage503:") {
         std::fs::write(&stage_down, stage).unwrap();
+        stage_down.clone()
     } else {
         std::fs::write(&group_review_down, mode).unwrap();
-    }
+        group_review_down.clone()
+    };
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -1073,6 +1078,7 @@ async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
         log,
         model_log,
         group_review_down,
+        outage_flag,
     }
 }
 
@@ -1271,20 +1277,102 @@ async fn a_503_outage_on_the_fix_stage_ends_the_job_in_bounded_time() {
     group_review_outage_ends_in_bounded_time("stage503:fix").await;
 }
 
+/// Records every wait a retry asks for and returns at once, so an outage test asserts the
+/// WAITS (what the policy decided) instead of how long the machine took.
+#[derive(Default)]
+struct WaitRecorder {
+    waits: std::sync::Mutex<Vec<std::time::Duration>>,
+}
+
+impl WaitRecorder {
+    fn secs(&self) -> Vec<u64> {
+        self.waits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(std::time::Duration::as_secs)
+            .collect()
+    }
+}
+
+impl camerata_llm::Sleeper for WaitRecorder {
+    fn sleep<'a>(
+        &'a self,
+        d: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.waits.lock().unwrap().push(d);
+        Box::pin(async {})
+    }
+}
+
+/// Installs a [`WaitRecorder`] as the process sleeper and removes it again, panic or not.
+struct RecorderGuard(Arc<WaitRecorder>);
+
+impl RecorderGuard {
+    fn install() -> Self {
+        let recorder = Arc::new(WaitRecorder::default());
+        camerata_llm::set_process_sleeper(Some(recorder.clone()));
+        Self(recorder)
+    }
+}
+
+impl Drop for RecorderGuard {
+    fn drop(&mut self) {
+        camerata_llm::set_process_sleeper(None);
+    }
+}
+
 async fn group_review_outage_ends_in_bounded_time(mode: &str) {
     if !camerata_test_env::python3_on_path_for("a_transport_outage_on_the_group_review") {
         return;
     }
-    let started = std::time::Instant::now();
+    let recorder = RecorderGuard::install();
     let rig = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         interrupted_scan_with(mode),
     )
     .await
-    .expect("the scan job hung on a group review transport outage (no end within 120 s)");
-    eprintln!("transport outage scan took {:?}", started.elapsed());
+    .expect("the scan job hung on an outage (no end within 120 s)");
     assert_eq!(
         crate::run_store::read_record(&rig.run_id).unwrap().status,
         crate::run_store::RunStatus::Incomplete
+    );
+    // What the policy decided: it waited, no single call spent more than its 60 s budget waiting,
+    // and each wait is one of the schedule's steps (5, 20, 60 clipped to 35 for a 503; 2, 8, 30
+    // for a lost connection).
+    let waits = recorder.0.secs();
+    assert!(!waits.is_empty(), "the outage was retried: {waits:?}");
+    let allowed: &[u64] = if mode == "transport" {
+        &[2, 8, 30]
+    } else {
+        &[5, 20, 35]
+    };
+    for w in &waits {
+        assert!(allowed.contains(w), "wait {w} is not a step of {allowed:?}: {waits:?}");
+    }
+    let per_call: u64 = if mode == "transport" { 40 } else { 60 };
+    assert_eq!(
+        waits.iter().sum::<u64>() % per_call,
+        0,
+        "every call ran its whole schedule and no more: {waits:?}"
+    );
+    assert!(
+        waits.contains(allowed.last().unwrap()),
+        "the last step of the schedule was taken (a 503's is clipped to the 35 s left): {waits:?}"
+    );
+    // The failed part is listed, so a resume knows what to run.
+    let scan = rig.state.get_last_scan(&rig.project_id).unwrap();
+    assert!(
+        scan.failed_passes.iter().any(|f| !f.scope_note),
+        "the failed part is listed: {:?}",
+        scan.failed_passes
+    );
+    // The outage ends and a resume finishes the run.
+    std::fs::remove_file(&rig.outage_flag).unwrap();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().status,
+        crate::run_store::RunStatus::Complete
     );
 }
