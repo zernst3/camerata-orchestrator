@@ -230,7 +230,7 @@ mod tests {
             finding("R-A", "critical", "src/a.rs", 9, "active"),
             finding("R-B", "critical", "src/a.rs", 2, "active"),
             finding("R-A", "high", "src/a.rs", 1, "active"),
-            finding("R-C", "critical", "src/m.rs", 7, "suppressed-baseline"),
+            finding("R-C", "critical", "src/m.rs", 7, "carried-baseline"),
         ]
     }
 
