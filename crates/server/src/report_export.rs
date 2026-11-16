@@ -2553,6 +2553,8 @@ pub use overlay::{
 pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFactsIndex};
 
 #[cfg(test)]
+mod addition_tests;
+#[cfg(test)]
 mod counts_surfaces_tests;
 #[cfg(test)]
 mod status_word_tests;

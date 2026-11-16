@@ -1011,3 +1011,178 @@ fn a_baseline_row_a_reviewer_decided_does_not_block_release() {
         messages(&problems)
     );
 }
+
+#[test]
+fn the_gate_refuses_a_findings_json_summary_that_contradicts_the_counts() {
+    let (mut entries, report) = consistent();
+    edit_json(&mut entries, "findings.json", |v| {
+        v["summary"]["held_for_review"] = json!(99);
+        v["summary"]["curated_total"] = json!(1);
+    });
+    let problems = counts_problems(&entries, &report);
+    let text = messages(&problems);
+    assert!(text.contains("summary.held_for_review"), "{text}");
+    assert!(text.contains("summary.curated_total"), "{text}");
+}
+
+// ── Follow ups to work order C ────────────────────────────────────────────────────────────
+
+fn row_of(
+    rule: &str,
+    path: &str,
+    line: usize,
+    kind: camerata_api_types::audit::FindingKind,
+) -> Finding {
+    Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: "medium".to_string(),
+        snippet: format!("snippet {line}"),
+        detail: format!("detail {line}"),
+        kind: Some(kind),
+        ..Finding::default()
+    }
+}
+
+fn departure() -> camerata_api_types::audit::FindingKind {
+    camerata_api_types::audit::FindingKind::Deviation(camerata_api_types::audit::DeviationKind {
+        deviating_sites: 1,
+        assessed_sites: Some(4),
+        convention_option_id: None,
+        convention_label: "the usual way".to_string(),
+    })
+}
+
+fn convention() -> camerata_api_types::audit::FindingKind {
+    camerata_api_types::audit::FindingKind::ConventionObserved(
+        camerata_api_types::audit::ConventionObservedKind {
+            convention_option_id: "x".to_string(),
+            convention_label: "the usual way".to_string(),
+        },
+    )
+}
+
+fn fix_plan_rows(bytes: &[u8]) -> usize {
+    let entries = read_zip_entries(bytes).expect("zip");
+    let xlsx = entries
+        .iter()
+        .find(|(n, _)| n.ends_with("-findings.xlsx"))
+        .expect("workbook")
+        .1;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, crate::xlsx_export::vocabulary::FIX_PLAN)
+        .expect("fix plan sheet");
+    let col = grid[0]
+        .iter()
+        .position(|h| h == "Fix id")
+        .expect("a Fix id column");
+    // A row that stands for a Fix names it; the empty sheet holds one line saying so.
+    grid.iter()
+        .skip(1)
+        .filter(|r| r.get(col).is_some_and(|c| !c.is_empty()))
+        .count()
+}
+
+#[test]
+fn an_accepted_departure_beside_a_convention_row_releases_and_the_fix_plan_has_no_row_for_it() {
+    let mut report = scan_report();
+    report.findings = vec![
+        row_of("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", 12, departure()),
+        row_of("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", 40, convention()),
+    ];
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        crate::report_export::finding_key(&sealed.findings[0]),
+        crate::report_export::DispositionWire {
+            state: "Ignored".to_string(),
+            reason: "we accept this one".to_string(),
+            ..Default::default()
+        },
+    );
+    let package = package_with_dispositions(report, &dispositions);
+    assert_eq!(
+        package.report_json.counts.problems.accepted, 1,
+        "anti-vacuity"
+    );
+    let released = release(package).expect("the package releases");
+    assert_eq!(fix_plan_rows(&released.bytes), 0);
+}
+
+#[test]
+fn a_reviewed_package_with_accepted_ruled_out_and_confirmed_rows_clears_the_counts_check() {
+    let mut report = scan_report();
+    report.findings = vec![
+        row_of(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/a.rs",
+            1,
+            camerata_api_types::audit::FindingKind::Defect,
+        ),
+        row_of(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/b.rs",
+            2,
+            camerata_api_types::audit::FindingKind::Defect,
+        ),
+        row_of(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/c.rs",
+            3,
+            camerata_api_types::audit::FindingKind::Defect,
+        ),
+    ];
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    for (i, (state, reason)) in [
+        ("Ignored", "accepted"),
+        ("FalsePositive", "a constant"),
+        ("Confirmed", ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        dispositions.insert(
+            crate::report_export::finding_key(&sealed.findings[i]),
+            crate::report_export::DispositionWire {
+                state: state.to_string(),
+                reason: reason.to_string(),
+                ..Default::default()
+            },
+        );
+    }
+    let package = package_with_dispositions(report, &dispositions);
+    let report_json = package.report_json.clone();
+    assert_eq!(report_json.counts.rows.ruled_out, 1, "anti-vacuity");
+    assert_eq!(report_json.counts.problems.accepted, 1, "anti-vacuity");
+    release(package).expect("a reviewed package clears the gate with the counts check on");
+}
+
+#[test]
+fn the_gate_refuses_an_and_n_more_line_that_disagrees_with_the_counts() {
+    let (entries, report) = consistent();
+    assert!(
+        report.dependency_snapshot.more_line.is_empty(),
+        "anti-vacuity"
+    );
+    let sheet = crate::xlsx_export::vocabulary::DEPENDENCIES;
+    let mut wrong = report.clone();
+    wrong.dependency_snapshot.more_line = crate::xlsx_export::vocabulary::more_in_sheet(7, sheet);
+    let text = messages(&counts_problems(&entries, &wrong));
+    assert!(text.contains("dependency_snapshot.more_line"), "{text}");
+
+    let mut wrong = report.clone();
+    wrong.escalations.more_line =
+        crate::xlsx_export::vocabulary::more_in_sheet(3, crate::xlsx_export::vocabulary::FIX_PLAN);
+    let text = messages(&counts_problems(&entries, &wrong));
+    assert!(text.contains("escalations.more_line"), "{text}");
+
+    let mut wrong = report.clone();
+    wrong.conventions.more_line = crate::xlsx_export::vocabulary::more_in_sheet(
+        2,
+        crate::xlsx_export::vocabulary::DEPARTURES,
+    );
+    let text = messages(&counts_problems(&entries, &wrong));
+    assert!(text.contains("conventions.more_line"), "{text}");
+}

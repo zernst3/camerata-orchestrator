@@ -146,6 +146,33 @@ fn no_surface_counts_by_itself() {
             );
         }
     }
+    // Every "and N more" line, the PDF's and the workbook's, is built by `more_line`.
+    let vocabulary = read("src/xlsx_export/vocabulary.rs");
+    let at = vocabulary
+        .find("pub fn more_in_sheet(")
+        .expect("vocabulary.rs has more_in_sheet");
+    let body = &vocabulary[at..vocabulary[at..]
+        .find("\n}\n")
+        .map_or(vocabulary.len(), |e| at + e)];
+    assert!(
+        body.contains("counts_prose::more_line("),
+        "more_in_sheet builds its own sentence: {body}"
+    );
+    for file in [
+        "src/report_export.rs",
+        "src/report_export/marking.rs",
+        "src/xlsx_export.rs",
+        "src/report_export/coverage_gaps.rs",
+    ] {
+        let source = read(file);
+        assert!(
+            !source.contains("\"and {} more")
+                && !source.contains("\"and {n} more")
+                && !source.contains("\"and {left_out} more")
+                && !source.contains("\"and {omitted} more"),
+            "{file} builds an \"and N more\" line by itself"
+        );
+    }
     // The old builders that took loose integers are gone.
     for (file, name) in [
         (
@@ -203,4 +230,51 @@ fn an_old_stored_tree_has_its_whole_file_places_merged_again_on_load() {
     let counts = report_counts(&reviewed, None, &empty_opts());
     assert_eq!(counts.problems.total, 2, "the export counts two places too");
     assert_eq!(counts.rows.folded, 0);
+}
+
+/// A reviewer's decision on a row of an old whole-file place is still in force after the places
+/// are merged again on load: the row stays accepted and the export counts it as such.
+#[test]
+fn a_decision_on_an_old_whole_file_place_survives_the_re_merge_on_load() {
+    use crate::report_export::DispositionWire;
+    use crate::review_tree::{place_id_of, PlaceNode};
+    let whole = |rule: &str| finding(rule, "src/whole.rs", 0, "medium");
+    let sealed = report_with(vec![whole("SYN-A-1"), whole("SYN-B-1")], vec![]).seal();
+    let keys: Vec<String> = sealed.findings.iter().map(|f| f.site_key.clone()).collect();
+    let stored = sealed.overlaid(|r| {
+        r.tree.as_mut().expect("the tree").places = vec![PlaceNode {
+            id: place_id_of("owner/repo", "src/whole.rs", 0),
+            repo: "owner/repo".to_string(),
+            path: "src/whole.rs".to_string(),
+            line: 0,
+            carrier: keys[0].clone(),
+            members: keys.clone(),
+            rules: vec!["SYN-A-1".to_string(), "SYN-B-1".to_string()],
+            fix_ids: Vec::new(),
+        }];
+    });
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        crate::report_export::finding_key(&stored.findings[0]),
+        DispositionWire {
+            state: "Ignored".to_string(),
+            reason: "we accept this one".to_string(),
+            ..Default::default()
+        },
+    );
+    let reviewed = ReviewedReport::unreviewed(&stored, &dispositions);
+    let counts = report_counts(&reviewed, None, &empty_opts());
+    assert_eq!(counts.problems.total, 2, "anti-vacuity: two places");
+    assert_eq!(
+        counts.problems.accepted, 1,
+        "the decision on the first rule's whole-file place survives the re-merge"
+    );
+    assert!(
+        reviewed
+            .report()
+            .tree
+            .as_ref()
+            .is_some_and(|t| t.places.is_empty()),
+        "the places were merged again"
+    );
 }

@@ -464,7 +464,7 @@ pub fn closes_rules(rules: &[String]) -> String {
 
 /// The line that points at the rest of a capped list: "and 4 more in the Fix plan sheet".
 pub fn more_in_sheet(n: usize, sheet: &str) -> String {
-    format!("and {n} more in the {sheet} sheet")
+    crate::report_export::counts_prose::more_line(n, &format!("more in the {sheet} sheet"))
 }
 
 /// A rule line of a fix that covers only some of the fix's places: the rule, then where.

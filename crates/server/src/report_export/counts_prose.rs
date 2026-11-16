@@ -103,7 +103,7 @@ pub(crate) fn narrative(c: &ReportCounts, state: ReviewState) -> String {
     ));
     if !state.is_draft() && c.rows.ruled_out > 0 {
         s.push_str(&format!(
-            " {} {} ruled out by a reviewer and left out of this report.",
+            " {} {} ruled out and left out of this report.",
             noun(c.rows.ruled_out, "source row", "source rows"),
             if c.rows.ruled_out == 1 { "was" } else { "were" },
         ));
@@ -209,7 +209,7 @@ pub(crate) fn next_steps(c: &ReportCounts, multi_repo: bool, state: ReviewState)
 pub(crate) fn cover_strip(c: &ReportCounts) -> String {
     let (p, s) = (&c.problems, &c.problems.by_severity);
     format!(
-        "{} critical · {} high · {} medium · {} low · {} accepted · {}",
+        "{} critical · {} high · {} medium · {} low · {} accepted risk · {}",
         n(s.critical),
         n(s.high),
         n(s.medium),
@@ -259,10 +259,10 @@ pub(crate) fn grid_left_out(c: &ReportCounts) -> String {
     );
     let mut out = match (decide.is_empty(), info.is_empty()) {
         (true, true) => return String::new(),
-        (false, true) => format!("Not in this grid: {decide} places that need a decision first."),
-        (true, false) => format!("Not in this grid: {info} places that are information only."),
+        (false, true) => format!("Not in this grid: {decide} problems that need a decision first."),
+        (true, false) => format!("Not in this grid: {info} problems that are information only."),
         (false, false) => format!(
-            "Not in this grid: {decide} places that need a decision first, and {info} places that are information only."
+            "Not in this grid: {decide} problems that need a decision first, and {info} problems that are information only."
         ),
     };
     out.push_str(" The cover counts all of them.");

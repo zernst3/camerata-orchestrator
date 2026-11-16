@@ -357,8 +357,7 @@ fn counts_of_problems(total: usize, needs: usize, ruled_out: usize) -> ReportCou
 fn next_steps_note_singular_finding_noun_at_exactly_one_candidate() {
     let note = counts_prose::next_steps(&counts_of_problems(1, 0, 0), false, ReviewState::Reviewed);
     assert!(
-        note.contains("0 of 1 problem need a reviewer's decision")
-            || note.contains("0 of 1 problem needs a reviewer's decision"),
+        note.contains("0 of 1 problem need a reviewer's decision"),
         "a single problem must use the singular noun, not 'problems': {note}"
     );
 }
@@ -1204,7 +1203,7 @@ fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
     assert!(n.contains("1 is accepted risk"), "{n}");
     assert!(n.contains("1 needs a reviewer's decision"), "{n}");
     assert!(
-        n.contains("1 source row was ruled out by a reviewer and left out of this report"),
+        n.contains("1 source row was ruled out and left out of this report"),
         "{n}"
     );
     assert!(

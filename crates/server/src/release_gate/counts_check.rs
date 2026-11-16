@@ -459,6 +459,10 @@ pub(super) fn counts_problems_with(
         }
     }
 
+    // 1b. Every field of findings.json `summary` equals the recount.
+    problems.extend(summary_problems(findings_json.as_ref(), &recounted));
+    problems.extend(more_line_problems(report, &recounted));
+
     // 2. The identities, on the recount and on the object (the gate's own arithmetic).
     for failure in identity_failures(&recounted) {
         problems.push(problem("json/all-findings.json", "identities", failure));
@@ -742,6 +746,26 @@ fn workbook_problems(entries: &Entries, want: &ReportCounts) -> Vec<Problem> {
             "Start here has no scorecard Total row",
         )),
     }
+    // Start here states the number of rules that could not be completed, the object's figure.
+    match start_here_count(&start, v::NOT_CHECKED) {
+        Some(said) if said != want.rows.not_checked => problems.push(problem(
+            &xlsx_name,
+            &format!("sheet \"Start here\" row count, sheet {}", v::NOT_CHECKED),
+            format!(
+                "Start here states {said} and the counts give {}",
+                want.rows.not_checked
+            ),
+        )),
+        Some(_) => {}
+        None => problems.push(problem(
+            &xlsx_name,
+            &format!("sheet \"Start here\" row count, sheet {}", v::NOT_CHECKED),
+            format!(
+                "Start here has no row count for the {} sheet",
+                v::NOT_CHECKED
+            ),
+        )),
+    }
     // The Not checked sheet lists a row for each rule that could not be completed.
     match not_checked_rule_rows(xlsx) {
         Ok(rows) if rows != want.rows.not_checked => problems.push(problem(
@@ -782,8 +806,136 @@ fn not_checked_rule_rows(xlsx: &[u8]) -> Result<usize, String> {
         .count())
 }
 
-/// Check 7: in every place with more than one problem row, all rows but the head carry
-/// `carried_by` naming the head's `site_id`.
+/// Every "and N more" line of the PDF data is the line the counts and the shown list give: the
+/// dependency, escalation and patterns lines recomputed exactly; the Fix plan and Departures lines
+/// (whose totals the object does not carry) may only be there when their list is full.
+fn more_line_problems(report: &AuditReportJson, want: &ReportCounts) -> Vec<Problem> {
+    use crate::report_export::{PDF_MAX_DEPARTURES, PDF_MAX_OTHER_FIXES, PDF_MAX_SERIOUS_PROBLEMS};
+    let mut out = Vec::new();
+    let mut expect = |location: &str, printed: &str, expected: String| {
+        if printed != expected {
+            out.push(problem(
+                "PDF data",
+                location,
+                format!("the PDF data states {printed:?} and the counts give {expected:?}"),
+            ));
+        }
+    };
+    let line = |n: usize, sheet: &str| {
+        if n == 0 {
+            String::new()
+        } else {
+            v::more_in_sheet(n, sheet)
+        }
+    };
+    let snapshot = &report.dependency_snapshot;
+    expect(
+        "dependency_snapshot.more_line",
+        &snapshot.more_line,
+        line(
+            want.rows.dependency.saturating_sub(snapshot.worst.len()),
+            v::DEPENDENCIES,
+        ),
+    );
+    let esc = &report.escalations;
+    expect(
+        "escalations.more_line",
+        &esc.more_line,
+        line(
+            esc.items.len().saturating_sub(PDF_MAX_SERIOUS_PROBLEMS),
+            v::FIX_PLAN,
+        ),
+    );
+    if let Some(p) = &report.patterns_across_services {
+        expect(
+            "patterns_across_services.more_line",
+            &p.more_line,
+            line(
+                p.rows.len().saturating_sub(p.summary_lines.len()),
+                v::PATTERNS_ACROSS_SERVICES,
+            ),
+        );
+    }
+    // The totals of these two are not in the object: a line is only possible when the list is
+    // full, and it must be a well formed "and N more" line for its sheet.
+    let conv = &report.conventions;
+    let other = &report.other_fixes;
+    for (location, printed, full, sheet) in [
+        (
+            "conventions.more_line",
+            conv.more_line.as_str(),
+            conv.departures.len() >= PDF_MAX_DEPARTURES,
+            v::DEPARTURES,
+        ),
+        (
+            "other_fixes.more_line",
+            other.more_line.as_str(),
+            other.shown >= PDF_MAX_OTHER_FIXES,
+            v::FIX_PLAN,
+        ),
+    ] {
+        if printed.is_empty() {
+            continue;
+        }
+        let well_formed = (1..100_000usize).any(|n| printed == v::more_in_sheet(n, sheet));
+        if !full || !well_formed {
+            out.push(problem(
+                "PDF data",
+                location,
+                format!("the PDF data states {printed:?} for a list that is not full or the line is malformed"),
+            ));
+        }
+    }
+    out
+}
+
+/// Every tally of findings.json `summary` equals the recount, and the retired row tallies
+/// (`curated_total`, `open`) are not in the file. Fail closed: a missing summary or tally is a
+/// problem.
+fn summary_problems(findings_json: Option<&Value>, want: &ReportCounts) -> Vec<Problem> {
+    let Some(summary) = findings_json.and_then(|v| v.get("summary")) else {
+        return vec![problem(
+            "findings.json",
+            "summary",
+            "findings.json has no summary object",
+        )];
+    };
+    let mut out = Vec::new();
+    let expected: [(&str, usize); 8] = [
+        ("candidates_reviewed", want.rows.total),
+        ("excluded_false_positive", want.rows.ruled_out),
+        ("held_for_review", want.problems.needs_decision),
+        ("dependency_advisories", want.rows.dependency),
+        ("do_now", want.problems.first),
+        ("do_next", want.problems.next),
+        ("plan", want.problems.later),
+        ("accepted", want.problems.accepted),
+    ];
+    for (field, n) in expected {
+        match summary.get(field).and_then(Value::as_u64) {
+            Some(printed) if printed as usize == n => {}
+            printed => out.push(problem(
+                "findings.json",
+                &format!("summary.{field}"),
+                format!(
+                    "findings.json summary states {} and the counts give {n}",
+                    printed.map_or("nothing".to_string(), |p| p.to_string())
+                ),
+            )),
+        }
+    }
+    for retired in ["curated_total", "open"] {
+        if summary.get(retired).is_some() {
+            out.push(problem(
+                "findings.json",
+                &format!("summary.{retired}"),
+                "findings.json summary holds a retired row tally",
+            ));
+        }
+    }
+    out
+}
+
 /// Check 6: every row with status `carried-baseline` or `waived-inline` has a reviewer's decision
 /// this session. A row nobody decided is still read as accepted by its baseline record or waiver
 /// alone, which closes a problem without anyone ruling on it. The row's disposition says which:
@@ -823,6 +975,8 @@ fn accepted_rows_without_a_decision_problems(entries: &Entries) -> Vec<Problem> 
         .collect()
 }
 
+/// Check 7: in every place with more than one problem row, all rows but the head carry
+/// `carried_by` naming the head's `site_id`.
 fn folded_rows_problems(entries: &Entries) -> Vec<Problem> {
     let Ok(live) = array_of(entries, "json/all-findings.json") else {
         // The recount has already refused a package it cannot read.

@@ -346,14 +346,18 @@ fn subgroup_facts_with(
             .iter()
             .copied()
             .filter(|r| {
-                !matches!(
-                    r.disposition_kind,
-                    Some(
-                        Disposition::Ignored
-                            | Disposition::BaselineAccepted
-                            | Disposition::WaivedInline
+                // Only a problem row (a defect or a departure) is a change still to make; a
+                // convention row or a row for a rule that could not be completed is not, so the
+                // Fix plan and the count of Fixes to do (and the gate's recount) agree.
+                crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&r.kind.tag())
+                    && !matches!(
+                        r.disposition_kind,
+                        Some(
+                            Disposition::Ignored
+                                | Disposition::BaselineAccepted
+                                | Disposition::WaivedInline
+                        )
                     )
-                )
             })
             .collect();
         if open.is_empty() && (!include_closed || live.is_empty()) {
