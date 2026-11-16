@@ -70,6 +70,10 @@ pub(super) const FINDER_WRITE_OR_PERSONAL_DATA_PHRASES: &[&str] = &[
     "writes",
     "write access",
     "can write",
+    "allows a write",
+    "modify",
+    "delete",
+    "update",
     "personal data",
     "personal information",
 ];

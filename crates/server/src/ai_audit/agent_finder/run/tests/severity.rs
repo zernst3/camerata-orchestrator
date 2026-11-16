@@ -345,6 +345,18 @@ async fn an_unauthenticated_access_problem_that_writes_or_exposes_personal_data_
 }
 
 #[tokio::test]
+async fn an_unauthenticated_access_problem_that_allows_a_write_or_changes_data_is_critical_r8() {
+    for what in [
+        "The route is reachable without authentication and allows a write to the orders table.",
+        "The route is reachable without authentication and lets anyone modify an order.",
+        "The route is reachable without authentication and lets anyone delete an order.",
+        "The route is reachable without authentication and lets anyone update an order.",
+    ] {
+        assert_eq!(rated_text("high", what).await, "critical", "{what}");
+    }
+}
+
+#[tokio::test]
 async fn an_unauthenticated_access_problem_the_agent_rated_critical_stays_critical_r8() {
     assert_eq!(
         rated_text(
