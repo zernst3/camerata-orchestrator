@@ -63,6 +63,7 @@ pub mod escalation;
 pub mod eval;
 pub mod evidence;
 pub mod feature_flags;
+pub mod finding_status;
 pub mod fix;
 pub mod follow_reviewers;
 pub mod github_issues;

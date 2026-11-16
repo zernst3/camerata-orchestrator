@@ -674,7 +674,7 @@ pub fn popover_view(
     let related_more = others.len().saturating_sub(RELATED_SHOWN);
     let related = others.into_iter().take(RELATED_SHOWN).collect();
     let mut disposition = state.label().to_string();
-    if f.status != "active" && !f.status.is_empty() {
+    if f.status != "active" && !f.status.is_empty() && !f.preview {
         disposition.push_str(&format!(" ({})", f.status));
     }
     PopoverView {

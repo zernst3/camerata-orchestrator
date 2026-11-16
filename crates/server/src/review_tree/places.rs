@@ -123,7 +123,7 @@ fn is_problem(f: &Finding) -> bool {
 pub fn is_place_row(f: &Finding) -> bool {
     is_problem(f)
         && !f.site_key.is_empty()
-        && !f.status.starts_with("suppressed")
+        && !crate::finding_status::is_suppressed(&f.status)
         && !crate::engine_discard::is_discarded(f)
         && !f.group_path.iter().any(|g| is_thrown_out_id(g))
 }
@@ -247,7 +247,7 @@ pub trait PlaceRow {
 }
 
 /// The fix order a place is recommended in: the earliest of its rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FixOrder {
     First,
     Next,
@@ -308,6 +308,46 @@ pub fn class_of_place<'b>(buckets: impl IntoIterator<Item = &'b str>) -> PlaceCl
         .map(class_of_bucket)
         .min_by_key(|c| precedence(*c))
         .unwrap_or(PlaceClass::NeedsDecision)
+}
+
+/// The one class of a Fix, and so the one order it is done in. The variants are in print and
+/// plan order: First, Next, Later, then the classes with nothing to act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FixClass {
+    /// The earliest order among the Fix's places that are for action.
+    Order(FixOrder),
+    /// No place for action, and at least one place needs a decision.
+    NeedsDecision,
+    /// No place for action and none needs a decision, at least one is information only.
+    InformationOnly,
+    /// Every place is accepted risk.
+    AcceptedRisk,
+}
+
+/// THE Fix order rule, and the only place an order is derived from places: a Fix's order is the
+/// earliest order among its places that are for action ([`class_of_place`] gives each place's
+/// class). A Fix with no place for action has the class of its places instead (needs a decision,
+/// then information only, then accepted risk) and never an order. Every surface (the PDF, the
+/// workbook, the tickets, the counts) takes a Fix's order from here.
+pub fn class_of_fix(place_classes: impl IntoIterator<Item = PlaceClass>) -> FixClass {
+    place_classes
+        .into_iter()
+        .map(FixClass::from)
+        .min()
+        // A Fix with no place at all is one nobody has settled: it needs a decision.
+        .unwrap_or(FixClass::NeedsDecision)
+}
+
+impl From<PlaceClass> for FixClass {
+    /// A place's class as the Fix class it would give a Fix of that one place.
+    fn from(c: PlaceClass) -> Self {
+        match c {
+            PlaceClass::ForAction(order) => Self::Order(order),
+            PlaceClass::NeedsDecision => Self::NeedsDecision,
+            PlaceClass::InformationOnly => Self::InformationOnly,
+            PlaceClass::AcceptedRisk => Self::AcceptedRisk,
+        }
+    }
 }
 
 /// The key of a place: (repo, path, line), and for a whole-file problem (line 0) the rule id as

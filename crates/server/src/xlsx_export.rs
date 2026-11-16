@@ -2260,7 +2260,7 @@ pub fn build_workbook_with_counts(
             totals: report_counts,
             coverage_summary: coverage_summary_line(
                 &coverage_rows,
-                not_assessed_rows.len(),
+                report_counts.rows.not_checked,
                 multi_repo,
             ),
         },
@@ -2327,7 +2327,7 @@ pub(crate) fn sheet_footer(line: &str) -> String {
 #[derive(Serialize)]
 pub struct FindingsExport {
     pub provenance: crate::report_export::CoverJson,
-    pub summary: crate::report_export::ExecutiveSummaryJson,
+    pub summary: FindingsSummary,
     /// Every count of the package, the object `report_json` carries (worked out once).
     pub counts: crate::report_export::ReportCounts,
     pub findings: Vec<FindingRow>,
@@ -2352,6 +2352,50 @@ pub struct FindingsExport {
     /// The Fixes: the rule groups whose places are one change, with every place and rule of each
     /// (item #1). Every row's `fix_id` names one of these.
     pub fixes: Vec<crate::review_tree::FixNode>,
+}
+
+/// The `summary` of findings.json: the executive summary's sentence and its tallies, every tally
+/// read from the counts object so no field contradicts `counts`. The old row tallies
+/// `curated_total` and `open` are retired words and are not in the file.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct FindingsSummary {
+    pub narrative: String,
+    pub is_override: bool,
+    pub candidates_reviewed: usize,
+    pub excluded_false_positive: usize,
+    /// Problems that need a reviewer's decision (`counts.problems.needs_decision`).
+    pub held_for_review: usize,
+    pub dependency_advisories: usize,
+    /// Problems for action by fix order (`counts.problems.first`, `next` and `later`).
+    pub do_now: usize,
+    pub do_next: usize,
+    pub plan: usize,
+    /// Problems every row of which is accepted (`counts.problems.accepted`).
+    pub accepted: usize,
+    pub failed_passes: Vec<String>,
+    pub failed_passes_more_line: String,
+}
+
+impl FindingsSummary {
+    fn of(
+        s: &crate::report_export::ExecutiveSummaryJson,
+        c: &crate::report_export::ReportCounts,
+    ) -> Self {
+        Self {
+            narrative: s.narrative.clone(),
+            is_override: s.is_override,
+            candidates_reviewed: c.rows.total,
+            excluded_false_positive: c.rows.ruled_out,
+            held_for_review: c.problems.needs_decision,
+            dependency_advisories: c.rows.dependency,
+            do_now: c.problems.first,
+            do_next: c.problems.next,
+            plan: c.problems.later,
+            accepted: c.problems.accepted,
+            failed_passes: s.failed_passes.clone(),
+            failed_passes_more_line: s.failed_passes_more_line.clone(),
+        }
+    }
 }
 
 /// One open place of a rule that a ruled-out row carries ([`FindingsExport::open_beside_ruled_out`]).
@@ -2437,7 +2481,7 @@ pub fn build_findings_export(
     FindingsExport {
         open_beside_ruled_out,
         provenance: report_json.cover.clone(),
-        summary: report_json.executive_summary.clone(),
+        summary: FindingsSummary::of(&report_json.executive_summary, &report_json.counts),
         counts: report_json.counts.clone(),
         findings,
         coverage: report_json.coverage_gaps.clone(),
@@ -4833,11 +4877,12 @@ mod tests {
             );
         }
 
-        // Expected shape for THIS fixture: 2 do_now (critical + high/low-effort), 1 do_next
-        // (high/no-effort), 1 plan (medium), 1 held (C5-4: the hedged low), 0 accepted, 0
-        // informational (a calibration hedge never lands there any more).
-        assert_eq!(json.matrix.do_now.len(), 2);
-        assert_eq!(json.matrix.do_next.len(), 1);
+        // Expected shape for THIS fixture: 3 do_now (critical, high/low-effort and high/no-effort:
+        // owner ruling 2026-11-16, a high problem with no estimate is First), 0 do_next, 1 plan
+        // (medium), 1 held (C5-4: the hedged low), 0 accepted, 0 informational (a calibration
+        // hedge never lands there any more).
+        assert_eq!(json.matrix.do_now.len(), 3);
+        assert_eq!(json.matrix.do_next.len(), 0);
         assert_eq!(json.matrix.plan.len(), 1);
         assert_eq!(json.matrix.accepted.len(), 0);
         assert_eq!(json.matrix.informational.len(), 0);

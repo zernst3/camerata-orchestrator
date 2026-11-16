@@ -558,8 +558,9 @@ fn unresolved_high_severity_low_effort_is_do_now() {
 }
 
 #[test]
-fn unresolved_high_severity_unknown_effort_is_do_next_not_do_now() {
-    // No calibration ran (effort = None) — must NOT be treated as low-effort.
+fn unresolved_high_severity_unknown_effort_is_do_now() {
+    // No calibration ran (effort = None). Owner ruling 2026-11-16 (intended change): a high
+    // problem with no estimate is First, like one at low effort.
     let f = finding("SEC-1", "a.rs", 1, "high");
     let report = report_with(vec![f], vec![]);
     let json = build_report_json(
@@ -567,8 +568,8 @@ fn unresolved_high_severity_unknown_effort_is_do_next_not_do_now() {
         None,
         &empty_opts(),
     );
-    assert_eq!(json.matrix.do_next.len(), 1);
-    assert_eq!(json.matrix.do_now.len(), 0);
+    assert_eq!(json.matrix.do_next.len(), 0);
+    assert_eq!(json.matrix.do_now.len(), 1);
 }
 
 #[test]
@@ -611,9 +612,9 @@ fn unresolved_critical_with_no_effort_is_do_now_not_do_next() {
 }
 
 #[test]
-fn unresolved_high_effort_medium_is_still_do_next_not_downgraded() {
-    // A "high" (not critical) finding with unknown effort keeps the pre-existing
-    // conservative behavior: Do next, never Do now, never silently downgraded to Plan.
+fn unresolved_high_with_unknown_effort_is_not_downgraded_to_plan() {
+    // A "high" (not critical) finding with unknown effort is First (owner ruling 2026-11-16,
+    // an intended change from Next), and is never silently downgraded to Plan.
     let f = finding("ARCH-1", "a.rs", 1, "high");
     let report = report_with(vec![f], vec![]);
     let json = build_report_json(
@@ -621,15 +622,15 @@ fn unresolved_high_effort_medium_is_still_do_next_not_downgraded() {
         None,
         &empty_opts(),
     );
-    assert_eq!(json.matrix.do_next.len(), 1);
-    assert_eq!(json.matrix.do_now.len(), 0);
+    assert_eq!(json.matrix.do_next.len(), 0);
+    assert_eq!(json.matrix.do_now.len(), 1);
     assert_eq!(json.matrix.plan.len(), 0);
 }
 
 // ── M7 regression: Unresolved disposition names its actual matrix bucket ───
 
 #[test]
-fn unresolved_disposition_label_names_do_next_bucket() {
+fn unresolved_disposition_label_names_its_bucket() {
     let f = finding("ARCH-1", "a.rs", 1, "high");
     let report = report_with(vec![f], vec![]);
     let json = build_report_json(
@@ -639,7 +640,7 @@ fn unresolved_disposition_label_names_do_next_bucket() {
     );
     assert_eq!(
         json.curated_findings[0].sites[0].disposition,
-        "Open (recommended: Next)"
+        "Open (recommended: First)"
     );
 }
 
@@ -956,10 +957,12 @@ fn req_e2_max_severity_clamps_a_critical_finding_down_to_the_declared_ceiling() 
         "a max_severity=\"high\" rule must never export critical"
     );
     assert_eq!(json.scorecard.rows[0].critical, 0, "{:?}", json.scorecard);
+    // The clamped row is a high problem with no estimate, which is First (owner ruling
+    // 2026-11-16), so it is the one do_now row and none of it is critical.
     assert_eq!(
         json.matrix.do_now.len(),
-        0,
-        "critical-only do_now must be empty: {:?}",
+        1,
+        "the clamped high row is the one do_now row: {:?}",
         json.matrix
     );
 }

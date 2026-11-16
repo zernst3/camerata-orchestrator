@@ -243,7 +243,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
         .iter()
         .filter(|f| f.severity == "critical" || f.severity == "high")
         .count();
-    let enforced = findings.iter().filter(|f| f.status == "active").count();
+    let enforced = findings
+        .iter()
+        .filter(|f| f.status == "active" && !f.preview)
+        .count();
     let suppressed = findings.len().saturating_sub(enforced);
 
     // The architect's PER-REPO alternative choices, keyed `chosen_key(repo, rule_id)` ->

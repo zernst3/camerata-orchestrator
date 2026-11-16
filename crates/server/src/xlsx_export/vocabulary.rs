@@ -220,6 +220,29 @@ pub const PDF_SECTIONS: [&str; 15] = [
 pub const FIX_ORDER_FIRST: &str = "First";
 pub const FIX_ORDER_NEXT: &str = "Next";
 pub const FIX_ORDER_LATER: &str = "Later";
+/// What a Fix or a place with nothing to act on prints in place of an order.
+pub const FIX_CLASS_NEEDS_DECISION: &str = NEEDS_A_DECISION;
+pub const FIX_CLASS_INFORMATION_ONLY: &str = "Information only";
+pub const FIX_CLASS_ACCEPTED: &str = "Accepted risk";
+
+/// The word a Fix prints in the Fix order column and in the PDF: its order, or its class when no
+/// place of it is for action.
+pub fn fix_class_label(class: crate::review_tree::FixClass) -> &'static str {
+    use crate::review_tree::{FixClass, FixOrder};
+    match class {
+        FixClass::Order(FixOrder::First) => FIX_ORDER_FIRST,
+        FixClass::Order(FixOrder::Next) => FIX_ORDER_NEXT,
+        FixClass::Order(FixOrder::Later) => FIX_ORDER_LATER,
+        FixClass::NeedsDecision => FIX_CLASS_NEEDS_DECISION,
+        FixClass::InformationOnly => FIX_CLASS_INFORMATION_ONLY,
+        FixClass::AcceptedRisk => FIX_CLASS_ACCEPTED,
+    }
+}
+
+/// The word a place prints in the Fix order column: its own class.
+pub fn place_class_label(class: crate::review_tree::PlaceClass) -> &'static str {
+    fix_class_label(crate::review_tree::FixClass::from(class))
+}
 
 // ── Column headers ──────────────────────────────────────────────────────────────────────
 
@@ -464,7 +487,7 @@ pub fn closes_rules(rules: &[String]) -> String {
 
 /// The line that points at the rest of a capped list: "and 4 more in the Fix plan sheet".
 pub fn more_in_sheet(n: usize, sheet: &str) -> String {
-    format!("and {n} more in the {sheet} sheet")
+    crate::report_export::counts_prose::more_line(n, &format!("more in the {sheet} sheet"))
 }
 
 /// A rule line of a fix that covers only some of the fix's places: the rule, then where.
@@ -727,7 +750,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Status",
-        "The state the engine holds a problem in, for example suppressed by an earlier baseline. For tools.",
+        "The state the engine holds a problem in: active, carried-baseline (matched to a baseline record Cantus wrote) or waived-inline (covered by a waiver comment). Whether a tool in preview found it is in the Source column. For tools.",
         "The technical columns of All problems",
     ),
     e(

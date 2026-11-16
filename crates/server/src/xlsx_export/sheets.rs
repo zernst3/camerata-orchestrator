@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use rust_xlsxwriter::{Color, Workbook, XlsxError};
 
-use super::subgroups::{FixFacts, Sequence};
+use super::subgroups::FixFacts;
 use super::tables::{Cell, Col, Table};
 use super::vocabulary as v;
 use super::{
@@ -35,6 +35,7 @@ use super::{
     Formats, KindSheet, NotAssessedRow, RulesAppliedRow, SiteParent, SiteRow,
 };
 use crate::report_export::Disposition;
+use crate::review_tree::FixClass;
 
 // ── Which rows are problems, and in what order ──────────────────────────────────────────
 
@@ -84,18 +85,52 @@ pub(super) fn place_rows(rows: &[FindingRow]) -> Vec<PlaceRows<'_>> {
     .collect()
 }
 
-/// The Fixes that are fixes: those with a problem on All problems or an advisory on Dependencies.
-/// A Fix that holds only conventions, or only rules that could not be completed, is no fix. The
-/// Fix plan, the tickets and the PDF's top three all keep the Fixes in this set and no others, so
-/// a ticket is a plan row.
+/// The class of every place of `rows`, by the one place rule: the class the counts object, All
+/// problems and every Fix take for the place. Keyed by [`crate::review_tree::place_key`].
+pub(super) fn place_classes(
+    rows: &[FindingRow],
+) -> HashMap<(String, String, usize, String), crate::review_tree::PlaceClass> {
+    place_rows(rows)
+        .into_iter()
+        .map(|p| {
+            let (repo, path, line, rule) =
+                crate::review_tree::place_key(&p.rep.repo, &p.rep.path, p.rep.line, &p.rep.rule_id);
+            (
+                (repo.to_string(), path.to_string(), line, rule.to_string()),
+                crate::review_tree::class_of_place(p.members.iter().map(|m| m.bucket)),
+            )
+        })
+        .collect()
+}
+
+/// THE predicate for "this row is a change still to make": no reviewer, baseline record or waiver
+/// accepted it, and the place it is at does not wait for a decision. A Fix is to do when any of its
+/// rows is (or it has a dependency advisory). The release gate mirrors it once, from the rows.
+pub(super) fn row_is_to_do(row: &FindingRow, place: crate::review_tree::PlaceClass) -> bool {
+    !matches!(
+        row.disposition_kind,
+        Some(Disposition::Ignored | Disposition::BaselineAccepted | Disposition::WaivedInline)
+    ) && place != crate::review_tree::PlaceClass::NeedsDecision
+}
+
+/// The Fixes that are fixes to do: those with a row to do ([`row_is_to_do`]) on All problems or an
+/// advisory on Dependencies. A Fix that holds only conventions, or only rules that could not be
+/// completed, is no fix; nor is one whose places are all accepted or all waiting for a decision.
+/// The Fix plan, the tickets, the PDF's top three and the counts all keep the Fixes in this set and
+/// no others, so a ticket is a plan row.
 pub(super) fn fixes_with_problems(
     rows: &[FindingRow],
     sorted_deps: &[DepRow],
 ) -> std::collections::HashSet<String> {
-    let mut ids: std::collections::HashSet<String> = rows
-        .iter()
-        .filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
-        .map(|r| r.facts.fix_id.clone())
+    let mut ids: std::collections::HashSet<String> = place_rows(rows)
+        .into_iter()
+        .flat_map(|p| {
+            let place = crate::review_tree::class_of_place(p.members.iter().map(|m| m.bucket));
+            p.members
+                .into_iter()
+                .filter(move |r| row_is_to_do(r, place))
+                .map(|r| r.facts.fix_id.clone())
+        })
         .filter(|id| !id.is_empty())
         .collect();
     ids.extend(
@@ -185,7 +220,13 @@ impl<'a> Layout<'a> {
         }
         let mut sorted: Vec<&PlaceRows> = places.iter().collect();
         sorted.sort_by_key(|p| {
-            fix_order_key(p.rep, &place_fixes[&p.rep.facts.site_id], &fix_at, &plan)
+            fix_order_key(
+                p.rep,
+                crate::review_tree::class_of_place(p.members.iter().map(|m| m.bucket)),
+                &place_fixes[&p.rep.facts.site_id],
+                &fix_at,
+                &plan,
+            )
         });
         let mut problems: Vec<&'a FindingRow> = Vec::with_capacity(sorted.len());
         let mut place_members: HashMap<String, Vec<&'a FindingRow>> = HashMap::new();
@@ -245,20 +286,21 @@ impl<'a> Layout<'a> {
     }
 }
 
-/// The sort key of a place: the fix order of its first fix, the position of that fix in the plan,
-/// then the worst severity first.
+/// The sort key of a place: the class of its first fix, the position of that fix in the plan,
+/// then the worst severity first. A place in no fix of the plan sorts by its own class.
 fn fix_order_key(
     row: &FindingRow,
+    place: crate::review_tree::PlaceClass,
     fixes: &[String],
     fix_at: &HashMap<String, (u32, usize)>,
     plan: &[&FixFacts],
-) -> (Sequence, usize, u8, u8, String, String, usize) {
-    let (sequence, position) = match fixes.first().and_then(|id| fix_at.get(id)) {
-        Some((_, i)) => (plan[*i].sequence, *i),
-        None => (Sequence::of(&row.severity, &row.effort), usize::MAX),
+) -> (FixClass, usize, u8, u8, String, String, usize) {
+    let (class, position) = match fixes.first().and_then(|id| fix_at.get(id)) {
+        Some((_, i)) => (plan[*i].class, *i),
+        None => (FixClass::from(place), usize::MAX),
     };
     (
-        sequence,
+        class,
         position,
         severity_rank(&row.severity),
         crate::report_export::provenance_tier_rank(&row.citation_kind),
@@ -268,12 +310,12 @@ fn fix_order_key(
     )
 }
 
-/// The fix order word of a row: that of its Fix, or the one its severity and effort give.
-fn fix_order_word(row: &FindingRow, lay: &Layout) -> &'static str {
-    match lay.fix_at.get(&row.facts.fix_id) {
-        Some((_, i)) => lay.plan[*i].sequence.label(),
-        None => Sequence::of(&row.severity, &row.effort).label(),
-    }
+/// The Fix order word of a place on All problems: its own class, by the one place rule over every
+/// row at the place.
+fn place_order_word(members: &[&FindingRow]) -> &'static str {
+    v::place_class_label(crate::review_tree::class_of_place(
+        members.iter().map(|m| m.bucket),
+    ))
 }
 
 // ── Row cells, assembled by header ──────────────────────────────────────────────────────
@@ -515,7 +557,13 @@ fn problem_cols(lay: &Layout, waiting: bool) -> Vec<Col> {
 
 fn problem_cells(row: &FindingRow, lay: &Layout) -> RowCells {
     let mut c = RowCells::default();
-    c.put(v::H_FIX_ORDER, Cell::text(fix_order_word(row, lay)))
+    // A row that is not a problem (a convention, a row that could not be completed) has no order.
+    let order = if !row.is_fp && kind_sheet(row) == KindSheet::Findings {
+        place_order_word(&[row])
+    } else {
+        ""
+    };
+    c.put(v::H_FIX_ORDER, Cell::text(order))
         .put(v::H_SEVERITY, Cell::Severity(row.severity.clone()))
         .put(v::H_PROBLEM, Cell::wrap(&row.headline))
         .put(v::H_FILE, Cell::text(&row.path))
@@ -650,12 +698,15 @@ fn place_cells(rep: &FindingRow, lay: &Layout) -> RowCells {
         .place_fixes
         .get(&rep.facts.site_id)
         .map_or(&[], Vec::as_slice);
+    // The place's own class word, from every row at the place.
+    if !members.is_empty() {
+        c.put(v::H_FIX_ORDER, Cell::text(place_order_word(members)));
+    }
     if let Some((fix_row, at)) = fixes.first().and_then(|id| lay.fix_at.get(id)) {
-        c.put(v::H_FIX_ORDER, Cell::text(lay.plan[*at].sequence.label()))
-            .put(
-                v::H_FIX,
-                Cell::link(v::FIX_PLAN, *fix_row, &lay.plan[*at].label),
-            );
+        c.put(
+            v::H_FIX,
+            Cell::link(v::FIX_PLAN, *fix_row, &lay.plan[*at].label),
+        );
     }
     if !fixes.is_empty() {
         c.put(v::H_FIX_ID, Cell::text(fixes.join(", ")));
@@ -890,7 +941,7 @@ pub(super) fn fix_plan_table(lay: &Layout, no_tree_note: &str) -> Table {
         cells
             .put(v::H_ORDER, Cell::Num((i + 1) as f64))
             .put(v::H_FIX, Cell::wrap(&g.label))
-            .put(v::H_FIX_ORDER, Cell::text(g.sequence.label()))
+            .put(v::H_FIX_ORDER, Cell::text(v::fix_class_label(g.class)))
             .put(v::H_WHAT_IS_WRONG, Cell::wrap(what_is_wrong))
             .put(v::H_WHY_IT_MATTERS, Cell::wrap(why))
             .put(v::H_WHAT_TO_DO, Cell::wrap(&g.fix))

@@ -52,8 +52,11 @@ pub use self_ref::{
 
 // Pull private/crate-internal helpers into scope for the orchestration functions and
 // test module (via `use super::*`).
+#[cfg(test)]
+pub(crate) use audit::classify_repo_findings;
 pub(crate) use audit::{
-    build_rule_alternatives, classify_repo_findings, is_ci_tier_rule, is_semantic_multi_option_rule,
+    build_rule_alternatives, is_ci_tier_rule, is_semantic_multi_option_rule,
+    record_first_inspection,
 };
 // Re-export camerata_gateway test-scope primitives so the test module's `use super::*`
 // can reach them directly (they're used in inline test assertions).
@@ -210,9 +213,10 @@ pub struct Finding {
     pub snippet: String,
     /// The gate's own explanation of the violation.
     pub detail: String,
-    /// Suppression status: `active` (NEW/changed — the gate enforces), `suppressed-inline`
-    /// (waived by a `camerata:allow` comment), or `suppressed-baseline` (accepted
-    /// pre-existing debt / policy). Report shows all; enforcement is on `active` only.
+    /// Status: `active` (open; a row from a tool in preview is `active` with `preview` set),
+    /// `waived-inline` (a `camerata:allow` comment) or `carried-baseline` (a baseline record
+    /// Cantus wrote). See [`crate::finding_status`]; sealed reports with the old
+    /// `suppressed-*` words are mapped on read.
     #[serde(default = "default_status")]
     pub status: String,
     /// Other rule ids this SAME code location also violates, demoted here when several
@@ -1014,6 +1018,7 @@ pub struct ScanReport {
     #[serde(default)]
     pub excluded_mechanical_rules: Vec<String>,
     /// Every violation found, across all repos (each tagged with its repo).
+    #[serde(deserialize_with = "crate::finding_status::de_findings")]
     pub findings: Vec<Finding>,
     /// The proposed starter ruleset (aggregated over all repos).
     pub proposed_rules: Vec<ProposedRule>,
@@ -3589,7 +3594,10 @@ pub async fn audit_repos_with_llm_controlled(
                     repo_findings.len(),
                     crate::scan_ledger::StageAccounting::default(),
                 );
-                classify_repo_findings(&mut repo_findings, spec, &files);
+                // Zach's ruling: a first inspection does not honour a baseline file or waiver
+                // comments found in the client's repository. The rows stay open and the package
+                // prints how many it found.
+                record_first_inspection(&mut repo_findings, &files, &mut pipeline_ledger);
                 // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
                 // `deviation_ceiling`), applied to the LIVE findings so the triage view shows
                 // the same severity the PDF/xlsx will bill. Before this, the bounds ran only at
@@ -5633,8 +5641,8 @@ mod tests {
             mk("b.rs", 1, "SEC-NO-HARDCODED-SECRETS-1", "danger()"), // inline-waived
         ];
         classify_repo_findings(&mut findings, "me/api", &files);
-        assert_eq!(findings[0].status, "suppressed-baseline");
-        assert_eq!(findings[1].status, "suppressed-inline");
+        assert_eq!(findings[0].status, "carried-baseline");
+        assert_eq!(findings[1].status, "waived-inline");
         // The reason-less waiver on b.rs:2 surfaced as its own violation.
         assert!(findings
             .iter()

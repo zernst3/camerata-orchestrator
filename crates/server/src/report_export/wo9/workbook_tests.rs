@@ -686,7 +686,15 @@ fn every_sheet_name_and_every_shared_header_is_defined_in_the_glossary() {
 #[test]
 fn fix_order_uses_one_set_of_words_on_every_sheet() {
     let xlsx = client_workbook();
-    let allowed = ["First", "Next", "Later"];
+    // A place or a fix with nothing to act on prints its class in place of an order.
+    let allowed = [
+        "First",
+        "Next",
+        "Later",
+        "Needs a decision",
+        "Information only",
+        "Accepted risk",
+    ];
     for sheet in [v::FIX_PLAN, v::ALL_PROBLEMS, v::NEEDS_A_DECISION] {
         let grid = table(&xlsx, sheet);
         for r in 1..grid.len() {

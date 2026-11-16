@@ -226,7 +226,7 @@ pub struct FindingView {
     pub severity: String,
     pub snippet: String,
     pub detail: String,
-    /// `active` (enforced), `suppressed-inline`, or `suppressed-baseline`.
+    /// `active` (enforced), `waived-inline`, or `carried-baseline`.
     #[serde(default = "default_finding_status")]
     pub status: String,
     /// Other rule ids this same location also violates (the server merged them into this
@@ -1123,7 +1123,11 @@ fn deviation_ratio_ppm(f: &FindingView) -> u64 {
 /// The default is opinionated; the table is not locked — chorale's column headers still
 /// re-sort on demand.
 pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, String, usize) {
-    let enforced = if f.status == "active" { 0 } else { 1 };
+    let enforced = if f.status == "active" && !f.preview {
+        0
+    } else {
+        1
+    };
     (
         enforced,
         severity_rank(&f.severity),
@@ -2342,7 +2346,7 @@ mod tests {
         let mut m = TriageModel::new();
         let unresolved_crit = f("r", 1, "critical", "active");
         let unresolved_low = f("r", 2, "low", "active");
-        let unresolved_high_suppressed = f("r", 3, "high", "suppressed-baseline");
+        let unresolved_high_suppressed = f("r", 3, "high", "carried-baseline");
         let ignored = f("r", 4, "critical", "active");
         m.ignore(std::slice::from_ref(&ignored), "noise");
 
@@ -2699,7 +2703,7 @@ mod tests {
         let high_defect = defect("A-DEFECT", "high");
         let high_deviation = deviation("A-DEVIATION", "high", 2, Some(47));
         let mut suppressed = defect("SUPPRESSED", "critical");
-        suppressed.status = "suppressed-baseline".to_string();
+        suppressed.status = "carried-baseline".to_string();
 
         let m = TriageModel::new();
         let out = m.visible(&[

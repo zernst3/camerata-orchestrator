@@ -591,11 +591,69 @@ pub(crate) fn build_rule_alternatives<'a>(
     out
 }
 
+/// What a client repository held that a first inspection does not honour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ClientSuppressions {
+    /// Inline `camerata:allow` waiver comments.
+    pub waivers: usize,
+    /// Entries of `.camerata/baseline.json`.
+    pub baseline_entries: usize,
+}
+
+impl ClientSuppressions {
+    /// Waivers plus baseline entries: the one number the package prints.
+    pub(crate) fn total(self) -> usize {
+        self.waivers + self.baseline_entries
+    }
+}
+
+/// A first inspection of a client repository. The baseline file and the waiver comments in that
+/// repository were written by someone else, so nothing in them closes a problem here: every row
+/// stays open (`active`) and the waivers and baseline entries are only counted, for the package
+/// to print. A baseline is honoured only on a re-inspection, and only one Cantus wrote; the
+/// engine puts no mark on a baseline it wrote (`suppression::baseline_entry` stamps the same
+/// fields a person's file has), so no baseline is honoured today. A waiver without a reason is
+/// not reported as a problem of its own: no waiver is read as one.
+pub(crate) fn open_every_row_on_first_inspection(
+    findings: &mut [Finding],
+    files: &[(String, String)],
+) -> ClientSuppressions {
+    use crate::suppression::{parse_inline_waivers, Baseline};
+    let waivers: usize = files
+        .iter()
+        .map(|(path, content)| parse_inline_waivers(path, content).len())
+        .sum();
+    let baseline_entries = files
+        .iter()
+        .find(|(p, _)| p == ".camerata/baseline.json")
+        .and_then(|(_, c)| serde_json::from_str::<Baseline>(c).ok())
+        .map_or(0, |b| b.entries.len());
+    for f in findings.iter_mut() {
+        f.status = crate::finding_status::ACTIVE.to_string();
+    }
+    ClientSuppressions {
+        waivers,
+        baseline_entries,
+    }
+}
+
+/// The first inspection of one repository: [`open_every_row_on_first_inspection`], and the count
+/// of what it found written to the scan ledger, which the package prints.
+pub(crate) fn record_first_inspection(
+    findings: &mut [Finding],
+    files: &[(String, String)],
+    ledger: &mut crate::scan_ledger::ScanLedger,
+) {
+    let found = open_every_row_on_first_inspection(findings, files);
+    ledger.add_client_suppressions(found.total());
+}
+
 /// Classify a repo's findings against its suppressions (inline `camerata:allow` waivers
 /// parsed from the files + the committed `.camerata/baseline.json`), setting each
 /// finding's `status`. Also appends a `CAM-WAIVER-NEEDS-REASON` finding for every
 /// reason-less waiver (the require-reason invariant). REPORT everything; the `status`
 /// is what lets enforcement act on the delta only.
+#[cfg(test)]
 pub(crate) fn classify_repo_findings(
     findings: &mut Vec<Finding>,
     repo: &str,
@@ -644,8 +702,8 @@ pub(crate) fn classify_repo_findings(
         }
         f.status = match status {
             Status::Active => "active",
-            Status::SuppressedInline => "suppressed-inline",
-            Status::SuppressedBaseline => "suppressed-baseline",
+            Status::SuppressedInline => crate::finding_status::WAIVED_INLINE,
+            Status::SuppressedBaseline => crate::finding_status::CARRIED_BASELINE,
         }
         .to_string();
     }
@@ -779,7 +837,7 @@ mod classify_tests {
         let mut findings = vec![finding("R-PRIMARY", "src/a.rs", 1, &["R-SIBLING"])];
         classify_repo_findings(&mut findings, "o/r", &files);
         assert_eq!(
-            findings[0].status, "suppressed-inline",
+            findings[0].status, "waived-inline",
             "waiver on a demoted sibling rule id must suppress the merged finding"
         );
     }
@@ -803,7 +861,49 @@ mod classify_tests {
         )];
         let mut findings = vec![finding("R-PRIMARY", "src/a.rs", 1, &[])];
         classify_repo_findings(&mut findings, "o/r", &files);
-        assert_eq!(findings[0].status, "suppressed-inline");
+        assert_eq!(findings[0].status, "waived-inline");
+    }
+
+    #[test]
+    fn a_first_inspection_keeps_client_baseline_and_waiver_rows_open_and_counts_them() {
+        let baseline = r#"{"entries":[{"rule_id":"R-ONE","path":"a.rs","fingerprint":"x","reason":"old","accepted_by":"someone","accepted_at":"2020-01-01","kind":"baseline"}]}"#;
+        let files = vec![
+            (".camerata/baseline.json".to_string(), baseline.to_string()),
+            (
+                "a.rs".to_string(),
+                "// camerata:allow R-TWO -- we know\nlet x = 1;\n".to_string(),
+            ),
+        ];
+        let mut rows = vec![
+            finding("R-ONE", "a.rs", 1, &[]),
+            finding("R-TWO", "a.rs", 2, &[]),
+        ];
+        // Anti-vacuity: the rows start closed by the client's files, so the assertion below can
+        // only pass when the function itself reopens them.
+        rows[0].status = crate::finding_status::CARRIED_BASELINE.to_string();
+        rows[1].status = crate::finding_status::WAIVED_INLINE.to_string();
+        let found = open_every_row_on_first_inspection(&mut rows, &files);
+        assert_eq!(found.waivers, 1, "anti-vacuity: the waiver was parsed");
+        assert_eq!(found.baseline_entries, 1);
+        assert_eq!(found.total(), 2);
+        assert!(
+            rows.iter().all(|r| r.status == "active"),
+            "no client file closes a row on a first inspection: {rows:?}"
+        );
+        assert_eq!(rows.len(), 2, "no problem of its own is added");
+    }
+
+    #[test]
+    fn the_ledger_carries_the_count_of_client_suppressions_found() {
+        let files = vec![(
+            "a.rs".to_string(),
+            "// camerata:allow R-TWO -- we know\nlet x = 1;\n".to_string(),
+        )];
+        let mut rows = vec![finding("R-TWO", "a.rs", 2, &[])];
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        assert_eq!(ledger.client_suppressions_found(), 0);
+        record_first_inspection(&mut rows, &files, &mut ledger);
+        assert_eq!(ledger.client_suppressions_found(), 1);
     }
 }
 

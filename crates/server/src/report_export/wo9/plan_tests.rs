@@ -127,10 +127,11 @@ fn the_remediation_plan_has_one_row_per_subgroup_and_excludes_false_positives_an
         "1",
         "the false positive is excluded"
     );
-    assert_eq!(cell(&grid, layering, "Fix order"), "Next");
+    // A medium problem is Later whatever its effort (the owner's order table).
+    assert_eq!(cell(&grid, layering, "Fix order"), "Later");
     // First leads.
     assert_eq!(cell(&grid, rows[0], "Fix order"), "First");
-    assert_eq!(cell(&grid, rows[rows.len() - 1], "Fix order"), "Next");
+    assert_eq!(cell(&grid, rows[rows.len() - 1], "Fix order"), "Later");
     // Neither the false positive nor the ignored site is named anywhere on the sheet.
     let sheet_text: String = grid
         .iter()

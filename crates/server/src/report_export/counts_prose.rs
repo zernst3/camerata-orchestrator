@@ -103,7 +103,7 @@ pub(crate) fn narrative(c: &ReportCounts, state: ReviewState) -> String {
     ));
     if !state.is_draft() && c.rows.ruled_out > 0 {
         s.push_str(&format!(
-            " {} {} ruled out by a reviewer and left out of this report.",
+            " {} {} ruled out and left out of this report.",
             noun(c.rows.ruled_out, "source row", "source rows"),
             if c.rows.ruled_out == 1 { "was" } else { "were" },
         ));
@@ -154,11 +154,25 @@ pub(crate) fn methodology_line(c: &ReportCounts, state: ReviewState) -> String {
         noun(r.total, "source row", "source rows"),
         join_and(&parts)
     );
-    if state.is_draft() {
-        format!("{core} This export has not yet had a human review.")
+    let review = if state.is_draft() {
+        "This export has not yet had a human review."
     } else {
-        format!("{core} Reviewed by a human reviewer.")
+        "Reviewed by a human reviewer."
+    };
+    format!("{core} {review}{}", suppressions_sentence(c))
+}
+
+/// The sentence that says how many waivers and baseline entries the client's repository held and
+/// that none was honoured; empty when it held none.
+pub(crate) fn suppressions_sentence(c: &ReportCounts) -> String {
+    let found = c.other.client_suppressions_found;
+    if found == 0 {
+        return String::new();
     }
+    format!(
+        " The inspected code held {}; this first inspection did not honour them, so every problem they cover is open.",
+        noun(found, "waiver or baseline entry", "waivers and baseline entries"),
+    )
 }
 
 /// The three steps from here, with the decision sentence in the first.
@@ -195,7 +209,7 @@ pub(crate) fn next_steps(c: &ReportCounts, multi_repo: bool, state: ReviewState)
 pub(crate) fn cover_strip(c: &ReportCounts) -> String {
     let (p, s) = (&c.problems, &c.problems.by_severity);
     format!(
-        "{} critical · {} high · {} medium · {} low · {} accepted · {}",
+        "{} critical · {} high · {} medium · {} low · {} accepted risk · {}",
         n(s.critical),
         n(s.high),
         n(s.medium),
@@ -243,16 +257,45 @@ pub(crate) fn grid_left_out(c: &ReportCounts) -> String {
         part(&p.needs_decision_by_severity),
         part(&p.information_only_by_severity),
     );
+    // The noun and the verb agree with the number of problems, not with the severities listed.
+    let (decide_n, info_n) = (
+        p.needs_decision_by_severity.sum(),
+        p.information_only_by_severity.sum(),
+    );
+    let (decide_noun, decide_verb) = if decide_n == 1 {
+        ("problem", "needs")
+    } else {
+        ("problems", "need")
+    };
+    let (info_noun, info_verb) = if info_n == 1 {
+        ("problem", "is")
+    } else {
+        ("problems", "are")
+    };
+    let decide_part = format!("{decide} {decide_noun} that {decide_verb} a decision first");
+    let info_part = format!("{info} {info_noun} that {info_verb} information only");
     let mut out = match (decide.is_empty(), info.is_empty()) {
         (true, true) => return String::new(),
-        (false, true) => format!("Not in this grid: {decide} places that need a decision first."),
-        (true, false) => format!("Not in this grid: {info} places that are information only."),
-        (false, false) => format!(
-            "Not in this grid: {decide} places that need a decision first, and {info} places that are information only."
-        ),
+        (false, true) => format!("Not in this grid: {decide_part}."),
+        (true, false) => format!("Not in this grid: {info_part}."),
+        (false, false) => format!("Not in this grid: {decide_part} and {info_part}."),
     };
     out.push_str(" The cover counts all of them.");
     out
+}
+
+/// What the three things box says when it is empty. With no dependency fix First nothing is due
+/// first; otherwise no code problem is, and the dependency fixes that are say so.
+pub(crate) fn nothing_first_sentence(dependency_fixes_first: usize) -> String {
+    match dependency_fixes_first {
+        0 => "No fix is due first this run.".to_string(),
+        1 => "No code problem is due first this run. 1 dependency fix is due first; see Dependencies."
+            .to_string(),
+        k => format!(
+            "No code problem is due first this run. {} dependency fixes are due first; see Dependencies.",
+            n(k)
+        ),
+    }
 }
 
 /// "and 3 more": the line under a list that shows only its first entries. `more` is the number of
@@ -262,4 +305,61 @@ pub(crate) fn more_line(more: usize, words: &str) -> String {
         return String::new();
     }
     format!("and {} {words}", n(more))
+}
+
+#[cfg(test)]
+mod grid_note_tests {
+    use super::*;
+    use crate::report_export::ReportCounts;
+
+    /// The grid's note agrees in number and verb with the count, and has no comma before "and".
+    #[test]
+    fn the_grid_note_agrees_with_the_count() {
+        let mut one = ReportCounts::default();
+        one.problems.needs_decision_by_severity.low = 1;
+        assert_eq!(
+            grid_left_out(&one),
+            "Not in this grid: 1 low problem that needs a decision first. The cover counts all of them."
+        );
+        let mut two = ReportCounts::default();
+        two.problems.needs_decision_by_severity.low = 2;
+        assert_eq!(
+            grid_left_out(&two),
+            "Not in this grid: 2 low problems that need a decision first. The cover counts all of them."
+        );
+        let mut both = ReportCounts::default();
+        both.problems.needs_decision_by_severity.low = 2;
+        both.problems.information_only_by_severity.medium = 1;
+        let note = grid_left_out(&both);
+        assert_eq!(
+            note,
+            "Not in this grid: 2 low problems that need a decision first and 1 medium problem that is information only. The cover counts all of them."
+        );
+        assert!(!note.contains(", and") && !note.contains(['\u{2014}', '\u{2013}']));
+    }
+
+    /// What the box says when it is empty: nothing is due first, or only dependency fixes are.
+    #[test]
+    fn the_empty_box_sentence_names_the_dependency_fixes_that_are_due_first() {
+        use crate::report_export::classification::total_hours_label_of;
+        assert_eq!(
+            total_hours_label_of(&[], 0),
+            "No fix is due first this run."
+        );
+        assert_eq!(
+            total_hours_label_of(&[], 1),
+            "No code problem is due first this run. 1 dependency fix is due first; see Dependencies."
+        );
+        assert_eq!(
+            total_hours_label_of(&[], 2),
+            "No code problem is due first this run. 2 dependency fixes are due first; see Dependencies."
+        );
+        for n in 0..3 {
+            let s = total_hours_label_of(&[], n);
+            assert!(
+                !s.contains(['\u{2014}', '\u{2013}']) && !s.contains(", and"),
+                "{s}"
+            );
+        }
+    }
 }

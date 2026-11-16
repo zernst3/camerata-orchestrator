@@ -71,6 +71,8 @@ pub const PDF_MAX_DEPARTURES: usize = 5;
 pub struct PatternJson {
     /// The Fix id; the All problems filter is `Fix id = <id>`.
     pub group: String,
+    /// Whether the Fix is a dependency upgrade.
+    pub is_dependency: bool,
     pub rule_id: String,
     pub rule_title: String,
     /// The Fix's area (the first when its rules span several).
@@ -105,6 +107,8 @@ pub struct PatternJson {
 /// One line of "The other fixes": a Fix that is not one of the most serious problems.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct OtherFixLineJson {
+    /// The Fix's id, so the release gate can recount its order from the rows.
+    pub fix_id: String,
     /// The Fix's name.
     pub name: String,
     pub severity: String,
@@ -112,7 +116,8 @@ pub struct OtherFixLineJson {
     pub places: String,
     /// The effort band in words; empty when it is not estimated.
     pub effort: String,
-    /// First, Next or Later.
+    /// First, Next or Later; for a Fix with no place for action, its class (Needs a decision or
+    /// Information only).
     pub fix_order: String,
 }
 

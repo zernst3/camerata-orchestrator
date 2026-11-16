@@ -590,8 +590,8 @@ pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Findi
         severity: "info".to_string(),
         snippet: String::new(),
         detail: message.clone(),
-        // Info notes are not enforced — keep them out of the active/enforced set.
-        status: "suppressed-baseline".to_string(),
+        // The row's `preview` field says it came from a tool; the status is the plain word.
+        status: crate::finding_status::ACTIVE.to_string(),
         preview: true,
         preview_tool: Some(tool.to_string()),
         // A5.6: "the tool could not run" is an honesty row, structurally distinguishable
@@ -1125,21 +1125,10 @@ pub fn parse_clippy_json(repo: &str, ndjson: &str) -> anyhow::Result<Vec<Finding
 /// tool recorded, a snippet that names the tool/rule honestly, and a client-readable
 /// detail (never internal gate vocabulary) so it is honest wherever it surfaces.
 ///
-/// `status`: left as `"suppressed-baseline"` for back-compat with the internal
-/// active/suppressed accounting several OTHER consumers do over this string (e.g.
-/// `render_scan_results_for_chat`'s "N active (enforced), M suppressed" line, which — like
-/// this finding — is correct in calling a preview row "not active/enforced"). This does
-/// NOT mean, and must never be read to mean, "a prior run accepted this exact finding into
-/// a committed baseline" — no such record exists for a scan-time preview row; the ONLY
-/// legitimate producer of that specific claim is `onboard::audit::classify_repo_findings`,
-/// which stamps this same string strictly when a finding's content fingerprint matches an
-/// entry actually present in `.camerata/baseline.json`, and which never sees preview
-/// findings (they are appended to the report AFTER that pass runs). The CLIENT-facing
-/// disposition layer (`report_export::classify`) is the one place this ambiguity could
-/// have mattered, and it is guarded there: a `preview == true` row can never classify as
-/// `Disposition::BaselineAccepted` regardless of this field's value. See `classify`'s doc
-/// comment for the full defect history (a preview row used to render "pre-existing accepted
-/// debt (baseline suppression)" on a repo nobody had ever triaged).
+/// `status`: `active`. That a row came from a tool in preview is carried by `preview = true`
+/// (and `preview_tool`), never by the status word, so a preview row can not read as "a prior
+/// run accepted this into a baseline". Consumers that tally enforced against not enforced read
+/// `preview`. `report_export::classify` also refuses `BaselineAccepted` for a preview row.
 fn preview_finding(
     repo: &str,
     tool: ScanTool,
@@ -1175,9 +1164,9 @@ fn preview_finding(
         severity: severity.to_string(),
         snippet: crate::onboard::redact::snippet_from_line(message, 160),
         detail,
-        // A preview is advisory, not an enforced/active gate hit. See this function's own
-        // doc comment above for why this is NOT a baseline-acceptance claim.
-        status: "suppressed-baseline".to_string(),
+        // The row's `preview` field (the Source column in the workbook) says it came from a
+        // tool in preview; the status is the plain word and never a baseline claim.
+        status: crate::finding_status::ACTIVE.to_string(),
         preview: true,
         preview_tool: Some(tool.name().to_string()),
         // A5.6: an external tool's reported violation is an objective fault.
@@ -3210,14 +3199,14 @@ mod tests {
     }
 
     #[test]
-    fn note_finding_is_preview_and_not_active() {
+    fn note_finding_is_preview_and_never_reads_as_enforced_or_as_a_baseline() {
         let n = note_finding("me/api", "ruff", "could not run");
-        assert!(n.preview);
-        assert_eq!(n.preview_tool.as_deref(), Some("ruff"));
-        assert_ne!(
-            n.status, "active",
-            "a note must not be an enforced/active hit"
+        assert!(
+            n.preview,
+            "a note is not an enforced hit: the preview field says so"
         );
+        assert_eq!(n.preview_tool.as_deref(), Some("ruff"));
+        assert_eq!(n.status, "active", "the status never claims a baseline");
     }
 
     // ── preview_tool_ids_for_rules ────────────────────────────────────────────

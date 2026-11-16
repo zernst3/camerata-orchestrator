@@ -827,7 +827,9 @@ pub fn counts_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Probl
     super::counts_check::counts_problems_with(
         entries,
         report,
-        super::counts_check::CountsChecks::default(),
+        super::counts_check::CountsChecks {
+            folded_rows_name_their_head: true,
+        },
     )
 }
 

@@ -977,3 +977,563 @@ fn the_gate_refuses_a_grid_note_that_states_other_counts() {
     );
     assert!(has(&new, "PDF data", "priority_grid.held_count"), "{new:?}");
 }
+
+/// Test 9 (single counts): a row a baseline record closed, with no reviewer's decision.
+fn with_a_baseline_row(disposition_kind: &str) -> Vec<super::report::Problem> {
+    let (mut entries, report) = consistent();
+    edit_json(&mut entries, "json/all-findings.json", |v| {
+        v[0]["status"] = json!("carried-baseline");
+        v[0]["disposition_kind"] = json!(disposition_kind);
+    });
+    counts_problems(&entries, &report)
+}
+
+#[test]
+fn an_accepted_baseline_row_without_a_decision_blocks_release() {
+    let problems = with_a_baseline_row("BaselineAccepted");
+    assert!(
+        problems.iter().any(|p| p
+            .message
+            .contains("no reviewer has decided it this session")),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn a_baseline_row_a_reviewer_decided_does_not_block_release() {
+    let problems = with_a_baseline_row("Confirmed");
+    assert!(
+        !problems.iter().any(|p| p
+            .message
+            .contains("no reviewer has decided it this session")),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_findings_json_summary_that_contradicts_the_counts() {
+    let (mut entries, report) = consistent();
+    edit_json(&mut entries, "findings.json", |v| {
+        v["summary"]["held_for_review"] = json!(99);
+        v["summary"]["curated_total"] = json!(1);
+    });
+    let problems = counts_problems(&entries, &report);
+    let text = messages(&problems);
+    assert!(text.contains("summary.held_for_review"), "{text}");
+    assert!(text.contains("summary.curated_total"), "{text}");
+}
+
+// ── Follow ups to work order C ────────────────────────────────────────────────────────────
+
+fn row_of(
+    rule: &str,
+    path: &str,
+    line: usize,
+    kind: camerata_api_types::audit::FindingKind,
+) -> Finding {
+    Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: "medium".to_string(),
+        snippet: format!("snippet {line}"),
+        detail: format!("detail {line}"),
+        kind: Some(kind),
+        ..Finding::default()
+    }
+}
+
+fn departure() -> camerata_api_types::audit::FindingKind {
+    camerata_api_types::audit::FindingKind::Deviation(camerata_api_types::audit::DeviationKind {
+        deviating_sites: 1,
+        assessed_sites: Some(4),
+        convention_option_id: None,
+        convention_label: "the usual way".to_string(),
+    })
+}
+
+fn convention() -> camerata_api_types::audit::FindingKind {
+    camerata_api_types::audit::FindingKind::ConventionObserved(
+        camerata_api_types::audit::ConventionObservedKind {
+            convention_option_id: "x".to_string(),
+            convention_label: "the usual way".to_string(),
+        },
+    )
+}
+
+fn fix_plan_rows(bytes: &[u8]) -> usize {
+    let entries = read_zip_entries(bytes).expect("zip");
+    let xlsx = entries
+        .iter()
+        .find(|(n, _)| n.ends_with("-findings.xlsx"))
+        .expect("workbook")
+        .1;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, crate::xlsx_export::vocabulary::FIX_PLAN)
+        .expect("fix plan sheet");
+    let col = grid[0]
+        .iter()
+        .position(|h| h == "Fix id")
+        .expect("a Fix id column");
+    // A row that stands for a Fix names it; the empty sheet holds one line saying so.
+    grid.iter()
+        .skip(1)
+        .filter(|r| r.get(col).is_some_and(|c| !c.is_empty()))
+        .count()
+}
+
+#[test]
+fn an_accepted_departure_beside_a_convention_row_releases_and_the_fix_plan_has_no_row_for_it() {
+    let mut report = scan_report();
+    report.findings = vec![
+        row_of("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", 12, departure()),
+        row_of("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", 40, convention()),
+    ];
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        crate::report_export::finding_key(&sealed.findings[0]),
+        crate::report_export::DispositionWire {
+            state: "Ignored".to_string(),
+            reason: "we accept this one".to_string(),
+            ..Default::default()
+        },
+    );
+    let package = package_with_dispositions(report, &dispositions);
+    assert_eq!(
+        package.report_json.counts.problems.accepted, 1,
+        "anti-vacuity"
+    );
+    let released = release(package).expect("the package releases");
+    assert_eq!(fix_plan_rows(&released.bytes), 0);
+}
+
+#[test]
+fn a_reviewed_package_with_accepted_ruled_out_and_confirmed_rows_clears_the_counts_check() {
+    let mut report = scan_report();
+    report.findings = vec![
+        row_of(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/a.rs",
+            1,
+            camerata_api_types::audit::FindingKind::Defect,
+        ),
+        row_of(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/b.rs",
+            2,
+            camerata_api_types::audit::FindingKind::Defect,
+        ),
+        row_of(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/c.rs",
+            3,
+            camerata_api_types::audit::FindingKind::Defect,
+        ),
+    ];
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    for (i, (state, reason)) in [
+        ("Ignored", "accepted"),
+        ("FalsePositive", "a constant"),
+        ("Confirmed", ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        dispositions.insert(
+            crate::report_export::finding_key(&sealed.findings[i]),
+            crate::report_export::DispositionWire {
+                state: state.to_string(),
+                reason: reason.to_string(),
+                ..Default::default()
+            },
+        );
+    }
+    let package = package_with_dispositions(report, &dispositions);
+    let report_json = package.report_json.clone();
+    assert_eq!(report_json.counts.rows.ruled_out, 1, "anti-vacuity");
+    assert_eq!(report_json.counts.problems.accepted, 1, "anti-vacuity");
+    release(package).expect("a reviewed package clears the gate with the counts check on");
+}
+
+#[test]
+fn the_gate_refuses_an_and_n_more_line_that_disagrees_with_the_counts() {
+    let (entries, report) = consistent();
+    assert!(
+        report.dependency_snapshot.more_line.is_empty(),
+        "anti-vacuity"
+    );
+    let sheet = crate::xlsx_export::vocabulary::DEPENDENCIES;
+    let mut wrong = report.clone();
+    wrong.dependency_snapshot.more_line = crate::xlsx_export::vocabulary::more_in_sheet(7, sheet);
+    let text = messages(&counts_problems(&entries, &wrong));
+    assert!(text.contains("dependency_snapshot.more_line"), "{text}");
+
+    let mut wrong = report.clone();
+    wrong.escalations.more_line =
+        crate::xlsx_export::vocabulary::more_in_sheet(3, crate::xlsx_export::vocabulary::FIX_PLAN);
+    let text = messages(&counts_problems(&entries, &wrong));
+    assert!(text.contains("escalations.more_line"), "{text}");
+
+    let mut wrong = report.clone();
+    wrong.conventions.more_line = crate::xlsx_export::vocabulary::more_in_sheet(
+        2,
+        crate::xlsx_export::vocabulary::DEPARTURES,
+    );
+    let text = messages(&counts_problems(&entries, &wrong));
+    assert!(text.contains("conventions.more_line"), "{text}");
+}
+
+// Single counts D, round 1: one order rule on every surface.
+
+/// One fix with a high place that has no effort estimate and a medium place, a low place held for
+/// a decision (a fix of its own), one accepted place and one ruled out place.
+fn order_rule_package() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    let row = |rule: &str, path: &str, line: usize, severity: &str| Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: severity.to_string(),
+        snippet: format!("let x{line} = 1;"),
+        detail: format!("detail {rule}"),
+        ..Finding::default()
+    };
+    let mut held = row("SYN-H-1", "src/h.rs", 3, "low");
+    held.needs_review = true;
+    let mut report = scan_report();
+    report.findings = vec![
+        row("SYN-A-1", "src/a.rs", 5, "high"),
+        row("SYN-A-1", "src/b.rs", 9, "medium"),
+        held,
+        row("SYN-I-1", "src/i.rs", 2, "medium"),
+        row("SYN-F-1", "src/f.rs", 4, "medium"),
+    ];
+    let sealed = report.clone().seal();
+    let key_of = |rule: &str| {
+        crate::report_export::finding_key(
+            sealed.findings.iter().find(|f| f.rule_id == rule).unwrap(),
+        )
+    };
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        key_of("SYN-I-1"),
+        crate::report_export::DispositionWire {
+            state: "Ignored".to_string(),
+            reason: "we accept this one".to_string(),
+            ..Default::default()
+        },
+    );
+    dispositions.insert(
+        key_of("SYN-F-1"),
+        crate::report_export::DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "a constant".to_string(),
+            ..Default::default()
+        },
+    );
+    let package = package_with_dispositions(report, &dispositions);
+    let report_json = package.report_json.clone();
+    let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
+    (read_zip_entries(&bytes).unwrap(), report_json)
+}
+
+#[test]
+fn every_surface_gives_a_fix_the_one_order_and_the_gate_passes() {
+    let (entries, report) = order_rule_package();
+    let p = &report.counts.problems;
+    // Anti-vacuity: the high place with no estimate is First, the medium one Later, the held one
+    // needs a decision, one is accepted.
+    assert_eq!(
+        (p.first, p.next, p.later, p.needs_decision, p.accepted),
+        (1, 0, 1, 1, 1),
+        "{p:?}"
+    );
+    // The summary, the box of three things and the fix lines say First for the one fix to do.
+    assert!(
+        report
+            .executive_summary
+            .narrative
+            .contains("1 First, 0 Next, 1 Later"),
+        "{}",
+        report.executive_summary.narrative
+    );
+    assert_eq!(report.three_things.items.len(), 1);
+    let lines: Vec<_> = report
+        .other_fixes
+        .groups
+        .iter()
+        .flat_map(|g| &g.lines)
+        .collect();
+    assert_eq!(lines.len(), 1, "the held fix is not a fix to do: {lines:?}");
+    assert_eq!(lines[0].fix_order, "First");
+    assert!(!lines[0].fix_id.is_empty());
+    // The workbook: one Fix plan row, First; All problems says each place's own word.
+    let xlsx = &entries[&xlsx_name()];
+    let plan = super::archive::xlsx_sheet_grid(xlsx, "Fix plan").unwrap();
+    let order = plan[0].iter().position(|h| h == "Fix order").unwrap();
+    assert_eq!(plan.len(), 2, "{plan:?}");
+    assert_eq!(plan[1][order], "First");
+    let all = super::archive::xlsx_sheet_grid(xlsx, "All problems").unwrap();
+    let order = all[0].iter().position(|h| h == "Fix order").unwrap();
+    let mut words: Vec<&str> = all.iter().skip(1).map(|r| r[order].as_str()).collect();
+    words.sort_unstable();
+    assert_eq!(
+        words,
+        ["Accepted risk", "First", "Later", "Needs a decision"]
+    );
+    // The tickets file lists the one fix.
+    let tickets = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice())
+        .records()
+        .count();
+    assert_eq!(tickets, 1);
+    assert_eq!(report.counts.fixes.to_do, 1);
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}
+
+#[test]
+fn the_gate_refuses_a_forged_fix_plan_order_and_a_forged_fix_line() {
+    let (entries, report) = order_rule_package();
+    let baseline = located(&counts_problems(&entries, &report));
+    let name = xlsx_name();
+    let mut tampered = entries.clone();
+    tampered.insert(
+        name.clone(),
+        rewrite_xlsx_part(&tampered[&name], "xl/sharedStrings.xml", |xml| {
+            assert!(xml.contains("<t>First</t>"), "anti-vacuity");
+            xml.replace("<t>First</t>", "<t>Later</t>")
+        }),
+    );
+    let new = new_problems(&tampered, &report, &baseline);
+    assert!(
+        new.iter()
+            .any(|(f, l)| f == &name && l.starts_with("sheet \"Fix plan\", fix ")),
+        "{new:?}"
+    );
+    assert!(
+        new.iter()
+            .any(|(f, l)| f == &name && l.starts_with("sheet \"All problems\" Fix order")),
+        "{new:?}"
+    );
+    // A fix line in the PDF data that says another order than the places give.
+    let mut forged = report.clone();
+    forged.other_fixes.groups[0].lines[0].fix_order = "Next".to_string();
+    let new = new_problems(&entries, &forged, &baseline);
+    assert!(
+        new.iter()
+            .any(|(f, l)| f == "PDF data" && l.starts_with("other_fixes, fix ")),
+        "{new:?}"
+    );
+    // A box of three things that is empty while a problem is First.
+    let mut empty_box = report.clone();
+    empty_box.three_things.items.clear();
+    let new = new_problems(&entries, &empty_box, &baseline);
+    assert!(has(&new, "PDF data", "three_things"), "{new:?}");
+}
+
+// Single counts D, round 2.
+
+/// One synthetic package from `rows`, with the given reviewer states by rule id.
+fn package_of_rows(
+    rows: Vec<Finding>,
+    states: &[(&str, &str)],
+) -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    // `states` pairs a path with the reviewer's state for the row there.
+    let mut report = scan_report();
+    report.findings = rows;
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    for (rule, state) in states {
+        let f = sealed.findings.iter().find(|f| f.path == *rule).unwrap();
+        dispositions.insert(
+            crate::report_export::finding_key(f),
+            crate::report_export::DispositionWire {
+                state: (*state).to_string(),
+                reason: "decided".to_string(),
+                ..Default::default()
+            },
+        );
+    }
+    let package = package_with_dispositions(report, &dispositions);
+    let report_json = package.report_json.clone();
+    let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
+    (read_zip_entries(&bytes).unwrap(), report_json)
+}
+
+fn plain_row(rule: &str, path: &str, line: usize, severity: &str) -> Finding {
+    Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: severity.to_string(),
+        snippet: format!("let x{line} = 1;"),
+        detail: format!("detail {rule}"),
+        ..Finding::default()
+    }
+}
+
+#[test]
+fn a_fix_with_one_accepted_place_and_one_held_place_is_not_a_fix_to_do() {
+    let mut held = plain_row("SYN-A-1", "src/b.rs", 9, "medium");
+    held.needs_review = true;
+    let (entries, report) = package_of_rows(
+        vec![plain_row("SYN-A-1", "src/a.rs", 5, "medium"), held],
+        &[("src/a.rs", "Ignored")],
+    );
+    let p = &report.counts.problems;
+    assert_eq!(
+        (p.accepted, p.needs_decision),
+        (1, 1),
+        "anti-vacuity: {p:?}"
+    );
+    assert_eq!(report.counts.fixes.to_do, 0, "{:?}", report.counts.fixes);
+    let plan = super::archive::xlsx_sheet_grid(&entries[&xlsx_name()], "Fix plan").unwrap();
+    let id = plan[0].iter().position(|h| h == "Fix id").unwrap();
+    let rows = plan.iter().skip(1).filter(|r| !r[id].is_empty()).count();
+    assert_eq!(rows, 0, "{plan:?}");
+    let tickets = csv::Reader::from_reader(entries["csv/tickets.csv"].as_slice())
+        .records()
+        .count();
+    assert_eq!(tickets, 0);
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}
+
+const ONE_DEPENDENCY_FIRST: &str =
+    "No code problem is due first this run. 1 dependency fix is due first; see Dependencies.";
+
+/// A medium code problem (Later) and a high advisory (First): the box is empty, one dependency fix
+/// is due first.
+fn dependency_first_package() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    package_of_rows(
+        vec![
+            plain_row("SYN-A-1", "src/a.rs", 5, "medium"),
+            plain_row(crate::dep_audit::DEP_AUDIT_RULE_ID, "Cargo.lock", 0, "high"),
+        ],
+        &[],
+    )
+}
+
+#[test]
+fn an_empty_box_names_the_dependency_fix_due_first_and_the_gate_checks_the_number() {
+    let (entries, report) = dependency_first_package();
+    assert!(report.three_things.items.is_empty(), "anti-vacuity");
+    assert_eq!(report.three_things.total_hours_label, ONE_DEPENDENCY_FIRST);
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+    // The old sentence, with a dependency fix First, is refused; so is a wrong number.
+    for forged in [
+        "No fix is due first this run.",
+        "No code problem is due first this run. 2 dependency fixes are due first; see Dependencies.",
+    ] {
+        let mut tampered = report.clone();
+        tampered.three_things.total_hours_label = forged.to_string();
+        let problems = counts_problems(&entries, &tampered);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.file == "PDF data" && p.location == "three_things.total_hours_label"),
+            "{forged}: {}",
+            messages(&problems)
+        );
+    }
+}
+
+#[test]
+fn an_empty_box_with_no_dependency_fix_first_keeps_the_old_sentence() {
+    let (entries, report) =
+        package_of_rows(vec![plain_row("SYN-A-1", "src/a.rs", 5, "medium")], &[]);
+    assert_eq!(
+        report.three_things.total_hours_label,
+        "No fix is due first this run."
+    );
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}
+
+// Single counts D, round 2, item 3: the order check fails closed.
+
+fn fix_order_problems(
+    entries: &BTreeMap<String, Vec<u8>>,
+    report: &AuditReportJson,
+) -> Vec<super::report::Problem> {
+    counts_problems(entries, report)
+        .into_iter()
+        .filter(|p| p.location.contains("fix order"))
+        .collect()
+}
+
+#[test]
+fn the_order_check_pushes_a_problem_for_a_missing_workbook() {
+    let (mut entries, report) = consistent();
+    assert!(
+        fix_order_problems(&entries, &report).is_empty(),
+        "anti-vacuity"
+    );
+    entries.remove(&xlsx_name());
+    let found = fix_order_problems(&entries, &report);
+    assert!(
+        found.iter().any(|p| p.file == xlsx_name()),
+        "{}",
+        messages(&found)
+    );
+}
+
+#[test]
+fn the_order_check_pushes_a_problem_for_an_unreadable_sheet() {
+    for sheet in ["Fix plan", "All problems"] {
+        let (mut entries, report) = consistent();
+        let name = xlsx_name();
+        entries.insert(
+            name.clone(),
+            rewrite_xlsx_part(&entries[&name], "xl/workbook.xml", |xml| {
+                assert!(xml.contains(&format!("name=\"{sheet}\"")), "anti-vacuity");
+                xml.replace(&format!("name=\"{sheet}\""), &format!("name=\"{sheet} x\""))
+            }),
+        );
+        let found = fix_order_problems(&entries, &report);
+        assert!(
+            found
+                .iter()
+                .any(|p| p.location == format!("sheet \"{sheet}\" fix order")),
+            "{sheet}: {}",
+            messages(&found)
+        );
+    }
+}
+
+#[test]
+fn the_order_check_pushes_a_problem_for_a_missing_column() {
+    // (the header renamed, the sheet whose check must notice)
+    for (header, sheet) in [
+        ("Fix order", "All problems"),
+        ("Fix order", "Fix plan"),
+        ("Severity", "All problems"),
+        ("Fix id", "Fix plan"),
+    ] {
+        let (mut entries, report) = consistent();
+        let name = xlsx_name();
+        entries.insert(
+            name.clone(),
+            rewrite_xlsx_part(&entries[&name], "xl/sharedStrings.xml", |xml| {
+                let cell = format!(">{header}<");
+                assert!(xml.contains(&cell), "anti-vacuity: {header}");
+                xml.replace(&cell, &format!(">{header} renamed<"))
+            }),
+        );
+        let found = fix_order_problems(&entries, &report);
+        assert!(
+            found
+                .iter()
+                .any(|p| p.location == format!("sheet \"{sheet}\" fix order")
+                    && p.message.contains(header)),
+            "{header} on {sheet}: {}",
+            messages(&found)
+        );
+    }
+}

@@ -794,7 +794,7 @@ fn the_matrix_footnote_names_the_places_it_leaves_out_by_severity() {
     let json = build_report_json(&apply_overlay(&report, &[], &[], &[]), None, &options());
     assert_eq!(
         json.priority_grid.left_out,
-        "Not in this grid: 1 critical and 2 medium places that need a decision first. The cover counts all of them."
+        "Not in this grid: 1 critical and 2 medium problems that need a decision first. The cover counts all of them."
     );
 }
 
