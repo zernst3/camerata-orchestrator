@@ -5231,3 +5231,6 @@ mod spend_limit_tests;
 
 #[cfg(test)]
 mod worktree_required_tests;
+
+#[cfg(test)]
+mod guard_tests;
