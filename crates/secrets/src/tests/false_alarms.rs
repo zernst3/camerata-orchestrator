@@ -149,6 +149,17 @@ fn a_terraform_heredoc_keeps_the_unquoted_form() {
 }
 
 #[test]
+fn a_jwt_in_a_terraform_heredoc_still_fires() {
+    let token = crate::fixtures::jwt(None);
+    let tf = format!("resource \"vm\" \"web\" {{\n  user_data = <<EOT\nTOKEN={token}\nEOT\n}}\n");
+    assert_eq!(in_file("infra/main.tf", &tf), vec![3]);
+    // A long dotted value with base64url-looking segments is no reference either.
+    let long = format!("DB_PASSWORD=Ab1{}.Cd2{}.tail", "x".repeat(30), "y".repeat(30));
+    let tf = format!("resource \"vm\" \"web\" {{\n  user_data = <<EOT\n{long}\nEOT\n}}\n");
+    assert_eq!(in_file("infra/main.tf", &tf), vec![3]);
+}
+
+#[test]
 fn an_all_caps_real_key_is_not_an_env_name() {
     let key = ["LIVE_9A8B7C6D5E4F3G2H1J0K", "9L8M"].concat();
     assert_eq!(lines(&format!("api_key: \"{key}\"")), vec![1]);

@@ -384,9 +384,21 @@ fn is_expression_language(path: Option<&str>) -> bool {
 
 /// Identifier segments joined by dots (`var.X`, `random_password.x.result`); a segment starts
 /// with a letter or underscore, so a digits-only run is not one.
+/// A value over 60 characters, or a segment that looks base64url-encoded (starts `eyJ`, or is
+/// 16+ characters of mixed case with a digit), is a token (a JWT), not a reference.
 fn is_dotted_reference(value: &str) -> bool {
+    if value.len() > 60 {
+        return false;
+    }
     let mut segments = 0;
     for segment in value.split('.') {
+        let encoded = segment.starts_with("eyJ")
+            || (segment.len() >= 16
+                && segment.bytes().any(|b| b.is_ascii_uppercase())
+                && segment.bytes().any(|b| b.is_ascii_digit()));
+        if encoded {
+            return false;
+        }
         let mut chars = segment.chars();
         let starts_ok = chars
             .next()
