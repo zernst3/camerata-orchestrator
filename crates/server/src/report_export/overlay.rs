@@ -223,16 +223,6 @@ impl ReviewedReport {
         self.with_legacy(dispositions, true)
     }
 
-    /// A reviewed report whose rulings never went through the unfold, for the tests of the
-    /// backstops that catch a report the overlay did not unfold.
-    #[cfg(test)]
-    pub(crate) fn unreviewed_without_unfold(
-        sealed: &SealedReport,
-        dispositions: &HashMap<String, DispositionWire>,
-    ) -> Self {
-        apply_overlay(sealed, &[], &[], &[]).with_legacy(dispositions.clone(), false)
-    }
-
     fn with_legacy(mut self, dispositions: HashMap<String, DispositionWire>, unfold: bool) -> Self {
         self.dispositions = dispositions;
         self.legacy = true;
@@ -989,6 +979,18 @@ fn slug(label: &str) -> String {
         "group".to_string()
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+impl ReviewedReport {
+    /// A reviewed report whose rulings never went through the unfold, for the tests of the
+    /// backstops that catch a report the overlay did not unfold.
+    pub(crate) fn unreviewed_without_unfold(
+        sealed: &SealedReport,
+        dispositions: &HashMap<String, DispositionWire>,
+    ) -> Self {
+        apply_overlay(sealed, &[], &[], &[]).with_legacy(dispositions.clone(), false)
     }
 }
 

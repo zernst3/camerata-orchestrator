@@ -296,6 +296,30 @@ fn a_package_whose_clean_cell_has_only_a_ruled_out_problem_clears_the_gate() {
 
 const RULE_B: &str = "SEC-OTHER-RULE-1";
 
+/// The report reviewed with `dispositions`, and with the problem the ruling split out of the
+/// ruled-out row confirmed too: a split-out problem needs a decision of its own to ship.
+fn decided_split_out(
+    sealed: &crate::onboard::SealedReport,
+    mut dispositions: HashMap<String, crate::report_export::DispositionWire>,
+) -> crate::report_export::ReviewedReport {
+    let first = crate::report_export::ReviewedReport::unreviewed(sealed, &dispositions);
+    for f in &first.report().findings {
+        if f.captures
+            .contains_key(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE)
+        {
+            dispositions.insert(
+                f.site_key.clone(),
+                crate::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    reason: "a real problem".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    crate::report_export::ReviewedReport::unreviewed(sealed, &dispositions)
+}
+
 /// A package where the portal's only row (rule `RULE`) absorbed a rule B site in the web and the
 /// reviewer ruled that row out. Rule B's cell for the web must stay open.
 fn package_with_ruled_out_host_absorbing_another_rules_site(
@@ -326,7 +350,7 @@ fn package_with_ruled_out_host_absorbing_another_rules_site(
             ..Default::default()
         },
     );
-    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &dispositions);
+    let reviewed = decided_split_out(&sealed, dispositions);
     let options = client_options();
     let json = build_report_json(&reviewed, None, &options);
     let data = render_data_json(&json).expect("data.json renders");
@@ -405,7 +429,7 @@ fn package_with_ruled_out_host_also_matching_another_rule(
             ..Default::default()
         },
     );
-    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &dispositions);
+    let reviewed = decided_split_out(&sealed, dispositions);
     let options = client_options();
     let json = build_report_json(&reviewed, None, &options);
     let data = render_data_json(&json).expect("data.json renders");
