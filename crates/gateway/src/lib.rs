@@ -416,6 +416,16 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
 /// line-by-line scan misses). Path-based rules return empty. The brownfield audit uses
 /// this for per-line findings; the write-time gate still uses the boolean arm.
 pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
+    content_match_lines_in(rule_id, None, content)
+}
+
+/// [`content_match_lines`] for the file at `path`: the path tells the secret detector which
+/// language the text is (an unquoted right side in a Terraform file is an expression, not a value).
+pub fn content_match_lines_in_file(rule_id: &str, path: &str, content: &str) -> Vec<usize> {
+    content_match_lines_in(rule_id, Some(path), content)
+}
+
+fn content_match_lines_in(rule_id: &str, path: Option<&str>, content: &str) -> Vec<usize> {
     // SEC-NO-UNSAFE-DESERIALIZATION-1 requires the SafeLoader/FullLoader carve-out:
     // matches on `yaml.load(` where the SAME LINE also contains SafeLoader or FullLoader
     // must be suppressed. The carve-out is applied here (not just in the arm) so the
@@ -445,7 +455,12 @@ pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
     // for the gate, the scan floor and the export release gate). Twins still count as rows: a
     // committed placeholder key is worth a finding; the redactor, not the floor, keeps it readable.
     if SHAPE_DRIVEN_SECRET_RULES.contains(&rule_id) {
-        return camerata_secrets::match_lines_for_rule(content, rule_id, true);
+        return match path {
+            Some(path) => {
+                camerata_secrets::match_lines_for_rule_in_file(content, rule_id, path, true)
+            }
+            None => camerata_secrets::match_lines_for_rule(content, rule_id, true),
+        };
     }
 
     let re = match rule_id {
@@ -957,7 +972,7 @@ fn deny_on_secret_shape(
     content: &str,
     message: impl FnOnce(&camerata_secrets::SecretMatch) -> String,
 ) -> Result<(), String> {
-    let Some(m) = camerata_secrets::detect_for_rule(content, rule_id)
+    let Some(m) = camerata_secrets::detect_for_rule_in_file(content, rule_id, path)
         .into_iter()
         .find(camerata_secrets::SecretMatch::counts_as_finding)
     else {

@@ -347,7 +347,19 @@ fn collect_pem(out: &mut Vec<SecretMatch>, text: &str) {
 
 // ---- driver -------------------------------------------------------------------------------
 
-fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape]) {
+/// Whether `path` is a Terraform or HCL file. There an unquoted right side is an expression (a
+/// reference, a function call), never a literal: a string literal must be quoted, so the quoted
+/// form still reads every literal.
+fn is_expression_language(path: Option<&str>) -> bool {
+    path.is_some_and(|p| {
+        let lower = p.to_ascii_lowercase();
+        [".tf", ".hcl", ".tfvars"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+    })
+}
+
+fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape], path: Option<&str>) {
     let mut jwt_done = false;
     for &shape in shapes {
         match shape {
@@ -402,7 +414,9 @@ fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape]) {
             }
             SecretShape::NamedSecretLiteral => {
                 collect_group(out, text, shape, shapes::re_named_literal(), false);
-                collect_group(out, text, shape, shapes::re_named_literal_unquoted(), false);
+                if !is_expression_language(path) {
+                    collect_group(out, text, shape, shapes::re_named_literal_unquoted(), false);
+                }
             }
             SecretShape::BearerToken => collect_group(out, text, shape, shapes::re_bearer(), true),
             SecretShape::BasicAuthCredential => {
@@ -464,15 +478,29 @@ pub fn first_secret(text: &str) -> Option<SecretMatch> {
 
 /// `detect_all` restricted to `shapes`, twins included.
 pub fn detect_shapes(text: &str, shapes: &[SecretShape]) -> Vec<SecretMatch> {
+    detect_shapes_in(text, shapes, None)
+}
+
+fn detect_shapes_in(text: &str, shapes: &[SecretShape], path: Option<&str>) -> Vec<SecretMatch> {
     let mut candidates = Vec::new();
-    collect(&mut candidates, text, shapes);
+    collect(&mut candidates, text, shapes, path);
     resolve(candidates)
 }
 
 /// The matches a corpus rule governs: `detect_shapes` over `shapes_for_rule`, plus the
 /// `SEC-NO-VENDOR-TOKEN-1` rule's Supabase-host filter on connection strings.
 pub fn detect_for_rule(text: &str, rule_id: &str) -> Vec<SecretMatch> {
-    let mut matches = detect_shapes(text, shapes_for_rule(rule_id));
+    detect_for_rule_in(text, rule_id, None)
+}
+
+/// [`detect_for_rule`] for the content of the file at `path`: the path tells the detector which
+/// language the text is, so a form that only makes sense in another one is not read.
+pub fn detect_for_rule_in_file(text: &str, rule_id: &str, path: &str) -> Vec<SecretMatch> {
+    detect_for_rule_in(text, rule_id, Some(path))
+}
+
+fn detect_for_rule_in(text: &str, rule_id: &str, path: Option<&str>) -> Vec<SecretMatch> {
+    let mut matches = detect_shapes_in(text, shapes_for_rule(rule_id), path);
     if rule_id == "SEC-NO-VENDOR-TOKEN-1" {
         matches.retain(|m| {
             m.shape != SecretShape::ConnectionStringPassword
@@ -508,4 +536,18 @@ pub fn match_lines(text: &str, shapes: &[SecretShape], twins_count: bool) -> Vec
 /// [`match_lines`] for a corpus rule id, with the rule's host filter applied.
 pub fn match_lines_for_rule(text: &str, rule_id: &str, twins_count: bool) -> Vec<usize> {
     lines_of(text, detect_for_rule(text, rule_id), twins_count)
+}
+
+/// [`match_lines_for_rule`] for the content of the file at `path` (see [`detect_for_rule_in_file`]).
+pub fn match_lines_for_rule_in_file(
+    text: &str,
+    rule_id: &str,
+    path: &str,
+    twins_count: bool,
+) -> Vec<usize> {
+    lines_of(
+        text,
+        detect_for_rule_in_file(text, rule_id, path),
+        twins_count,
+    )
 }

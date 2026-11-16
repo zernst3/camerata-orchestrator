@@ -226,7 +226,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
     // match is attributed to the line where it starts.
     for rule_id in AUDIT_RULES {
-        let content_lines = camerata_gateway::content_match_lines(rule_id, content);
+        let content_lines = camerata_gateway::content_match_lines_in_file(rule_id, path, content);
         if content_lines.is_empty() {
             // Path-based rule: fire the arm with the real path and empty content to
             // check whether this file's PATH marks it as secret-bearing. A path-based

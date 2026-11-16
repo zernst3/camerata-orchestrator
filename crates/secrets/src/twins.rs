@@ -41,6 +41,8 @@ pub enum Twin {
     /// A qualified label name (`nodes.cloudhost.internal/worker-pool`: a lowercase dotted domain,
     /// one slash, a name) on an identifier that is not password-like. A label key, not a value.
     QualifiedLabelName,
+    /// A quoted label on a Terraform block header (`resource "type" "name" {`): a name by grammar.
+    BlockHeaderLabel,
 }
 
 impl Twin {
@@ -57,6 +59,7 @@ impl Twin {
                 | Twin::PublishableKey
                 | Twin::FirebaseWebApiKey
                 | Twin::QualifiedLabelName
+                | Twin::BlockHeaderLabel
         )
     }
 }
@@ -252,6 +255,44 @@ fn is_qualified_label_name(value: &str) -> bool {
         })
 }
 
+/// Whether the line holding the value is a Terraform block header: `resource` or `data`, quoted
+/// labels, then an opening brace. The value is one of the labels.
+fn is_block_header_label(value: &str, context: &TwinContext<'_>) -> bool {
+    let tail_end = context.window[context.at..]
+        .find('\n')
+        .map_or(context.window.len(), |i| context.at + i);
+    let tail = context
+        .window
+        .get(context.at + value.len()..tail_end)
+        .unwrap_or("");
+    // The value sits inside quotes: the line must open with the keyword and end in a brace.
+    let line = format!("{}{value}{tail}", context.line_prefix);
+    let line = line.trim();
+    let Some(rest) = line
+        .strip_prefix("resource")
+        .or_else(|| line.strip_prefix("data"))
+    else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix('{') else {
+        return false;
+    };
+    let mut rest = rest.trim();
+    if !rest.starts_with('"') {
+        return false;
+    }
+    // Every remaining token is a quoted label.
+    let mut labels = 0;
+    while let Some(after_open) = rest.strip_prefix('"') {
+        let Some(close) = after_open.find('"') else {
+            return false;
+        };
+        labels += 1;
+        rest = after_open[close + 1..].trim_start();
+    }
+    labels >= 1 && rest.is_empty()
+}
+
 fn is_context_shaped(shape: SecretShape) -> bool {
     !shape.is_vendor_shaped()
 }
@@ -335,6 +376,9 @@ pub(crate) fn classify(
         && is_qualified_label_name(value)
     {
         return Some(Twin::QualifiedLabelName);
+    }
+    if shape == SecretShape::NamedSecretLiteral && is_block_header_label(value, context) {
+        return Some(Twin::BlockHeaderLabel);
     }
     if shape == SecretShape::BasicAuthCredential && value.bytes().all(|b| b.is_ascii_lowercase()) {
         // `Authorization: Basic authentication ...` is prose; a real credential is not one word.

@@ -165,3 +165,14 @@ fn the_hardcoded_arm_keeps_its_precision_guards() {
             .is_ok()
     );
 }
+
+#[test]
+fn a_terraform_reference_is_quiet_through_the_file_entry_and_loud_in_a_dotenv_file() {
+    let line = "password = random_password.reader_login.result\n";
+    let rule = "SEC-NO-HARDCODED-SECRETS-1";
+    assert!(content_match_lines_in_file(rule, "grants/main.tf", line).is_empty());
+    assert_eq!(
+        content_match_lines_in_file(rule, "config/service.env", line),
+        vec![1]
+    );
+}
