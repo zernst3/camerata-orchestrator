@@ -814,6 +814,12 @@ async fn a_read_outside_the_room_fails_the_piece() {
         ("LS", json!({"path": "/Users/auditor/other"})),
         ("Read", json!({"file_path": "@ROOM@/../outside.txt"})),
         ("Read", json!({"file_path": "../outside.txt"})),
+        ("Read", json!({"file_path": "~/other/x"})),
+        ("Read", json!({"file_path": "$HOME/other/x"})),
+        ("Grep", json!({"pattern": "k", "path": "~/other"})),
+        ("Glob", json!({"pattern": "../../**/*KEY*"})),
+        ("Glob", json!({"pattern": "~/other/*.md"})),
+        ("Glob", json!({"pattern": "src/../../x/*"})),
         (
             "Write",
             json!({"file_path": "/Users/auditor/x", "content": "x"}),
@@ -1141,4 +1147,83 @@ fn a_session_file_request_id_is_read_in_its_own_spelling() {
     );
     assert_eq!(parsed.usage.len(), 1, "{:?}", parsed.usage);
     assert_eq!(parsed.usage[0].output_tokens, 9);
+}
+
+#[tokio::test]
+async fn a_successful_call_to_a_tool_outside_the_set_fails_the_piece() {
+    for name in ["Bash", "WebFetch", "Task", "SomeFutureTool", "NotebookEdit"] {
+        let rig = Rig::new().call(
+            1,
+            Some(replay(&[
+                call("u1", name, json!({"command": "ls ~"})),
+                answer("u1", "ok", None, false),
+            ])),
+            &[],
+            OK_RESULT,
+        );
+        let room = room_for(&["src/a.rs"], &repo());
+        let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+        match &run.stop {
+            AgentStop::Failed(why) => assert!(why.contains("outside"), "{name}: {why}"),
+            other => panic!("{name}: expected Failed, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_refused_call_to_a_tool_outside_the_set_and_the_todo_tool_are_fine() {
+    let rig = Rig::new().call(
+        1,
+        Some(replay(&[
+            call("u1", "Bash", json!({"command": "ls"})),
+            answer("u1", "denied", None, true),
+            call("u2", "TodoWrite", json!({"todos": []})),
+            answer("u2", "ok", None, false),
+        ])),
+        &[],
+        OK_RESULT,
+    );
+    let room = room_for(&["src/a.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert!(
+        !matches!(run.stop, AgentStop::Failed(_)),
+        "{:?}",
+        run.stop
+    );
+}
+
+#[tokio::test]
+async fn a_denied_search_inside_the_room_records_nothing_and_one_outside_still_fails() {
+    let rig = Rig::new().call(
+        1,
+        Some(replay(&[
+            call("s1", "Grep", json!({"pattern": "k", "path": "@ROOM@/code"})),
+            answer("s1", "denied", None, true),
+            call("s2", "Glob", json!({"pattern": "src/*.rs"})),
+            answer("s2", "denied", None, true),
+        ])),
+        &[],
+        OK_RESULT,
+    );
+    let room = room_for(&["src/a.rs"], &repo());
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert!(
+        !run.trace
+            .iter()
+            .any(|e| matches!(e, ToolEvent::Grep { .. } | ToolEvent::Glob { .. })),
+        "{:?}",
+        run.trace
+    );
+    // The same denied calls aimed outside the room fail the piece.
+    let rig = Rig::new().call(
+        1,
+        Some(replay(&[
+            call("s1", "Grep", json!({"pattern": "k", "path": "~/other"})),
+            answer("s1", "denied", None, true),
+        ])),
+        &[],
+        OK_RESULT,
+    );
+    let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
 }

@@ -25,7 +25,7 @@ use super::{
     AgentRun, AgentStop, ConversationHandle, FollowUp, PieceAgent, PieceLimits, Room, ToolEvent,
     TurnUsage,
 };
-use crate::llm::{Llm, LlmRequest, SessionSink};
+use crate::llm::{Llm, LlmRequest, SessionSink, ROOM_TOOLS};
 
 /// The lines a Read returns when the call names no `limit` (the tool's own default).
 const DEFAULT_READ_LINES: usize = 2_000;
@@ -384,7 +384,15 @@ fn room_path(path: &str, roots: &[PathBuf]) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for component in rest.components() {
         match component {
-            Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
+            Component::Normal(name) => {
+                let name = name.to_string_lossy().into_owned();
+                // A home-relative (`~`) or variable (`$HOME`) first part is expanded by the tool
+                // to a place outside the room; it is never a folder of the room.
+                if parts.is_empty() && (name.starts_with('~') || name.starts_with('$')) {
+                    return None;
+                }
+                parts.push(name);
+            }
             Component::CurDir => {}
             Component::ParentDir => {
                 parts.pop()?;
@@ -562,6 +570,12 @@ pub(crate) fn parse_session(
             }
             placed
         };
+        // The room offers a closed set of tools. A call to any other tool that went through
+        // means the program did not hold to it, and nothing about what it touched is known.
+        if !failed && !ROOM_TOOLS.contains(&u.name.as_str()) && u.name != "TodoWrite" {
+            outside.push(format!("the tool {}", u.name));
+            continue;
+        }
         match u.name.as_str() {
             "Read" => {
                 let Some(path) = place(text_of("file_path")) else {
@@ -586,22 +600,36 @@ pub(crate) fn parse_session(
             "Glob" => {
                 let path_arg = text_of("path");
                 if !path_arg.is_empty() {
-                    place(path_arg);
+                    place(path_arg.clone());
                 }
                 let pattern = text_of("pattern");
-                if pattern.starts_with('/') {
-                    place(pattern.clone());
+                // The literal part of the pattern before its first wildcard is a path: checked
+                // alone and under the `path` argument, so `..`, `~` and absolute prefixes
+                // count as outside whichever way the tool resolves them.
+                let prefix: String = pattern
+                    .chars()
+                    .take_while(|c| !matches!(c, '*' | '?' | '[' | '{'))
+                    .collect();
+                if !prefix.is_empty() {
+                    place(prefix.clone());
+                    if !path_arg.is_empty() {
+                        place(format!("{}/{prefix}", path_arg.trim_end_matches('/')));
+                    }
                 }
-                trace.push(ToolEvent::Glob { pattern });
+                if !failed {
+                    trace.push(ToolEvent::Glob { pattern });
+                }
             }
             "Grep" => {
                 let path_arg = text_of("path");
                 if !path_arg.is_empty() {
                     place(path_arg);
                 }
-                trace.push(ToolEvent::Grep {
-                    pattern: text_of("pattern"),
-                });
+                if !failed {
+                    trace.push(ToolEvent::Grep {
+                        pattern: text_of("pattern"),
+                    });
+                }
             }
             "LS" => {
                 if let Some(path) = place(text_of("path")) {
