@@ -1823,7 +1823,9 @@ newer. If the version found is too old, the run is refused before any model call
 names the version found, the version needed, the model and the fix: update Claude Code, or set
 `CAMERATA_CLAUDE_PROGRAM` to a newer binary. If the version cannot be read (the program is missing,
 does not answer or prints no version number), the run is refused too, with the reason. A run that
-calls no model with a known minimum is not held up by an old version.
+calls no model with a known minimum is not held up by an old version. A value of
+`CAMERATA_CLAUDE_PROGRAM` that is not an absolute path is refused, and a non-zero exit from
+`--version` counts as an unreadable version.
 
 #### What a scan will cost, and how to cap it
 
