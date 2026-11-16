@@ -60,13 +60,19 @@ fn is_bare_token_uuid(line: &str) -> bool {
 /// `apiKeyId`). Only key and token: a `secret_id` (a Vault AppRole one) IS the credential.
 fn is_credential_id_uuid(line: &str) -> bool {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
+    let re = RE.get_or_init(|| {
         regex::Regex::new(
-            r#"(?:(?i:key|token)[A-Za-z0-9_.-]*(?:[_.-][iI][dD]|Id))["']?\s*[:=]\s*["']?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']?\s*,?\s*$"#,
+            r#"([A-Za-z0-9_.-]*(?i:key|token)[A-Za-z0-9_.-]*(?:[_.-][iI][dD]|Id))["']?\s*[:=]\s*["']?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']?\s*,?\s*$"#,
         )
         .expect("credential id uuid regex must compile")
+    });
+    // A name that also holds a password-like word (`key_secret_id`) names the credential itself.
+    re.captures(line).is_some_and(|c| {
+        let name = c[1].to_ascii_lowercase();
+        !["secret", "password", "passwd", "pwd"]
+            .iter()
+            .any(|w| name.contains(w))
     })
-    .is_match(line)
 }
 
 /// The gate's description for a rule id, or the id if unknown.
@@ -1099,6 +1105,22 @@ mod hold_scope_tests {
         // The name without `_id` stays urgent.
         let rows = audit_content("r", "config/service.yaml", &format!("token: {id}\n"));
         assert_eq!(secret_rows(&rows)[0].severity, "critical");
+    }
+
+    #[test]
+    fn a_secret_word_in_a_key_id_name_keeps_it_critical() {
+        let id = uuid();
+        for name in ["key_secret_id", "api_key_secret_id"] {
+            let rows = audit_content("r", "config/service.yaml", &format!("{name}: {id}\n"));
+            let rows = secret_rows(&rows);
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!(rows[0].severity, "critical", "{name}");
+            assert!(!rows[0].needs_review, "{name}");
+        }
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        let rows = secret_rows(&rows);
+        assert_eq!(rows[0].severity, "low");
+        assert!(rows[0].needs_review);
     }
 
     #[test]
