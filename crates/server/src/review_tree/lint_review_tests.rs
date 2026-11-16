@@ -102,6 +102,24 @@ fn a_style_lint_row_whose_own_category_is_security_stays_per_place() {
     assert_per_place(&rows, &tree, "no-var", "acme/web");
 }
 
+// ── Fix 2: a row that is not a lint never stays in a stored lint group ────────────────────────
+
+#[test]
+fn a_security_lint_stored_in_a_lint_group_is_placed_again_outside_it() {
+    let (mut rows, tree) = grouped(lint_rows("acme/api", "ruff", "S608", 5));
+    // A tree stored before S608 was known to be a security check put it in a lint group.
+    let rule = rows[0].group_path[1].clone();
+    let lint_id = format!(
+        "sub:{}/lint-0123456789ab",
+        rule.strip_prefix("rule:").unwrap()
+    );
+    for f in &mut rows {
+        f.group_path[2] = lint_id.clone();
+    }
+    let tree = build_tree(&mut rows, &mut [], Some(tree), &ToolMap::builtin(), "run-1");
+    assert_per_place(&rows, &tree, "S608", "acme/api");
+}
+
 // ── Fix 3: two lint rules never share a group ─────────────────────────────────────────────────
 
 #[test]

@@ -228,6 +228,19 @@ pub fn build_tree(
                 row_sub.push(super::lint::lint_sub_id(&fresh.rule, &f.repo, &f.rule_id));
                 placements.push(fresh);
             }
+            // A row that is not a lint never stays in a lint group (a tree stored before its rule
+            // was known to be a security check, say): it goes to its rule's residual sub-group,
+            // per place. Its stored rule node stays: it is the mapping the scan made with the
+            // corpus loaded, which the tables at hand may not know.
+            Some([category, rule, sub]) if super::lint::is_lint_sub_id(sub) => {
+                let rule_label = stored_rule_label(&fresh, rule);
+                row_sub.push(residual_sub_id(rule));
+                placements.push(RulePlacement {
+                    category: category.clone(),
+                    rule: rule.clone(),
+                    rule_label,
+                });
+            }
             Some([category, rule, sub]) => {
                 let rule_label = stored_rule_label(&fresh, rule);
                 placements.push(RulePlacement {
