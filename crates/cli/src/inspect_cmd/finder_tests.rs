@@ -208,8 +208,7 @@ fn the_setup_cannot_be_built_without_a_key_on_the_api_backend() {
             rooms.path().to_path_buf(),
             true,
         )
-        .err()
-        .expect("no key, no setup");
+        .expect_err("no key, no setup");
         assert!(why.contains("key"), "{why}");
     }
     // The command line backend needs no key.

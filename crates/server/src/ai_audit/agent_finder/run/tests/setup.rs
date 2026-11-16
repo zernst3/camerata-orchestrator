@@ -36,6 +36,10 @@ impl crate::llm::LlmPort for NoModel {
     }
 }
 
+/// What the factory saw: the key, the rooms folder, the engagement kind and whether the meter it
+/// was given is the run's own.
+type Built = (Option<String>, PathBuf, EngagementKind, bool);
+
 fn setup(engagement: EngagementKind) -> FinderSetup {
     FinderSetup {
         rooms_dir: PathBuf::from("/run/folder/finder-rooms"),
@@ -78,7 +82,7 @@ fn the_setup_never_prints_its_key() {
 #[tokio::test]
 async fn the_run_builds_the_agent_on_its_own_meter_and_its_spend_appears_once() {
     let meter = Arc::new(UsageMeter::default());
-    let seen: Mutex<Vec<(Option<String>, PathBuf, EngagementKind, bool)>> = Mutex::default();
+    let seen: Mutex<Vec<Built>> = Mutex::default();
     let run_meter = meter.clone();
     let factory = |_c: &RunControls,
                    build: &super::super::AgentBuild,
