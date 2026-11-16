@@ -47,7 +47,9 @@ pub enum Twin {
     /// language reads the literal as a module name.
     ModulePath,
     /// A canonical UUID on an identifier that ends in `id` (`token_id`, `tokenId`) and is not
-    /// password-like: the id of a domain object that happens to be called token or key.
+    /// password-like: most likely the id of a domain object that happens to be called token or
+    /// key. The row is NOT removed (the id could still be the credential); the audit holds it
+    /// at low for a reviewer.
     EntityId,
     /// The ciphertext of a sealed secret: a long base64 value under `encryptedData` in a
     /// `kind: SealedSecret` document. Encrypted for committing, so it is not a credential.
@@ -70,7 +72,6 @@ impl Twin {
                 | Twin::QualifiedLabelName
                 | Twin::BlockHeaderLabel
                 | Twin::ModulePath
-                | Twin::EntityId
                 | Twin::SealedCiphertext
         )
     }

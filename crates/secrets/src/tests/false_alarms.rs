@@ -82,8 +82,12 @@ fn uuid() -> String {
 #[test]
 fn a_uuid_on_an_id_named_field_is_an_entity_id() {
     let id = uuid();
-    assert!(lines(&format!("example:\n  token_id: {id}\n")).is_empty());
-    assert!(lines(&format!("const row = {{ tokenId: '{id}' }};")).is_empty());
+    // The row stays (the audit holds it at low for a reviewer); it is not removed.
+    assert_eq!(lines(&format!("example:\n  token_id: {id}\n")), vec![2]);
+    assert_eq!(
+        lines(&format!("const row = {{ tokenId: '{id}' }};")),
+        vec![1]
+    );
     assert_eq!(lines(&format!("api_token: {id}\n")), vec![1]);
     assert_eq!(lines(&format!("client_secret_id: {id}\n")), vec![1]);
     let opaque = body(36, ALNUM, 16);

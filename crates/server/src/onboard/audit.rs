@@ -20,36 +20,51 @@ pub(crate) fn severity_for(_rule_id: &str) -> &'static str {
 
 /// The note appended to a floor row held as a sample value in an API description file.
 const API_DESCRIPTION_NOTE: &str =
-    " (a sample value in an API description file; a reviewer should confirm)";
+    " (possibly a sample value in an API description file; a reviewer should confirm)";
+
+/// The note appended to a floor row held because a UUID sits on an id field of a credential word.
+const ENTITY_ID_NOTE: &str =
+    " (a UUID on an id field, possibly an entity id and not a credential; a reviewer should confirm)";
 
 /// Whether `content` is an API description (an OpenAPI or Swagger document, or a request
-/// collection): a top-level `openapi` or `swagger` key, or a request collection marker.
+/// collection): a top-level `openapi` or `swagger` key WITH a version value, or a request
+/// collection marker. A bare `swagger:` section (Spring configuration) is not one.
 fn is_api_description(content: &str) -> bool {
+    static VERSIONED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let versioned = VERSIONED.get_or_init(|| {
+        regex::Regex::new(r#"^\{?\s*["']?(?:openapi|swagger)["']?\s*:\s*["']?[0-9]"#)
+            .expect("api description version regex must compile")
+    });
     content.lines().any(|line| {
         let line = line.trim_end();
-        let key = line.trim_start_matches('{').trim_start();
-        let top_level_key = |name: &str| {
-            [format!("{name}:"), format!("\"{name}\":")]
-                .iter()
-                .any(|k| key.starts_with(k.as_str()) && !line.starts_with([' ', '\t']))
-                || (line.starts_with('{') && key.starts_with(&format!("\"{name}\":")))
-        };
-        top_level_key("openapi")
-            || top_level_key("swagger")
+        (versioned.is_match(line) && !line.starts_with([' ', '\t']))
             || line.contains("schema.getpostman.com")
             || line.contains("\"_postman_id\"")
     })
 }
 
 /// Whether `line` assigns a canonical UUID to a field named exactly `token` (not `api_token`,
-/// not `token_id`).
+/// not `access-token`, not `refresh.token`, not `token_id`).
 fn is_bare_token_uuid(line: &str) -> bool {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
         regex::Regex::new(
-            r#"(?i)(?:^|[^A-Za-z0-9_])token["']?\s*[:=]\s*["']?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}["']?\s*,?\s*$"#,
+            r#"(?i)(?:^|[^A-Za-z0-9_.-])token["']?\s*[:=]\s*["']?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}["']?\s*,?\s*$"#,
         )
         .expect("bare token uuid regex must compile")
+    })
+    .is_match(line)
+}
+
+/// Whether `line` assigns a canonical UUID to an id field of a credential word (`token_id`,
+/// `apiKeyId`, `client-secret-id`).
+fn is_credential_id_uuid(line: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?:(?i:key|secret|token|password|passwd|pwd|passphrase|credential)[A-Za-z0-9_.-]*(?:[_.-][iI][dD]|Id))["']?\s*[:=]\s*["']?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']?\s*,?\s*$"#,
+        )
+        .expect("credential id uuid regex must compile")
     })
     .is_match(line)
 }
@@ -342,7 +357,19 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 && lines
                     .get(line_no.saturating_sub(1))
                     .is_some_and(|l| is_bare_token_uuid(l));
-            let (severity, detail, in_test, needs_review) = if held_sample {
+            let held_entity_id = !is_test
+                && *rule_id == "SEC-NO-HARDCODED-SECRETS-1"
+                && lines
+                    .get(line_no.saturating_sub(1))
+                    .is_some_and(|l| is_credential_id_uuid(l));
+            let (severity, detail, in_test, needs_review) = if held_entity_id {
+                (
+                    TEST_PATH_SEVERITY.to_string(),
+                    format!("{}{}", title_for(rule_id), ENTITY_ID_NOTE),
+                    false,
+                    true,
+                )
+            } else if held_sample {
                 (
                     TEST_PATH_SEVERITY.to_string(),
                     format!("{}{}", title_for(rule_id), API_DESCRIPTION_NOTE),
@@ -699,6 +726,14 @@ mod api_description_tests {
         let spec = format!("openapi: 3.0.0\nexample:\n  api_token: {id}\n");
         let rows = audit_content("r", "docs/api/spec.yaml", &spec);
         assert_eq!(secret_row(&rows).severity, "critical");
+        // A dash or dot before `token` is a different field name.
+        let spec =
+            format!("openapi: 3.0.0\nexample:\n  access-token: {id}\n  refresh.token: {id}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert!(rows
+            .iter()
+            .filter(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .all(|f| f.severity == "critical"));
         // An opaque value on `token` in an API description is not a sample UUID.
         let opaque = body(
             36,
@@ -1014,5 +1049,55 @@ mod p4_context_tests {
             .find(|f| f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
             .expect("a bare Google key is still a floor finding");
         assert_eq!(hit.severity, "critical");
+    }
+}
+
+#[cfg(test)]
+mod hold_scope_tests {
+    use super::*;
+    use camerata_secrets::fixtures::body;
+
+    fn uuid() -> String {
+        [
+            body(8, "0123456789abcdef", 41),
+            body(4, "0123456789abcdef", 42),
+            body(4, "0123456789abcdef", 43),
+            body(4, "0123456789abcdef", 44),
+            body(12, "0123456789abcdef", 45),
+        ]
+        .join("-")
+    }
+
+    fn secret_rows(rows: &[Finding]) -> Vec<&Finding> {
+        rows.iter()
+            .filter(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .collect()
+    }
+
+    #[test]
+    fn a_spring_swagger_section_is_not_an_api_description() {
+        let id = uuid();
+        let yml = format!("swagger:\n  enabled: true\nservice:\n  token: {id}\n");
+        let rows = audit_content("r", "src/main/resources/application.yml", &yml);
+        let rows = secret_rows(&rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, "critical");
+        // A versioned key does make it one.
+        let spec = format!("swagger: \"2.0\"\nexample:\n  token: {id}\n");
+        let found = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_rows(&found)[0].severity, "low");
+    }
+
+    #[test]
+    fn a_uuid_on_a_token_id_field_is_held_at_low_not_removed() {
+        let id = uuid();
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        let rows = secret_rows(&rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, "low");
+        assert!(rows[0].needs_review);
+        // The name without `_id` stays urgent.
+        let rows = audit_content("r", "config/service.yaml", &format!("token: {id}\n"));
+        assert_eq!(secret_rows(&rows)[0].severity, "critical");
     }
 }
