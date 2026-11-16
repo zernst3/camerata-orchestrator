@@ -1851,7 +1851,13 @@ fn truncate_output(s: String, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         s
     } else {
-        let truncated = &s[..max_bytes];
+        // Back up to a character boundary: a byte budget can land inside a multi-byte
+        // character, and slicing there would panic and kill the run.
+        let mut cut = max_bytes;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let truncated = &s[..cut];
         format!("{truncated}\n... (output truncated at {max_bytes} bytes)")
     }
 }
@@ -5049,3 +5055,5 @@ mod tests {
 
 #[cfg(test)]
 mod model_input_tests;
+#[cfg(test)]
+mod truncate_tests;
