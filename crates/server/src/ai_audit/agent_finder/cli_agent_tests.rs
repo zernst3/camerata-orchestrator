@@ -226,7 +226,7 @@ exit 0
 
     fn agent(&self) -> CliPieceAgent {
         CliPieceAgent::new(MODEL, self.path().join("work"), EngagementKind::Internal)
-            .with_claude_program(self.program())
+            .with_program(self.program())
     }
 
     fn log(&self, name: &str) -> String {
@@ -388,7 +388,7 @@ async fn a_program_that_cannot_start_is_an_error_before_anything_was_sent_or_a_f
 ) {
     let rig = Rig::new();
     let agent = CliPieceAgent::new(MODEL, rig.path().join("work"), EngagementKind::Internal)
-        .with_claude_program(rig.path().join("no-such-program"));
+        .with_program(rig.path().join("no-such-program"));
     let room = room_for(&["src/a.rs"], &repo());
     match agent.run(&room, "b", &limits()).await {
         Err(_) => {}
@@ -902,7 +902,7 @@ async fn paths_inside_the_room_are_not_outside() {
 async fn a_client_engagement_is_refused_before_a_room_is_written_or_the_program_started() {
     let rig = Rig::new().call(1, Some(full_replay()), &[], OK_RESULT);
     let agent = CliPieceAgent::new(MODEL, rig.path().join("work"), EngagementKind::Client)
-        .with_claude_program(rig.program());
+        .with_program(rig.program());
     let room = room_for(&["src/a.rs"], &repo());
     let err = agent.run(&room, "b", &limits()).await.expect_err("refused");
     assert!(err.to_string().contains("internal"), "{err}");

@@ -51,7 +51,7 @@ pub struct CliPieceAgent {
     /// An engine-owned folder under the run's state folder; never inside a client's repository.
     pub(crate) work_dir: PathBuf,
     /// The `claude` program to run. `None` = the engine's one resolver
-    /// (`camerata_api_types::claude_cli::claude_program()`, applied where the process is spawned).
+    /// (applied where the process is spawned, in `camerata-llm`).
     program: Option<PathBuf>,
     engagement: EngagementKind,
     /// The wall-clock bound of one call. `None` = the piece limits' own bound.
@@ -71,7 +71,7 @@ impl CliPieceAgent {
 
     /// Run this `claude` program (the desktop app ships a newer one than a terminal install).
     #[must_use]
-    pub fn with_claude_program(mut self, program: PathBuf) -> Self {
+    pub fn with_program(mut self, program: PathBuf) -> Self {
         self.program = Some(program);
         self
     }
