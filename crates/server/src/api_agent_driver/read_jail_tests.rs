@@ -283,9 +283,11 @@ fn a_declared_read_folder_is_readable_and_logged_without_its_host_path() {
 async fn a_refused_read_reaches_the_model_as_a_tool_error_through_the_driver() {
     use std::sync::Arc;
     let l = layout();
-    let driver =
-        super::ApiAgentDriver::new(Arc::new(super::AnthropicNoopCompleter), "claude-sonnet-5")
-            .with_worktree(l.wt.clone());
+    let driver = super::ApiAgentDriver::new(
+        Arc::new(super::AnthropicNoopCompleter),
+        "claude-sonnet-5",
+        l.wt.clone(),
+    );
     let role = camerata_core::Role {
         name: "jail".to_string(),
         rule_subset: vec![],
@@ -313,8 +315,8 @@ fn a_read_folder_does_not_widen_the_write_jail() {
     let driver = super::ApiAgentDriver::new(
         std::sync::Arc::new(super::AnthropicNoopCompleter),
         "claude-sonnet-5",
+        l.wt.clone(),
     )
-    .with_worktree(l.wt.clone())
     .with_read_dirs(vec![l.outside_dir.clone()]);
     let role = camerata_core::Role {
         name: "jail".to_string(),

@@ -726,7 +726,8 @@ fn scope5_build_agent_driver_routes_by_provider() {
         &creds_or,
         "/tmp/mcp.json",
         vec![],
-        None,
+        // An API-loop driver is built only with a worktree to jail it to.
+        Some(std::path::PathBuf::from("/tmp/wt")),
         false,
         limiter.clone(),
         None,
@@ -747,7 +748,8 @@ fn scope5_build_agent_driver_routes_by_provider() {
         &creds_none,
         "/tmp/mcp.json",
         vec![],
-        None,
+        // An API-loop driver is built only with a worktree to jail it to.
+        Some(std::path::PathBuf::from("/tmp/wt")),
         false,
         limiter,
         None,

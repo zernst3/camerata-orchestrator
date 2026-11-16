@@ -31,7 +31,7 @@ fn worktree() -> (tempfile::TempDir, PathBuf) {
 
 fn driver(script: Vec<serde_json::Value>, wt: &Path) -> (ApiAgentDriver, Arc<ScriptedCompleter>) {
     let completer = Arc::new(ScriptedCompleter::new(script, Some(0.0)));
-    let d = ApiAgentDriver::new(completer.clone(), "scripted").with_worktree(wt.to_path_buf());
+    let d = ApiAgentDriver::new(completer.clone(), "scripted", wt.to_path_buf());
     (d, completer)
 }
 
@@ -139,8 +139,7 @@ impl camerata_gateway::delegate::ChildDriverFactory for ScriptedChildFactory {
             Some(0.0),
         ));
         Ok(Box::new(
-            ApiAgentDriver::new(completer, model)
-                .with_worktree(worktree.to_path_buf())
+            ApiAgentDriver::new(completer, model, worktree.to_path_buf())
                 .with_api_loop(self.server.api_loop_for_child(read_dirs)),
         ))
     }
@@ -190,8 +189,7 @@ async fn a_child_agents_reads_appear_in_the_parent_runs_log() {
         ],
         Some(0.0),
     ));
-    let lead = ApiAgentDriver::new(lead_completer, "scripted-strong")
-        .with_worktree(wt.clone())
+    let lead = ApiAgentDriver::new(lead_completer, "scripted-strong", wt.clone())
         .as_orchestrator(true)
         .with_orchestrator_config(config)
         .with_run_ledger(ledger.clone());

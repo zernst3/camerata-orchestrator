@@ -41,9 +41,8 @@ async fn a_scripted_run_that_would_exceed_the_limit_stops_at_the_limit_with_a_cl
     let (_tmp, wt) = worktree();
     let completer = Arc::new(ScriptedCompleter::new(endless_reads(), Some(0.40)));
     let ledger = limited(1.00);
-    let driver = ApiAgentDriver::new(completer.clone(), "scripted")
-        .with_worktree(wt)
-        .with_run_ledger(ledger.clone());
+    let driver =
+        ApiAgentDriver::new(completer.clone(), "scripted", wt).with_run_ledger(ledger.clone());
 
     let result = driver.run(&role(), "read forever").await;
 
@@ -88,9 +87,7 @@ async fn cost_is_recorded_per_turn() {
         Some(0.25),
     ));
     let ledger = Arc::new(AgentRunLedger::new());
-    let driver = ApiAgentDriver::new(completer, "scripted")
-        .with_worktree(wt)
-        .with_run_ledger(ledger.clone());
+    let driver = ApiAgentDriver::new(completer, "scripted", wt).with_run_ledger(ledger.clone());
 
     let out = driver.run(&role(), "three turns").await.expect("run");
 
@@ -113,9 +110,8 @@ async fn a_turn_that_cannot_be_priced_stops_a_limited_run() {
     let (_tmp, wt) = worktree();
     // No dollar figure and no token counts: the registry has nothing to price.
     let completer = Arc::new(ScriptedCompleter::new(endless_reads(), None));
-    let driver = ApiAgentDriver::new(completer.clone(), "unknown-model")
-        .with_worktree(wt)
-        .with_run_ledger(limited(5.00));
+    let driver =
+        ApiAgentDriver::new(completer.clone(), "unknown-model", wt).with_run_ledger(limited(5.00));
 
     let result = driver.run(&role(), "read forever").await;
 
@@ -150,7 +146,7 @@ async fn a_run_with_no_limit_is_not_stopped_by_spend() {
         ],
         Some(50.0),
     ));
-    let driver = ApiAgentDriver::new(completer, "scripted").with_worktree(wt);
+    let driver = ApiAgentDriver::new(completer, "scripted", wt);
     let out = driver
         .run(&role(), "two turns")
         .await

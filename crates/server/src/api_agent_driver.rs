@@ -26,9 +26,10 @@
 //!    final arbiter.
 //! 3. **`shell` / `Task` are never exposed.** The tool schema list is an explicit allowlist;
 //!    any tool not in it is not callable.
-//! 4. **Worktree jail.** When `worktree` is set, `gated_write` paths that escape the jail
-//!    (via the existing gateway rules: `SEC-NO-PATH-ESCAPE-1` + the worktree prefix check)
-//!    are denied before the file is written.
+//! 4. **Worktree jail.** Every driver HAS a worktree ([`ApiAgentDriver::new`] requires one, and
+//!    the builders refuse to make an API driver without one), and `gated_write` paths that
+//!    escape it (via the existing gateway rules: `SEC-NO-PATH-ESCAPE-1` + the worktree prefix
+//!    check) are denied before the file is written. Reads are jailed too (see Read tools).
 //!
 //! # Tool-call normalization
 //!
@@ -175,18 +176,20 @@ pub struct ApiLoopContext {
 /// Owns the multi-turn tool-use loop: call the provider → parse tool-calls →
 /// execute each through the gateway library → feed results back → repeat.
 ///
-/// Constructed by [`ApiAgentDriver::new`]. Use [`ApiAgentDriver::as_orchestrator`] and
-/// [`ApiAgentDriver::with_worktree`] to configure the mode and jail before calling `run`.
+/// Constructed by [`ApiAgentDriver::new`], which REQUIRES the worktree: the driver can write
+/// (`gated_write`), and both its write jail and its read jail are rooted there, so a driver
+/// with no worktree is not representable. Use [`ApiAgentDriver::as_orchestrator`] to configure
+/// the mode before calling `run`.
 #[derive(Clone)]
 pub struct ApiAgentDriver {
     /// The `LlmPort` that makes the provider API calls.
     completer: Arc<dyn LlmPort>,
     /// Model id to request (empty = completer's default).
     pub model: String,
-    /// Optional worktree the agent's writes are jailed to. Enforced by the gateway rules
+    /// The worktree the agent's writes are jailed to. Enforced by the gateway rules
     /// (`SEC-NO-PATH-ESCAPE-1` + worktree-prefix check below) on every `gated_write`. Also the
-    /// root of the read jail.
-    pub worktree: Option<PathBuf>,
+    /// root of the read jail. Required at construction (see [`ApiAgentDriver::new`]).
+    worktree: PathBuf,
     /// Folders the read tools may read beside the worktree (a multi-repo project's sibling
     /// clones). Read-only: `gated_write` is still jailed to `worktree` alone.
     read_dirs: Vec<PathBuf>,
@@ -247,12 +250,17 @@ pub struct ApiAgentDriver {
 }
 
 impl ApiAgentDriver {
-    /// Build a new driver backed by `completer` using `model`.
+    /// Build a new driver backed by `completer` using `model`, jailed to `worktree` (writes go
+    /// only under it; reads only under it and the declared read folders).
     ///
     /// If `completer` is an [`crate::llm::OpenRouterCompleter`], its `session_id` is
     /// inherited here so every direct HTTP call (the tool-schema path) uses the same
     /// session id as bare-LLM calls made through the `LlmPort` trait.
-    pub fn new(completer: Arc<dyn LlmPort>, model: impl Into<String>) -> Self {
+    pub fn new(
+        completer: Arc<dyn LlmPort>,
+        model: impl Into<String>,
+        worktree: impl Into<PathBuf>,
+    ) -> Self {
         // Inherit the session id from an OpenRouterCompleter when available; fall back to
         // a stable per-instance token for other completer types (no-op for them).
         let session_id = completer
@@ -272,7 +280,7 @@ impl ApiAgentDriver {
         Self {
             completer,
             model: model.into(),
-            worktree: None,
+            worktree: worktree.into(),
             read_dirs: Vec::new(),
             ledger: Arc::new(AgentRunLedger::new()),
             orchestrator: false,
@@ -355,11 +363,9 @@ impl ApiAgentDriver {
         self
     }
 
-    /// Bind this driver to a worktree: writes are jailed to that directory.
-    /// Builder form.
-    pub fn with_worktree(mut self, worktree: impl Into<PathBuf>) -> Self {
-        self.worktree = Some(worktree.into());
-        self
+    /// The worktree this driver's writes (and reads) are jailed to.
+    pub fn worktree(&self) -> &Path {
+        &self.worktree
     }
 
     /// Declare the folders the read tools may read beside the worktree. Builder form. Writes
@@ -1454,7 +1460,7 @@ async fn execute_tool(
         TOOL_READ | TOOL_GLOB | TOOL_GREP | TOOL_LS => {
             // Every read is confined to the worktree plus the run's declared read folders
             // (`read_jail`); a path outside is refused with a tool error, never read.
-            let jail = ReadJail::new(driver.worktree.as_deref(), &driver.read_dirs);
+            let jail = ReadJail::new(Some(&driver.worktree), &driver.read_dirs);
             let outcome = match inv.name.as_str() {
                 TOOL_READ => execute_read(inv, &jail),
                 TOOL_GLOB => execute_glob(inv, &jail),
@@ -1752,7 +1758,8 @@ fn execute_gated_write(
     // The jail check RETURNS the resolved absolute write path, so the CHECK and the
     // write EFFECT are the same path: no `wt.join(trim)` path-doubling (GATE-F3) and no
     // check-here/write-there divergence (GATE-F4).
-    let write_path = if let Some(wt) = &driver.worktree {
+    let write_path = {
+        let wt = &driver.worktree;
         // The jail root must still exist: a write creates missing parents, so into a worktree
         // whose checkout was deleted mid-run it would quietly recreate the deleted folder.
         if !wt.is_dir() {
@@ -1781,8 +1788,6 @@ fn execute_gated_write(
                 return (msg, Some(denial));
             }
         }
-    } else {
-        PathBuf::from(&path)
     };
 
     if let Some(parent) = write_path.parent() {
@@ -2235,17 +2240,15 @@ fn build_claude_driver(
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let key = resolve_claude_backend(creds, backend)?;
     if let Some(key) = key {
+        let wt = api_driver_worktree(worktree, model_id)?;
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
         // gated_write-only, worktree-jailed, delegate/fan_out only when orchestrator=true.
-        let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id)
+        let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id, wt)
             .with_rule_subset(rule_subset)
             .as_orchestrator(orchestrator)
             .with_shape(ApiShape::Anthropic)
             .with_anthropic_api_key(key)
             .with_api_loop(api_loop);
-        if let Some(wt) = worktree {
-            driver = driver.with_worktree(wt);
-        }
         if let Some(cb) = on_activity {
             driver = driver.with_on_activity(cb);
         }
@@ -2271,6 +2274,19 @@ fn build_claude_driver(
 }
 
 // ─── driver selection factory ─────────────────────────────────────────────────
+
+/// The worktree an API-loop driver for `model_id` is jailed to, or the refusal to build one
+/// without: the in-process loop writes through `gated_write`, and with no worktree there is
+/// nothing to jail the writes (or the reads) to.
+fn api_driver_worktree(worktree: Option<PathBuf>, model_id: &str) -> anyhow::Result<PathBuf> {
+    worktree.ok_or_else(|| {
+        anyhow::anyhow!(
+            "refusing to build the in-process API agent for model `{model_id}` without a \
+             worktree: its writes and reads are jailed to the worktree, and with none they \
+             would not be confined"
+        )
+    })
+}
 
 /// Select the right `Arc<dyn AgentDriver>` for `model_id` based on its provider.
 ///
@@ -2348,6 +2364,7 @@ pub fn build_agent_driver(
 
     match provider.as_str() {
         "openrouter" => {
+            let wt = api_driver_worktree(worktree, model_id)?;
             let key = crate::credentials::openrouter_api_key(creds).ok_or_else(|| {
                 anyhow::anyhow!(
                     "model `{model_id}` is an OpenRouter model but no OpenRouter API key is \
@@ -2366,13 +2383,10 @@ pub fn build_agent_driver(
                 or_completer = or_completer.with_session_id(sid);
             }
             let completer = Arc::new(or_completer);
-            let mut driver = ApiAgentDriver::new(completer, model_id)
+            let mut driver = ApiAgentDriver::new(completer, model_id, wt)
                 .with_rule_subset(rule_subset)
                 .as_orchestrator(orchestrator)
                 .with_api_loop(api_loop);
-            if let Some(wt) = worktree {
-                driver = driver.with_worktree(wt);
-            }
             if let Some(cb) = on_activity {
                 driver = driver.with_on_activity(cb);
             }
@@ -2786,9 +2800,8 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     child_driver_factory: Some(Arc::new(child_factory)),
                 };
 
-                let driver = ApiAgentDriver::new(completer, ctx.strongest_model)
+                let driver = ApiAgentDriver::new(completer, ctx.strongest_model, ctx.worktree)
                     .with_rule_subset(rule_subset)
-                    .with_worktree(ctx.worktree.to_path_buf())
                     // ORCHESTRATOR-ONLY: only the lead is ever built here.
                     .as_orchestrator(true)
                     .with_orchestrator_config(orch_config)
@@ -2824,16 +2837,18 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         child_driver_factory: Some(Arc::new(child_factory)),
                     };
 
-                    let driver =
-                        ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), ctx.strongest_model)
-                            .with_rule_subset(rule_subset)
-                            .with_worktree(ctx.worktree.to_path_buf())
-                            .with_shape(ApiShape::Anthropic)
-                            .with_anthropic_api_key(key)
-                            // ORCHESTRATOR-ONLY: only the lead is ever built here.
-                            .as_orchestrator(true)
-                            .with_orchestrator_config(orch_config)
-                            .with_run_ledger(ledger);
+                    let driver = ApiAgentDriver::new(
+                        Arc::new(AnthropicNoopCompleter),
+                        ctx.strongest_model,
+                        ctx.worktree,
+                    )
+                    .with_rule_subset(rule_subset)
+                    .with_shape(ApiShape::Anthropic)
+                    .with_anthropic_api_key(key)
+                    // ORCHESTRATOR-ONLY: only the lead is ever built here.
+                    .as_orchestrator(true)
+                    .with_orchestrator_config(orch_config)
+                    .with_run_ledger(ledger);
                     return Ok(Box::new(driver));
                 }
 
@@ -3119,12 +3134,10 @@ mod tests {
         role: &Role,
         wt: Option<PathBuf>,
     ) -> ApiAgentDriver {
-        let mut d =
-            ApiAgentDriver::new(completer, "stub-model").with_rule_subset(role.rule_subset.clone());
-        if let Some(w) = wt {
-            d = d.with_worktree(w);
-        }
-        d
+        // A worktree is required; a test that needs none gets one that does not exist (every
+        // read is then refused and every write denied).
+        let wt = wt.unwrap_or_else(|| PathBuf::from("/nonexistent/camerata-test-worktree"));
+        ApiAgentDriver::new(completer, "stub-model", wt).with_rule_subset(role.rule_subset.clone())
     }
 
     #[test]
@@ -3374,8 +3387,7 @@ mod tests {
         let role = test_role();
         let driver = ApiAgentDriver::new(
             Arc::new(StubCompleter("x".into())),
-            "stub",
-        )
+            "stub", PathBuf::from("/nonexistent/camerata-test-worktree"))
         .with_rule_subset(role.rule_subset.clone())
         // orchestrator = false (default)
         ;
@@ -3398,8 +3410,12 @@ mod tests {
     #[tokio::test]
     async fn invariant_fan_out_rejected_for_non_orchestrator_execution() {
         let role = test_role();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone());
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone());
 
         let inv = ToolInvocation {
             id: "fo1".to_string(),
@@ -3445,8 +3461,12 @@ mod tests {
     #[tokio::test]
     async fn invariant_task_tool_rejected_at_execution() {
         let role = test_role();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone());
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone());
 
         for bad_tool in ["Task", "shell", "Bash", "Write", "Edit"] {
             let inv = ToolInvocation {
@@ -3798,7 +3818,7 @@ mod tests {
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
-            None,
+            Some(PathBuf::from("/tmp/wt")),
             false,
             limiter,
             None,                            // run_session_id
@@ -3832,7 +3852,7 @@ mod tests {
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
-            None,
+            Some(PathBuf::from("/tmp/wt")),
             false,
             limiter,
             None,                            // run_session_id
@@ -3861,6 +3881,7 @@ mod tests {
         let driver = ApiAgentDriver::new(
             Arc::new(StubCompleter("All done!".to_string())),
             "stub-model",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
         )
         .with_rule_subset(role.rule_subset.clone());
 
@@ -3884,9 +3905,8 @@ mod tests {
         ));
 
         let role = all_rules_role();
-        let driver = ApiAgentDriver::new(completer, "stub-model")
-            .with_rule_subset(role.rule_subset.clone())
-            .with_worktree(wt.clone());
+        let driver = ApiAgentDriver::new(completer, "stub-model", wt.clone())
+            .with_rule_subset(role.rule_subset.clone());
 
         let outcome = driver.run(&role, "write the hello function").await.unwrap();
         assert_eq!(outcome.result, "Done! I wrote src/lib.rs.");
@@ -3917,9 +3937,8 @@ mod tests {
         ));
 
         let role = all_rules_role();
-        let driver = ApiAgentDriver::new(completer, "stub-model")
-            .with_rule_subset(role.rule_subset.clone())
-            .with_worktree(wt.clone());
+        let driver = ApiAgentDriver::new(completer, "stub-model", wt.clone())
+            .with_rule_subset(role.rule_subset.clone());
 
         let outcome = driver.run(&role, "write to forbidden").await.unwrap();
         assert!(!outcome.denials.is_empty(), "denial must be recorded");
@@ -4002,9 +4021,9 @@ mod tests {
                 calls: Default::default(),
             }),
             "stub-model",
+            tmp.path().to_path_buf(),
         )
-        .with_rule_subset(role.rule_subset.clone())
-        .with_worktree(tmp.path().to_path_buf());
+        .with_rule_subset(role.rule_subset.clone());
 
         let outcome = driver
             .run(&role, "write something")
@@ -4052,9 +4071,8 @@ mod tests {
         ));
 
         let role = all_rules_role();
-        let driver = ApiAgentDriver::new(completer, "stub-model")
+        let driver = ApiAgentDriver::new(completer, "stub-model", wt.clone())
             .with_rule_subset(role.rule_subset.clone())
-            .with_worktree(wt.clone())
             .with_governance(log.clone(), "run-deny-gov-1");
 
         let outcome = driver.run(&role, "write to forbidden").await.unwrap();
@@ -4118,9 +4136,8 @@ mod tests {
         ));
 
         let role = all_rules_role();
-        let driver = ApiAgentDriver::new(completer, "stub-model")
+        let driver = ApiAgentDriver::new(completer, "stub-model", wt.clone())
             .with_rule_subset(role.rule_subset.clone())
-            .with_worktree(wt.clone())
             .with_governance(log.clone(), "run-allow-gov-1");
 
         let outcome = driver.run(&role, "write the hello function").await.unwrap();
@@ -4162,7 +4179,11 @@ mod tests {
         let expected_session = or_completer.session_id_for_agent();
         assert_eq!(expected_session, "my-story-id-123");
 
-        let driver = ApiAgentDriver::new(Arc::new(or_completer), "openrouter/model");
+        let driver = ApiAgentDriver::new(
+            Arc::new(or_completer),
+            "openrouter/model",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        );
         // session_id must be inherited (non-empty, matches what the completer reports).
         assert_eq!(
             driver.session_id, "my-story-id-123",
@@ -4173,14 +4194,21 @@ mod tests {
     /// Non-OR completers (stubs) generate a per-instance session token (non-empty).
     #[test]
     fn driver_generates_session_id_for_non_or_completer() {
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        );
         assert!(
             !driver.session_id.is_empty(),
             "session_id must be non-empty even for non-OR completers"
         );
         // Two distinct drivers must get different session ids (no collision).
-        let driver2 =
-            ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
+        let driver2 = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        );
         assert_ne!(
             driver.session_id, driver2.session_id,
             "two drivers must have distinct session ids"
@@ -4223,8 +4251,11 @@ mod tests {
     /// `bust_cache_on_next_call` sets `bust_cache = true` on the driver.
     #[test]
     fn bust_cache_flag_is_settable() {
-        let mut driver =
-            ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
+        let mut driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        );
         assert!(!driver.bust_cache, "bust_cache must start false");
         driver.bust_cache_on_next_call();
         assert!(driver.bust_cache, "bust_cache must be true after call");
@@ -4249,7 +4280,7 @@ mod tests {
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
-            None,
+            Some(PathBuf::from("/tmp/wt")),
             false,
             limiter,
             Some("uow-story-id-42"),         // run_session_id
@@ -4447,9 +4478,13 @@ mod tests {
     #[tokio::test]
     async fn native_delegate_without_config_is_honest_no_spawn() {
         let role = test_role();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone())
-            .as_orchestrator(true); // orchestrator, but no config attached
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        .as_orchestrator(true); // orchestrator, but no config attached
         let inv = ToolInvocation {
             id: "d".into(),
             name: "delegate".into(),
@@ -4471,10 +4506,14 @@ mod tests {
         let role = test_role();
         let mut cfg = orchestrator_config_with_server_factory();
         cfg.depth = 1; // == max_depth: depth guard must trip in run_delegated
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone())
-            .as_orchestrator(true)
-            .with_orchestrator_config(cfg);
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        .as_orchestrator(true)
+        .with_orchestrator_config(cfg);
         let inv = ToolInvocation {
             id: "d".into(),
             name: "delegate".into(),
@@ -4493,10 +4532,14 @@ mod tests {
     async fn native_fan_out_routes_through_gated_primitive_duplicate_repo() {
         let role = test_role();
         let cfg = orchestrator_config_with_server_factory();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone())
-            .as_orchestrator(true)
-            .with_orchestrator_config(cfg);
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        .as_orchestrator(true)
+        .with_orchestrator_config(cfg);
         let inv = ToolInvocation {
             id: "fo".into(),
             name: "fan_out".into(),
@@ -4518,10 +4561,14 @@ mod tests {
     async fn worker_with_config_still_denies_delegate() {
         let role = test_role();
         let cfg = orchestrator_config_with_server_factory();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone())
-            // orchestrator = false (worker) even though a config is attached
-            .with_orchestrator_config(cfg);
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        // orchestrator = false (worker) even though a config is attached
+        .with_orchestrator_config(cfg);
         assert!(!driver.orchestrator);
         let inv = ToolInvocation {
             id: "d".into(),
@@ -4880,7 +4927,11 @@ mod tests {
 
     #[test]
     fn default_shape_is_openrouter_back_compat() {
-        let d = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "m");
+        let d = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "m",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        );
         assert_eq!(
             d.shape,
             ApiShape::OpenRouter,
@@ -4891,17 +4942,25 @@ mod tests {
 
     #[test]
     fn with_shape_and_key_set_anthropic_fields() {
-        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-5")
-            .with_shape(ApiShape::Anthropic)
-            .with_anthropic_api_key("sk-ant-test");
+        let d = ApiAgentDriver::new(
+            Arc::new(AnthropicNoopCompleter),
+            "claude-opus-5",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        )
+        .with_shape(ApiShape::Anthropic)
+        .with_anthropic_api_key("sk-ant-test");
         assert_eq!(d.shape, ApiShape::Anthropic);
         assert_eq!(d.anthropic_api_key.as_deref(), Some("sk-ant-test"));
     }
 
     #[test]
     fn empty_anthropic_key_is_noop() {
-        let d =
-            ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "m").with_anthropic_api_key("");
+        let d = ApiAgentDriver::new(
+            Arc::new(AnthropicNoopCompleter),
+            "m",
+            PathBuf::from("/nonexistent/camerata-test-worktree"),
+        )
+        .with_anthropic_api_key("");
         assert!(
             d.anthropic_api_key.is_none(),
             "empty key must not be stored"
@@ -5021,7 +5080,7 @@ mod tests {
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
-            None,
+            Some(PathBuf::from("/tmp/wt")),
             false,
             limiter,
             None,
@@ -5109,19 +5168,23 @@ mod tests {
         // An Anthropic-shape worker (what build_claude_driver builds for a Claude tier under
         // backend=api) must be orchestrator=false (no delegate/fan_out), jailed to a
         // worktree, and its (Anthropic-format) tool schemas must be gated_write + reads only.
-        let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-5")
-            .with_rule_subset(vec![gov1_rule()])
-            .with_worktree(PathBuf::from("/tmp/wt"))
-            .with_shape(ApiShape::Anthropic)
-            .with_anthropic_api_key("sk-ant-test");
+        let driver = ApiAgentDriver::new(
+            Arc::new(AnthropicNoopCompleter),
+            "claude-opus-5",
+            PathBuf::from("/tmp/wt"),
+        )
+        .with_rule_subset(vec![gov1_rule()])
+        .with_shape(ApiShape::Anthropic)
+        .with_anthropic_api_key("sk-ant-test");
         // orchestrator=false (default) → workers can never delegate/fan_out.
         assert!(
             !driver.orchestrator,
             "Anthropic worker must be orchestrator=false"
         );
-        assert!(
-            driver.worktree.is_some(),
-            "Anthropic worker must be jailed to a worktree"
+        assert_eq!(
+            driver.worktree(),
+            std::path::Path::new("/tmp/wt"),
+            "Anthropic worker must be jailed to its worktree"
         );
 
         // delegate/fan_out absent from the Anthropic worker's schemas; gated_write present.
@@ -5165,3 +5228,6 @@ mod read_log_tests;
 
 #[cfg(test)]
 mod spend_limit_tests;
+
+#[cfg(test)]
+mod worktree_required_tests;
