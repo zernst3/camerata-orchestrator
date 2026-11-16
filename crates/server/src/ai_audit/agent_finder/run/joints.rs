@@ -202,8 +202,8 @@ pub(super) fn report_of(
 ) -> JointsReport {
     let repo = shared.repo;
     let all_files: Vec<String> = shared.files.iter().map(|(p, _)| p.clone()).collect();
-    let outputs = merged_outputs(&runs);
-    let mut out = reply::parse_outputs(&outputs, &all_files);
+    let (outputs, joined_files) = merged_outputs(&runs);
+    let mut out = reply::parse_outputs_joined(&outputs, &all_files, &joined_files);
     let mut report = JointsReport {
         usage: runs.iter().flat_map(|r| r.usage.iter().cloned()).collect(),
         ..JointsReport::default()

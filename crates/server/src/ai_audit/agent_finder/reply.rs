@@ -117,7 +117,7 @@ fn problems_file_number(name: &str) -> Option<u64> {
 /// Whether `name` is a stray problems file name (`problems_2.json`, `problems.json`) whose `text`
 /// parses as a problems list. The agent has no delete tool, so a stray file it already wrote could
 /// never be repaired; one that holds a usable list is read as a problems file.
-fn stray_problems_list(name: &str, text: &str) -> bool {
+fn stray_problems_list(name: &str, text: &str, cap: usize) -> bool {
     if !(name.starts_with("problems") && name.ends_with(".json")) {
         return false;
     }
@@ -127,7 +127,7 @@ fn stray_problems_list(name: &str, text: &str) -> bool {
     let Ok(items) = array_of(&value, "problems") else {
         return false;
     };
-    items.len() <= MAX_PROBLEMS_PER_FILE && items.iter().all(|item| parse_problem(item).is_ok())
+    items.len() <= cap && items.iter().all(|item| parse_problem(item).is_ok())
 }
 
 fn field<'a>(v: &'a serde_json::Value, name: &str) -> Result<&'a serde_json::Value, String> {
@@ -365,6 +365,17 @@ fn parse_unread(v: &serde_json::Value) -> Result<Vec<String>, String> {
 /// other file is moved to the leads. A file that cannot be used is listed with the reason (the
 /// caller gives the agent one repair turn); its entries are not used.
 pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String]) -> PieceOutput {
+    parse_outputs_joined(outputs, piece_files, &HashSet::new())
+}
+
+/// [`parse_outputs`] where the files named in `joined` hold the engine's own joined text (a base
+/// plus a later rewrite): those are not held to [`MAX_PROBLEMS_PER_FILE`], which limits what the
+/// agent writes in one go, not what the engine puts together from several steps.
+pub fn parse_outputs_joined(
+    outputs: &BTreeMap<String, String>,
+    piece_files: &[String],
+    joined: &HashSet<String>,
+) -> PieceOutput {
     let mut out = PieceOutput::default();
     let in_piece: HashSet<String> = piece_files.iter().map(|p| plain_path(p)).collect();
     let mut named: Vec<(&String, &str)> = outputs.keys().map(|k| (k, file_name(k))).collect();
@@ -381,7 +392,12 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
             file: key.clone(),
             reason,
         };
-        if problems_file_number(name).is_some() || stray_problems_list(name, text) {
+        let cap = if joined.contains(key) {
+            usize::MAX
+        } else {
+            MAX_PROBLEMS_PER_FILE
+        };
+        if problems_file_number(name).is_some() || stray_problems_list(name, text, cap) {
             out.problems_files += 1;
             let value: serde_json::Value = match serde_json::from_str(text) {
                 Ok(v) => v,
@@ -398,7 +414,7 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
                     continue;
                 }
             };
-            if items.len() > MAX_PROBLEMS_PER_FILE {
+            if items.len() > cap {
                 out.unusable.push(unusable(format!(
                     "holds {} problems; at most {MAX_PROBLEMS_PER_FILE} to a file",
                     items.len()

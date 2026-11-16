@@ -349,7 +349,7 @@ async fn a_problem_number_reused_at_a_different_place_is_a_repair_turn_then_a_fa
         agent
             .messages()
             .iter()
-            .any(|m| m.contains("problems-1.json") && m.contains("used twice")),
+            .any(|m| m.contains("problems-1.json") && m.contains("earlier step")),
         "a repair turn names the file: {:?}",
         agent.messages()
     );

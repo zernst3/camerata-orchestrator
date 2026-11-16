@@ -96,9 +96,10 @@ fn is_known_output(file: &str) -> bool {
     name == "checklist.json"
         || name == "leads.json"
         || name == "unread.json"
-        // Any file named like a problems file is one the agent meant as such, so a stray name
-        // (`problems_2.json`, `problems-2a.json`) is repaired and then a failed part.
-        || name.starts_with("problems")
+        // Any `problems*.json` is one the agent meant as a problems file, so a stray name
+        // (`problems_2.json`, `problems-2a.json`) is repaired and then a failed part. A
+        // `problems.md` or `problems-notes.txt` is not a problems output.
+        || (name.starts_with("problems") && name.ends_with(".json"))
 }
 
 /// A file named like a problems file (a stray name too: the reader takes one that parses as a
@@ -108,10 +109,18 @@ fn is_problems_file(key: &str) -> bool {
     name.starts_with("problems") && name.ends_with(".json")
 }
 
-/// Whether `text` is a problems file the reader accepts.
-fn problems_text_is_usable(key: &str, text: &str) -> bool {
+/// Whether `text` is a problems file the reader accepts. `joined` is true for the engine's own
+/// joined text, which is not held to the per-file cap.
+fn problems_text_is_usable(key: &str, text: &str, joined: bool) -> bool {
     let one: BTreeMap<String, String> = [(key.to_string(), text.to_string())].into();
-    reply::parse_outputs(&one, &[]).unusable.is_empty()
+    let exempt: HashSet<String> = if joined {
+        [key.to_string()].into()
+    } else {
+        HashSet::new()
+    };
+    reply::parse_outputs_joined(&one, &[], &exempt)
+        .unusable
+        .is_empty()
 }
 
 /// The items of a problems file's text (a list, or an object holding `problems`).
@@ -131,35 +140,79 @@ fn item_place(item: &serde_json::Value) -> (Option<String>, Option<u64>) {
     (
         item.get("path")
             .and_then(serde_json::Value::as_str)
-            .map(|p| p.trim().to_string()),
+            .map(|p| p.trim().trim_start_matches("./").to_string()),
         item.get("line").and_then(serde_json::Value::as_u64),
     )
+}
+
+/// A problem number an earlier step used at one place that a later step used again at another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Clash {
+    /// The problems file both versions are of.
+    pub file: String,
+    pub n: u64,
+    /// Where the earlier step put the problem.
+    pub path: String,
+    pub line: Option<u64>,
 }
 
 /// Join a later version of a problems file onto an earlier one. A number only the earlier version
 /// holds stays. A number both hold at the same path and line is a correction: the later wins. A
 /// number both hold at a different place is a clash: both stay in the text, which the reader then
-/// refuses ("problem number used twice") so the agent is asked to write the file again. `None`
-/// when either version cannot be used (the later one then simply replaces the earlier).
-fn join_problem_versions(key: &str, earlier: &str, later: &str) -> Option<String> {
-    if !problems_text_is_usable(key, earlier) || !problems_text_is_usable(key, later) {
+/// refuses ("problem number used twice") so the agent is asked to write the file again; the
+/// clashes are returned with the earlier place. `None` when either version cannot be used (the
+/// later one then simply replaces the earlier). `earlier_joined` is true when the earlier version
+/// is itself the engine's joined text.
+fn join_problem_versions(
+    key: &str,
+    earlier: &str,
+    earlier_joined: bool,
+    later: &str,
+) -> Option<(String, Vec<Clash>)> {
+    if !problems_text_is_usable(key, earlier, earlier_joined)
+        || !problems_text_is_usable(key, later, false)
+    {
         return None;
     }
     let later_items = problem_items(later)?;
-    let mut joined: Vec<serde_json::Value> = problem_items(earlier)?
-        .into_iter()
-        .filter(|old| {
-            let Some(n) = item_number(old) else {
-                return false;
-            };
-            // Dropped only when the later version corrects it, at the same place.
-            !later_items
-                .iter()
-                .any(|new| item_number(new) == Some(n) && item_place(new) == item_place(old))
-        })
-        .collect();
+    let mut clashes = Vec::new();
+    let mut joined: Vec<serde_json::Value> = Vec::new();
+    for old in problem_items(earlier)? {
+        let Some(n) = item_number(&old) else {
+            continue;
+        };
+        let reused = later_items
+            .iter()
+            .filter(|new| item_number(new) == Some(n))
+            .collect::<Vec<_>>();
+        // Dropped only when the later version corrects it, at the same place.
+        if reused.iter().any(|new| item_place(new) == item_place(&old)) {
+            continue;
+        }
+        if !reused.is_empty() {
+            let (path, line) = item_place(&old);
+            clashes.push(Clash {
+                file: key.to_string(),
+                n,
+                path: path.unwrap_or_default(),
+                line,
+            });
+        }
+        joined.push(old);
+    }
     joined.extend(later_items);
-    Some(serde_json::Value::Array(joined).to_string())
+    Some((serde_json::Value::Array(joined).to_string(), clashes))
+}
+
+/// What joining the outputs of every run gave.
+struct Joined {
+    outputs: BTreeMap<String, String>,
+    /// The problems files where a later version joined onto a base that held a problem the later
+    /// version did not (those problems were kept), in path order.
+    kept: Vec<String>,
+    /// The problems files whose text is the engine's own join (exempt from the per-file cap).
+    joined: HashSet<String>,
+    clashes: Vec<Clash>,
 }
 
 /// The outputs of every run joined, and the problems files whose earlier problems were kept.
@@ -169,26 +222,34 @@ fn join_problem_versions(key: &str, earlier: &str, later: &str) -> Option<String
 /// (see [`join_problem_versions`]), so a step that wrote broken text in between does not lose the
 /// problems the base held. A later version that is not usable is the file's text as it stands
 /// (the reader refuses it, and the agent is asked to write it again), but it never becomes the
-/// base. The second value lists, in path order, the problems files where a later version joined
-/// onto a base that held a problem the later version did not (those problems were kept).
-fn join_outputs(runs: &[AgentRun]) -> (BTreeMap<String, String>, Vec<String>) {
-    let mut out: BTreeMap<String, String> = BTreeMap::new();
+/// base.
+fn join_outputs(runs: &[AgentRun]) -> Joined {
+    let mut result = Joined {
+        outputs: BTreeMap::new(),
+        kept: Vec::new(),
+        joined: HashSet::new(),
+        clashes: Vec::new(),
+    };
     let mut base: BTreeMap<String, String> = BTreeMap::new();
-    let mut kept: Vec<String> = Vec::new();
     for run in runs {
         for (k, v) in &run.outputs {
-            if !is_problems_file(k) || !problems_text_is_usable(k, v) {
-                out.insert(k.clone(), v.clone());
+            if !is_problems_file(k) || !problems_text_is_usable(k, v, false) {
+                result.joined.remove(k);
+                result.outputs.insert(k.clone(), v.clone());
                 continue;
             }
             let Some(earlier) = base.get(k) else {
                 base.insert(k.clone(), v.clone());
-                out.insert(k.clone(), v.clone());
+                result.joined.remove(k);
+                result.outputs.insert(k.clone(), v.clone());
                 continue;
             };
-            let Some(joined) = join_problem_versions(k, earlier, v) else {
+            let earlier_joined =
+                result.joined.contains(k) && result.outputs.get(k) == Some(earlier);
+            let Some((text, clashes)) = join_problem_versions(k, earlier, earlier_joined, v) else {
                 base.insert(k.clone(), v.clone());
-                out.insert(k.clone(), v.clone());
+                result.joined.remove(k);
+                result.outputs.insert(k.clone(), v.clone());
                 continue;
             };
             let later_numbers: HashSet<u64> = problem_items(v)
@@ -201,29 +262,38 @@ fn join_outputs(runs: &[AgentRun]) -> (BTreeMap<String, String>, Vec<String>) {
                 .iter()
                 .filter_map(item_number)
                 .any(|n| !later_numbers.contains(&n));
-            if held_only_earlier && !kept.contains(k) {
-                kept.push(k.clone());
+            if held_only_earlier && !result.kept.contains(k) {
+                result.kept.push(k.clone());
             }
-            if problems_text_is_usable(k, &joined) {
-                base.insert(k.clone(), joined.clone());
+            result.clashes.retain(|c| &c.file != k);
+            result.clashes.extend(clashes);
+            result.joined.insert(k.clone());
+            if problems_text_is_usable(k, &text, true) {
+                base.insert(k.clone(), text.clone());
             }
-            out.insert(k.clone(), joined);
+            result.outputs.insert(k.clone(), text);
         }
     }
-    kept.sort();
-    (out, kept)
+    result.kept.sort();
+    result
 }
 
 /// The problems files a later step wrote again where the problems only an earlier version held
 /// were kept, in path order.
 pub(super) fn rewritten_problem_files(runs: &[AgentRun]) -> Vec<String> {
-    join_outputs(runs).1
+    join_outputs(runs).kept
 }
 
 /// The outputs of every run, later runs replacing earlier ones that wrote the same file (a
-/// problems file is joined, not replaced).
-pub(super) fn merged_outputs(runs: &[AgentRun]) -> BTreeMap<String, String> {
-    join_outputs(runs).0
+/// problems file is joined, not replaced), and the files whose text is the engine's own join.
+pub(super) fn merged_outputs(runs: &[AgentRun]) -> (BTreeMap<String, String>, HashSet<String>) {
+    let joined = join_outputs(runs);
+    (joined.outputs, joined.joined)
+}
+
+/// The number clashes between steps, see [`Clash`].
+fn number_clashes(runs: &[AgentRun]) -> Vec<Clash> {
+    join_outputs(runs).clashes
 }
 
 /// The checklist answers of every run joined: an answer a later run gives for a rule replaces the
@@ -270,6 +340,8 @@ pub(super) struct View {
     /// Unread piece files the room can serve again.
     pub unread_sendable: Vec<String>,
     pub citations: Vec<Citation>,
+    /// Problem numbers an earlier step used that a later step used again at another place.
+    pub clashes: Vec<Clash>,
 }
 
 impl View {
@@ -290,8 +362,8 @@ pub(super) fn interpret(
     piece: &Piece,
     runs: &[AgentRun],
 ) -> View {
-    let outputs = merged_outputs(runs);
-    let mut output = reply::parse_outputs(&outputs, room.piece_files());
+    let (outputs, joined_files) = merged_outputs(runs);
+    let mut output = reply::parse_outputs_joined(&outputs, room.piece_files(), &joined_files);
     let (known_unusable, stray): (Vec<Unusable>, Vec<Unusable>) =
         std::mem::take(&mut output.unusable)
             .into_iter()
@@ -356,6 +428,7 @@ pub(super) fn interpret(
         coverage,
         unread_sendable,
         citations,
+        clashes: number_clashes(runs),
     }
 }
 
@@ -364,7 +437,21 @@ fn repair_message(view: &View) -> String {
         "Some of your output files could not be used. Write each one again in full.\n",
     );
     for u in &view.known_unusable {
-        text.push_str(&format!("- {} {}\n", u.file, u.reason));
+        let clashes: Vec<&Clash> = view.clashes.iter().filter(|c| c.file == u.file).collect();
+        if clashes.is_empty() {
+            text.push_str(&format!("- {} {}\n", u.file, u.reason));
+            continue;
+        }
+        for c in clashes {
+            let at = c
+                .line
+                .map_or_else(|| c.path.clone(), |l| format!("{}:{l}", c.path));
+            text.push_str(&format!(
+                "- {}: an earlier step used problem number {} at {at}; keep that problem as it \
+                 was and renumber the new one, then write the file again in full.\n",
+                u.file, c.n
+            ));
+        }
     }
     if view.output.problems_files == 0 {
         text.push_str(
