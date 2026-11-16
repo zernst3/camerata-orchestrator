@@ -274,6 +274,7 @@ impl Default for RuleRecommendation {
     }
 }
 
+pub mod agent_finder;
 mod failures;
 pub(crate) use failures::*;
 mod usage_meter;
