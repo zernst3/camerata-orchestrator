@@ -216,3 +216,121 @@ pub fn places_for(tree: Option<&ReviewTree>, findings: &[Finding]) -> Vec<PlaceN
         tree.places.clone()
     }
 }
+
+// ── The one place rule for counting (single counts, work order A) ─────────────────────────
+
+/// What a row must tell the place rule: where it is, how bad, and which bucket it is in. The
+/// workbook's rows and the PDF's matrix refs both implement it, so one function groups both.
+pub trait PlaceRow {
+    fn place_repo(&self) -> &str;
+    fn place_path(&self) -> &str;
+    fn place_line(&self) -> usize;
+    fn place_severity(&self) -> &str;
+    /// `"do_now"` | `"do_next"` | `"plan"` | `"accepted"` | `"informational"` | `"held"`.
+    fn place_bucket(&self) -> &str;
+}
+
+/// The fix order a place is recommended in: the earliest of its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FixOrder {
+    First,
+    Next,
+    Later,
+}
+
+/// The one class of a place. The order of the variants is the FAIL CLOSED precedence: a place with
+/// any held row needs a decision whatever else is there, then a place with any row to act on is
+/// for action, then information only, and a place whose every row is accepted is accepted risk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceClass {
+    NeedsDecision,
+    ForAction(FixOrder),
+    InformationOnly,
+    AcceptedRisk,
+}
+
+/// One place: the row that heads it, every row at it (the head first) and its class.
+#[derive(Debug)]
+pub struct Place<'a, T> {
+    pub head: &'a T,
+    pub members: Vec<&'a T>,
+    pub class: PlaceClass,
+}
+
+fn severity_order(sev: &str) -> u8 {
+    camerata_rules::severity_bounds::severity_rank(sev)
+}
+
+/// The class of one row's bucket. An unknown bucket needs a decision: a row the rule does not
+/// know is never counted as settled.
+fn class_of_bucket(bucket: &str) -> PlaceClass {
+    match bucket {
+        "do_now" => PlaceClass::ForAction(FixOrder::First),
+        "do_next" => PlaceClass::ForAction(FixOrder::Next),
+        "plan" => PlaceClass::ForAction(FixOrder::Later),
+        "informational" => PlaceClass::InformationOnly,
+        "accepted" => PlaceClass::AcceptedRisk,
+        _ => PlaceClass::NeedsDecision,
+    }
+}
+
+fn precedence(c: PlaceClass) -> (u8, u8) {
+    match c {
+        PlaceClass::NeedsDecision => (0, 0),
+        PlaceClass::ForAction(FixOrder::First) => (1, 0),
+        PlaceClass::ForAction(FixOrder::Next) => (1, 1),
+        PlaceClass::ForAction(FixOrder::Later) => (1, 2),
+        PlaceClass::InformationOnly => (2, 0),
+        PlaceClass::AcceptedRisk => (3, 0),
+    }
+}
+
+/// The class of a place from the buckets of all its rows (fail closed, see [`PlaceClass`]).
+pub fn class_of_place<'b>(buckets: impl IntoIterator<Item = &'b str>) -> PlaceClass {
+    buckets
+        .into_iter()
+        .map(class_of_bucket)
+        .min_by_key(|c| precedence(*c))
+        .unwrap_or(PlaceClass::NeedsDecision)
+}
+
+/// THE place rule: one place for each (repo, path, line) of the problem rows given, in the order
+/// the places first appear. The head is the row with the worst severity, the first of them on a
+/// tie. The caller passes problem rows only (it knows what a problem is: a defect or a departure
+/// that is not ruled out); this function never drops a row.
+pub fn places_of<'a, T: PlaceRow>(rows: impl IntoIterator<Item = &'a T>) -> Vec<Place<'a, T>> {
+    let mut order: Vec<(&'a str, &'a str, usize)> = Vec::new();
+    let mut at: std::collections::HashMap<(&'a str, &'a str, usize), Vec<&'a T>> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let key = (r.place_repo(), r.place_path(), r.place_line());
+        at.entry(key)
+            .or_insert_with(|| {
+                order.push(key);
+                Vec::new()
+            })
+            .push(r);
+    }
+    order
+        .into_iter()
+        .filter_map(|k| at.remove(&k))
+        .map(|mut members| {
+            let mut best = 0;
+            for (i, m) in members.iter().enumerate() {
+                if severity_order(m.place_severity())
+                    < severity_order(members[best].place_severity())
+                {
+                    best = i;
+                }
+            }
+            let head = members.remove(best);
+            members.insert(0, head);
+            let class = class_of_place(members.iter().map(|m| m.place_bucket()));
+            Place {
+                head,
+                members,
+                class,
+            }
+        })
+        .collect()
+}

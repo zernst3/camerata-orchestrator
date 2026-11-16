@@ -733,11 +733,13 @@ pub(crate) fn clamp_deviation_severity(
 
 mod citations_fixes;
 mod classification;
+pub mod counts;
 mod json_types;
 mod marking;
 
 pub use citations_fixes::*;
 pub use classification::*;
+pub use counts::{report_counts, ReportCounts};
 pub use json_types::*;
 pub use marking::*;
 
@@ -766,6 +768,19 @@ pub fn build_report_json(
     reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
+) -> AuditReportJson {
+    let counts = report_counts(reviewed, corpus, opts);
+    build_report_json_with_counts(reviewed, corpus, opts, &counts)
+}
+
+/// [`build_report_json`] with the package's counts worked out once by the caller
+/// (`build_product_package_with_stem`) and passed by reference; they are serialised whole as
+/// `counts` beside the old fields.
+pub fn build_report_json_with_counts(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    opts: &ReportOptions,
+    counts: &ReportCounts,
 ) -> AuditReportJson {
     // The PDF's data is built from the reviewed report and nothing else (design 3B): the rows
     // with the reviewer's overlay applied, and the reviewer's decisions.
@@ -2072,6 +2087,7 @@ pub fn build_report_json(
     let other_fixes = other_fixes_of(&sub_group_patterns, &escalated_items, escalation_cap);
 
     AuditReportJson {
+        counts: counts.clone(),
         internal: opts.internal,
         site_total,
         words: PdfWordsJson::new(),
@@ -2567,6 +2583,9 @@ pub use overlay::{
     summary_fingerprint, AppliedEdit, MergeNote, ReviewedReport, StaleEditNote, SupersededNote,
 };
 pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFactsIndex};
+
+#[cfg(test)]
+mod counts_tests;
 
 #[cfg(test)]
 mod coverage_gaps_tests;

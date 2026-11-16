@@ -1698,9 +1698,9 @@ pub(super) fn code_volume_label(report: &crate::onboard::ScanReport) -> Option<S
 /// completed), the first row there. The scorecard, the PDF cover and the All problems sheet count
 /// these and no others, so the three agree by construction.
 pub(super) fn problem_heads<'a>(rows: impl Iterator<Item = &'a FindingRow>) -> Vec<&'a FindingRow> {
-    let mut seen: std::collections::HashSet<(&str, &str, usize)> = std::collections::HashSet::new();
-    rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings)
-        .filter(|r| seen.insert((r.repo.as_str(), r.path.as_str(), r.line)))
+    crate::review_tree::places_of(rows.filter(|r| !r.is_fp && kind_sheet(r) == KindSheet::Findings))
+        .into_iter()
+        .map(|p| p.head)
         .collect()
 }
 

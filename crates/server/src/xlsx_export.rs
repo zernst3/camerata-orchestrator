@@ -1154,6 +1154,111 @@ enum KindSheet {
     Coverage,
 }
 
+impl crate::review_tree::PlaceRow for FindingRow {
+    fn place_repo(&self) -> &str {
+        &self.repo
+    }
+    fn place_path(&self) -> &str {
+        &self.path
+    }
+    fn place_line(&self) -> usize {
+        self.line
+    }
+    fn place_severity(&self) -> &str {
+        &self.severity
+    }
+    fn place_bucket(&self) -> &str {
+        self.bucket
+    }
+}
+
+/// What kind of row a counted row is, by the sheet it lands on (the same decision as
+/// [`kind_sheet`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CountKind {
+    Problem,
+    Convention,
+    NotChecked,
+}
+
+/// One exported row as the counts object reads it: only what counting needs.
+#[derive(Debug, Clone)]
+pub(crate) struct CountRow {
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub severity: String,
+    pub bucket: &'static str,
+    pub ruled_out: bool,
+    pub kind: CountKind,
+    pub tool_preview: bool,
+    pub escalated: bool,
+    pub rule_id: String,
+}
+
+impl crate::review_tree::PlaceRow for CountRow {
+    fn place_repo(&self) -> &str {
+        &self.repo
+    }
+    fn place_path(&self) -> &str {
+        &self.path
+    }
+    fn place_line(&self) -> usize {
+        self.line
+    }
+    fn place_severity(&self) -> &str {
+        &self.severity
+    }
+    fn place_bucket(&self) -> &str {
+        self.bucket
+    }
+}
+
+/// The rows of one export partition, reduced to what [`crate::report_export::report_counts`]
+/// counts, with the dependency rows and the fixes that still have something to change.
+pub(crate) struct CountingView {
+    pub rows: Vec<CountRow>,
+    pub dependency_rows: usize,
+    /// Fixes with a problem on All problems or an advisory on Dependencies.
+    pub fix_ids_to_do: std::collections::HashSet<String>,
+}
+
+/// The counting view of `reviewed`: ONE partition pass, shared with every other consumer's
+/// definition of a row (`partition_rows_for`).
+pub(crate) fn counting_view(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &HashMap<String, String>,
+    internal: bool,
+) -> CountingView {
+    let (rows, dep_rows) = partition_rows_for(reviewed, corpus, chosen_options, internal);
+    let fix_ids_to_do = sheets::fixes_with_problems(&rows, &dep_rows);
+    let rows = rows
+        .iter()
+        .map(|r| CountRow {
+            repo: r.repo.clone(),
+            path: r.path.clone(),
+            line: r.line,
+            severity: r.severity.clone(),
+            bucket: r.bucket,
+            ruled_out: r.is_fp,
+            kind: match kind_sheet(r) {
+                KindSheet::Findings => CountKind::Problem,
+                KindSheet::Conventions => CountKind::Convention,
+                KindSheet::Coverage => CountKind::NotChecked,
+            },
+            tool_preview: r.provenance.starts_with("Preview:"),
+            escalated: r.facts.escalated,
+            rule_id: r.rule_id.clone(),
+        })
+        .collect();
+    CountingView {
+        rows,
+        dependency_rows: dep_rows.len(),
+        fix_ids_to_do,
+    }
+}
+
 /// The ONE kind→sheet decision, so no sheet writer re-derives it and two of them can never
 /// disagree (which would either duplicate a row or lose it entirely).
 fn kind_sheet(row: &FindingRow) -> KindSheet {
@@ -2177,6 +2282,8 @@ pub(crate) fn sheet_footer(line: &str) -> String {
 pub struct FindingsExport {
     pub provenance: crate::report_export::CoverJson,
     pub summary: crate::report_export::ExecutiveSummaryJson,
+    /// Every count of the package, the object `report_json` carries (worked out once).
+    pub counts: crate::report_export::ReportCounts,
     pub findings: Vec<FindingRow>,
     /// H4: what the scan did not review (failed AI passes, files skipped for size or past the
     /// file cap), by path. Reused verbatim from `report_json.coverage_gaps`, like `provenance`.
@@ -2265,6 +2372,7 @@ pub fn build_findings_export(
         open_beside_ruled_out,
         provenance: report_json.cover.clone(),
         summary: report_json.executive_summary.clone(),
+        counts: report_json.counts.clone(),
         findings,
         coverage: report_json.coverage_gaps.clone(),
         patterns_across_services: report_json.patterns_across_services.clone(),
