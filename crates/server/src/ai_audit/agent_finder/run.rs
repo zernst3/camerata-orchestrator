@@ -22,7 +22,10 @@ use futures::StreamExt;
 use super::checklist;
 use super::coverage::PieceCoverage;
 use super::pieces::{plan_pieces, units_for, TARGET_BYTES};
-use super::reply::{FINDER_PIECE_CAPTURE, FINDER_SURE_CAPTURE};
+use super::reply::{
+    Problem, FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE, FINDER_RULES_CAPTURE,
+    FINDER_SURE_CAPTURE,
+};
 use super::room::Room;
 use super::{Piece, PieceAgent};
 use crate::ai_audit::{FailedPass, FailureClass, RuleRecommendation, UsageMeter};
@@ -443,6 +446,53 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
     }
 }
 
+/// Move each agent problem keyed by a rule with no convention off that rule: to the next rule it
+/// was cited to that has a convention, else to the `AI-` id of its own label. `findings` and
+/// `problems` are in the same order.
+fn rekey_no_convention(
+    findings: &mut [Finding],
+    problems: &[Problem],
+    no_convention: &HashSet<String>,
+    adopted: &HashSet<String>,
+) {
+    if findings.len() != problems.len() {
+        return;
+    }
+    for (f, p) in findings.iter_mut().zip(problems) {
+        if !f.captures.contains_key(FINDER_PROBLEM_CAPTURE)
+            || !no_convention.contains(&f.rule_id.to_ascii_uppercase())
+        {
+            continue;
+        }
+        let next = f
+            .captures
+            .get(FINDER_RULES_CAPTURE)
+            .into_iter()
+            .flat_map(|c| c.split(','))
+            .map(|r| r.trim().to_ascii_uppercase())
+            .find(|r| adopted.contains(r) && !no_convention.contains(r));
+        match next {
+            Some(rule) => {
+                f.also_matches.retain(|r| *r != rule);
+                f.rule_id = rule;
+            }
+            None => {
+                let label = crate::ai_audit::digest_parse::normalize_model_rule_label(&p.label);
+                f.rule_id = format!(
+                    "AI-{}",
+                    if label.is_empty() {
+                        "ARCHITECTURE"
+                    } else {
+                        &label
+                    }
+                );
+            }
+        }
+        f.also_matches
+            .retain(|r| !no_convention.contains(&r.to_ascii_uppercase()));
+    }
+}
+
 /// Find the problems of one repository with the agent finder.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn find_repo(
@@ -526,9 +576,13 @@ pub async fn find_repo(
     let input = joints::gather(&reports);
     let mut joints_findings: Vec<Finding> = Vec::new();
     let mut joints_proposed: Vec<ProposedRule> = Vec::new();
+    let mut joints_problems: Vec<Problem> = Vec::new();
     let unresolved: Vec<Finding>;
     let any_run = reports.iter().any(|r| !r.runs.is_empty());
-    if reports.len() >= 2 && any_run {
+    // The joints call waits while any part failed: the run is incomplete already, the leads
+    // still become problems needing a decision, and the resume pays for the call once.
+    let any_part_failed = !failed.is_empty();
+    if reports.len() >= 2 && any_run && !any_part_failed {
         let key = format!("joints:{}", input.digest());
         let stored = stored_lines
             .get(&key)
@@ -602,6 +656,7 @@ pub async fn find_repo(
                 extras.notes.append(&mut jr.notes);
                 joints_findings = std::mem::take(&mut jr.findings);
                 joints_proposed = std::mem::take(&mut jr.proposed);
+                joints_problems = std::mem::take(&mut jr.problems);
                 unresolved = std::mem::take(&mut jr.unresolved);
                 if !replayed {
                     if clean {
@@ -677,6 +732,31 @@ pub async fn find_repo(
     );
     extras.notes.extend(conv.notes.iter().cloned());
 
+    // A problem cited to a rule with no convention is never thrown out: it moves to the next rule
+    // it was cited to that has one, else to its own label.
+    let no_convention_rules: HashSet<String> = conv
+        .recommendations
+        .iter()
+        .filter(|r| r.no_convention)
+        .map(|r| r.rule_id.to_ascii_uppercase())
+        .collect();
+    if !no_convention_rules.is_empty() {
+        for r in &mut reports {
+            rekey_no_convention(
+                &mut r.findings,
+                &r.problems,
+                &no_convention_rules,
+                &adopted_all,
+            );
+        }
+        rekey_no_convention(
+            &mut joints_findings,
+            &joints_problems,
+            &no_convention_rules,
+            &adopted_all,
+        );
+    }
+
     // Every problem so far, in piece order.
     let mut rows: Vec<Finding> = Vec::new();
     let mut proposed: Vec<ProposedRule> = Vec::new();
@@ -746,7 +826,11 @@ pub async fn find_repo(
     if !no_convention.is_empty() {
         for f in &mut rows {
             let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
-            if no_convention.contains(&bare) && !crate::engine_discard::is_discarded(f) {
+            // An agent problem is never set aside (it was moved off the rule above).
+            if no_convention.contains(&bare)
+                && !f.captures.contains_key(FINDER_PROBLEM_CAPTURE)
+                && !crate::engine_discard::is_discarded(f)
+            {
                 crate::engine_discard::mark(f, crate::engine_discard::NO_CONVENTION);
                 dropped_no_convention += 1;
             }

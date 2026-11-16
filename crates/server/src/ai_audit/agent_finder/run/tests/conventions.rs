@@ -95,7 +95,7 @@ async fn every_place_following_one_good_option_gives_a_convention_followed_row()
 
 #[tokio::test]
 async fn a_split_with_no_two_thirds_majority_gives_one_no_convention_row_and_no_departures() {
-    // Two and two: no option holds two thirds. An agent problem under the rule is set aside.
+    // Two and two: no option holds two thirds. An agent problem under the rule is kept, re-keyed to its label.
     let (rows, _, recs, failed, _, _) = run_layer(script_with(
         json!([
             {"id": "repo", "count": 2, "places": ["src/a.rs:1"]},
@@ -115,8 +115,8 @@ async fn a_split_with_no_two_thirds_majority_gives_one_no_convention_row_and_no_
     let (thrown_out, rows) = crate::engine_discard::split_discarded(rows);
     assert_eq!(
         thrown_out.len(),
-        1,
-        "the stray problem is set aside, not deleted"
+        0,
+        "the problem is kept under its label, never thrown out"
     );
     assert_eq!(recs.len(), 1);
     assert!(recs[0].no_convention);

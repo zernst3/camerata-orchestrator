@@ -800,6 +800,18 @@ pub(super) fn unstarted_report(
             reason: "this part was not reviewed".to_string(),
         });
     }
+    // Nothing was reviewed: every file of the piece is on the record as not reviewed.
+    let mut sorted = piece.files.clone();
+    sorted.sort();
+    report.coverage = Some(PieceCoverage {
+        piece_key: piece.key.clone(),
+        files: sorted
+            .iter()
+            .map(|p| (p.clone(), super::super::coverage::FileState::NotReviewed))
+            .collect(),
+        still_unread: sorted,
+        ..PieceCoverage::default()
+    });
     report
 }
 

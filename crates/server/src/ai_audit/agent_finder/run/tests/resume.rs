@@ -354,3 +354,71 @@ async fn a_piece_that_cannot_start_is_a_failed_part_and_costs_nothing() {
     assert_eq!(failed[0].files.len(), 2);
     assert_eq!(meter.snapshot().calls, 0);
 }
+
+#[tokio::test]
+async fn a_piece_the_spend_limit_refuses_has_a_coverage_record_listing_its_files_as_not_reviewed() {
+    let meter = UsageMeter::with_controls(RunControls {
+        max_cost_usd: Some(0.5),
+        ..RunControls::default()
+    });
+    let agent = ByPiece::new(vec![
+        ("src/a.rs", part("src/a.rs", 6, 3.0)),
+        ("src/b.rs", part("src/b.rs", 4, 3.0)),
+        ("joints", joints_agent()),
+    ]);
+    let (_, _, _, _, _, extras) = go(&agent, &meter).await;
+    let mut ledger = crate::scan_ledger::ScanLedger::default();
+    for rule in ["ARCH-ONE-1", "SEC-TWO-1"] {
+        ledger.record_rule(
+            REPO,
+            rule,
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            2,
+            0,
+        );
+    }
+    extras.note_after_rules(&mut ledger, REPO);
+    let blocks = ledger.finder_coverage();
+    let pieces: Vec<_> = blocks.iter().flat_map(|b| b.pieces.iter()).collect();
+    assert_eq!(pieces.len(), 2, "both pieces have a coverage record");
+    let missing = pieces
+        .iter()
+        .find(|p| p.not_reviewed_files == vec!["src/b.rs".to_string()])
+        .unwrap_or_else(|| panic!("the piece that did not start lists its file: {pieces:?}"));
+    assert_eq!(missing.not_reviewed, 1);
+    assert!(!missing.complete());
+}
+
+fn joints_calls(agent: &ByPiece) -> usize {
+    agent
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|k| *k == "joints")
+        .count()
+}
+
+#[tokio::test]
+async fn no_joints_call_is_paid_while_a_piece_has_a_failed_part_and_the_resume_makes_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let failing = ByPiece::new(vec![
+        ("src/a.rs", part("src/a.rs", 6, 1.0)),
+        (
+            "src/b.rs",
+            part("src/b.rs", 4, 1.0).with_stop(AgentStop::TurnLimit("60 turns".into())),
+        ),
+        ("joints", joints_agent()),
+    ]);
+    let meter = UsageMeter::default();
+    let (_, _, _, failed, _, _) = in_run(dir.path(), go(&failing, &meter)).await;
+    assert!(!failed.is_empty());
+    assert_eq!(joints_calls(&failing), 0, "the run is incomplete already");
+    let resumed = agent_set();
+    let meter2 = UsageMeter::default();
+    let (_, _, _, failed2, _, _) = in_run(dir.path(), go(&resumed, &meter2)).await;
+    assert!(failed2.is_empty(), "{failed2:?}");
+    assert_eq!(joints_calls(&resumed), 1, "the resume runs it once");
+}

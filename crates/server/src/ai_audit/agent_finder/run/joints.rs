@@ -109,6 +109,8 @@ pub(super) struct JointsReport {
     pub proposed: Vec<ProposedRule>,
     /// The problems needing a decision made from leads nothing settled.
     pub unresolved: Vec<Finding>,
+    /// The joints agent's own problems, in the order of `findings`.
+    pub problems: Vec<Problem>,
     pub failures: Vec<FailedPass>,
     pub notes: Vec<String>,
     pub runs: Vec<AgentRun>,
@@ -337,6 +339,7 @@ pub(super) fn report_of(
     let (findings, proposed) = reply::to_findings(repo, "joints", &problems, &cites, adopted);
     report.findings = super::rating::apply_agent_rating(findings, &problems);
     report.proposed = proposed;
+    report.problems = problems;
     report.failures = failures;
     report.runs = runs;
     report
