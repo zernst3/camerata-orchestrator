@@ -46,11 +46,6 @@ pub enum Twin {
     /// A module path in a `require(...)`, `import(...)`, `import '...'` or `from '...'`: the
     /// language reads the literal as a module name.
     ModulePath,
-    /// A canonical UUID on an identifier that ends in `id` (`token_id`, `tokenId`) and is not
-    /// password-like: most likely the id of a domain object that happens to be called token or
-    /// key. The row is NOT removed (the id could still be the credential); the audit holds it
-    /// at low for a reviewer.
-    EntityId,
     /// The ciphertext of a sealed secret: a long base64 value under `encryptedData` in a
     /// `kind: SealedSecret` document. Encrypted for committing, so it is not a credential.
     SealedCiphertext,
@@ -337,44 +332,6 @@ fn ends_with_word(text: &str, word: &str) -> bool {
     })
 }
 
-/// A canonical UUID: 8-4-4-4-12 hexadecimal digits.
-fn is_uuid(value: &str) -> bool {
-    let parts: Vec<&str> = value.split('-').collect();
-    parts.len() == 5
-        && parts
-            .iter()
-            .zip([8, 4, 4, 4, 12])
-            .all(|(part, len)| part.len() == len && part.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
-/// The identifier a context-shaped match starts with (`token_id`, `tokenId`): the leading run of
-/// name characters after any `export` or list dash.
-fn leading_identifier(before_value: &str) -> &str {
-    let trimmed = before_value.trim_start();
-    let trimmed = trimmed
-        .strip_prefix("export")
-        .map_or(trimmed, str::trim_start);
-    let trimmed = trimmed.strip_prefix('-').map_or(trimmed, str::trim_start);
-    let end = trimmed
-        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
-        .unwrap_or(trimmed.len());
-    &trimmed[..end]
-}
-
-/// Whether `identifier` names an id: ends in `_id`, `-id`, `.id` (any case) or a camel-case `Id`
-/// after a lowercase letter or digit (`tokenId`).
-fn names_an_id(identifier: &str) -> bool {
-    let bytes = identifier.as_bytes();
-    let n = bytes.len();
-    if n < 3 {
-        return false;
-    }
-    let tail = &identifier[n - 2..];
-    let before = bytes[n - 3];
-    (tail.eq_ignore_ascii_case("id") && matches!(before, b'_' | b'-' | b'.'))
-        || (tail == "Id" && (before.is_ascii_lowercase() || before.is_ascii_digit()))
-}
-
 fn is_context_shaped(shape: SecretShape) -> bool {
     !shape.is_vendor_shaped()
 }
@@ -527,13 +484,6 @@ pub(crate) fn classify(
     }
     if shape == SecretShape::NamedSecretLiteral && is_block_header_label(value, context) {
         return Some(Twin::BlockHeaderLabel);
-    }
-    if shape == SecretShape::NamedSecretLiteral
-        && !names_a_secret(before_value)
-        && is_uuid(value)
-        && names_an_id(leading_identifier(before_value))
-    {
-        return Some(Twin::EntityId);
     }
     if shape == SecretShape::BasicAuthCredential && value.bytes().all(|b| b.is_ascii_lowercase()) {
         // `Authorization: Basic authentication ...` is prose; a real credential is not one word.

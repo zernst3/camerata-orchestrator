@@ -80,9 +80,9 @@ fn uuid() -> String {
 }
 
 #[test]
-fn a_uuid_on_an_id_named_field_is_an_entity_id() {
+fn a_uuid_on_an_id_named_field_is_still_reported() {
     let id = uuid();
-    // The row stays (the audit holds it at low for a reviewer); it is not removed.
+    // No twin: the row stays and the value is masked (the audit holds it at low).
     assert_eq!(lines(&format!("example:\n  token_id: {id}\n")), vec![2]);
     assert_eq!(
         lines(&format!("const row = {{ tokenId: '{id}' }};")),

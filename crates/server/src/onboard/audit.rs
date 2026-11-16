@@ -57,12 +57,12 @@ fn is_bare_token_uuid(line: &str) -> bool {
 }
 
 /// Whether `line` assigns a canonical UUID to an id field of a credential word (`token_id`,
-/// `apiKeyId`, `client-secret-id`).
+/// `apiKeyId`). Only key and token: a `secret_id` (a Vault AppRole one) IS the credential.
 fn is_credential_id_uuid(line: &str) -> bool {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
         regex::Regex::new(
-            r#"(?:(?i:key|secret|token|password|passwd|pwd|passphrase|credential)[A-Za-z0-9_.-]*(?:[_.-][iI][dD]|Id))["']?\s*[:=]\s*["']?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']?\s*,?\s*$"#,
+            r#"(?:(?i:key|token)[A-Za-z0-9_.-]*(?:[_.-][iI][dD]|Id))["']?\s*[:=]\s*["']?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']?\s*,?\s*$"#,
         )
         .expect("credential id uuid regex must compile")
     })
@@ -1099,5 +1099,18 @@ mod hold_scope_tests {
         // The name without `_id` stays urgent.
         let rows = audit_content("r", "config/service.yaml", &format!("token: {id}\n"));
         assert_eq!(secret_rows(&rows)[0].severity, "critical");
+    }
+
+    #[test]
+    fn a_uuid_on_a_secret_id_field_stays_critical() {
+        let id = uuid();
+        for name in ["secret_id", "client_secret_id"] {
+            let rows = audit_content("r", "config/service.yaml", &format!("{name}: {id}\n"));
+            let rows = secret_rows(&rows);
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!(rows[0].severity, "critical", "{name}");
+        }
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        assert_eq!(secret_rows(&rows)[0].severity, "low");
     }
 }
