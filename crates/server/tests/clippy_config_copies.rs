@@ -94,3 +94,68 @@ fn a_copy_with_an_extra_non_reqwest_line_fails() {
     );
     assert!(check_copy(ROOT, &copy).is_err());
 }
+
+/// Lines of `src` that build a default `reqwest` client. `Client::default` is a trait method, so
+/// clippy cannot ban it by path; this scan stands in for that ban.
+fn default_client_hits(src: &str) -> Vec<String> {
+    src.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//")
+                && (l.contains("Client::default") || l.contains("Client :: default"))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn the_default_client_scan_catches_a_planted_use() {
+    assert_eq!(
+        default_client_hits("let c = reqwest::Client::default();").len(),
+        1
+    );
+    assert_eq!(
+        default_client_hits("    let c = Client::default();").len(),
+        1
+    );
+    assert!(default_client_hits("let c = http::build_client();").is_empty());
+    assert!(default_client_hits("// reqwest::Client::default is banned").is_empty());
+}
+
+#[test]
+fn no_source_file_builds_a_default_reqwest_client() {
+    let mut files = Vec::new();
+    for rel in ["../llm/src", "../server/src"] {
+        rust_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join(rel), &mut files);
+    }
+    assert!(!files.is_empty(), "the scan found no source files");
+    let mut found = Vec::new();
+    for f in files {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&f).unwrap();
+        // Everything from the first `#[cfg(test)]` on is test code.
+        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        for hit in default_client_hits(non_test) {
+            found.push(format!("{}: {}", f.display(), hit.trim()));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "build the client through the shared builder, not Client::default:\n{}",
+        found.join("\n")
+    );
+}
