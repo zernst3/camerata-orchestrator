@@ -153,6 +153,20 @@ const NOT_SENDERS: &[(&str, &str, &[&str])] = &[
         &["reqwest::", "api."],
     ),
     (
+        "crates/llm/src/claude_version.rs",
+        "runs `<claude> --version` once, to read the installed Claude Code's version; its argv is \
+         exactly `--version` with stdin closed (pinned by a test in the file), so no prompt or \
+         model input can pass through it",
+        &[
+            "\"-p\"",
+            ".spawn(",
+            "Stdio::piped",
+            ".args(",
+            "system-prompt",
+            "write_all",
+        ],
+    ),
+    (
         "crates/llm/src/model_registry.rs",
         "lists models (GET /v1/models, OpenRouter's model and provider catalogues); it sends no \
          prompt",
@@ -423,4 +437,34 @@ fn an_exempt_file_that_starts_to_send_is_caught() {
             .any(|v| v.contains("model_registry.rs") && v.contains(".post(")),
         "{found:?}"
     );
+}
+
+/// The Claude Code version probe is cleared as sending nothing, and held to it: a prompt
+/// sent through that file is caught.
+#[test]
+fn the_version_probe_file_is_cleared_but_a_planted_send_in_it_is_caught() {
+    let file = "crates/llm/src/claude_version.rs";
+    let clean = violations(&workspace_sources());
+    assert!(clean.is_empty(), "{clean:?}");
+    for planted in [
+        "fn leak(p: &str) { let _ = std::process::Command::new(p).arg(\"-p\"); }",
+        "fn leak(p: &str) { let _ = std::process::Command::new(p).spawn(); }",
+        "fn leak(p: &str) { let _ = std::process::Command::new(p).stdin(std::process::Stdio::piped()); }",
+    ] {
+        let files: Vec<(String, String)> = workspace_sources()
+            .into_iter()
+            .map(|(path, text)| {
+                if path == file {
+                    (path, format!("{text}\n{planted}"))
+                } else {
+                    (path, text)
+                }
+            })
+            .collect();
+        let found = violations(&files);
+        assert!(
+            found.iter().any(|v| v.contains(file)),
+            "{planted}: {found:?}"
+        );
+    }
 }

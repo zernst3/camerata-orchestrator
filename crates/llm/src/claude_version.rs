@@ -40,17 +40,22 @@ pub fn parse_version(output: &str) -> Option<Version> {
     })
 }
 
+/// The probe command: `<program> --version` and nothing else, stdin closed. It carries no model
+/// input; `tests/model_input_guard.rs` clears this file as a non-sender on that basis, and a
+/// test below pins the argv.
+fn version_probe(program: &OsStr) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.arg("--version").stdin(std::process::Stdio::null());
+    cmd
+}
+
 /// Run `<program> --version` and read the version, or say why it could not be read.
 pub fn read_version(program: &OsStr) -> Result<Version, String> {
     let program = program.to_os_string();
     let shown = program.to_string_lossy().into_owned();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new(&program)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .output();
-        let _ = tx.send(out);
+        let _ = tx.send(version_probe(&program).output());
     });
     let out = match rx.recv_timeout(VERSION_TIMEOUT) {
         Ok(Ok(out)) => out,
@@ -143,6 +148,24 @@ mod tests {
             .iter()
             .map(|m| ("the group reviewer".to_string(), (*m).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn the_probe_is_exactly_version_with_no_stdin_and_no_other_argument() {
+        let cmd = version_probe(OsStr::new("claude"));
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["--version"]);
+        // Source pin: the only argument call and the only stdin setting in this file's
+        // non-test code are the probe's, so a later edit that sends a prompt trips this.
+        let code = include_str!("claude_version.rs");
+        let code = &code[..code.find("#[cfg(test)]").unwrap()];
+        assert_eq!(code.matches(".arg(").count(), 1, "one argument call");
+        // Spelled in pieces so this test does not itself hold the texts the guard forbids.
+        assert_eq!(code.matches(concat!(".ar", "gs(")).count(), 0);
+        assert_eq!(code.matches(".stdin(").count(), 1);
+        assert!(code.contains(".stdin(std::process::Stdio::null())"));
+        assert_eq!(code.matches("Command::new(").count(), 1);
+        assert_eq!(code.matches(concat!(".sp", "awn(")).count(), 0);
     }
 
     #[test]
