@@ -45,11 +45,9 @@ fn each_crate_clippy_toml_is_the_root_plus_exactly_the_ban_block() {
     let llm = check_copy(&root, &read("../llm/clippy.toml")).unwrap();
     let server = check_copy(&root, &read("../server/clippy.toml")).unwrap();
     assert_eq!(llm, server, "the two copies must carry the same ban block");
-    for banned in [
-        "reqwest::Client::new",
-        "reqwest::Client::default",
-        "reqwest::get",
-    ] {
+    // `Client::default` is a trait method (`Default::default`), which clippy cannot ban by a
+    // type path, so only the two inherent entry points are listed.
+    for banned in ["reqwest::Client::new", "reqwest::get"] {
         assert!(
             llm.iter().any(|l| l.contains(&format!("\"{banned}\""))),
             "the ban block must ban {banned}: {llm:?}"

@@ -11,6 +11,5 @@ disallowed-methods = [
     { path = "std::env::set_var", reason = "use camerata_test_env::EnvGuard + #[serial_test::serial(process_env)] (tests), or inject the value (production)" },
     { path = "std::env::remove_var", reason = "use camerata_test_env::EnvGuard + #[serial_test::serial(process_env)] (tests), or inject the value (production)" },
     { path = "reqwest::Client::new", reason = "has no timeout and can hang a run forever; build one with Client::builder().timeout(..).connect_timeout(..)" },
-    { path = "reqwest::Client::default", reason = "has no timeout and can hang a run forever; build one with Client::builder().timeout(..).connect_timeout(..)" },
     { path = "reqwest::get", reason = "builds a throwaway client with no timeout; build one with Client::builder().timeout(..).connect_timeout(..)" },
 ]
