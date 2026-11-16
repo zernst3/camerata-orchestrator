@@ -549,6 +549,69 @@ async fn post_project_backend_reports_error_for_unknown_project() {
     );
 }
 
+/// `POST /api/projects/:id/dev-run-spend-limit` - the only way to set the dev run spend limit
+/// until the cockpit has a control for it (owner call: every client dev run is refused without
+/// one, so this route and its setter are what lets one start). Sets, rejects zero without
+/// changing anything, clears with `null`, and reports an unknown project.
+#[tokio::test]
+async fn post_project_dev_run_spend_limit_sets_rejects_zero_and_clears() {
+    let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+    let p = state.projects.create("Spend", vec![]).unwrap();
+    assert_eq!(p.dev_run_spend_limit(), None, "a new project has no limit");
+    let app = router(state.clone());
+    let post = |id: String, body: &'static str| {
+        let app = app.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/projects/{id}/dev-run-spend-limit"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_json(resp).await
+        }
+    };
+
+    let set = post(p.id.clone(), r#"{"dev_run_spend_limit_cents":750}"#).await;
+    assert_eq!(set["ok"], true);
+    assert_eq!(set["project"]["dev_run_spend_limit_cents"], 750);
+    assert_eq!(
+        state.projects.get(&p.id).unwrap().dev_run_spend_limit(),
+        Some(7.5),
+        "persisted on the store as dollars the loop can enforce"
+    );
+
+    let zero = post(p.id.clone(), r#"{"dev_run_spend_limit_cents":0}"#).await;
+    assert_eq!(zero["ok"], false);
+    assert!(zero["message"].as_str().unwrap().contains("more than zero"));
+    assert_eq!(
+        state.projects.get(&p.id).unwrap().dev_run_spend_limit(),
+        Some(7.5),
+        "a refused amount changes nothing"
+    );
+
+    let cleared = post(p.id.clone(), r#"{"dev_run_spend_limit_cents":null}"#).await;
+    assert_eq!(cleared["ok"], true);
+    assert_eq!(
+        state.projects.get(&p.id).unwrap().dev_run_spend_limit(),
+        None
+    );
+
+    let unknown = post(
+        "does-not-exist".to_string(),
+        r#"{"dev_run_spend_limit_cents":100}"#,
+    )
+    .await;
+    assert_eq!(unknown["ok"], false);
+    assert!(unknown["message"].as_str().is_some());
+}
+
 // ── Audit-integrated alternative recommendation endpoints ─────────────────────────
 // (docs/design/2026-09-22_audit-integrated-alternatives.md)
 

@@ -1154,6 +1154,128 @@ enum KindSheet {
     Coverage,
 }
 
+impl crate::review_tree::PlaceRow for FindingRow {
+    fn place_repo(&self) -> &str {
+        &self.repo
+    }
+    fn place_path(&self) -> &str {
+        &self.path
+    }
+    fn place_line(&self) -> usize {
+        self.line
+    }
+    fn place_rule_id(&self) -> &str {
+        &self.rule_id
+    }
+    fn place_severity(&self) -> &str {
+        &self.severity
+    }
+    fn place_bucket(&self) -> &str {
+        self.bucket
+    }
+}
+
+/// What kind of row a counted row is, by the sheet it lands on (the same decision as
+/// [`kind_sheet`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CountKind {
+    Problem,
+    Convention,
+    NotChecked,
+}
+
+/// One exported row as the counts object reads it: only what counting needs.
+#[derive(Debug, Clone)]
+pub(crate) struct CountRow {
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub severity: String,
+    pub bucket: &'static str,
+    pub ruled_out: bool,
+    pub kind: CountKind,
+    pub tool_preview: bool,
+    pub escalated: bool,
+    pub rule_id: String,
+}
+
+impl crate::review_tree::PlaceRow for CountRow {
+    fn place_repo(&self) -> &str {
+        &self.repo
+    }
+    fn place_path(&self) -> &str {
+        &self.path
+    }
+    fn place_line(&self) -> usize {
+        self.line
+    }
+    fn place_rule_id(&self) -> &str {
+        &self.rule_id
+    }
+    fn place_severity(&self) -> &str {
+        &self.severity
+    }
+    fn place_bucket(&self) -> &str {
+        self.bucket
+    }
+}
+
+/// The rows of one export partition, reduced to what [`crate::report_export::report_counts`]
+/// counts, with the dependency rows and the fixes that still have something to change.
+pub(crate) struct CountingView {
+    pub rows: Vec<CountRow>,
+    pub dependency_rows: usize,
+    /// The places of other rules that ruled-out rows carry in THIS (reviewed, overlaid) report
+    /// and that stay open ([`open_beside_ruled_out`]). The counts read them here and nowhere
+    /// else, so a place a ruling already split into a problem of its own is never counted twice.
+    pub open_beside_ruled_out: Vec<OpenSiteJson>,
+    /// Fixes with a place still to change: the Fix plan rows and the tickets.
+    pub fix_ids_to_do: std::collections::HashSet<String>,
+}
+
+/// The counting view of `reviewed`: ONE partition pass, shared with every other consumer's
+/// definition of a row (`partition_rows_for`).
+pub(crate) fn counting_view(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &HashMap<String, String>,
+    internal: bool,
+) -> CountingView {
+    let (all_rows, dep_rows) = partition_rows_for(reviewed, corpus, chosen_options, internal);
+    // The Fixes of the plan: those with a place still to change (not ruled out, not accepted).
+    // The Fix plan sheet and the ticket file are this same list.
+    let fix_ids_to_do: std::collections::HashSet<String> =
+        subgroups::plan_facts(reviewed, &all_rows, &dep_rows, corpus)
+            .into_iter()
+            .map(|g| g.id)
+            .collect();
+    let rows = all_rows
+        .iter()
+        .map(|r| CountRow {
+            repo: r.repo.clone(),
+            path: r.path.clone(),
+            line: r.line,
+            severity: r.severity.clone(),
+            bucket: r.bucket,
+            ruled_out: r.is_fp,
+            kind: match kind_sheet(r) {
+                KindSheet::Findings => CountKind::Problem,
+                KindSheet::Conventions => CountKind::Convention,
+                KindSheet::Coverage => CountKind::NotChecked,
+            },
+            tool_preview: r.provenance.starts_with("Preview:"),
+            escalated: r.facts.escalated,
+            rule_id: r.rule_id.clone(),
+        })
+        .collect();
+    CountingView {
+        open_beside_ruled_out: open_beside_ruled_out(reviewed),
+        rows,
+        dependency_rows: dep_rows.len(),
+        fix_ids_to_do,
+    }
+}
+
 /// The ONE kind→sheet decision, so no sheet writer re-derives it and two of them can never
 /// disagree (which would either duplicate a row or lose it entirely).
 fn kind_sheet(row: &FindingRow) -> KindSheet {
@@ -1810,6 +1932,12 @@ fn held_reasons(f: &crate::onboard::Finding) -> String {
     {
         reasons.push("put back by the reviewer after the engine threw it out".to_string());
     }
+    if let Some(note) = f
+        .captures
+        .get(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE)
+    {
+        reasons.push(note.clone());
+    }
     reasons.join("; ")
 }
 
@@ -1888,6 +2016,18 @@ pub fn build_workbook(
     reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
+) -> anyhow::Result<Vec<u8>> {
+    let counts = crate::report_export::report_counts(reviewed, corpus, opts);
+    build_workbook_with_counts(reviewed, corpus, opts, &counts)
+}
+
+/// [`build_workbook`] with the package's counts worked out once by the caller. Start here and
+/// the scorecard print the object's numbers; the release gate holds each sheet's rows to them.
+pub fn build_workbook_with_counts(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    opts: &ReportOptions,
+    report_counts: &crate::report_export::ReportCounts,
 ) -> anyhow::Result<Vec<u8>> {
     use vocabulary as v;
     let report = reviewed.report();
@@ -2072,7 +2212,17 @@ pub fn build_workbook(
             }
             continue;
         }
-        counts.push((t.name.clone(), t.rows.len()));
+        // The sheets the counts object names print its number; the gate holds each sheet's rows
+        // to it. The others print the rows of their table.
+        let said = match t.name.as_str() {
+            n if n == v::ALL_PROBLEMS => report_counts.problems.total,
+            n if n == v::NEEDS_A_DECISION => report_counts.problems.needs_decision,
+            n if n == v::FIX_PLAN => report_counts.fixes.to_do,
+            n if n == v::DEPENDENCIES => report_counts.rows.dependency,
+            n if n == v::YOUR_CONVENTIONS => report_counts.rows.convention,
+            _ => t.rows.len(),
+        };
+        counts.push((t.name.clone(), said));
     }
 
     let mut wb = Workbook::new();
@@ -2107,6 +2257,7 @@ pub fn build_workbook(
             live_rows: &live_rows,
             corpus,
             counts,
+            totals: report_counts,
             coverage_summary: coverage_summary_line(
                 &coverage_rows,
                 not_assessed_rows.len(),
@@ -2177,6 +2328,8 @@ pub(crate) fn sheet_footer(line: &str) -> String {
 pub struct FindingsExport {
     pub provenance: crate::report_export::CoverJson,
     pub summary: crate::report_export::ExecutiveSummaryJson,
+    /// Every count of the package, the object `report_json` carries (worked out once).
+    pub counts: crate::report_export::ReportCounts,
     pub findings: Vec<FindingRow>,
     /// H4: what the scan did not review (failed AI passes, files skipped for size or past the
     /// file cap), by path. Reused verbatim from `report_json.coverage_gaps`, like `provenance`.
@@ -2190,10 +2343,10 @@ pub struct FindingsExport {
     /// counts from the rows (design 3B). A client package carries only what the client reads; an
     /// internal one adds the architect's triage of each node.
     pub tree: TreeJson,
-    /// The places of other rules that a ruled-out row carries and that stay open: a ruling on a
-    /// row clears its own rule, not another rule's site a merge put on it. The ruled-out row is
-    /// not in `findings`, so these places are listed here and the release gate reads them with
-    /// `findings`. Absent when there are none.
+    /// The places of other rules that a ruled-out row still carries: a ruling on a row clears its
+    /// own rule, not another rule's site a merge put on it. The overlay unfolds each such place
+    /// into a row of its own, so this is empty (and absent) in a normal export; it is a backstop,
+    /// and the release gate refuses a package that lists anything here.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_beside_ruled_out: Vec<OpenSiteJson>,
     /// The Fixes: the rule groups whose places are one change, with every place and rule of each
@@ -2208,31 +2361,51 @@ pub struct OpenSiteJson {
     pub rule_id: String,
     pub path: String,
     pub line: usize,
+    /// The severity of the ruled-out row that carries the place (its host's), never lower: the
+    /// counts file the place under it (fail closed).
+    pub severity: String,
 }
 
-/// The places of other rules (or other services) that ruled-out rows carry: every absorbed site
-/// whose rule or service is not the row's own, and every rule the row also matches. Collapsed
-/// sources (`flagged_by`) are the same site as the row and are ruled with it.
-fn open_beside_ruled_out(rows: &[FindingRow]) -> Vec<OpenSiteJson> {
+/// The places of other rules (or other services) that ruled-out rows still carry: every absorbed
+/// site whose rule or service is not the row's own, and every rule the row also matches
+/// ([`crate::onboard::patterns_matrix::is_other_rules_place`], the test the Patterns across
+/// services cell uses). Collapsed sources (`flagged_by`) are the same site as the row and are
+/// ruled with it.
+///
+/// A normal export lists nothing: the overlay unfolds every such place into a row of its own and
+/// removes it from the ruled-out row ([`crate::report_export::unfold`]). This stays as the
+/// backstop for a reviewed report the overlay did not unfold, and the release gate refuses a
+/// package whose key is not empty.
+fn open_beside_ruled_out(reviewed: &ReviewedReport) -> Vec<OpenSiteJson> {
+    use crate::onboard::patterns_matrix::is_other_rules_place;
+    let dispositions = reviewed.dispositions();
     let mut out = Vec::new();
-    for row in rows.iter().filter(|r| r.is_fp) {
+    for row in reviewed.report().findings.iter().filter(|f| {
+        dispositions
+            .get(&finding_key(f))
+            .is_some_and(|d| d.state == "FalsePositive")
+    }) {
         for site in &row.also_locations {
-            if site.repo != row.repo || !site.rule_id.eq_ignore_ascii_case(&row.rule_id) {
+            if is_other_rules_place(row, &site.repo, &site.rule_id) {
                 out.push(OpenSiteJson {
                     repo: site.repo.clone(),
                     rule_id: site.rule_id.clone(),
                     path: site.path.clone(),
                     line: site.line,
+                    severity: row.severity.clone(),
                 });
             }
         }
-        for rule in &row.also_match_ids {
-            out.push(OpenSiteJson {
-                repo: row.repo.clone(),
-                rule_id: rule.clone(),
-                path: row.path.clone(),
-                line: row.line,
-            });
+        for rule in &row.also_matches {
+            if is_other_rules_place(row, &row.repo, rule) {
+                out.push(OpenSiteJson {
+                    repo: row.repo.clone(),
+                    rule_id: rule.clone(),
+                    path: row.path.clone(),
+                    line: row.line,
+                    severity: row.severity.clone(),
+                });
+            }
         }
     }
     out
@@ -2259,12 +2432,13 @@ pub fn build_findings_export(
 ) -> FindingsExport {
     let (rows, _dep_rows) =
         partition_rows_for(reviewed, corpus, chosen_options, report_json.internal);
-    let open_beside_ruled_out = open_beside_ruled_out(&rows);
+    let open_beside_ruled_out = open_beside_ruled_out(reviewed);
     let findings: Vec<FindingRow> = rows.into_iter().filter(|r| !r.is_fp).collect();
     FindingsExport {
         open_beside_ruled_out,
         provenance: report_json.cover.clone(),
         summary: report_json.executive_summary.clone(),
+        counts: report_json.counts.clone(),
         findings,
         coverage: report_json.coverage_gaps.clone(),
         patterns_across_services: report_json.patterns_across_services.clone(),

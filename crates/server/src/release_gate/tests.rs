@@ -434,6 +434,7 @@ fn release_passes_a_clean_package_and_reports_sixteen_checks() {
             "reviewer decision on unverified evidence",
             "decision records behind merged rows",
             "reviewer decision on restored findings",
+            "reviewer decision on split-out problems",
             "reviewer correction on flagged findings",
             "confidentiality marking",
             "manifest",
@@ -457,7 +458,7 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
             "Release checks: secrets, dataset set, dataset parity, row parity, severity and \
              kind counts, finding content, reviewer decision on unverified evidence, \
              decision records behind merged rows, reviewer decision on restored findings, \
-             reviewer correction on flagged findings, confidentiality marking, manifest, \
+             reviewer decision on split-out problems, reviewer correction on flagged findings, confidentiality marking, manifest, \
              provenance, unsynced reviewer changes, one fix per row, client text style, internal \
              notes kept out (all passed)"
         ),
@@ -1251,7 +1252,7 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         Some(
             "secrets, dataset set, dataset parity, row parity, severity and kind counts, \
              finding content, reviewer decision on unverified evidence, decision records behind \
-             merged rows, reviewer decision on restored findings, reviewer correction on \
+             merged rows, reviewer decision on restored findings, reviewer decision on split-out problems, reviewer correction on \
              flagged findings, confidentiality marking, manifest, provenance, unsynced \
              reviewer changes, one fix per row, client text style, internal notes kept out"
         )
@@ -1607,7 +1608,7 @@ fn every_sheet_footer_carries_the_pdfs_confidentiality_line_and_the_gate_checks_
 }
 
 /// Rebuild an xlsx (a zip) with each UTF-8 member passed through `f`.
-fn rewrite_xlsx(xlsx: &[u8], f: impl Fn(&str, &str) -> String) -> Vec<u8> {
+pub(super) fn rewrite_xlsx(xlsx: &[u8], f: impl Fn(&str, &str) -> String) -> Vec<u8> {
     let entries = read_zip_entries(xlsx).expect("the workbook is a zip");
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
@@ -2043,7 +2044,7 @@ fn the_gate_catches_a_workbook_whose_rows_disagree_by_severity() {
 
 /// The position of `text` in the workbook's shared-string table (each distinct cell text is
 /// stored once; a cell holds the position).
-fn shared_string_index(xlsx: &[u8], text: &str) -> usize {
+pub(super) fn shared_string_index(xlsx: &[u8], text: &str) -> usize {
     let entries = read_zip_entries(xlsx).expect("the workbook is a zip");
     let table = String::from_utf8(
         entries
@@ -2061,7 +2062,7 @@ fn shared_string_index(xlsx: &[u8], text: &str) -> usize {
 
 /// Remove every worksheet row that holds a cell with exactly this text, leaving the rest of the
 /// workbook (its Start here counts included) untouched: a row dropped from one sheet by itself.
-fn drop_sheet_rows_with_text(xlsx: &[u8], text: &str) -> Vec<u8> {
+pub(super) fn drop_sheet_rows_with_text(xlsx: &[u8], text: &str) -> Vec<u8> {
     let cell = format!("t=\"s\"><v>{}</v>", shared_string_index(xlsx, text));
     rewrite_xlsx(xlsx, |name, xml| {
         if !(name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml")) {

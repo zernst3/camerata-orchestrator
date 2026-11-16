@@ -380,16 +380,33 @@ fn every_production_llm_build_gets_its_key_from_the_resolver() {
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
 
-/// Every non-test spawn of the `claude` binary must scrub `ANTHROPIC_API_KEY` from the child's
-/// environment (`camerata_api_types::claude_cli::scrub_anthropic_key_env`), so the subscription
-/// CLI can never silently bill the API because a `.env` key was inherited.
-#[test]
-fn every_production_claude_spawn_scrubs_the_anthropic_key() {
+/// Files that may name `claude_program()` without spawning: the resolver's definition and the
+/// version probe (which runs `--version` only and carries no environment-sensitive input).
+const RESOLVER_NON_SPAWNERS: [&str; 2] =
+    ["api-types/src/claude_cli.rs", "llm/src/claude_version.rs"];
+
+/// Every production use of `claude_program(` (a direct `Command::new(claude_program())`, a
+/// `let p = claude_program();`, an imported bare call) counted, with the ones that do not scrub
+/// `ANTHROPIC_API_KEY` within the next lines listed.
+fn claude_spawn_scan(files: &[(PathBuf, Vec<(usize, String)>)]) -> (usize, Vec<String>) {
     let mut spawns = 0;
     let mut offenders = Vec::new();
-    for (path, lines) in scan_all() {
+    for (path, lines) in files {
+        if RESOLVER_NON_SPAWNERS.iter().any(|f| path.ends_with(f)) {
+            continue;
+        }
         for (idx, (n, line)) in lines.iter().enumerate() {
-            if !line.contains("Command::new(\"claude\")") {
+            // No production spawn names the binary itself: the program comes from the one
+            // resolver, so `CAMERATA_CLAUDE_PROGRAM` reaches every cli call.
+            if line.contains("Command::new(\"claude\")") {
+                offenders.push(format!(
+                    "{}:{n}: names `claude` directly, use claude_cli::claude_program(): {}",
+                    path.display(),
+                    line.trim()
+                ));
+                continue;
+            }
+            if !line.contains("claude_program(") {
                 continue;
             }
             spawns += 1;
@@ -402,6 +419,15 @@ fn every_production_claude_spawn_scrubs_the_anthropic_key() {
             }
         }
     }
+    (spawns, offenders)
+}
+
+/// Every non-test spawn of the `claude` binary must scrub `ANTHROPIC_API_KEY` from the child's
+/// environment (`camerata_api_types::claude_cli::scrub_anthropic_key_env`), so the subscription
+/// CLI can never silently bill the API because a `.env` key was inherited.
+#[test]
+fn every_production_claude_spawn_scrubs_the_anthropic_key() {
+    let (spawns, offenders) = claude_spawn_scan(&scan_all());
     // The scan must have found the known spawns (llm, agent, intake x2), or it is vacuous.
     assert!(
         spawns >= 4,
@@ -411,7 +437,39 @@ fn every_production_claude_spawn_scrubs_the_anthropic_key() {
         offenders.is_empty(),
         "a `claude` subprocess inherits ANTHROPIC_API_KEY; call \
          `camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut())` right after \
-         `Command::new(\"claude\")`:\n{}",
+         `claude_program()`:\n{}",
         offenders.join("\n")
     );
+}
+
+/// The scan sees a spawn however it reaches the resolver: an imported bare `claude_program()`
+/// with no scrub is caught, and the same spawn with the scrub passes.
+#[test]
+fn a_planted_unscrubbed_spawn_through_an_imported_resolver_is_caught() {
+    let lines = |src: &str| -> Vec<(usize, String)> {
+        src.lines()
+            .enumerate()
+            .map(|(i, l)| (i + 1, l.to_string()))
+            .collect()
+    };
+    let bad = lines(
+        "use camerata_api_types::claude_cli::claude_program;\n\
+         fn go() {\n    let p = claude_program();\n    let mut c = tokio::process::Command::new(p);\n    c.arg(\"--print\");\n}",
+    );
+    let (spawns, offenders) = claude_spawn_scan(&[(PathBuf::from("crates/x/src/new.rs"), bad)]);
+    assert_eq!(spawns, 1);
+    assert_eq!(offenders.len(), 1, "{offenders:?}");
+    let inline = lines("fn go() { let c = Command::new(claude_program()); }");
+    let (_, offenders) = claude_spawn_scan(&[(PathBuf::from("crates/x/src/new2.rs"), inline)]);
+    assert_eq!(offenders.len(), 1, "{offenders:?}");
+    let good = lines(
+        "fn go() {\n    let p = claude_program();\n    let mut c = Command::new(p);\n    scrub_anthropic_key_env(&mut c);\n}",
+    );
+    let (spawns, offenders) = claude_spawn_scan(&[(PathBuf::from("crates/x/src/ok.rs"), good)]);
+    assert_eq!((spawns, offenders.len()), (1, 0));
+    // The definition file and the version probe are excluded by name.
+    let def = lines("pub fn claude_program() -> OsString { x }");
+    let (spawns, _) =
+        claude_spawn_scan(&[(PathBuf::from("crates/api-types/src/claude_cli.rs"), def)]);
+    assert_eq!(spawns, 0);
 }

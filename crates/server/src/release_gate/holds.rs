@@ -4,7 +4,7 @@
 //! The gate's reviewer-decision checks each answer one question about a reviewed report: which
 //! rows are held for a ruling nobody has made? Each check owns the filter that answers it
 //! ([`super::evidence::undecided_unverified`], [`super::junk::undecided_junk`],
-//! [`super::held::undecided_restored`], [`super::engine_check::uncorrected_no`] and
+//! [`super::held::undecided_restored`], [`super::held::undecided_split_out`], [`super::engine_check::uncorrected_no`] and
 //! [`super::engine_check::uncorrected_no_thrown_out`],
 //! [`super::held::merge_is_backed`] and [`super::held::group_decision_gaps`]) and turns its rows into [`super::Problem`]s. This module
 //! turns the same rows into an [`ExportGateView`], so the panel lists exactly what the gate
@@ -114,6 +114,10 @@ pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {
     rows.extend(
         held::undecided_restored(findings, reviewed)
             .map(|f| held_row(f, HoldReason::RestoredWithoutDecision, "")),
+    );
+    rows.extend(
+        held::undecided_split_out(findings, reviewed)
+            .map(|f| held_row(f, HoldReason::SplitOutWithoutDecision, "")),
     );
     rows.extend(
         engine_check::uncorrected_no(findings, reviewed)

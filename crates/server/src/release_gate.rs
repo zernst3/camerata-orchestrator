@@ -18,6 +18,11 @@
 
 mod archive;
 mod consistency;
+#[allow(
+    dead_code,
+    reason = "built but not yet enforced: work order C wires the counts check into gate_report"
+)]
+mod counts_check;
 pub mod engine_check;
 pub mod evidence;
 pub mod held;
@@ -39,7 +44,7 @@ pub use archive::{
     xlsx_strings, XlsxCell, XlsxHeaderFooter,
 };
 pub use consistency::{
-    client_readme_problems, compare_csv_to_json, count_reconciliation_problems,
+    client_readme_problems, compare_csv_to_json, count_reconciliation_problems, counts_problems,
     dataset_parity_problems, dataset_set_problems, fix_archive_problems, fix_report_problems,
     marking_problems, package_stem, parse_readme_provenance, patterns_clean_cell_problems,
     patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems,
@@ -81,6 +86,9 @@ pub struct ProductPackage {
     /// Findings the reviewer restored after the engine threw them out that carry no decision
     /// since, one problem each (A12 item 2).
     pub restored_without_decision: Vec<Problem>,
+    /// Problems split out of one the reviewer ruled out that carry no decision of their own, one
+    /// problem each.
+    pub split_out_without_decision: Vec<Problem>,
     /// Sites the Engine Check said No to that carry no correction, one problem each, and one
     /// problem when the Engine Check file cannot be read (design A2b).
     pub engine_check_no_without_correction: Vec<Problem>,
@@ -134,7 +142,10 @@ pub async fn build_product_package_with_stem(
     crate::report_export::require_all_repos(report, options)?;
     // And no client package for a run that did not run to completion.
     crate::report_export::require_complete_run(report, options)?;
-    let report_json = crate::report_export::build_report_json(reviewed, corpus, options);
+    // The counts are worked out ONCE here and handed to the report builder by reference.
+    let counts = crate::report_export::report_counts(reviewed, corpus, options);
+    let report_json =
+        crate::report_export::build_report_json_with_counts(reviewed, corpus, options, &counts);
     let data_json = crate::report_export::render_data_json(&report_json)?;
     // Everything but the PDF, then every check that needs no Typst (the secrets in every file,
     // the held rows, the counts, the marking, the row parity), then the compile. The refusal is
@@ -187,8 +198,13 @@ pub(crate) fn assemble_package(
     (report_json, data_json, pdf): (AuditReportJson, String, Vec<u8>),
 ) -> anyhow::Result<ProductPackage> {
     let report = reviewed.report();
-    let xlsx = crate::xlsx_export::build_workbook(reviewed, corpus, options)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let xlsx = crate::xlsx_export::build_workbook_with_counts(
+        reviewed,
+        corpus,
+        options,
+        &report_json.counts,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // `findings.json`: the machine-readable sibling of the workbook's "All Findings" sheet,
     // built from the SAME reviewed report/corpus pass (and `report_json`'s cover and
@@ -265,6 +281,7 @@ pub(crate) fn assemble_package(
         ),
         unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
         restored_without_decision: held::restored_without_decision(&report.findings, reviewed),
+        split_out_without_decision: held::split_out_without_decision(&report.findings, reviewed),
         engine_check_no_without_correction: engine_check::problems(
             &report.findings,
             &report.discarded,
@@ -686,6 +703,12 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
             CheckId::Counts,
             pdf_count_reconciliation_problems(&entries, &package.report_json),
         );
+        // Every printed number held to an independent recount of the files in the package
+        // (single counts, design 5.7): a package whose numbers differ is refused.
+        report.record(
+            CheckId::Counts,
+            counts_problems(&entries, &package.report_json),
+        );
         report.record(
             CheckId::Marking,
             pdf_marking_problems(&entries, &package.report_json.confidentiality.line),
@@ -713,6 +736,14 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
             Vec::new()
         } else {
             package.restored_without_decision.clone()
+        },
+    );
+    report.record(
+        CheckId::SplitOutWithoutDecision,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.split_out_without_decision.clone()
         },
     );
     report.record(
@@ -779,6 +810,9 @@ pub(crate) fn test_scan_report() -> crate::onboard::ScanReport {
 pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
     run_complete_tests::internal_incomplete_package()
 }
+
+#[cfg(test)]
+mod counts_tests;
 
 #[cfg(test)]
 mod patterns_tests;

@@ -28,6 +28,8 @@ use camerata_server::run_store::PartKind;
 struct Outage {
     /// Every fix-text call fails like an unreachable provider.
     fix_stage: bool,
+    /// Every group review call fails like an unreachable provider.
+    group_review: bool,
     /// Every scan call whose prompt frames this file fails.
     scan_of: Option<&'static str>,
     /// Every scan call whose prompt frames this file gets an answer that holds no JSON.
@@ -39,7 +41,7 @@ struct Outage {
 struct Scripted {
     down: Mutex<Outage>,
     calls: AtomicUsize,
-    /// `kind:digest` of every request sent, in order.
+    /// The kind and the requested model of every request sent, in order.
     sent: Mutex<Vec<(PartKind, String)>>,
 }
 
@@ -66,12 +68,24 @@ impl Scripted {
             .count()
     }
 
+    /// The model each request of `kind` was sent to, in order.
+    fn models_of(&self, kind: PartKind) -> Vec<String> {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| *k == kind)
+            .map(|(_, m)| m.clone())
+            .collect()
+    }
+
     fn answer(&self, req: &LlmRequest) -> anyhow::Result<LlmResponse> {
         let (kind, _repo, files) = classify(req);
         let down = *self.down.lock().unwrap();
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.sent.lock().unwrap().push((kind, String::new()));
+        self.sent.lock().unwrap().push((kind, req.model.clone()));
         let unreachable = (kind == PartKind::Fix && down.fix_stage)
+            || (kind == PartKind::GroupReview && down.group_review)
             || (kind == PartKind::Scan
                 && down
                     .scan_of
@@ -548,6 +562,10 @@ struct Env {
     _state: tempfile::TempDir,
     _g1: camerata_test_env::EnvGuard,
     _g2: camerata_test_env::EnvGuard,
+    /// The scripted provider fails instantly, so the outage stop's 120 s span could never pass:
+    /// these tests are about resuming after a stop, not about how long it takes to trip (the
+    /// span has its own tests in `run_health`).
+    _span: camerata_server::run_health::OutageSpanGuard,
 }
 
 fn env() -> Env {
@@ -558,6 +576,7 @@ fn env() -> Env {
         _state: state,
         _g1: g1,
         _g2: g2,
+        _span: camerata_server::run_health::OutageSpanGuard::set(std::time::Duration::ZERO),
     }
 }
 
@@ -1294,4 +1313,174 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
     assert_eq!(llm.calls(), 0, "nothing was sent to the model");
     let after = std::fs::read(rs::runs_dir().join(&run_id).join("run.json")).unwrap();
     assert_eq!(before, after, "the refusal leaves the saved run untouched");
+}
+
+/// Rewrite the saved record of `run_id` the way an earlier build, or a hand edit, could have
+/// left it.
+fn patch_saved_run(run_id: &str, patch: impl FnOnce(&mut serde_json::Value)) {
+    let path = camerata_server::run_store::runs_dir()
+        .join(run_id)
+        .join("run.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("the record is JSON");
+    patch(&mut value);
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+/// A run with the stages `down` unreachable, saved and incomplete, plus the scripted model that
+/// is back up.
+async fn interrupted_run(repo: &Path, export: &Path, down: Outage) -> (Scripted, String) {
+    let llm = Scripted::new(down);
+    let err = run(&llm, &[repo], &["acme/one"], export)
+        .await
+        .expect_err("the run with a failed part is not exported");
+    let run_id = the_run_id(&err);
+    llm.set(Outage::default());
+    (llm, run_id)
+}
+
+/// A client engagement checks the group review model the resume keeps, not only the pick it was
+/// handed. A record naming `vendor/x` (a run started with `--internal`) resumed as a client
+/// engagement is refused before any model call.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_kept_group_review_model_that_the_client_lock_refuses_refuses_the_resume() {
+    if !typst_available("a_kept_group_review_model_that_the_client_lock_refuses") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let down = Outage {
+        fix_stage: true,
+        ..Outage::default()
+    };
+    let (llm, run_id) = interrupted_run(repo.path(), &export, down).await;
+    patch_saved_run(&run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("vendor/x");
+    });
+    let calls_before = llm.calls();
+    let result = resume(&llm, &run_id, Some(export.clone())).await;
+    let Err(err) = result else {
+        panic!("a client engagement must not send client code to the kept model");
+    };
+    let InspectError::Failed(why) = &err else {
+        panic!("expected a plain refusal, got {err}");
+    };
+    assert!(why.contains("client engagement"), "{why}");
+    assert!(why.contains("vendor/x"), "{why}");
+    assert_eq!(llm.calls(), calls_before, "no model call was made");
+    assert!(!export.exists());
+}
+
+/// `resume`, with the pre-flight text a resume prints returned beside the outcome.
+async fn resume_with_preflight(
+    llm: &Scripted,
+    run_id: &str,
+    export: PathBuf,
+) -> (Result<InspectOutcome, InspectError>, String) {
+    let sink = Mutex::new(Vec::new());
+    let result = resume_inspect(
+        run_id,
+        &[],
+        Some(export),
+        None,
+        true,
+        &store(),
+        seams(llm, &sink),
+    )
+    .await;
+    let text = sink.lock().unwrap().join("");
+    (result, text)
+}
+
+/// A run that started on Fable 5.1 and is resumed with no model flag (the built-in default is
+/// Fable 5.2 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
+/// in one line.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_with_no_group_review_flag_stays_on_the_recorded_model_and_says_so() {
+    if !typst_available("a_resume_with_no_group_review_flag_stays_on_the_recorded_model") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let down = Outage {
+        group_review: true,
+        ..Outage::default()
+    };
+    let (llm, run_id) = interrupted_run(repo.path(), &export, down).await;
+    patch_saved_run(&run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("claude-fable-5-1");
+    });
+    let asked_before = llm.models_of(PartKind::GroupReview).len();
+    let (result, preflight) = resume_with_preflight(&llm, &run_id, export.clone()).await;
+    result.expect("the resume completes");
+    let resumed_calls = llm.models_of(PartKind::GroupReview);
+    assert!(
+        resumed_calls.len() > asked_before,
+        "the resume asked the group reviewer"
+    );
+    for model in &resumed_calls[asked_before..] {
+        assert_eq!(
+            model, "claude-fable-5-1",
+            "every resumed call keeps the model"
+        );
+    }
+    let notice = "Group review stays on claude-fable-5-1, the model this run started with.";
+    assert_eq!(
+        preflight.matches(notice).count(),
+        1,
+        "the pre-flight says it once: {preflight}"
+    );
+}
+
+/// An explicit group review model that differs from the one the run started on is refused, as the
+/// scan, calibration and fix models are, before any model call.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_with_a_different_explicit_group_review_model_is_refused() {
+    if !typst_available("a_resume_with_a_different_explicit_group_review_model") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let down = Outage {
+        group_review: true,
+        ..Outage::default()
+    };
+    let (llm, run_id) = interrupted_run(repo.path(), &export, down).await;
+    patch_saved_run(&run_id, |v| {
+        v["models"]["group_review"] = serde_json::json!("claude-fable-5-1");
+        v["args"]["group_review_model"] = serde_json::json!("claude-opus-5-5");
+    });
+    let calls_before = llm.calls();
+    let (result, _) = resume_with_preflight(&llm, &run_id, export.clone()).await;
+    let Err(err) = result else {
+        panic!("an explicit different group review model must be refused");
+    };
+    let InspectError::Failed(why) = &err else {
+        panic!("expected a plain refusal, got {err}");
+    };
+    assert!(
+        why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
+        "{why}"
+    );
+    assert_eq!(llm.calls(), calls_before, "no model call was made");
+    assert!(!export.exists());
+
+    // The same explicit pick as the one the run started on is not a different pick.
+    patch_saved_run(&run_id, |v| {
+        v["args"]["group_review_model"] = serde_json::json!("claude-fable-5-1");
+    });
+    let (result, _) = resume_with_preflight(&llm, &run_id, export.clone()).await;
+    result.expect("the same model is accepted");
 }

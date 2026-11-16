@@ -907,6 +907,31 @@ pub(crate) async fn set_client_engagement_handler(
     }
 }
 
+/// Body for `POST /api/projects/:id/dev-run-spend-limit`.
+#[derive(serde::Deserialize)]
+pub(crate) struct SetDevRunSpendLimitReq {
+    /// Whole US cents; `null` clears the limit.
+    pub(crate) dev_run_spend_limit_cents: Option<u64>,
+}
+
+/// `POST /api/projects/:id/dev-run-spend-limit` - set (or clear) the most one governed dev run
+/// of the project may spend. A client engagement's dev run is refused without one. Same
+/// `{ ok, project }` / `{ ok: false, message }` shape as `set_client_engagement_handler`.
+pub(crate) async fn set_dev_run_spend_limit_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetDevRunSpendLimitReq>,
+) -> Json<serde_json::Value> {
+    match state
+        .projects
+        .set_dev_run_spend_limit(&id, req.dev_run_spend_limit_cents)
+    {
+        Ok(Some(p)) => Json(serde_json::json!({ "ok": true, "project": p })),
+        Ok(None) => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
+    }
+}
+
 /// Body for `POST /api/projects/:id/stall-thresholds`.
 #[derive(serde::Deserialize)]
 pub(crate) struct SetStallThresholdsReq {

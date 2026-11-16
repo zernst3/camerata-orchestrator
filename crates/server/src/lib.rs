@@ -78,6 +78,8 @@ pub use camerata_app_core::lifecycle;
 pub mod cost_cap;
 pub mod failure_report;
 pub mod rewrite_advisory;
+/// The cli backend's Claude Code version pre-flight, for callers of the server.
+pub use camerata_llm::claude_version;
 /// The failure classes and typed transport failure, re-exported for callers of the server.
 pub use camerata_llm::failure;
 pub mod dev_implement_run;
@@ -122,6 +124,7 @@ pub mod run_store;
 mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;
+mod scan_cli_version;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
@@ -1438,6 +1441,10 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/client-engagement",
             post(set_client_engagement_handler),
         )
+        .route(
+            "/api/projects/:id/dev-run-spend-limit",
+            post(set_dev_run_spend_limit_handler),
+        )
         // Stall-detection thresholds: per-project idle timeout config.
         .route(
             "/api/projects/:id/stall-thresholds",
@@ -2358,6 +2365,20 @@ async fn onboard_audit(
     // This request has no job to record a batch id on, and a batch can run for hours: a dropped
     // connection would orphan a running, billed batch. Batch runs on the job path only.
     let mode = synchronous_scan_mode(mode, &mut notes);
+    // The cli backend launches the local Claude Code, which refuses a model it predates: check
+    // every model the run will call now, before any call. Same refusal shape as the lock above.
+    if let Some(why) = crate::scan_cli_version::cli_version_refusal_for_scan(
+        matches!(backend_resolution, crate::llm::BackendResolution::Cli),
+        run_ai_review,
+        model.as_deref(),
+        calibration_model.as_deref(),
+        req.deep,
+        &selected,
+        &run_controls,
+        crate::claude_version::check_run_models,
+    ) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
 
     // PANIC GUARD: this handler has no background job to fail into (unlike
     // `onboard_audit_start`'s spawned task) — a bare panic anywhere in the pipeline below
@@ -2871,6 +2892,24 @@ pub(crate) async fn start_audit_job(
                 },
                 &format!("{mode:?}").to_ascii_lowercase(),
             );
+            // The cli backend launches the local Claude Code, which refuses a model it predates:
+            // check every model a new run will call before it is saved or called. A resumed run is
+            // checked below, once the group review model it keeps is known.
+            if resume_run.is_none() {
+                if let Some(why) = crate::scan_cli_version::cli_version_refusal_for_scan(
+                    matches!(backend_resolution, crate::llm::BackendResolution::Cli),
+                    run_ai_review,
+                    model.as_deref(),
+                    calibration_model.as_deref(),
+                    deep,
+                    &selected,
+                    &run_controls,
+                    crate::claude_version::check_run_models,
+                ) {
+                    body_jobs.fail(&body_jid, why);
+                    return;
+                }
+            }
             let mut prior = prior;
             let run_store = match &resume_run {
                 Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {
@@ -2880,10 +2919,58 @@ pub(crate) async fn start_audit_job(
                         // The spend limit counts the whole run: the stored replies' cost joins it.
                         run_controls.stored_spend_usd = store.stored_usd();
                         // The group reviewer stays on the model the run started with.
-                        store
-                            .record()
-                            .models
-                            .keep_group_review_model(&mut run_controls);
+                        // A project setting that is only the built-in default is no pick of
+                        // its own (every new project is seeded with it).
+                        let explicit =
+                            Some(run_controls.review.group_review_model.clone()).filter(|m| {
+                                m.trim() != camerata_api_types::project::STAGE2_DEFAULT_MODEL
+                            });
+                        match store.hold_group_review_model(&mut run_controls, explicit.as_deref())
+                        {
+                            Ok(notice) => {
+                                store.add_note(&notice);
+                            }
+                            Err(why) => {
+                                body_jobs.fail(&body_jid, why);
+                                return;
+                            }
+                        }
+                        // The kept model was not part of the pick the lock checked before the
+                        // job started: check every model the resumed run will call, before any
+                        // call.
+                        let (client_engagement, lock_backend) = engagement_project
+                            .as_ref()
+                            .map_or((true, crate::project::ProjectBackend::Cli), |p| {
+                                (p.client_engagement, p.backend)
+                            });
+                        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+                        if let Some(why) = crate::client_lock::refusal_for_run_models(
+                            client_engagement,
+                            lock_backend,
+                            model.as_deref(),
+                            calibration_model.as_deref(),
+                            deep,
+                            &ids,
+                            &run_controls,
+                        ) {
+                            body_jobs.fail(&body_jid, format!("{why} {APP_CLIENT_LOCK_FIX}"));
+                            return;
+                        }
+                        // The version check, on the models the resumed run will call (the kept
+                        // group review model included).
+                        if let Some(why) = crate::scan_cli_version::cli_version_refusal_for_scan(
+                            matches!(backend_resolution, crate::llm::BackendResolution::Cli),
+                            run_ai_review,
+                            model.as_deref(),
+                            calibration_model.as_deref(),
+                            deep,
+                            &selected,
+                            &run_controls,
+                            crate::claude_version::check_run_models,
+                        ) {
+                            body_jobs.fail(&body_jid, why);
+                            return;
+                        }
                         Some(store)
                     }
                     Err(e) => {
@@ -4690,6 +4777,9 @@ mod preview_evidence_tests;
 
 #[cfg(test)]
 mod cockpit_resume_tests;
+
+#[cfg(test)]
+mod greenfield_lock_tests;
 
 #[cfg(test)]
 mod model_input_chat_tests;

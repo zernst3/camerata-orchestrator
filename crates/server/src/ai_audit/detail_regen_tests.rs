@@ -2035,7 +2035,8 @@ async fn a_detail_that_fails_both_tries_records_both_with_the_class() {
 #[tokio::test]
 async fn a_stopped_run_sends_no_second_detail_try() {
     let llm = RoleLlm::new(&terse_scan(1), Regen::DownFirst(usize::MAX));
-    let meter = UsageMeter::default();
+    // Each failure lands a minute after the one before, so three span the outage stop's 120 s.
+    let meter = UsageMeter::default().with_health(crate::run_health::RunHealth::stepping(60));
     let input = vec![finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"))];
     let (_out, failed) = regenerate_full_details(
         &llm,

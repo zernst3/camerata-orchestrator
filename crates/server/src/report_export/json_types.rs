@@ -133,6 +133,9 @@ pub struct CoverJson {
     /// `docs/design/2026-09-13_audit-deliverable-review-fixes.md`.
     pub brand: Option<String>,
     pub stats: CoverStatsJson,
+    /// The strip under the cover title, built from the counts object
+    /// ([`super::counts_prose::cover_strip`]): the template prints it as it is.
+    pub strip: String,
     /// H11: set when this run re-audited only the changed files and carried the earlier
     /// inspection's other findings forward ("12 files re-audited this run, 3 findings carried
     /// from the inspection at abc1234."). `None` for a full scan, and the cover then prints
@@ -212,6 +215,9 @@ pub struct ExecutiveSummaryJson {
     /// render in `MethodologyJson::failed_passes` for the more technical section.
     #[serde(default)]
     pub failed_passes: Vec<String>,
+    /// The line under the failed passes list when there are more than the PDF shows.
+    #[serde(default)]
+    pub failed_passes_more_line: String,
 }
 
 /// Item 7: "If you only do three things this week" — a half-page box right after the
@@ -393,6 +399,8 @@ pub struct GridTagJson {
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct GridCellJson {
+    /// The problems in the cell, for the template to print as it is.
+    pub count: usize,
     pub findings: Vec<GridTagJson>,
 }
 
@@ -421,13 +429,16 @@ pub struct PriorityGridJson {
     /// Severity rows present this run (`"critical"` | `"high"` | `"medium"` | `"low"`), in
     /// that fixed order, filtered to the ones with at least one finding.
     pub rows: Vec<GridRowJson>,
+    /// The counts object's accepted risk, information only and needs a decision problems.
     pub accepted_count: usize,
     pub informational_count: usize,
-    /// Places whose head row needs a decision: counted on the cover, not in the grid.
+    /// Problems that need a decision: counted on the cover, not in the grid.
     pub held_count: usize,
-    /// "Not in this grid: 2 critical, 2 high and 5 low places that need a decision first, and 6
-    /// low places that are information only. The cover counts all of them." Empty when nothing is
-    /// left out.
+    /// "N problems are accepted risk and out of scope for this grid." Empty when there are none.
+    #[serde(default)]
+    pub accepted_line: String,
+    /// "Not in this grid: 406 problems that need a decision first and 137 that are information
+    /// only. The cover counts all of them." Empty when nothing is left out.
     pub left_out: String,
     /// The line under the grid: each cell counts, the rows are on the All problems sheet.
     pub footnote: String,
@@ -446,93 +457,63 @@ pub(crate) fn grid_effort_key(effort: Option<&str>) -> &'static str {
     }
 }
 
-/// The rows that head the places of the matrix: one for each (repo, file, line) of a problem (a
-/// kind the All problems sheet lists), the worst severity at the place, the first on a tie. The
-/// grid, the executive summary's counts, the cover and the scorecard all count these, so the PDF
-/// states one number of problems.
-pub(crate) fn problem_heads(matrix: &MatrixJson) -> Vec<&FindingRefJson> {
-    let mut order: Vec<(&str, &str, usize)> = Vec::new();
-    let mut best: std::collections::HashMap<(&str, &str, usize), &FindingRefJson> =
-        std::collections::HashMap::new();
-    for f in matrix
-        .do_now
-        .iter()
-        .chain(&matrix.do_next)
-        .chain(&matrix.plan)
-        .chain(&matrix.accepted)
-        .chain(&matrix.informational)
-        .chain(&matrix.held)
-        .filter(|f| crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&f.kind.tag()))
-    {
-        let key = (f.repo.as_str(), f.path.as_str(), f.line);
-        match best.get(&key) {
-            None => {
-                order.push(key);
-                best.insert(key, f);
-            }
-            Some(kept) if severity_rank(&f.severity) < severity_rank(&kept.severity) => {
-                best.insert(key, f);
-            }
-            Some(_) => {}
-        }
-    }
-    order.into_iter().filter_map(|k| best.remove(&k)).collect()
+/// The places of the matrix, by THE place rule ([`crate::review_tree::places_of`]): one for each
+/// (repo, file, line) of a problem (a kind the All problems sheet lists), with its head row and
+/// its class. The grid is built from these, so a problem is in the grid exactly when the counts
+/// object calls it for action.
+pub(crate) fn problem_places(
+    matrix: &MatrixJson,
+) -> Vec<crate::review_tree::Place<'_, FindingRefJson>> {
+    crate::review_tree::places_of(
+        matrix
+            .do_now
+            .iter()
+            .chain(&matrix.do_next)
+            .chain(&matrix.plan)
+            .chain(&matrix.accepted)
+            .chain(&matrix.informational)
+            .chain(&matrix.held)
+            .filter(|f| crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&f.kind.tag())),
+    )
 }
 
-/// The grid's note on the places it leaves out, by severity, so the grid closes to the cover.
-fn left_out_line(heads: &[&FindingRefJson]) -> String {
-    let part = |bucket: &str| -> String {
-        let items: Vec<String> = ["critical", "high", "medium", "low"]
-            .iter()
-            .filter_map(|sev| {
-                let n = heads
-                    .iter()
-                    .filter(|f| {
-                        f.bucket == bucket
-                            && (if *sev == "low" {
-                                !matches!(f.severity.as_str(), "critical" | "high" | "medium")
-                            } else {
-                                f.severity == *sev
-                            })
-                    })
-                    .count();
-                (n > 0).then(|| format!("{n} {sev}"))
-            })
-            .collect();
-        match items.split_last() {
-            None => String::new(),
-            Some((last, [])) => last.clone(),
-            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        }
-    };
-    let (held, info) = (part("held"), part("informational"));
-    let mut out = match (held.is_empty(), info.is_empty()) {
-        (true, true) => return String::new(),
-        (false, true) => format!("Not in this grid: {held} places that need a decision first."),
-        (true, false) => format!("Not in this grid: {info} places that are information only."),
-        (false, false) => format!(
-            "Not in this grid: {held} places that need a decision first, and {info} places that are information only."
-        ),
-    };
-    out.push_str(" The cover counts all of them.");
-    out
+impl crate::review_tree::PlaceRow for FindingRefJson {
+    fn place_repo(&self) -> &str {
+        &self.repo
+    }
+    fn place_path(&self) -> &str {
+        &self.path
+    }
+    fn place_line(&self) -> usize {
+        self.line
+    }
+    fn place_rule_id(&self) -> &str {
+        &self.rule_id
+    }
+    fn place_severity(&self) -> &str {
+        &self.severity
+    }
+    fn place_bucket(&self) -> &str {
+        &self.bucket
+    }
 }
 
 /// FIX 6 — project the `do_now`/`do_next`/`plan` findings (Accepted and Informational are OUT
 /// OF SCOPE, see [`PriorityGridJson`]'s doc comment) into the real 2-D grid. Rows/columns are
 /// fixed orderings but only emitted when at least one finding uses them, so a small scan's
 /// grid stays small instead of always rendering a fixed 4x4 of mostly-empty cells.
-pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
+pub(crate) fn build_priority_grid(matrix: &MatrixJson, counts: &ReportCounts) -> PriorityGridJson {
     const SEVERITY_ORDER: [&str; 4] = ["critical", "high", "medium", "low"];
     const EFFORT_ORDER: [&str; 4] = ["low", "medium", "high", "unscoped"];
 
-    // A problem is a place: each place counts once, at the severity, effort and bucket of the row
-    // that heads it (the cover, the scorecard and the narrative count the same way).
-    let heads = problem_heads(matrix);
-    let action_findings: Vec<&FindingRefJson> = heads
+    // A problem is a place: each place counts once, at the severity and effort of the row that
+    // heads it. The grid holds the places the counts call for action and no others (a place with
+    // a held row needs a decision whatever heads it).
+    let places = problem_places(matrix);
+    let action_findings: Vec<&FindingRefJson> = places
         .iter()
-        .copied()
-        .filter(|f| matches!(f.bucket.as_str(), "do_now" | "do_next" | "plan"))
+        .filter(|p| matches!(p.class, crate::review_tree::PlaceClass::ForAction(_)))
+        .map(|p| p.head)
         .collect();
 
     let present_severities: Vec<&str> = SEVERITY_ORDER
@@ -572,7 +553,10 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
                     findings.sort_by(|a, b| {
                         (&a.repo, &a.path, a.line).cmp(&(&b.repo, &b.path, b.line))
                     });
-                    GridCellJson { findings }
+                    GridCellJson {
+                        count: findings.len(),
+                        findings,
+                    }
                 })
                 .collect();
             GridRowJson {
@@ -585,10 +569,11 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
     PriorityGridJson {
         columns: present_efforts.into_iter().map(String::from).collect(),
         rows,
-        accepted_count: heads.iter().filter(|f| f.bucket == "accepted").count(),
-        informational_count: heads.iter().filter(|f| f.bucket == "informational").count(),
-        held_count: heads.iter().filter(|f| f.bucket == "held").count(),
-        left_out: left_out_line(&heads),
+        accepted_count: counts.problems.accepted,
+        informational_count: counts.problems.information_only,
+        held_count: counts.problems.needs_decision,
+        accepted_line: super::counts_prose::grid_accepted_line(counts),
+        left_out: super::counts_prose::grid_left_out(counts),
         footnote: format!(
             "Each cell counts the problems in it, one for each place. Every problem is on the {} sheet, with its severity, effort and place.",
             crate::xlsx_export::vocabulary::ALL_PROBLEMS
@@ -1023,6 +1008,13 @@ pub struct DependencySnapshotJson {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MethodologyJson {
+    /// The source rows reconciled once, in row words ([`super::counts_prose::methodology_line`]).
+    /// The template prints this line and no number of its own.
+    pub reconciliation: String,
+    /// The line under the failed passes list when there are more than the PDF shows.
+    #[serde(default)]
+    pub failed_passes_more_line: String,
+    /// The counts object's source rows, kept for machine readers for one release.
     pub candidates_reviewed: usize,
     pub excluded_false_positive: usize,
     /// P5: mirrors `ExecutiveSummaryJson::held_for_review` — carried here too so the
@@ -1128,6 +1120,9 @@ impl PdfWordsJson {
 /// `docs/design/2026-07-23_brownfield-audit-report.md` in order.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditReportJson {
+    /// Every count of the package, worked out once (`report_counts`). Beside the old fields,
+    /// which stay for one release.
+    pub counts: super::counts::ReportCounts,
     /// The package is for the operator's own review. Not part of the PDF's data: the exporters
     /// that build from this value beside the PDF (`findings.json`) read it to decide whether the
     /// group reviewer's triage columns go in.

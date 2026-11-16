@@ -156,9 +156,11 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     // The model-input chokepoint: the prompt and the system prompt go out redacted.
     let req = crate::model_input::guarded(req);
     let req = &*req;
+    // The finder's clean room may name its own `claude`; otherwise the shared lookup (the
+    // `CAMERATA_CLAUDE_PROGRAM` override, then `claude` on `PATH`).
     let mut cmd = match req.room_output.as_ref().and_then(|r| r.program.as_ref()) {
         Some(program) => tokio::process::Command::new(program),
-        None => tokio::process::Command::new("claude"),
+        None => tokio::process::Command::new(camerata_api_types::claude_cli::claude_program()),
     };
     // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
     // leaving a stalled `claude` running in the background.
@@ -2088,7 +2090,7 @@ impl Llm {
     fn sleeper(&self) -> &dyn crate::retry::Sleeper {
         match &self.sleeper {
             Some(s) => s.as_ref(),
-            None => &crate::retry::TokioSleeper,
+            None => &crate::retry::ProcessSleeper,
         }
     }
 
@@ -3414,7 +3416,7 @@ impl OpenRouterCompleter {
 
         let body = build_openrouter_chat_body(model, req, &self.session_id, provider_constraint);
 
-        let mut builder = reqwest::Client::new()
+        let mut builder = shared_http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -3428,14 +3430,7 @@ impl OpenRouterCompleter {
             builder = builder.header("X-OpenRouter-Cache-Clear", "true");
         }
 
-        let resp = builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("OpenRouter API request failed: {e}"))?;
-
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let (status, text) = send_openrouter(builder.json(&body)).await?;
         if !status.is_success() {
             anyhow::bail!("OpenRouter API HTTP {status}: {text}");
         }
@@ -3673,6 +3668,22 @@ pub fn build_completer(
 //   - "tool use not supported" → try a tool-capable model
 //   - Generic / other 400 → surface immediately (would fail identically on every model)
 
+/// Sends one OpenRouter request and reads the whole body.
+async fn send_openrouter(
+    builder: reqwest::RequestBuilder,
+) -> anyhow::Result<(reqwest::StatusCode, String)> {
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("OpenRouter API request failed"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("OpenRouter API response body failed"))?;
+    Ok((status, text))
+}
+
 /// Classify an error string to decide whether to advance the fallback chain.
 ///
 /// Returns `true` when the next model should be tried; `false` when the error
@@ -3766,7 +3777,9 @@ pub async fn call_with_fallback(
         match completer.complete(req).await {
             Ok(resp) => return Ok(resp),
             Err(e) => {
-                let msg = e.to_string();
+                // The whole chain: a typed transport error's cause ("operation timed out") is
+                // in its source, not in the outer context.
+                let msg = format!("{e:#}");
                 if is_retryable_for_chain(&msg) {
                     last_err = anyhow::anyhow!(
                         "model `{model_id}` retryable error (advancing chain): {msg}"
@@ -6869,5 +6882,43 @@ exit 1"#,
             "its reason is kept and names the refusal"
         );
         assert!(results.responses.contains_key("c0-b1"));
+    }
+}
+
+/// The OpenRouter post keeps the typed `reqwest` timeout, so a stalled provider classifies as a
+/// retryable transport failure (reqwest's `Display` omits its source, so flattening to text
+/// loses the "timed out").
+#[cfg(test)]
+mod openrouter_timeout_tests {
+    use super::*;
+
+    async fn stalled_listener() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_stalled_openrouter_post_reads_as_a_retryable_transport_failure() {
+        let addr = stalled_listener().await;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(400))
+            .build()
+            .unwrap();
+        let err = send_openrouter(client.post(format!("http://{addr}/chat")))
+            .await
+            .expect_err("the provider never answers");
+        assert_eq!(
+            crate::failure::classify_error(&err),
+            crate::failure::FailureClass::Transport,
+            "{err:#}"
+        );
+        assert!(is_retryable_for_chain(&format!("{err:#}")), "{err:#}");
     }
 }

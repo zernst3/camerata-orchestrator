@@ -441,6 +441,16 @@ pub async fn run_repeatability_with(
     if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
         return Err(why);
     }
+    // The cli backend launches the local Claude Code, which refuses a model it predates: check
+    // before the first run, not after a round of failed calls. A scripted model launches nothing.
+    if let Some(why) = crate::inspect_cmd::cli_version_refusal(
+        matches!(backend_resolution, BackendResolution::Cli),
+        seams.llm.is_some(),
+        &models,
+        camerata_server::claude_version::check_run_models,
+    ) {
+        return Err(why);
+    }
 
     // ── Two runs, nothing carried between them ───────────────────────────────────────────
     let mut summaries = Vec::new();

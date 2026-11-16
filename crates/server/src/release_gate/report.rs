@@ -34,6 +34,9 @@ pub enum CheckId {
     /// A finding the engine threw out and the reviewer put back is decided before it ships
     /// (A12 item 2).
     RestoredWithoutDecision,
+    /// A problem split out of one the reviewer ruled out has a decision of its own before it
+    /// ships: the ruling on the first did not cover it.
+    SplitOutWithoutDecision,
     /// A site the Engine Check (the reviewer's internal quality control of the engine) said No to
     /// carries a correction, a decision or a later edit before it ships (design A2b). An Engine
     /// Check file that cannot be read refuses too: with the verdicts unknown, no No can be ruled
@@ -65,7 +68,7 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 17] = [
+    pub const ALL: [CheckId; 18] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -75,6 +78,7 @@ impl CheckId {
         CheckId::EvidenceUnverified,
         CheckId::MergedWithoutDecision,
         CheckId::RestoredWithoutDecision,
+        CheckId::SplitOutWithoutDecision,
         CheckId::EngineCheckNoWithoutCorrection,
         CheckId::Marking,
         CheckId::Manifest,
@@ -97,6 +101,7 @@ impl CheckId {
             CheckId::EvidenceUnverified => "reviewer decision on unverified evidence",
             CheckId::MergedWithoutDecision => "decision records behind merged rows",
             CheckId::RestoredWithoutDecision => "reviewer decision on restored findings",
+            CheckId::SplitOutWithoutDecision => "reviewer decision on split-out problems",
             CheckId::EngineCheckNoWithoutCorrection => "reviewer correction on flagged findings",
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",

@@ -571,7 +571,8 @@ impl ClaudeLeadEngineer {
         // and the read-only built-ins (Read/Grep/Glob/LS) enabled, so the engineer can scan
         // ANY file in the real codebase while planning, not just the inlined digest. Reads
         // are inherently safe here: no write/exec tool is offered, so this adds no write path.
-        let mut cmd = tokio::process::Command::new("claude");
+        let program = camerata_api_types::claude_cli::claude_program();
+        let mut cmd = tokio::process::Command::new(program);
         // The subscription CLI must never inherit an API key from the parent's `.env`.
         camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a model

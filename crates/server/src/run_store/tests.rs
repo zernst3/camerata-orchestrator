@@ -2273,8 +2273,29 @@ fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on()
         "claude-fable-5-2",
         "the default has moved on"
     );
-    started.keep_group_review_model(&mut resumed);
+    let notice = started
+        .hold_group_review_model(&mut resumed, None)
+        .expect("no explicit pick, nothing to refuse");
     assert_eq!(resumed.group_review_model_for(), "claude-fable-5-1");
+    assert_eq!(
+        notice,
+        "Group review stays on claude-fable-5-1, the model this run started with."
+    );
+    // The same model named explicitly is not a different pick.
+    let mut same = crate::cost_cap::RunControls::default();
+    started
+        .hold_group_review_model(&mut same, Some("claude-fable-5-1"))
+        .unwrap();
+    // A different one is refused, and the controls are left as they were.
+    let mut other = crate::cost_cap::RunControls::default();
+    let why = started
+        .hold_group_review_model(&mut other, Some("claude-opus-5-5"))
+        .expect_err("a different explicit model is refused");
+    assert!(
+        why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
+        "{why}"
+    );
+    assert_eq!(other.group_review_model_for(), "claude-fable-5-2");
 }
 
 /// A run saved before the group reviewer was recorded has nothing to keep: the current pick stands.
@@ -2283,8 +2304,9 @@ fn a_record_without_a_group_review_model_leaves_the_pick_alone() {
     let mut old = models();
     old.group_review = String::new();
     let mut resumed = controls_with_group_review("claude-opus-5-5");
-    old.keep_group_review_model(&mut resumed);
+    let notice = old.hold_group_review_model(&mut resumed, None).unwrap();
     assert_eq!(resumed.group_review_model_for(), "claude-opus-5-5");
+    assert!(notice.contains("claude-opus-5-5"), "{notice}");
 }
 
 /// A moved built-in default is kept, not refused: a resolved record whose only difference is the
@@ -2300,5 +2322,96 @@ fn a_resume_is_not_refused_because_the_group_review_default_moved() {
     assert!(
         !saved.matches_for_resume(&now),
         "the other models still count"
+    );
+}
+
+// ---- a run saved before the group review model was recorded ----
+
+/// Answers every stage 2 call with a good reply, from the model the request named (as the
+/// backends do), so a stored reply says which model gave it.
+struct AnswersAsAsked;
+
+#[async_trait::async_trait]
+impl LlmPort for AnswersAsAsked {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let mut r = response(GOOD_STAGE2_REPLY, 0.05);
+        r.model = req.model.clone();
+        Ok(r)
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A record that names no group review model takes it from the group review replies the run
+/// already stored (their key includes the model), so the resume reuses them and pays nothing
+/// twice; the resume says which model it stays on.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_record_without_a_group_review_model_takes_it_from_its_stored_replies() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        assert!(store.record().models.group_review.is_empty());
+        {
+            let journal = JournalLlm::new(&AnswersAsAsked, store.clone());
+            journal
+                .complete(stage2_request("review one").with_model("claude-fable-5-1"))
+                .await
+                .unwrap();
+        }
+        let store = reopen(store);
+        let mut resumed = crate::cost_cap::RunControls::default();
+        let notice = store
+            .hold_group_review_model(&mut resumed, None)
+            .expect("no explicit pick");
+        assert_eq!(resumed.group_review_model_for(), "claude-fable-5-1");
+        assert_eq!(
+            notice,
+            "Group review stays on claude-fable-5-1, the model this run started with."
+        );
+        // The stored reply is found under the controls' model, so the resume replays it.
+        let model = Fixed(GOOD_STAGE2_REPLY.to_string(), AtomicUsize::new(0));
+        let journal = JournalLlm::new(&model, store.clone());
+        journal
+            .complete(stage2_request("review one").with_model(resumed.group_review_model_for()))
+            .await
+            .unwrap();
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            0,
+            "the stored reply was reused"
+        );
+        // An explicit different model is refused for such a run too.
+        let mut other = crate::cost_cap::RunControls::default();
+        assert!(store
+            .hold_group_review_model(&mut other, Some("claude-opus-5-5"))
+            .is_err());
+    })
+    .await;
+}
+
+/// With no recorded model and no stored group review reply, the resume says which model it will
+/// use.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_record_with_no_model_and_no_stored_replies_says_the_model_it_will_use() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let mut resumed = controls_with_group_review("claude-opus-5-5");
+    let notice = store.hold_group_review_model(&mut resumed, None).unwrap();
+    assert_eq!(resumed.group_review_model_for(), "claude-opus-5-5");
+    assert!(
+        notice.contains("claude-opus-5-5") && notice.contains("did not record"),
+        "{notice}"
     );
 }

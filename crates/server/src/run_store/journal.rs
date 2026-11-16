@@ -1159,6 +1159,35 @@ pub(crate) fn stored_spend(dir: &Path) -> f64 {
     all
 }
 
+/// The model the group reviewer's stored replies in `dir` came from: the requested model of the
+/// most recent good one. A stored reply is keyed by a digest that includes the model, so a resume
+/// on any other model asks (and pays for) the whole stage again. `None` when no group review
+/// reply is stored.
+pub(crate) fn stored_group_review_model(dir: &Path) -> Option<String> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    for file in std::fs::read_dir(dir.join("calls"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|e| read_json::<CallFile>(&e.path()))
+        .filter(|f| f.kind == PartKind::GroupReview)
+    {
+        for entry in file.entries.values() {
+            if entry.status != EntryStatus::Done {
+                continue;
+            }
+            if let Some(model) = entry
+                .response
+                .as_ref()
+                .map(|r| r.model.trim())
+                .filter(|m| !m.is_empty())
+            {
+                found.push((entry.at.clone(), model.to_string()));
+            }
+        }
+    }
+    found.into_iter().max().map(|(_, model)| model)
+}
+
 /// Whether every part of `kind` for `repo` in the plan is done. A call whose repo the prompt did
 /// not name is matched against the parts of that kind in any repo.
 fn part_finished(record: &RunRecord, kind: PartKind, repo: &str) -> bool {

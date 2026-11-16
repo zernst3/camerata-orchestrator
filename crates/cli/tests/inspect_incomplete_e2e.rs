@@ -195,6 +195,8 @@ async fn a_client_run_whose_provider_is_unreachable_stops_with_exit_5_and_writes
     let state = tempfile::tempdir().unwrap();
     let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+    // The scripted provider fails instantly: the 120 s outage span is covered in `run_health`.
+    let _span = camerata_server::run_health::OutageSpanGuard::set(std::time::Duration::ZERO);
     let (result, export, _out, _repo) = run(Mode::Unreachable, true).await;
     let err = result.expect_err("a client export of an unreachable-provider run is refused");
     assert_eq!(err.exit_code(), EXIT_OUTAGE_STOPPED);
@@ -227,6 +229,8 @@ async fn the_internal_export_of_an_unreachable_run_is_written_marked_and_gate_re
     let state = tempfile::tempdir().unwrap();
     let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+    // The scripted provider fails instantly: the 120 s outage span is covered in `run_health`.
+    let _span = camerata_server::run_health::OutageSpanGuard::set(std::time::Duration::ZERO);
     let (result, export, _out, _repo) = run(Mode::Unreachable, false).await;
     let outcome = result.expect("an internal export is written");
     assert!(outcome.outage_stopped());

@@ -21,6 +21,10 @@ const NO_KEYCHAIN: &str = camerata_server::credentials::NO_KEYCHAIN_ENV;
 const FAKE_CLAUDE: &str = r#"#!/usr/bin/env python3
 import hashlib, json, os, re, sys, time
 args = sys.argv[1:]
+# The run's pre-flight reads the Claude Code version before any model call; it is not a call.
+if args == ["--version"]:
+    print("2.1.321 (Claude Code)")
+    sys.exit(0)
 prompt = args[args.index("-p") + 1] if "-p" in args else ""
 system = args[args.index("--system-prompt") + 1] if "--system-prompt" in args else ""
 if os.environ.get("CAMERATA_FAKE_WARM"):

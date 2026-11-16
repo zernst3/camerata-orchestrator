@@ -236,7 +236,8 @@ pub struct ModelsRecord {
     /// The group reviewer's resolved id, so a resume keeps the model the run started on (no mixed
     /// models in one run's group review) even after the built-in default moves. Empty for a run
     /// saved before it was recorded; such a resume uses the current pick. Not part of
-    /// [`Self::matches_for_resume`]: a changed default is kept, not refused.
+    /// [`Self::matches_for_resume`]: [`Self::hold_group_review_model`] keeps it when the resume
+    /// names no model, and refuses a resume that names a different one.
     #[serde(default)]
     pub group_review: String,
 }
@@ -268,17 +269,48 @@ impl ModelsRecord {
         }
     }
 
-    /// Hold a resumed run to the group review model it started with.
-    pub fn keep_group_review_model(&self, controls: &mut crate::cost_cap::RunControls) {
-        if !self.group_review.trim().is_empty() {
-            controls.review.group_review_model = self.group_review.clone();
+    /// Hold a resumed run to the group review model it started with, and return the one line the
+    /// resume pre-flight prints about it.
+    ///
+    /// `explicit` is the group review model the resume was explicitly given (the command line's
+    /// `--group-review-model`, or a project setting that is not just the built-in default), if
+    /// any. With none, the recorded model is kept whatever the default is now (no mixed models in
+    /// one run's group review). With one that differs from the recorded model the resume is
+    /// refused, exactly as a different scan, calibration or fix model is: the stored replies came
+    /// from the recorded model.
+    pub fn hold_group_review_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+        explicit: Option<&str>,
+    ) -> Result<String, String> {
+        let recorded = self.group_review.trim();
+        if recorded.is_empty() {
+            return Ok(format!(
+                "Group review runs on {}: this run did not record a group review model.",
+                controls.group_review_model_for()
+            ));
         }
+        if let Some(pick) = explicit.map(str::trim).filter(|m| !m.is_empty()) {
+            if pick != recorded {
+                return Err(format!(
+                    "this run's group review is on {recorded}, and this resume asks for {pick}. \
+                     The stored group review replies came from {recorded}, so resume it with \
+                     the same model, or start a new run"
+                ));
+            }
+        }
+        controls.review.group_review_model = recorded.to_string();
+        Ok(format!(
+            "Group review stays on {recorded}, the model this run started with."
+        ))
     }
 
     /// Whether a resume with `now` may reuse a run saved with `self`. A resolved record must be
-    /// equal. A record from before ids were resolved is compared on the audit model, the backend
-    /// and the mode it recorded, and on a calibration or fix pick only when it recorded one (an
-    /// empty raw pick said nothing about what ran).
+    /// equal to `now` in its audit, calibration and fix models, its backend and its mode; the
+    /// group review model is not compared here ([`Self::hold_group_review_model`] keeps it, and
+    /// refuses an explicit different one). A record from before ids were resolved is compared on
+    /// the audit model, the backend and the mode it recorded, and on a calibration or fix pick
+    /// only when it recorded one (an empty raw pick said nothing about what ran).
     pub fn matches_for_resume(&self, now: &ModelsRecord) -> bool {
         if self.resolved {
             // The group review model is kept on resume, not compared (see `group_review`).
@@ -939,6 +971,23 @@ impl RunStore {
     /// The record as it stands.
     pub fn record(&self) -> RunRecord {
         self.lock_state().record.clone()
+    }
+
+    /// [`ModelsRecord::hold_group_review_model`] for this run. A run saved before the group review
+    /// model was recorded takes it from the group review replies it stored, so the resume reuses
+    /// them; with none stored the current pick stands.
+    pub fn hold_group_review_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+        explicit: Option<&str>,
+    ) -> Result<String, String> {
+        let mut models = self.record().models;
+        if models.group_review.trim().is_empty() {
+            if let Some(stored) = journal::stored_group_review_model(&self.dir) {
+                models.group_review = stored;
+            }
+        }
+        models.hold_group_review_model(controls, explicit)
     }
 
     /// The secret the prompt tokens of this run are drawn from.

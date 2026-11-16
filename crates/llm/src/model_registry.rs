@@ -38,6 +38,25 @@ pub use camerata_api_types::model_registry::{
 
 // ── Static Claude catalog ────────────────────────────────────────────────────
 
+/// The oldest Claude Code that accepts a model on the cli backend, as (major, minor, patch).
+/// Claude Code refuses a model it predates ("does not support this model; version X or newer is
+/// required"), so the cli pre-flight ([`crate::claude_version`]) checks this table before any
+/// model call. A model not listed has no known minimum. Add a line when a model ships that needs
+/// a newer Claude Code.
+pub const CLAUDE_CODE_MIN_VERSIONS: &[(&str, (u32, u32, u32))] =
+    &[("claude-fable-5-2", (2, 1, 290))];
+
+/// The minimum Claude Code version for `model` on the cli backend, when one is known.
+pub fn min_claude_code_version(model: &str) -> Option<(u32, u32, u32)> {
+    let model = model.trim();
+    // The same resolution as the catalog lookup, so a dated snapshot id names its base model.
+    let base = registry_entry_for(model).map_or(model, |e| e.id);
+    CLAUDE_CODE_MIN_VERSIONS
+        .iter()
+        .find(|(id, _)| *id == base)
+        .map(|(_, v)| *v)
+}
+
 /// The curated static list of Claude (subscription-CLI) models.
 ///
 /// No list-models API exists for the Claude Code CLI, so this is data. Trivial to update
@@ -983,7 +1002,7 @@ impl ModelRegistry {
 
 /// Fetch and parse the OpenRouter `/api/v1/models` endpoint.
 async fn fetch_openrouter_models(api_key: &str) -> anyhow::Result<Vec<RegistryEntry>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let resp = client
         .get("https://openrouter.ai/api/v1/models")
         .header("Authorization", format!("Bearer {api_key}"))
@@ -1355,7 +1374,7 @@ pub fn compute_safe_providers(endpoints: &[ProviderEndpointInfo]) -> Vec<String>
 async fn fetch_provider_policies(
     api_key: Option<&str>,
 ) -> anyhow::Result<HashMap<String, ProviderPolicyRecord>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let mut req = client
         .get("https://openrouter.ai/api/frontend/v1/all-providers")
         .header("HTTP-Referer", "https://camerata.ai")
@@ -1395,7 +1414,7 @@ async fn fetch_model_endpoints(
     api_key: Option<&str>,
     model_id: &str,
 ) -> anyhow::Result<Vec<OpenRouterEndpointRaw>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let mut req = client
         .get(format!(
             "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
@@ -1418,13 +1437,78 @@ async fn fetch_model_endpoints(
     Ok(body.data.endpoints)
 }
 
+/// A client for the registry lookups: bounded, so a stalled connection fails (a retryable
+/// network error to the caller) instead of hanging the run.
+fn bounded_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            bounded_client_with(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(10),
+            )
+        })
+        .clone()
+}
+
+fn bounded_client_with(
+    total: std::time::Duration,
+    connect: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(total)
+        .connect_timeout(connect)
+        .build()
+        .expect("building a reqwest client with only timeouts set cannot fail")
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A peer that accepts the connection and never answers: a client with no timeout waits
+    /// forever, the bounded one returns a timeout error that the chain treats as retryable.
+    #[tokio::test]
+    async fn a_stalled_peer_hangs_an_unbounded_client_and_fails_a_bounded_one() {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+
+            // Deliberately unbounded: the test shows what a client with no timeout does.
+            #[allow(clippy::disallowed_methods)]
+            let unbounded = reqwest::Client::new().get(&url).send();
+            let hung = tokio::time::timeout(std::time::Duration::from_secs(3), unbounded).await;
+            assert!(
+                hung.is_err(),
+                "a client with no timeout must still be waiting"
+            );
+
+            let bounded = bounded_client_with(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            );
+            let err = bounded.get(&url).send().await.expect_err("must time out");
+            assert!(err.is_timeout(), "{err:?}");
+            let text = format!("{:#}", anyhow::Error::from(err));
+            assert!(crate::llm::is_retryable_for_chain(&text), "{text}");
+            drop(listener);
+        })
+        .await
+        .expect("the test itself must finish inside 60 s");
+    }
+
     // ── Claude static catalog ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_minimum_claude_code_version_resolves_dated_and_untrimmed_ids() {
+        let min = Some((2, 1, 290));
+        assert_eq!(min_claude_code_version("claude-fable-5-2"), min);
+        assert_eq!(min_claude_code_version("claude-fable-5-2-20261101"), min);
+        assert_eq!(min_claude_code_version(" claude-fable-5-2 "), min);
+        assert_eq!(min_claude_code_version("claude-opus-5-5"), None);
+    }
 
     #[test]
     fn claude_entries_has_all_four_tiers() {

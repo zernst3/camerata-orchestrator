@@ -34,9 +34,6 @@ const DEFAULT_READ_LINES: usize = 2_000;
 /// agent to read them from the folder (a process argument has a size limit).
 const MAX_INLINE_BYTES: usize = 400_000;
 
-/// The environment variable that names the `claude` program when the caller names none.
-pub const PROGRAM_ENV: &str = "CAMERATA_CLAUDE_PROGRAM";
-
 /// What the agent is told about the layout, after the brief or the follow-up message.
 const LAYOUT_NOTE: &str = "The files of this part are in the folder `code/`. Every path in these instructions (in `_camerata/context/tree.txt`, `neighbours.md` and `context-files.txt`, and the `path` of a problem, a lead and `unread.json`) is relative to `code/`, so the file `src/a.rs` is `code/src/a.rs` on disk. The `_camerata/` folder is beside `code/`, not inside it.";
 
@@ -53,7 +50,8 @@ pub struct CliPieceAgent {
     pub(crate) model: String,
     /// An engine-owned folder under the run's state folder; never inside a client's repository.
     pub(crate) work_dir: PathBuf,
-    /// The `claude` program to run. `None` = `claude` from `PATH`.
+    /// The `claude` program to run. `None` = the engine's one resolver
+    /// (`camerata_api_types::claude_cli::claude_program()`, applied where the process is spawned).
     program: Option<PathBuf>,
     engagement: EngagementKind,
     /// The wall-clock bound of one call. `None` = the piece limits' own bound.
@@ -65,9 +63,7 @@ impl CliPieceAgent {
         Self {
             model: model.into(),
             work_dir,
-            program: std::env::var_os(PROGRAM_ENV)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from),
+            program: None,
             engagement,
             wall_clock: None,
         }

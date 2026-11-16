@@ -1017,6 +1017,8 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE,
     crate::ai_audit::agent_finder::reply::FINDER_END_LINE_CAPTURE,
     crate::ai_audit::agent_finder::reply::FINDER_RULES_CAPTURE,
+    // The note on a place unfolded from a ruled-out row: it names the host row's key.
+    crate::report_export::unfold::UNFOLDED_FROM_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.

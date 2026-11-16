@@ -505,17 +505,13 @@ fn places_tally(entries: &Entries, kinds: &[&str]) -> Tally {
     };
     // Each place: the row that carries the others heads it (the first row there when none does),
     // at the worst severity of any row at the place, as the All problems sheet prints it.
-    let mut places: BTreeMap<(String, String, String), Vec<&Value>> = BTreeMap::new();
+    let mut places: BTreeMap<(String, String, String, String), Vec<&Value>> = BTreeMap::new();
     for row in &rows {
         if !kinds.contains(&cell_text(row, "kind").as_str()) {
             continue;
         }
         places
-            .entry((
-                cell_text(row, "repo"),
-                cell_text(row, "path"),
-                cell_text(row, "line"),
-            ))
+            .entry(super::counts_check::place_key_of(row))
             .or_default()
             .push(row);
     }
@@ -820,6 +816,21 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
     problems
 }
 
+/// Every count in the package, held to the files in it (single counts, design 5.7): the object in
+/// `findings.json` and the PDF data equals an independent recount, the four identities hold,
+/// every surface equals the object, every count sentence equals the one the counts give and an
+/// executive summary override states no number that is no count.
+///
+/// ENFORCED: `gate_report` records it under the counts check, so a package whose printed numbers
+/// differ from the files in it is refused. See [`super::counts_check`].
+pub fn counts_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
+    super::counts_check::counts_problems_with(
+        entries,
+        report,
+        super::counts_check::CountsChecks::default(),
+    )
+}
+
 const PATTERNS: &str = "patterns across services";
 
 /// The "Patterns across services" section is an observation, never a finding: it must change no
@@ -832,13 +843,38 @@ const PATTERNS: &str = "patterns across services";
 /// * no pattern row sits inside the `findings` array, so every count read off that array (and
 ///   off `json/all-findings.json`, which the rest of this check holds it to) is findings only;
 /// * no cell says clean for a service and rule that has an open problem in the package
-///   ([`patterns_clean_cell_problems`]).
+///   ([`patterns_clean_cell_problems`]);
+/// * `findings.json` lists nothing under `open_beside_ruled_out`: every place of another rule
+///   that a ruled-out row carries has a row of its own.
 pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
     let mut problems = patterns_clean_cell_problems(entries, report);
     let findings_json: Option<Value> = entries
         .get("findings.json")
         .and_then(|bytes| serde_json::from_slice(bytes).ok());
     if let Some(value) = &findings_json {
+        // The backstop for the unfold: a place of another rule that a ruled-out row still carries
+        // must have a row of its own, so the key lists nothing in a package that may ship.
+        for (i, site) in value
+            .get("open_beside_ruled_out")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            problems.push(problem(
+                "findings.json",
+                &format!("open_beside_ruled_out[{i}]"),
+                format!(
+                    "{} line {} in {} is a place of {} that a ruled-out row still carries and \
+                     that has no row of its own, so it is counted nowhere. Export again so the \
+                     place becomes a row that needs a decision",
+                    cell_text(site, "path"),
+                    cell_text(site, "line"),
+                    cell_text(site, "repo"),
+                    cell_text(site, "rule_id"),
+                ),
+            ));
+        }
         let section = value.get("patterns_across_services");
         match (&report.patterns_across_services, section) {
             (Some(_), None) => problems.push(problem(
@@ -1195,7 +1231,7 @@ pub fn pdf_count_reconciliation_problems(
     }
     // The grid counts the places the cover counts, minus those whose bucket the grid leaves out
     // (accepted, informational, held): its total by severity equals the cover's less those.
-    let heads = crate::report_export::problem_heads(&report.matrix);
+    let heads = crate::report_export::problem_places(&report.matrix);
     for (severity, printed) in [
         ("critical", stats.critical),
         ("high", stats.high),
@@ -1204,8 +1240,8 @@ pub fn pdf_count_reconciliation_problems(
     ] {
         let left_out = heads
             .iter()
-            .filter(|f| severity_bucket(&f.severity) == severity)
-            .filter(|f| !matches!(f.bucket.as_str(), "do_now" | "do_next" | "plan"))
+            .filter(|p| severity_bucket(&p.head.severity) == severity)
+            .filter(|p| !matches!(p.class, crate::review_tree::PlaceClass::ForAction(_)))
             .count();
         let grid: usize = report
             .priority_grid
@@ -1911,13 +1947,7 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
         .map(|r| (cell_text(r, "site_id"), r))
         .filter(|(id, _)| !id.is_empty())
         .collect();
-    let place_of = |r: &Value| {
-        (
-            cell_text(r, "repo"),
-            cell_text(r, "path"),
-            cell_text(r, "line"),
-        )
-    };
+    let place_of = super::counts_check::place_key_of;
     // Rows the reviewer ruled out are no problem: they neither carry nor are carried.
     let ruled_out: BTreeSet<String> = entries
         .get("json/false-positives.json")
@@ -2021,7 +2051,8 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
         })
         .filter(|r| cell_text(r, "is_fp") != "true")
         .collect();
-    let places: BTreeSet<(String, String, String)> = listed.iter().map(|r| place_of(r)).collect();
+    let places: BTreeSet<(String, String, String, String)> =
+        listed.iter().map(|r| place_of(r)).collect();
     if shown.len() != places.len() {
         problems.push(problem(
             "(workbook)",

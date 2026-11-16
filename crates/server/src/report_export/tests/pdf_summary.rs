@@ -599,7 +599,7 @@ fn the_cover_the_matrix_the_scorecard_and_the_summary_count_the_same_places() {
     assert!(
         json.executive_summary
             .narrative
-            .contains("produced 2 problems"),
+            .contains("found 2 problems"),
         "{}",
         json.executive_summary.narrative
     );
@@ -809,7 +809,7 @@ fn the_summary_counts_decision_and_information_only_places_apart() {
     let json = build_report_json(&apply_overlay(&report, &[], &[], &[]), None, &options());
     let n = &json.executive_summary.narrative;
     assert!(
-        n.contains("1 needs a human reviewer's decision, 1 is information only"),
+        n.contains("1 needs a reviewer's decision, 1 is information only"),
         "{n}"
     );
 }

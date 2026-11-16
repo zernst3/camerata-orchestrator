@@ -26,6 +26,11 @@ const SEND_MARKERS: &[&str] = &[
     "localhost:11434",
     "Command::new(\"claude\")",
     "Command::new(&self.program)",
+    // The one resolver of the `claude` program: whatever calls it launches a model CLI.
+    "claude_program(",
+    // The variable that names that program: a file reading it picks the program itself.
+    "CLAUDE_PROGRAM_ENV",
+    "CAMERATA_CLAUDE_PROGRAM",
     // The paths of the model APIs, whatever host a config or a test points them at.
     "/v1/messages",
     "/chat/completions",
@@ -157,6 +162,20 @@ const NOT_SENDERS: &[(&str, &str, &[&str])] = &[
         "test module: runs its own recording fake `claude` script once to warm it; the request \
          itself goes through the chat handler and the transports",
         &["reqwest::", "api."],
+    ),
+    (
+        "crates/llm/src/claude_version.rs",
+        "runs `<claude> --version` once, to read the installed Claude Code's version; its argv is \
+         exactly `--version` with stdin closed (pinned by a test in the file), so no prompt or \
+         model input can pass through it",
+        &[
+            "\"-p\"",
+            ".spawn(",
+            "Stdio::piped",
+            ".args(",
+            "system-prompt",
+            "write_all",
+        ],
     ),
     (
         "crates/llm/src/model_registry.rs",
@@ -396,6 +415,44 @@ fn every_kind_of_send_marker_is_caught_in_an_unlisted_file() {
     }
 }
 
+/// The one `claude` resolver is itself a send marker: a new spawn through `claude_program()`
+/// (called, bound, or imported) is a new model send site, whatever the file names around it.
+#[test]
+fn a_new_spawn_through_the_claude_resolver_is_caught() {
+    for planted in [
+        "fn go() { let mut c = tokio::process::Command::new(camerata_api_types::claude_cli::claude_program()); c.arg(\"--print\"); }",
+        "use camerata_api_types::claude_cli::claude_program;\nfn go() { let p = claude_program(); let mut c = std::process::Command::new(p); c.arg(\"--print\"); }",
+    ] {
+        let mut files = workspace_sources();
+        files.push((
+            "crates/somewhere/src/resolver_spawn.rs".to_string(),
+            planted.to_string(),
+        ));
+        let found = violations(&files);
+        assert_eq!(found.len(), 1, "{planted}: {found:?}");
+        assert!(found[0].contains("resolver_spawn.rs"), "{found:?}");
+    }
+}
+
+/// A file that reads the program variable itself (by constant or by name) is a send marker: it
+/// is choosing the `claude` program without the one resolver.
+#[test]
+fn a_new_file_reading_the_program_variable_and_spawning_is_caught() {
+    for planted in [
+        "fn go() { let p = std::env::var_os(\"CAMERATA_CLAUDE_PROGRAM\"); let _ = std::process::Command::new(p.unwrap()); }",
+        "use camerata_api_types::claude_cli::CLAUDE_PROGRAM_ENV;\nfn go() { let p = std::env::var_os(CLAUDE_PROGRAM_ENV); let _ = std::process::Command::new(p.unwrap()); }",
+    ] {
+        let mut files = workspace_sources();
+        files.push((
+            "crates/somewhere/src/env_spawn.rs".to_string(),
+            planted.to_string(),
+        ));
+        let found = violations(&files);
+        assert_eq!(found.len(), 1, "{planted}: {found:?}");
+        assert!(found[0].contains("env_spawn.rs"), "{found:?}");
+    }
+}
+
 /// No directory is exempt: a new module beside the transports' test modules is scanned.
 #[test]
 fn a_new_module_in_the_transport_directory_is_scanned() {
@@ -429,4 +486,34 @@ fn an_exempt_file_that_starts_to_send_is_caught() {
             .any(|v| v.contains("model_registry.rs") && v.contains(".post(")),
         "{found:?}"
     );
+}
+
+/// The Claude Code version probe is cleared as sending nothing, and held to it: a prompt
+/// sent through that file is caught.
+#[test]
+fn the_version_probe_file_is_cleared_but_a_planted_send_in_it_is_caught() {
+    let file = "crates/llm/src/claude_version.rs";
+    let clean = violations(&workspace_sources());
+    assert!(clean.is_empty(), "{clean:?}");
+    for planted in [
+        "fn leak(p: &str) { let _ = std::process::Command::new(p).arg(\"-p\"); }",
+        "fn leak(p: &str) { let _ = std::process::Command::new(p).spawn(); }",
+        "fn leak(p: &str) { let _ = std::process::Command::new(p).stdin(std::process::Stdio::piped()); }",
+    ] {
+        let files: Vec<(String, String)> = workspace_sources()
+            .into_iter()
+            .map(|(path, text)| {
+                if path == file {
+                    (path, format!("{text}\n{planted}"))
+                } else {
+                    (path, text)
+                }
+            })
+            .collect();
+        let found = violations(&files);
+        assert!(
+            found.iter().any(|v| v.contains(file)),
+            "{planted}: {found:?}"
+        );
+    }
 }

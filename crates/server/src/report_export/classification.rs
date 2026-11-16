@@ -947,110 +947,12 @@ pub(crate) fn ends_with_known_abbreviation(prefix: &str) -> bool {
     SENTENCE_ABBREVIATIONS.iter().any(|a| lower.ends_with(a))
 }
 
-/// Deterministic exec-summary narrative (never an LLM call). Overridden verbatim by
-/// `ReportOptions::executive_summary_override` when the client supplies one. Special-cases
-/// zero candidates (a plain "0 candidate finding(s) were reviewed..." reads as broken, not
-/// clean) and uses real pluralization throughout (`noun`) rather than the "(s)" CLI-ism.
-///
-/// FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): this used to LEAD with a
-/// blast-radius sentence composed from the top do-now findings' own headlines — the SAME 3
-/// findings the "If you only do three things this week" box (immediately below, on the same
-/// page) already names in full. Between that box and the (also-dropped) "Top priority items"
-/// bullet list, the top 3 were stated three separate times on one page. The exec summary is
-/// now curation-and-counts ONLY: the false-positive triage line, then the single one-pass
-/// bucket-count partition.
-///
-/// # P5: review-state honesty + full reconciliation
-/// `default_narrative` now takes `review_state` and branches on it — this is the fix for a
-/// raw (nobody has reviewed anything this run) export whose narrative used to claim "N were
-/// reviewed... 0 were dispositioned as false positives by the reviewer" no matter what, even
-/// when NO reviewer had ever opened the report. See [`ReviewState`]'s doc comment for the
-/// derivation.
-/// - `Raw`: describes what the ENGINE did ("The engine analyzed N files and produced C
-///   candidate findings..."). NEVER the phrase "reviewed by a human reviewer" or
-///   "dispositioned by a human reviewer" — grep-tested (see
-///   `raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narrative`).
-/// - `Reviewed`: describes the reviewer's actual dispositions, same voice as before this pass.
-///
-/// In BOTH states the narrative reconciles EVERY candidate finding, with each number shown:
-/// `candidates_reviewed == curated_total + held_for_review + excluded_fp +
-/// dependency_advisories` always holds (by construction — see `build_report_json`: every
-/// finding lands in exactly one of those four buckets). This is the fix for the "41 reviewed;
-/// 0 excluded... 18 curated" bug, where the other 23 needs-review rows were held out of the
-/// curated set and never counted anywhere in the narrative.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn default_narrative(
-    review_state: ReviewState,
-    files_scanned: usize,
-    candidates_reviewed: usize,
-    excluded_fp: usize,
-    curated_total: usize,
-    held_for_review: usize,
-    dependency_advisories: usize,
-    do_now: usize,
-    do_next: usize,
-    plan: usize,
-    accepted: usize,
-    informational: usize,
-) -> String {
-    if candidates_reviewed == 0 {
-        return "The scan surfaced no problems to review in this run.".to_string();
-    }
-    let dep_clause = if dependency_advisories == 0 {
-        String::new()
-    } else {
-        format!(
-            " A further {} tracked separately in the dependency snapshot.",
-            noun(
-                dependency_advisories,
-                "dependency advisory is",
-                "dependency advisories are"
-            ),
-        )
-    };
-    match review_state {
-        ReviewState::Raw => format!(
-            "This is a draft export: no problem in this run has had a human review. The \
-             engine analyzed {} and produced {}. {curated_total} {} for action \
-             ({do_now} First, {do_next} Next, {plan} Later, {accepted} already carried \
-             as accepted risk from a prior baseline or in-code waiver), {held_for_review} {} \
-             a human reviewer's decision, {informational} {} information only and \
-             {excluded_fp} {} ruled out automatically.{dep_clause}",
-            noun(files_scanned, "file", "files"),
-            noun(candidates_reviewed, "problem", "problems"),
-            if curated_total == 1 { "is" } else { "are" },
-            if held_for_review == 1 {
-                "needs"
-            } else {
-                "need"
-            },
-            if informational == 1 { "is" } else { "are" },
-            if excluded_fp == 1 { "was" } else { "were" },
-        ),
-        ReviewState::Reviewed => {
-            format!(
-            "{} were reviewed by a human reviewer; {} {} ruled out and left out of this report \
-             entirely. Of the remaining {}, {curated_total} {} for action ({do_now} First, \
-             {do_next} Next, {plan} Later, {accepted} accepted as risk), {held_for_review} \
-             {} a further decision and {informational} {} information only.{dep_clause}",
-            noun(candidates_reviewed, "problem", "problems"),
-            excluded_fp,
-            if excluded_fp == 1 { "was" } else { "were" },
-            noun(curated_total + held_for_review + informational, "problem", "problems"),
-            if curated_total == 1 { "is" } else { "are" },
-            if held_for_review == 1 { "needs" } else { "need" },
-            if informational == 1 { "is" } else { "are" },
-        )
-        }
-    }
-}
-
 /// P5: the AI-tier Methodology paragraph must never claim a human already reviewed advisory
 /// findings when this export is [`ReviewState::Raw`] — the paragraph used to unconditionally
 /// say "Every advisory finding is reviewed and dispositioned by a human reviewer before it
 /// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
 /// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
-/// reviewer" in the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
+/// reviewer" in the `Raw` case — grep-tested alongside the narrative's own gate.
 pub(crate) fn ai_tier_note_for(
     review_state: ReviewState,
     repos_not_run: usize,

@@ -257,6 +257,59 @@ pub fn tool_for_rule(rule: &Rule) -> Option<ScanTool> {
         })
 }
 
+/// The tool whose rule `rule_id` is, or `None` when it is one of ours (a native rule found by
+/// the floor, a checker or the model). A merged place records no source of its own, so the
+/// report's unfold reads it from the rule id it carried.
+///
+/// Native ids are the corpus's own: upper-case words ending in a number (`SEC-NO-RAW-SQL-1`)
+/// or the model's `AI-` ids. Everything else is a tool's: the grounded Semgrep and ESLint ids
+/// the tables know, then the shape of each tool's ids (a Semgrep id has a dot, a Clippy lint
+/// a `clippy::` prefix or underscores, a Ruff code letters then digits, an ESLint rule is
+/// kebab-case, scoped with `/` or `@`).
+pub fn tool_for_rule_id(rule_id: &str) -> Option<&'static str> {
+    let id = rule_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if crate::semgrep_floor_category(id).is_some() {
+        return Some(ScanTool::Semgrep.name());
+    }
+    if crate::eslint_floor_category(id).is_some() {
+        return Some(ScanTool::Eslint.name());
+    }
+    let native_shape = id.starts_with("AI-")
+        || (id
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+            && id
+                .rsplit('-')
+                .next()
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            && id.contains('-'));
+    if native_shape {
+        return None;
+    }
+    let lower = id.to_ascii_lowercase();
+    if lower.starts_with("clippy::") || (lower.contains('_') && !lower.contains(['.', '/', ' '])) {
+        return Some(ScanTool::Clippy.name());
+    }
+    if lower.contains('.') {
+        return Some(ScanTool::Semgrep.name());
+    }
+    let letters = id.chars().take_while(|c| c.is_ascii_uppercase()).count();
+    let rest = &id[letters..];
+    if (1..=5).contains(&letters)
+        && (2..=4).contains(&rest.len())
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(ScanTool::Ruff.name());
+    }
+    if lower.contains(['-', '/', '@']) || lower.chars().all(|c| c.is_ascii_lowercase()) {
+        return Some(ScanTool::Eslint.name());
+    }
+    None
+}
+
 /// Whether `s` is shaped like a real lint rule identifier (`kebab-case`, optionally
 /// `scope/kebab-case` or `scope/kebab_case`) rather than a prose description of a tool
 /// CONVENTION. A handful of corpus `[[sources]].linter` annotations describe how a

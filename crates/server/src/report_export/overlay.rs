@@ -68,7 +68,7 @@ pub const MERGED_LABEL_CAPTURE: &str = "merged_into_label";
 
 /// Every capture the overlay writes. Listed once so the engine's merge stages treat them as
 /// bookkeeping (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`) and the tests can check none leaks.
-pub const OVERLAY_CAPTURE_KEYS: [&str; 8] = [
+pub const OVERLAY_CAPTURE_KEYS: [&str; 9] = [
     REVIEWER_EDITED_CAPTURE,
     REVIEWER_FIELDS_CAPTURE,
     REVIEWER_HEADLINE_CAPTURE,
@@ -77,6 +77,7 @@ pub const OVERLAY_CAPTURE_KEYS: [&str; 8] = [
     MERGED_INTO_CAPTURE,
     MERGED_LABEL_CAPTURE,
     crate::engine_discard::ENGINE_RESTORED_CAPTURE,
+    super::unfold::UNFOLDED_FROM_CAPTURE,
 ];
 
 /// One edit that was applied.
@@ -218,12 +219,30 @@ impl ReviewedReport {
     /// This report with `dispositions` (an older client's export request) as the decisions. Used
     /// only while the decision store holds no record for the project.
     #[must_use]
-    pub fn with_legacy_dispositions(
-        mut self,
-        dispositions: HashMap<String, DispositionWire>,
-    ) -> Self {
+    pub fn with_legacy_dispositions(self, dispositions: HashMap<String, DispositionWire>) -> Self {
+        self.with_legacy(dispositions, true)
+    }
+
+    fn with_legacy(mut self, dispositions: HashMap<String, DispositionWire>, unfold: bool) -> Self {
         self.dispositions = dispositions;
         self.legacy = true;
+        // An older client's rulings unfold the places they leave open, like the store's.
+        let ruled_out: HashSet<String> = self
+            .dispositions
+            .iter()
+            .filter(|(_, d)| d.state == "FalsePositive")
+            .map(|(key, _)| key.clone())
+            .collect();
+        if unfold && !ruled_out.is_empty() {
+            self.report = self.report.overlaid(|r| {
+                let unfolded = super::unfold::unfold_ruled_out(r, &|f| {
+                    ruled_out.contains(&super::finding_key(f))
+                });
+                if unfolded > 0 {
+                    r.attach_tree();
+                }
+            });
+        }
         // The levels are worked out again here, in this module, with the older client's decisions
         // among the evidence of who looked at what.
         self.levels = compute_levels(
@@ -312,6 +331,15 @@ pub fn apply_overlay(
         }
         let (added_rows, taken) = add_findings(&mut r.findings, added);
         superseded = taken;
+        // A ruling on a row does not rule out the places of other rules it carries: each becomes
+        // a row of its own, held, before edits and merges so a reviewer can work on it.
+        let ruled_out: HashSet<String> = effective_by_key(&records)
+            .into_iter()
+            .filter(|(_, d)| d.state == DecisionState::FalsePositive)
+            .map(|(key, _)| key.to_string())
+            .collect();
+        let unfolded =
+            super::unfold::unfold_ruled_out(r, &|f| ruled_out.contains(&super::finding_key(f)));
 
         let outcome = apply_edits(&mut r.findings, &edits);
         applied = outcome.applied;
@@ -321,7 +349,7 @@ pub fn apply_overlay(
 
         // The tree is rebuilt only when a change could have moved a row: building it again for
         // an overlay of nothing would change a report the reviewer never touched.
-        if reinstated > 0 || added_rows > 0 || outcome.moves_rows {
+        if reinstated > 0 || added_rows > 0 || unfolded > 0 || outcome.moves_rows {
             r.attach_tree();
         }
         if !outcome.splits.is_empty() {
@@ -333,6 +361,15 @@ pub fn apply_overlay(
                 r.ledger.record_fix_merge(block);
                 let places = tree.refresh_places(&r.findings);
                 r.ledger.record_place_merge(places);
+            }
+        }
+        // A tree sealed before the per-rule key of a whole-file place stores places the rows no
+        // longer give. They are worked out again, so the cockpit (which reads the stored places)
+        // and the export (which counts by the one place rule) agree.
+        if let Some(tree) = r.tree.as_mut() {
+            if tree.places_are_stale(&r.findings) {
+                let block = tree.refresh_places(&r.findings);
+                r.ledger.record_place_merge(block);
             }
         }
         // The reviewer's node summaries replace the model's, after the tree is in its final
@@ -436,6 +473,7 @@ fn is_held_for_a_ruling(f: &Finding) -> bool {
         crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
         crate::junk_finding::JUNK_CONTENT_CAPTURE,
         crate::engine_discard::ENGINE_RESTORED_CAPTURE,
+        super::unfold::UNFOLDED_FROM_CAPTURE,
     ]
     .iter()
     .any(|capture| f.captures.contains_key(*capture))
@@ -950,6 +988,18 @@ fn slug(label: &str) -> String {
         "group".to_string()
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+impl ReviewedReport {
+    /// A reviewed report whose rulings never went through the unfold, for the tests of the
+    /// backstops that catch a report the overlay did not unfold.
+    pub(crate) fn unreviewed_without_unfold(
+        sealed: &SealedReport,
+        dispositions: &HashMap<String, DispositionWire>,
+    ) -> Self {
+        apply_overlay(sealed, &[], &[], &[]).with_legacy(dispositions.clone(), false)
     }
 }
 

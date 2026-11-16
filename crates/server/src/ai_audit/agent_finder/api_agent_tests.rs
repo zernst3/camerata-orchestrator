@@ -1298,11 +1298,11 @@ async fn a_provider_that_never_answers_ends_the_piece_failed_with_the_usage_kept
     });
     let wire = Arc::new(LocalHttpWire {
         url,
-        client: crate::api_agent_driver::agent_http_client_with(
-            Duration::from_millis(300),
-            Duration::from_millis(300),
-        )
-        .expect("a client with timeouts"),
+        client: reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .connect_timeout(Duration::from_millis(300))
+            .build()
+            .expect("a client with timeouts"),
         first: Mutex::new(Some(tools_reply(vec![call(
             "a",
             "Glob",

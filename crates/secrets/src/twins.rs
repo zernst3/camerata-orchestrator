@@ -38,6 +38,17 @@ pub enum Twin {
     /// secrets, and it's safe to include them in your code or configuration files"). A Google key
     /// anywhere else is not covered.
     FirebaseWebApiKey,
+    /// A qualified label name (`nodes.cloudhost.internal/worker-pool`: a lowercase dotted domain,
+    /// one slash, a name) on an identifier that is not password-like. A label key, not a value.
+    QualifiedLabelName,
+    /// A quoted label on a Terraform block header (`resource "type" "name" {`): a name by grammar.
+    BlockHeaderLabel,
+    /// A module path in a `require(...)`, `import(...)`, `import '...'` or `from '...'`: the
+    /// language reads the literal as a module name.
+    ModulePath,
+    /// The ciphertext of a sealed secret: a long base64 value under `encryptedData` in a
+    /// `kind: SealedSecret` document. Encrypted for committing, so it is not a credential.
+    SealedCiphertext,
 }
 
 impl Twin {
@@ -53,6 +64,10 @@ impl Twin {
                 | Twin::ReadableName
                 | Twin::PublishableKey
                 | Twin::FirebaseWebApiKey
+                | Twin::QualifiedLabelName
+                | Twin::BlockHeaderLabel
+                | Twin::ModulePath
+                | Twin::SealedCiphertext
         )
     }
 }
@@ -229,6 +244,94 @@ fn is_path_like(value: &str) -> bool {
         })
 }
 
+/// A qualified label name: a lowercase dotted domain, one slash, then a name
+/// (`nodes.cloudhost.internal/worker-pool`). A credential is not shaped like this.
+fn is_qualified_label_name(value: &str) -> bool {
+    let Some((domain, name)) = value.split_once('/') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        && domain.contains('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
+/// Whether the line holding the value is a Terraform block header: `resource` or `data`, quoted
+/// labels, then an opening brace. The value is one of the labels.
+fn is_block_header_label(value: &str, context: &TwinContext<'_>) -> bool {
+    let tail_end = context.window[context.at..]
+        .find('\n')
+        .map_or(context.window.len(), |i| context.at + i);
+    let tail = context
+        .window
+        .get(context.at + value.len()..tail_end)
+        .unwrap_or("");
+    // The value sits inside quotes: the line must open with the keyword and end in a brace.
+    let line = format!("{}{value}{tail}", context.line_prefix);
+    let line = line.trim();
+    let Some(rest) = line
+        .strip_prefix("resource")
+        .or_else(|| line.strip_prefix("data"))
+    else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix('{') else {
+        return false;
+    };
+    let mut rest = rest.trim();
+    if !rest.starts_with('"') {
+        return false;
+    }
+    // Every remaining token is a quoted label.
+    let mut labels = 0;
+    while let Some(after_open) = rest.strip_prefix('"') {
+        let Some(close) = after_open.find('"') else {
+            return false;
+        };
+        labels += 1;
+        rest = after_open[close + 1..].trim_start();
+    }
+    labels >= 1 && rest.is_empty()
+}
+
+/// A module specifier: starts with `./` or `../`, or has a slash and no character a base64 run
+/// would add (`+`, `=`).
+fn is_module_path(value: &str) -> bool {
+    value.starts_with("./")
+        || value.starts_with("../")
+        || (value.contains('/') && !value.contains(['+', '=']))
+}
+
+/// Whether the text just before the opening quote makes the literal a module name.
+fn opens_a_module_specifier(before_value: &str) -> bool {
+    let Some(head) = before_value.strip_suffix(['"', '\'']) else {
+        return false;
+    };
+    let head = head.trim_end();
+    head.ends_with("require(")
+        || head.ends_with("import(")
+        || ends_with_word(head, "import")
+        || ends_with_word(head, "from")
+}
+
+/// `text` ends with `word` and the character before it is not part of an identifier
+/// (`fromage` and `tokenfrom` do not end with the word `from`).
+fn ends_with_word(text: &str, word: &str) -> bool {
+    text.strip_suffix(word).is_some_and(|rest| {
+        !rest
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 fn is_context_shaped(shape: SecretShape) -> bool {
     !shape.is_vendor_shaped()
 }
@@ -246,11 +349,71 @@ const SECRET_IDENTIFIER_WORDS: &[&str] = &[
 
 /// Whether `before_value` (the identifier and what sits between it and the value) names a
 /// password-like thing.
-fn names_a_secret(before_value: &str) -> bool {
+pub(crate) fn names_a_secret(before_value: &str) -> bool {
     let lower = before_value.to_ascii_lowercase();
     SECRET_IDENTIFIER_WORDS
         .iter()
         .any(|word| lower.contains(word))
+}
+
+/// The fewest characters a sealed-secret ciphertext value has (a real one is hundreds).
+const SEALED_CIPHERTEXT_MIN_LEN: usize = 200;
+
+/// Whether the value at `value` in `text` is the ciphertext of a sealed secret: the document has
+/// `kind: SealedSecret` at its top level, the value is base64 of 200 or more characters and the
+/// nearest less-indented key above its line is `encryptedData`. Only ciphertext under that key is
+/// cleared: a short value, a value under `template` and the same key in a plain Secret all stay.
+pub(crate) fn is_sealed_ciphertext(text: &str, value: &std::ops::Range<usize>) -> bool {
+    let body = &text[value.clone()];
+    if body.len() < SEALED_CIPHERTEXT_MIN_LEN
+        || !body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    {
+        return false;
+    }
+    // The document holding the value: between the `---` separator lines around it.
+    let separator = |line: &str| line.starts_with("---");
+    let line_start = text[..value.start].rfind('\n').map_or(0, |i| i + 1);
+    let mut doc_start = 0;
+    let mut offset = 0;
+    for line in text[..line_start].split_inclusive('\n') {
+        if separator(line) {
+            doc_start = offset + line.len();
+        }
+        offset += line.len();
+    }
+    let mut doc_end = text.len();
+    let mut offset = line_start;
+    for line in text[line_start..].split_inclusive('\n') {
+        if offset > line_start && separator(line) {
+            doc_end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    let document = &text[doc_start..doc_end];
+    let is_sealed = document.lines().any(|line| {
+        line.strip_prefix("kind:")
+            .is_some_and(|rest| rest.trim().trim_matches(['"', '\'']) == "SealedSecret")
+    });
+    if !is_sealed {
+        return false;
+    }
+    let indent_of = |line: &str| line.len() - line.trim_start().len();
+    let own_line = text[line_start..].lines().next().unwrap_or("");
+    let own_indent = indent_of(own_line);
+    let above = &text[doc_start..line_start];
+    for line in above.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if indent_of(line) < own_indent {
+            return trimmed.trim_end_matches(':') == "encryptedData" && trimmed.ends_with(':');
+        }
+    }
+    false
 }
 
 /// Classify a candidate. `before_value` is the matched text before the value (the identifier, for
@@ -306,6 +469,21 @@ pub(crate) fn classify(
         && is_readable_name(value)
     {
         return Some(Twin::ReadableName);
+    }
+    if shape == SecretShape::NamedSecretLiteral
+        && !names_a_secret(before_value)
+        && is_qualified_label_name(value)
+    {
+        return Some(Twin::QualifiedLabelName);
+    }
+    if shape == SecretShape::NamedSecretLiteral
+        && opens_a_module_specifier(before_value)
+        && is_module_path(value)
+    {
+        return Some(Twin::ModulePath);
+    }
+    if shape == SecretShape::NamedSecretLiteral && is_block_header_label(value, context) {
+        return Some(Twin::BlockHeaderLabel);
     }
     if shape == SecretShape::BasicAuthCredential && value.bytes().all(|b| b.is_ascii_lowercase()) {
         // `Authorization: Basic authentication ...` is prose; a real credential is not one word.

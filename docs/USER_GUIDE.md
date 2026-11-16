@@ -1813,6 +1813,20 @@ the incremental-scan cache and rescan every file, `--verbose` to print the per-r
 ledger rather than the concise summary, `--max-cost-usd` to cap the spend and `--efficiency` to
 switch a saving off (both below).
 
+Which `claude` the cli backend runs: every cli call launches the program named by the
+`CAMERATA_CLAUDE_PROGRAM` environment variable (give a full path) when it is set, and otherwise the
+`claude` found on `PATH`. Set it when the copy on `PATH` is old or when several copies are installed.
+Before the first model call on the cli backend, the run reads that program's version
+(`<program> --version`) and checks it against the models the run will call. Some models need a
+newer Claude Code than others: `claude-fable-5-2`, the default group review model, needs 2.1.290 or
+newer. If the version found is too old, the run is refused before any model call, and the message
+names the version found, the version needed, the model and the fix: update Claude Code, or set
+`CAMERATA_CLAUDE_PROGRAM` to a newer binary. If the version cannot be read (the program is missing,
+does not answer or prints no version number), the run is refused too, with the reason. A run that
+calls no model with a known minimum is not held up by an old version. A value of
+`CAMERATA_CLAUDE_PROGRAM` that is not an absolute path is refused, and a non-zero exit from
+`--version` counts as an unreadable version.
+
 #### What a scan will cost, and how to cap it
 
 Before the first model call, `camerata inspect` prints a pre-flight ESTIMATE: about how many dollars,

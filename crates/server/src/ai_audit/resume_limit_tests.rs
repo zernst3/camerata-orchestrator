@@ -432,6 +432,27 @@ fn a_replayed_checkpoint_reply_is_not_counted_twice_against_the_limit() {
     assert!((meter.limit_spend_usd() - 23.0).abs() < 1e-9);
 }
 
+/// A stored reply replayed on resume comes from disk, not from the provider: it is no proof the
+/// provider is reachable, so replays interleaved with failing live calls cannot delay the stop.
+#[test]
+fn a_replayed_reply_does_not_reset_the_outage_streak() {
+    use crate::failure::FailureClass;
+    let meter = capped(Some(25.0), 20.0);
+    meter.health().note_failure(FailureClass::Transport, "a");
+    meter.record_resumed(Stage::Calibration, &reply(1.0));
+    meter.health().note_failure(FailureClass::Transport, "b");
+    meter.record_resumed(Stage::Calibration, &reply(1.0));
+    meter.health().note_failure(FailureClass::Transport, "c");
+    assert_eq!(
+        meter.health().streak(),
+        3,
+        "replays between failures must not restart the streak"
+    );
+    // A live reply still does.
+    meter.record_stage(Stage::Calibration, &reply(1.0));
+    assert_eq!(meter.health().streak(), 0);
+}
+
 #[test]
 fn the_stage_that_continues_a_run_carries_the_replayed_share() {
     let controls = RunControls {

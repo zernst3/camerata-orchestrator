@@ -75,8 +75,13 @@ pub(crate) struct SiteFact {
 
 impl SiteFact {
     /// The place, as the key that tells places apart.
-    pub fn place(&self) -> (String, String, usize) {
-        (self.repo.clone(), self.path.clone(), self.line)
+    ///
+    /// THE place key ([`crate::review_tree::place_key`]): a whole-file place is a place of its own
+    /// rule, so the whole-file problems of two rules in one file are two places.
+    pub fn place(&self) -> (String, String, usize, String) {
+        let (repo, path, line, rule) =
+            crate::review_tree::place_key(&self.repo, &self.path, self.line, &self.rule_id);
+        (repo.to_string(), path.to_string(), line, rule.to_string())
     }
 
     /// The place as a cell prints it: the file alone for a whole-file place.
@@ -584,7 +589,7 @@ fn level_strength(level: &str) -> u8 {
 /// `sites`, each place once: the worst severity's row stands for it, the largest count is kept
 /// and the place is escalated when any row at it is.
 fn union_places<'a>(lists: impl Iterator<Item = &'a [SiteFact]>) -> Vec<SiteFact> {
-    let mut by_place: BTreeMap<(String, String, usize), SiteFact> = BTreeMap::new();
+    let mut by_place: BTreeMap<(String, String, usize, String), SiteFact> = BTreeMap::new();
     for site in lists.flatten() {
         match by_place.get_mut(&site.place()) {
             None => {
@@ -640,7 +645,7 @@ fn fold_fix(
     } else {
         union_places(members.iter().map(|m| m.open.as_slice()))
     };
-    let open_keys: std::collections::HashSet<(String, String, usize)> =
+    let open_keys: std::collections::HashSet<(String, String, usize, String)> =
         open_all.iter().map(SiteFact::place).collect();
     let mut review_levels: BTreeMap<String, usize> = BTreeMap::new();
     for s in &live_all {
@@ -673,7 +678,7 @@ fn fold_fix(
         citation: String,
         rank: u8,
         order: usize,
-        places: std::collections::BTreeSet<(String, String, usize)>,
+        places: std::collections::BTreeSet<(String, String, usize, String)>,
         labels: Vec<(String, String, usize, String)>,
         open: bool,
         decided: Vec<String>,
@@ -1108,8 +1113,6 @@ pub(crate) struct PdfSections {
     /// Problems by area and severity (critical, high, medium, low), one for each place: the
     /// scorecard and the cover, counted the way the workbook's scorecard counts.
     pub problem_counts: BTreeMap<String, [usize; 4]>,
-    /// The same by severity alone, each place once: the cover.
-    pub problem_totals: [usize; 4],
 }
 
 /// What the PDF prints from the reviewed report beyond the per-site sections (design 3B item 1):
@@ -1141,7 +1144,6 @@ pub(crate) fn pdf_sections(
     }
     let conventions = super::pdf_conventions_of(&rows, corpus);
     let problem_counts = super::sheets::problem_counts(rows.iter());
-    let problem_totals = super::sheets::problem_totals(rows.iter());
     let by_id = facts
         .iter()
         .map(|g| {
@@ -1206,6 +1208,5 @@ pub(crate) fn pdf_sections(
         fixes: by_id,
         conventions,
         problem_counts,
-        problem_totals,
     }
 }

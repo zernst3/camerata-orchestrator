@@ -506,7 +506,7 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
 /// looked at by anyone THIS run.
 ///
 /// Gates two things:
-/// - The narrative voice (`default_narrative`): `Raw` describes what the ENGINE did and never
+/// - The narrative voice (`counts_prose::narrative`): `Raw` describes what the ENGINE did and never
 ///   claims a human reviewed or dispositioned anything; `Reviewed` describes the reviewer's
 ///   actual dispositions.
 /// - The PDF's per-page "DRAFT: not yet reviewed" banner (`Raw` only) — see the Typst
@@ -733,11 +733,14 @@ pub(crate) fn clamp_deviation_severity(
 
 mod citations_fixes;
 mod classification;
+pub mod counts;
+pub(crate) mod counts_prose;
 mod json_types;
 mod marking;
 
 pub use citations_fixes::*;
 pub use classification::*;
+pub use counts::{report_counts, ReportCounts};
 pub use json_types::*;
 pub use marking::*;
 
@@ -766,6 +769,19 @@ pub fn build_report_json(
     reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
+) -> AuditReportJson {
+    let counts = report_counts(reviewed, corpus, opts);
+    build_report_json_with_counts(reviewed, corpus, opts, &counts)
+}
+
+/// [`build_report_json`] with the package's counts worked out once by the caller
+/// (`build_product_package_with_stem`) and passed by reference; they are serialised whole as
+/// `counts` beside the old fields.
+pub fn build_report_json_with_counts(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    opts: &ReportOptions,
+    counts: &ReportCounts,
 ) -> AuditReportJson {
     // The PDF's data is built from the reviewed report and nothing else (design 3B): the rows
     // with the reviewer's overlay applied, and the reviewer's decisions.
@@ -1343,7 +1359,6 @@ pub fn build_report_json(
         fixes: fix_facts,
         conventions,
         problem_counts,
-        problem_totals,
     } = crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
     for (category, entries) in &by_category {
@@ -1611,22 +1626,15 @@ pub fn build_report_json(
     // still held out of every action tier via the separate `held` bucket, and must still count
     // toward "held for review" or the total silently undercounts every needs-review row above
     // medium severity.
-    let informational = matrix.informational.len();
-    let held = matrix.held.len();
-    let held_for_review_total = informational + held;
+    // The row tallies of the legacy summary fields (`curated_total`, `held_for_review`, `do_now`,
+    // `do_next`, `plan`, `accepted`, `open`): ROWS of every kind, kept for machine readers for one
+    // release. No client sentence prints them; every sentence reads the counts object.
+    let held_for_review_total = matrix.informational.len() + matrix.held.len();
     let curated_total = code_findings.len() - held_for_review_total;
     let do_now = matrix.do_now.len();
     let do_next = matrix.do_next.len();
     let plan = matrix.plan.len();
     let accepted = matrix.accepted.len();
-    // Still-open action items (every informational/held row is Unresolved by construction — see
-    // `is_informational`/`is_held_for_review` — so subtracting them keeps `open` an ACTION
-    // count, not an appendix one).
-    // `Confirmed` counts here for the same reason it counts in `still_open` above: the auditor
-    // established the finding is real and nobody has fixed it. Subtracting
-    // `held_for_review_total` stays valid because every informational/held row is `Unresolved`
-    // by construction (both gates return early on any other disposition), so confirming a row
-    // removes it from that bucket before it is ever counted there.
     let open = code_findings
         .iter()
         .filter(|(_, d, _, _)| matches!(d, Disposition::Unresolved | Disposition::Confirmed))
@@ -1653,7 +1661,7 @@ pub fn build_report_json(
     // FIX 4 (2026-09-13 review): `top3_do_now` still feeds the "Three things this week" box
     // below (the ONE place these findings are now named) — the exec-summary's own
     // `top_do_now` bullet list and blast-radius lead sentence are gone (see
-    // `default_narrative`'s doc comment).
+    // `counts_prose::narrative`'s doc comment).
     //
     // Item #1: the three are three DISTINCT FIXES at three distinct places. Walk `do_now_sorted` in rank order and skip a
     // row whose Fix is already chosen, so one committed secret that six rules flag is one entry
@@ -1730,7 +1738,6 @@ pub fn build_report_json(
         }
         selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
     }
-    let dependency_advisories = dependency_snapshot.rows.len();
     // W6: never a silent omission — one explicit sentence per pass that failed/timed out
     // this scan, shared verbatim between the summary and the methodology below.
     // W1: fold in a disclosure for EVERY stage-level ledger integrity gap — every scan-time
@@ -1792,57 +1799,32 @@ pub fn build_report_json(
     ));
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
-        _ => (
-            {
-                // The narrative counts problems, one for each place, as the cover and the grid do.
-                let heads = problem_heads(&matrix);
-                let in_bucket = |b: &[&str]| {
-                    heads
-                        .iter()
-                        .filter(|f| b.contains(&f.bucket.as_str()))
-                        .count()
-                };
-                let (p_do_now, p_do_next, p_plan, p_accepted) = (
-                    in_bucket(&["do_now"]),
-                    in_bucket(&["do_next"]),
-                    in_bucket(&["plan"]),
-                    in_bucket(&["accepted"]),
-                );
-                let p_held = in_bucket(&["held"]);
-                let p_info = in_bucket(&["informational"]);
-                let p_curated = p_do_now + p_do_next + p_plan + p_accepted;
-                default_narrative(
-                    review_state,
-                    report.files_scanned,
-                    p_curated + p_held + p_info + excluded_fp,
-                    excluded_fp,
-                    p_curated,
-                    p_held,
-                    dependency_advisories,
-                    p_do_now,
-                    p_do_next,
-                    p_plan,
-                    p_accepted,
-                    p_info,
-                )
-            },
-            false,
-        ),
+        // The narrative is built from the counts object and nothing else.
+        _ => (counts_prose::narrative(counts, review_state), false),
     };
+    let failed_passes_more_line = counts_prose::more_line(
+        failed_pass_notes
+            .len()
+            .saturating_sub(PDF_MAX_FAILED_PASS_NOTES),
+        &PdfWordsJson::new().failed_passes_more,
+    );
     let executive_summary = ExecutiveSummaryJson {
         narrative,
         is_override,
-        candidates_reviewed,
-        excluded_false_positive: excluded_fp,
+        // Source rows and dependency advisories read the counts object. The bucket tallies below
+        // them are ROWS of every kind (legacy, one more release); no client sentence prints them.
+        candidates_reviewed: counts.rows.total,
+        excluded_false_positive: counts.rows.ruled_out,
         curated_total,
         held_for_review: held_for_review_total,
-        dependency_advisories,
+        dependency_advisories: counts.rows.dependency,
         do_now,
         do_next,
         plan,
         accepted,
         open,
         failed_passes: failed_pass_notes.clone(),
+        failed_passes_more_line: failed_passes_more_line.clone(),
     };
 
     // ── Item 7: "If you only do three things this week" ───────────────────────
@@ -1912,12 +1894,12 @@ pub fn build_report_json(
         })
         .collect();
     let stats = CoverStatsJson {
-        critical: problem_totals[0],
-        high: problem_totals[1],
-        medium: problem_totals[2],
-        low: problem_totals[3],
-        accepted,
-        dependency_advisories: dependency_snapshot.rows.len(),
+        critical: counts.problems.by_severity.critical,
+        high: counts.problems.by_severity.high,
+        medium: counts.problems.by_severity.medium,
+        low: counts.problems.by_severity.low,
+        accepted: counts.problems.accepted,
+        dependency_advisories: counts.rows.dependency,
     };
     // P6: hide the "Code volume" row entirely rather than ever render "0 characters"/"0
     // lines" — `None` whenever this run genuinely has no real line count (a compliance-blocked
@@ -1970,6 +1952,7 @@ pub fn build_report_json(
         prepared_by: resolve_prepared_by(opts, None),
         brand: resolve_brand(opts, None),
         stats,
+        strip: counts_prose::cover_strip(counts),
         incremental_note: report.ledger.incremental().map(incremental_cover_note),
         internal_incomplete: internal_incomplete_marking(report, opts),
     };
@@ -1979,17 +1962,11 @@ pub fn build_report_json(
     // "the repository" or "the codebase" speaks of the repositories and the services instead.
     let multi_repo = report.repos.len() > 1;
     let methodology = MethodologyJson {
-        candidates_reviewed,
-        excluded_false_positive: excluded_fp,
+        reconciliation: counts_prose::methodology_line(counts, review_state),
+        candidates_reviewed: counts.rows.total,
+        excluded_false_positive: counts.rows.ruled_out,
         held_for_review: held_for_review_total,
-        next_steps: next_steps_note_for(
-            multi_repo,
-            review_state,
-            candidates_reviewed,
-            curated_total,
-            held_for_review_total,
-            excluded_fp,
-        ),
+        next_steps: counts_prose::next_steps(counts, multi_repo, review_state),
         deterministic_note:
             "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
              SAST rules plus a migration-timeline replay for Supabase Row Level Security) \
@@ -2037,9 +2014,10 @@ pub fn build_report_json(
              remediation team needs to know."
                 .to_string(),
         failed_passes: failed_pass_notes,
+        failed_passes_more_line,
     };
 
-    let priority_grid = build_priority_grid(&matrix);
+    let priority_grid = build_priority_grid(&matrix, counts);
 
     // WO9 (design 3B item 1): the escalations and one pattern for each sub-group, worked out from
     // the reviewed report. The sentence is derived from the tree being exported, never copied from
@@ -2072,6 +2050,7 @@ pub fn build_report_json(
     let other_fixes = other_fixes_of(&sub_group_patterns, &escalated_items, escalation_cap);
 
     AuditReportJson {
+        counts: counts.clone(),
         internal: opts.internal,
         site_total,
         words: PdfWordsJson::new(),
@@ -2562,6 +2541,7 @@ pub mod overlay;
 pub mod prose_checks;
 pub mod row_facts;
 pub mod tree_view;
+pub mod unfold;
 pub use overlay::{
     apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, re_mark_line,
     summary_fingerprint, AppliedEdit, MergeNote, ReviewedReport, StaleEditNote, SupersededNote,
@@ -2569,10 +2549,19 @@ pub use overlay::{
 pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFactsIndex};
 
 #[cfg(test)]
+mod counts_surfaces_tests;
+
+#[cfg(test)]
+mod counts_tests;
+
+#[cfg(test)]
 mod coverage_gaps_tests;
 
 #[cfg(test)]
 mod patterns_open_tests;
+
+#[cfg(test)]
+mod unfold_tests;
 
 #[cfg(test)]
 mod wo9 {
