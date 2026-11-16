@@ -649,7 +649,7 @@ const OPERATOR_ONLY_LABEL: &str = "Internal working notes, not reviewed, not for
 /// is not gated. `(site, reason)`.
 const NOT_CLIENT_FILES: [(&str, &str); 5] = [
     (
-        "server/src/api_agent_driver.rs::call_anthropic_with_tools",
+        "server/src/api_agent_driver.rs::post_anthropic_body_to",
         "an outbound request header to the model API, never a served file",
     ),
     (

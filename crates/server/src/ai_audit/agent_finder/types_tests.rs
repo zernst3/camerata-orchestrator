@@ -246,25 +246,18 @@ fn the_stop_reasons_carry_text_and_the_run_carries_a_serialisable_conversation_h
 fn the_factory_builds_each_backend_and_never_falls_back_quietly() {
     let controls = crate::cost_cap::RunControls::default();
     let dir = std::path::Path::new("/Users/auditor/.camerata/runs/r1");
-    let meter = std::sync::Arc::new(crate::ai_audit::UsageMeter::with_controls(controls.clone()));
-    assert!(piece_agent_for(
-        &controls,
-        crate::llm::Backend::Cli,
-        None,
-        dir,
-        meter.clone()
-    )
-    .is_ok());
+    let meter = || std::sync::Arc::new(crate::ai_audit::UsageMeter::default());
+    assert!(piece_agent_for(&controls, crate::llm::Backend::Cli, None, dir, meter()).is_ok());
     assert!(piece_agent_for(
         &controls,
         crate::llm::Backend::Api,
         Some("sk-test"),
         dir,
-        meter.clone()
+        meter()
     )
     .is_ok());
     for key in [None, Some(""), Some("   ")] {
-        let err = piece_agent_for(&controls, crate::llm::Backend::Api, key, dir, meter.clone())
+        let err = piece_agent_for(&controls, crate::llm::Backend::Api, key, dir, meter())
             .err()
             .expect("an API run without a key is refused");
         assert!(err.to_string().contains("key"), "{err}");

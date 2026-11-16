@@ -281,16 +281,10 @@ pub trait PieceAgent: Send + Sync {
         limits: &PieceLimits,
     ) -> anyhow::Result<AgentRun>;
 
-    /// Let go of the conversation behind `handle` (the transport's stored history or session).
-    /// The runner calls it when a piece ends, finished, failed or replayed from storage, with the
-    /// newest handle only: a successful [`PieceAgent::follow_up`] already releases the handle it
-    /// continued from. The default does nothing.
-    ///
-    /// SHIM: build 2 (`feat/agent-finder-api`) defines this method; this default stands in until
-    /// that branch is merged.
-    fn release(&self, handle: &ConversationHandle) {
-        let _ = handle;
-    }
+    /// The piece is over: let the transport drop what it keeps for `conversation`. A follow-up
+    /// on a released handle is an `Err` before anything is sent. The default keeps nothing, so
+    /// there is nothing to release.
+    fn release(&self, _conversation: &ConversationHandle) {}
 }
 
 /// Send the files the first run did not read (`unread`, repo-relative paths) once more (design
@@ -337,17 +331,15 @@ pub fn finder_model_for(controls: &crate::cost_cap::RunControls) -> String {
 /// backend: a missing key is an error, never a quiet switch to the command line. `work_dir` is an
 /// engine-owned folder under the run's state folder where the command line transport writes its
 /// rooms; it is never inside a client's repository. Build 3 calls this; builds 2 and 4 fill in
-/// [`api_agent::ApiPieceAgent`] and [`cli_agent::CliPieceAgent`].
+/// [`api_agent::ApiPieceAgent`] and [`cli_agent::CliPieceAgent`]. The API agent is always built
+/// with the run's `meter`: an API agent with no meter would spend money no limit counts.
 pub fn piece_agent_for(
     controls: &crate::cost_cap::RunControls,
     backend: crate::llm::Backend,
     api_key: Option<&str>,
     work_dir: &std::path::Path,
-    meter: std::sync::Arc<super::UsageMeter>,
+    meter: std::sync::Arc<crate::ai_audit::UsageMeter>,
 ) -> anyhow::Result<Box<dyn PieceAgent>> {
-    // SHIM: build 2 attaches the run's shared meter to the agent (an agent with no meter refuses
-    // to send). Until that branch is merged the meter is accepted and not yet used here.
-    let _ = &meter;
     let model = finder_model_for(controls);
     match backend {
         crate::llm::Backend::Api => {
@@ -355,7 +347,9 @@ pub fn piece_agent_for(
                 .map(str::trim)
                 .filter(|k| !k.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("the API backend needs an Anthropic key"))?;
-            Ok(Box::new(api_agent::ApiPieceAgent::new(model, key)))
+            Ok(Box::new(
+                api_agent::ApiPieceAgent::new(model, key).with_meter(meter),
+            ))
         }
         crate::llm::Backend::Cli => Ok(Box::new(cli_agent::CliPieceAgent::new(
             model,
