@@ -678,7 +678,8 @@ impl UsageMeter {
         self.stages.record(stage, r);
         let micro = self.record(stage, r);
         self.resumed_micro_usd.fetch_add(micro, Ordering::Relaxed);
-        self.health.note_success();
+        // No `note_success`: a stored reply came off disk, not from the provider, so it proves
+        // nothing about the provider being reachable.
     }
 
     /// Mark a completion already passed to [`Self::record_stage`] as one whose output was
