@@ -54,6 +54,27 @@ pub use camerata_api_types::model_registry::{
 /// price / long-prompt tier (consumed via [`rates_for`]).
 pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
     RegistryEntryStatic {
+        display: "Fable 5.2",
+        id: "claude-fable-5-2",
+        context: 1_000_000,
+        max_output: 128_000,
+        // 5.1's 15 scaled by list price ($8 against $10), as the doc above describes.
+        weight: 12,
+        price_in: 8.0,
+        price_out: 40.0,
+        // 0.025x input, as on 5.1.
+        cache_read_price: Some(0.20),
+        long_prompt: None,
+        // Same request shape as Fable 5.1: rejects thinking, sampling params, prefill AND
+        // forced tool_choice; the effort default is already the high we want.
+        shape: RequestShapeSpec {
+            strict_params: true,
+            disabled_thinking: DisabledThinking::Rejected,
+            no_forced_tool_choice: true,
+            effort: EffortPolicy::Omit,
+        },
+    },
+    RegistryEntryStatic {
         display: "Fable 5.1",
         id: "claude-fable-5-1",
         context: 1_000_000,
@@ -1410,10 +1431,11 @@ mod tests {
         let entries = claude_entries();
         assert_eq!(
             entries.len(),
-            8,
-            "expect the 4 tiers plus the 4 newer models"
+            9,
+            "expect the 4 tiers plus the 5 newer models"
         );
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
@@ -2452,6 +2474,7 @@ mod tests {
     #[test]
     fn price_join_for_claude_id_finds_every_static_model() {
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-fable-5",
             "claude-opus-5-5",
@@ -2636,6 +2659,7 @@ mod tests {
     fn newer_models_carry_the_verified_prices_context_and_output_limits() {
         // (id, in, out, context, max_output)
         for (id, pin, pout, ctx, max_out) in [
+            ("claude-fable-5-2", 8.0, 40.0, 1_000_000, 128_000),
             ("claude-fable-5-1", 10.0, 50.0, 1_000_000, 128_000),
             ("claude-opus-5-5", 4.0, 20.0, 1_000_000, 128_000),
             ("claude-sonnet-5-5", 2.0, 10.0, 1_000_000, 128_000),
@@ -2648,11 +2672,51 @@ mod tests {
         }
     }
 
+    /// Fable 5.2 is its own entry beside 5.1 (saved runs and explicit choices still name 5.1),
+    /// with 5.1's behaviour flags and its own prices.
+    #[test]
+    fn fable_5_2_is_listed_with_its_own_prices_and_5_1s_request_shape() {
+        let e = registry_entry_for("claude-fable-5-2").expect("5.2 listed");
+        assert_eq!(e.display, "Fable 5.2");
+        assert!(close(e.price_in, 8.0) && close(e.price_out, 40.0));
+        assert_eq!(e.cache_read_price, Some(0.20));
+        assert_eq!(
+            e.shape,
+            registry_entry_for("claude-fable-5-1").unwrap().shape
+        );
+        assert!(e.shape.no_forced_tool_choice && e.shape.strict_params);
+        // The older entry is kept at its own list price.
+        assert!(close(
+            registry_entry_for("claude-fable-5-1").unwrap().price_in,
+            10.0
+        ));
+    }
+
+    /// 5.2 bills 5-minute writes at $10, 1-hour writes at $16 (1.25x and 2x of $8).
+    #[test]
+    fn fable_5_2_cache_write_rates() {
+        let r = rates_for("claude-fable-5-2", 1000).unwrap();
+        assert!(close(r.cache_write_5m * 1e6, 10.0));
+        assert!(close(r.cache_write_1h * 1e6, 16.0));
+    }
+
+    /// 5.2 rejects a forced tool_choice and sampling params, like 5.1.
+    #[test]
+    fn fable_5_2_conform_strips_forced_tool_choice_and_sampling() {
+        let mut b = hostile_body();
+        conform_messages_body("claude-fable-5-2", &mut b);
+        assert_eq!(b["tool_choice"], serde_json::json!({"type": "auto"}));
+        for k in ["temperature", "top_p", "top_k"] {
+            assert!(b.get(k).is_none(), "{k}");
+        }
+    }
+
     /// A stage sizes its runaway guard from the model's own output limit, and sends an effort
     /// only where the model takes one.
     #[test]
     fn the_registry_answers_what_a_model_can_write_and_whether_it_takes_an_effort() {
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
@@ -2687,6 +2751,9 @@ mod tests {
     #[test]
     fn weights_follow_the_tier_and_price_ordering() {
         let w = |id: &str| registry_entry_for(id).unwrap().weight;
+        // 5.2 lists at $8 / $40 against 5.1's $10 / $50, so it weighs less, still above Opus.
+        assert!(w("claude-fable-5-2") <= w("claude-fable-5-1"));
+        assert!(w("claude-fable-5-2") > w("claude-opus-5-5"));
         assert!(w("claude-fable-5-1") >= w("claude-fable-5"));
         assert!(w("claude-opus-5-5") <= w("claude-opus-5"));
         assert!(w("claude-opus-5-5") > w("claude-sonnet-5-5"));
@@ -2698,6 +2765,7 @@ mod tests {
     #[test]
     fn cache_read_is_per_model_falling_back_to_a_tenth_of_input() {
         let per_m = |id: &str, toks: u64| rates_for(id, toks).unwrap().cache_read * 1_000_000.0;
+        assert!(close(per_m("claude-fable-5-2", 1000), 0.20), "0.025x of $8");
         assert!(
             close(per_m("claude-fable-5-1", 1000), 0.25),
             "0.025x of $10"
@@ -2783,6 +2851,7 @@ mod tests {
     #[test]
     fn conform_strips_everything_the_strict_models_reject() {
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
@@ -2916,7 +2985,12 @@ mod tests {
     /// The other three newest models reject disabled thinking at any effort.
     #[test]
     fn newest_models_reject_disabled_thinking_outright() {
-        for id in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] {
+        for id in [
+            "claude-fable-5-2",
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+        ] {
             let mut d = with_thinking(disabled(), Some("low"));
             conform_messages_body(id, &mut d);
             assert!(d.get("thinking").is_none(), "{id}");
@@ -2977,6 +3051,7 @@ mod tests {
             ("claude-opus-5-5", true),
             ("claude-haiku-5-5", true),
             ("claude-sonnet-5-5", false),
+            ("claude-fable-5-2", false),
             ("claude-fable-5-1", false),
         ] {
             let mut b = serde_json::json!({"messages": [{"role": "user", "content": "q"}]});

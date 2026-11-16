@@ -174,7 +174,7 @@ enum Command {
         #[arg(long = "clone-judge-model")]
         clone_judge_model: Option<String>,
         /// Model for the group reviewer (stage 2), the architect's first reader of each rule
-        /// group. Unset: the built-in default, Fable 5.1. Set only here or in a project's
+        /// group. Unset: the built-in default, Fable 5.2. Set only here or in a project's
         /// settings, never by the environment.
         #[arg(long = "group-review-model")]
         group_review_model: Option<String>,

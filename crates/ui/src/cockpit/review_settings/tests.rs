@@ -86,7 +86,7 @@ fn defaults_show_the_saved_formula_and_a_disabled_apply() {
     assert!(!html.contains("review-settings-locked"));
     // The group review model is the fixture's, selected.
     assert!(
-        html.contains("value=\"claude-fable-5-1\" selected"),
+        html.contains("value=\"claude-fable-5-2\" selected"),
         "{html}"
     );
     // The fix model offers "(not set)".

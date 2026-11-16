@@ -41,6 +41,9 @@ pub struct ProjectStore {
     path: Option<std::sync::Arc<std::path::PathBuf>>,
 }
 
+/// The group review model a project seeded before Fable 5.2 became the default.
+const PREVIOUS_STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-1";
+
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     projects: Vec<Project>,
@@ -71,6 +74,23 @@ impl ProjectStore {
                  each run's ledger records the set it used"
             );
         }
+        // The group review model moved to Fable 5.2 everywhere: a project that stored Fable 5.1
+        // (the previous seeded default) loads on 5.2, and the file is written back. A run that
+        // already started keeps the model it recorded (see `run_store::ModelsRecord`).
+        let mut moved = false;
+        for project in &mut state.projects {
+            if project.review.group_review_model.trim() == PREVIOUS_STAGE2_DEFAULT_MODEL {
+                project.review.group_review_model =
+                    camerata_api_types::project::STAGE2_DEFAULT_MODEL.to_string();
+                tracing::info!(
+                    "project {}: the group review model {PREVIOUS_STAGE2_DEFAULT_MODEL} moved to \
+                     {}; a run already started keeps the model it began on",
+                    project.name,
+                    camerata_api_types::project::STAGE2_DEFAULT_MODEL
+                );
+                moved = true;
+            }
+        }
         // ISOLATION (A7): validate the persisted active pointer. A dangling `active` id
         // (project deleted out-of-band, hand-edited file, partial write) would otherwise
         // make `active()` fall through to `projects.first()`, silently grounding the chat
@@ -82,10 +102,14 @@ impl ProjectStore {
         if !active_is_valid {
             state.active = state.projects.first().map(|p| p.id.clone());
         }
-        Self {
+        let store = Self {
             inner: std::sync::Arc::new(Mutex::new(state)),
             path: Some(std::sync::Arc::new(path)),
+        };
+        if moved {
+            store.save();
         }
+        store
     }
 
     /// Write the current state to disk (best-effort; a write failure does not break
@@ -879,7 +903,7 @@ mod tests {
         let p = store.create("Stages", vec![]).unwrap();
         // Stage 1 is the calibration step; stage 2 is the review settings' group review model.
         assert_eq!(p.step_models.calibration, "claude-opus-5-5");
-        assert_eq!(p.review.group_review_model, "claude-fable-5-1");
+        assert_eq!(p.review.group_review_model, "claude-fable-5-2");
         // The scan keeps its own default.
         assert_eq!(p.step_models.audit, DEFAULT_MODEL);
         // The rest of the review settings are the design values.
@@ -993,7 +1017,7 @@ mod tests {
             let b = store.create("B", vec![]).unwrap();
             // A new project carries the design values, and stage 2's own default model.
             let seeded = ReviewSettings {
-                group_review_model: "claude-fable-5-1".to_string(),
+                group_review_model: "claude-fable-5-2".to_string(),
                 ..ReviewSettings::default()
             };
             assert_eq!(a.review, seeded);
@@ -1034,7 +1058,66 @@ mod tests {
         assert_eq!(a.review.group_review_model, "claude-opus-5-5");
         assert_eq!(
             reloaded.get(&b_id).unwrap().review.group_review_model,
-            "claude-fable-5-1"
+            "claude-fable-5-2"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A project that stored Fable 5.1 as its group review model loads on Fable 5.2 (the
+    /// built-in default moved, and 5.1 is not a pick anyone made on purpose now), and the file is
+    /// written back so it says so. Any other stored model is the architect's own choice.
+    #[test]
+    fn a_stored_fable_5_1_group_review_model_loads_as_fable_5_2() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-project-fable-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("projects.json");
+        let (old_id, other_id) = {
+            let store = ProjectStore::load_or_new(path.clone());
+            let old = store.create("Old", vec![]).unwrap();
+            let other = store.create("Other", vec![]).unwrap();
+            for (id, model) in [
+                (&old.id, "claude-fable-5-1"),
+                (&other.id, "claude-opus-5-5"),
+            ] {
+                store
+                    .set_review_settings(
+                        id,
+                        ReviewSettings {
+                            group_review_model: model.to_string(),
+                            ..ReviewSettings::default()
+                        },
+                    )
+                    .expect("the project exists")
+                    .expect("valid settings");
+            }
+            (old.id, other.id)
+        };
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("claude-fable-5-1"),
+            "the file starts on 5.1"
+        );
+
+        let reloaded = ProjectStore::load_or_new(path.clone());
+        assert_eq!(
+            reloaded.get(&old_id).unwrap().review.group_review_model,
+            "claude-fable-5-2"
+        );
+        assert_eq!(
+            reloaded.get(&other_id).unwrap().review.group_review_model,
+            "claude-opus-5-5",
+            "another pick is kept"
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("claude-fable-5-1"),
+            "the move is saved back: {on_disk}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

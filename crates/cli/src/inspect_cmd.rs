@@ -99,7 +99,7 @@ pub struct InspectArgs {
     /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
     pub fix_model: Option<String>,
     /// `--group-review-model`: the group reviewer's (stage 2) model. `None`/blank = the built-in
-    /// default, Fable 5.1 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
+    /// default, Fable 5.2 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
     /// Never the environment.
     #[serde(default)]
     pub group_review_model: Option<String>,
@@ -1010,8 +1010,32 @@ pub async fn run_inspect_pipeline_with(
     // A resumed run is held to the whole run's spend: what its stored replies cost counts toward
     // `--max-cost-usd`, every stored dollar of it. The meter takes off again whatever a
     // checkpoint replays onto it, so a stored dollar is counted once, at every moment.
+    let mut group_review_notice: Option<String> = None;
     if let Some((store, _)) = &resumed {
         controls.stored_spend_usd = store.stored_usd();
+        // The group reviewer stays on the model the run started with, whatever the default is now.
+        let notice = store
+            .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
+            .map_err(InspectError::Failed)?;
+        group_review_notice = Some(notice);
+        // The kept model was not part of the pick the client lock checked at the top of this
+        // run, so it is checked here, on every model the resumed run will call, before any call.
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        if let Some(why) = camerata_server::client_lock::refusal_for_run_models(
+            args.client_engagement,
+            args.backend,
+            model,
+            calibration_model,
+            false,
+            &ids,
+            &controls,
+        ) {
+            return Err(InspectError::Failed(format!(
+                "{why} The run being resumed keeps the group review model it started on. Start \
+                 a new run with `--backend api` and Anthropic models, or pass `--internal` if \
+                 this is your own development and not client work."
+            )));
+        }
     }
     let incremental_prior = match &resumed {
         // The baseline the run started from, not the one an attempt since may have replaced.
@@ -1042,6 +1066,10 @@ pub async fn run_inspect_pipeline_with(
         // A resume prices only what remains, and says beside the limit what the stored replies
         // already count against it, before any call.
         let mut text = estimate_text.clone();
+        if let Some(notice) = &group_review_notice {
+            text.push_str(notice);
+            text.push('\n');
+        }
         if let Some(cap) = controls.max_cost_usd {
             text.push_str(&camerata_server::cost_cap::resume_limit_line(
                 cap,
@@ -2940,7 +2968,7 @@ mod tests {
         let defaults = args.run_controls().unwrap();
         assert!((defaults.review.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
         assert_eq!(defaults.review.escalation_floor, 20);
-        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-1");
+        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-2");
         // The flags win.
         args.group_review_model = Some("claude-opus-5-5".to_string());
         args.escalation_rate = Some(0.5);
@@ -2953,7 +2981,7 @@ mod tests {
         args.group_review_model = Some("  ".to_string());
         assert_eq!(
             args.run_controls().unwrap().group_review_model_for(),
-            "claude-fable-5-1"
+            "claude-fable-5-2"
         );
     }
 

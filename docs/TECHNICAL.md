@@ -786,6 +786,7 @@ Key design points:
 
   | id | input | output | cache read | context | max output | weight |
   |---|---|---|---|---|---|---|
+  | `claude-fable-5-2` | 8.00 | 40.00 | 0.20 | 1M | 128K | 12 |
   | `claude-fable-5-1` | 10.00 | 50.00 | 0.25 | 1M | 128K | 15 |
   | `claude-fable-5` | 10.00 | 50.00 | 1.00 (0.1x) | 1M | 128K | 15 |
   | `claude-opus-5-5` | 4.00 | 20.00 | 0.20 | 1M | 128K | 8 |
@@ -821,7 +822,7 @@ Key design points:
 
   | model | `thinking: disabled` | forced `tool_choice` | effort default |
   |---|---|---|---|
-  | Fable 5.1, Sonnet 5.5 | rejected (omit it) | rejected | high |
+  | Fable 5.2, Fable 5.1, Sonnet 5.5 | rejected (omit it) | rejected | high |
   | Haiku 5.5 | only at effort high or below | accepted | medium (set to `high`) |
   | Opus 5.5 | rejected (omit it) | rejected | medium (set to `high`) |
   | Fable 5 | rejected (omit it) | accepted | high |

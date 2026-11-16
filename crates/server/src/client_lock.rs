@@ -82,6 +82,29 @@ pub fn refusal(
     ))
 }
 
+/// The reason a client engagement must not run with `backend` and the models `controls` hold
+/// RIGHT NOW, or `None`. [`models_a_scan_may_use`] checks the picks before the run opens; a
+/// resume swaps in the models the saved run started on after that check, so it asks this
+/// once more on the controls it will actually run with, before any model call.
+pub fn refusal_for_run_models(
+    client_engagement: bool,
+    backend: ProjectBackend,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    deep: bool,
+    selected_rule_ids: &[&str],
+    controls: &crate::cost_cap::RunControls,
+) -> Option<String> {
+    let models = crate::cost_cap::models_the_run_will_use(
+        model,
+        calibration_model,
+        deep,
+        selected_rule_ids,
+        controls,
+    );
+    refusal(client_engagement, backend, &models)
+}
+
 /// Every model a scan may use, by role, for the lock to check BEFORE the scan starts: the scan,
 /// calibration (stage 1), group review (stage 2) and fix generation passes, the deep tier when it is on, and the clone judge
 /// (always included, because which rules are selected is only known once files have been read,

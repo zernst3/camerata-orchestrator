@@ -274,6 +274,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<crate::run_store::RunStore> {
             backend: "api".to_string(),
             mode: "batch".to_string(),
             resolved: true,
+            group_review: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: MODEL.to_string(),

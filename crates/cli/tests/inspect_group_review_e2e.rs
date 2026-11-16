@@ -242,7 +242,7 @@ async fn with_no_flag_the_group_reviewer_runs_on_fable_and_the_environment_is_ig
     };
     assert!(!requests.is_empty());
     for req in &requests {
-        assert_eq!(req.model, "claude-fable-5-1");
+        assert_eq!(req.model, "claude-fable-5-2");
         assert_ne!(req.model, "env-picked-model");
     }
     // This export is the operator's own (the project is not a client engagement). What the group

@@ -599,8 +599,33 @@ mod tests {
         assert!((with - without).abs() < 1e-9, "{with} vs {without}");
     }
 
+    /// The group reviewer's default model prices at the registry's Fable 5.2 rates, $8 in and $40
+    /// out per million tokens, and the group review part of the figure is 0.8 of what the same run
+    /// costs on Fable 5.1 ($10 / $50).
+    #[test]
+    fn the_group_review_is_priced_at_fable_5_2_rates() {
+        assert_eq!(price_of("claude-fable-5-2"), Some((8.0, 40.0)));
+        assert_eq!(price_of("claude-fable-5-1"), Some((10.0, 50.0)));
+        let repos = [repo(26_544, 152)];
+        let estimate_with = |group_review: &str| {
+            let mut i = inputs(&repos, None);
+            i.model = "claude-sonnet-5-5".into();
+            i.calibration_model = "claude-sonnet-5-5".into();
+            i.group_review_model = group_review.into();
+            build(&i).estimate_usd.unwrap()
+        };
+        let left_out = estimate_with("some-model-without-a-price");
+        let on_5_1 = estimate_with("claude-fable-5-1") - left_out;
+        let on_5_2 = estimate_with("claude-fable-5-2") - left_out;
+        assert!(on_5_2 > 0.0, "the group review is in the figure");
+        assert!(
+            (on_5_2 - 0.8 * on_5_1).abs() < 1e-9,
+            "{on_5_2} vs 0.8 x {on_5_1}"
+        );
+    }
+
     /// A13: the figure counts both reviewers, each on its own model. The group reviewer is priced
-    /// at its model (Fable 5.1 is dearer than Sonnet), shows in the basis, and is left out, with
+    /// at its model (Fable 5.2 is dearer than Sonnet), shows in the basis, and is left out, with
     /// a line saying so, when its model has no list price.
     #[test]
     fn the_group_review_stage_is_priced_at_its_own_model_and_named_in_the_basis() {
@@ -613,7 +638,7 @@ mod tests {
         let mut dear = inputs(&repos, None);
         dear.model = "claude-sonnet-5-5".into();
         dear.calibration_model = "claude-sonnet-5-5".into();
-        dear.group_review_model = "claude-fable-5-1".into();
+        dear.group_review_model = "claude-fable-5-2".into();
         let dear_p = build(&dear);
         assert!(
             dear_p.estimate_usd.unwrap() > cheap_p.estimate_usd.unwrap() + 0.01,
@@ -622,7 +647,7 @@ mod tests {
             dear_p.estimate_usd
         );
         assert!(
-            dear_p.text.contains("group review model claude-fable-5-1"),
+            dear_p.text.contains("group review model claude-fable-5-2"),
             "{}",
             dear_p.text
         );
