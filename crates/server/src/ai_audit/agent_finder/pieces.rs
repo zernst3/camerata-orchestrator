@@ -105,7 +105,28 @@ fn folder_groups(paths: &[&str], bytes: &[usize], target: usize) -> Vec<Vec<usiz
     let all: Vec<usize> = (0..paths.len()).collect();
     let mut blocks = Vec::new();
     split_blocks(paths, bytes, &all, 0, target, &mut blocks);
-    pack(blocks, target)
+    merge_small_tail(pack(blocks, target), bytes, target)
+}
+
+/// A last piece of one or two files joins the piece before it when the two stay within the
+/// one piece allowance (1.25 times the target, the same allowance a whole unit gets to stay one
+/// piece). The greedy pack leaves such a tail when the last block missed the previous piece by a
+/// little, and a tiny piece costs a whole agent run.
+fn merge_small_tail(
+    mut groups: Vec<Vec<usize>>,
+    bytes: &[usize],
+    target: usize,
+) -> Vec<Vec<usize>> {
+    let group_bytes = |g: &[usize]| g.iter().map(|&m| bytes[m]).sum::<usize>();
+    if groups.len() >= 2 {
+        let tail = groups.len() - 1;
+        let combined = group_bytes(&groups[tail]) + group_bytes(&groups[tail - 1]);
+        if groups[tail].len() <= 2 && combined * 100 <= target * ONE_PIECE_PERCENT {
+            let last = groups.pop().unwrap_or_default();
+            groups[tail - 1].extend(last);
+        }
+    }
+    groups
 }
 
 /// Turn `members` (indexes sharing the first `depth` path components) into blocks. A group that
@@ -174,11 +195,20 @@ fn pack(blocks: Vec<Block>, target: usize) -> Vec<Vec<usize>> {
     groups
 }
 
-/// The forced cut: the folder cut at the smaller target, then the largest multi-file piece is
-/// halved (at its byte midpoint, in path order) until there are `k` pieces or every piece is one
-/// file.
+/// The forced cut: the folder cut at the smaller target; when that gives more than `k` pieces,
+/// the two neighbours with the fewest bytes together are joined until there are `k`; when it
+/// gives fewer, the largest multi-file piece is halved (at its byte midpoint, in path order)
+/// until there are `k` pieces or every piece is one file.
 fn forced_groups(paths: &[&str], bytes: &[usize], target: usize, k: usize) -> Vec<Vec<usize>> {
     let mut groups = folder_groups(paths, bytes, target);
+    while groups.len() > k.max(1) {
+        let size = |g: &Vec<usize>| g.iter().map(|&m| bytes[m]).sum::<usize>();
+        let at = (0..groups.len() - 1)
+            .min_by_key(|&i| (size(&groups[i]) + size(&groups[i + 1]), i))
+            .unwrap_or(0);
+        let next = groups.remove(at + 1);
+        groups[at].extend(next);
+    }
     while groups.len() < k {
         let pick = groups
             .iter()

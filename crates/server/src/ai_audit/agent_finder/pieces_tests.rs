@@ -204,6 +204,80 @@ fn a_synthetic_40_file_repository_unsplit_and_forced_to_4() {
     }
     assert_eq!(unsplit.len(), 1);
     assert_eq!(unsplit[0].files.len(), 40);
-    assert!(forced.len() >= 4);
+    assert_eq!(forced.len(), 4, "forced to 4 gives 4");
     assert_eq!(forced.iter().map(|p| p.files.len()).sum::<usize>(), 40);
+}
+
+#[test]
+fn a_trailing_piece_of_one_or_two_files_joins_its_neighbour_within_the_one_piece_allowance() {
+    // Nine files of 1,000 bytes against a target of 4,500: the greedy pack gives 4 + 4 + 1. The
+    // one-file tail joins the piece before it (5,000 bytes, within 1.25 times the target, the
+    // same allowance a whole unit gets to stay one piece).
+    let files: Vec<(String, String)> = (0..9).map(|i| file(&format!("f{i}.rs"), 1_000)).collect();
+    let pieces = plan_pieces(&one_unit(&files), &files, 4_500, None);
+    assert_eq!(
+        pieces.iter().map(|p| p.files.len()).collect::<Vec<_>>(),
+        vec![4, 5]
+    );
+    // Two 700 byte files after four 1,000 byte files (target 4,300) are only two groups, so the
+    // one piece rule decides: 5,400 bytes is over 1.25 times 4,300 (5,375), and the tail stays.
+    let mut sized: Vec<(String, String)> =
+        (0..4).map(|i| file(&format!("a{i}.rs"), 1_000)).collect();
+    sized.push(file("b0.rs", 700));
+    sized.push(file("b1.rs", 700));
+    let pieces = plan_pieces(&one_unit(&sized), &sized, 4_300, None);
+    assert_eq!(
+        pieces.iter().map(|p| p.files.len()).collect::<Vec<_>>(),
+        vec![4, 2]
+    );
+    // Two 500 byte files after eight 1,000 byte files (target 4,500): 4 + 4 + 2, and the tail
+    // joins the piece before it (5,000 bytes).
+    let mut small: Vec<(String, String)> =
+        (0..8).map(|i| file(&format!("a{i}.rs"), 1_000)).collect();
+    small.push(file("b0.rs", 500));
+    small.push(file("b1.rs", 500));
+    let pieces = plan_pieces(&one_unit(&small), &small, 4_500, None);
+    assert_eq!(
+        pieces.iter().map(|p| p.files.len()).collect::<Vec<_>>(),
+        vec![4, 6]
+    );
+}
+
+#[test]
+fn a_tail_of_three_files_or_one_that_would_pass_the_allowance_is_not_merged() {
+    // Seven files of 1,000 bytes against 4,500: 4 + 3. Three files are not a small tail.
+    let files: Vec<(String, String)> = (0..7).map(|i| file(&format!("f{i}.rs"), 1_000)).collect();
+    let pieces = plan_pieces(&one_unit(&files), &files, 4_500, None);
+    assert_eq!(
+        pieces.iter().map(|p| p.files.len()).collect::<Vec<_>>(),
+        vec![4, 3]
+    );
+    // One file tail that would pass 1.25 times the target stays alone.
+    let big = vec![
+        file("a.rs", 3_000),
+        file("b.rs", 3_000),
+        file("c.rs", 3_000),
+    ];
+    let pieces = plan_pieces(&one_unit(&big), &big, 4_000, None);
+    assert_eq!(pieces.len(), 3);
+}
+
+#[test]
+fn forced_mode_gives_k_pieces_when_the_folder_cut_would_give_more() {
+    // 5 folders of nearly equal size: the folder cut at total / 4 gives more than 4 pieces; the
+    // forced mode brings it back to exactly 4 without cutting a file in two.
+    let files: Vec<(String, String)> = (0..5)
+        .flat_map(|d| (0..4).map(move |i| file(&format!("m{d}/f{i}.rs"), 1_000 + d * 10 + i)))
+        .collect();
+    for k in [2usize, 3, 4, 5] {
+        let pieces = plan_pieces(&one_unit(&files), &files, 240_000, Some(k));
+        assert_eq!(pieces.len(), k, "forced to {k}");
+        assert_eq!(pieces.iter().map(|p| p.files.len()).sum::<usize>(), 20);
+        let mut seen = std::collections::BTreeSet::new();
+        for p in &pieces {
+            for f in &p.files {
+                assert!(seen.insert(f.clone()), "{f} in two pieces");
+            }
+        }
+    }
 }
