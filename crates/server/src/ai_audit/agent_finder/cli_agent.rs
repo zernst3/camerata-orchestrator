@@ -414,6 +414,14 @@ fn room_path(path: &str, roots: &[PathBuf]) -> Option<String> {
 /// are split on `/` and also on `{`, `}` and `,`, so brace alternatives are seen. The argument is
 /// outside the room whatever else it holds.
 fn escapes(value: &str) -> bool {
+    // An absolute path inside a brace alternative (`{/etc,code}/*`) is outside.
+    let bytes = value.as_bytes();
+    if bytes
+        .windows(2)
+        .any(|w| (w[0] == b'{' || w[0] == b',') && w[1] == b'/')
+    {
+        return true;
+    }
     value
         .split(['/', '{', '}', ','])
         .any(|seg| seg == ".." || seg.starts_with('~') || seg.starts_with('$'))

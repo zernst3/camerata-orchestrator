@@ -821,6 +821,10 @@ async fn a_read_outside_the_room_fails_the_piece() {
         ("Glob", json!({"pattern": "~/other/*.md"})),
         ("Glob", json!({"pattern": "src/../../x/*"})),
         ("Glob", json!({"pattern": "{../..,x}/*"})),
+        (
+            "Glob",
+            json!({"pattern": "{/Users/auditor/other,code}/**/*"}),
+        ),
         ("Glob", json!({"pattern": "x/{a,../../b}/*"})),
         ("Glob", json!({"pattern": "**/../../*KEY*"})),
         ("Glob", json!({"pattern": "*.rs", "path": "{x,$HOME}/y"})),
