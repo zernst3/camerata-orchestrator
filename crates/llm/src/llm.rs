@@ -567,11 +567,26 @@ fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
 /// Standalone from any `claude`-specific spawn setup so it is exercisable in a unit test
 /// against ANY child process that writes stream-json lines, not just a live `claude` CLI.
 async fn read_cli_stream(
+    child: tokio::process::Child,
+    model: &str,
+    idle: std::time::Duration,
+    overall_timeout: std::time::Duration,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<LlmResponse> {
+    read_cli_stream_capturing(child, model, idle, overall_timeout, on_delta, None).await
+}
+
+/// [`read_cli_stream`] that also hands every record of the stream except the partial-message
+/// events (the assistant and user records with their tool calls and results, the system records
+/// and the final result) to `capture`, as the raw line, in order. The record is handed over as it
+/// arrives, so a call that is later killed or abandoned has still left what it printed.
+async fn read_cli_stream_capturing(
     mut child: tokio::process::Child,
     model: &str,
     idle: std::time::Duration,
     overall_timeout: std::time::Duration,
     on_delta: &mut (dyn FnMut(&str) + Send),
+    mut capture: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> anyhow::Result<LlmResponse> {
     use tokio::io::AsyncBufReadExt;
     let stdout = child
@@ -651,6 +666,11 @@ async fn read_cli_stream(
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
+                if v["type"].as_str() != Some("stream_event") {
+                    if let Some(capture) = capture.as_deref_mut() {
+                        capture(&line);
+                    }
+                }
                 // Real model progress extends the deadline; status/keepalive lines do not.
                 let mut progressed = false;
                 match v["type"].as_str() {
@@ -2312,7 +2332,22 @@ impl Llm {
         // long-but-live call is never killed merely for running past this window.
         let overall_timeout = cli_overall_timeout();
 
-        match read_cli_stream(child, model, idle, overall_timeout, on_delta).await {
+        // A sink that keeps the stream gets each record as it arrives (see
+        // [`SessionSink::with_stream_capture`]); everyone else reads exactly as before.
+        let capture_sink = self.sessions.as_ref().filter(|s| s.captures_streams());
+        let mut keep = |line: &str| {
+            if let Some(sink) = capture_sink {
+                sink.record_stream_line(&session_id, line);
+            }
+        };
+        let capture: Option<&mut (dyn FnMut(&str) + Send)> = if capture_sink.is_some() {
+            Some(&mut keep)
+        } else {
+            None
+        };
+        match read_cli_stream_capturing(child, model, idle, overall_timeout, on_delta, capture)
+            .await
+        {
             Ok(resp) => Step::Done(resp),
             Err(e) => {
                 let Some(failure) = crate::failure::call_failure_of(&e) else {
@@ -6158,6 +6193,39 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
             camerata_api_types::claude_cli::engine_empty_cwd().to_string_lossy()
         );
         assert!(!recorded[0].created_at.is_empty());
+    }
+
+    /// A sink built to capture keeps the records the call printed on stdout (not the partial
+    /// message events), under the call's session id; a plain sink keeps nothing.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_capturing_sink_keeps_the_stdout_records_of_each_call() {
+        let fake = FakeClaude::new(
+            "capture-ok",
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init"}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}'
+printf '%s\n' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}}]}}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sink = SessionSink::with_stream_capture();
+        let plain = SessionSink::new();
+        for s in [&sink, &plain] {
+            cli_llm()
+                .with_session_sink(s.clone())
+                .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+                .await
+                .expect("fake claude answers");
+        }
+        let id = sink.snapshot()[0].session_id.clone();
+        let lines = sink.stream_lines(&id).expect("the stream was kept");
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("init") && lines[1].contains("tool_use"));
+        assert!(lines[2].contains("\"type\":\"result\""));
+        assert!(!lines.iter().any(|l| l.contains("stream_event")));
+        assert_eq!(plain.stream_lines(&plain.snapshot()[0].session_id), None);
     }
 
     /// A call that fails still wrote (part of) a session file, so it is still recorded.
