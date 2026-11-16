@@ -1814,7 +1814,7 @@ pub fn settings_for(p: &Params, budget: &EscalationBudget) -> ReviewSettingsView
         stage_models: StageModelsView {
             scan: "claude-sonnet-5-5".to_string(),
             calibration: "claude-sonnet-5-5".to_string(),
-            group_review: "claude-fable-5-1".to_string(),
+            group_review: "claude-fable-5-2".to_string(),
             fix: "claude-sonnet-5-5".to_string(),
         },
         escalation: EscalationSettingsView {
