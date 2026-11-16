@@ -4,6 +4,7 @@
 use crate::fixtures::body;
 use crate::{match_lines_for_rule, match_lines_for_rule_in_file};
 
+const HEX: &str = "0123456789abcdef";
 const ALNUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 fn lines(text: &str) -> Vec<usize> {
@@ -64,4 +65,26 @@ fn a_module_path_in_an_import_or_require_is_not_a_value() {
         lines(&format!("const apiKey = require('{opaque}');")),
         vec![1]
     );
+}
+
+fn uuid() -> String {
+    [
+        body(8, HEX, 21),
+        body(4, HEX, 22),
+        body(4, HEX, 23),
+        body(4, HEX, 24),
+        body(12, HEX, 25),
+    ]
+    .join("-")
+}
+
+#[test]
+fn a_uuid_on_an_id_named_field_is_an_entity_id() {
+    let id = uuid();
+    assert!(lines(&format!("example:\n  token_id: {id}\n")).is_empty());
+    assert!(lines(&format!("const row = {{ tokenId: '{id}' }};")).is_empty());
+    assert_eq!(lines(&format!("api_token: {id}\n")), vec![1]);
+    assert_eq!(lines(&format!("client_secret_id: {id}\n")), vec![1]);
+    let opaque = body(36, ALNUM, 16);
+    assert_eq!(lines(&format!("token_id: {opaque}\n")), vec![1]);
 }

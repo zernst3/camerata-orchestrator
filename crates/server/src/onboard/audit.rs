@@ -18,6 +18,42 @@ pub(crate) fn severity_for(_rule_id: &str) -> &'static str {
     "critical"
 }
 
+/// The note appended to a floor row held as a sample value in an API description file.
+const API_DESCRIPTION_NOTE: &str =
+    " (a sample value in an API description file; a reviewer should confirm)";
+
+/// Whether `content` is an API description (an OpenAPI or Swagger document, or a request
+/// collection): a top-level `openapi` or `swagger` key, or a request collection marker.
+fn is_api_description(content: &str) -> bool {
+    content.lines().any(|line| {
+        let line = line.trim_end();
+        let key = line.trim_start_matches('{').trim_start();
+        let top_level_key = |name: &str| {
+            [format!("{name}:"), format!("\"{name}\":")]
+                .iter()
+                .any(|k| key.starts_with(k.as_str()) && !line.starts_with([' ', '\t']))
+                || (line.starts_with('{') && key.starts_with(&format!("\"{name}\":")))
+        };
+        top_level_key("openapi")
+            || top_level_key("swagger")
+            || line.contains("schema.getpostman.com")
+            || line.contains("\"_postman_id\"")
+    })
+}
+
+/// Whether `line` assigns a canonical UUID to a field named exactly `token` (not `api_token`,
+/// not `token_id`).
+fn is_bare_token_uuid(line: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)(?:^|[^A-Za-z0-9_])token["']?\s*[:=]\s*["']?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}["']?\s*,?\s*$"#,
+        )
+        .expect("bare token uuid regex must compile")
+    })
+    .is_match(line)
+}
+
 /// The gate's description for a rule id, or the id if unknown.
 ///
 /// This is INTERNAL/enforcement prose (the same directive text the agent reads when the gate
@@ -221,6 +257,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let in_test_path = is_test_or_fixture_path(path);
+    let api_description = is_api_description(content);
     let test_ranges = test_scope_line_ranges(path, content);
     // Whole-content matching (not line-by-line) so MULTI-LINE constructs are caught —
     // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
@@ -297,7 +334,22 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
             // This is per-finding-by-line: a production secret in a file that also has a
             // test block stays Critical; only findings inside a test scope are downgraded.
             let is_test = in_test_path || is_in_test_scope(line_no, &test_ranges);
-            let (severity, detail, in_test, needs_review) = if is_test {
+            // A bare `token` holding a UUID in an API description is most often a sample value.
+            // The row stays, held at low for a reviewer, the way a test path's row is.
+            let held_sample = !is_test
+                && api_description
+                && *rule_id == "SEC-NO-HARDCODED-SECRETS-1"
+                && lines
+                    .get(line_no.saturating_sub(1))
+                    .is_some_and(|l| is_bare_token_uuid(l));
+            let (severity, detail, in_test, needs_review) = if held_sample {
+                (
+                    TEST_PATH_SEVERITY.to_string(),
+                    format!("{}{}", title_for(rule_id), API_DESCRIPTION_NOTE),
+                    false,
+                    true,
+                )
+            } else if is_test {
                 (
                     TEST_PATH_SEVERITY.to_string(),
                     format!("{}{}", title_for(rule_id), TEST_PATH_NOTE),
@@ -602,6 +654,60 @@ pub(crate) fn classify_repo_findings(
             // A5.6: a reason-less waiver is an objective fault (the un-auditable hole).
             kind: Some(camerata_api_types::audit::FindingKind::Defect),
         });
+    }
+}
+
+#[cfg(test)]
+mod api_description_tests {
+    use super::*;
+    use camerata_secrets::fixtures::body;
+
+    fn uuid() -> String {
+        [
+            body(8, "0123456789abcdef", 31),
+            body(4, "0123456789abcdef", 32),
+            body(4, "0123456789abcdef", 33),
+            body(4, "0123456789abcdef", 34),
+            body(12, "0123456789abcdef", 35),
+        ]
+        .join("-")
+    }
+
+    fn secret_row(rows: &[Finding]) -> &Finding {
+        rows.iter()
+            .find(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("still a row")
+    }
+
+    #[test]
+    fn a_uuid_token_in_an_api_description_is_held_not_urgent() {
+        let id = uuid();
+        let spec = format!(
+            "openapi: 3.0.0\ncomponents:\n  examples:\n    transfer:\n      value:\n        token: {id}\n"
+        );
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        let row = secret_row(&rows);
+        assert_eq!(row.severity, "low");
+        assert!(row.needs_review);
+        let rows = audit_content(
+            "r",
+            "config/service.yaml",
+            &format!("service:\n  token: {id}\n"),
+        );
+        assert_eq!(secret_row(&rows).severity, "critical");
+        // Only a bare `token` is held: another name in the same description stays urgent.
+        let spec = format!("openapi: 3.0.0\nexample:\n  api_token: {id}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_row(&rows).severity, "critical");
+        // An opaque value on `token` in an API description is not a sample UUID.
+        let opaque = body(
+            36,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            36,
+        );
+        let spec = format!("openapi: 3.0.0\nexample:\n  token: {opaque}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_row(&rows).severity, "critical");
     }
 }
 
