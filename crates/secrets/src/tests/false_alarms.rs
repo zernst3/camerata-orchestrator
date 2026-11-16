@@ -5,6 +5,7 @@ use crate::fixtures::body;
 use crate::{match_lines_for_rule, match_lines_for_rule_in_file};
 
 const HEX: &str = "0123456789abcdef";
+const B64: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const ALNUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 fn lines(text: &str) -> Vec<usize> {
@@ -87,4 +88,34 @@ fn a_uuid_on_an_id_named_field_is_an_entity_id() {
     assert_eq!(lines(&format!("client_secret_id: {id}\n")), vec![1]);
     let opaque = body(36, ALNUM, 16);
     assert_eq!(lines(&format!("token_id: {opaque}\n")), vec![1]);
+}
+
+#[test]
+fn sealed_secret_ciphertext_is_not_a_hardcoded_value() {
+    let blob = body(700, B64, 14);
+    let head = "apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nspec:\n";
+    let sealed =
+        format!("{head}  encryptedData:\n    password: {blob}\n  template:\n    type: Opaque\n");
+    assert!(lines(&sealed).is_empty());
+    let short = body(32, ALNUM, 15);
+    // A short value under encryptedData is not ciphertext.
+    assert_eq!(
+        lines(&format!("{head}  encryptedData:\n    password: {short}\n")),
+        vec![5]
+    );
+    // A value under template is plain text.
+    assert_eq!(
+        lines(&format!(
+            "{head}  template:\n    data:\n      password: {short}\n"
+        )),
+        vec![6]
+    );
+    // The same key in a plain Secret.
+    assert_eq!(
+        lines(&format!("kind: Secret\nstringData:\n  password: {blob}\n")),
+        vec![3]
+    );
+    // A sealed secret does not clear a plain Secret in the next document.
+    let stream = format!("{head}  encryptedData:\n    password: {blob}\n---\nkind: Secret\nstringData:\n  password: {blob}\n");
+    assert_eq!(lines(&stream), vec![9]);
 }

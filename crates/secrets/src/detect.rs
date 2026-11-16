@@ -9,7 +9,7 @@ use regex::Regex;
 
 use crate::firebase::{TwinContext, LINE_PREFIX_CAP, WINDOW};
 use crate::shapes::{self, is_supabase_dsn, shapes_for_rule, SecretShape};
-use crate::twins::{classify, Twin};
+use crate::twins::{classify, is_sealed_ciphertext, Twin};
 
 /// How far past a PEM header the matching footer is searched for.
 const PEM_FOOTER_WINDOW: usize = 8000;
@@ -71,13 +71,20 @@ fn push(
     // The text of the match before the value: for a context shape it holds the identifier.
     let before_value = &text[span.start..value.start];
     let context = twin_context(text, value.start);
-    let twin = classify(
+    let mut twin = classify(
         shape,
         &text[value.clone()],
         before_value,
         jwt_role.as_deref(),
         &context,
     );
+    // The sealed-secret check reads the whole document, which the bounded context cannot hold.
+    if twin.is_none()
+        && shape == SecretShape::NamedSecretLiteral
+        && is_sealed_ciphertext(text, &value)
+    {
+        twin = Some(Twin::SealedCiphertext);
+    }
     out.push(SecretMatch {
         start: span.start,
         end: span.end,

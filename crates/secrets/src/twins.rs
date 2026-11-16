@@ -49,6 +49,9 @@ pub enum Twin {
     /// A canonical UUID on an identifier that ends in `id` (`token_id`, `tokenId`) and is not
     /// password-like: the id of a domain object that happens to be called token or key.
     EntityId,
+    /// The ciphertext of a sealed secret: a long base64 value under `encryptedData` in a
+    /// `kind: SealedSecret` document. Encrypted for committing, so it is not a credential.
+    SealedCiphertext,
 }
 
 impl Twin {
@@ -68,6 +71,7 @@ impl Twin {
                 | Twin::BlockHeaderLabel
                 | Twin::ModulePath
                 | Twin::EntityId
+                | Twin::SealedCiphertext
         )
     }
 }
@@ -381,6 +385,66 @@ fn names_a_secret(before_value: &str) -> bool {
     SECRET_IDENTIFIER_WORDS
         .iter()
         .any(|word| lower.contains(word))
+}
+
+/// The fewest characters a sealed-secret ciphertext value has (a real one is hundreds).
+const SEALED_CIPHERTEXT_MIN_LEN: usize = 200;
+
+/// Whether the value at `value` in `text` is the ciphertext of a sealed secret: the document has
+/// `kind: SealedSecret` at its top level, the value is base64 of 200 or more characters and the
+/// nearest less-indented key above its line is `encryptedData`. Only ciphertext under that key is
+/// cleared: a short value, a value under `template` and the same key in a plain Secret all stay.
+pub(crate) fn is_sealed_ciphertext(text: &str, value: &std::ops::Range<usize>) -> bool {
+    let body = &text[value.clone()];
+    if body.len() < SEALED_CIPHERTEXT_MIN_LEN
+        || !body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    {
+        return false;
+    }
+    // The document holding the value: between the `---` separator lines around it.
+    let separator = |line: &str| line.starts_with("---");
+    let line_start = text[..value.start].rfind('\n').map_or(0, |i| i + 1);
+    let mut doc_start = 0;
+    let mut offset = 0;
+    for line in text[..line_start].split_inclusive('\n') {
+        if separator(line) {
+            doc_start = offset + line.len();
+        }
+        offset += line.len();
+    }
+    let mut doc_end = text.len();
+    let mut offset = line_start;
+    for line in text[line_start..].split_inclusive('\n') {
+        if offset > line_start && separator(line) {
+            doc_end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    let document = &text[doc_start..doc_end];
+    let is_sealed = document.lines().any(|line| {
+        line.strip_prefix("kind:")
+            .is_some_and(|rest| rest.trim().trim_matches(['"', '\'']) == "SealedSecret")
+    });
+    if !is_sealed {
+        return false;
+    }
+    let indent_of = |line: &str| line.len() - line.trim_start().len();
+    let own_line = text[line_start..].lines().next().unwrap_or("");
+    let own_indent = indent_of(own_line);
+    let above = &text[doc_start..line_start];
+    for line in above.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if indent_of(line) < own_indent {
+            return trimmed.trim_end_matches(':') == "encryptedData" && trimmed.ends_with(':');
+        }
+    }
+    false
 }
 
 /// Classify a candidate. `before_value` is the matched text before the value (the identifier, for
