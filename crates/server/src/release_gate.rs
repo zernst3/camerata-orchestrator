@@ -18,6 +18,11 @@
 
 mod archive;
 mod consistency;
+#[allow(
+    dead_code,
+    reason = "built but not yet enforced: work order C wires the counts check into gate_report"
+)]
+mod counts_check;
 pub mod engine_check;
 pub mod evidence;
 pub mod held;
@@ -782,6 +787,9 @@ pub(crate) fn test_scan_report() -> crate::onboard::ScanReport {
 pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
     run_complete_tests::internal_incomplete_package()
 }
+
+#[cfg(test)]
+mod counts_tests;
 
 #[cfg(test)]
 mod patterns_tests;

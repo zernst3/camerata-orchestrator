@@ -820,6 +820,26 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
     problems
 }
 
+/// Every count in the package, held to the files in it (single counts, design 5.7): the object in
+/// `findings.json` and the PDF data equals an independent recount, the four identities hold,
+/// every surface equals the object, every count sentence equals the one the counts give and an
+/// executive summary override states no number that is no count.
+///
+/// BUILT BUT NOT YET ENFORCED: the surfaces still count on their own, so this refuses today's
+/// package. It is not in `gate_report`; work order C makes the surfaces read the object and then
+/// wires it in. See [`super::counts_check`].
+#[allow(
+    dead_code,
+    reason = "built but not yet enforced: work order C wires it into gate_report"
+)]
+pub fn counts_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
+    super::counts_check::counts_problems_with(
+        entries,
+        report,
+        super::counts_check::CountsChecks::default(),
+    )
+}
+
 const PATTERNS: &str = "patterns across services";
 
 /// The "Patterns across services" section is an observation, never a finding: it must change no
