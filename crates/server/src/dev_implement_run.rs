@@ -161,6 +161,25 @@ pub(crate) fn dev_loop_client_lock_refusal(
                 .to_string(),
         );
     }
+    if project.client_engagement {
+        // The dev loop calls the model directly, outside the inspection's spend meter, so a
+        // client run needs its own limit, and a model whose price the limit can count.
+        if project.dev_run_spend_limit().is_none() {
+            return Some(
+                "This is a client engagement, and the dev loop calls the model directly, so it \
+                 needs a spend limit. Set a dev run spend limit in this project's Settings to \
+                 allow it. Nothing was run."
+                    .to_string(),
+            );
+        }
+        if !crate::llm::is_priced(model) {
+            return Some(format!(
+                "A dev run's spend limit cannot be enforced: `{model}` has no price in the model \
+                 registry, so what it costs cannot be counted. Choose a priced model. Nothing \
+                 was run."
+            ));
+        }
+    }
     None
 }
 
@@ -1431,6 +1450,11 @@ pub async fn execute_dev_implement_run(
         // (beside the worktree) and nothing else; every read is logged under this run.
         &crate::api_agent_driver::DriverControls {
             read_roots: sibling_read_dirs.clone(),
+            // The project's dev run spend limit: the loop stops at it (children share it).
+            spend: run_project
+                .as_ref()
+                .and_then(|p| p.dev_run_spend_limit())
+                .and_then(|usd| crate::api_agent_driver::SpendMeter::with_limit(usd).ok()),
             ..Default::default()
         },
     ) {
@@ -2332,6 +2356,16 @@ mod tests {
     // ── H2: the client-engagement lock on the dev loop ──────────────────────
 
     fn lock_project(backend: &str, client: bool, opt_in: bool) -> crate::project::Project {
+        let mut p = lock_project_without_limit(backend, client, opt_in);
+        p.dev_run_spend_limit_cents = Some(500);
+        p
+    }
+
+    fn lock_project_without_limit(
+        backend: &str,
+        client: bool,
+        opt_in: bool,
+    ) -> crate::project::Project {
         serde_json::from_value(serde_json::json!({
             "id": "proj-1",
             "name": "Lock",
@@ -2340,6 +2374,48 @@ mod tests {
             "client_tooling_opt_in": opt_in,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_client_dev_loop_needs_a_spend_limit_because_the_loop_calls_the_model_directly() {
+        let why = dev_loop_client_lock_refusal(
+            &lock_project_without_limit("api", true, true),
+            "claude-sonnet-5",
+        )
+        .expect("a client dev run with no spend limit is refused");
+        assert!(why.contains("spend limit"), "{why}");
+        let mut zero = lock_project("api", true, true);
+        zero.dev_run_spend_limit_cents = Some(0);
+        assert!(
+            dev_loop_client_lock_refusal(&zero, "claude-sonnet-5").is_some(),
+            "a limit of zero is not a limit"
+        );
+        assert_eq!(
+            dev_loop_client_lock_refusal(&lock_project("api", true, true), "claude-sonnet-5"),
+            None,
+            "with a limit it may run"
+        );
+    }
+
+    #[test]
+    fn a_client_dev_loop_refuses_a_model_with_no_list_price_because_the_limit_cannot_count_it() {
+        let why = dev_loop_client_lock_refusal(
+            &lock_project("api", true, true),
+            "claude-not-in-the-registry-9",
+        )
+        .expect("an unpriced model cannot be held to a limit");
+        assert!(why.contains("price"), "{why}");
+    }
+
+    #[test]
+    fn an_internal_dev_loop_needs_no_spend_limit() {
+        assert_eq!(
+            dev_loop_client_lock_refusal(
+                &lock_project_without_limit("cli", false, false),
+                "claude-sonnet-5"
+            ),
+            None
+        );
     }
 
     #[test]

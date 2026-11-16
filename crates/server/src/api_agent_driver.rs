@@ -190,6 +190,8 @@ pub struct DriverControls {
     pub governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
     /// Name for the read log's `agent` column. `None` = `agent`.
     pub agent_label: Option<String>,
+    /// The run's spend meter. `None` = the driver has a meter of its own with no limit.
+    pub spend: Option<SpendMeter>,
 }
 
 /// Apply a run's controls to a driver.
@@ -205,6 +207,9 @@ fn apply_controls(mut driver: ApiAgentDriver, controls: &DriverControls) -> ApiA
     }
     if let Some(label) = &controls.agent_label {
         driver = driver.with_agent_label(label.clone());
+    }
+    if let Some(meter) = &controls.spend {
+        driver = driver.with_spend_meter(meter.clone());
     }
     driver
 }
@@ -223,6 +228,170 @@ fn child_controls_from(parent: &DriverControls) -> DriverControls {
     DriverControls {
         agent_label: Some("delegate-child".to_string()),
         ..parent.clone()
+    }
+}
+
+// ─── spend meter ──────────────────────────────────────────────────────────────
+
+/// What one provider turn cost: the usage the reply reported and the dollars it was priced at
+/// from the model registry (`None` when the price or the usage is unknown).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnCost {
+    /// Who spent it: `agent`, `lead` or `delegate-child`.
+    pub agent: String,
+    pub model: String,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Default)]
+struct SpendState {
+    spent_usd: f64,
+    turns: Vec<TurnCost>,
+    /// A turn came back with a cost that could not be worked out: a limit can no longer be
+    /// enforced, so a limited run admits nothing more.
+    cost_unknown: bool,
+}
+
+#[derive(Debug)]
+struct SpendInner {
+    /// `None` = no limit (the meter still counts).
+    limit_usd: Option<f64>,
+    /// Set when a limit was asked for that is not a positive dollar figure: every request is
+    /// refused with this text rather than running unlimited.
+    invalid: Option<String>,
+    state: std::sync::Mutex<SpendState>,
+}
+
+/// The dollars a run has spent on model calls, shared by handle: a child agent given the run's
+/// meter spends against the same limit. The loop asks [`Self::admit`] before every request and
+/// reports every turn with [`Self::record`].
+#[derive(Debug, Clone)]
+pub struct SpendMeter(Arc<SpendInner>);
+
+impl SpendMeter {
+    fn from_inner(limit_usd: Option<f64>, invalid: Option<String>) -> Self {
+        Self(Arc::new(SpendInner {
+            limit_usd,
+            invalid,
+            state: std::sync::Mutex::new(SpendState::default()),
+        }))
+    }
+
+    /// A meter that counts and never stops a run.
+    pub fn unlimited() -> Self {
+        Self::from_inner(None, None)
+    }
+
+    /// A meter with a limit. `Err` unless `usd` is a positive, finite dollar amount (a limit of
+    /// zero would read as "spend nothing" and still let the first request through).
+    pub fn with_limit(usd: f64) -> Result<Self, String> {
+        if usd.is_finite() && usd > 0.0 {
+            Ok(Self::from_inner(Some(usd), None))
+        } else {
+            Err(format!(
+                "the spend limit must be a positive dollar amount (got {usd})"
+            ))
+        }
+    }
+
+    pub fn limit_usd(&self) -> Option<f64> {
+        self.0.limit_usd
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, SpendState> {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Dollars spent so far, by every driver sharing this meter.
+    pub fn spent_usd(&self) -> f64 {
+        self.state().spent_usd
+    }
+
+    /// Every turn recorded so far, in order.
+    pub fn turns(&self) -> Vec<TurnCost> {
+        self.state().turns.clone()
+    }
+
+    /// Record one turn. A turn with no cost marks the meter unable to enforce its limit.
+    pub fn record(&self, turn: TurnCost) {
+        let mut st = self.state();
+        match turn.cost_usd {
+            Some(c) => st.spent_usd += c,
+            None => st.cost_unknown = true,
+        }
+        st.turns.push(turn);
+    }
+
+    /// May the next request be sent? `Ok` with no limit. With a limit the answer is no when the
+    /// model has no list price, when an earlier turn could not be costed, when the limit is
+    /// already spent, or when what is spent plus `ceiling_usd` (the most this one request could
+    /// cost) would pass it. The very first request of a run (nothing spent) is always admitted
+    /// once the model is priced, as the inspection's meter does, so a limit smaller than one
+    /// request still lets that one finish. The text is the reason, ready for the run's result.
+    pub fn admit(
+        &self,
+        model: &str,
+        ceiling_usd: impl FnOnce() -> Option<f64>,
+    ) -> Result<(), String> {
+        if let Some(why) = &self.0.invalid {
+            return Err(why.clone());
+        }
+        let Some(limit) = self.0.limit_usd else {
+            return Ok(());
+        };
+        if !crate::llm::is_priced(model) {
+            return Err(format!(
+                "the spend limit of ${limit:.2} cannot be enforced: `{model}` has no price in the \
+                 model registry, so what its requests cost cannot be counted"
+            ));
+        }
+        let st = self.state();
+        if st.cost_unknown {
+            return Err(format!(
+                "the spend limit of ${limit:.2} cannot be enforced: the cost of a turn could not be \
+                 counted, so the run stopped"
+            ));
+        }
+        let turns = st.turns.len();
+        if st.spent_usd >= limit {
+            return Err(format!(
+                "the spend limit of ${limit:.2} was reached (${:.2} spent over {turns} turns)",
+                st.spent_usd
+            ));
+        }
+        if st.spent_usd > 0.0 {
+            let spent = st.spent_usd;
+            drop(st);
+            match ceiling_usd() {
+                Some(c) if spent + c > limit => {
+                    return Err(format!(
+                        "the next request could cost up to ${c:.2}, which would pass the spend \
+                         limit of ${limit:.2} (${spent:.2} spent over {turns} turns)"
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    return Err(format!(
+                        "the spend limit of ${limit:.2} cannot be enforced: the next request \
+                         cannot be priced"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for SpendMeter {
+    fn default() -> Self {
+        Self::unlimited()
     }
 }
 
@@ -302,6 +471,8 @@ pub struct ApiAgentDriver {
     read_log: ReadLog,
     /// Who the read log names as the reader.
     agent_label: String,
+    /// What this driver has spent on model calls, and the limit it stops at.
+    spend: SpendMeter,
 }
 
 impl ApiAgentDriver {
@@ -348,7 +519,29 @@ impl ApiAgentDriver {
             read_roots: Vec::new(),
             read_log: ReadLog::new(),
             agent_label: "agent".to_string(),
+            spend: SpendMeter::unlimited(),
         }
+    }
+
+    /// Stop the run once it has spent `usd` dollars (builder form). A figure that is not a
+    /// positive dollar amount makes the run refuse to start rather than run unlimited.
+    pub fn with_spend_limit(mut self, usd: f64) -> Self {
+        self.spend = SpendMeter::with_limit(usd).unwrap_or_else(|why| {
+            SpendMeter::from_inner(None, Some(format!("{why}; nothing was sent")))
+        });
+        self
+    }
+
+    /// Spend against the run's shared meter (builder form), so a child counts against its
+    /// parent's limit.
+    pub fn with_spend_meter(mut self, meter: SpendMeter) -> Self {
+        self.spend = meter;
+        self
+    }
+
+    /// The handle to this driver's spend meter.
+    pub fn spend_meter(&self) -> SpendMeter {
+        self.spend.clone()
     }
 
     /// Log reads into `log` (the run's shared handle) instead of a log of this driver's own.
@@ -530,6 +723,18 @@ async fn run_loop(
         }
         iteration += 1;
 
+        // The spend limit: asked BEFORE every request, so a run that has spent its limit (or
+        // whose next request could pass it) sends nothing more.
+        if let Err(reason) = driver.spend.admit(&driver.model, || {
+            request_ceiling_usd(&driver.model, system_prompt.as_deref(), &messages, &tool_schemas)
+        }) {
+            final_result = format!(
+                "INCOMPLETE: {reason}; the run stopped before turn {iteration}, so the work may be \
+                 unfinished."
+            );
+            break;
+        }
+
         // LIFECYCLE-7: beat the liveness heartbeat once per turn. The API loop has no
         // per-line output stream (unlike the CLI driver), so a multi-turn run that is
         // healthily grinding through provider calls would otherwise look idle. Firing here
@@ -554,8 +759,12 @@ async fn run_loop(
             // keeps the cost and the assistant output so far, instead of discarding it all.
             Err(e) if crate::llm::is_refusal(&e) => {
                 // The refused call was billed too: its cost belongs in the run's total.
-                if let Some(c) = crate::llm::refusal_billed(&e).and_then(|b| b.cost_usd) {
-                    total_cost_usd += c;
+                if let Some(billed) = crate::llm::refusal_billed(&e) {
+                    let cost = price_turn(driver, billed);
+                    driver.spend.record(turn_cost(driver, billed, cost));
+                    if let Some(c) = cost {
+                        total_cost_usd += c;
+                    }
                 }
                 final_result = refused_result(iteration, &messages);
                 break;
@@ -584,8 +793,12 @@ async fn run_loop(
             );
         }
 
-        // Accumulate cost.
-        if let Some(c) = resp.cost_usd {
+        // Price the turn (the provider's own figure when it gave one, else the model
+        // registry's list price for the reported tokens), record it against the run's meter,
+        // and add it to this driver's total.
+        let turn = price_turn(driver, &resp);
+        driver.spend.record(turn_cost(driver, &resp, turn));
+        if let Some(c) = turn {
             total_cost_usd += c;
         }
 
@@ -654,6 +867,86 @@ async fn run_loop(
         denials,
     })
 }
+
+/// What one turn cost, in dollars: the provider's own figure when the reply carried one, else
+/// the model registry's list price for the tokens it reported. `None` when the tokens or the
+/// price are unknown.
+///
+/// The Anthropic reply's `input_tokens` counts only the uncached input, so the cache read and
+/// cache write tokens are added back before pricing (the arithmetic wants the whole prompt).
+fn price_turn(driver: &ApiAgentDriver, resp: &LlmResponse) -> Option<f64> {
+    if let Some(c) = resp.cost_usd {
+        return Some(c);
+    }
+    let input = resp.input_tokens?.checked_add(
+        resp.cache_read_input_tokens
+            .saturating_add(resp.cache_creation_input_tokens),
+    )?;
+    let usage = crate::llm::CallUsage {
+        input: Some(input),
+        output: Some(resp.output_tokens?),
+        cache_read: resp.cache_read_input_tokens,
+        cache_creation: resp.cache_creation_input_tokens,
+        cache_creation_1h: None,
+    };
+    let basis = crate::llm::PriceBasis::realtime();
+    if let Some(c) = crate::llm::usage_cost_usd(&driver.model, &usage, basis)
+        .or_else(|| crate::llm::usage_cost_usd(&resp.model, &usage, basis))
+    {
+        return Some(c);
+    }
+    // An OpenRouter model: its list price is in the registry the completer was built with.
+    let or = driver
+        .completer
+        .as_any()
+        .downcast_ref::<crate::llm::OpenRouterCompleter>()?;
+    let entry = or
+        .registry_for_agent()
+        .all_entries()
+        .into_iter()
+        .find(|e| e.id == driver.model && e.price_known)?;
+    Some(
+        usage.input? as f64 * entry.price_in / 1_000_000.0
+            + usage.output? as f64 * entry.price_out / 1_000_000.0,
+    )
+}
+
+fn turn_cost(driver: &ApiAgentDriver, resp: &LlmResponse, cost_usd: Option<f64>) -> TurnCost {
+    TurnCost {
+        agent: driver.agent_label.clone(),
+        model: driver.model.clone(),
+        input_tokens: resp.input_tokens,
+        output_tokens: resp.output_tokens,
+        cache_read_input_tokens: resp.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.cache_creation_input_tokens,
+        cost_usd,
+    }
+}
+
+/// The most one request could cost: the whole conversation at the full input rate (about three
+/// bytes a token, on the high side) plus the output cap at the output rate. `None` when the
+/// model has no list price. The loop adds this to what is already spent before it sends.
+fn request_ceiling_usd(
+    model: &str,
+    system: Option<&str>,
+    messages: &[Value],
+    tool_schemas: &[Value],
+) -> Option<f64> {
+    let bytes = system.map_or(0, str::len)
+        + messages.iter().map(|m| m.to_string().len()).sum::<usize>()
+        + tool_schemas.iter().map(|t| t.to_string().len()).sum::<usize>();
+    let usage = crate::llm::CallUsage {
+        input: Some(bytes as u64 / 3 + 1),
+        output: Some(AGENT_MAX_OUTPUT_TOKENS),
+        cache_read: 0,
+        cache_creation: 0,
+        cache_creation_1h: None,
+    };
+    crate::llm::usage_cost_usd(model, &usage, crate::llm::PriceBasis::realtime())
+}
+
+/// The output cap both request bodies carry (`max_tokens`).
+const AGENT_MAX_OUTPUT_TOKENS: u64 = 8192;
 
 /// The outcome text for a run the model refused part-way: it starts with `INCOMPLETE:` (the
 /// marker delegates and fan-out already read as "this work did not finish", so a parent never
@@ -881,7 +1174,7 @@ fn build_openrouter_agent_body(
     let mut body = serde_json::json!({
         "model": model,
         "messages": full_messages,
-        "max_tokens": 8192,
+        "max_tokens": AGENT_MAX_OUTPUT_TOKENS,
         // Sticky routing: same backend slot across all turns so the KV cache stays warm.
         "session_id": session_id,
     });
@@ -999,7 +1292,9 @@ async fn call_openrouter_with_tools(
         text: raw_json,
         model: model_returned,
         backend: "openrouter/api/agentic".to_string(),
-        cost_usd: None,
+        // OpenRouter reports the dollars a call was billed; absent, the loop prices the tokens
+        // from the registry.
+        cost_usd: v["usage"]["cost"].as_f64(),
         input_tokens,
         output_tokens,
         cache_read_input_tokens: 0,
@@ -1113,7 +1408,7 @@ fn build_anthropic_request_body(
 
     let mut body = serde_json::json!({
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": AGENT_MAX_OUTPUT_TOKENS,
         "messages": shaped_messages,
     });
 
@@ -5440,3 +5735,5 @@ mod read_jail_tests;
 mod read_log_tests;
 #[cfg(test)]
 mod write_jail_tests;
+#[cfg(test)]
+mod spend_limit_tests;
