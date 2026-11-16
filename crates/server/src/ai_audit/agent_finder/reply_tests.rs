@@ -549,7 +549,7 @@ fn every_rule_a_problem_cites_is_recorded_not_only_the_first() {
             rule: "arch-strict-layering-1".into(),
         },
     ];
-    let map = citation_map(&cites);
+    let map = citation_map(&super::checklist::Checklist::default(), &cites);
     assert_eq!(
         map[&1],
         vec![
@@ -628,4 +628,68 @@ fn a_covered_by_answer_must_name_a_problem_at_the_leads_file() {
     assert_eq!(a.invalid.len(), 3, "{:?}", a.invalid);
     assert_eq!(a.unknown_leads, vec![7]);
     assert_eq!(a.unresolved(), vec![1, 2, 3]);
+}
+
+fn bounded_rule(id: &str, min: Option<&str>, max: Option<&str>) -> super::checklist::ChecklistRule {
+    super::checklist::ChecklistRule {
+        id: id.to_string(),
+        title: id.to_string(),
+        directive: "d".to_string(),
+        min_severity: min.map(str::to_string),
+        max_severity: max.map(str::to_string),
+        options: Vec::new(),
+    }
+}
+
+fn cite(problem: u32, rule: &str) -> super::checklist::Citation {
+    super::checklist::Citation {
+        problem,
+        rule: rule.to_string(),
+    }
+}
+
+#[test]
+fn the_strictest_cited_rule_is_first_whatever_order_the_model_cited_in() {
+    let checklist = super::checklist::Checklist {
+        rules: vec![
+            bounded_rule("A-CAPPED-1", None, Some("medium")),
+            bounded_rule("B-FLOOR-1", Some("high"), None),
+            bounded_rule("C-HIGHER-FLOOR-1", Some("critical"), None),
+            bounded_rule("D-PLAIN-1", None, None),
+        ],
+    };
+    let forward = citation_map(&checklist, &[cite(1, "A-CAPPED-1"), cite(1, "B-FLOOR-1")]);
+    let backward = citation_map(&checklist, &[cite(1, "B-FLOOR-1"), cite(1, "A-CAPPED-1")]);
+    assert_eq!(forward[&1][0], "B-FLOOR-1");
+    assert_eq!(backward[&1][0], "B-FLOOR-1");
+    assert_eq!(forward, backward);
+    // No maximum before a maximum, then the higher minimum, then the id.
+    let all = citation_map(
+        &checklist,
+        &[
+            cite(2, "A-CAPPED-1"),
+            cite(2, "D-PLAIN-1"),
+            cite(2, "B-FLOOR-1"),
+            cite(2, "C-HIGHER-FLOOR-1"),
+        ],
+    );
+    assert_eq!(
+        all[&2],
+        vec!["C-HIGHER-FLOOR-1", "B-FLOOR-1", "D-PLAIN-1", "A-CAPPED-1"]
+    );
+}
+
+#[test]
+fn the_finding_takes_its_rule_from_the_strictest_citation() {
+    let checklist = super::checklist::Checklist {
+        rules: vec![
+            bounded_rule("A-CAPPED-1", None, Some("medium")),
+            bounded_rule("B-FLOOR-1", Some("high"), None),
+        ],
+    };
+    let adopted: HashSet<String> = ["A-CAPPED-1".to_string(), "B-FLOOR-1".to_string()].into();
+    let map = citation_map(&checklist, &[cite(1, "A-CAPPED-1"), cite(1, "B-FLOOR-1")]);
+    let (findings, _) = to_findings("acme/app", "k", &[problem_for(1, "x y")], &map, &adopted);
+    assert_eq!(findings[0].rule_id, "B-FLOOR-1");
+    assert_eq!(findings[0].also_matches, vec!["A-CAPPED-1".to_string()]);
 }
