@@ -257,13 +257,28 @@ pub(crate) fn grid_left_out(c: &ReportCounts) -> String {
         part(&p.needs_decision_by_severity),
         part(&p.information_only_by_severity),
     );
+    // The noun and the verb agree with the number of problems, not with the severities listed.
+    let (decide_n, info_n) = (
+        p.needs_decision_by_severity.sum(),
+        p.information_only_by_severity.sum(),
+    );
+    let (decide_noun, decide_verb) = if decide_n == 1 {
+        ("problem", "needs")
+    } else {
+        ("problems", "need")
+    };
+    let (info_noun, info_verb) = if info_n == 1 {
+        ("problem", "is")
+    } else {
+        ("problems", "are")
+    };
+    let decide_part = format!("{decide} {decide_noun} that {decide_verb} a decision first");
+    let info_part = format!("{info} {info_noun} that {info_verb} information only");
     let mut out = match (decide.is_empty(), info.is_empty()) {
         (true, true) => return String::new(),
-        (false, true) => format!("Not in this grid: {decide} problems that need a decision first."),
-        (true, false) => format!("Not in this grid: {info} problems that are information only."),
-        (false, false) => format!(
-            "Not in this grid: {decide} problems that need a decision first, and {info} problems that are information only."
-        ),
+        (false, true) => format!("Not in this grid: {decide_part}."),
+        (true, false) => format!("Not in this grid: {info_part}."),
+        (false, false) => format!("Not in this grid: {decide_part} and {info_part}."),
     };
     out.push_str(" The cover counts all of them.");
     out
@@ -276,4 +291,36 @@ pub(crate) fn more_line(more: usize, words: &str) -> String {
         return String::new();
     }
     format!("and {} {words}", n(more))
+}
+
+#[cfg(test)]
+mod grid_note_tests {
+    use super::*;
+    use crate::report_export::ReportCounts;
+
+    /// The grid's note agrees in number and verb with the count, and has no comma before "and".
+    #[test]
+    fn the_grid_note_agrees_with_the_count() {
+        let mut one = ReportCounts::default();
+        one.problems.needs_decision_by_severity.low = 1;
+        assert_eq!(
+            grid_left_out(&one),
+            "Not in this grid: 1 low problem that needs a decision first. The cover counts all of them."
+        );
+        let mut two = ReportCounts::default();
+        two.problems.needs_decision_by_severity.low = 2;
+        assert_eq!(
+            grid_left_out(&two),
+            "Not in this grid: 2 low problems that need a decision first. The cover counts all of them."
+        );
+        let mut both = ReportCounts::default();
+        both.problems.needs_decision_by_severity.low = 2;
+        both.problems.information_only_by_severity.medium = 1;
+        let note = grid_left_out(&both);
+        assert_eq!(
+            note,
+            "Not in this grid: 2 low problems that need a decision first and 1 medium problem that is information only. The cover counts all of them."
+        );
+        assert!(!note.contains(", and") && !note.contains(['\u{2014}', '\u{2013}']));
+    }
 }
