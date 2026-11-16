@@ -1601,7 +1601,8 @@ async fn three_connection_failures_in_a_row_still_trip_the_outage_stop() {
             ))),
         )
     });
-    let meter = UsageMeter::default();
+    // Each failure lands a minute after the one before: a long outage, not one wave.
+    let meter = UsageMeter::default().with_health(crate::run_health::RunHealth::stepping(60));
     let mut stage = Scripted::numbered(10);
     let mut c = ctx(&rt, None);
     c.meter = Some(&meter);

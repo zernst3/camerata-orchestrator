@@ -85,6 +85,13 @@ impl UsageMeter {
         }
     }
 
+    /// TEST SUPPORT: this meter with `health` as its outage counter (one on an injected clock).
+    #[cfg(test)]
+    pub(crate) fn with_health(mut self, health: crate::run_health::RunHealth) -> Self {
+        self.health = health;
+        self
+    }
+
     /// A meter for a stage that runs after the scan's own meter was closed (the group reviewer
     /// reads the final report): it starts from the usage the scan already made, so a spend limit
     /// counts the whole run and not only this stage.
@@ -671,7 +678,8 @@ impl UsageMeter {
         self.stages.record(stage, r);
         let micro = self.record(stage, r);
         self.resumed_micro_usd.fetch_add(micro, Ordering::Relaxed);
-        self.health.note_success();
+        // No `note_success`: a stored reply came off disk, not from the provider, so it proves
+        // nothing about the provider being reachable.
     }
 
     /// Mark a completion already passed to [`Self::record_stage`] as one whose output was

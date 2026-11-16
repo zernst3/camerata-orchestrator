@@ -56,6 +56,7 @@ dotenvy = "0.15"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
+camerata-server = { path = "../server", features = ["test-support"] }
 tokio = { workspace = true }
 # Synthetic secret-shaped fixtures (built at runtime) for the redaction and release-gate tests.
 camerata-secrets = { path = "../secrets" }

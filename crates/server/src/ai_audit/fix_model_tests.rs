@@ -319,7 +319,9 @@ async fn a_finding_whose_every_call_failed_is_not_a_give_up() {
         fail_first: usize::MAX,
         ..Recorder::default()
     };
-    let meter = meter(EfficiencyConfig::default());
+    // Each failure lands a minute after the one before, so three span the outage stop's 120 s.
+    let meter =
+        meter(EfficiencyConfig::default()).with_health(crate::run_health::RunHealth::stepping(60));
     let _ = generate_fix_specifics(
         &llm,
         "o/r",

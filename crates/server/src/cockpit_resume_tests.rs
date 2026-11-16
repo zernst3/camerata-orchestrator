@@ -22,6 +22,10 @@ system = args[args.index("--system-prompt") + 1] if "--system-prompt" in args el
 if os.environ.get("CAMERATA_FAKE_WARM"):
     sys.exit(0)
 def note(stage):
+    down = os.environ.get("FAKE_503_STAGE_FILE", "")
+    if down and os.path.exists(down) and open(down).read().strip() == stage:
+        sys.stderr.write("API Error: 503 Service Unavailable\\n")
+        sys.exit(1)
     log = os.environ.get("FAKE_LOG")
     if log:
         with open(log, "a") as f:
@@ -58,7 +62,13 @@ elif "architect's first reader of this rule group" in system:
             f.write("group_review " + args[args.index("--model") + 1] + "\n")
     gr_flag = os.environ.get("FAKE_GROUP_REVIEW_DOWN", "")
     idx = [int(m) for m in re.findall(r'^(\d+): ', prompt, re.M)]
-    if gr_flag and os.path.exists(gr_flag):
+    if gr_flag and os.path.exists(gr_flag) and open(gr_flag).read().strip() == "unavailable":
+        sys.stderr.write("API Error: 503 Service Unavailable\\n")
+        sys.exit(1)
+    elif gr_flag and os.path.exists(gr_flag) and open(gr_flag).read().strip() == "transport":
+        sys.stderr.write("API Error: Unable to connect to API (ECONNREFUSED): connection refused\\n")
+        sys.exit(1)
+    elif gr_flag and os.path.exists(gr_flag):
         out = "I cannot review this group right now."
     else:
         out = json.dumps({"summary": "The fixture's sites share one cause.",
@@ -970,9 +980,18 @@ struct InterruptedScan {
     model_log: std::path::PathBuf,
     /// While this file exists the fake group review call fails.
     group_review_down: std::path::PathBuf,
+    /// The file whose presence is the outage this scan ran under (the group review's, or the
+    /// stage 503 file); removing it ends the outage.
+    outage_flag: std::path::PathBuf,
 }
 
 async fn interrupted_scan() -> InterruptedScan {
+    interrupted_scan_with("down").await
+}
+
+/// As [`interrupted_scan`], with the group review call failing the way `mode` says: `down` is a
+/// reply that is not JSON, `transport` is a connection failure with no reply at all.
+async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
     let state_dir = root.path().join("state");
@@ -994,7 +1013,15 @@ async fn interrupted_scan() -> InterruptedScan {
     let model_log = root.path().join("models.log");
     // The calibration answer is fine here; the group review call is what is down.
     let group_review_down = root.path().join("group-review-down");
-    std::fs::write(&group_review_down, "down").unwrap();
+    // `stage503:<stage>` takes that stage's calls down with a 503 instead of the group review's.
+    let stage_down = root.path().join("stage-503");
+    let outage_flag = if let Some(stage) = mode.strip_prefix("stage503:") {
+        std::fs::write(&stage_down, stage).unwrap();
+        stage_down.clone()
+    } else {
+        std::fs::write(&group_review_down, mode).unwrap();
+        group_review_down.clone()
+    };
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -1002,6 +1029,7 @@ async fn interrupted_scan() -> InterruptedScan {
     );
     let guards = vec![
         camerata_test_env::EnvGuard::set("FAKE_GROUP_REVIEW_DOWN", &group_review_down),
+        camerata_test_env::EnvGuard::set("FAKE_503_STAGE_FILE", &stage_down),
         camerata_test_env::EnvGuard::set("PATH", &path),
         camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &state_dir),
         camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1"),
@@ -1050,6 +1078,7 @@ async fn interrupted_scan() -> InterruptedScan {
         log,
         model_log,
         group_review_down,
+        outage_flag,
     }
 }
 
@@ -1212,5 +1241,141 @@ async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
         stage_calls(&rig.log).len(),
         calls_before,
         "no model call was made"
+    );
+}
+
+/// Run to completion: a connection failure on the group review call ends the scan in bounded
+/// time with the run incomplete, never hung. (Seen 2026-11-16: the job sat in retries for more
+/// than five minutes.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_503_outage_on_the_group_review_ends_the_scan_in_bounded_time_as_a_failed_part() {
+    group_review_outage_ends_in_bounded_time("unavailable").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_transport_outage_on_the_group_review_ends_the_scan_in_bounded_time_as_a_failed_part() {
+    group_review_outage_ends_in_bounded_time("transport").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_503_outage_on_the_scan_ends_the_job_in_bounded_time() {
+    group_review_outage_ends_in_bounded_time("stage503:audit").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_503_outage_on_calibration_ends_the_job_in_bounded_time() {
+    group_review_outage_ends_in_bounded_time("stage503:calibration").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_503_outage_on_the_fix_stage_ends_the_job_in_bounded_time() {
+    group_review_outage_ends_in_bounded_time("stage503:fix").await;
+}
+
+/// Records every wait a retry asks for and returns at once, so an outage test asserts the
+/// WAITS (what the policy decided) instead of how long the machine took.
+#[derive(Default)]
+struct WaitRecorder {
+    waits: std::sync::Mutex<Vec<std::time::Duration>>,
+}
+
+impl WaitRecorder {
+    fn secs(&self) -> Vec<u64> {
+        self.waits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(std::time::Duration::as_secs)
+            .collect()
+    }
+}
+
+impl camerata_llm::Sleeper for WaitRecorder {
+    fn sleep<'a>(
+        &'a self,
+        d: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.waits.lock().unwrap().push(d);
+        Box::pin(async {})
+    }
+}
+
+/// Installs a [`WaitRecorder`] as the process sleeper and removes it again, panic or not.
+struct RecorderGuard(Arc<WaitRecorder>);
+
+impl RecorderGuard {
+    fn install() -> Self {
+        let recorder = Arc::new(WaitRecorder::default());
+        camerata_llm::set_process_sleeper(Some(recorder.clone()));
+        Self(recorder)
+    }
+}
+
+impl Drop for RecorderGuard {
+    fn drop(&mut self) {
+        camerata_llm::set_process_sleeper(None);
+    }
+}
+
+async fn group_review_outage_ends_in_bounded_time(mode: &str) {
+    if !camerata_test_env::python3_on_path_for("a_transport_outage_on_the_group_review") {
+        return;
+    }
+    let recorder = RecorderGuard::install();
+    let rig = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        interrupted_scan_with(mode),
+    )
+    .await
+    .expect("the scan job hung on an outage (no end within 120 s)");
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().status,
+        crate::run_store::RunStatus::Incomplete
+    );
+    // What the policy decided: it waited, no single call spent more than its 60 s budget waiting,
+    // and each wait is one of the schedule's steps (5, 20, 60 clipped to 35 for a 503; 2, 8, 30
+    // for a lost connection).
+    let waits = recorder.0.secs();
+    assert!(!waits.is_empty(), "the outage was retried: {waits:?}");
+    let allowed: &[u64] = if mode == "transport" {
+        &[2, 8, 30]
+    } else {
+        &[5, 20, 35]
+    };
+    for w in &waits {
+        assert!(
+            allowed.contains(w),
+            "wait {w} is not a step of {allowed:?}: {waits:?}"
+        );
+    }
+    let per_call: u64 = if mode == "transport" { 40 } else { 60 };
+    assert_eq!(
+        waits.iter().sum::<u64>() % per_call,
+        0,
+        "every call ran its whole schedule and no more: {waits:?}"
+    );
+    assert!(
+        waits.contains(allowed.last().unwrap()),
+        "the last step of the schedule was taken (a 503's is clipped to the 35 s left): {waits:?}"
+    );
+    // The failed part is listed, so a resume knows what to run.
+    let scan = rig.state.get_last_scan(&rig.project_id).unwrap();
+    assert!(
+        scan.failed_passes.iter().any(|f| !f.scope_note),
+        "the failed part is listed: {:?}",
+        scan.failed_passes
+    );
+    // The outage ends and a resume finishes the run.
+    std::fs::remove_file(&rig.outage_flag).unwrap();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().status,
+        crate::run_store::RunStatus::Complete
     );
 }
