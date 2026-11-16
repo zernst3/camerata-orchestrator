@@ -349,3 +349,24 @@ async fn a_covered_by_answer_for_a_line_outside_the_problems_range_needs_a_decis
         extras.notes
     );
 }
+
+#[tokio::test]
+async fn joints_skipped_because_a_part_failed_leave_an_operator_note() {
+    let (a, b) = parts(a_own(), vec![]);
+    let b = b.with_stop(AgentStop::TurnLimit("60 turns".into()));
+    let joints = ScriptedAgent::new(vec![out("problems-1.json", &json!([]))]);
+    let (agent, _, failed, extras) = two_part_run(a, b, joints).await;
+    assert!(!failed.is_empty(), "a part failed");
+    assert!(
+        !agent.seen.lock().unwrap().contains(&"joints".to_string()),
+        "no joints call while a part failed"
+    );
+    assert!(
+        extras
+            .notes
+            .iter()
+            .any(|n| n.contains("joints") && n.contains("not reviewed") && n.contains("failed")),
+        "{:?}",
+        extras.notes
+    );
+}

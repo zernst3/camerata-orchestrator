@@ -724,6 +724,12 @@ pub async fn find_repo(
             }
         }
     } else {
+        if reports.len() >= 2 && any_run && any_part_failed {
+            extras.notes.push(format!(
+                "{repo}: the joints between the parts were not reviewed because a part failed; \
+                 the leads became problems needing a decision, and a resume pays for the joints call once"
+            ));
+        }
         // A repository that is one piece makes no joints call. A lead it still holds (a place
         // outside every file it was given) is never dropped.
         unresolved = joints::unresolved_findings(
