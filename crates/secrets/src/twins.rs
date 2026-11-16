@@ -38,6 +38,9 @@ pub enum Twin {
     /// secrets, and it's safe to include them in your code or configuration files"). A Google key
     /// anywhere else is not covered.
     FirebaseWebApiKey,
+    /// A qualified label name (`nodes.cloudhost.internal/worker-pool`: a lowercase dotted domain,
+    /// one slash, a name) on an identifier that is not password-like. A label key, not a value.
+    QualifiedLabelName,
 }
 
 impl Twin {
@@ -53,6 +56,7 @@ impl Twin {
                 | Twin::ReadableName
                 | Twin::PublishableKey
                 | Twin::FirebaseWebApiKey
+                | Twin::QualifiedLabelName
         )
     }
 }
@@ -229,6 +233,25 @@ fn is_path_like(value: &str) -> bool {
         })
 }
 
+/// A qualified label name: a lowercase dotted domain, one slash, then a name
+/// (`nodes.cloudhost.internal/worker-pool`). A credential is not shaped like this.
+fn is_qualified_label_name(value: &str) -> bool {
+    let Some((domain, name)) = value.split_once('/') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        && domain.contains('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
 fn is_context_shaped(shape: SecretShape) -> bool {
     !shape.is_vendor_shaped()
 }
@@ -306,6 +329,12 @@ pub(crate) fn classify(
         && is_readable_name(value)
     {
         return Some(Twin::ReadableName);
+    }
+    if shape == SecretShape::NamedSecretLiteral
+        && !names_a_secret(before_value)
+        && is_qualified_label_name(value)
+    {
+        return Some(Twin::QualifiedLabelName);
     }
     if shape == SecretShape::BasicAuthCredential && value.bytes().all(|b| b.is_ascii_lowercase()) {
         // `Authorization: Basic authentication ...` is prose; a real credential is not one word.
