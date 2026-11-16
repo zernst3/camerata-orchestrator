@@ -58,7 +58,13 @@ elif "architect's first reader of this rule group" in system:
             f.write("group_review " + args[args.index("--model") + 1] + "\n")
     gr_flag = os.environ.get("FAKE_GROUP_REVIEW_DOWN", "")
     idx = [int(m) for m in re.findall(r'^(\d+): ', prompt, re.M)]
-    if gr_flag and os.path.exists(gr_flag):
+    if gr_flag and os.path.exists(gr_flag) and open(gr_flag).read().strip() == "unavailable":
+        sys.stderr.write("API Error: 503 Service Unavailable\\n")
+        sys.exit(1)
+    elif gr_flag and os.path.exists(gr_flag) and open(gr_flag).read().strip() == "transport":
+        sys.stderr.write("API Error: Unable to connect to API (ECONNREFUSED): connection refused\\n")
+        sys.exit(1)
+    elif gr_flag and os.path.exists(gr_flag):
         out = "I cannot review this group right now."
     else:
         out = json.dumps({"summary": "The fixture's sites share one cause.",
@@ -973,6 +979,12 @@ struct InterruptedScan {
 }
 
 async fn interrupted_scan() -> InterruptedScan {
+    interrupted_scan_with("down").await
+}
+
+/// As [`interrupted_scan`], with the group review call failing the way `mode` says: `down` is a
+/// reply that is not JSON, `transport` is a connection failure with no reply at all.
+async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
     let state_dir = root.path().join("state");
@@ -994,7 +1006,7 @@ async fn interrupted_scan() -> InterruptedScan {
     let model_log = root.path().join("models.log");
     // The calibration answer is fine here; the group review call is what is down.
     let group_review_down = root.path().join("group-review-down");
-    std::fs::write(&group_review_down, "down").unwrap();
+    std::fs::write(&group_review_down, mode).unwrap();
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -1212,5 +1224,38 @@ async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
         stage_calls(&rig.log).len(),
         calls_before,
         "no model call was made"
+    );
+}
+
+/// Run to completion: a connection failure on the group review call ends the scan in bounded
+/// time with the run incomplete, never hung. (Seen 2026-11-16: the job sat in retries for more
+/// than five minutes.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_503_outage_on_the_group_review_ends_the_scan_in_bounded_time_as_a_failed_part() {
+    group_review_outage_ends_in_bounded_time("unavailable").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_transport_outage_on_the_group_review_ends_the_scan_in_bounded_time_as_a_failed_part() {
+    group_review_outage_ends_in_bounded_time("transport").await;
+}
+
+async fn group_review_outage_ends_in_bounded_time(mode: &str) {
+    if !camerata_test_env::python3_on_path_for("a_transport_outage_on_the_group_review") {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let rig = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        interrupted_scan_with(mode),
+    )
+    .await
+    .expect("the scan job hung on a group review transport outage (no end within 120 s)");
+    eprintln!("transport outage scan took {:?}", started.elapsed());
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().status,
+        crate::run_store::RunStatus::Incomplete
     );
 }
