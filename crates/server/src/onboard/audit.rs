@@ -18,6 +18,63 @@ pub(crate) fn severity_for(_rule_id: &str) -> &'static str {
     "critical"
 }
 
+/// The note appended to a floor row held as a sample value in an API description file.
+const API_DESCRIPTION_NOTE: &str =
+    " (possibly a sample value in an API description file; a reviewer should confirm)";
+
+/// The note appended to a floor row held because a UUID sits on an id field of a credential word.
+const ENTITY_ID_NOTE: &str =
+    " (a UUID on an id field, possibly an entity id and not a credential; a reviewer should confirm)";
+
+/// Whether `content` is an API description (an OpenAPI or Swagger document, or a request
+/// collection): a top-level `openapi` or `swagger` key WITH a version value, or a request
+/// collection marker. A bare `swagger:` section (Spring configuration) is not one.
+fn is_api_description(content: &str) -> bool {
+    static VERSIONED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let versioned = VERSIONED.get_or_init(|| {
+        regex::Regex::new(r#"^\{?\s*["']?(?:openapi|swagger)["']?\s*:\s*["']?[0-9]"#)
+            .expect("api description version regex must compile")
+    });
+    content.lines().any(|line| {
+        let line = line.trim_end();
+        (versioned.is_match(line) && !line.starts_with([' ', '\t']))
+            || line.contains("schema.getpostman.com")
+            || line.contains("\"_postman_id\"")
+    })
+}
+
+/// Whether `line` assigns a canonical UUID to a field named exactly `token` (not `api_token`,
+/// not `access-token`, not `refresh.token`, not `token_id`).
+fn is_bare_token_uuid(line: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)(?:^|[^A-Za-z0-9_.-])token["']?\s*[:=]\s*["']?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}["']?\s*,?\s*$"#,
+        )
+        .expect("bare token uuid regex must compile")
+    })
+    .is_match(line)
+}
+
+/// Whether `line` assigns a canonical UUID to an id field of a credential word (`token_id`,
+/// `apiKeyId`). Only key and token: a `secret_id` (a Vault AppRole one) IS the credential.
+fn is_credential_id_uuid(line: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"([A-Za-z0-9_.-]*(?i:key|token)[A-Za-z0-9_.-]*(?:[_.-][iI][dD]|Id))["']?\s*[:=]\s*["']?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']?\s*,?\s*$"#,
+        )
+        .expect("credential id uuid regex must compile")
+    });
+    // A name that also holds a password-like word (`key_secret_id`) names the credential itself.
+    re.captures(line).is_some_and(|c| {
+        let name = c[1].to_ascii_lowercase();
+        !["secret", "password", "passwd", "pwd"]
+            .iter()
+            .any(|w| name.contains(w))
+    })
+}
+
 /// The gate's description for a rule id, or the id if unknown.
 ///
 /// This is INTERNAL/enforcement prose (the same directive text the agent reads when the gate
@@ -221,12 +278,13 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let in_test_path = is_test_or_fixture_path(path);
+    let api_description = is_api_description(content);
     let test_ranges = test_scope_line_ranges(path, content);
     // Whole-content matching (not line-by-line) so MULTI-LINE constructs are caught —
     // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
     // match is attributed to the line where it starts.
     for rule_id in AUDIT_RULES {
-        let content_lines = camerata_gateway::content_match_lines(rule_id, content);
+        let content_lines = camerata_gateway::content_match_lines_in_file(rule_id, path, content);
         if content_lines.is_empty() {
             // Path-based rule: fire the arm with the real path and empty content to
             // check whether this file's PATH marks it as secret-bearing. A path-based
@@ -297,7 +355,34 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
             // This is per-finding-by-line: a production secret in a file that also has a
             // test block stays Critical; only findings inside a test scope are downgraded.
             let is_test = in_test_path || is_in_test_scope(line_no, &test_ranges);
-            let (severity, detail, in_test, needs_review) = if is_test {
+            // A bare `token` holding a UUID in an API description is most often a sample value.
+            // The row stays, held at low for a reviewer, the way a test path's row is.
+            let held_sample = !is_test
+                && api_description
+                && *rule_id == "SEC-NO-HARDCODED-SECRETS-1"
+                && lines
+                    .get(line_no.saturating_sub(1))
+                    .is_some_and(|l| is_bare_token_uuid(l));
+            let held_entity_id = !is_test
+                && *rule_id == "SEC-NO-HARDCODED-SECRETS-1"
+                && lines
+                    .get(line_no.saturating_sub(1))
+                    .is_some_and(|l| is_credential_id_uuid(l));
+            let (severity, detail, in_test, needs_review) = if held_entity_id {
+                (
+                    TEST_PATH_SEVERITY.to_string(),
+                    format!("{}{}", title_for(rule_id), ENTITY_ID_NOTE),
+                    false,
+                    true,
+                )
+            } else if held_sample {
+                (
+                    TEST_PATH_SEVERITY.to_string(),
+                    format!("{}{}", title_for(rule_id), API_DESCRIPTION_NOTE),
+                    false,
+                    true,
+                )
+            } else if is_test {
                 (
                     TEST_PATH_SEVERITY.to_string(),
                     format!("{}{}", title_for(rule_id), TEST_PATH_NOTE),
@@ -606,6 +691,68 @@ pub(crate) fn classify_repo_findings(
 }
 
 #[cfg(test)]
+mod api_description_tests {
+    use super::*;
+    use camerata_secrets::fixtures::body;
+
+    fn uuid() -> String {
+        [
+            body(8, "0123456789abcdef", 31),
+            body(4, "0123456789abcdef", 32),
+            body(4, "0123456789abcdef", 33),
+            body(4, "0123456789abcdef", 34),
+            body(12, "0123456789abcdef", 35),
+        ]
+        .join("-")
+    }
+
+    fn secret_row(rows: &[Finding]) -> &Finding {
+        rows.iter()
+            .find(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("still a row")
+    }
+
+    #[test]
+    fn a_uuid_token_in_an_api_description_is_held_not_urgent() {
+        let id = uuid();
+        let spec = format!(
+            "openapi: 3.0.0\ncomponents:\n  examples:\n    transfer:\n      value:\n        token: {id}\n"
+        );
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        let row = secret_row(&rows);
+        assert_eq!(row.severity, "low");
+        assert!(row.needs_review);
+        let rows = audit_content(
+            "r",
+            "config/service.yaml",
+            &format!("service:\n  token: {id}\n"),
+        );
+        assert_eq!(secret_row(&rows).severity, "critical");
+        // Only a bare `token` is held: another name in the same description stays urgent.
+        let spec = format!("openapi: 3.0.0\nexample:\n  api_token: {id}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_row(&rows).severity, "critical");
+        // A dash or dot before `token` is a different field name.
+        let spec =
+            format!("openapi: 3.0.0\nexample:\n  access-token: {id}\n  refresh.token: {id}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert!(rows
+            .iter()
+            .filter(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .all(|f| f.severity == "critical"));
+        // An opaque value on `token` in an API description is not a sample UUID.
+        let opaque = body(
+            36,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            36,
+        );
+        let spec = format!("openapi: 3.0.0\nexample:\n  token: {opaque}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_row(&rows).severity, "critical");
+    }
+}
+
+#[cfg(test)]
 mod classify_tests {
     use super::*;
 
@@ -908,5 +1055,84 @@ mod p4_context_tests {
             .find(|f| f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
             .expect("a bare Google key is still a floor finding");
         assert_eq!(hit.severity, "critical");
+    }
+}
+
+#[cfg(test)]
+mod hold_scope_tests {
+    use super::*;
+    use camerata_secrets::fixtures::body;
+
+    fn uuid() -> String {
+        [
+            body(8, "0123456789abcdef", 41),
+            body(4, "0123456789abcdef", 42),
+            body(4, "0123456789abcdef", 43),
+            body(4, "0123456789abcdef", 44),
+            body(12, "0123456789abcdef", 45),
+        ]
+        .join("-")
+    }
+
+    fn secret_rows(rows: &[Finding]) -> Vec<&Finding> {
+        rows.iter()
+            .filter(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .collect()
+    }
+
+    #[test]
+    fn a_spring_swagger_section_is_not_an_api_description() {
+        let id = uuid();
+        let yml = format!("swagger:\n  enabled: true\nservice:\n  token: {id}\n");
+        let rows = audit_content("r", "src/main/resources/application.yml", &yml);
+        let rows = secret_rows(&rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, "critical");
+        // A versioned key does make it one.
+        let spec = format!("swagger: \"2.0\"\nexample:\n  token: {id}\n");
+        let found = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_rows(&found)[0].severity, "low");
+    }
+
+    #[test]
+    fn a_uuid_on_a_token_id_field_is_held_at_low_not_removed() {
+        let id = uuid();
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        let rows = secret_rows(&rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, "low");
+        assert!(rows[0].needs_review);
+        // The name without `_id` stays urgent.
+        let rows = audit_content("r", "config/service.yaml", &format!("token: {id}\n"));
+        assert_eq!(secret_rows(&rows)[0].severity, "critical");
+    }
+
+    #[test]
+    fn a_secret_word_in_a_key_id_name_keeps_it_critical() {
+        let id = uuid();
+        for name in ["key_secret_id", "api_key_secret_id"] {
+            let rows = audit_content("r", "config/service.yaml", &format!("{name}: {id}\n"));
+            let rows = secret_rows(&rows);
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!(rows[0].severity, "critical", "{name}");
+            assert!(!rows[0].needs_review, "{name}");
+        }
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        let rows = secret_rows(&rows);
+        assert_eq!(rows[0].severity, "low");
+        assert!(rows[0].needs_review);
+    }
+
+    #[test]
+    fn a_uuid_on_a_secret_id_field_stays_critical() {
+        let id = uuid();
+        for name in ["secret_id", "client_secret_id"] {
+            let rows = audit_content("r", "config/service.yaml", &format!("{name}: {id}\n"));
+            let rows = secret_rows(&rows);
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!(rows[0].severity, "critical", "{name}");
+        }
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        assert_eq!(secret_rows(&rows)[0].severity, "low");
     }
 }
