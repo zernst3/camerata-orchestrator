@@ -254,7 +254,7 @@ fn the_factory_builds_each_backend_and_never_falls_back_quietly() {
         None,
         dir,
         meter(),
-        EngagementKind::Internal
+        EngagementKind::Client
     )
     .is_ok());
     assert!(piece_agent_for(
@@ -263,7 +263,7 @@ fn the_factory_builds_each_backend_and_never_falls_back_quietly() {
         Some("sk-test"),
         dir,
         meter(),
-        EngagementKind::Internal
+        EngagementKind::Client
     )
     .is_ok());
     for key in [None, Some(""), Some("   ")] {
@@ -273,7 +273,7 @@ fn the_factory_builds_each_backend_and_never_falls_back_quietly() {
             key,
             dir,
             meter(),
-            EngagementKind::Internal,
+            EngagementKind::Client,
         )
         .err()
         .expect("an API run without a key is refused");
@@ -305,7 +305,7 @@ fn the_stub_signatures_exist_for_later_builds() {
     let _: fn(String, &str) -> api_agent::ApiPieceAgent =
         |m, k| api_agent::ApiPieceAgent::new(m, k);
     let _: fn(String, std::path::PathBuf) -> cli_agent::CliPieceAgent =
-        |m, d| cli_agent::CliPieceAgent::new(m, d, cli_agent::EngagementKind::Internal);
+        |m, d| cli_agent::CliPieceAgent::new(m, d, cli_agent::EngagementKind::Client);
     let _ = run::find_repo;
     let _: fn(&[crate::onboard::Finding], &[crate::onboard::Finding]) -> run_diff::RunDiff =
         run_diff::diff_runs;

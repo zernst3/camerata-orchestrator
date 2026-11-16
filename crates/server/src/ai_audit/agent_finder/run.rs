@@ -1002,16 +1002,7 @@ pub fn agent_override_is_set() -> bool {
     AGENT_OVERRIDE.try_with(|_| ()).is_ok()
 }
 
-/// The kind of engagement a run is for. A client engagement is the strict side; a run with no
-/// setup is treated as one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EngagementKind {
-    /// A client engagement (the default, strict).
-    #[default]
-    Client,
-    /// An internal (maintainer) run.
-    Internal,
-}
+pub use super::cli_agent::EngagementKind;
 
 /// Everything the command line decides about the run's finder agent, as one value built once
 /// before the audit starts and carried into it ([`with_finder_setup`]). The command line never
@@ -1107,15 +1098,13 @@ pub async fn find_repo_for_run(
         backend_resolution,
         meter,
         &|controls, build, meter| {
-            // Build 4 passes the engagement kind to the factory here; this is its one real caller.
-            let engagement = build.engagement;
-            let _ = engagement;
             super::piece_agent_for(
                 controls,
                 build.backend,
                 build.api_key.as_deref(),
                 &build.work_dir,
                 meter,
+                build.engagement,
             )
         },
     )

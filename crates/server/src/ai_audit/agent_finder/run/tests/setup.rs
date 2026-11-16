@@ -130,3 +130,97 @@ async fn the_run_builds_the_agent_on_its_own_meter_and_its_spend_appears_once() 
     assert_eq!(snap.calls, 1, "one turn, counted once");
     assert!((snap.cost_usd - 1.0).abs() < 1e-9, "{}", snap.cost_usd);
 }
+
+/// Run the finder for one repository with `setup` (or none) and return the engagement kind the
+/// factory was handed.
+async fn engagement_the_factory_saw(setup: Option<FinderSetup>) -> EngagementKind {
+    let meter = Arc::new(UsageMeter::default());
+    let seen: Mutex<Vec<EngagementKind>> = Mutex::default();
+    let factory = |_c: &RunControls,
+                   build: &super::super::AgentBuild,
+                   m: Arc<UsageMeter>|
+     -> anyhow::Result<Box<dyn PieceAgent>> {
+        seen.lock().unwrap().push(build.engagement);
+        Ok(Box::new(SelfMetering {
+            inner: ScriptedAgent::new(good_script(vec![], vec![])).with_usage(usage(1.0)),
+            meter: m,
+        }))
+    };
+    let controls = RunControls::default();
+    let files = repo_files();
+    let selected = rules();
+    let corpus = corpus();
+    let chosen = HashMap::new();
+    let call = find_repo_for_run_with(
+        &NoModel,
+        REPO,
+        &files,
+        &selected,
+        Some(&corpus),
+        &controls,
+        &chosen,
+        &BackendResolution::Api,
+        Some(&meter),
+        &factory,
+    );
+    let result = match setup {
+        Some(s) => with_finder_setup(s, call).await,
+        None => call.await,
+    };
+    assert!(result.is_ok());
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    seen[0]
+}
+
+#[tokio::test]
+async fn a_client_setup_hands_the_factory_client() {
+    assert_eq!(
+        engagement_the_factory_saw(Some(setup(EngagementKind::Client))).await,
+        EngagementKind::Client
+    );
+}
+
+#[tokio::test]
+async fn no_setup_hands_the_factory_client() {
+    assert_eq!(
+        engagement_the_factory_saw(None).await,
+        EngagementKind::Client
+    );
+}
+
+#[tokio::test]
+async fn an_internal_setup_hands_the_factory_internal() {
+    assert_eq!(
+        engagement_the_factory_saw(Some(setup(EngagementKind::Internal))).await,
+        EngagementKind::Internal
+    );
+}
+
+#[tokio::test]
+async fn the_production_factory_passes_the_engagement_on_so_a_client_run_is_refused_by_the_cli_agent(
+) {
+    let meter = Arc::new(UsageMeter::default());
+    let result = with_finder_setup(
+        setup(EngagementKind::Client),
+        super::super::find_repo_for_run(
+            &NoModel,
+            REPO,
+            &repo_files(),
+            &rules(),
+            Some(&corpus()),
+            &RunControls::default(),
+            &HashMap::new(),
+            &BackendResolution::Cli,
+            Some(&meter),
+        ),
+    )
+    .await;
+    let (_, _, _, failed, _, _) = result.expect("a refused piece is a failed pass, not an error");
+    let text = failed
+        .iter()
+        .map(|f| f.reason.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("internal runs only"), "{text}");
+}

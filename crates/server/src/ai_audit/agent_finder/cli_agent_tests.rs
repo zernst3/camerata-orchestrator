@@ -1340,3 +1340,9 @@ async fn writes_into_the_out_folder_and_refused_writes_are_fine() {
         );
     }
 }
+
+#[test]
+fn the_cli_agent_does_not_meter_its_own_turns_so_the_runner_records_them() {
+    let agent = CliPieceAgent::new(MODEL, PathBuf::from("/run/rooms"), EngagementKind::Internal);
+    assert!(!agent.meters_its_own_turns());
+}
