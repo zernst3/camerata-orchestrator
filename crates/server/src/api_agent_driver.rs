@@ -76,8 +76,10 @@ use serde_json::Value;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 
 mod read_jail;
+mod run_ledger;
 use read_jail::{execute_glob, execute_grep, execute_ls, execute_read, ReadJail};
 pub use read_jail::{ReadOutcome, ReadVerdict};
+pub use run_ledger::{AgentRunLedger, ReadLogEntry};
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -149,6 +151,9 @@ struct ToolInvocation {
 pub struct ApiLoopContext {
     /// Folders the read tools may read beside the worktree (read-only).
     pub read_dirs: Vec<PathBuf>,
+    /// The run's ledger (its read log), shared by every agent the run builds. `None` gives the
+    /// driver a ledger of its own (tests, callers that keep no run record).
+    pub ledger: Option<Arc<AgentRunLedger>>,
 }
 
 // ─── ApiAgentDriver ──────────────────────────────────────────────────────────
@@ -173,6 +178,9 @@ pub struct ApiAgentDriver {
     /// Folders the read tools may read beside the worktree (a multi-repo project's sibling
     /// clones). Read-only: `gated_write` is still jailed to `worktree` alone.
     read_dirs: Vec<PathBuf>,
+    /// The run ledger every read-tool call is recorded in. Shared with the rest of the run's
+    /// agents when the run passed one ([`Self::with_run_ledger`]), else this driver's own.
+    ledger: Arc<AgentRunLedger>,
     /// When `true`, `delegate` and `fan_out` tool schemas are included in the API request.
     /// Default `false`: workers never get these, enforcing depth-1.
     pub orchestrator: bool,
@@ -254,6 +262,7 @@ impl ApiAgentDriver {
             model: model.into(),
             worktree: None,
             read_dirs: Vec::new(),
+            ledger: Arc::new(AgentRunLedger::new()),
             orchestrator: false,
             rule_subset: Vec::new(),
             session_id,
@@ -346,6 +355,27 @@ impl ApiAgentDriver {
     pub fn with_read_dirs(mut self, read_dirs: Vec<PathBuf>) -> Self {
         self.read_dirs = read_dirs;
         self
+    }
+
+    /// Record this driver's reads in the run's shared `ledger`. Builder form.
+    pub fn with_run_ledger(mut self, ledger: Arc<AgentRunLedger>) -> Self {
+        self.ledger = ledger;
+        self
+    }
+
+    /// Apply what the run hands the API loop: its read folders and, when it has one, its
+    /// ledger. Builder form.
+    pub fn with_api_loop(mut self, api_loop: ApiLoopContext) -> Self {
+        self.read_dirs = api_loop.read_dirs;
+        if let Some(ledger) = api_loop.ledger {
+            self.ledger = ledger;
+        }
+        self
+    }
+
+    /// The ledger this driver records into.
+    pub fn run_ledger(&self) -> &Arc<AgentRunLedger> {
+        &self.ledger
     }
 
     /// Mark this driver as orchestrator-mode (includes `delegate` + `fan_out` in the
@@ -1305,6 +1335,18 @@ async fn execute_tool(
                 TOOL_GREP => execute_grep(inv, &jail),
                 _ => execute_ls(inv, &jail),
             };
+            // The read log: every read-tool call, allowed or refused, lands in the run's
+            // ledger (shared with the run's other agents) under this agent's role name.
+            driver
+                .ledger
+                .record_read(ReadLogEntry {
+                    agent: role.name.clone(),
+                    tool: inv.name.clone(),
+                    path: outcome.path,
+                    bytes: outcome.bytes,
+                    verdict: outcome.verdict,
+                })
+                .await;
             (outcome.text, None)
         }
         TOOL_DELEGATE if driver.orchestrator => {
@@ -2074,7 +2116,7 @@ fn build_claude_driver(
             .as_orchestrator(orchestrator)
             .with_shape(ApiShape::Anthropic)
             .with_anthropic_api_key(key)
-            .with_read_dirs(api_loop.read_dirs);
+            .with_api_loop(api_loop);
         if let Some(wt) = worktree {
             driver = driver.with_worktree(wt);
         }
@@ -2201,7 +2243,7 @@ pub fn build_agent_driver(
             let mut driver = ApiAgentDriver::new(completer, model_id)
                 .with_rule_subset(rule_subset)
                 .as_orchestrator(orchestrator)
-                .with_read_dirs(api_loop.read_dirs);
+                .with_api_loop(api_loop);
             if let Some(wt) = worktree {
                 driver = driver.with_worktree(wt);
             }
@@ -2287,6 +2329,9 @@ pub struct ServerChildDriverFactory {
     /// choice — same principle as `policy` above for the OpenRouter safety policy). See
     /// `docs/design/2026-09-22_per-project-backend.md`.
     backend: crate::llm::ProjectBackend,
+    /// The PARENT run's ledger, handed to every child so a child's reads land in the parent
+    /// run's read log. `None` = each child keeps its own.
+    ledger: Option<Arc<AgentRunLedger>>,
 }
 
 impl ServerChildDriverFactory {
@@ -2313,6 +2358,22 @@ impl ServerChildDriverFactory {
             run_session_id,
             gate_events_file,
             backend,
+            ledger: None,
+        }
+    }
+
+    /// Share the parent run's ledger with every child this factory builds. Builder form.
+    pub fn with_run_ledger(mut self, ledger: Arc<AgentRunLedger>) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// What a child built for a session declaring `read_dirs` is handed: those read folders,
+    /// and the parent run's ledger.
+    pub fn api_loop_for_child(&self, read_dirs: &[PathBuf]) -> ApiLoopContext {
+        ApiLoopContext {
+            read_dirs: read_dirs.to_vec(),
+            ledger: self.ledger.clone(),
         }
     }
 }
@@ -2390,10 +2451,9 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             None,
             // Children inherit the parent run's project backend setting.
             self.backend,
-            // A child's read jail admits the same read folders its session declares.
-            ApiLoopContext {
-                read_dirs: read_dirs.to_vec(),
-            },
+            // A child's read jail admits the same read folders its session declares, and its
+            // reads land in the parent run's ledger.
+            self.api_loop_for_child(read_dirs),
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2452,6 +2512,9 @@ pub struct ServerOrchestratorDriverFactory {
     /// [`ServerChildDriverFactory`] this builds for delegated/fanned-out children. See
     /// `docs/design/2026-09-22_per-project-backend.md`.
     backend: crate::llm::ProjectBackend,
+    /// The run's ledger, shared by the lead and every child it delegates to. `None` = each lead
+    /// this factory builds gets a fresh one (still shared with that lead's children).
+    ledger: Option<Arc<AgentRunLedger>>,
 }
 
 impl ServerOrchestratorDriverFactory {
@@ -2476,7 +2539,40 @@ impl ServerOrchestratorDriverFactory {
             run_session_id,
             gate_events_file,
             backend,
+            ledger: None,
         }
+    }
+
+    /// Share the run's `ledger` with the lead and every child it delegates to. Builder form.
+    pub fn with_run_ledger(mut self, ledger: Arc<AgentRunLedger>) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// The ledger a native (API-loop) lead records into, and the child factory its
+    /// `delegate`/`fan_out` children are built by, sharing that ledger: so every read of the
+    /// lead and of its children lands in the one run ledger.
+    fn native_lead_parts(
+        &self,
+        rule_subset: &[RuleId],
+    ) -> (Arc<AgentRunLedger>, ServerChildDriverFactory) {
+        let ledger = self
+            .ledger
+            .clone()
+            .unwrap_or_else(|| Arc::new(AgentRunLedger::new()));
+        let child_factory = ServerChildDriverFactory::new(
+            self.registry.clone(),
+            self.policy.clone(),
+            self.creds.clone(),
+            self.limiter.clone(),
+            self.gateway_bin.clone(),
+            rule_subset.to_vec(),
+            self.run_session_id.clone(),
+            self.gate_events_file.clone(),
+            self.backend,
+        )
+        .with_run_ledger(ledger.clone());
+        (ledger, child_factory)
     }
 
     /// Resolve a model id's provider, defaulting to `"claude"` for unknown ids (mirrors
@@ -2553,17 +2649,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                 }
                 let completer = Arc::new(or_completer);
 
-                let child_factory = ServerChildDriverFactory::new(
-                    self.registry.clone(),
-                    self.policy.clone(),
-                    self.creds.clone(),
-                    self.limiter.clone(),
-                    self.gateway_bin.clone(),
-                    rule_subset.clone(),
-                    self.run_session_id.clone(),
-                    self.gate_events_file.clone(),
-                    self.backend,
-                );
+                let (ledger, child_factory) = self.native_lead_parts(&rule_subset);
 
                 let orch_config = camerata_gateway::delegate::OrchestratorConfig {
                     models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
@@ -2579,7 +2665,8 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     .with_worktree(ctx.worktree.to_path_buf())
                     // ORCHESTRATOR-ONLY: only the lead is ever built here.
                     .as_orchestrator(true)
-                    .with_orchestrator_config(orch_config);
+                    .with_orchestrator_config(orch_config)
+                    .with_run_ledger(ledger);
                 Ok(Box::new(driver))
             }
             // "claude" or any unrecognised provider: the Anthropic Messages API native
@@ -2600,17 +2687,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     // model's provider (CLI / Anthropic API / OpenRouter), gated.
                     let rule_subset = ctx.session.role_rule_subset.clone();
 
-                    let child_factory = ServerChildDriverFactory::new(
-                        self.registry.clone(),
-                        self.policy.clone(),
-                        self.creds.clone(),
-                        self.limiter.clone(),
-                        self.gateway_bin.clone(),
-                        rule_subset.clone(),
-                        self.run_session_id.clone(),
-                        self.gate_events_file.clone(),
-                        self.backend,
-                    );
+                    let (ledger, child_factory) = self.native_lead_parts(&rule_subset);
 
                     let orch_config = camerata_gateway::delegate::OrchestratorConfig {
                         models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
@@ -2629,7 +2706,8 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                             .with_anthropic_api_key(key)
                             // ORCHESTRATOR-ONLY: only the lead is ever built here.
                             .as_orchestrator(true)
-                            .with_orchestrator_config(orch_config);
+                            .with_orchestrator_config(orch_config)
+                            .with_run_ledger(ledger);
                     return Ok(Box::new(driver));
                 }
 
@@ -4952,3 +5030,9 @@ mod truncate_tests;
 
 #[cfg(test)]
 mod read_jail_tests;
+
+#[cfg(test)]
+mod scripted;
+
+#[cfg(test)]
+mod read_log_tests;

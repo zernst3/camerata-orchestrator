@@ -1404,6 +1404,16 @@ pub async fn execute_dev_implement_run(
         fail(&runs, &uow, why);
         return;
     }
+    // The run ledger: every read the agent makes (allowed or refused) is recorded here and, with
+    // a governance log wired, as a durable `agent_read` event under THIS run's id. One ledger for
+    // the whole run, so every bounce-and-revise pass adds to the same log.
+    let run_ledger = {
+        let ledger = crate::api_agent_driver::AgentRunLedger::new();
+        Arc::new(match governance_log.clone() {
+            Some(log) => ledger.with_governance(log, run_id.clone()),
+            None => ledger,
+        })
+    };
     let driver: Arc<dyn AgentDriver> = match build_agent_driver(
         &model,
         &registry,
@@ -1431,6 +1441,7 @@ pub async fn execute_dev_implement_run(
         // (`--add-dir` on the CLI path), read-only.
         crate::api_agent_driver::ApiLoopContext {
             read_dirs: sibling_read_dirs.clone(),
+            ledger: Some(run_ledger.clone()),
         },
     ) {
         Ok(d) => d,

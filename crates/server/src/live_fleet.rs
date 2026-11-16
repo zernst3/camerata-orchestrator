@@ -439,6 +439,9 @@ pub async fn execute_live_run_tiered(
     // provider (Claude -> CLI orchestrator; OpenRouter -> native ApiAgentDriver orchestrator
     // whose delegate/fan_out children resolve per-model + gated via ServerChildDriverFactory).
     // `run_id` is the stable per-run session id (OpenRouter sticky routing / KV-cache warmth).
+    // One ledger for the run: a native lead and every child it delegates to record their
+    // reads here (the CLI lead's reads go through its gateway instead).
+    let run_ledger = Arc::new(crate::api_agent_driver::AgentRunLedger::new());
     let orch_factory: Option<camerata_fleet::orchestrator::SharedOrchestratorDriverFactory> =
         Some(Arc::new(
             crate::api_agent_driver::ServerOrchestratorDriverFactory::new(
@@ -451,7 +454,8 @@ pub async fn execute_live_run_tiered(
                 // LIFECYCLE-10: the lead + its delegate children write to THIS run's sink.
                 Some(sink_path.clone()),
                 backend,
-            ),
+            )
+            .with_run_ledger(run_ledger.clone()),
         ));
 
     let result = build_from_plan_with_tier_map_layer2_and_activity(
@@ -470,7 +474,45 @@ pub async fn execute_live_run_tiered(
     .await;
 
     stop_gate_observability(obs).await;
+    if let Some(ev) = read_log_event(&run_ledger) {
+        store.push_event(&run_id, ev);
+    }
     finish_live_run(&store, &run_id, result);
+}
+
+/// The run event that keeps a live run's read log with the run: how many reads its in-process
+/// agents made, how many the read jail refused, and each path (allowed or refused). `None` when
+/// no in-process agent read anything (a CLI-led run records its reads at its gateway).
+fn read_log_event(ledger: &crate::api_agent_driver::AgentRunLedger) -> Option<GateEvent> {
+    let log = ledger.read_log();
+    if log.is_empty() {
+        return None;
+    }
+    let refused = log
+        .iter()
+        .filter(|e| e.verdict == crate::api_agent_driver::ReadVerdict::Refused)
+        .count();
+    let lines: Vec<String> = log
+        .iter()
+        .map(|e| {
+            format!(
+                "{} {} `{}` {} bytes ({:?})",
+                e.agent, e.tool, e.path, e.bytes, e.verdict
+            )
+        })
+        .collect();
+    Some(GateEvent {
+        seq: 0,
+        layer: "agent".to_string(),
+        verdict: if refused > 0 { "warn" } else { "info" }.to_string(),
+        rule: None,
+        detail: format!(
+            "Read log: {} read(s), {refused} refused by the read jail.\n{}",
+            log.len(),
+            lines.join("\n")
+        ),
+        content_hash: None,
+    })
 }
 
 /// Push a visible info event when a run is a layer-2 bootstrap bypass, so the cockpit
@@ -694,6 +736,40 @@ fn finish_live_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_live_runs_read_log_is_kept_as_a_run_event() {
+        use crate::api_agent_driver::{AgentRunLedger, ReadLogEntry, ReadVerdict};
+        let ledger = AgentRunLedger::new();
+        assert!(read_log_event(&ledger).is_none(), "no reads, no event");
+        for (path, verdict, bytes) in [
+            ("src/lib.rs", ReadVerdict::Allowed, 14),
+            ("/Users/auditor/.ssh/id_ed25519", ReadVerdict::Refused, 0),
+        ] {
+            ledger
+                .record_read(ReadLogEntry {
+                    agent: "delegate-child".to_string(),
+                    tool: "Read".to_string(),
+                    path: path.to_string(),
+                    bytes,
+                    verdict,
+                })
+                .await;
+        }
+        let ev = read_log_event(&ledger).expect("an event");
+        assert_eq!(
+            ev.verdict, "warn",
+            "a refused read makes the event a warning"
+        );
+        assert!(ev.detail.contains("2 read(s), 1 refused"), "{}", ev.detail);
+        assert!(ev.detail.contains("`src/lib.rs` 14 bytes"), "{}", ev.detail);
+        assert!(
+            ev.detail
+                .contains("`/Users/auditor/.ssh/id_ed25519` 0 bytes (Refused)"),
+            "{}",
+            ev.detail
+        );
+    }
     use camerata_fleet::BuildEvent;
 
     // ── gateway gate-decision JSONL → GateEvent ──────────────────────────────
