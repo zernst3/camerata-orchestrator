@@ -1135,6 +1135,29 @@ fn status_text(status: u16) -> String {
     reqwest::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string())
 }
 
+/// The total time one agent request may take (the llm crate's 600 seconds).
+const AGENT_HTTP_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// The time allowed to open the connection (the llm crate's 10 seconds).
+const AGENT_HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The HTTP client of the agent loops: the llm crate's timeouts (600 s total, 10 s connect), so a
+/// provider that stops answering ends the request as a network error, which the caller retries.
+pub(crate) fn agent_http_client() -> reqwest::Client {
+    agent_http_client_with(AGENT_HTTP_TOTAL_TIMEOUT, AGENT_HTTP_CONNECT_TIMEOUT)
+}
+
+/// [`agent_http_client`] with other timeouts (tests use short ones).
+pub(crate) fn agent_http_client_with(
+    total: std::time::Duration,
+    connect: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(total)
+        .connect_timeout(connect)
+        .build()
+        .unwrap_or_default()
+}
+
 /// POST an already built Messages `body` and read the reply: the second half of
 /// [`call_anthropic_with_tools`], reachable on its own so a caller that builds the body itself
 /// (the finder loop) sees the typed failure.
@@ -1143,9 +1166,27 @@ pub(crate) async fn post_anthropic_body(
     body: &Value,
     use_caching: bool,
 ) -> Result<LlmResponse, AnthropicPostError> {
+    post_anthropic_body_to(
+        &agent_http_client(),
+        "https://api.anthropic.com/v1/messages",
+        api_key,
+        body,
+        use_caching,
+    )
+    .await
+}
+
+/// [`post_anthropic_body`] through a given client and URL (a test points it at a local listener).
+pub(crate) async fn post_anthropic_body_to(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    body: &Value,
+    use_caching: bool,
+) -> Result<LlmResponse, AnthropicPostError> {
     let model = body["model"].as_str().unwrap_or_default().to_string();
-    let mut builder = reqwest::Client::new()
-        .post("https://api.anthropic.com/v1/messages")
+    let mut builder = client
+        .post(url)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("content-type", "application/json");
@@ -1167,7 +1208,11 @@ pub(crate) async fn post_anthropic_body(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(std::time::Duration::from_secs);
-    let text = resp.text().await.unwrap_or_default();
+    // A body that stops arriving is the same failure as a request that does: a network error.
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| AnthropicPostError::Network(e.to_string()))?;
     if !status.is_success() {
         return Err(AnthropicPostError::Http {
             status: status.as_u16(),
