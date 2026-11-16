@@ -202,6 +202,8 @@ pub struct ApiAgentDriver {
     /// The run id every governance event this driver records is tagged with. `None` unless
     /// [`Self::with_governance`] was called.
     run_id: Option<String>,
+    /// Extra folders the read tools may read besides the worktree (declared sibling repos).
+    read_roots: Vec<PathBuf>,
 }
 
 impl ApiAgentDriver {
@@ -241,6 +243,7 @@ impl ApiAgentDriver {
             on_activity: None,
             governance_log: None,
             run_id: None,
+            read_roots: Vec::new(),
         }
     }
 
@@ -315,6 +318,12 @@ impl ApiAgentDriver {
     /// Builder form.
     pub fn with_worktree(mut self, worktree: impl Into<PathBuf>) -> Self {
         self.worktree = Some(worktree.into());
+        self
+    }
+
+    /// Declare extra folders the read tools may read (sibling repos), beside the worktree.
+    pub fn with_read_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.read_roots = roots;
         self
     }
 
@@ -1265,10 +1274,10 @@ async fn execute_tool(
             }
             (text, denial.map(|d| d.message))
         }
-        TOOL_READ => (execute_read(inv, driver.worktree.as_deref()), None),
-        TOOL_GLOB => (execute_glob(inv, driver.worktree.as_deref()), None),
-        TOOL_GREP => (execute_grep(inv, driver.worktree.as_deref()), None),
-        TOOL_LS => (execute_ls(inv, driver.worktree.as_deref()), None),
+        TOOL_READ => (execute_read(inv, &read_jail(driver)), None),
+        TOOL_GLOB => (execute_glob(inv, &read_jail(driver)), None),
+        TOOL_GREP => (execute_grep(inv, &read_jail(driver)), None),
+        TOOL_LS => (execute_ls(inv, &read_jail(driver)), None),
         TOOL_DELEGATE if driver.orchestrator => {
             // Native orchestrator delegation. The gate is NOT reimplemented here: we
             // dispatch through the SAME gated `run_delegated` primitive the CLI
@@ -1675,12 +1684,75 @@ fn assert_in_worktree(worktree: &Path, path: &str) -> anyhow::Result<PathBuf> {
     Ok(target)
 }
 
+// ─── read jail ────────────────────────────────────────────────────────────────
+
+/// The places the read tools may read: the worktree plus the read folders the run declared.
+/// Every root is canonical (symlinks resolved), so a prefix check against it cannot be fooled
+/// by a link. With no root at all, every read is refused.
+struct ReadJail {
+    /// Relative paths resolve against this (the worktree).
+    base: Option<PathBuf>,
+    roots: Vec<PathBuf>,
+}
+
+fn read_jail(driver: &ApiAgentDriver) -> ReadJail {
+    let mut roots = Vec::new();
+    if let Some(wt) = driver.worktree.as_deref() {
+        roots.push(canonicalize_existing_prefix(wt));
+    }
+    for r in &driver.read_roots {
+        roots.push(canonicalize_existing_prefix(r));
+    }
+    ReadJail {
+        base: driver.worktree.clone(),
+        roots,
+    }
+}
+
+impl ReadJail {
+    fn refusal(&self, raw: &str, why: &str) -> String {
+        format!(
+            "DENIED: `{raw}` {why}. Reads are limited to the worktree and the read folders \
+             declared for this run. Nothing was read."
+        )
+    }
+
+    fn contains(&self, canonical: &Path) -> bool {
+        self.roots.iter().any(|r| canonical.starts_with(r))
+    }
+
+    /// Resolve `raw` to a canonical path inside the jail, or the refusal text the model sees.
+    /// Refuses `..`, absolute paths outside every root and symlinks that lead out. The path
+    /// need not exist (a missing file inside the jail is a plain not-found, not a refusal).
+    fn resolve(&self, raw: &str) -> Result<PathBuf, String> {
+        let p = Path::new(raw);
+        if p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(self.refusal(raw, "contains `..`, which can leave the jail"));
+        }
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else if let Some(base) = &self.base {
+            base.join(p)
+        } else {
+            return Err(self.refusal(raw, "cannot be resolved because no worktree is set"));
+        };
+        let canonical = canonicalize_existing_prefix(&abs);
+        if self.contains(&canonical) {
+            Ok(canonical)
+        } else {
+            Err(self.refusal(raw, "is outside the places this run may read"))
+        }
+    }
+}
+
 // ─── read-tool implementations ────────────────────────────────────────────────
 
 /// Execute a `Read` tool call: read the content of a file.
 ///
 /// Expected input: `{file_path: "..."}` (Claude Code convention).
-fn execute_read(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
+fn execute_read(inv: &ToolInvocation, jail: &ReadJail) -> String {
     let raw_path = match inv.input["file_path"]
         .as_str()
         .or_else(|| inv.input["path"].as_str())
@@ -1688,17 +1760,33 @@ fn execute_read(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
         Some(p) => p,
         None => return "ERROR: Read requires `file_path` in input".to_string(),
     };
-    let resolved = resolve_path(raw_path, worktree);
+    let resolved = match jail.resolve(raw_path) {
+        Ok(p) => p,
+        Err(refusal) => return refusal,
+    };
     match std::fs::read_to_string(&resolved) {
         Ok(content) => truncate_output(content, MAX_READ_OUTPUT_BYTES),
         Err(e) => format!("ERROR reading `{raw_path}`: {e}"),
     }
 }
 
+/// The part of a glob pattern before its first wildcard, cut back to a whole folder.
+fn glob_static_prefix(pattern: &str) -> &str {
+    let end = pattern.find(['*', '?', '[', '{']).unwrap_or(pattern.len());
+    let head = &pattern[..end];
+    if end == pattern.len() {
+        return head;
+    }
+    match head.rfind('/') {
+        Some(i) => &head[..=i],
+        None => "",
+    }
+}
+
 /// Execute a `Glob` tool call: list files matching a glob pattern.
 ///
 /// Expected input: `{pattern: "..."}` or `{glob: "..."}`.
-fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
+fn execute_glob(inv: &ToolInvocation, jail: &ReadJail) -> String {
     let pattern = match inv.input["pattern"]
         .as_str()
         .or_else(|| inv.input["glob"].as_str())
@@ -1706,20 +1794,40 @@ fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
         Some(p) => p,
         None => return "ERROR: Glob requires `pattern` in input".to_string(),
     };
+    if Path::new(pattern)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return jail.refusal(pattern, "contains `..`, which can leave the jail");
+    }
 
-    let base = worktree
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
     let full_pattern = if pattern.starts_with('/') {
+        // An absolute pattern is allowed only when the folder it starts from is in the jail.
+        let prefix = glob_static_prefix(pattern);
+        if prefix.is_empty() || jail.resolve(prefix).is_err() {
+            return jail.refusal(pattern, "starts outside the places this run may read");
+        }
         pattern.to_string()
     } else {
-        format!("{}/{}", base.display(), pattern)
+        match &jail.base {
+            Some(base) => format!(
+                "{}/{}",
+                glob::Pattern::escape(&base.display().to_string()),
+                pattern
+            ),
+            None => {
+                return jail.refusal(pattern, "cannot be resolved because no worktree is set")
+            }
+        }
     };
 
     match glob::glob(&full_pattern) {
         Ok(paths) => {
+            // Every match is checked again after symlinks are resolved: a link inside the
+            // jail can lead a pattern that started inside it out of it.
             let entries: Vec<String> = paths
                 .filter_map(|p| p.ok())
+                .filter(|p| jail.contains(&canonicalize_existing_prefix(p)))
                 .map(|p| p.display().to_string())
                 .collect();
             if entries.is_empty() {
@@ -1735,7 +1843,7 @@ fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
 /// Execute a `Grep` tool call: search files for a pattern.
 ///
 /// Expected input: `{pattern: "...", path: "..."}` or `{regex: "...", directory: "..."}`.
-fn execute_grep(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
+fn execute_grep(inv: &ToolInvocation, jail: &ReadJail) -> String {
     let search_pattern = match inv.input["pattern"]
         .as_str()
         .or_else(|| inv.input["regex"].as_str())
@@ -1748,7 +1856,10 @@ fn execute_grep(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
         .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
-    let resolved_dir = resolve_path(search_dir, worktree);
+    let resolved_dir = match jail.resolve(search_dir) {
+        Ok(p) => p,
+        Err(refusal) => return refusal,
+    };
 
     // Compile the regex.
     let re = match regex::Regex::new(search_pattern) {
@@ -1765,10 +1876,11 @@ fn execute_grep(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
     }
 }
 
-/// Recursive grep helper: walks `dir` and collects `file:line:text` entries.
+/// Recursive grep helper: walks `dir` and collects `file:line:text` entries. Symlinks are
+/// never followed (a link committed in a repository can lead out of the jail).
 fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) {
     if depth > 8 {
-        return; // depth limit to avoid symlink loops
+        return; // depth limit
     }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -1784,9 +1896,16 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
         {
             continue;
         }
-        if path.is_dir() {
+        // `file_type` does not follow a symlink, so a link reads as a link here.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             grep_dir(&path, re, out, depth + 1);
-        } else if path.is_file() {
+        } else if kind.is_file() {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 for (lineno, line) in text.lines().enumerate() {
                     if re.is_match(line) {
@@ -1806,12 +1925,15 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
 /// Execute an `LS` tool call: list directory contents.
 ///
 /// Expected input: `{path: "..."}` or `{directory: "..."}`.
-fn execute_ls(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
+fn execute_ls(inv: &ToolInvocation, jail: &ReadJail) -> String {
     let dir_path = inv.input["path"]
         .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
-    let resolved = resolve_path(dir_path, worktree);
+    let resolved = match jail.resolve(dir_path) {
+        Ok(p) => p,
+        Err(refusal) => return refusal,
+    };
     match std::fs::read_dir(&resolved) {
         Ok(entries) => {
             let mut names: Vec<String> = entries
@@ -1833,18 +1955,6 @@ fn execute_ls(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
 }
 
 // ─── path helpers ─────────────────────────────────────────────────────────────
-
-/// Resolve a path relative to `worktree` (if set) or the current directory.
-fn resolve_path(raw: &str, worktree: Option<&Path>) -> PathBuf {
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else if let Some(wt) = worktree {
-        wt.join(raw)
-    } else {
-        PathBuf::from(raw)
-    }
-}
 
 /// Truncate a string to at most `max_bytes`, appending a note when truncated.
 fn truncate_output(s: String, max_bytes: usize) -> String {
@@ -5057,3 +5167,5 @@ mod tests {
 mod model_input_tests;
 #[cfg(test)]
 mod truncate_tests;
+#[cfg(test)]
+mod read_jail_tests;
