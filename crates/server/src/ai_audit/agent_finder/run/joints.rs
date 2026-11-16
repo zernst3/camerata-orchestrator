@@ -356,7 +356,7 @@ pub(super) fn report_of(
         let inside = lead.line == 0
             || ranges
                 .get(&p)
-                .map_or(true, |(from, to)| (*from..=*to).contains(&lead.line));
+                .is_none_or(|(from, to)| (*from..=*to).contains(&lead.line));
         if inside {
             report.notes.push(format!(
                 "joints: the lead at {}:{} was covered by problem {p}",

@@ -150,7 +150,16 @@ pub fn build_agent(
     api_key: Option<&str>,
     rooms_dir: &Path,
 ) -> Result<Arc<dyn PieceAgent>, String> {
-    camerata_server::ai_audit::agent_finder::piece_agent_for(controls, backend, api_key, rooms_dir)
-        .map(Arc::from)
-        .map_err(|e| e.to_string())
+    // FLAG: this meter is the agent's own, not the scan run's shared meter (which is built inside
+    // the audit call). An API agent built here counts its spend on this meter only; see the
+    // build report. The production path (`find_repo_for_run`) builds its agent with the run's
+    // meter.
+    let meter = Arc::new(camerata_server::ai_audit::UsageMeter::with_controls(
+        controls.clone(),
+    ));
+    camerata_server::ai_audit::agent_finder::piece_agent_for(
+        controls, backend, api_key, rooms_dir, meter,
+    )
+    .map(Arc::from)
+    .map_err(|e| e.to_string())
 }
