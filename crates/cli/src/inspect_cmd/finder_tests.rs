@@ -183,6 +183,7 @@ fn the_comparison_goes_through_the_two_functions_it_is_given() {
                 .collect(),
             only_in_b: Vec::new(),
             in_both: 1,
+            severity_changed: Vec::new(),
         }
     };
     let note = |d: &RunDiff| {
