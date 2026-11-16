@@ -187,6 +187,7 @@ fn agent(wire: &Arc<ScriptedWire>) -> ApiPieceAgent {
     ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
         .with_wire(wire)
         .with_pause(pause)
+        .with_meter(Arc::new(UsageMeter::default()))
 }
 
 fn metered(wire: &Arc<ScriptedWire>, meter: &Arc<UsageMeter>) -> (ApiPieceAgent, Pauses) {
@@ -592,7 +593,9 @@ async fn the_turn_limit_stops_the_run_and_keeps_the_trace() {
         run.stop
     );
     assert_eq!(wire.calls(), 3);
-    assert_eq!(run.trace.len(), 3);
+    // Three replies asked for three Globs, but the third was never answered: the model saw the
+    // results of two.
+    assert_eq!(run.trace.len(), 2);
     assert_eq!(run.usage.len(), 3);
 }
 
@@ -618,7 +621,11 @@ async fn the_spend_ceiling_of_the_piece_stops_the_run_and_keeps_the_trace() {
         run.stop
     );
     assert_eq!(wire.calls(), 2, "the third request is never sent");
-    assert_eq!(run.trace.len(), 2);
+    assert_eq!(
+        run.trace.len(),
+        1,
+        "the second reply's call was never answered"
+    );
     let spent: f64 = run.usage.iter().filter_map(|u| u.cost_usd).sum();
     assert!((spent - 2.4).abs() < 1e-6, "spent {spent}");
 }
@@ -877,7 +884,10 @@ async fn a_failure_after_a_paid_turn_is_an_ok_run_that_keeps_the_usage_never_an_
     assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
     assert_eq!(run.usage.len(), 1);
     assert!(run.usage[0].cost_usd.expect("priced") > 0.0);
-    assert_eq!(run.trace.len(), 1);
+    assert!(
+        run.trace.is_empty(),
+        "the 401 came back for the request that carried the glob's result"
+    );
 
     // The same holds for a follow-up whose own request fails after the first run was paid.
     let wire = ScriptedWire::new(vec![
@@ -984,6 +994,379 @@ async fn a_follow_up_on_a_conversation_the_transport_does_not_hold_sends_nothing
         "no conversation, no request, and `Err` is allowed"
     );
     assert_eq!(wire.calls(), 0);
+}
+
+#[tokio::test]
+async fn an_agent_with_no_meter_sends_nothing_neither_a_run_nor_a_follow_up() {
+    let wire = ScriptedWire::new(vec![text_reply("never sent")]);
+    let wire_dyn: Arc<dyn FinderWire> = wire.clone();
+    let unmetered = ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key").with_wire(wire_dyn);
+    let result = unmetered.run(&room(), "Review.", &limits()).await;
+    let Err(error) = result else {
+        panic!("a run with no meter would spend money nobody counts and must not start");
+    };
+    assert!(error.to_string().contains("meter"), "got {error}");
+    let prior = AgentRun::empty(AgentStop::Finished);
+    let again = unmetered
+        .follow_up(&room(), &prior, &FollowUp::text("more"), &limits())
+        .await;
+    assert!(again.is_err());
+    assert_eq!(wire.calls(), 0, "nothing was sent");
+}
+
+// ─── 9. what the model received, what is priced, whose conversation ─────────────────────────
+
+fn other_agent_with_meter(
+    model: &str,
+    wire: &Arc<ScriptedWire>,
+    meter: Arc<UsageMeter>,
+) -> ApiPieceAgent {
+    let wire: Arc<dyn FinderWire> = wire.clone();
+    let (pause, _) = pause_recorder();
+    ApiPieceAgent::new(model, "sk-test-not-a-real-key")
+        .with_wire(wire)
+        .with_pause(pause)
+        .with_meter(meter)
+}
+
+#[tokio::test]
+async fn a_read_whose_results_were_never_sent_is_not_in_the_trace_and_not_covered() {
+    // Reply one asks to read src/b.rs; the request that would carry the result is refused (400).
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![call("r", "Read", json!({"file_path": "src/b.rs"}))]),
+        http(400, "invalid_request_error", "bad history", None),
+    ]);
+    let piece = piece();
+    let room = room();
+    let run = run_ok(&agent(&wire), &room, &limits()).await;
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+    assert_eq!(wire.calls(), 2);
+    assert!(
+        run.trace.is_empty(),
+        "the model never received that read: {:?}",
+        run.trace
+    );
+    let coverage = coverage_of(
+        &piece.key,
+        std::slice::from_ref(&run),
+        &room.piece_line_counts(),
+        &[],
+        room.context_files(),
+        None,
+    );
+    assert!(
+        coverage.still_unread.contains(&"src/b.rs".to_string()),
+        "src/b.rs was not reviewed: {:?}",
+        coverage.still_unread
+    );
+}
+
+#[tokio::test]
+async fn an_unpriced_model_is_refused_even_with_no_spend_limit() {
+    let wire = ScriptedWire::new(vec![text_reply("never sent")]);
+    let agent = other_agent_with_meter(
+        "acme-unpriced-model-1",
+        &wire,
+        Arc::new(UsageMeter::default()),
+    );
+    let result = agent.run(&room(), "Review.", &limits()).await;
+    let Err(error) = result else {
+        panic!("a model with no registry price must not run, limit or no limit");
+    };
+    assert!(error.to_string().contains("price"), "got {error}");
+    assert_eq!(wire.calls(), 0, "nothing was sent");
+}
+
+#[tokio::test]
+async fn a_turn_whose_cost_cannot_be_known_stops_the_piece_as_a_spend_limit() {
+    // A priced model, but the reply reports no token counts: the cost of the turn is unknown.
+    let mut unknown =
+        tools_reply(vec![call("a", "Glob", json!({"pattern": "*.rs"}))]).expect("a reply");
+    unknown.input_tokens = None;
+    unknown.output_tokens = None;
+    let wire = ScriptedWire::new(vec![Ok(unknown), text_reply("never sent")]);
+    let run = run_ok(&agent(&wire), &room(), &limits()).await;
+    assert!(
+        matches!(&run.stop, AgentStop::SpendLimit(_)),
+        "got {:?}",
+        run.stop
+    );
+    assert_eq!(wire.calls(), 1, "no second request after an unpriced turn");
+    assert_eq!(run.usage.len(), 1);
+}
+
+#[tokio::test]
+async fn a_handle_with_the_right_counter_and_the_wrong_token_holds_no_conversation() {
+    let wire = ScriptedWire::new(vec![text_reply("done"), text_reply("never sent")]);
+    let agent = agent(&wire);
+    let first = run_ok(&agent, &room(), &limits()).await;
+    let text = first.conversation.as_str().to_string();
+    let parts: Vec<&str> = text.split(':').collect();
+    assert_eq!(parts.len(), 3, "api:<token>:<n>, got {text}");
+    assert_eq!(parts[0], "api");
+    let forged = crate::ai_audit::agent_finder::ConversationHandle::new(format!(
+        "api:{}:{}",
+        "0".repeat(parts[1].len().max(16)),
+        parts[2]
+    ));
+    let mut stale = first.clone();
+    stale.conversation = forged;
+    let result = agent
+        .follow_up(&room(), &stale, &FollowUp::text("more"), &limits())
+        .await;
+    let Err(error) = result else {
+        panic!("another instance's handle must not resolve");
+    };
+    assert!(error.to_string().contains("no conversation"), "got {error}");
+    assert_eq!(wire.calls(), 1);
+    // The real handle still resolves.
+    assert!(agent.conversation(&first.conversation).is_some());
+}
+
+#[tokio::test]
+async fn two_instances_do_not_share_a_token() {
+    let wire = ScriptedWire::new(vec![text_reply("done"), text_reply("done")]);
+    let a = run_ok(&agent(&wire), &room(), &limits()).await;
+    let b = run_ok(&agent(&wire), &room(), &limits()).await;
+    let token = |r: &AgentRun| {
+        r.conversation
+            .as_str()
+            .split(':')
+            .nth(1)
+            .map(str::to_string)
+    };
+    assert_ne!(token(&a), token(&b));
+    // A random token, not a small counter that repeats after a restart.
+    assert!(token(&a).is_some_and(|t| t.len() >= 16), "{a:?}");
+}
+
+// ─── 10. follow-ups of the second round ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_released_conversation_cannot_be_continued_and_a_follow_up_supersedes_its_prior() {
+    let wire = ScriptedWire::new(vec![
+        text_reply("done"),
+        text_reply("again"),
+        text_reply("never sent"),
+    ]);
+    let agent = agent(&wire);
+    let first = run_ok(&agent, &room(), &limits()).await;
+    let second = agent
+        .follow_up(&room(), &first, &FollowUp::text("more"), &limits())
+        .await
+        .expect("the follow up");
+    // The step's own handle continues the piece; the one it continued from is released.
+    assert!(agent.conversation(&first.conversation).is_none());
+    assert!(agent.conversation(&second.conversation).is_some());
+    agent.release(&second.conversation);
+    let result = agent
+        .follow_up(&room(), &second, &FollowUp::text("late"), &limits())
+        .await;
+    assert!(result.is_err(), "a released conversation is a failed part");
+    assert_eq!(wire.calls(), 2, "nothing was sent for it");
+}
+
+#[tokio::test]
+async fn live_conversations_are_never_evicted_however_many_there_are() {
+    let n = 300;
+    let wire = ScriptedWire::new((0..=n).map(|i| text_reply(&format!("done {i}"))).collect());
+    let agent = agent(&wire);
+    let mut runs = Vec::new();
+    for _ in 0..n {
+        runs.push(run_ok(&agent, &room(), &limits()).await);
+    }
+    let again = agent
+        .follow_up(&room(), &runs[0], &FollowUp::text("more"), &limits())
+        .await;
+    assert!(again.is_ok(), "the oldest live conversation was evicted");
+}
+
+#[tokio::test]
+async fn the_spend_ceiling_is_one_per_piece_across_its_follow_up_steps() {
+    // Each turn: 100,000 input and 10,000 output tokens, $1.20 on Fable 5.2.
+    let turn = |blocks: Vec<Value>, stop: &str| reply_with(blocks, stop, 100_000, 10_000, 0);
+    let wire = ScriptedWire::new(vec![
+        turn(
+            vec![call("g0", "Glob", json!({"pattern": "*.rs"}))],
+            "tool_use",
+        ),
+        turn(vec![json!({"type": "text", "text": "done"})], "end_turn"),
+        // The follow-up step: one turn, then it would go on.
+        turn(
+            vec![call("g1", "Glob", json!({"pattern": "*.md"}))],
+            "tool_use",
+        ),
+        turn(vec![json!({"type": "text", "text": "never"})], "end_turn"),
+    ]);
+    let mut lim = limits();
+    lim.ceiling_usd = 3.0;
+    let agent = agent(&wire);
+    let first = run_ok(&agent, &room(), &lim).await;
+    assert_eq!(
+        first.stop,
+        AgentStop::Finished,
+        "$2.40 is under the ceiling"
+    );
+    let second = agent
+        .follow_up(&room(), &first, &FollowUp::text("more"), &lim)
+        .await
+        .expect("the follow up");
+    assert!(
+        matches!(second.stop, AgentStop::SpendLimit(_)),
+        "$2.40 already spent: one more turn reaches the ceiling, got {:?}",
+        second.stop
+    );
+    assert_eq!(wire.calls(), 3, "the fourth request is never sent");
+}
+
+/// The real HTTP code of `api_agent_driver.rs` pointed at a local address with short timeouts,
+/// after an optional scripted first reply.
+struct LocalHttpWire {
+    url: String,
+    client: reqwest::Client,
+    first: Mutex<Option<Reply>>,
+    posts: Mutex<usize>,
+}
+
+#[async_trait::async_trait]
+impl FinderWire for LocalHttpWire {
+    async fn send(&self, body: &Value, use_caching: bool) -> Reply {
+        if let Some(reply) = self.first.lock().expect("lock").take() {
+            return reply;
+        }
+        *self.posts.lock().expect("lock") += 1;
+        crate::api_agent_driver::post_anthropic_body_to(
+            &self.client,
+            &self.url,
+            "sk-test-not-a-real-key",
+            body,
+            use_caching,
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn a_provider_that_never_answers_ends_the_piece_failed_with_the_usage_kept() {
+    // A local listener that accepts connections and never writes a byte.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!(
+        "http://{}/v1/messages",
+        listener.local_addr().expect("addr")
+    );
+    let held = tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            open.push(socket);
+        }
+    });
+    let wire = Arc::new(LocalHttpWire {
+        url,
+        client: crate::api_agent_driver::agent_http_client_with(
+            Duration::from_millis(300),
+            Duration::from_millis(300),
+        ),
+        first: Mutex::new(Some(tools_reply(vec![call(
+            "a",
+            "Glob",
+            json!({"pattern": "*.rs"}),
+        )]))),
+        posts: Mutex::new(0),
+    });
+    let dyn_wire: Arc<dyn FinderWire> = wire.clone();
+    let (pause, _) = pause_recorder();
+    let agent = ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
+        .with_wire(dyn_wire)
+        .with_pause(pause)
+        .with_meter(Arc::new(UsageMeter::default()));
+    let run = tokio::time::timeout(
+        Duration::from_secs(60),
+        agent.run(&room(), "Review.", &limits()),
+    )
+    .await
+    .expect("the piece hung instead of timing out")
+    .expect("a paid turn came first, so this is Ok");
+    held.abort();
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if why.contains("request failed")),
+        "{:?}",
+        run.stop
+    );
+    assert_eq!(run.usage.len(), 1, "the paid turn is kept");
+    assert_eq!(
+        *wire.posts.lock().expect("lock"),
+        4,
+        "tried, then 3 retries"
+    );
+}
+
+/// A wire that trips the run's outage stop after its first reply.
+struct TripAfterFirst {
+    inner: Arc<ScriptedWire>,
+    meter: Arc<UsageMeter>,
+}
+
+#[async_trait::async_trait]
+impl FinderWire for TripAfterFirst {
+    async fn send(&self, body: &Value, use_caching: bool) -> Reply {
+        let reply = self.inner.send(body, use_caching).await;
+        self.meter.health().note_failure(
+            camerata_llm::failure::FailureClass::AuthOrBilling,
+            "invalid x-api-key",
+        );
+        reply
+    }
+}
+
+#[tokio::test]
+async fn the_outage_stop_is_checked_between_turns() {
+    let inner = ScriptedWire::new(glob_turns(4));
+    let meter = Arc::new(UsageMeter::default());
+    let wire: Arc<dyn FinderWire> = Arc::new(TripAfterFirst {
+        inner: inner.clone(),
+        meter: Arc::clone(&meter),
+    });
+    let (pause, _) = pause_recorder();
+    let agent = ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
+        .with_wire(wire)
+        .with_pause(pause)
+        .with_meter(Arc::clone(&meter));
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if why.contains("stopped")),
+        "got {:?}",
+        run.stop
+    );
+    assert_eq!(inner.calls(), 1, "no second request once the run stopped");
+    assert_eq!(run.usage.len(), 1);
+}
+
+#[tokio::test]
+async fn a_reply_cut_off_inside_a_thinking_block_goes_back_without_it() {
+    let cut = reply_with(
+        vec![json!({"type": "thinking", "thinking": "I should look at"})],
+        "max_tokens",
+        1_000,
+        500,
+        0,
+    );
+    let wire = ScriptedWire::new(vec![cut, text_reply("done")]);
+    let run = run_ok(&agent(&wire), &room(), &limits()).await;
+    assert_eq!(run.stop, AgentStop::Finished);
+    let second = &wire.bodies()[1];
+    assert!(
+        !second["messages"].to_string().contains("thinking"),
+        "an unfinished thinking block (no signature) must not be sent back: {}",
+        second["messages"]
+    );
+    // The assistant turn is still there and not empty.
+    assert_eq!(second["messages"][1]["role"], "assistant");
+    assert!(!second["messages"][1]["content"]
+        .as_array()
+        .expect("blocks")
+        .is_empty());
 }
 
 // ─── 8. injection ────────────────────────────────────────────────────────────────────────────

@@ -18,7 +18,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -75,22 +74,47 @@ const OVERLOADED_SECS: [u64; 4] = [5, 20, 60, 120];
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 /// The longest hit line a Grep returns.
 const MAX_GREP_LINE_CHARS: usize = 400;
-/// The most conversations a transport keeps for follow-ups.
-const MAX_CONVERSATIONS: usize = 256;
 
-/// The conversations a transport keeps so a follow-up can continue one.
+/// One conversation a transport keeps, and what its piece has spent so far (one ceiling per
+/// piece, however many steps it takes).
+#[derive(Debug, Clone)]
+struct Kept {
+    messages: Vec<Value>,
+    spent_usd: f64,
+}
+
+/// The conversations a transport keeps so a follow-up can continue one. An entry lives until the
+/// piece releases it ([`PieceAgent::release`]) or a follow-up supersedes it with its own: there is
+/// no count cap, because the only entries are those of pieces still running, and dropping a live
+/// conversation would turn a follow-up into a failed part.
 #[derive(Debug, Default)]
 struct Store {
     next: u64,
-    conversations: BTreeMap<u64, Vec<Value>>,
+    conversations: BTreeMap<u64, Kept>,
+}
+
+/// A random token for one transport instance, so a handle from another instance or an earlier
+/// process (whose counter restarts at 1) never resolves here.
+fn instance_token() -> String {
+    let mut bytes = [0u8; 8];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        // No OS randomness: fall back to the clock and the address of a local, which still tells
+        // two processes apart in practice.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let addr = std::ptr::addr_of!(bytes) as usize as u128;
+        bytes = ((nanos ^ addr.rotate_left(32)) as u64).to_le_bytes();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The API transport.
 pub struct ApiPieceAgent {
     pub(crate) model: String,
     api_key: String,
-    /// Tells this transport's conversation keys from another's.
-    id: u64,
+    /// Tells this transport's conversation keys from another's (random per instance).
+    token: String,
     wire: Option<Arc<dyn FinderWire>>,
     pause: Option<PauseFn>,
     meter: Option<Arc<UsageMeter>>,
@@ -116,11 +140,10 @@ enum SendFailure {
 impl ApiPieceAgent {
     /// `model` is the resolved finder model; `api_key` the Anthropic key (never logged).
     pub fn new(model: impl Into<String>, api_key: impl Into<String>) -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self {
             model: model.into(),
             api_key: api_key.into(),
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            token: instance_token(),
             wire: None,
             pause: None,
             meter: None,
@@ -157,10 +180,15 @@ impl ApiPieceAgent {
         &self.api_key
     }
 
-    /// Checks made before anything is sent. `Err` is allowed here: nothing was paid.
+    /// Checks made before anything is sent. `Err` is allowed here: nothing was paid. An agent
+    /// with no meter, or a model with no registry price, never runs: what it costs could not be
+    /// counted, so no limit could hold.
     fn preflight(&self) -> anyhow::Result<()> {
         let Some(meter) = &self.meter else {
-            return Ok(());
+            anyhow::bail!(
+                "the agent finder transport has no usage meter, so what it spends would not be \
+                 counted against the run's limit; no request was sent"
+            );
         };
         if let Some(why) = meter
             .controls()
@@ -168,42 +196,64 @@ impl ApiPieceAgent {
         {
             anyhow::bail!(why);
         }
+        if !crate::llm::is_priced(&self.model) {
+            anyhow::bail!(
+                "`{}` has no price in the model registry, so what the finder's calls cost cannot \
+                 be counted. Nothing was run. Choose a priced model.",
+                self.model
+            );
+        }
         if meter.outage_stopped() {
             anyhow::bail!("the run stopped after repeated provider failures; no request was sent");
         }
         Ok(())
     }
 
-    fn keep(&self, messages: Vec<Value>) -> ConversationHandle {
+    fn keep(&self, messages: Vec<Value>, spent_usd: f64) -> ConversationHandle {
         let mut store = self
             .store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         store.next += 1;
         let n = store.next;
-        store.conversations.insert(n, messages);
-        while store.conversations.len() > MAX_CONVERSATIONS {
-            let Some(oldest) = store.conversations.keys().next().copied() else {
-                break;
-            };
-            store.conversations.remove(&oldest);
-        }
-        ConversationHandle::new(format!("api:{}:{n}", self.id))
+        store.conversations.insert(
+            n,
+            Kept {
+                messages,
+                spent_usd,
+            },
+        );
+        ConversationHandle::new(format!("api:{}:{n}", self.token))
     }
 
-    fn conversation(&self, handle: &ConversationHandle) -> Option<Vec<Value>> {
+    /// The key of a handle this instance issued, else `None`.
+    fn key_of(&self, handle: &ConversationHandle) -> Option<u64> {
         let rest = handle.as_str().strip_prefix("api:")?;
-        let (id, n) = rest.split_once(':')?;
-        if id.parse::<u64>().ok()? != self.id {
+        let (token, n) = rest.split_once(':')?;
+        if token != self.token {
             return None;
         }
-        let n = n.parse::<u64>().ok()?;
+        n.parse::<u64>().ok()
+    }
+
+    fn conversation(&self, handle: &ConversationHandle) -> Option<Kept> {
+        let n = self.key_of(handle)?;
         self.store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .conversations
             .get(&n)
             .cloned()
+    }
+
+    fn forget(&self, handle: &ConversationHandle) {
+        if let Some(n) = self.key_of(handle) {
+            self.store
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .conversations
+                .remove(&n);
+        }
     }
 
     async fn post(
@@ -350,15 +400,26 @@ impl ApiPieceAgent {
         mut messages: Vec<Value>,
         limits: &PieceLimits,
         shown: Vec<String>,
+        spent_before: f64,
     ) -> AgentRun {
         let tools = tool_schemas();
         let outputs_before = room.outputs();
         let mut trace: Vec<ToolEvent> = Vec::new();
+        // The events of the turn just served. They enter the trace only once the request that
+        // carries their results gets a reply: a read the model never received covers nothing.
+        let mut pending: Vec<ToolEvent> = Vec::new();
         let mut usage: Vec<TurnUsage> = Vec::new();
-        let mut spent = 0.0_f64;
+        // One ceiling per piece: what its earlier steps spent counts here.
+        let mut spent = spent_before;
         let mut continued = false;
 
         let stop = loop {
+            if self.meter.as_ref().is_some_and(|m| m.outage_stopped()) {
+                break AgentStop::Failed(
+                    "the run stopped after repeated provider failures; no further request was sent"
+                        .to_string(),
+                );
+            }
             if usage.len() >= limits.max_turns {
                 break AgentStop::TurnLimit(format!(
                     "the turn limit of {} turns was reached",
@@ -384,6 +445,8 @@ impl ApiPieceAgent {
             let reply = match self.send_with_retry(&body, use_caching).await {
                 Ok(reply) => reply,
                 Err(SendFailure::Refused(v)) => {
+                    // The provider answered this request, so it received the results in it.
+                    trace.append(&mut pending);
                     let refusal = crate::llm::refusal_error_billed(
                         &v,
                         &self.model,
@@ -407,9 +470,18 @@ impl ApiPieceAgent {
                     break AgentStop::Failed(message);
                 }
             };
+            trace.append(&mut pending);
             let turn = self.account(&reply);
+            let cost_known = turn.cost_usd.is_some();
             spent += turn.cost_usd.unwrap_or(0.0);
             usage.push(turn);
+            if !cost_known {
+                break AgentStop::SpendLimit(
+                    "what the last turn cost is unknown, so the piece's spend ceiling cannot be \
+                     enforced"
+                        .to_string(),
+                );
+            }
 
             let message: Value = serde_json::from_str(&reply.text).unwrap_or(Value::Null);
             if message["stop_reason"].as_str() == Some("max_tokens") {
@@ -442,7 +514,7 @@ impl ApiPieceAgent {
                     messages.push(raw_assistant_msg);
                     let results: Vec<(String, String)> = calls
                         .iter()
-                        .map(|c| (c.id.clone(), serve(room, c, &mut trace)))
+                        .map(|c| (c.id.clone(), serve(room, c, &mut pending)))
                         .collect();
                     append_tool_results(&mut messages, ApiShape::Anthropic, &results);
                 }
@@ -473,7 +545,7 @@ impl ApiPieceAgent {
             usage,
             stop,
             shown_in_full,
-            conversation: self.keep(messages),
+            conversation: self.keep(messages, spent),
         }
     }
 }
@@ -488,7 +560,7 @@ impl PieceAgent for ApiPieceAgent {
     ) -> anyhow::Result<AgentRun> {
         self.preflight()?;
         let messages = vec![json!({"role": "user", "content": brief})];
-        Ok(self.drive(room, messages, limits, Vec::new()).await)
+        Ok(self.drive(room, messages, limits, Vec::new(), 0.0).await)
     }
 
     async fn follow_up(
@@ -499,12 +571,22 @@ impl PieceAgent for ApiPieceAgent {
         limits: &PieceLimits,
     ) -> anyhow::Result<AgentRun> {
         self.preflight()?;
-        let mut messages = self
+        let kept = self
             .conversation(&prior.conversation)
             .ok_or_else(|| anyhow::anyhow!("this transport holds no conversation for that run"))?;
+        let mut messages = kept.messages;
         let (text, shown) = turn.render(room);
         messages.push(json!({"role": "user", "content": text}));
-        Ok(self.drive(room, messages, limits, shown).await)
+        let run = self
+            .drive(room, messages, limits, shown, kept.spent_usd)
+            .await;
+        // The step's own handle continues the piece from here.
+        self.forget(&prior.conversation);
+        Ok(run)
+    }
+
+    fn release(&self, conversation: &ConversationHandle) {
+        self.forget(conversation);
     }
 }
 
@@ -526,9 +608,11 @@ fn refusal_text(v: &Value) -> String {
     }
 }
 
-/// The content of a reply with its tool calls left out (a cut off reply may end inside one).
+/// The content of a reply with its tool calls left out (a cut off reply may end inside one) and
+/// a thinking block cut off at the end left out too: it has no signature, and the provider
+/// refuses a turn that sends one back.
 fn without_tool_calls(content: &Value) -> Value {
-    let kept: Vec<Value> = content
+    let mut kept: Vec<Value> = content
         .as_array()
         .map(|blocks| {
             blocks
@@ -538,6 +622,11 @@ fn without_tool_calls(content: &Value) -> Value {
                 .collect()
         })
         .unwrap_or_default();
+    while kept.last().is_some_and(|b| {
+        b["type"] == "thinking" && b["signature"].as_str().is_none_or(str::is_empty)
+    }) {
+        kept.pop();
+    }
     if kept.is_empty() {
         json!([{"type": "text", "text": "(the reply was cut off)"}])
     } else {
