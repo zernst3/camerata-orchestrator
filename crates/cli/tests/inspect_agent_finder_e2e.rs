@@ -73,6 +73,10 @@ struct Reviewer {
     problems: Vec<Value>,
     stop: AgentStop,
     calls: Arc<AtomicUsize>,
+    /// Cite problem 1 to the first two rules of the checklist (and answer them `problems`).
+    cite_to_two_rules: bool,
+    /// The rules problem 1 was cited to.
+    cited_seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Reviewer {
@@ -81,6 +85,8 @@ impl Reviewer {
             problems,
             stop: AgentStop::Finished,
             calls: Arc::new(AtomicUsize::new(0)),
+            cite_to_two_rules: false,
+            cited_seen: Arc::default(),
         }
     }
 
@@ -99,14 +105,31 @@ impl Reviewer {
             .map(|r| r.text)
             .unwrap_or_default();
         let first = counts.first().map(|(p, _)| p.clone()).unwrap_or_default();
+        let ids: Vec<String> = checklist
+            .lines()
+            .filter_map(|l| l.split_once('\t').map(|(_, rest)| rest))
+            .filter_map(|l| l.strip_prefix("## "))
+            .filter_map(|l| l.split_once(": ").map(|(id, _)| id.to_string()))
+            .collect();
+        let cited: Vec<String> = if self.cite_to_two_rules {
+            ids.iter().take(2).cloned().collect()
+        } else {
+            Vec::new()
+        };
+        *self.cited_seen.lock().unwrap() = cited.clone();
+        let citations: Vec<Value> = cited.iter().map(|r| json!({"n": 1, "rule": r})).collect();
         let answers: Vec<Value> = checklist
             .lines()
             .filter_map(|l| l.split_once('\t').map(|(_, rest)| rest))
             .filter_map(|l| l.strip_prefix("## "))
             .filter_map(|l| l.split_once(": ").map(|(id, _)| id.to_string()))
-            .map(
-                |id| json!({"rule": id, "answer": "clean", "places": [{"path": first, "line": 1}]}),
-            )
+            .map(|id| {
+                if cited.contains(&id) {
+                    json!({"rule": id, "answer": "problems", "problems": [1]})
+                } else {
+                    json!({"rule": id, "answer": "clean", "places": [{"path": first, "line": 1}]})
+                }
+            })
             .collect();
         let out = |file: &str, v: &Value| ScriptStep::Write {
             path: format!("_camerata/out/{file}"),
@@ -115,7 +138,7 @@ impl Reviewer {
         steps.push(out("problems-1.json", &Value::Array(self.problems.clone())));
         steps.push(out(
             "checklist.json",
-            &json!({"citations": [], "answers": answers}),
+            &json!({"citations": citations, "answers": answers}),
         ));
         steps.push(ScriptStep::Write {
             path: "_camerata/out/card.md".to_string(),
@@ -404,6 +427,38 @@ fn an_agent_problem_whose_quote_is_not_in_the_file_is_caught_before_release() {
             "{text}"
         );
         assert!(!run.export.exists(), "nothing is written");
+    })
+}
+
+/// A problem cited to two rules is one row under the first; the second rule has a problem too, so
+/// the ledger must not read it as verified clean (the line in `onboard.rs` that adds it).
+#[test]
+#[serial_test::serial(process_env)]
+fn a_rule_a_problem_was_also_cited_to_is_never_verified_clean() {
+    on_a_big_stack(async {
+        if !typst_available("a_rule_a_problem_was_also_cited_to_is_never_verified_clean") {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let mut reviewer = Reviewer::new(vec![real_problem()]);
+        reviewer.cite_to_two_rules = true;
+        let cited = reviewer.cited_seen.clone();
+        // An internal run: the scripted model has no fix text for the cited rules, which would
+        // refuse a client package; the ledger is written either way.
+        let run = run_agent(Arc::new(reviewer), false, |_| {}).await;
+        let outcome = run.result.expect("an internal package is written");
+        let ledger = ledger_of(&outcome);
+        let cited = cited.lock().unwrap().clone();
+        assert_eq!(cited.len(), 2, "{cited:?}");
+        for rule in &cited {
+            let entry = ledger.rule(rule).expect("the cited rule is in the ledger");
+            assert!(
+                !entry.verified_clean(),
+                "{rule} has a problem cited to it and must not read as verified clean"
+            );
+        }
     })
 }
 
