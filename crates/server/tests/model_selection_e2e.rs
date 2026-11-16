@@ -725,7 +725,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         &creds_or,
         "/tmp/mcp.json",
         vec![],
-        None,
+        Some(std::path::PathBuf::from("/tmp/wt")),
         false,
         limiter.clone(),
         None,

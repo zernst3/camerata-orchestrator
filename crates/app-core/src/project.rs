@@ -478,6 +478,13 @@ pub struct Project {
     /// when [`Self::client_engagement`] is off (nothing is withheld then).
     #[serde(default)]
     pub client_tooling_opt_in: bool,
+    /// The most one governed dev run may spend on model calls, in whole US cents (kept as an
+    /// integer so the project stays comparable). A client engagement's dev run is refused unless
+    /// this is set and above zero (the dev loop calls the model directly, outside the
+    /// inspection's spend meter), and the run stops when it is reached. `None` = not set.
+    /// Absent from a project saved before the field existed.
+    #[serde(default)]
+    pub dev_run_spend_limit_cents: Option<u64>,
     /// The review tree's settings: the escalation rate and floor, the reasons that may exceed
     /// the budget, and the group reviewer's model (design D3, D5, A3). Defaults to the design
     /// values for a project written before the settings existed.
@@ -622,6 +629,13 @@ pub fn default_max_iterations() -> usize {
 }
 
 impl Project {
+    /// The dev run spend limit in dollars, or `None` when it is not set or is zero.
+    pub fn dev_run_spend_limit(&self) -> Option<f64> {
+        self.dev_run_spend_limit_cents
+            .filter(|c| *c > 0)
+            .map(|c| c as f64 / 100.0)
+    }
+
     /// Replace the BASE rules (selections / cross-repo / process) from an edit or
     /// import, while PRESERVING the architect's custom rules. This is the upsert
     /// the ADR calls out: changing/deleting/adding base rules never clobbers custom.
@@ -1008,6 +1022,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
@@ -1052,6 +1067,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections,
@@ -1151,6 +1167,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![],
@@ -1260,6 +1277,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
@@ -1306,6 +1324,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
@@ -1345,6 +1364,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
@@ -1516,6 +1536,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
@@ -1587,6 +1608,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
@@ -1680,6 +1702,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_run_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };

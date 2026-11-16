@@ -26,9 +26,19 @@
 //!    final arbiter.
 //! 3. **`shell` / `Task` are never exposed.** The tool schema list is an explicit allowlist;
 //!    any tool not in it is not callable.
-//! 4. **Worktree jail.** When `worktree` is set, `gated_write` paths that escape the jail
-//!    (via the existing gateway rules: `SEC-NO-PATH-ESCAPE-1` + the worktree prefix check)
-//!    are denied before the file is written.
+//! 4. **Worktree jail for writes.** `gated_write` paths that escape the worktree (via the
+//!    existing gateway rules: `SEC-NO-PATH-ESCAPE-1` + the symlink-resolving worktree prefix
+//!    check) are denied before the file is written.
+//! 5. **Read jail for reads.** `Read`, `Glob`, `Grep` and `LS` may read only the worktree and
+//!    the read folders the run declared. Symlinks are resolved before the check, and a root
+//!    that would open (nearly) everything (empty, relative, the filesystem root) is dropped,
+//!    so with no usable root every read is refused.
+//! 6. **Every read is logged.** Each read tool call lands in the run's [`ReadLog`] (shared with
+//!    the lead and its children) and, when wired, the governance log, with whether the jail
+//!    allowed it.
+//! 7. **Spend limit.** A run given a [`SpendMeter`] with a limit sends no request that could
+//!    pass it; the meter is shared by handle with children, and admission reserves each
+//!    request's ceiling atomically so concurrent children cannot overshoot together.
 //!
 //! # Tool-call normalization
 //!
@@ -50,9 +60,10 @@
 //!
 //! # Read tools
 //!
-//! `Read`, `Glob`, `Grep`, `LS` are executed in-process directly on the filesystem.
-//! They carry no write authority and are safe to execute without gate evaluation. The
-//! results are fed back to the model as tool-result messages.
+//! `Read`, `Glob`, `Grep`, `LS` are executed in-process directly on the filesystem, inside
+//! the read jail (invariant 5) and the read log (invariant 6). They carry no write authority,
+//! so they need no gate evaluation. The results are fed back to the model as tool-result
+//! messages.
 //!
 //! # Iteration cap
 //!
@@ -133,6 +144,325 @@ struct ToolInvocation {
     input: Value,
 }
 
+// ─── read log + driver controls ───────────────────────────────────────────────
+
+/// One read tool call: which tool, what path (relative to the jail when it was allowed, as
+/// asked when it was refused), how many bytes went back to the model, and whether it was allowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadLogEntry {
+    /// The agent that read: `agent` for the run's own driver, `delegate-child` for a child.
+    pub agent: String,
+    pub tool: String,
+    pub path: String,
+    pub bytes: usize,
+    pub allowed: bool,
+}
+
+/// The reads of one run, shared by handle: a clone writes into the same list, so a child agent
+/// or a lead given the run's handle logs into the parent run's log.
+#[derive(Debug, Clone, Default)]
+pub struct ReadLog(Arc<std::sync::Mutex<Vec<ReadLogEntry>>>);
+
+impl ReadLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&self, entry: ReadLogEntry) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(entry);
+    }
+
+    /// A copy of every read logged so far, in order.
+    pub fn entries(&self) -> Vec<ReadLogEntry> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// True when both handles write into the same list.
+    pub fn same_log(&self, other: &ReadLog) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// What a run hands to every driver it builds so they act as one run: the shared read log, the
+/// declared read folders and the governance trail.
+#[derive(Clone, Default)]
+pub struct DriverControls {
+    /// The run's read log. `None` = the driver keeps a log of its own.
+    pub read_log: Option<ReadLog>,
+    /// Folders the read tools may read besides the worktree (declared sibling repos).
+    pub read_roots: Vec<PathBuf>,
+    /// The governance trail and the run id every event is tagged with.
+    pub governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
+    /// Name for the read log's `agent` column. `None` = `agent`.
+    pub agent_label: Option<String>,
+    /// The run's spend meter. `None` = the driver has a meter of its own with no limit.
+    pub spend: Option<SpendMeter>,
+}
+
+/// Apply a run's controls to a driver.
+fn apply_controls(mut driver: ApiAgentDriver, controls: &DriverControls) -> ApiAgentDriver {
+    if let Some(log) = &controls.read_log {
+        driver = driver.with_read_log(log.clone());
+    }
+    if !controls.read_roots.is_empty() {
+        driver = driver.with_read_roots(controls.read_roots.clone());
+    }
+    if let Some((log, run_id)) = &controls.governance {
+        driver = driver.with_governance(log.clone(), run_id.clone());
+    }
+    if let Some(label) = &controls.agent_label {
+        driver = driver.with_agent_label(label.clone());
+    }
+    if let Some(meter) = &controls.spend {
+        driver = driver.with_spend_meter(meter.clone());
+    }
+    #[cfg(test)]
+    built_spy::record(&driver);
+    driver
+}
+
+/// The controls the lead gets: the run's, with the lead named in the read log.
+fn lead_controls(run: &DriverControls) -> DriverControls {
+    DriverControls {
+        agent_label: Some("lead".to_string()),
+        ..run.clone()
+    }
+}
+
+/// The controls a child agent gets from its parent's: the same read log, read folders and
+/// governance trail, so what a child reads lands in the parent run's record.
+fn child_controls_from(parent: &DriverControls) -> DriverControls {
+    DriverControls {
+        agent_label: Some("delegate-child".to_string()),
+        ..parent.clone()
+    }
+}
+
+// ─── spend meter ──────────────────────────────────────────────────────────────
+
+/// What one provider turn cost: the usage the reply reported and the dollars it was priced at
+/// from the model registry (`None` when the price or the usage is unknown).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnCost {
+    /// Who spent it: `agent`, `lead` or `delegate-child`.
+    pub agent: String,
+    pub model: String,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Default)]
+struct SpendState {
+    spent_usd: f64,
+    turns: Vec<TurnCost>,
+    /// A turn came back with a cost that could not be worked out: a limit can no longer be
+    /// enforced, so a limited run admits nothing more.
+    cost_unknown: bool,
+    /// The ceilings of the requests admitted and not yet recorded: what could still be spent by
+    /// requests in flight. Counted against the limit so concurrent drivers cannot each pass it.
+    reserved_usd: f64,
+    /// How many admitted requests are still in flight.
+    in_flight: usize,
+}
+
+#[derive(Debug)]
+struct SpendInner {
+    /// `None` = no limit (the meter still counts).
+    limit_usd: Option<f64>,
+    /// Set when a limit was asked for that is not a positive dollar figure: every request is
+    /// refused with this text rather than running unlimited.
+    invalid: Option<String>,
+    state: std::sync::Mutex<SpendState>,
+}
+
+/// The dollars a run has spent on model calls, shared by handle: a child agent given the run's
+/// meter spends against the same limit. The loop asks [`Self::admit`] before every request and
+/// reports every turn with [`Self::record`].
+#[derive(Debug, Clone)]
+pub struct SpendMeter(Arc<SpendInner>);
+
+impl SpendMeter {
+    fn from_inner(limit_usd: Option<f64>, invalid: Option<String>) -> Self {
+        Self(Arc::new(SpendInner {
+            limit_usd,
+            invalid,
+            state: std::sync::Mutex::new(SpendState::default()),
+        }))
+    }
+
+    /// A meter that counts and never stops a run.
+    pub fn unlimited() -> Self {
+        Self::from_inner(None, None)
+    }
+
+    /// A meter with a limit. `Err` unless `usd` is a positive, finite dollar amount (a limit of
+    /// zero would read as "spend nothing" and still let the first request through).
+    pub fn with_limit(usd: f64) -> Result<Self, String> {
+        if usd.is_finite() && usd > 0.0 {
+            Ok(Self::from_inner(Some(usd), None))
+        } else {
+            Err(format!(
+                "the spend limit must be a positive dollar amount (got {usd})"
+            ))
+        }
+    }
+
+    pub fn limit_usd(&self) -> Option<f64> {
+        self.0.limit_usd
+    }
+
+    /// True when both handles are the same meter (the run's, shared).
+    pub fn same_meter(&self, other: &SpendMeter) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, SpendState> {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Dollars spent so far, by every driver sharing this meter.
+    pub fn spent_usd(&self) -> f64 {
+        self.state().spent_usd
+    }
+
+    /// Every turn recorded so far, in order.
+    pub fn turns(&self) -> Vec<TurnCost> {
+        self.state().turns.clone()
+    }
+
+    /// Record one turn. A turn with no cost marks the meter unable to enforce its limit.
+    pub fn record(&self, turn: TurnCost) {
+        let mut st = self.state();
+        match turn.cost_usd {
+            Some(c) => st.spent_usd += c,
+            None => st.cost_unknown = true,
+        }
+        st.turns.push(turn);
+    }
+
+    /// May the next request be sent? `Ok` with no limit. With a limit the answer is no when the
+    /// model has no list price, when an earlier turn could not be costed, when the limit is
+    /// already spent, or when what is spent, plus what the requests still in flight could cost,
+    /// plus `ceiling_usd` (the most this one request could cost) would pass it. The very first
+    /// request of a run (nothing spent, nothing in flight) is always admitted once the model is
+    /// priced, as the inspection's meter does, so a limit smaller than one request still lets
+    /// that one finish. The text is the reason, ready for the run's result.
+    ///
+    /// Admission is atomic: the check and the reservation of this request's ceiling happen under
+    /// one lock, so drivers sharing the meter cannot each pass the limit by one request. The
+    /// reservation is released when the returned guard is dropped; the caller records the turn
+    /// first and then drops it.
+    pub fn admit(
+        &self,
+        model: &str,
+        ceiling_usd: impl FnOnce() -> Option<f64>,
+    ) -> Result<SpendReservation, String> {
+        if let Some(why) = &self.0.invalid {
+            return Err(why.clone());
+        }
+        let Some(limit) = self.0.limit_usd else {
+            return Ok(SpendReservation {
+                inner: None,
+                usd: 0.0,
+            });
+        };
+        if !crate::llm::is_priced(model) {
+            return Err(format!(
+                "the spend limit of ${limit:.2} cannot be enforced: `{model}` has no price in the \
+                 model registry, so what its requests cost cannot be counted"
+            ));
+        }
+        let mut st = self.state();
+        if st.cost_unknown {
+            return Err(format!(
+                "the spend limit of ${limit:.2} cannot be enforced: the cost of a turn could not be \
+                 counted, so the run stopped"
+            ));
+        }
+        let turns = st.turns.len();
+        if st.spent_usd >= limit {
+            return Err(format!(
+                "the spend limit of ${limit:.2} was reached (${:.2} spent over {turns} turns)",
+                st.spent_usd
+            ));
+        }
+        let ceiling = ceiling_usd();
+        let reserve = if st.spent_usd > 0.0 || st.in_flight > 0 {
+            match ceiling {
+                Some(c) if st.spent_usd + st.reserved_usd + c > limit => {
+                    return Err(format!(
+                        "the next request could cost up to ${c:.2}, which would pass the spend \
+                         limit of ${limit:.2} (${:.2} spent over {turns} turns, ${:.2} reserved \
+                         for {} requests in flight)",
+                        st.spent_usd, st.reserved_usd, st.in_flight
+                    ));
+                }
+                Some(c) => c,
+                None => {
+                    return Err(format!(
+                        "the spend limit of ${limit:.2} cannot be enforced: the next request \
+                         cannot be priced"
+                    ));
+                }
+            }
+        } else {
+            // The first request of the run: admitted, and its ceiling held back so a request
+            // that starts while it is in flight is checked against it.
+            ceiling.unwrap_or(0.0)
+        };
+        st.reserved_usd += reserve;
+        st.in_flight += 1;
+        drop(st);
+        Ok(SpendReservation {
+            inner: Some(self.0.clone()),
+            usd: reserve,
+        })
+    }
+}
+
+/// The ceiling of one admitted request, held against the spend limit until the request's turn is
+/// recorded. Dropping it releases the hold, so a request that fails or is refused part-way never
+/// leaves the limit reserved.
+#[derive(Debug)]
+#[must_use = "dropping the reservation releases it; hold it until the turn is recorded"]
+pub struct SpendReservation {
+    /// `None` for an unlimited meter, which reserves nothing.
+    inner: Option<Arc<SpendInner>>,
+    usd: f64,
+}
+
+impl Drop for SpendReservation {
+    fn drop(&mut self) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        let mut st = inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        st.reserved_usd = (st.reserved_usd - self.usd).max(0.0);
+        st.in_flight = st.in_flight.saturating_sub(1);
+    }
+}
+
+impl Default for SpendMeter {
+    fn default() -> Self {
+        Self::unlimited()
+    }
+}
+
 // ─── ApiAgentDriver ──────────────────────────────────────────────────────────
 
 /// A native, provider-agnostic agentic driver.
@@ -141,16 +471,18 @@ struct ToolInvocation {
 /// execute each through the gateway library → feed results back → repeat.
 ///
 /// Constructed by [`ApiAgentDriver::new`]. Use [`ApiAgentDriver::as_orchestrator`] and
-/// [`ApiAgentDriver::with_worktree`] to configure the mode and jail before calling `run`.
+/// the other `with_*` builders to configure it before calling `run`. The worktree is a
+/// constructor argument, so a driver that can write cannot exist without one.
 #[derive(Clone)]
 pub struct ApiAgentDriver {
     /// The `LlmPort` that makes the provider API calls.
     completer: Arc<dyn LlmPort>,
     /// Model id to request (empty = completer's default).
     pub model: String,
-    /// Optional worktree the agent's writes are jailed to. Enforced by the gateway rules
-    /// (`SEC-NO-PATH-ESCAPE-1` + worktree-prefix check below) on every `gated_write`.
-    pub worktree: Option<PathBuf>,
+    /// The worktree the agent's writes are jailed to. Enforced by the gateway rules
+    /// (`SEC-NO-PATH-ESCAPE-1` + worktree-prefix check below) on every `gated_write`, and the
+    /// first place the read tools may read. Private so nothing swaps it after construction.
+    worktree: PathBuf,
     /// When `true`, `delegate` and `fan_out` tool schemas are included in the API request.
     /// Default `false`: workers never get these, enforcing depth-1.
     pub orchestrator: bool,
@@ -202,6 +534,14 @@ pub struct ApiAgentDriver {
     /// The run id every governance event this driver records is tagged with. `None` unless
     /// [`Self::with_governance`] was called.
     run_id: Option<String>,
+    /// Extra folders the read tools may read besides the worktree (declared sibling repos).
+    read_roots: Vec<PathBuf>,
+    /// Every read tool call this driver makes (and, by shared handle, its children's).
+    read_log: ReadLog,
+    /// Who the read log names as the reader.
+    agent_label: String,
+    /// What this driver has spent on model calls, and the limit it stops at.
+    spend: SpendMeter,
 }
 
 impl ApiAgentDriver {
@@ -210,7 +550,11 @@ impl ApiAgentDriver {
     /// If `completer` is an [`crate::llm::OpenRouterCompleter`], its `session_id` is
     /// inherited here so every direct HTTP call (the tool-schema path) uses the same
     /// session id as bare-LLM calls made through the `LlmPort` trait.
-    pub fn new(completer: Arc<dyn LlmPort>, model: impl Into<String>) -> Self {
+    pub fn new(
+        completer: Arc<dyn LlmPort>,
+        model: impl Into<String>,
+        worktree: impl Into<PathBuf>,
+    ) -> Self {
         // Inherit the session id from an OpenRouterCompleter when available; fall back to
         // a stable per-instance token for other completer types (no-op for them).
         let session_id = completer
@@ -230,7 +574,7 @@ impl ApiAgentDriver {
         Self {
             completer,
             model: model.into(),
-            worktree: None,
+            worktree: worktree.into(),
             orchestrator: false,
             rule_subset: Vec::new(),
             session_id,
@@ -241,7 +585,49 @@ impl ApiAgentDriver {
             on_activity: None,
             governance_log: None,
             run_id: None,
+            read_roots: Vec::new(),
+            read_log: ReadLog::new(),
+            agent_label: "agent".to_string(),
+            spend: SpendMeter::unlimited(),
         }
+    }
+
+    /// Stop the run once it has spent `usd` dollars (builder form). A figure that is not a
+    /// positive dollar amount makes the run refuse to start rather than run unlimited.
+    pub fn with_spend_limit(mut self, usd: f64) -> Self {
+        self.spend = SpendMeter::with_limit(usd).unwrap_or_else(|why| {
+            SpendMeter::from_inner(None, Some(format!("{why}; nothing was sent")))
+        });
+        self
+    }
+
+    /// Spend against the run's shared meter (builder form), so a child counts against its
+    /// parent's limit.
+    pub fn with_spend_meter(mut self, meter: SpendMeter) -> Self {
+        self.spend = meter;
+        self
+    }
+
+    /// The handle to this driver's spend meter.
+    pub fn spend_meter(&self) -> SpendMeter {
+        self.spend.clone()
+    }
+
+    /// Log reads into `log` (the run's shared handle) instead of a log of this driver's own.
+    pub fn with_read_log(mut self, log: ReadLog) -> Self {
+        self.read_log = log;
+        self
+    }
+
+    /// The handle to this driver's read log.
+    pub fn read_log(&self) -> ReadLog {
+        self.read_log.clone()
+    }
+
+    /// Name this driver in the read log (`delegate-child` for a child).
+    pub fn with_agent_label(mut self, label: impl Into<String>) -> Self {
+        self.agent_label = label.into();
+        self
     }
 
     /// Wire the LIFECYCLE-7 liveness heartbeat. Builder form. The callback fires once per
@@ -311,10 +697,9 @@ impl ApiAgentDriver {
         self
     }
 
-    /// Bind this driver to a worktree: writes are jailed to that directory.
-    /// Builder form.
-    pub fn with_worktree(mut self, worktree: impl Into<PathBuf>) -> Self {
-        self.worktree = Some(worktree.into());
+    /// Declare extra folders the read tools may read (sibling repos), beside the worktree.
+    pub fn with_read_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.read_roots = roots;
         self
     }
 
@@ -407,6 +792,28 @@ async fn run_loop(
         }
         iteration += 1;
 
+        // The spend limit: asked BEFORE every request, so a run that has spent its limit (or
+        // whose next request could pass it) sends nothing more.
+        // The reservation it returns holds this request's ceiling against the limit until the
+        // turn is recorded below (atomic admission: concurrent children share the meter).
+        let reservation = match driver.spend.admit(&driver.model, || {
+            request_ceiling_usd(
+                &driver.model,
+                system_prompt.as_deref(),
+                &messages,
+                &tool_schemas,
+            )
+        }) {
+            Ok(reservation) => reservation,
+            Err(reason) => {
+                final_result = format!(
+                    "INCOMPLETE: {reason}; the run stopped before turn {iteration}, so the work \
+                     may be unfinished."
+                );
+                break;
+            }
+        };
+
         // LIFECYCLE-7: beat the liveness heartbeat once per turn. The API loop has no
         // per-line output stream (unlike the CLI driver), so a multi-turn run that is
         // healthily grinding through provider calls would otherwise look idle. Firing here
@@ -431,15 +838,39 @@ async fn run_loop(
             // keeps the cost and the assistant output so far, instead of discarding it all.
             Err(e) if crate::llm::is_refusal(&e) => {
                 // The refused call was billed too: its cost belongs in the run's total.
-                if let Some(c) = crate::llm::refusal_billed(&e).and_then(|b| b.cost_usd) {
-                    total_cost_usd += c;
+                if let Some(billed) = crate::llm::refusal_billed(&e) {
+                    let cost = price_turn(driver, billed);
+                    driver.spend.record(turn_cost(driver, billed, cost));
+                    if let Some(c) = cost {
+                        total_cost_usd += c;
+                    }
                 }
                 final_result = refused_result(iteration, &messages);
                 break;
             }
             Err(e) => {
+                // A call that timed out may still have been billed, and nothing came back to
+                // price it from: it counts at its cost cap, the request ceiling. A failure that
+                // never reached the model (a 400, a refused connection) was not billed.
+                if is_timeout_error(&e) {
+                    let ceiling = request_ceiling_usd(
+                        &driver.model,
+                        system_prompt.as_deref(),
+                        &messages,
+                        &tool_schemas,
+                    );
+                    driver.spend.record(TurnCost {
+                        agent: driver.agent_label.clone(),
+                        model: driver.model.clone(),
+                        input_tokens: None,
+                        output_tokens: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cost_usd: ceiling,
+                    });
+                }
                 return Err(e)
-                    .with_context(|| format!("provider call failed on iteration {iteration}"))
+                    .with_context(|| format!("provider call failed on iteration {iteration}"));
             }
         };
         // Cache-bust is one-shot: reset after use so subsequent turns use cached responses.
@@ -461,8 +892,15 @@ async fn run_loop(
             );
         }
 
-        // Accumulate cost.
-        if let Some(c) = resp.cost_usd {
+        // Price the turn (the provider's own figure when it gave one, else the model
+        // registry's list price for the reported tokens), record it against the run's meter,
+        // and add it to this driver's total.
+        let turn = price_turn(driver, &resp);
+        driver.spend.record(turn_cost(driver, &resp, turn));
+        // Recorded: the real cost now stands where the reserved ceiling was. Released before
+        // the tools run, so a long delegate does not hold the limit against its own children.
+        drop(reservation);
+        if let Some(c) = turn {
             total_cost_usd += c;
         }
 
@@ -531,6 +969,99 @@ async fn run_loop(
         denials,
     })
 }
+
+/// What one turn cost, in dollars: the provider's own figure when the reply carried one, else
+/// the model registry's list price for the tokens it reported. `None` when the tokens or the
+/// price are unknown.
+///
+/// The Anthropic reply's `input_tokens` counts only the uncached input, so the cache read and
+/// cache write tokens are added back before pricing (the arithmetic wants the whole prompt).
+fn price_turn(driver: &ApiAgentDriver, resp: &LlmResponse) -> Option<f64> {
+    if let Some(c) = resp.cost_usd {
+        return Some(c);
+    }
+    let input = resp.input_tokens?.checked_add(
+        resp.cache_read_input_tokens
+            .saturating_add(resp.cache_creation_input_tokens),
+    )?;
+    let usage = crate::llm::CallUsage {
+        input: Some(input),
+        output: Some(resp.output_tokens?),
+        cache_read: resp.cache_read_input_tokens,
+        cache_creation: resp.cache_creation_input_tokens,
+        cache_creation_1h: None,
+    };
+    let basis = crate::llm::PriceBasis::realtime();
+    if let Some(c) = crate::llm::usage_cost_usd(&driver.model, &usage, basis)
+        .or_else(|| crate::llm::usage_cost_usd(&resp.model, &usage, basis))
+    {
+        return Some(c);
+    }
+    // An OpenRouter model: its list price is in the registry the completer was built with.
+    let or = driver
+        .completer
+        .as_any()
+        .downcast_ref::<crate::llm::OpenRouterCompleter>()?;
+    let entry = or
+        .registry_for_agent()
+        .all_entries()
+        .into_iter()
+        .find(|e| e.id == driver.model && e.price_known)?;
+    Some(
+        usage.input? as f64 * entry.price_in / 1_000_000.0
+            + usage.output? as f64 * entry.price_out / 1_000_000.0,
+    )
+}
+
+fn turn_cost(driver: &ApiAgentDriver, resp: &LlmResponse, cost_usd: Option<f64>) -> TurnCost {
+    TurnCost {
+        agent: driver.agent_label.clone(),
+        model: driver.model.clone(),
+        input_tokens: resp.input_tokens,
+        output_tokens: resp.output_tokens,
+        cache_read_input_tokens: resp.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.cache_creation_input_tokens,
+        cost_usd,
+    }
+}
+
+/// The most one request could cost: the whole conversation at the full input rate (about three
+/// bytes a token, on the high side) plus the output cap at the output rate. `None` when the
+/// model has no list price. The loop adds this to what is already spent before it sends.
+fn request_ceiling_usd(
+    model: &str,
+    system: Option<&str>,
+    messages: &[Value],
+    tool_schemas: &[Value],
+) -> Option<f64> {
+    let bytes = system.map_or(0, str::len)
+        + messages.iter().map(|m| m.to_string().len()).sum::<usize>()
+        + tool_schemas
+            .iter()
+            .map(|t| t.to_string().len())
+            .sum::<usize>();
+    let usage = crate::llm::CallUsage {
+        input: Some(bytes as u64 / 3 + 1),
+        output: Some(AGENT_MAX_OUTPUT_TOKENS),
+        cache_read: 0,
+        cache_creation: 0,
+        cache_creation_1h: None,
+    };
+    crate::llm::usage_cost_usd(model, &usage, crate::llm::PriceBasis::realtime())
+}
+
+/// True when the call failed by timing out: a typed `reqwest` timeout anywhere in the chain, or
+/// the text of one (the OpenRouter path flattens the error to a string).
+fn is_timeout_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+            || c.to_string().to_ascii_lowercase().contains("timed out")
+    })
+}
+
+/// The output cap both request bodies carry (`max_tokens`).
+const AGENT_MAX_OUTPUT_TOKENS: u64 = 8192;
 
 /// The outcome text for a run the model refused part-way: it starts with `INCOMPLETE:` (the
 /// marker delegates and fan-out already read as "this work did not finish", so a parent never
@@ -787,7 +1318,7 @@ fn build_openrouter_agent_body(
     let mut body = serde_json::json!({
         "model": model,
         "messages": full_messages,
-        "max_tokens": 8192,
+        "max_tokens": AGENT_MAX_OUTPUT_TOKENS,
         // Sticky routing: same backend slot across all turns so the KV cache stays warm.
         "session_id": session_id,
     });
@@ -905,7 +1436,9 @@ async fn call_openrouter_with_tools(
         text: raw_json,
         model: model_returned,
         backend: "openrouter/api/agentic".to_string(),
-        cost_usd: None,
+        // OpenRouter reports the dollars a call was billed; absent, the loop prices the tokens
+        // from the registry.
+        cost_usd: v["usage"]["cost"].as_f64(),
         input_tokens,
         output_tokens,
         cache_read_input_tokens: 0,
@@ -1020,7 +1553,7 @@ fn build_anthropic_request_body(
 
     let mut body = serde_json::json!({
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": AGENT_MAX_OUTPUT_TOKENS,
         "messages": shaped_messages,
     });
 
@@ -1295,10 +1828,20 @@ async fn execute_tool(
             }
             (text, denial.map(|d| d.message))
         }
-        TOOL_READ => (execute_read(inv, driver.worktree.as_deref()), None),
-        TOOL_GLOB => (execute_glob(inv, driver.worktree.as_deref()), None),
-        TOOL_GREP => (execute_grep(inv, driver.worktree.as_deref()), None),
-        TOOL_LS => (execute_ls(inv, driver.worktree.as_deref()), None),
+        TOOL_READ | TOOL_GLOB | TOOL_GREP | TOOL_LS => {
+            let jail = read_jail(driver);
+            let result = match inv.name.as_str() {
+                TOOL_READ => execute_read(inv, &jail),
+                TOOL_GLOB => execute_glob(inv, &jail),
+                TOOL_GREP => execute_grep(inv, &jail),
+                _ => execute_ls(inv, &jail),
+            };
+            // `Err` is a refusal by the jail; `Ok` is a read that ran (whatever its text says).
+            let allowed = result.is_ok();
+            let text = result.unwrap_or_else(|refusal| refusal);
+            record_read(driver, &jail, inv, &text, allowed).await;
+            (text, None)
+        }
         TOOL_DELEGATE if driver.orchestrator => {
             // Native orchestrator delegation. The gate is NOT reimplemented here: we
             // dispatch through the SAME gated `run_delegated` primitive the CLI
@@ -1353,6 +1896,77 @@ async fn record_agent_step(driver: &ApiAgentDriver, tool_name: &str) {
         .with_reason(format!("called tool `{tool_name}`"));
     if let Err(e) = log.record(event).await {
         tracing::warn!(error = %e, run_id = %run_id, "failed to record agent_step governance event");
+    }
+}
+
+/// The path (or pattern) a read tool call asked for, as the model wrote it.
+fn requested_read_path(inv: &ToolInvocation) -> String {
+    let input = &inv.input;
+    let first = |keys: &[&str], default: &str| {
+        keys.iter()
+            .find_map(|k| input[*k].as_str())
+            .unwrap_or(default)
+            .to_string()
+    };
+    match inv.name.as_str() {
+        TOOL_READ => first(&["file_path", "path"], ""),
+        TOOL_GLOB => first(&["pattern", "glob"], ""),
+        _ => first(&["path", "directory"], "."),
+    }
+}
+
+/// Log one read tool call: into the run's read log, and into the governance log when one is
+/// wired (a refused read is a warning). The path is relative to the worktree when the read was
+/// allowed and as asked when it was refused, so the trail never claims a place the read did not
+/// reach.
+async fn record_read(
+    driver: &ApiAgentDriver,
+    jail: &ReadJail,
+    inv: &ToolInvocation,
+    text: &str,
+    allowed: bool,
+) {
+    let asked = requested_read_path(inv);
+    let path = if allowed {
+        jail.logged_path(&asked)
+    } else {
+        asked
+    };
+    let entry = ReadLogEntry {
+        agent: driver.agent_label.clone(),
+        tool: inv.name.clone(),
+        path,
+        bytes: text.len(),
+        allowed,
+    };
+    driver.read_log.record(entry.clone());
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref()) else {
+        return;
+    };
+    let reason = format!(
+        "{} {} ({} bytes, {})",
+        entry.tool,
+        entry.path,
+        entry.bytes,
+        if allowed { "allowed" } else { "refused" }
+    );
+    let detail = serde_json::json!({
+        "agent": entry.agent,
+        "tool": entry.tool,
+        "path": entry.path,
+        "bytes": entry.bytes,
+        "allowed": allowed,
+    })
+    .to_string();
+    let event = if allowed {
+        camerata_persistence::GovernanceEvent::info(run_id.clone(), "read", "agent")
+    } else {
+        camerata_persistence::GovernanceEvent::warn(run_id.clone(), "read", "agent")
+    }
+    .with_reason(reason)
+    .with_detail(detail);
+    if let Err(e) = log.record(event).await {
+        tracing::warn!(error = %e, run_id = %run_id, "failed to record read governance event");
     }
 }
 
@@ -1494,7 +2108,7 @@ async fn execute_fan_out(
 /// 1. Extract `path` + `content` from `input`.
 /// 2. Enforce size guard.
 /// 3. Evaluate against the role's rule subset via `evaluate_call`.
-/// 4. Enforce worktree jail (path must be under `driver.worktree` when set).
+/// 4. Enforce worktree jail (path must be under `driver.worktree`).
 /// 5. If everything passes: write the file, returning an allow message.
 /// 6. If denied: return the denial reason without writing.
 ///
@@ -1576,7 +2190,8 @@ fn execute_gated_write(
     // The jail check RETURNS the resolved absolute write path, so the CHECK and the
     // write EFFECT are the same path: no `wt.join(trim)` path-doubling (GATE-F3) and no
     // check-here/write-there divergence (GATE-F4).
-    let write_path = if let Some(wt) = &driver.worktree {
+    let write_path = {
+        let wt = &driver.worktree;
         // The jail root must still exist: a write creates missing parents, so into a worktree
         // whose checkout was deleted mid-run it would quietly recreate the deleted folder.
         if !wt.is_dir() {
@@ -1605,8 +2220,6 @@ fn execute_gated_write(
                 return (msg, Some(denial));
             }
         }
-    } else {
-        PathBuf::from(&path)
     };
 
     if let Some(parent) = write_path.parent() {
@@ -1705,51 +2318,178 @@ fn assert_in_worktree(worktree: &Path, path: &str) -> anyhow::Result<PathBuf> {
     Ok(target)
 }
 
+// ─── read jail ────────────────────────────────────────────────────────────────
+
+/// The places the read tools may read: the worktree plus the read folders the run declared.
+/// Every root is canonical (symlinks resolved), so a prefix check against it cannot be fooled
+/// by a link. With no root at all, every read is refused.
+struct ReadJail {
+    /// Relative paths resolve against this (the worktree).
+    base: Option<PathBuf>,
+    roots: Vec<PathBuf>,
+}
+
+/// A canonical folder the jail may open, or `None` when the folder would open (nearly)
+/// everything: an empty path, a path that is not absolute once symlinks are resolved, or one with
+/// no parent (the filesystem root, which a link such as `x -> /` resolves to). An empty path in
+/// particular is a prefix of every path, so it must never become a root.
+fn usable_jail_root(p: &Path) -> Option<PathBuf> {
+    if p.as_os_str().is_empty() {
+        return None;
+    }
+    let canonical = canonicalize_existing_prefix(p);
+    if canonical.as_os_str().is_empty() || !canonical.is_absolute() || canonical.parent().is_none()
+    {
+        return None;
+    }
+    Some(canonical)
+}
+
+fn read_jail(driver: &ApiAgentDriver) -> ReadJail {
+    let worktree = usable_jail_root(&driver.worktree);
+    // Relative paths resolve against the worktree only while it is a usable root.
+    let base = worktree.as_ref().map(|_| driver.worktree.clone());
+    let roots = worktree
+        .into_iter()
+        .chain(driver.read_roots.iter().filter_map(|r| usable_jail_root(r)))
+        .collect();
+    ReadJail { base, roots }
+}
+
+impl ReadJail {
+    fn refusal(&self, raw: &str, why: &str) -> String {
+        format!(
+            "DENIED: `{raw}` {why}. Reads are limited to the worktree and the read folders \
+             declared for this run. Nothing was read."
+        )
+    }
+
+    /// The path to put in the read log for an allowed read: relative to the worktree when it is
+    /// under it, else the full path inside the declared read folder.
+    fn logged_path(&self, raw: &str) -> String {
+        let Ok(canonical) = self.resolve(raw) else {
+            return raw.to_string();
+        };
+        let relative = self
+            .roots
+            .first()
+            .filter(|_| self.base.is_some())
+            .and_then(|wt| canonical.strip_prefix(wt).ok());
+        match relative {
+            Some(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+            Some(rel) => rel.display().to_string(),
+            None => canonical.display().to_string(),
+        }
+    }
+
+    fn contains(&self, canonical: &Path) -> bool {
+        self.roots.iter().any(|r| canonical.starts_with(r))
+    }
+
+    /// Resolve `raw` to a canonical path inside the jail, or the refusal text the model sees.
+    /// Refuses `..`, absolute paths outside every root and symlinks that lead out. The path
+    /// need not exist (a missing file inside the jail is a plain not-found, not a refusal).
+    fn resolve(&self, raw: &str) -> Result<PathBuf, String> {
+        let p = Path::new(raw);
+        if p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(self.refusal(raw, "contains `..`, which can leave the jail"));
+        }
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else if let Some(base) = &self.base {
+            base.join(p)
+        } else {
+            return Err(self.refusal(raw, "cannot be resolved because no worktree is set"));
+        };
+        let canonical = canonicalize_existing_prefix(&abs);
+        if self.contains(&canonical) {
+            Ok(canonical)
+        } else {
+            Err(self.refusal(raw, "is outside the places this run may read"))
+        }
+    }
+}
+
 // ─── read-tool implementations ────────────────────────────────────────────────
 
 /// Execute a `Read` tool call: read the content of a file.
 ///
 /// Expected input: `{file_path: "..."}` (Claude Code convention).
-fn execute_read(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
+fn execute_read(inv: &ToolInvocation, jail: &ReadJail) -> Result<String, String> {
     let raw_path = match inv.input["file_path"]
         .as_str()
         .or_else(|| inv.input["path"].as_str())
     {
         Some(p) => p,
-        None => return "ERROR: Read requires `file_path` in input".to_string(),
+        None => return Ok("ERROR: Read requires `file_path` in input".to_string()),
     };
-    let resolved = resolve_path(raw_path, worktree);
-    match std::fs::read_to_string(&resolved) {
+    let resolved = jail.resolve(raw_path)?;
+    Ok(match std::fs::read_to_string(&resolved) {
         Ok(content) => truncate_output(content, MAX_READ_OUTPUT_BYTES),
         Err(e) => format!("ERROR reading `{raw_path}`: {e}"),
+    })
+}
+
+/// The part of a glob pattern before its first wildcard, cut back to a whole folder.
+fn glob_static_prefix(pattern: &str) -> &str {
+    let end = pattern.find(['*', '?', '[', '{']).unwrap_or(pattern.len());
+    let head = &pattern[..end];
+    if end == pattern.len() {
+        return head;
+    }
+    match head.rfind('/') {
+        Some(i) => &head[..=i],
+        None => "",
     }
 }
 
 /// Execute a `Glob` tool call: list files matching a glob pattern.
 ///
 /// Expected input: `{pattern: "..."}` or `{glob: "..."}`.
-fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
+fn execute_glob(inv: &ToolInvocation, jail: &ReadJail) -> Result<String, String> {
     let pattern = match inv.input["pattern"]
         .as_str()
         .or_else(|| inv.input["glob"].as_str())
     {
         Some(p) => p,
-        None => return "ERROR: Glob requires `pattern` in input".to_string(),
+        None => return Ok("ERROR: Glob requires `pattern` in input".to_string()),
     };
+    if Path::new(pattern)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(jail.refusal(pattern, "contains `..`, which can leave the jail"));
+    }
 
-    let base = worktree
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
     let full_pattern = if pattern.starts_with('/') {
+        // An absolute pattern is allowed only when the folder it starts from is in the jail.
+        let prefix = glob_static_prefix(pattern);
+        if prefix.is_empty() || jail.resolve(prefix).is_err() {
+            return Err(jail.refusal(pattern, "starts outside the places this run may read"));
+        }
         pattern.to_string()
     } else {
-        format!("{}/{}", base.display(), pattern)
+        match &jail.base {
+            Some(base) => format!(
+                "{}/{}",
+                glob::Pattern::escape(&base.display().to_string()),
+                pattern
+            ),
+            None => {
+                return Err(jail.refusal(pattern, "cannot be resolved because no worktree is set"))
+            }
+        }
     };
 
-    match glob::glob(&full_pattern) {
+    Ok(match glob::glob(&full_pattern) {
         Ok(paths) => {
+            // Every match is checked again after symlinks are resolved: a link inside the
+            // jail can lead a pattern that started inside it out of it.
             let entries: Vec<String> = paths
                 .filter_map(|p| p.ok())
+                .filter(|p| jail.contains(&canonicalize_existing_prefix(p)))
                 .map(|p| p.display().to_string())
                 .collect();
             if entries.is_empty() {
@@ -1759,46 +2499,56 @@ fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
             }
         }
         Err(e) => format!("ERROR: Glob pattern error `{pattern}`: {e}"),
-    }
+    })
 }
 
 /// Execute a `Grep` tool call: search files for a pattern.
 ///
 /// Expected input: `{pattern: "...", path: "..."}` or `{regex: "...", directory: "..."}`.
-fn execute_grep(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
+fn execute_grep(inv: &ToolInvocation, jail: &ReadJail) -> Result<String, String> {
     let search_pattern = match inv.input["pattern"]
         .as_str()
         .or_else(|| inv.input["regex"].as_str())
     {
         Some(p) => p,
-        None => return "ERROR: Grep requires `pattern` in input".to_string(),
+        None => return Ok("ERROR: Grep requires `pattern` in input".to_string()),
     };
 
     let search_dir = inv.input["path"]
         .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
-    let resolved_dir = resolve_path(search_dir, worktree);
+    let resolved_dir = jail.resolve(search_dir)?;
 
     // Compile the regex.
     let re = match regex::Regex::new(search_pattern) {
         Ok(r) => r,
-        Err(e) => return format!("ERROR: invalid grep pattern `{search_pattern}`: {e}"),
+        Err(e) => {
+            return Ok(format!(
+                "ERROR: invalid grep pattern `{search_pattern}`: {e}"
+            ))
+        }
     };
 
     let mut findings: Vec<String> = Vec::new();
-    grep_dir(&resolved_dir, &re, &mut findings, 0);
-    if findings.is_empty() {
+    if resolved_dir.is_file() {
+        // The schema says `path` is a file or a directory: a file is searched on its own.
+        grep_file(&resolved_dir, &re, &mut findings);
+    } else {
+        grep_dir(&resolved_dir, &re, &mut findings, 0);
+    }
+    Ok(if findings.is_empty() {
         format!("No matches for `{search_pattern}` in `{search_dir}`")
     } else {
         truncate_output(findings.join("\n"), MAX_READ_OUTPUT_BYTES)
-    }
+    })
 }
 
-/// Recursive grep helper: walks `dir` and collects `file:line:text` entries.
+/// Recursive grep helper: walks `dir` and collects `file:line:text` entries. Symlinks are
+/// never followed (a link committed in a repository can lead out of the jail).
 fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) {
     if depth > 8 {
-        return; // depth limit to avoid symlink loops
+        return; // depth limit
     }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -1814,19 +2564,35 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
         {
             continue;
         }
-        if path.is_dir() {
+        // `file_type` does not follow a symlink, so a link reads as a link here.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             grep_dir(&path, re, out, depth + 1);
-        } else if path.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                for (lineno, line) in text.lines().enumerate() {
-                    if re.is_match(line) {
-                        out.push(format!("{}:{}:{}", path.display(), lineno + 1, line));
-                        if out.len() > 2000 {
-                            // Safety cap: avoid unbounded output.
-                            out.push("... (truncated at 2000 matches)".to_string());
-                            return;
-                        }
-                    }
+        } else if kind.is_file() {
+            grep_file(&path, re, out);
+            if out.len() > 2000 {
+                return;
+            }
+        }
+    }
+}
+
+/// Collect the `file:line:text` entries of one file's matching lines, capped as the directory
+/// walk is.
+fn grep_file(path: &Path, re: &regex::Regex, out: &mut Vec<String>) {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        for (lineno, line) in text.lines().enumerate() {
+            if re.is_match(line) {
+                out.push(format!("{}:{}:{}", path.display(), lineno + 1, line));
+                if out.len() > 2000 {
+                    // Safety cap: avoid unbounded output.
+                    out.push("... (truncated at 2000 matches)".to_string());
+                    return;
                 }
             }
         }
@@ -1836,13 +2602,13 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
 /// Execute an `LS` tool call: list directory contents.
 ///
 /// Expected input: `{path: "..."}` or `{directory: "..."}`.
-fn execute_ls(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
+fn execute_ls(inv: &ToolInvocation, jail: &ReadJail) -> Result<String, String> {
     let dir_path = inv.input["path"]
         .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
-    let resolved = resolve_path(dir_path, worktree);
-    match std::fs::read_dir(&resolved) {
+    let resolved = jail.resolve(dir_path)?;
+    Ok(match std::fs::read_dir(&resolved) {
         Ok(entries) => {
             let mut names: Vec<String> = entries
                 .flatten()
@@ -1859,29 +2625,23 @@ fn execute_ls(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
             truncate_output(names.join("\n"), MAX_READ_OUTPUT_BYTES)
         }
         Err(e) => format!("ERROR listing `{dir_path}`: {e}"),
-    }
+    })
 }
 
 // ─── path helpers ─────────────────────────────────────────────────────────────
-
-/// Resolve a path relative to `worktree` (if set) or the current directory.
-fn resolve_path(raw: &str, worktree: Option<&Path>) -> PathBuf {
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else if let Some(wt) = worktree {
-        wt.join(raw)
-    } else {
-        PathBuf::from(raw)
-    }
-}
 
 /// Truncate a string to at most `max_bytes`, appending a note when truncated.
 fn truncate_output(s: String, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         s
     } else {
-        let truncated = &s[..max_bytes];
+        // Back up to a character boundary: a byte budget can land inside a multi-byte
+        // character, and slicing there would panic and kill the run.
+        let mut cut = max_bytes;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let truncated = &s[..cut];
         format!("{truncated}\n... (output truncated at {max_bytes} bytes)")
     }
 }
@@ -2006,10 +2766,17 @@ fn build_tool_schemas(orchestrator: bool) -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "role": { "type": "string" },
-                        "task": { "type": "string" }
+                        "subtask": {
+                            "type": "string",
+                            "description": "The work for the child agent to do."
+                        },
+                        "tier": {
+                            "type": "string",
+                            "description": "Which model tier runs it: fast, balanced (default) or strongest."
+                        }
                     },
-                    "required": ["role", "task"]
+                    "required": ["subtask"],
+                    "additionalProperties": false
                 }
             }
         }));
@@ -2101,7 +2868,9 @@ fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
         camerata_app_core::kernel_for(model)
     };
     let paths = if role.allowed_paths.is_empty() {
-        "<unrestricted>".to_string()
+        // The jail limits every read and write to the worktree (and, for reads, the declared
+        // read folders), so "no list" means the worktree and nothing else.
+        "only the worktree".to_string()
     } else {
         role.allowed_paths.join(", ")
     };
@@ -2154,6 +2923,15 @@ impl LlmPort for AnthropicNoopCompleter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+}
+
+/// The refusal for an in-process loop asked for without a worktree: it offers a write tool, and
+/// with no worktree the write would go to whatever path the model named.
+fn no_worktree_refusal(model_id: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the in-process agent loop for `{model_id}` writes files, so it needs a worktree to \
+         keep those writes inside; none was given. Nothing was started."
+    )
 }
 
 /// Resolve the compliance-safety [`crate::llm::BackendResolution`] for the `claude` provider
@@ -2216,26 +2994,27 @@ fn build_claude_driver(
     governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
     // The calling project's (or chat's) resolved backend setting. See the fn doc.
     backend: crate::llm::ProjectBackend,
+    // The run's shared read log, declared read folders and governance trail.
+    controls: &DriverControls,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let key = resolve_claude_backend(creds, backend)?;
     if let Some(key) = key {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
         // gated_write-only, worktree-jailed, delegate/fan_out only when orchestrator=true.
-        let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id)
+        // The loop offers `gated_write`; it cannot exist without a worktree to jail it to.
+        let worktree = worktree.ok_or_else(|| no_worktree_refusal(model_id))?;
+        let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id, worktree)
             .with_rule_subset(rule_subset)
             .as_orchestrator(orchestrator)
             .with_shape(ApiShape::Anthropic)
             .with_anthropic_api_key(key);
-        if let Some(wt) = worktree {
-            driver = driver.with_worktree(wt);
-        }
         if let Some(cb) = on_activity {
             driver = driver.with_on_activity(cb);
         }
         if let Some((log, run_id)) = governance {
             driver = driver.with_governance(log, run_id);
         }
-        Ok(Arc::new(driver))
+        Ok(Arc::new(apply_controls(driver, controls)))
     } else {
         let mut cli_driver = camerata_agent::ClaudeCliDriver::new(mcp_config_path)
             .as_orchestrator(orchestrator)
@@ -2281,6 +3060,44 @@ fn build_claude_driver(
 pub fn build_agent_driver(
     model_id: &str,
     registry: &crate::model_registry::ModelRegistry,
+    policy: &crate::provider_policy::ProviderPolicy,
+    creds: &dyn crate::credentials::CredentialStore,
+    mcp_config_path: &str,
+    rule_subset: Vec<RuleId>,
+    worktree: Option<PathBuf>,
+    orchestrator: bool,
+    limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+    run_session_id: Option<&str>,
+    escalation: bool,
+    on_activity: Option<HeartbeatFn>,
+    governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
+    backend: crate::llm::ProjectBackend,
+) -> anyhow::Result<Arc<dyn AgentDriver>> {
+    build_agent_driver_with(
+        model_id,
+        registry,
+        policy,
+        creds,
+        mcp_config_path,
+        rule_subset,
+        worktree,
+        orchestrator,
+        limiter,
+        run_session_id,
+        escalation,
+        on_activity,
+        governance,
+        backend,
+        &DriverControls::default(),
+    )
+}
+
+/// [`build_agent_driver`] with the run's shared [`DriverControls`] (read log, declared read
+/// folders): the entry point a run uses so every driver it builds acts as one run.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_driver_with(
+    model_id: &str,
+    registry: &crate::model_registry::ModelRegistry,
     // THE TRUST CORE: the OpenRouter provider-safety policy (see
     // `crate::provider_policy`) — resolve from `state.settings().provider_policy()` at
     // the call site (safe by default) and pass it in. Threaded through to the
@@ -2318,6 +3135,7 @@ pub fn build_agent_driver(
     // ignored for `openrouter`, which has its own independent key-presence-or-error gate
     // above and no CLI transport to guard against.
     backend: crate::llm::ProjectBackend,
+    controls: &DriverControls,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -2346,19 +3164,17 @@ pub fn build_agent_driver(
                 or_completer = or_completer.with_session_id(sid);
             }
             let completer = Arc::new(or_completer);
-            let mut driver = ApiAgentDriver::new(completer, model_id)
+            let worktree = worktree.ok_or_else(|| no_worktree_refusal(model_id))?;
+            let mut driver = ApiAgentDriver::new(completer, model_id, worktree)
                 .with_rule_subset(rule_subset)
                 .as_orchestrator(orchestrator);
-            if let Some(wt) = worktree {
-                driver = driver.with_worktree(wt);
-            }
             if let Some(cb) = on_activity {
                 driver = driver.with_on_activity(cb);
             }
             if let Some((log, run_id)) = governance {
                 driver = driver.with_governance(log, run_id);
             }
-            Ok(Arc::new(driver))
+            Ok(Arc::new(apply_controls(driver, controls)))
         }
         // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
         // API agent when the resolved backend is `Api` and an Anthropic API key is configured.
@@ -2375,6 +3191,7 @@ pub fn build_agent_driver(
             on_activity,
             governance,
             backend,
+            controls,
         ),
     }
 }
@@ -2433,6 +3250,8 @@ pub struct ServerChildDriverFactory {
     /// choice — same principle as `policy` above for the OpenRouter safety policy). See
     /// `docs/design/2026-09-22_per-project-backend.md`.
     backend: crate::llm::ProjectBackend,
+    /// The run's shared read log, read folders and governance trail, handed to every child.
+    controls: DriverControls,
 }
 
 impl ServerChildDriverFactory {
@@ -2459,7 +3278,15 @@ impl ServerChildDriverFactory {
             run_session_id,
             gate_events_file,
             backend,
+            controls: DriverControls::default(),
         }
+    }
+
+    /// Give every child the run's [`DriverControls`] (builder form): a child's reads then land in
+    /// the parent run's read log and governance trail.
+    pub fn with_controls(mut self, controls: DriverControls) -> Self {
+        self.controls = controls;
+        self
     }
 }
 
@@ -2514,7 +3341,8 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
 
         // Route the model to its OWN provider; build a WORKER (orchestrator = false),
         // jailed to `worktree`, under the orchestrator's rule subset.
-        let inner = build_agent_driver(
+        let child_controls = child_controls_from(&self.controls);
+        let inner = build_agent_driver_with(
             model,
             &self.registry,
             &self.policy,
@@ -2527,15 +3355,13 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             self.run_session_id.as_deref(),
             false, // workers do not self-escalate (the governed dev-implement agent does)
             None,  // child driver: heartbeat is owned by the parent run's supervised path
-            // Phase H2: delegated/fanned-out children are NOT individually wired into the
-            // governance log — threading it here would also require adding a governance field
-            // to `ServerChildDriverFactory` (and its own construction call sites), and a
-            // child's denials already surface in the parent's `delegate`/`fan_out` result text
-            // (visible to the parent's own agent_step trail). Documented skip; the top-level
-            // implementer driver (built directly in `dev_implement_run.rs`) IS wired.
+            // Governance: a child's trail comes from the run's `DriverControls` (applied below),
+            // so its reads and writes are recorded under the parent run's id.
             None,
             // Children inherit the parent run's project backend setting.
             self.backend,
+            // And the parent run's read log, read folders and governance trail.
+            &child_controls,
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2594,6 +3420,9 @@ pub struct ServerOrchestratorDriverFactory {
     /// [`ServerChildDriverFactory`] this builds for delegated/fanned-out children. See
     /// `docs/design/2026-09-22_per-project-backend.md`.
     backend: crate::llm::ProjectBackend,
+    /// The run's shared read log, read folders and governance trail: applied to the lead and
+    /// handed to every child its embedded [`ServerChildDriverFactory`] builds.
+    controls: DriverControls,
 }
 
 impl ServerOrchestratorDriverFactory {
@@ -2618,7 +3447,32 @@ impl ServerOrchestratorDriverFactory {
             run_session_id,
             gate_events_file,
             backend,
+            controls: DriverControls::default(),
         }
+    }
+
+    /// Give the lead and every child the run's [`DriverControls`] (builder form).
+    pub fn with_controls(mut self, controls: DriverControls) -> Self {
+        self.controls = controls;
+        self
+    }
+
+    /// The factory the lead's delegate/fan_out children are built by: the same provider context
+    /// as the lead, under `rule_subset`, and the run's own [`DriverControls`], so a child shares
+    /// the lead's read log, spend meter and governance trail.
+    fn child_factory(&self, rule_subset: Vec<RuleId>) -> ServerChildDriverFactory {
+        ServerChildDriverFactory::new(
+            self.registry.clone(),
+            self.policy.clone(),
+            self.creds.clone(),
+            self.limiter.clone(),
+            self.gateway_bin.clone(),
+            rule_subset,
+            self.run_session_id.clone(),
+            self.gate_events_file.clone(),
+            self.backend,
+        )
+        .with_controls(self.controls.clone())
     }
 
     /// Resolve a model id's provider, defaulting to `"claude"` for unknown ids (mirrors
@@ -2695,17 +3549,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                 }
                 let completer = Arc::new(or_completer);
 
-                let child_factory = ServerChildDriverFactory::new(
-                    self.registry.clone(),
-                    self.policy.clone(),
-                    self.creds.clone(),
-                    self.limiter.clone(),
-                    self.gateway_bin.clone(),
-                    rule_subset.clone(),
-                    self.run_session_id.clone(),
-                    self.gate_events_file.clone(),
-                    self.backend,
-                );
+                let child_factory = self.child_factory(rule_subset.clone());
 
                 let orch_config = camerata_gateway::delegate::OrchestratorConfig {
                     models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
@@ -2716,12 +3560,13 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     child_driver_factory: Some(Arc::new(child_factory)),
                 };
 
-                let driver = ApiAgentDriver::new(completer, ctx.strongest_model)
-                    .with_rule_subset(rule_subset)
-                    .with_worktree(ctx.worktree.to_path_buf())
-                    // ORCHESTRATOR-ONLY: only the lead is ever built here.
-                    .as_orchestrator(true)
-                    .with_orchestrator_config(orch_config);
+                let driver =
+                    ApiAgentDriver::new(completer, ctx.strongest_model, ctx.worktree.to_path_buf())
+                        .with_rule_subset(rule_subset)
+                        // ORCHESTRATOR-ONLY: only the lead is ever built here.
+                        .as_orchestrator(true)
+                        .with_orchestrator_config(orch_config);
+                let driver = apply_controls(driver, &lead_controls(&self.controls));
                 Ok(Box::new(driver))
             }
             // "claude" or any unrecognised provider: the Anthropic Messages API native
@@ -2742,17 +3587,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     // model's provider (CLI / Anthropic API / OpenRouter), gated.
                     let rule_subset = ctx.session.role_rule_subset.clone();
 
-                    let child_factory = ServerChildDriverFactory::new(
-                        self.registry.clone(),
-                        self.policy.clone(),
-                        self.creds.clone(),
-                        self.limiter.clone(),
-                        self.gateway_bin.clone(),
-                        rule_subset.clone(),
-                        self.run_session_id.clone(),
-                        self.gate_events_file.clone(),
-                        self.backend,
-                    );
+                    let child_factory = self.child_factory(rule_subset.clone());
 
                     let orch_config = camerata_gateway::delegate::OrchestratorConfig {
                         models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
@@ -2763,15 +3598,18 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         child_driver_factory: Some(Arc::new(child_factory)),
                     };
 
-                    let driver =
-                        ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), ctx.strongest_model)
-                            .with_rule_subset(rule_subset)
-                            .with_worktree(ctx.worktree.to_path_buf())
-                            .with_shape(ApiShape::Anthropic)
-                            .with_anthropic_api_key(key)
-                            // ORCHESTRATOR-ONLY: only the lead is ever built here.
-                            .as_orchestrator(true)
-                            .with_orchestrator_config(orch_config);
+                    let driver = ApiAgentDriver::new(
+                        Arc::new(AnthropicNoopCompleter),
+                        ctx.strongest_model,
+                        ctx.worktree.to_path_buf(),
+                    )
+                    .with_rule_subset(rule_subset)
+                    .with_shape(ApiShape::Anthropic)
+                    .with_anthropic_api_key(key)
+                    // ORCHESTRATOR-ONLY: only the lead is ever built here.
+                    .as_orchestrator(true)
+                    .with_orchestrator_config(orch_config);
+                    let driver = apply_controls(driver, &lead_controls(&self.controls));
                     return Ok(Box::new(driver));
                 }
 
@@ -3070,12 +3908,12 @@ mod tests {
         role: &Role,
         wt: Option<PathBuf>,
     ) -> ApiAgentDriver {
-        let mut d =
-            ApiAgentDriver::new(completer, "stub-model").with_rule_subset(role.rule_subset.clone());
-        if let Some(w) = wt {
-            d = d.with_worktree(w);
-        }
-        d
+        ApiAgentDriver::new(
+            completer,
+            "stub-model",
+            wt.unwrap_or_else(|| PathBuf::from("/nonexistent-test-worktree")),
+        )
+        .with_rule_subset(role.rule_subset.clone())
     }
 
     #[test]
@@ -3325,7 +4163,7 @@ mod tests {
         let role = test_role();
         let driver = ApiAgentDriver::new(
             Arc::new(StubCompleter("x".into())),
-            "stub",
+            "stub", PathBuf::from("/nonexistent-test-worktree")
         )
         .with_rule_subset(role.rule_subset.clone())
         // orchestrator = false (default)
@@ -3349,8 +4187,12 @@ mod tests {
     #[tokio::test]
     async fn invariant_fan_out_rejected_for_non_orchestrator_execution() {
         let role = test_role();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone());
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone());
 
         let inv = ToolInvocation {
             id: "fo1".to_string(),
@@ -3396,8 +4238,12 @@ mod tests {
     #[tokio::test]
     async fn invariant_task_tool_rejected_at_execution() {
         let role = test_role();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone());
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone());
 
         for bad_tool in ["Task", "shell", "Bash", "Write", "Edit"] {
             let inv = ToolInvocation {
@@ -3748,7 +4594,7 @@ mod tests {
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
-            None,
+            Some(PathBuf::from("/tmp/wt")),
             false,
             limiter,
             None,                            // run_session_id
@@ -3809,6 +4655,7 @@ mod tests {
         let driver = ApiAgentDriver::new(
             Arc::new(StubCompleter("All done!".to_string())),
             "stub-model",
+            PathBuf::from("/nonexistent-test-worktree"),
         )
         .with_rule_subset(role.rule_subset.clone());
 
@@ -3832,9 +4679,8 @@ mod tests {
         ));
 
         let role = all_rules_role();
-        let driver = ApiAgentDriver::new(completer, "stub-model")
-            .with_rule_subset(role.rule_subset.clone())
-            .with_worktree(wt.clone());
+        let driver = ApiAgentDriver::new(completer, "stub-model", wt.clone())
+            .with_rule_subset(role.rule_subset.clone());
 
         let outcome = driver.run(&role, "write the hello function").await.unwrap();
         assert_eq!(outcome.result, "Done! I wrote src/lib.rs.");
@@ -3865,9 +4711,8 @@ mod tests {
         ));
 
         let role = all_rules_role();
-        let driver = ApiAgentDriver::new(completer, "stub-model")
-            .with_rule_subset(role.rule_subset.clone())
-            .with_worktree(wt.clone());
+        let driver = ApiAgentDriver::new(completer, "stub-model", wt.clone())
+            .with_rule_subset(role.rule_subset.clone());
 
         let outcome = driver.run(&role, "write to forbidden").await.unwrap();
         assert!(!outcome.denials.is_empty(), "denial must be recorded");
@@ -3950,9 +4795,9 @@ mod tests {
                 calls: Default::default(),
             }),
             "stub-model",
+            tmp.path().to_path_buf(),
         )
-        .with_rule_subset(role.rule_subset.clone())
-        .with_worktree(tmp.path().to_path_buf());
+        .with_rule_subset(role.rule_subset.clone());
 
         let outcome = driver
             .run(&role, "write something")
@@ -4000,9 +4845,8 @@ mod tests {
         ));
 
         let role = all_rules_role();
-        let driver = ApiAgentDriver::new(completer, "stub-model")
+        let driver = ApiAgentDriver::new(completer, "stub-model", wt.clone())
             .with_rule_subset(role.rule_subset.clone())
-            .with_worktree(wt.clone())
             .with_governance(log.clone(), "run-deny-gov-1");
 
         let outcome = driver.run(&role, "write to forbidden").await.unwrap();
@@ -4066,9 +4910,8 @@ mod tests {
         ));
 
         let role = all_rules_role();
-        let driver = ApiAgentDriver::new(completer, "stub-model")
+        let driver = ApiAgentDriver::new(completer, "stub-model", wt.clone())
             .with_rule_subset(role.rule_subset.clone())
-            .with_worktree(wt.clone())
             .with_governance(log.clone(), "run-allow-gov-1");
 
         let outcome = driver.run(&role, "write the hello function").await.unwrap();
@@ -4110,7 +4953,11 @@ mod tests {
         let expected_session = or_completer.session_id_for_agent();
         assert_eq!(expected_session, "my-story-id-123");
 
-        let driver = ApiAgentDriver::new(Arc::new(or_completer), "openrouter/model");
+        let driver = ApiAgentDriver::new(
+            Arc::new(or_completer),
+            "openrouter/model",
+            PathBuf::from("/nonexistent-test-worktree"),
+        );
         // session_id must be inherited (non-empty, matches what the completer reports).
         assert_eq!(
             driver.session_id, "my-story-id-123",
@@ -4121,14 +4968,21 @@ mod tests {
     /// Non-OR completers (stubs) generate a per-instance session token (non-empty).
     #[test]
     fn driver_generates_session_id_for_non_or_completer() {
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+            PathBuf::from("/nonexistent-test-worktree"),
+        );
         assert!(
             !driver.session_id.is_empty(),
             "session_id must be non-empty even for non-OR completers"
         );
         // Two distinct drivers must get different session ids (no collision).
-        let driver2 =
-            ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
+        let driver2 = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+            PathBuf::from("/nonexistent-test-worktree"),
+        );
         assert_ne!(
             driver.session_id, driver2.session_id,
             "two drivers must have distinct session ids"
@@ -4171,8 +5025,11 @@ mod tests {
     /// `bust_cache_on_next_call` sets `bust_cache = true` on the driver.
     #[test]
     fn bust_cache_flag_is_settable() {
-        let mut driver =
-            ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
+        let mut driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+            PathBuf::from("/nonexistent-test-worktree"),
+        );
         assert!(!driver.bust_cache, "bust_cache must start false");
         driver.bust_cache_on_next_call();
         assert!(driver.bust_cache, "bust_cache must be true after call");
@@ -4197,7 +5054,7 @@ mod tests {
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
-            None,
+            Some(PathBuf::from("/tmp/wt")),
             false,
             limiter,
             Some("uow-story-id-42"),         // run_session_id
@@ -4394,9 +5251,13 @@ mod tests {
     #[tokio::test]
     async fn native_delegate_without_config_is_honest_no_spawn() {
         let role = test_role();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone())
-            .as_orchestrator(true); // orchestrator, but no config attached
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        .as_orchestrator(true); // orchestrator, but no config attached
         let inv = ToolInvocation {
             id: "d".into(),
             name: "delegate".into(),
@@ -4418,10 +5279,14 @@ mod tests {
         let role = test_role();
         let mut cfg = orchestrator_config_with_server_factory();
         cfg.depth = 1; // == max_depth: depth guard must trip in run_delegated
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone())
-            .as_orchestrator(true)
-            .with_orchestrator_config(cfg);
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        .as_orchestrator(true)
+        .with_orchestrator_config(cfg);
         let inv = ToolInvocation {
             id: "d".into(),
             name: "delegate".into(),
@@ -4440,10 +5305,14 @@ mod tests {
     async fn native_fan_out_routes_through_gated_primitive_duplicate_repo() {
         let role = test_role();
         let cfg = orchestrator_config_with_server_factory();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone())
-            .as_orchestrator(true)
-            .with_orchestrator_config(cfg);
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        .as_orchestrator(true)
+        .with_orchestrator_config(cfg);
         let inv = ToolInvocation {
             id: "fo".into(),
             name: "fan_out".into(),
@@ -4465,10 +5334,14 @@ mod tests {
     async fn worker_with_config_still_denies_delegate() {
         let role = test_role();
         let cfg = orchestrator_config_with_server_factory();
-        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
-            .with_rule_subset(role.rule_subset.clone())
-            // orchestrator = false (worker) even though a config is attached
-            .with_orchestrator_config(cfg);
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "stub",
+            PathBuf::from("/nonexistent-test-worktree"),
+        )
+        .with_rule_subset(role.rule_subset.clone())
+        // orchestrator = false (worker) even though a config is attached
+        .with_orchestrator_config(cfg);
         assert!(!driver.orchestrator);
         let inv = ToolInvocation {
             id: "d".into(),
@@ -4827,7 +5700,11 @@ mod tests {
 
     #[test]
     fn default_shape_is_openrouter_back_compat() {
-        let d = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "m");
+        let d = ApiAgentDriver::new(
+            Arc::new(StubCompleter("x".into())),
+            "m",
+            PathBuf::from("/nonexistent-test-worktree"),
+        );
         assert_eq!(
             d.shape,
             ApiShape::OpenRouter,
@@ -4838,17 +5715,25 @@ mod tests {
 
     #[test]
     fn with_shape_and_key_set_anthropic_fields() {
-        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-5")
-            .with_shape(ApiShape::Anthropic)
-            .with_anthropic_api_key("sk-ant-test");
+        let d = ApiAgentDriver::new(
+            Arc::new(AnthropicNoopCompleter),
+            "claude-opus-5",
+            PathBuf::from("/nonexistent-test-worktree"),
+        )
+        .with_shape(ApiShape::Anthropic)
+        .with_anthropic_api_key("sk-ant-test");
         assert_eq!(d.shape, ApiShape::Anthropic);
         assert_eq!(d.anthropic_api_key.as_deref(), Some("sk-ant-test"));
     }
 
     #[test]
     fn empty_anthropic_key_is_noop() {
-        let d =
-            ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "m").with_anthropic_api_key("");
+        let d = ApiAgentDriver::new(
+            Arc::new(AnthropicNoopCompleter),
+            "m",
+            PathBuf::from("/nonexistent-test-worktree"),
+        )
+        .with_anthropic_api_key("");
         assert!(
             d.anthropic_api_key.is_none(),
             "empty key must not be stored"
@@ -4895,6 +5780,7 @@ mod tests {
             None,  // on_activity — no heartbeat in this unit test
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Api,
+            &DriverControls::default(),
         )
         .expect("building must not panic / spawn"); // Result — the compliance gate can fail-closed
 
@@ -4911,6 +5797,7 @@ mod tests {
             None,  // on_activity — no heartbeat in this unit test
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli,
+            &DriverControls::default(),
         )
         .expect("building must not panic / spawn");
     }
@@ -4935,6 +5822,7 @@ mod tests {
             None,                            // on_activity
             None,                            // governance
             crate::llm::ProjectBackend::Api, // Api backend, and no key is configured
+            &DriverControls::default(),
         );
         let err = result
             .err()
@@ -4965,7 +5853,7 @@ mod tests {
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
-            None,
+            Some(PathBuf::from("/tmp/wt")),
             false,
             limiter,
             None,
@@ -5051,18 +5939,21 @@ mod tests {
         // An Anthropic-shape worker (what build_claude_driver builds for a Claude tier under
         // backend=api) must be orchestrator=false (no delegate/fan_out), jailed to a
         // worktree, and its (Anthropic-format) tool schemas must be gated_write + reads only.
-        let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-5")
-            .with_rule_subset(vec![gov1_rule()])
-            .with_worktree(PathBuf::from("/tmp/wt"))
-            .with_shape(ApiShape::Anthropic)
-            .with_anthropic_api_key("sk-ant-test");
+        let driver = ApiAgentDriver::new(
+            Arc::new(AnthropicNoopCompleter),
+            "claude-opus-5",
+            PathBuf::from("/tmp/wt"),
+        )
+        .with_rule_subset(vec![gov1_rule()])
+        .with_shape(ApiShape::Anthropic)
+        .with_anthropic_api_key("sk-ant-test");
         // orchestrator=false (default) → workers can never delegate/fan_out.
         assert!(
             !driver.orchestrator,
             "Anthropic worker must be orchestrator=false"
         );
         assert!(
-            driver.worktree.is_some(),
+            driver.worktree.as_path() == std::path::Path::new("/tmp/wt"),
             "Anthropic worker must be jailed to a worktree"
         );
 
@@ -5091,4 +5982,22 @@ mod tests {
 }
 
 #[cfg(test)]
+mod built_spy;
+#[cfg(test)]
+mod greenfield_controls_tests;
+#[cfg(test)]
 mod model_input_tests;
+#[cfg(test)]
+mod read_jail_tests;
+#[cfg(test)]
+mod read_log_tests;
+#[cfg(test)]
+mod spend_limit_tests;
+#[cfg(test)]
+mod system_prompt_tests;
+#[cfg(test)]
+mod tool_list_tests;
+#[cfg(test)]
+mod truncate_tests;
+#[cfg(test)]
+mod write_jail_tests;

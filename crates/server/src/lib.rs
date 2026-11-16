@@ -1438,6 +1438,10 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/client-engagement",
             post(set_client_engagement_handler),
         )
+        .route(
+            "/api/projects/:id/dev-run-spend-limit",
+            post(set_dev_run_spend_limit_handler),
+        )
         // Stall-detection thresholds: per-project idle timeout config.
         .route(
             "/api/projects/:id/stall-thresholds",
@@ -4723,6 +4727,9 @@ mod preview_evidence_tests;
 
 #[cfg(test)]
 mod cockpit_resume_tests;
+
+#[cfg(test)]
+mod greenfield_lock_tests;
 
 #[cfg(test)]
 mod model_input_chat_tests;
