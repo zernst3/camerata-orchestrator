@@ -22,6 +22,10 @@ system = args[args.index("--system-prompt") + 1] if "--system-prompt" in args el
 if os.environ.get("CAMERATA_FAKE_WARM"):
     sys.exit(0)
 def note(stage):
+    down = os.environ.get("FAKE_503_STAGE_FILE", "")
+    if down and os.path.exists(down) and open(down).read().strip() == stage:
+        sys.stderr.write("API Error: 503 Service Unavailable\\n")
+        sys.exit(1)
     log = os.environ.get("FAKE_LOG")
     if log:
         with open(log, "a") as f:
@@ -1006,7 +1010,13 @@ async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
     let model_log = root.path().join("models.log");
     // The calibration answer is fine here; the group review call is what is down.
     let group_review_down = root.path().join("group-review-down");
-    std::fs::write(&group_review_down, mode).unwrap();
+    // `stage503:<stage>` takes that stage's calls down with a 503 instead of the group review's.
+    let stage_down = root.path().join("stage-503");
+    if let Some(stage) = mode.strip_prefix("stage503:") {
+        std::fs::write(&stage_down, stage).unwrap();
+    } else {
+        std::fs::write(&group_review_down, mode).unwrap();
+    }
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -1014,6 +1024,7 @@ async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
     );
     let guards = vec![
         camerata_test_env::EnvGuard::set("FAKE_GROUP_REVIEW_DOWN", &group_review_down),
+        camerata_test_env::EnvGuard::set("FAKE_503_STAGE_FILE", &stage_down),
         camerata_test_env::EnvGuard::set("PATH", &path),
         camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &state_dir),
         camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1"),
@@ -1240,6 +1251,24 @@ async fn a_503_outage_on_the_group_review_ends_the_scan_in_bounded_time_as_a_fai
 #[serial_test::serial(process_env)]
 async fn a_transport_outage_on_the_group_review_ends_the_scan_in_bounded_time_as_a_failed_part() {
     group_review_outage_ends_in_bounded_time("transport").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_503_outage_on_the_scan_ends_the_job_in_bounded_time() {
+    group_review_outage_ends_in_bounded_time("stage503:audit").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_503_outage_on_calibration_ends_the_job_in_bounded_time() {
+    group_review_outage_ends_in_bounded_time("stage503:calibration").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_503_outage_on_the_fix_stage_ends_the_job_in_bounded_time() {
+    group_review_outage_ends_in_bounded_time("stage503:fix").await;
 }
 
 async fn group_review_outage_ends_in_bounded_time(mode: &str) {
