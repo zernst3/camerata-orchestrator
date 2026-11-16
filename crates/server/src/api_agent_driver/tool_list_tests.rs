@@ -1,6 +1,8 @@
 //! The loop offers a closed list of tools. A new tool must not appear silently: this test names
 //! them all, and each read tool must go through the read jail and the read log.
 
+use serde_json::json;
+
 use super::*;
 
 #[test]
@@ -118,4 +120,25 @@ async fn a_tool_that_is_not_in_the_list_is_denied() {
         assert!(out.starts_with("DENIED"), "{tool}: {out}");
         assert!(denial.is_some(), "{tool}");
     }
+}
+
+#[test]
+fn the_delegate_schema_asks_for_exactly_what_the_code_reads() {
+    let schemas = build_tool_schemas(true);
+    let delegate = schemas
+        .iter()
+        .find(|s| s["function"]["name"] == "delegate")
+        .expect("an orchestrator is offered delegate");
+    let params = &delegate["function"]["parameters"];
+    let mut properties: Vec<&str> = params["properties"]
+        .as_object()
+        .expect("properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    properties.sort_unstable();
+    // `execute_delegate` reads `subtask` and `tier`; nothing else may be offered.
+    assert_eq!(properties, ["subtask", "tier"]);
+    assert_eq!(params["required"], json!(["subtask"]));
+    assert_eq!(params["additionalProperties"], json!(false), "a closed schema");
 }

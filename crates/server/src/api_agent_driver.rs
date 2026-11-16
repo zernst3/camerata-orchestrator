@@ -2660,10 +2660,17 @@ fn build_tool_schemas(orchestrator: bool) -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "role": { "type": "string" },
-                        "task": { "type": "string" }
+                        "subtask": {
+                            "type": "string",
+                            "description": "The work for the child agent to do."
+                        },
+                        "tier": {
+                            "type": "string",
+                            "description": "Which model tier runs it: fast, balanced (default) or strongest."
+                        }
                     },
-                    "required": ["role", "task"]
+                    "required": ["subtask"],
+                    "additionalProperties": false
                 }
             }
         }));
