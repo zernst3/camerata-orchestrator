@@ -847,7 +847,7 @@ async fn call_openrouter_with_tools(
         provider_constraint,
     );
 
-    let mut builder = reqwest::Client::new()
+    let mut builder = agent_http_client()
         .post("https://openrouter.ai/api/v1/chat/completions")
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
@@ -1073,7 +1073,7 @@ async fn call_anthropic_with_tools(
 ) -> anyhow::Result<LlmResponse> {
     let (body, use_caching) = build_anthropic_request_body(model, system, messages, tool_schemas);
 
-    let mut builder = reqwest::Client::new()
+    let mut builder = agent_http_client()
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -2795,6 +2795,19 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────
+
+/// The agent driver's HTTP client: a 600 s total and 10 s connect bound, so a stalled
+/// connection ends as an error instead of hanging the run.
+fn agent_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build the agent HTTP client")
+    })
+}
 
 #[cfg(test)]
 mod tests {

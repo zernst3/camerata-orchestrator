@@ -3246,7 +3246,7 @@ impl OpenRouterCompleter {
 
         let body = build_openrouter_chat_body(model, req, &self.session_id, provider_constraint);
 
-        let mut builder = reqwest::Client::new()
+        let mut builder = shared_http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")

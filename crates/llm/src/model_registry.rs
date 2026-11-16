@@ -983,7 +983,7 @@ impl ModelRegistry {
 
 /// Fetch and parse the OpenRouter `/api/v1/models` endpoint.
 async fn fetch_openrouter_models(api_key: &str) -> anyhow::Result<Vec<RegistryEntry>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let resp = client
         .get("https://openrouter.ai/api/v1/models")
         .header("Authorization", format!("Bearer {api_key}"))
@@ -1355,7 +1355,7 @@ pub fn compute_safe_providers(endpoints: &[ProviderEndpointInfo]) -> Vec<String>
 async fn fetch_provider_policies(
     api_key: Option<&str>,
 ) -> anyhow::Result<HashMap<String, ProviderPolicyRecord>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let mut req = client
         .get("https://openrouter.ai/api/frontend/v1/all-providers")
         .header("HTTP-Referer", "https://camerata.ai")
@@ -1395,7 +1395,7 @@ async fn fetch_model_endpoints(
     api_key: Option<&str>,
     model_id: &str,
 ) -> anyhow::Result<Vec<OpenRouterEndpointRaw>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let mut req = client
         .get(format!(
             "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
@@ -1418,11 +1418,60 @@ async fn fetch_model_endpoints(
     Ok(body.data.endpoints)
 }
 
+/// A client for the registry lookups: bounded, so a stalled connection fails (a retryable
+/// network error to the caller) instead of hanging the run.
+fn bounded_client() -> reqwest::Client {
+    bounded_client_with(
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(10),
+    )
+}
+
+fn bounded_client_with(
+    total: std::time::Duration,
+    connect: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(total)
+        .connect_timeout(connect)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A peer that accepts the connection and never answers: a client with no timeout waits
+    /// forever, the bounded one returns a timeout error that the chain treats as retryable.
+    #[tokio::test]
+    async fn a_stalled_peer_hangs_an_unbounded_client_and_fails_a_bounded_one() {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+
+            let unbounded = reqwest::Client::new().get(&url).send();
+            let hung = tokio::time::timeout(std::time::Duration::from_secs(3), unbounded).await;
+            assert!(
+                hung.is_err(),
+                "a client with no timeout must still be waiting"
+            );
+
+            let bounded = bounded_client_with(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            );
+            let err = bounded.get(&url).send().await.expect_err("must time out");
+            assert!(err.is_timeout(), "{err:?}");
+            let text = format!("{:#}", anyhow::Error::from(err));
+            assert!(crate::llm::is_retryable_for_chain(&text), "{text}");
+            drop(listener);
+        })
+        .await
+        .expect("the test itself must finish inside 60 s");
+    }
 
     // ── Claude static catalog ─────────────────────────────────────────────────
 
