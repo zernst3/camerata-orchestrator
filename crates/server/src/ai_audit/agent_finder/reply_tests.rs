@@ -575,6 +575,7 @@ fn lead(n: u32, path: &str) -> super::reply::Lead {
         line: 5,
         what: "w".into(),
         source_problem: None,
+        severity: None,
     }
 }
 

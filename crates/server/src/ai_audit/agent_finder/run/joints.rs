@@ -32,6 +32,8 @@ pub(super) struct JointsInput {
     pub problems: Vec<(u32, String)>,
     /// The highest problem number already used.
     pub max_problem: u32,
+    /// The first and last line of every reported problem, by its number across the pieces.
+    pub ranges: BTreeMap<u32, (usize, usize)>,
 }
 
 impl JointsInput {
@@ -59,6 +61,7 @@ pub(super) fn gather(reports: &[PieceReport]) -> JointsInput {
     let mut leads: Vec<Lead> = Vec::new();
     let mut leads_md = String::from("# Leads\n\n");
     let mut cards_md = String::from("# Cards\n");
+    let mut ranges: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
     let mut next_problem = 1u32;
     let mut next_lead = 1u32;
     for report in reports {
@@ -72,6 +75,10 @@ pub(super) fn gather(reports: &[PieceReport]) -> JointsInput {
                 p.path, p.line, p.title
             ));
             problems.push((next_problem, p.path.clone()));
+            ranges.insert(
+                next_problem,
+                (p.line, p.end_line.unwrap_or(p.line).max(p.line)),
+            );
             next_problem += 1;
         }
         for lead in &report.leads {
@@ -99,6 +106,7 @@ pub(super) fn gather(reports: &[PieceReport]) -> JointsInput {
         leads,
         problems,
         max_problem: next_problem - 1,
+        ranges,
     }
 }
 
@@ -136,7 +144,12 @@ fn lead_finding(repo: &str, lead: &Lead, files: &BTreeMap<&str, Vec<&str>>) -> F
         path: lead.path.clone(),
         line: lead.line,
         rule_id: "AI-OPEN-QUESTION".to_string(),
-        severity: "medium".to_string(),
+        severity: lead
+            .severity
+            .as_deref()
+            .filter(|s| ["critical", "high", "medium", "low"].contains(s))
+            .unwrap_or("medium")
+            .to_string(),
         snippet: if text.is_empty() {
             title.to_string()
         } else {
@@ -283,6 +296,10 @@ pub(super) fn report_of(
     }
     let mut numbers: Vec<(u32, String)> = input.problems.clone();
     numbers.extend(problems.iter().map(|p| (p.n, p.path.clone())));
+    let mut ranges = input.ranges.clone();
+    for p in &problems {
+        ranges.insert(p.n, (p.line, p.end_line.unwrap_or(p.line).max(p.line)));
+    }
 
     // Problems the joints agent put in files outside the repository are leads again.
     let mut leads = input.leads.clone();
@@ -326,6 +343,35 @@ pub(super) fn report_of(
     let answers = reply::parse_leads_answers(answers_text.as_deref(), &leads, &numbers);
     let mut unresolved: Vec<u32> = answers.unresolved();
     unresolved.retain(|n| *n != 0);
+    // A lead answered "covered by problem n" is noted for the operator, and the line must lie
+    // within the covering problem's range, not only in its file. A line outside it is not
+    // settled: it becomes a problem needing a decision.
+    for answer in &answers.answered {
+        let reply::LeadOutcome::CoveredBy(p) = answer.outcome else {
+            continue;
+        };
+        let Some(lead) = leads.iter().find(|l| l.n == answer.lead) else {
+            continue;
+        };
+        let inside = lead.line == 0
+            || ranges
+                .get(&p)
+                .map_or(true, |(from, to)| (*from..=*to).contains(&lead.line));
+        if inside {
+            report.notes.push(format!(
+                "joints: the lead at {}:{} was covered by problem {p}",
+                lead.path, lead.line
+            ));
+        } else {
+            report.notes.push(format!(
+                "joints: the lead at {}:{} was said to be covered by problem {p}, but its line is outside the lines of that problem, so it needs a decision",
+                lead.path, lead.line
+            ));
+            unresolved.push(lead.n);
+        }
+    }
+    unresolved.sort_unstable();
+    unresolved.dedup();
     if let Some(why) = &answers.unusable {
         fail(
             format!("the joints review's answers to the leads could not be used: leads-answers.json {why}"),

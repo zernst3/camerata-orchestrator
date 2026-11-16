@@ -54,6 +54,8 @@ pub struct Lead {
     /// The number of the agent's problem this lead was made from, when it was a problem written
     /// for a file outside the piece. `None` for an entry of `leads.json`.
     pub source_problem: Option<u32>,
+    /// The severity of the problem this lead was made from; `None` for an entry of `leads.json`.
+    pub severity: Option<String>,
 }
 
 /// An output file that could not be used, and why.
@@ -325,6 +327,7 @@ fn parse_leads(v: &serde_json::Value) -> Result<Vec<Lead>, String> {
                 &text_field(l, "what", false).map_err(|e| format!("lead {} {e}", i + 1))?,
             ),
             source_problem: None,
+            severity: None,
         });
     }
     Ok(out)
@@ -421,6 +424,7 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
                         line: p.line,
                         what: lead_text(&format!("{}. {}", p.title, p.what)),
                         source_problem: Some(p.n),
+                        severity: Some(p.severity),
                     });
                 }
             }

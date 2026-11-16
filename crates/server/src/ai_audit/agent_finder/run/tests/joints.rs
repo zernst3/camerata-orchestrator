@@ -286,3 +286,66 @@ async fn the_joints_room_holds_every_file_the_cards_the_leads_and_the_problems()
     );
     assert!(brief.contains("from 1"), "{brief}");
 }
+
+#[tokio::test]
+async fn a_lead_made_from_a_problem_keeps_the_problems_severity() {
+    // Part two writes a high problem about a.rs: a lead. Nothing settles it, so it becomes a
+    // problem needing a decision at the severity the source problem had.
+    let (a, b) = parts(
+        vec![],
+        vec![problem(1, "src/a.rs", 3, "high", "fn item_3() { run(3); }")],
+    );
+    let joints = ScriptedAgent::new(vec![out("problems-1.json", &json!([]))]);
+    let (_, rows, _, _) = two_part_run(a, b, joints).await;
+    let held = rows.iter().find(|f| f.line == 3).expect("the lead row");
+    assert_eq!(held.rule_id, "AI-OPEN-QUESTION");
+    assert_eq!(held.severity, "high");
+}
+
+#[tokio::test]
+async fn a_lead_answered_covered_by_a_problem_leaves_an_operator_note() {
+    let (a, b) = parts(a_own(), lead_in_a());
+    let joints = ScriptedAgent::new(vec![
+        out("problems-1.json", &json!([])),
+        out("leads-answers.json", &json!([{"lead": 1, "covered_by": 1}])),
+    ]);
+    let (_, _, _, extras) = two_part_run(a, b, joints).await;
+    assert!(
+        extras
+            .notes
+            .iter()
+            .any(|n| n.contains("covered by problem 1") && n.contains("src/a.rs")),
+        "{:?}",
+        extras.notes
+    );
+}
+
+#[tokio::test]
+async fn a_covered_by_answer_for_a_line_outside_the_problems_range_needs_a_decision() {
+    // The covering problem is at a.rs:5 only; the lead is at a.rs:2 in the same file.
+    let (a, b) = parts(
+        a_own(),
+        vec![problem(
+            1,
+            "src/a.rs",
+            2,
+            "medium",
+            "fn item_2() { run(2); }",
+        )],
+    );
+    let joints = ScriptedAgent::new(vec![
+        out("problems-1.json", &json!([])),
+        out("leads-answers.json", &json!([{"lead": 1, "covered_by": 1}])),
+    ]);
+    let (_, rows, _, extras) = two_part_run(a, b, joints).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter().any(|f| f.line == 2 && f.needs_review),
+        "{rows:?}"
+    );
+    assert!(
+        extras.notes.iter().any(|n| n.contains("outside")),
+        "{:?}",
+        extras.notes
+    );
+}
