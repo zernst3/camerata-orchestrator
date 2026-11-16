@@ -297,6 +297,12 @@ pub trait PieceAgent: Send + Sync {
     fn meters_its_own_turns(&self) -> bool {
         false
     }
+
+    /// A line for the run's operator notes saying where the transport keeps a trace of each call
+    /// on disk, when it does. The default keeps none.
+    fn trace_note(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Send the files the first run did not read (`unread`, repo-relative paths) once more (design
@@ -365,11 +371,18 @@ pub fn piece_agent_for(
                 api_agent::ApiPieceAgent::new(model, key).with_meter(meter),
             ))
         }
-        crate::llm::Backend::Cli => Ok(Box::new(cli_agent::CliPieceAgent::new(
-            model,
-            work_dir.to_path_buf(),
-            engagement,
-        ))),
+        crate::llm::Backend::Cli => {
+            let mut agent =
+                cli_agent::CliPieceAgent::new(model, work_dir.to_path_buf(), engagement);
+            // Internal runs only: the traces sit beside the rooms folder in the run folder,
+            // never inside a room.
+            if engagement == cli_agent::EngagementKind::Internal {
+                if let Some(parent) = work_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    agent = agent.with_trace_dir(parent.join("finder-traces"));
+                }
+            }
+            Ok(Box::new(agent))
+        }
     }
 }
 

@@ -1346,3 +1346,53 @@ fn the_cli_agent_does_not_meter_its_own_turns_so_the_runner_records_them() {
     let agent = CliPieceAgent::new(MODEL, PathBuf::from("/run/rooms"), EngagementKind::Internal);
     assert!(!agent.meters_its_own_turns());
 }
+
+#[tokio::test]
+async fn each_call_leaves_its_stream_records_outside_the_room() {
+    let rig = Rig::new()
+        .call(1, Some(full_replay()), &[], OK_RESULT)
+        .call(2, Some(full_replay()), &[], OK_RESULT);
+    let traces = rig.path().join("finder-traces");
+    let agent = rig.agent().with_trace_dir(traces.clone());
+    let room = room_for(&["src/a.rs"], &repo());
+    let first = agent.run(&room, "b", &limits()).await.unwrap();
+    agent
+        .follow_up(
+            &room,
+            &first,
+            &super::super::FollowUp::text("again".to_string()),
+            &limits(),
+        )
+        .await
+        .unwrap();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&traces)
+        .expect("the trace folder exists")
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 2, "one trace file per call: {files:?}");
+    for f in &files {
+        assert_eq!(f.extension().and_then(|e| e.to_str()), Some("jsonl"));
+        let text = std::fs::read_to_string(f).unwrap();
+        let records: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each line is one JSON record"))
+            .collect();
+        assert!(records.iter().any(|r| r["type"] == "assistant"), "{text}");
+        assert!(records.iter().any(|r| r["type"] == "result"), "{text}");
+    }
+    let mut room_tree = BTreeMap::new();
+    read_tree(&rig.path().join("work"), &mut room_tree);
+    assert!(
+        room_tree
+            .keys()
+            .all(|p| !p.to_string_lossy().contains("finder-traces")
+                && p.extension().and_then(|e| e.to_str()) != Some("jsonl")),
+        "nothing of the trace is under the room: {:?}",
+        room_tree.keys()
+    );
+    assert!(agent
+        .trace_note()
+        .is_some_and(|n| n.contains("finder-traces")));
+}

@@ -760,6 +760,9 @@ pub async fn find_repo(
         corpus,
     );
     extras.notes.extend(conv.notes.iter().cloned());
+    if let Some(note) = agent.trace_note() {
+        extras.notes.push(format!("{repo}: {note}"));
+    }
 
     // A problem cited to a rule with no convention is never thrown out: it moves to the next rule
     // it was cited to that has one, else to its own label.

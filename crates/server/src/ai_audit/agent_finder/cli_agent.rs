@@ -56,6 +56,11 @@ pub struct CliPieceAgent {
     engagement: EngagementKind,
     /// The wall-clock bound of one call. `None` = the piece limits' own bound.
     wall_clock: Option<Duration>,
+    /// Where the stream records of each call are kept as JSON lines: outside every room, so the
+    /// agent can neither read nor edit them. `None` = not kept.
+    trace_dir: Option<PathBuf>,
+    /// The calls made so far, to number the trace files.
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl CliPieceAgent {
@@ -66,6 +71,8 @@ impl CliPieceAgent {
             program: None,
             engagement,
             wall_clock: None,
+            trace_dir: None,
+            calls: std::sync::Arc::default(),
         }
     }
 
@@ -74,6 +81,47 @@ impl CliPieceAgent {
     pub fn with_program(mut self, program: PathBuf) -> Self {
         self.program = Some(program);
         self
+    }
+
+    /// Keep the stdout stream records of every call as JSON lines in `dir` (outside every room).
+    #[must_use]
+    pub fn with_trace_dir(mut self, dir: PathBuf) -> Self {
+        self.trace_dir = Some(dir);
+        self
+    }
+
+    /// Write the stream records of this call, every attempt in order, to
+    /// `<trace dir>/<piece>-<call n>.jsonl`. Best effort: a trace that cannot be written never
+    /// fails the call.
+    fn keep_trace(&self, room: &Room, sink: &SessionSink, session_ids: &[String]) {
+        let Some(dir) = &self.trace_dir else {
+            return;
+        };
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let piece = if room.extra_files().is_empty() {
+            room.piece_files().first().cloned().unwrap_or_default()
+        } else {
+            "joints".to_string()
+        };
+        let piece: String = piece
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let piece = if piece.is_empty() {
+            "room".to_string()
+        } else {
+            piece
+        };
+        let mut text = String::new();
+        for id in session_ids {
+            for line in sink.stream_lines(id).unwrap_or_default() {
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
+        if std::fs::create_dir_all(dir).is_ok() {
+            let _ = std::fs::write(dir.join(format!("{piece}-{n}.jsonl")), text);
+        }
     }
 
     /// Bound one call to `bound` of wall-clock time instead of the piece limits' own bound.
@@ -140,6 +188,14 @@ impl CliPieceAgent {
         let reply = tokio::time::timeout(bound, llm.complete(request)).await;
 
         let sessions = sink.snapshot();
+        self.keep_trace(
+            room,
+            &sink,
+            &sessions
+                .iter()
+                .map(|s| s.session_id.clone())
+                .collect::<Vec<_>>(),
+        );
         let mut roots = vec![resolved.clone(), dir.clone()];
         roots.dedup();
         // One parse for each attempt; `None` = the attempt printed no record we can read.
@@ -262,6 +318,15 @@ impl CliPieceAgent {
 
 #[async_trait::async_trait]
 impl PieceAgent for CliPieceAgent {
+    fn trace_note(&self) -> Option<String> {
+        self.trace_dir.as_ref().map(|d| {
+            format!(
+                "the stream records of each model call are kept in {} (one .jsonl file per call, outside the review rooms)",
+                d.display()
+            )
+        })
+    }
+
     async fn run(
         &self,
         room: &Room,

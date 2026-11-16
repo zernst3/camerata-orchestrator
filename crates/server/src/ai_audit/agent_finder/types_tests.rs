@@ -311,3 +311,30 @@ fn the_stub_signatures_exist_for_later_builds() {
         run_diff::diff_runs;
     let _: fn(&run_diff::RunDiff) -> String = run_diff::operator_note;
 }
+
+#[test]
+fn only_an_internal_cli_agent_keeps_traces_and_names_them_beside_the_rooms_folder() {
+    let controls = crate::cost_cap::RunControls::default();
+    let rooms = std::path::Path::new("/run/folder/finder-rooms");
+    let meter = || std::sync::Arc::new(crate::ai_audit::UsageMeter::default());
+    let build = |backend, key, engagement| {
+        piece_agent_for(&controls, backend, key, rooms, meter(), engagement)
+            .expect("the agent is built")
+    };
+    let note = build(crate::llm::Backend::Cli, None, EngagementKind::Internal)
+        .trace_note()
+        .expect("an internal cli run keeps traces");
+    assert!(note.contains("/run/folder/finder-traces"), "{note}");
+    assert!(
+        build(crate::llm::Backend::Cli, None, EngagementKind::Client)
+            .trace_note()
+            .is_none()
+    );
+    assert!(build(
+        crate::llm::Backend::Api,
+        Some("sk-test"),
+        EngagementKind::Internal
+    )
+    .trace_note()
+    .is_none());
+}
