@@ -463,8 +463,16 @@ fn content_match_lines_in(rule_id: &str, path: Option<&str>, content: &str) -> V
         };
     }
 
+    if rule_id == "SEC-NO-RAW-SQL-CONCAT-1" {
+        let mut lines: Vec<usize> = sql_concat_offsets(content)
+            .into_iter()
+            .map(|at| content[..at].bytes().filter(|&b| b == b'\n').count() + 1)
+            .collect();
+        lines.dedup();
+        return lines;
+    }
+
     let re = match rule_id {
-        "SEC-NO-RAW-SQL-CONCAT-1" => sec_sql_concat_regex(),
         "ARCH-NO-SECRETS-IN-URL-1" => arch_url_secret_regex(),
         "SEC-NO-DISABLED-TLS-1" => sec_disabled_tls_regex(),
         _ => return Vec::new(),
@@ -1046,6 +1054,15 @@ fn arm_sec_no_hardcoded_secrets_1(path: &str, content: &str) -> Result<(), Strin
 ///   this rule complements, not replaces, a parameterised-query lint.
 /// - Raw string literals (`r#"..."#`) are not matched by the opening `"` anchor; raw-SQL in
 ///   raw strings is a known gap.
+/// - A match that spans lines counts only when its first quote OPENS a string (an even number of
+///   unescaped quotes before it on its line) or a SQL verb follows it on that line. Started at a
+///   closing quote, the pattern would run through code and prose until it met a verb, a clause
+///   word and a `{name}` (the `${name}` of a template literal supplies one). A rejected start is
+///   skipped and the search resumes one character later. Residual gap: a multi-line
+///   double-quoted query whose opening line has an odd number of quotes before it and no verb
+///   after it.
+/// - A template literal (backticks) has its own pattern, [`sec_sql_template_regex`]: a verb, a
+///   clause word, then `${` inside one backtick literal, reported on the line of the `${`.
 /// - Intentional raw SQL in test fixtures / migrations triggers it; exclude those via the
 ///   rule-subset config.
 static SEC_SQL_CONCAT_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -1093,11 +1110,103 @@ fn sec_sql_concat_regex() -> &'static Regex {
     })
 }
 
+static SEC_SQL_TEMPLATE_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The template-literal form: inside ONE backtick literal, a DML word, a clause word, then `${`.
+fn sec_sql_template_regex() -> &'static Regex {
+    SEC_SQL_TEMPLATE_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            `
+            (?:[^`\\]|\\[\s\S])*?
+            \b(?:SELECT|INSERT|UPDATE|DELETE)\b
+            (?:[^`\\]|\\[\s\S])*?
+            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b
+            (?:[^`\\]|\\[\s\S])*?
+            \$\{
+            "#,
+        )
+        .expect("SEC-NO-RAW-SQL-CONCAT-1 template regex must compile")
+    })
+}
+
+/// Whether the quote at `at` opens a string: an even number of unescaped `quote` characters
+/// precede it on its line.
+fn quote_opens_a_string(content: &str, at: usize, quote: char) -> bool {
+    let line_start = content[..at].rfind('\n').map_or(0, |i| i + 1);
+    let mut count = 0;
+    let mut escaped = false;
+    for c in content[line_start..at].chars() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            count += 1;
+        }
+    }
+    count % 2 == 0
+}
+
+/// Whether a SQL verb follows the quote at `at` on the same line.
+fn verb_follows_on_line(content: &str, at: usize) -> bool {
+    static VERB: OnceLock<Regex> = OnceLock::new();
+    let line_end = content[at..].find('\n').map_or(content.len(), |i| at + i);
+    VERB.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:SELECT|INSERT|UPDATE|DELETE)\b").expect("verb regex must compile")
+    })
+    .is_match(&content[at + 1..line_end])
+}
+
+/// Every accepted match of one quote form, as the byte offset to report. `report_at` maps the
+/// match to that offset. A one-line match is always kept; a match across lines is kept only when
+/// its first quote opens a string or a verb follows it on its line. After a rejection the search
+/// resumes one character past the match start.
+fn sql_concat_hits(
+    content: &str,
+    re: &Regex,
+    quote: char,
+    report_at: impl Fn(&regex::Match<'_>) -> usize,
+) -> Vec<usize> {
+    let mut hits = Vec::new();
+    let mut pos = 0;
+    while pos <= content.len() {
+        let Some(m) = re.find_at(content, pos) else {
+            break;
+        };
+        let one_line = !m.as_str().contains('\n');
+        if one_line
+            || quote_opens_a_string(content, m.start(), quote)
+            || verb_follows_on_line(content, m.start())
+        {
+            hits.push(report_at(&m));
+            pos = m.end().max(m.start() + 1);
+        } else {
+            pos = m.start() + 1;
+        }
+    }
+    hits
+}
+
+/// Offsets of every raw-SQL concatenation hit in `content`, sorted: the double-quoted form at the
+/// match start, the template-literal form at its `${`.
+fn sql_concat_offsets(content: &str) -> Vec<usize> {
+    let mut hits = sql_concat_hits(content, sec_sql_concat_regex(), '"', |m| m.start());
+    hits.extend(sql_concat_hits(
+        content,
+        sec_sql_template_regex(),
+        '`',
+        |m| m.end() - 2,
+    ));
+    hits.sort_unstable();
+    hits
+}
+
 /// SEC-NO-RAW-SQL-CONCAT-1: deny content that builds SQL by string
 /// concatenation or format-string interpolation.
 fn arm_sec_no_raw_sql_concat_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(m) = sec_sql_concat_regex().find(content) {
-        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+    if let Some(&start) = sql_concat_offsets(content).first() {
+        let match_line = content[..start].bytes().filter(|&b| b == b'\n').count() + 1;
         let in_test = is_test_or_fixture_path(path)
             || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
         if in_test {
@@ -1583,6 +1692,8 @@ impl GovernanceGateway for GovernedGateway {
 
 #[cfg(test)]
 mod secret_arm_tests;
+#[cfg(test)]
+mod sql_concat_tests;
 
 #[cfg(test)]
 mod tests {
