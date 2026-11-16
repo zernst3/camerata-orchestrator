@@ -469,7 +469,7 @@ fn outline_text(
 /// repo's own paths. Best effort and cheap: a relative import in the languages below (JavaScript
 /// and TypeScript, Python, Rust `mod`). An import it cannot resolve is simply absent; the
 /// same-directory neighbours still apply.
-fn import_graph(
+pub(super) fn import_graph(
     files: &[(String, String)],
     by_path: &HashMap<String, usize>,
 ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {

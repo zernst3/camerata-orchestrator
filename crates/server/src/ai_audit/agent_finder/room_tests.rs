@@ -1,0 +1,313 @@
+//! Tests for the review room (design sections 1 and 2).
+
+use super::room::{Room, RoomError, MAX_READ_LINES, OUT_DIR};
+use super::Piece;
+
+fn f(path: &str, text: &str) -> (String, String) {
+    (path.to_string(), text.to_string())
+}
+
+fn piece(files: &[&str]) -> Piece {
+    Piece {
+        key: "acme/app#1:00000000".into(),
+        unit: "acme/app".into(),
+        files: files.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn numbered(n: usize) -> String {
+    (1..=n).map(|i| format!("line {i}\n")).collect()
+}
+
+fn repo() -> Vec<(String, String)> {
+    vec![
+        f(
+            "src/main.rs",
+            &format!(
+                "mod util;\nfn main() {{ util::go(); }}\n// {}\n",
+                "padding ".repeat(30)
+            ),
+        ),
+        f("src/util.rs", "pub fn go() {}\n"),
+        f("src/other.rs", "pub fn other() {}\n"),
+        f("README.md", "# readme\n"),
+    ]
+}
+
+fn room() -> Room {
+    Room::build(&piece(&["src/main.rs"]), &repo(), "# checklist\n")
+}
+
+#[test]
+fn the_room_holds_the_piece_the_context_files_and_the_four_harness_files() {
+    let r = room();
+    let paths = r.paths();
+    for expected in [
+        "src/main.rs",
+        "_camerata/context/tree.txt",
+        "_camerata/context/neighbours.md",
+        "_camerata/context/context-files.txt",
+        "_camerata/checklist.md",
+    ] {
+        assert!(
+            paths.iter().any(|p| p == expected),
+            "missing {expected}: {paths:?}"
+        );
+    }
+    assert_eq!(r.piece_files(), ["src/main.rs".to_string()]);
+    assert!(
+        r.context_files().iter().any(|p| p == "src/util.rs"),
+        "{:?}",
+        r.context_files()
+    );
+    assert!(
+        !paths.iter().any(|p| p == "src/other.rs"),
+        "an unrelated file is not served"
+    );
+}
+
+#[test]
+fn the_tree_lists_every_file_of_the_repository() {
+    let r = room();
+    let tree = r
+        .read("_camerata/context/tree.txt", 1, 100)
+        .expect("tree reads");
+    for p in ["src/main.rs", "src/util.rs", "src/other.rs", "README.md"] {
+        assert!(tree.text.contains(p), "{p} not in the tree: {}", tree.text);
+    }
+}
+
+#[test]
+fn a_path_not_in_the_room_does_not_exist() {
+    let r = room();
+    for path in [
+        "src/other.rs",
+        "/etc/passwd",
+        "/src/main.rs",
+        "../secrets.txt",
+        "src/../src/other.rs",
+        "src/main.rs/../other.rs",
+        "nope.rs",
+    ] {
+        assert!(!r.contains(path), "{path} must not exist");
+        assert!(
+            matches!(r.read(path, 1, 10), Err(RoomError::NotFound(_))),
+            "{path} read"
+        );
+    }
+    assert!(
+        r.contains("./src/main.rs"),
+        "a leading ./ names the same file"
+    );
+    assert!(r.read("./src/main.rs", 1, 10).is_ok());
+}
+
+#[test]
+fn a_write_outside_the_out_folder_is_refused() {
+    let r = room();
+    for path in [
+        "src/main.rs",
+        "notes.txt",
+        "_camerata/checklist.md",
+        "_camerata/out",
+        "_camerata/out/../checklist.md",
+        "/tmp/x",
+        "_camerata/outside/x",
+    ] {
+        assert!(r.write(path, "x").is_err(), "{path} must be refused");
+    }
+    assert!(r.outputs().is_empty());
+    assert!(r
+        .read("src/main.rs", 1, 10)
+        .expect("reads")
+        .text
+        .contains("mod util"));
+}
+
+#[test]
+fn a_write_under_the_out_folder_is_stored_and_can_be_read_back() {
+    let r = room();
+    r.write(&format!("{OUT_DIR}problems-1.json"), "[]")
+        .expect("accepted");
+    r.write(&format!("{OUT_DIR}problems-1.json"), "[1]")
+        .expect("replaced");
+    assert_eq!(
+        r.outputs()
+            .get("_camerata/out/problems-1.json")
+            .map(String::as_str),
+        Some("[1]")
+    );
+    assert!(r.read("_camerata/out/problems-1.json", 1, 5).is_ok());
+}
+
+#[test]
+fn read_returns_numbered_lines_and_how_many_it_returned() {
+    let big = numbered(5_000);
+    let r = Room::build(&piece(&["big.rs"]), &[f("big.rs", &big)], "");
+    let one = r.read("big.rs", 1, 3).expect("reads");
+    assert_eq!(one.lines_returned, 3);
+    assert_eq!(one.first_line, 1);
+    assert_eq!(one.total_lines, 5_000);
+    assert!(one.text.contains("1\tline 1"), "{:?}", one.text);
+    assert!(one.text.contains("3\tline 3"));
+    assert!(!one.text.contains("line 4"));
+
+    let cut = r.read("big.rs", 1, 9_999).expect("reads");
+    assert_eq!(cut.lines_returned, MAX_READ_LINES);
+    let tail = r.read("big.rs", 4_999, 50).expect("reads");
+    assert_eq!(tail.lines_returned, 2);
+    let past = r.read("big.rs", 6_000, 5).expect("reads");
+    assert_eq!(past.lines_returned, 0);
+}
+
+#[test]
+fn a_secret_value_in_a_source_file_is_absent_from_every_served_byte() {
+    let secret = "sk_live_4eC39HqLyjWDarjtT1zdp7dcAbCdEfGhIjKl";
+    let src = format!("const KEY = \"{secret}\";\nfn main() {{}}\n");
+    let files = vec![
+        f("src/main.rs", &src),
+        f("src/util.rs", &format!("// {secret}\npub fn go() {{}}\n")),
+    ];
+    let redacted = crate::onboard::redact::files_for_model(&files);
+    let r = Room::build(&piece(&["src/main.rs"]), &redacted, "# checklist\n");
+    assert!(
+        r.paths().len() >= 5,
+        "the room serves files: {:?}",
+        r.paths()
+    );
+    assert!(
+        r.read("src/main.rs", 1, 10)
+            .expect("reads")
+            .text
+            .contains("fn main"),
+        "the room serves the redacted source"
+    );
+    for path in r.paths() {
+        let all = r.read(&path, 1, MAX_READ_LINES).expect("reads");
+        assert!(!all.text.contains(secret), "{path} serves the secret");
+    }
+    let hits = r.grep("sk_live", None).expect("grep runs");
+    assert!(hits.iter().all(|h| !h.text.contains(secret)));
+    let dir = tempfile::tempdir().expect("tempdir");
+    r.materialize(dir.path()).expect("materializes");
+    for path in r.paths() {
+        let on_disk = std::fs::read_to_string(dir.path().join(&path)).expect("file written");
+        assert!(!on_disk.contains(secret), "{path} on disk holds the secret");
+    }
+}
+
+#[test]
+fn context_files_stay_within_thirty_percent_of_the_piece_and_the_rest_are_outline_only() {
+    // The piece is 1,000 bytes; two imported files of 200 and 300 bytes fit the 300 byte budget
+    // only one at a time; a third of 400 bytes never fits.
+    let main = format!("mod a;\nmod b;\nmod c;\n{}", "x".repeat(985));
+    let files = vec![
+        f("src/main.rs", &main),
+        f("src/a.rs", &format!("pub fn a() {{}}\n{}", "y".repeat(184))),
+        f("src/b.rs", &format!("pub fn b() {{}}\n{}", "y".repeat(284))),
+        f("src/c.rs", &format!("pub fn c() {{}}\n{}", "y".repeat(384))),
+    ];
+    let piece_bytes = main.len();
+    let r = Room::build(&piece(&["src/main.rs"]), &files, "");
+    let used: usize = r
+        .context_files()
+        .iter()
+        .map(|p| {
+            files
+                .iter()
+                .find(|(q, _)| q == p)
+                .map_or(0, |(_, c)| c.len())
+        })
+        .sum();
+    assert!(
+        used * 100 <= piece_bytes * 30,
+        "context takes {used} of {piece_bytes}"
+    );
+    assert!(!r.context_files().is_empty(), "something fits");
+    assert!(
+        !r.context_files().iter().any(|p| p == "src/c.rs"),
+        "c.rs is over budget"
+    );
+    let neighbours = r
+        .read("_camerata/context/neighbours.md", 1, 200)
+        .expect("reads")
+        .text;
+    assert!(
+        neighbours.contains("src/c.rs"),
+        "an over-budget neighbour is still outlined"
+    );
+    assert!(
+        neighbours.contains("pub fn c") || neighbours.contains("c"),
+        "{neighbours}"
+    );
+    let listing = r
+        .read("_camerata/context/context-files.txt", 1, 50)
+        .expect("reads")
+        .text;
+    for p in r.context_files() {
+        assert!(listing.contains(p.as_str()), "{p} not listed: {listing}");
+    }
+}
+
+#[test]
+fn glob_grep_and_ls_are_served_from_the_room_only() {
+    let r = room();
+    assert_eq!(
+        r.glob("src/*.rs"),
+        vec!["src/main.rs".to_string(), "src/util.rs".to_string()]
+    );
+    assert!(r.glob("**/other.rs").is_empty());
+    let hits = r.grep("util", None).expect("grep runs");
+    assert!(hits.iter().any(|h| h.path == "src/main.rs" && h.line == 1));
+    assert!(hits.iter().all(|h| h.path != "src/other.rs"));
+    assert!(matches!(r.grep("(", None), Err(RoomError::Invalid(_))));
+    let root = r.ls("").expect("root lists");
+    assert!(root.iter().any(|e| e == "src/"), "{root:?}");
+    assert!(root.iter().any(|e| e == "_camerata/"), "{root:?}");
+    assert!(matches!(r.ls("../"), Err(RoomError::NotFound(_))));
+    assert!(matches!(r.ls("/etc"), Err(RoomError::NotFound(_))));
+}
+
+#[test]
+fn materialize_writes_exactly_the_rooms_files() {
+    let r = room();
+    r.write("_camerata/out/card.md", "card").expect("accepted");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut written = r.materialize(dir.path()).expect("materializes");
+    written.sort();
+    assert_eq!(written, r.paths());
+    let mut on_disk = Vec::new();
+    let mut stack = vec![dir.path().to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).expect("reads dir") {
+            let e = e.expect("entry");
+            if e.path().is_dir() {
+                stack.push(e.path());
+            } else {
+                on_disk.push(
+                    e.path()
+                        .strip_prefix(dir.path())
+                        .expect("under dir")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    on_disk.sort();
+    assert_eq!(on_disk, r.paths());
+    assert!(
+        dir.path().join("_camerata/out").is_dir(),
+        "the out folder exists"
+    );
+}
+
+#[test]
+fn only_keeps_the_named_piece_files_and_the_harness_files() {
+    let files = vec![f("a.rs", "fn a() {}\n"), f("b.rs", "fn b() {}\n")];
+    let r = Room::build(&piece(&["a.rs", "b.rs"]), &files, "# c\n");
+    let again = r.only(&["b.rs".to_string()]);
+    assert_eq!(again.piece_files(), ["b.rs".to_string()]);
+    assert!(!again.contains("a.rs"));
+    assert!(again.contains("_camerata/checklist.md"));
+}
