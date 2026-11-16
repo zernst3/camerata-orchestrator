@@ -101,11 +101,11 @@ fn is_known_output(file: &str) -> bool {
         || name.starts_with("problems")
 }
 
+/// A file named like a problems file (a stray name too: the reader takes one that parses as a
+/// problems list, and the others are refused, so both are joined across steps the same way).
 fn is_problems_file(key: &str) -> bool {
     let name = key.strip_prefix(super::super::room::OUT_DIR).unwrap_or(key);
-    name.strip_prefix("problems-")
-        .and_then(|r| r.strip_suffix(".json"))
-        .is_some_and(|n| n.parse::<u64>().is_ok())
+    name.starts_with("problems") && name.ends_with(".json")
 }
 
 /// Whether `text` is a problems file the reader accepts.

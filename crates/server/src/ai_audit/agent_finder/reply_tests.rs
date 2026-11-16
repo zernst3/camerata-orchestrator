@@ -406,7 +406,11 @@ fn two_unrelated_problems_from_one_piece_are_not_one_cause() {
 #[test]
 fn a_problems_json_file_is_unusable_never_ignored_and_counted_files_are_exact() {
     let one = serde_json::json!([entry(1, "src/a.rs")]).to_string();
-    let out = parse_outputs(&outputs(&[("problems.json", one.clone())]), &piece_files());
+    // A stray name that does NOT parse as a problems list is never ignored.
+    let out = parse_outputs(
+        &outputs(&[("problems.json", "{\"note\": 1}".to_string())]),
+        &piece_files(),
+    );
     assert!(out.problems.is_empty());
     assert_eq!(out.unusable.len(), 1, "{:?}", out.unusable);
     assert!(out.unusable[0].file.ends_with("problems.json"));
@@ -414,6 +418,11 @@ fn a_problems_json_file_is_unusable_never_ignored_and_counted_files_are_exact() 
         out.problems_files, 0,
         "problems.json is not a problems file"
     );
+    // An intended change (round 2): a stray name that parses as a problems list is read as one.
+    let out = parse_outputs(&outputs(&[("problems.json", one.clone())]), &piece_files());
+    assert_eq!(out.problems.len(), 1);
+    assert!(out.unusable.is_empty(), "{:?}", out.unusable);
+    assert_eq!(out.problems_files, 1);
 
     // A file nobody reads, in a folder or at the top, is visible too.
     let out = parse_outputs(

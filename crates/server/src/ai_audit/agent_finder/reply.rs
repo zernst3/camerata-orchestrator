@@ -114,6 +114,22 @@ fn problems_file_number(name: &str) -> Option<u64> {
         .ok()
 }
 
+/// Whether `name` is a stray problems file name (`problems_2.json`, `problems.json`) whose `text`
+/// parses as a problems list. The agent has no delete tool, so a stray file it already wrote could
+/// never be repaired; one that holds a usable list is read as a problems file.
+fn stray_problems_list(name: &str, text: &str) -> bool {
+    if !(name.starts_with("problems") && name.ends_with(".json")) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Ok(items) = array_of(&value, "problems") else {
+        return false;
+    };
+    items.len() <= MAX_PROBLEMS_PER_FILE && items.iter().all(|item| parse_problem(item).is_ok())
+}
+
 fn field<'a>(v: &'a serde_json::Value, name: &str) -> Result<&'a serde_json::Value, String> {
     v.get(name)
         .filter(|x| !x.is_null())
@@ -365,7 +381,7 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
             file: key.clone(),
             reason,
         };
-        if problems_file_number(name).is_some() {
+        if problems_file_number(name).is_some() || stray_problems_list(name, text) {
             out.problems_files += 1;
             let value: serde_json::Value = match serde_json::from_str(text) {
                 Ok(v) => v,

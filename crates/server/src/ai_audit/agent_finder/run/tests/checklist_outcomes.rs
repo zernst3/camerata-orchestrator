@@ -362,10 +362,10 @@ async fn a_problem_number_reused_at_a_different_place_is_a_repair_turn_then_a_fa
 }
 
 #[tokio::test]
-async fn a_stray_problems_file_name_is_a_known_output_repaired_then_a_failed_part() {
+async fn a_stray_problems_file_that_is_not_a_problems_list_is_repaired_then_a_failed_part() {
     for name in ["problems_2.json", "problems-2a.json", "problems.json"] {
         let mut script = good_script(vec![], vec![]);
-        script.push(out(name, &json!([])));
+        script.push(out(name, &json!({"note": "nothing here"})));
         let agent = ScriptedAgent::new(script);
         let (_, _, _, failed, _, _) = run(&agent).await;
         assert_eq!(agent.messages().len(), 1, "{name}: one repair turn");
@@ -380,5 +380,25 @@ async fn a_stray_problems_file_name_is_a_known_output_repaired_then_a_failed_par
             "{name}: {}",
             failed[0].reason
         );
+    }
+}
+
+/// Follow-up (round 2): the agent has no delete tool, so a stray `problems_2.json` that already
+/// holds a problems list could never be repaired and would be paid for again on a resume. Any
+/// `problems*.json` that parses as a problems list is read as one.
+#[tokio::test]
+async fn a_stray_problems_file_that_is_a_problems_list_is_read_as_one() {
+    for name in ["problems_2.json", "problems-2a.json", "problems.json"] {
+        let mut script = good_script(vec![], vec![]);
+        script.push(out(
+            name,
+            &json!([problem(7, "src/b.rs", 3, "high", "fn item_3() { run(3); }")]),
+        ));
+        let agent = ScriptedAgent::new(script);
+        let (rows, _, _, failed, _, _) = run(&agent).await;
+        assert!(agent.messages().is_empty(), "{name}: {:?}", agent.messages());
+        assert!(failed.is_empty(), "{name}: {failed:?}");
+        assert_eq!(rows.len(), 1, "{name}: {rows:?}");
+        assert_eq!((rows[0].path.as_str(), rows[0].line), ("src/b.rs", 3));
     }
 }
