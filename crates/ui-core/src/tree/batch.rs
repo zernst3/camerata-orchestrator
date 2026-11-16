@@ -515,6 +515,7 @@ mod tests {
             rows.push(r);
         }
         rows.push(merged(400));
+        let merged_key = rows.last().expect("the merged row").site_key.clone();
         let plan = batch_plan(
             "sub:X/1",
             &DecisionState::Confirmed,
@@ -527,11 +528,7 @@ mod tests {
             "only the plain rows are written: {plan:?}"
         );
         assert_eq!(plan.excluded_held.len(), HoldReason::ALL.len(), "{plan:?}");
-        assert_eq!(
-            plan.excluded_merged,
-            vec![rows[9].site_key.clone()],
-            "{plan:?}"
-        );
+        assert_eq!(plan.excluded_merged, vec![merged_key], "{plan:?}");
         let all = plan.keys.len()
             + plan.excluded_outliers.len()
             + plan.excluded_held.len()
@@ -539,7 +536,8 @@ mod tests {
             + plan.already_recorded.len();
         assert_eq!(all, rows.len(), "every member is in exactly one place");
         assert!(
-            plan.except().contains(&rows[9].site_key),
+            plan.except()
+                .contains(&rows.last().expect("the merged row").site_key),
             "the request leaves the merge out"
         );
         let sentence = plan_sentence(&plan);
@@ -547,7 +545,13 @@ mod tests {
             sentence.starts_with("This writes 4 site records."),
             "{sentence}"
         );
-        assert!(sentence.contains("5 held rows are excluded."), "{sentence}");
+        assert!(
+            sentence.contains(&format!(
+                "{} held rows are excluded.",
+                HoldReason::ALL.len()
+            )),
+            "{sentence}"
+        );
         assert!(sentence.contains("1 merged row is excluded."), "{sentence}");
     }
 

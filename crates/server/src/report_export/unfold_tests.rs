@@ -658,10 +658,21 @@ fn a_split_out_problem_takes_the_higher_of_its_own_severity_and_the_hosts() {
 
 #[test]
 fn a_place_a_tool_found_keeps_the_tool_as_its_source() {
-    let mut r = host_carrying(vec![web_site()]);
-    r.findings[0].preview_tool = Some("semgrep".to_string());
+    // The place's own rule is a Semgrep rule; the host is a native row with no tool.
+    let tool_place = MergedLocation::site(
+        WEB,
+        "src/query.ts",
+        7,
+        "camerata.security.hardcoded-secret",
+        "const k = \"abc\"",
+        false,
+    )
+    .with_rating("medium", "Hardcoded secret");
+    let r = host_carrying(vec![tool_place]);
+    assert_eq!(r.findings[0].preview_tool, None, "the host is a native row");
     let (_sealed, reviewed, _key) = ruled_out_host(r);
-    let row = unfolded(&reviewed, RULE_B);
+    let row = unfolded(&reviewed, "camerata.security.hardcoded-secret");
+    assert_eq!(row.len(), 1);
     assert_eq!(row[0].preview_tool.as_deref(), Some("semgrep"));
     assert_ne!(
         row[0].confidence.as_deref(),
@@ -670,10 +681,30 @@ fn a_place_a_tool_found_keeps_the_tool_as_its_source() {
     );
     let (_json, findings) = exports(&reviewed);
     let rows = rows_of(&findings);
-    let b = row_for(&rows, RULE_B).expect("the rule B row");
+    let b = row_for(&rows, "camerata.security.hardcoded-secret").expect("the tool place's row");
     assert_eq!(
         b["provenance"], "Preview: semgrep",
-        "the Source column reads Tool: semgrep from this: {b}"
+        "the Source column reads the place's own tool: {b}"
+    );
+}
+
+#[test]
+fn a_native_place_carried_by_a_tool_host_has_no_tool_source() {
+    let mut r = host_carrying(vec![web_site()]);
+    r.findings[0].preview_tool = Some("semgrep".to_string());
+    let (_sealed, reviewed, _key) = ruled_out_host(r);
+    let row = unfolded(&reviewed, RULE_B);
+    assert_eq!(row.len(), 1);
+    assert_eq!(
+        row[0].preview_tool, None,
+        "a native rule found this place; the host's tool is not its source"
+    );
+    let (_json, findings) = exports(&reviewed);
+    let rows = rows_of(&findings);
+    let b = row_for(&rows, RULE_B).expect("the rule B row");
+    assert_ne!(
+        b["provenance"], "Preview: semgrep",
+        "the Source column must not read the host's tool: {b}"
     );
 }
 
@@ -745,5 +776,25 @@ fn a_split_out_problem_with_a_cited_rule_leaves_needs_a_decision_once_confirmed(
     assert!(
         row_for(&rows, RULE_B).is_some(),
         "anti-vacuity: the confirmed problem is still a problem: {rows:?}"
+    );
+}
+
+#[test]
+fn the_source_of_a_carried_rule_id_is_its_tool_or_none() {
+    use crate::scan_tools::tool_for_rule_id;
+    for native in [RULE_A, "SEC-NO-RAW-SQL-CONCAT-1", "AI-SOMETHING-ODD"] {
+        assert_eq!(tool_for_rule_id(native), None, "{native}");
+    }
+    assert_eq!(
+        tool_for_rule_id("camerata.security.hardcoded-secret"),
+        Some("semgrep")
+    );
+    assert_eq!(tool_for_rule_id("clippy::unwrap_used"), Some("clippy"));
+    assert_eq!(tool_for_rule_id("unwrap_used"), Some("clippy"));
+    assert_eq!(tool_for_rule_id("S608"), Some("ruff"));
+    assert_eq!(tool_for_rule_id("no-console"), Some("eslint"));
+    assert_eq!(
+        tool_for_rule_id("react-hooks/exhaustive-deps"),
+        Some("eslint")
     );
 }

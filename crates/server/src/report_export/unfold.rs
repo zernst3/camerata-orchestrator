@@ -176,6 +176,7 @@ fn row_for(host: &Finding, host_key: &str, c: Carried, key: String) -> Finding {
     if c.snippet.is_empty() {
         note.push_str(" The host held no snippet for this place.");
     }
+    let preview_tool = crate::scan_tools::tool_for_rule_id(&c.rule_id).map(str::to_string);
     Finding {
         repo: c.repo,
         path: c.path,
@@ -186,9 +187,11 @@ fn row_for(host: &Finding, host_key: &str, c: Carried, key: String) -> Finding {
         detail,
         status: "active".to_string(),
         needs_review: true,
-        // The source stays the place's own: a tool's pass keeps its tool, and no confidence
-        // is set that would relabel it. The hold is `needs_review`.
-        preview_tool: host.preview_tool.clone(),
+        // The source is the place's own, not the host's: a merged place records none, so it is
+        // read from the carried rule id (a tool's rule keeps its tool, a native rule has none,
+        // whatever tool the host came from). No confidence is set that would relabel it; the
+        // hold is `needs_review`.
+        preview_tool,
         located: !c.consequence,
         kind: Some(FindingKind::Defect),
         site_key: key,
