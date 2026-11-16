@@ -821,6 +821,8 @@ async fn a_read_outside_the_room_fails_the_piece() {
         ("Glob", json!({"pattern": "~/other/*.md"})),
         ("Glob", json!({"pattern": "src/../../x/*"})),
         ("Glob", json!({"pattern": "{../..,x}/*"})),
+        ("Glob", json!({"pattern": "$HOME/x"})),
+        ("Glob", json!({"pattern": "~/x"})),
         (
             "Glob",
             json!({"pattern": "{/Users/auditor/other,code}/**/*"}),
@@ -1231,4 +1233,22 @@ async fn a_denied_search_inside_the_room_records_nothing_and_one_outside_still_f
     );
     let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
     assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+}
+
+#[tokio::test]
+async fn real_folder_names_with_a_dollar_or_tilde_inside_a_path_are_fine() {
+    for (name, input) in [
+        ("Glob", json!({"pattern": "routes/$id.tsx"})),
+        ("Grep", json!({"pattern": "k", "path": "app/~shared"})),
+        ("Glob", json!({"pattern": "{src,routes}/$id.tsx"})),
+    ] {
+        let rig = Rig::new().call(1, Some(one_call(name, input.clone())), &[], OK_RESULT);
+        let room = room_for(&["src/a.rs"], &repo());
+        let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+        assert!(
+            !matches!(run.stop, AgentStop::Failed(_)),
+            "{name} {input}: {:?}",
+            run.stop
+        );
+    }
 }

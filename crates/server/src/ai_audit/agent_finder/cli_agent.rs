@@ -410,21 +410,35 @@ fn room_path(path: &str, roots: &[PathBuf]) -> Option<String> {
     })
 }
 
-/// Whether any segment of a path or glob argument is `..`, or starts with `~` or `$`. Segments
-/// are split on `/` and also on `{`, `}` and `,`, so brace alternatives are seen. The argument is
-/// outside the room whatever else it holds.
+/// Whether a path or glob argument reaches outside the room by its spelling. Segments are split
+/// on `/` and also on `{`, `}` and `,`, so brace alternatives are seen. A `..` segment anywhere
+/// is outside. A segment starting with `~` or `$` is outside only where the tool would expand it
+/// (the first segment of the whole argument, or the first of a brace alternative); inside a path
+/// it is a real folder or file name (`routes/$id.tsx`). An absolute path in a brace alternative
+/// (`{/etc,code}/*`) is outside.
 fn escapes(value: &str) -> bool {
-    // An absolute path inside a brace alternative (`{/etc,code}/*`) is outside.
-    let bytes = value.as_bytes();
-    if bytes
-        .windows(2)
-        .any(|w| (w[0] == b'{' || w[0] == b',') && w[1] == b'/')
-    {
-        return true;
+    let bad = |seg: &str, first: bool| {
+        seg == ".." || (first && (seg.starts_with('~') || seg.starts_with('$')))
+    };
+    let mut first = true;
+    let mut segment = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '/' | '{' | '}' | ',') {
+            if bad(&segment, first) {
+                return true;
+            }
+            segment.clear();
+            // The next segment is first only where a brace alternative starts.
+            first = matches!(c, '{' | ',');
+            if first && chars.peek() == Some(&'/') {
+                return true;
+            }
+        } else {
+            segment.push(c);
+        }
     }
-    value
-        .split(['/', '{', '}', ','])
-        .any(|seg| seg == ".." || seg.starts_with('~') || seg.starts_with('$'))
+    bad(&segment, first)
 }
 
 /// How many lines a tool result returned: the tool's own count when the record carries it, else
