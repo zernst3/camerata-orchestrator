@@ -246,6 +246,14 @@ async fn a_refused_piece_is_retried_in_two_halves_on_a_resume() {
         "the refused piece ran as two halves: {seen:?}"
     );
     assert_eq!(extras.coverage.len(), 3, "three pieces after the split");
+    // The refused parent's stored cost (0.2) is replayed as resumed, with the stored part one
+    // (1.0): the halves' own turns are fresh.
+    let usage = meter2.snapshot();
+    assert!(
+        (usage.resumed_cost_usd - 1.2).abs() < 1e-9,
+        "the refused parent's cost is replayed as resumed: {}",
+        usage.resumed_cost_usd
+    );
 }
 
 #[tokio::test]

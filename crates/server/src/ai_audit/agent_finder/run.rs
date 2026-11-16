@@ -225,7 +225,14 @@ fn refused_key(key: &str) -> String {
 
 /// Expand a planned piece against the stored lines of an earlier attempt: a finished piece is
 /// replayed, a refused piece is run in two halves (by path order), and anything else runs.
-fn expand(piece: Piece, lines: &HashMap<String, AbsorbedLine>, out: &mut Vec<Work>) {
+/// The stored line of each refused piece that was split into halves goes to `split_parents`: its
+/// cost was paid, so the resume replays it as resumed.
+fn expand(
+    piece: Piece,
+    lines: &HashMap<String, AbsorbedLine>,
+    out: &mut Vec<Work>,
+    split_parents: &mut Vec<AbsorbedLine>,
+) {
     if let Some(line) = lines.get(&piece.key) {
         if let Ok(stored) = serde_json::from_str::<StoredPiece>(&line.text) {
             out.push(Work::Stored(piece, stored));
@@ -234,6 +241,7 @@ fn expand(piece: Piece, lines: &HashMap<String, AbsorbedLine>, out: &mut Vec<Wor
     }
     if let Some(line) = lines.get(&refused_key(&piece.key)) {
         if piece.files.len() >= 2 {
+            split_parents.push(line.clone());
             let mid = piece.files.len() / 2;
             for (suffix, files) in [("a", &piece.files[..mid]), ("b", &piece.files[mid..])] {
                 expand(
@@ -244,6 +252,7 @@ fn expand(piece: Piece, lines: &HashMap<String, AbsorbedLine>, out: &mut Vec<Wor
                     },
                     lines,
                     out,
+                    split_parents,
                 );
             }
         } else {
@@ -277,6 +286,17 @@ fn checkpoint_line(
         text,
         members: Vec::new(),
         batch_id: None,
+    }
+}
+
+/// The turn usage a stored checkpoint line recorded.
+fn line_usage(line: &AbsorbedLine) -> super::TurnUsage {
+    super::TurnUsage {
+        input_tokens: line.input_tokens.unwrap_or(0),
+        output_tokens: line.output_tokens.unwrap_or(0),
+        cache_read_input_tokens: line.cache_read_input_tokens,
+        cache_creation_input_tokens: line.cache_creation_input_tokens,
+        cost_usd: line.cost_usd,
     }
 }
 
@@ -338,13 +358,7 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
         }
         Work::RefusedFinal(_, line) => {
             if let Some(m) = shared.meter {
-                let usage = super::TurnUsage {
-                    input_tokens: line.input_tokens.unwrap_or(0),
-                    output_tokens: line.output_tokens.unwrap_or(0),
-                    cache_read_input_tokens: line.cache_read_input_tokens,
-                    cache_creation_input_tokens: line.cache_creation_input_tokens,
-                    cost_usd: line.cost_usd,
-                };
+                let usage = line_usage(&line);
                 m.record_resumed(Stage::Finder, &piece::response_of(shared.options, &usage));
             }
             let mut report = piece::unstarted_report(
@@ -536,8 +550,17 @@ pub async fn find_repo(
             })
             .unwrap_or_default();
     let mut works: Vec<Work> = Vec::new();
+    let mut split_parents: Vec<AbsorbedLine> = Vec::new();
     for p in planned {
-        expand(p, &stored_lines, &mut works);
+        expand(p, &stored_lines, &mut works, &mut split_parents);
+    }
+    if let Some(m) = meter {
+        for line in &split_parents {
+            m.record_resumed(
+                Stage::Finder,
+                &piece::response_of(options, &line_usage(line)),
+            );
+        }
     }
     let shared = Shared {
         agent,
