@@ -396,7 +396,11 @@ async fn a_stray_problems_file_that_is_a_problems_list_is_read_as_one() {
         ));
         let agent = ScriptedAgent::new(script);
         let (rows, _, _, failed, _, _) = run(&agent).await;
-        assert!(agent.messages().is_empty(), "{name}: {:?}", agent.messages());
+        assert!(
+            agent.messages().is_empty(),
+            "{name}: {:?}",
+            agent.messages()
+        );
         assert!(failed.is_empty(), "{name}: {failed:?}");
         assert_eq!(rows.len(), 1, "{name}: {rows:?}");
         assert_eq!((rows[0].path.as_str(), rows[0].line), ("src/b.rs", 3));
