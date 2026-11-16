@@ -1185,11 +1185,7 @@ async fn a_refused_call_to_a_tool_outside_the_set_and_the_todo_tool_are_fine() {
     );
     let room = room_for(&["src/a.rs"], &repo());
     let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
-    assert!(
-        !matches!(run.stop, AgentStop::Failed(_)),
-        "{:?}",
-        run.stop
-    );
+    assert!(!matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
 }
 
 #[tokio::test]
