@@ -85,7 +85,9 @@ static PROCESS_SLEEPER: std::sync::Mutex<Option<std::sync::Arc<dyn Sleeper>>> =
     std::sync::Mutex::new(None);
 
 /// Install (or, with `None`, remove) the process-wide sleeper. TEST SUPPORT: a test that sets
-/// it must run serially and remove it again.
+/// it must run serially and remove it again. Compiled only for tests and the `test-support`
+/// feature (enabled from dev-dependencies), so a production build does not contain it.
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_process_sleeper(sleeper: Option<std::sync::Arc<dyn Sleeper>>) {
     *PROCESS_SLEEPER
         .lock()

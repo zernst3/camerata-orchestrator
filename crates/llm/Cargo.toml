@@ -17,6 +17,10 @@ workspace = true
 # the Axum adapter; the server re-exports everything here so its module paths
 # (`crate::llm::*`, `crate::credentials::*`, ...) keep resolving unchanged.
 
+[features]
+# Test seams (the process-wide sleeper). Enabled only from dev-dependencies; never in production.
+test-support = []
+
 [dependencies]
 # Pure-serde wire DTOs (Phase A): `LlmResponse`, the credential wire shapes + name
 # consts + `CredentialError`, the registry wire shapes, and `DEFAULT_MODEL`.

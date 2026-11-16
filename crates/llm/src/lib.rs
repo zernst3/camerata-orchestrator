@@ -35,7 +35,9 @@ pub mod rate_limit;
 // the Message Batches path). Not part of the public surface — `llm` is the only caller.
 pub(crate) mod retry;
 // The wait seam a test injects (`Llm::with_sleeper`, `set_process_sleeper`).
-pub use retry::{set_process_sleeper, Sleeper};
+#[cfg(any(test, feature = "test-support"))]
+pub use retry::set_process_sleeper;
+pub use retry::Sleeper;
 // The Messages API's server-sent events: the stream parser and the idle-timeout reader behind
 // the API leg of `llm::Llm`.
 pub(crate) mod sse;

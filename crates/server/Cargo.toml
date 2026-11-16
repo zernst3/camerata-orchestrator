@@ -131,7 +131,12 @@ csv = "1"
 pdf-extract = "0.12"
 sha2 = { workspace = true }
 
+[features]
+# Test seams (the outage-span override). Enabled only from dev-dependencies; never in production.
+test-support = []
+
 [dev-dependencies]
+camerata-llm = { path = "../llm", features = ["test-support"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # test-util gives start_paused so the run executor's sleeps resolve instantly in tests.

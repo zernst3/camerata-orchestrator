@@ -42,13 +42,16 @@ pub const OUTAGE_SPAN: Duration = Duration::from_secs(120);
 /// TEST SUPPORT: a process-wide replacement for [`OUTAGE_SPAN`], in milliseconds (`u64::MAX` =
 /// none). An end-to-end test that drives a whole run through instantly-failing stub calls cannot
 /// reach the real span; it holds an [`OutageSpanGuard`] instead. Production never sets it.
+#[cfg(any(test, feature = "test-support"))]
 static SPAN_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
 /// While alive, the outage stop needs `span` of failures instead of [`OUTAGE_SPAN`]. A test that
 /// holds one must run serially (it is process-wide).
+#[cfg(any(test, feature = "test-support"))]
 #[must_use = "the override ends when the guard is dropped"]
 pub struct OutageSpanGuard(());
 
+#[cfg(any(test, feature = "test-support"))]
 impl OutageSpanGuard {
     pub fn set(span: Duration) -> Self {
         let ms = u64::try_from(span.as_millis()).unwrap_or(u64::MAX - 1);
@@ -57,17 +60,24 @@ impl OutageSpanGuard {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for OutageSpanGuard {
     fn drop(&mut self) {
         SPAN_OVERRIDE_MS.store(u64::MAX, Ordering::SeqCst);
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn outage_span() -> Duration {
     match SPAN_OVERRIDE_MS.load(Ordering::SeqCst) {
         u64::MAX => OUTAGE_SPAN,
         ms => Duration::from_millis(ms),
     }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn outage_span() -> Duration {
+    OUTAGE_SPAN
 }
 
 /// Time as the health counter sees it: the time since some fixed origin. Production reads the
