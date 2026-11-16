@@ -452,7 +452,7 @@ fn short_client() -> reqwest::Client {
 #[tokio::test]
 async fn a_real_request_timeout_is_recognised_through_the_post_wrapping() {
     let addr = stalled_listener(b"").await;
-    let builder = short_client().post(format!("http://{addr}/v1/messages"));
+    let builder = short_client().post(format!("http://{addr}/stalled"));
     let err = send_and_read(builder, "Anthropic API")
         .await
         .expect_err("the provider never answers");
@@ -467,7 +467,7 @@ async fn a_real_body_phase_timeout_is_recognised() {
         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{\"a\":",
     )
     .await;
-    let builder = short_client().post(format!("http://{addr}/v1/messages"));
+    let builder = short_client().post(format!("http://{addr}/stalled"));
     let err = send_and_read(builder, "OpenRouter API")
         .await
         .expect_err("the body never completes");
