@@ -253,8 +253,12 @@ pub(super) fn interpret(
     let joined = merged_checklist(runs);
     let file = joined.clone().or_else(|| output.checklist.clone());
     output.checklist = file.clone();
-    let trace: Vec<super::super::ToolEvent> =
-        runs.iter().flat_map(|r| r.trace.iter().cloned()).collect();
+    // A step that did not end `Finished` reviewed nothing: its reads are not evidence.
+    let trace: Vec<super::super::ToolEvent> = runs
+        .iter()
+        .filter(|r| r.stop.is_finished())
+        .flat_map(|r| r.trace.iter().cloned())
+        .collect();
     let outcome = checklist.check(
         &file.clone().unwrap_or_default(),
         &output.problems,
@@ -834,6 +838,9 @@ pub(super) async fn converse(
     meter_turns(shared, &first);
     runs.push(first);
     let (mut repaired, mut sent, mut asked) = (false, false, false);
+    // The newest conversation the agent holds: a successful follow-up releases the one it
+    // continued from, so only this one is let go of when the piece ends.
+    let mut live = runs[0].conversation.clone();
     loop {
         let last = runs.last().expect("one run");
         if !last.stop.is_finished() {
@@ -856,6 +863,7 @@ pub(super) async fn converse(
         match shared.agent.follow_up(room, &prior, &turn, limits).await {
             Ok(run) => {
                 meter_turns(shared, &run);
+                live = run.conversation.clone();
                 runs.push(run);
             }
             // Nothing was sent: the step simply did not happen; its gaps stay disclosed.
@@ -868,6 +876,7 @@ pub(super) async fn converse(
             }
         }
     }
+    shared.agent.release(&live);
     let _ = index;
     Ok(runs)
 }

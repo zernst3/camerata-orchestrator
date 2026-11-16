@@ -280,6 +280,17 @@ pub trait PieceAgent: Send + Sync {
         turn: &FollowUp,
         limits: &PieceLimits,
     ) -> anyhow::Result<AgentRun>;
+
+    /// Let go of the conversation behind `handle` (the transport's stored history or session).
+    /// The runner calls it when a piece ends, finished, failed or replayed from storage, with the
+    /// newest handle only: a successful [`PieceAgent::follow_up`] already releases the handle it
+    /// continued from. The default does nothing.
+    ///
+    /// SHIM: build 2 (`feat/agent-finder-api`) defines this method; this default stands in until
+    /// that branch is merged.
+    fn release(&self, handle: &ConversationHandle) {
+        let _ = handle;
+    }
 }
 
 /// Send the files the first run did not read (`unread`, repo-relative paths) once more (design
@@ -332,7 +343,11 @@ pub fn piece_agent_for(
     backend: crate::llm::Backend,
     api_key: Option<&str>,
     work_dir: &std::path::Path,
+    meter: std::sync::Arc<super::UsageMeter>,
 ) -> anyhow::Result<Box<dyn PieceAgent>> {
+    // SHIM: build 2 attaches the run's shared meter to the agent (an agent with no meter refuses
+    // to send). Until that branch is merged the meter is accepted and not yet used here.
+    let _ = &meter;
     let model = finder_model_for(controls);
     match backend {
         crate::llm::Backend::Api => {
@@ -388,7 +403,11 @@ pub struct ScriptedAgent {
     pub usage_per_turn: TurnUsage,
     queued: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ScriptedTurn>>>,
     received: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// The conversations this stand-in still keeps (a real transport holds file text for each).
+    kept: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
+
+static SCRIPTED_HANDLES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
 impl ScriptedAgent {
     pub fn new(first: Vec<ScriptStep>) -> Self {
@@ -400,7 +419,18 @@ impl ScriptedAgent {
             usage_per_turn: TurnUsage::default(),
             queued: std::sync::Arc::default(),
             received: std::sync::Arc::default(),
+            kept: std::sync::Arc::default(),
         }
+    }
+
+    /// How many conversations are still kept: one for each run or follow-up whose handle was not
+    /// released (by [`PieceAgent::release`], or by the follow-up that continued from it). Zero at
+    /// the end of a run.
+    pub fn kept(&self) -> usize {
+        self.kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     #[must_use]
@@ -509,7 +539,17 @@ impl ScriptedAgent {
             usage: vec![self.usage_per_turn.clone()],
             stop,
             shown_in_full,
-            conversation: ConversationHandle::new("scripted"),
+            conversation: {
+                let id = format!(
+                    "scripted-{}",
+                    SCRIPTED_HANDLES.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                );
+                self.kept
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id.clone());
+                ConversationHandle::new(id)
+            },
         }
     }
 }
@@ -528,10 +568,12 @@ impl PieceAgent for ScriptedAgent {
     async fn follow_up(
         &self,
         room: &Room,
-        _prior: &AgentRun,
+        prior: &AgentRun,
         turn: &FollowUp,
         _limits: &PieceLimits,
     ) -> anyhow::Result<AgentRun> {
+        // A follow-up continues from the handle of `prior` and releases it.
+        self.release(&prior.conversation);
         let (text, shown) = turn.render(room);
         self.received
             .lock()
@@ -546,5 +588,12 @@ impl PieceAgent for ScriptedAgent {
             Some(t) => self.play(room, &t.steps, t.stop, shown),
             None => self.play(room, &self.again, self.again_stop.clone(), shown),
         })
+    }
+
+    fn release(&self, handle: &ConversationHandle) {
+        self.kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(handle.as_str());
     }
 }

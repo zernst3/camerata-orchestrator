@@ -159,6 +159,11 @@ pub(super) struct ByPiece {
 }
 
 impl ByPiece {
+    /// Conversations still kept over every script (zero at the end of a run).
+    pub fn kept(&self) -> usize {
+        self.agents.values().map(ScriptedAgent::kept).sum()
+    }
+
     pub fn new(agents: Vec<(&str, ScriptedAgent)>) -> Self {
         Self {
             agents: agents
@@ -209,9 +214,17 @@ impl PieceAgent for ByPiece {
         self.follow_ups.fetch_add(1, Ordering::SeqCst);
         self.pick(room).follow_up(room, prior, turn, limits).await
     }
+
+    fn release(&self, handle: &super::super::ConversationHandle) {
+        // Handles are unique over the scripts, so only the one that owns it forgets it.
+        for agent in self.agents.values() {
+            agent.release(handle);
+        }
+    }
 }
 
 mod checklist_outcomes;
+mod contract;
 mod conventions;
 mod coverage;
 mod downstream;

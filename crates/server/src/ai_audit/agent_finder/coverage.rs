@@ -70,8 +70,11 @@ pub fn coverage_of(
     context_files: &[String],
     claimed_unread: Option<&[String]>,
 ) -> PieceCoverage {
-    let trace: Vec<&ToolEvent> = runs.iter().flat_map(|r| r.trace.iter()).collect();
-    let sent_again: Vec<&String> = runs.iter().flat_map(|r| r.shown_in_full.iter()).collect();
+    // A step that did not end `Finished` reviewed nothing (design section 4): neither its reads
+    // nor the files it was sent count.
+    let done = || runs.iter().filter(|r| r.stop.is_finished());
+    let trace: Vec<&ToolEvent> = done().flat_map(|r| r.trace.iter()).collect();
+    let sent_again: Vec<&String> = done().flat_map(|r| r.shown_in_full.iter()).collect();
     let mut ranges: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
     let mut touched: BTreeMap<String, bool> = BTreeMap::new();
     for event in trace.iter().copied() {

@@ -303,6 +303,9 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
                     }
                 }
             }
+            if let Some(last) = stored.runs.last() {
+                shared.agent.release(&last.conversation);
+            }
             let mut report = piece::report_of(
                 shared,
                 index,
@@ -518,6 +521,9 @@ pub async fn find_repo(
                             m.record_resumed(Stage::Finder, &piece::response_of(options, usage));
                         }
                     }
+                }
+                if let Some(last) = s.runs.last() {
+                    agent.release(&last.conversation);
                 }
                 (Ok(s.runs), true)
             }
@@ -876,7 +882,7 @@ pub async fn find_repo_for_run(
     controls: &RunControls,
     chosen_options: &HashMap<String, String>,
     backend_resolution: &crate::llm::BackendResolution,
-    meter: Option<&UsageMeter>,
+    meter: Option<&std::sync::Arc<UsageMeter>>,
 ) -> anyhow::Result<FinderResult> {
     let backend = match backend_resolution {
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
@@ -899,7 +905,14 @@ pub async fn find_repo_for_run(
     let corpus = corpus.unwrap_or(&empty);
     if let Ok(agent) = AGENT_OVERRIDE.try_with(std::sync::Arc::clone) {
         return find_repo(
-            &*agent, repo, files, selected, corpus, controls, &options, meter,
+            &*agent,
+            repo,
+            files,
+            selected,
+            corpus,
+            controls,
+            &options,
+            meter.map(|m| &**m),
         )
         .await;
     }
@@ -909,9 +922,21 @@ pub async fn find_repo_for_run(
         .and_then(crate::llm::Llm::api_key);
     // The command line transport writes its rooms here, never inside the client's repository.
     let work_dir = std::env::temp_dir().join("camerata-finder-rooms");
-    let agent = super::piece_agent_for(controls, backend, key, &work_dir)?;
+    // The agent is built with the run's shared meter (an agent with no meter refuses to send).
+    let shared_meter = meter.map_or_else(
+        || std::sync::Arc::new(UsageMeter::with_controls(controls.clone())),
+        std::sync::Arc::clone,
+    );
+    let agent = super::piece_agent_for(controls, backend, key, &work_dir, shared_meter)?;
     find_repo(
-        &*agent, repo, files, selected, corpus, controls, &options, meter,
+        &*agent,
+        repo,
+        files,
+        selected,
+        corpus,
+        controls,
+        &options,
+        meter.map(|m| &**m),
     )
     .await
 }

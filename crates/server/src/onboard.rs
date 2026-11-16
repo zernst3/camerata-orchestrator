@@ -2410,7 +2410,7 @@ pub async fn audit_repos_with_llm_controlled(
     let fix_model: Option<String> = Some(crate::ai_audit::resolve_audit_model(
         controls.fix_model_for(model, calibration_model),
     ));
-    let meter = crate::ai_audit::UsageMeter::with_controls(controls.clone());
+    let meter = std::sync::Arc::new(crate::ai_audit::UsageMeter::with_controls(controls.clone()));
     // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
     // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
     // question, so a changed rule set or an AI-off prior scan does not invalidate them); a

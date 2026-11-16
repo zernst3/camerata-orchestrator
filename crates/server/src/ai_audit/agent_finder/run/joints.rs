@@ -379,5 +379,6 @@ pub(super) async fn run_joints(
     let _ = adopted;
     let run = shared.agent.run(&room, &brief, &limits).await?;
     meter_turns(shared, &run);
+    shared.agent.release(&run.conversation);
     Ok(vec![run])
 }
