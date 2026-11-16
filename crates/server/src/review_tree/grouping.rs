@@ -132,8 +132,18 @@ pub fn group_semantic(
     let mut rule_ids_sorted: Vec<&str> = placements.iter().map(|p| p.rule.as_str()).collect();
     rule_ids_sorted.sort_unstable();
     rule_ids_sorted.dedup();
+    // A style linter's rule is one rule group per repository (see [`super::lint`]): its rows
+    // form no same-cause sub-group, whatever the pair tests found.
+    let lint_sub: Vec<Option<String>> = findings
+        .iter()
+        .zip(&placements)
+        .map(|(f, p)| {
+            super::lint::is_style_lint_row(f, tools)
+                .then(|| super::lint::lint_sub_id(&p.rule, &f.repo))
+        })
+        .collect();
     let mut members_by_rule_component: BTreeMap<(&str, usize), Vec<usize>> = BTreeMap::new();
-    for i in 0..n {
+    for i in (0..n).filter(|&i| lint_sub[i].is_none()) {
         members_by_rule_component
             .entry((placements[i].rule.as_str(), component_of[i]))
             .or_default()
@@ -201,8 +211,9 @@ pub fn group_semantic(
     let mut groups: BTreeMap<(usize, String), Vec<usize>> = BTreeMap::new();
     for i in 0..n {
         let rule = &placements[i].rule;
-        let sub = sub_of_row[i]
+        let sub = lint_sub[i]
             .clone()
+            .or_else(|| sub_of_row[i].clone())
             .unwrap_or_else(|| residual_sub_id(rule));
         let category = rule_category
             .get(rule)

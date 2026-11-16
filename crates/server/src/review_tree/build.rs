@@ -64,12 +64,14 @@ pub fn resolve_rule_categories(placements: &[RulePlacement]) -> HashMap<String, 
 /// the group reviewer's sub-groups did not name.
 pub const UNPLACED_SEGMENT: &str = "unplaced";
 
-/// Whether `sub` is a valid sub-group id under `rule`: `sub:<rule>/<digits>`, or the rule's
-/// `unplaced` sub-group.
+/// Whether `sub` is a valid sub-group id under `rule`: `sub:<rule>/<digits>`, the rule's
+/// `unplaced` sub-group, or one of its lint rule groups (`sub:<rule>/lint-<repo digest>`).
 fn sub_belongs_to(sub: &str, rule: &str) -> bool {
     let prefix = format!("sub:{}/", rule.strip_prefix("rule:").unwrap_or(rule));
     sub.strip_prefix(&prefix).is_some_and(|rest| {
-        rest == UNPLACED_SEGMENT || (!rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+        rest == UNPLACED_SEGMENT
+            || super::lint::is_lint_segment(rest)
+            || (!rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
     })
 }
 
@@ -156,10 +158,15 @@ fn merged_outliers<'a>(
     out
 }
 
-/// The ordinal of a sub-group id (`sub:SEC-1/3` is 3). The `unplaced` sub-group sorts last.
+/// The ordinal a lint rule group sorts by: after every numbered sub-group, before `unplaced`.
+const LINT_ORDINAL: u32 = u32::MAX - 1;
+
+/// The ordinal of a sub-group id (`sub:SEC-1/3` is 3). A lint rule group sorts after the numbered
+/// ones and the `unplaced` sub-group sorts last.
 fn sub_ordinal(sub: &str) -> u32 {
     match sub.rsplit('/').next() {
         Some(UNPLACED_SEGMENT) => u32::MAX,
+        Some(d) if super::lint::is_lint_segment(d) => LINT_ORDINAL,
         Some(d) => d.parse().unwrap_or(0),
         None => 0,
     }
@@ -191,7 +198,30 @@ pub fn build_tree(
     let mut row_sub: Vec<String> = Vec::with_capacity(n);
     for f in findings.iter() {
         let fresh = place_row(f, tools);
+        // A style linter's rule is one rule group per repository (see [`super::lint`]), whatever
+        // sub-group the scan or the group reviewer gave the row. A lint the scan mapped to a
+        // security rule (with the corpus loaded) keeps its place.
+        let lint = super::lint::is_style_lint_row(f, tools)
+            && valid_path(f)
+                .is_none_or(|[_, rule, _]| !super::lint::rule_node_is_security(f, rule));
         match valid_path(f) {
+            Some([category, rule, _]) if lint => {
+                let rule_label = if fresh.rule == *rule {
+                    fresh.rule_label
+                } else {
+                    rule.strip_prefix("rule:").unwrap_or(rule).to_string()
+                };
+                row_sub.push(super::lint::lint_sub_id(rule, &f.repo));
+                placements.push(RulePlacement {
+                    category: category.clone(),
+                    rule: rule.clone(),
+                    rule_label,
+                });
+            }
+            None if lint => {
+                row_sub.push(super::lint::lint_sub_id(&fresh.rule, &f.repo));
+                placements.push(fresh);
+            }
             Some([category, rule, sub]) => {
                 let rule_label = if fresh.rule == *rule {
                     fresh.rule_label
@@ -267,7 +297,16 @@ pub fn build_tree(
         rule_ids.sort();
         rule_ids.dedup();
         let old = prev_nodes.get(id);
+        let lint = *ordinal == LINT_ORDINAL;
         let (label, cause) = match old {
+            // A lint rule group's words are the engine's: the rule, the repository and the count.
+            _ if lint => {
+                let first = &findings[members[0]];
+                (
+                    super::lint::lint_label(&first.rule_id, &first.repo),
+                    Some(super::lint::LINT_CAUSE.to_string()),
+                )
+            }
             Some(o) => (o.label.clone(), o.cause.clone()),
             None if *ordinal == 0 => (RESIDUAL_LABEL.to_string(), None),
             None if *ordinal == u32::MAX => (UNPLACED_LABEL.to_string(), None),
@@ -277,6 +316,11 @@ pub fn build_tree(
         // how many sites are in it, so it always agrees with the rows (A15).
         let (summary, summary_source) = if *ordinal == u32::MAX {
             (Some(unplaced_summary(keys.len())), TextSource::Model)
+        } else if lint {
+            (
+                Some(super::lint::lint_summary(keys.len())),
+                TextSource::Model,
+            )
         } else {
             (
                 old.and_then(|o| o.summary.clone()),
@@ -289,7 +333,12 @@ pub fn build_tree(
             parent: Some(rule.clone()),
             label,
             rule_ids,
-            kind: kind_of(members.iter().map(|&i| &findings[i])),
+            // A lint rule group is decided as a batch, never read place by place.
+            kind: if lint {
+                NodeKind::Bulk
+            } else {
+                kind_of(members.iter().map(|&i| &findings[i]))
+            },
             cause,
             members: keys.clone(),
             outliers: merged_outliers(old, &key_set, members.iter().map(|&i| &findings[i])),

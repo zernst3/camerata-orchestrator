@@ -15,6 +15,7 @@ mod build;
 mod collapse;
 mod fixes;
 mod grouping;
+mod lint;
 mod mapping;
 mod places;
 mod types;
@@ -30,6 +31,10 @@ pub use fixes::{
     FIX_PREFIX,
 };
 pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};
+pub use lint::{
+    in_lint_group, is_lint_sub_id, is_security_family_lint, is_security_lint_id, is_style_lint_row,
+    is_style_linter, lint_sub_id, LINT_SEGMENT_PREFIX, STYLE_LINTERS,
+};
 pub use mapping::{
     family_of, is_external_tool_row, rule_node_for, RulePlacement, ToolMap, OTHER_TOOLS,
     UNCATEGORISED,
@@ -575,6 +580,8 @@ fn keyed_in_line_order(findings: &[Finding]) -> Vec<Finding> {
 
 #[cfg(test)]
 mod fixes_tests;
+#[cfg(test)]
+mod lint_tests;
 #[cfg(test)]
 mod outlier_tests;
 #[cfg(test)]
