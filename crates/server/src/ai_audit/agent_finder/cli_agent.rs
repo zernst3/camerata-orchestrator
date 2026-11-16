@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::room::{CODE_DIR, OUT_DIR};
+use super::room::{CODE_DIR, OUT_DIR, RESERVED_DIR};
 use super::{
     AgentRun, AgentStop, ConversationHandle, FollowUp, PieceAgent, PieceLimits, Room, ToolEvent,
     TurnUsage,
@@ -372,6 +372,27 @@ pub(crate) struct ParsedSession {
 /// repository's files live under `code/` on disk and are named without it in the room, so that
 /// part is stripped; the room's own `_camerata/` files keep their name.
 fn room_path(path: &str, roots: &[PathBuf]) -> Option<String> {
+    let mut parts = room_parts(path, roots)?;
+    if parts.first().map(String::as_str) == Some(CODE_DIR) {
+        parts.remove(0);
+    }
+    Some(if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    })
+}
+
+/// Whether a path is under `_camerata/out/` of the room, the only place the agent may write.
+fn in_out_folder(path: &str, roots: &[PathBuf]) -> bool {
+    room_parts(path, roots).is_some_and(|p| {
+        p.len() > 2 && p[0] == RESERVED_DIR && format!("{}/", p[..2].join("/")) == OUT_DIR
+    })
+}
+
+/// The parts of a path below the room root, as it is on disk (`code/` kept), or `None` when it
+/// is outside the room.
+fn room_parts(path: &str, roots: &[PathBuf]) -> Option<Vec<String>> {
     let given = Path::new(path);
     let rest: PathBuf = if given.is_absolute() {
         roots
@@ -400,14 +421,7 @@ fn room_path(path: &str, roots: &[PathBuf]) -> Option<String> {
             Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    if parts.first().map(String::as_str) == Some(CODE_DIR) {
-        parts.remove(0);
-    }
-    Some(if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    })
+    Some(parts)
 }
 
 /// Whether a path or glob argument reaches outside the room by its spelling. Segments are split
@@ -679,17 +693,29 @@ pub(crate) fn parse_session(
             // A refused write left nothing behind and is not recorded, but a write aimed
             // outside the room is still a path outside the room.
             "Write" => {
-                if let Some(path) = place(text_of("file_path"), false) {
-                    if !failed {
+                let raw = text_of("file_path");
+                let went_through = !failed;
+                if let Some(path) = place(raw.clone(), false) {
+                    if went_through {
+                        if !in_out_folder(&raw, roots) {
+                            outside.push(format!("a write to {raw}"));
+                        }
                         trace.push(ToolEvent::Write { path });
                     }
                 }
             }
-            "Edit" | "MultiEdit" => {
-                place(text_of("file_path"), false);
-            }
-            "NotebookEdit" => {
-                place(text_of("notebook_path"), false);
+            // A write that went through anywhere in the room but its out folder altered text
+            // the review depends on.
+            "Edit" | "MultiEdit" | "NotebookEdit" => {
+                let key = if u.name == "NotebookEdit" {
+                    "notebook_path"
+                } else {
+                    "file_path"
+                };
+                let raw = text_of(key);
+                if place(raw.clone(), false).is_some() && !failed && !in_out_folder(&raw, roots) {
+                    outside.push(format!("a write to {raw}"));
+                }
             }
             _ => {}
         }

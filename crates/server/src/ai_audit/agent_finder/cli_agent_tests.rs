@@ -1252,3 +1252,91 @@ async fn real_folder_names_with_a_dollar_or_tilde_inside_a_path_are_fine() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_write_that_went_through_outside_the_out_folder_fails_the_piece() {
+    for (name, input) in [
+        (
+            "Write",
+            json!({"file_path": "@ROOM@/code/src/a.rs", "content": "x"}),
+        ),
+        ("Write", json!({"file_path": "src/a.rs", "content": "x"})),
+        (
+            "Edit",
+            json!({"file_path": "@ROOM@/_camerata/checklist.md", "old_string": "a", "new_string": "b"}),
+        ),
+        (
+            "MultiEdit",
+            json!({"file_path": "@ROOM@/code/src/a.rs", "edits": []}),
+        ),
+        (
+            "NotebookEdit",
+            json!({"notebook_path": "@ROOM@/code/n.ipynb", "new_source": "x"}),
+        ),
+    ] {
+        let rig = Rig::new().call(
+            1,
+            Some(replay(&[
+                call("w1", name, input.clone()),
+                answer("w1", "ok", None, false),
+            ])),
+            &[],
+            OK_RESULT,
+        );
+        let room = room_for(&["src/a.rs"], &repo());
+        let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+        assert!(
+            matches!(run.stop, AgentStop::Failed(_)),
+            "{name} {input}: {:?}",
+            run.stop
+        );
+    }
+}
+
+#[tokio::test]
+async fn writes_into_the_out_folder_and_refused_writes_are_fine() {
+    for (name, input, refused) in [
+        (
+            "Write",
+            json!({"file_path": "@ROOM@/_camerata/out/problems-1.json", "content": "x"}),
+            false,
+        ),
+        (
+            "Write",
+            json!({"file_path": "_camerata/out/x.json", "content": "x"}),
+            false,
+        ),
+        (
+            "Edit",
+            json!({"file_path": "@ROOM@/code/../_camerata/out/y", "old_string": "a", "new_string": "b"}),
+            false,
+        ),
+        (
+            "Write",
+            json!({"file_path": "@ROOM@/code/src/a.rs", "content": "x"}),
+            true,
+        ),
+        (
+            "Edit",
+            json!({"file_path": "@ROOM@/_camerata/checklist.md", "old_string": "a", "new_string": "b"}),
+            true,
+        ),
+    ] {
+        let rig = Rig::new().call(
+            1,
+            Some(replay(&[
+                call("w1", name, input.clone()),
+                answer("w1", "x", None, refused),
+            ])),
+            &[],
+            OK_RESULT,
+        );
+        let room = room_for(&["src/a.rs"], &repo());
+        let run = rig.agent().run(&room, "b", &limits()).await.unwrap();
+        assert!(
+            !matches!(run.stop, AgentStop::Failed(_)),
+            "{name} {input}: {:?}",
+            run.stop
+        );
+    }
+}
