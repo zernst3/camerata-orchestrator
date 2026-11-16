@@ -91,21 +91,23 @@ pub(crate) fn unfold_ruled_out(
     for host in report.findings.iter_mut().filter(|f| ruled_out(f)) {
         let host_key = finding_key(host);
         let mut carried: Vec<Carried> = Vec::new();
-        for l in std::mem::take(&mut host.also_locations) {
-            if is_other_rules_place(host, &l.repo, &l.rule_id) {
-                carried.push(Carried {
-                    repo: l.repo,
-                    path: l.path,
-                    line: l.line,
-                    rule_id: l.rule_id,
-                    snippet: l.snippet,
-                    headline: l.headline,
-                    severity: l.severity,
-                    consequence: l.consequence,
-                });
-            } else {
-                host.also_locations.push(l);
-            }
+        let (carried_sites, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut host.also_locations)
+            .into_iter()
+            .partition(|l| is_other_rules_place(host, &l.repo, &l.rule_id));
+        // The places that stay are put back as they were; nothing here makes a site.
+        let mut kept = kept;
+        std::mem::swap(&mut host.also_locations, &mut kept);
+        for l in carried_sites {
+            carried.push(Carried {
+                repo: l.repo,
+                path: l.path,
+                line: l.line,
+                rule_id: l.rule_id,
+                snippet: l.snippet,
+                headline: l.headline,
+                severity: l.severity,
+                consequence: l.consequence,
+            });
         }
         for rule in std::mem::take(&mut host.also_matches) {
             if is_other_rules_place(host, &host.repo, &rule) {
