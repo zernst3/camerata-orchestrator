@@ -62,7 +62,12 @@ pub(super) fn native_row(repo: &str, path: &str, line: usize) -> Finding {
 /// Group `rows` the way the scan does (one repository at a time, one allocator for the scan) and
 /// assemble the tree the way sealing does.
 pub(super) fn grouped(rows: Vec<Finding>) -> (Vec<Finding>, ReviewTree) {
-    let tools = ToolMap::builtin();
+    grouped_with(rows, &ToolMap::builtin())
+}
+
+/// [`grouped`] with the scan's tool map (the corpus's selectors) for the grouping pass; the tree
+/// is assembled with the built-in tables, as the seal and the group review do.
+pub(super) fn grouped_with(rows: Vec<Finding>, tools: &ToolMap) -> (Vec<Finding>, ReviewTree) {
     let mut alloc = SubgroupAllocator::new();
     let mut repos: Vec<String> = rows.iter().map(|f| f.repo.clone()).collect();
     repos.sort();
@@ -71,7 +76,7 @@ pub(super) fn grouped(rows: Vec<Finding>) -> (Vec<Finding>, ReviewTree) {
     let mut sub_nodes: Vec<TreeNode> = Vec::new();
     for repo in repos {
         let of_repo: Vec<Finding> = rows.iter().filter(|f| f.repo == repo).cloned().collect();
-        let (out, subs) = group_semantic(of_repo, &[], &tools, &mut alloc);
+        let (out, subs) = group_semantic(of_repo, &[], tools, &mut alloc);
         all.extend(out);
         sub_nodes.extend(subs);
     }
@@ -80,13 +85,18 @@ pub(super) fn grouped(rows: Vec<Finding>) -> (Vec<Finding>, ReviewTree) {
         ..ReviewTree::default()
     };
     backfill_site_keys(&mut all);
-    let tree = build_tree(&mut all, &mut [], Some(prev), &tools, "run-1");
+    let tree = build_tree(&mut all, &mut [], Some(prev), &ToolMap::builtin(), "run-1");
     (all, tree)
 }
 
 /// The group reviewer split a rule group: the first `n` rows of `rule` are moved to a sub-group of
 /// its own, and the tree is assembled again the way the group review does.
-fn reviewer_splits(rows: &mut [Finding], tree: ReviewTree, rule: &str, n: usize) -> ReviewTree {
+pub(super) fn reviewer_splits(
+    rows: &mut [Finding],
+    tree: ReviewTree,
+    rule: &str,
+    n: usize,
+) -> ReviewTree {
     for f in rows.iter_mut().filter(|f| f.rule_id == rule).take(n) {
         let sub = format!(
             "{}/7",
@@ -119,7 +129,7 @@ pub(super) fn rule_groups_of<'a>(
 }
 
 /// The Fixes that cover a row of `rule` in `repo`.
-fn fixes_of<'a>(
+pub(super) fn fixes_of<'a>(
     tree: &'a ReviewTree,
     rows: &[Finding],
     rule: &str,
@@ -244,6 +254,19 @@ fn a_decision_on_the_lint_group_applies_to_every_place_and_is_recorded_once() {
 
 #[test]
 fn security_family_lints_keep_per_place_handling() {
+    // The corpus maps the two security checks to rules that are not security rules, so only the
+    // lint's own id says what it is: nothing else would keep them per place.
+    let selectors: std::collections::HashMap<String, Vec<String>> = [
+        (
+            "JAVASCRIPT-OBJECT-ACCESS-1",
+            "security/detect-object-injection",
+        ),
+        ("PYTHON-TESTING-ASSERTS-1", "s101"),
+    ]
+    .into_iter()
+    .map(|(native, lint)| (native.to_string(), vec![lint.to_string()]))
+    .collect();
+    let tools = ToolMap::from_selectors(Some(&selectors));
     let mut input = Vec::new();
     for repo in ["acme/web", "acme/admin"] {
         input.extend(lint_rows(
@@ -252,12 +275,13 @@ fn security_family_lints_keep_per_place_handling() {
             "security/detect-object-injection",
             4,
         ));
+        input.extend(lint_rows(repo, "ruff", "S101", 4));
         input.extend(lint_rows(repo, "ruff", "S608", 4));
         input.extend(lint_rows(repo, "eslint", "no-var", 4));
     }
-    let (mut rows, mut tree) = grouped(input);
+    let (mut rows, mut tree) = grouped_with(input, &tools);
     // The group reviewer splits every rule group it reads.
-    for rule in ["security/detect-object-injection", "S608", "no-var"] {
+    for rule in ["security/detect-object-injection", "S101", "S608", "no-var"] {
         tree = reviewer_splits(&mut rows, tree, rule, 2);
     }
 
@@ -266,16 +290,31 @@ fn security_family_lints_keep_per_place_handling() {
     let admin = rule_groups_of(&tree, &rows, "no-var", "acme/admin");
     assert_eq!((web.len(), admin.len()), (1, 1));
     assert_ne!(web[0].id, admin[0].id, "two repositories, two rule groups");
-    // ...a security lint keeps today's handling: the reviewer's split stands, place by place.
-    for rule in ["security/detect-object-injection", "S608"] {
-        let groups: BTreeSet<&str> = rule_groups_of(&tree, &rows, rule, "acme/web")
+    // ...a security lint keeps today's handling in every repository: no group that holds one is a
+    // lint group, and the reviewer's split stands, place by place.
+    for rule in ["security/detect-object-injection", "S101", "S608"] {
+        for repo in ["acme/web", "acme/admin"] {
+            let groups = rule_groups_of(&tree, &rows, rule, repo);
+            assert!(!groups.is_empty(), "{rule} in {repo} has a group");
+            for g in &groups {
+                assert!(
+                    !is_lint_sub_id(&g.id),
+                    "{rule} in {repo} is in the lint group {}",
+                    g.id
+                );
+            }
+            for f in rows.iter().filter(|f| f.rule_id == rule && f.repo == repo) {
+                assert!(!in_lint_group(f), "{rule} in {repo}: {:?}", f.group_path);
+            }
+        }
+        let groups: BTreeSet<&str> = ["acme/web", "acme/admin"]
             .into_iter()
-            .chain(rule_groups_of(&tree, &rows, rule, "acme/admin"))
+            .flat_map(|repo| rule_groups_of(&tree, &rows, rule, repo))
             .map(|n| n.id.as_str())
             .collect();
         assert!(
             groups.len() >= 2,
-            "{rule}: a security lint is not folded into one group: {groups:?}"
+            "{rule}: the reviewer's split stands: {groups:?}"
         );
     }
     // And a security lint's place can still be escalated, one place at a time.

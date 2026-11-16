@@ -3,10 +3,12 @@
 //! security branch keeps its own place, and the group summary never claims a held place.
 //! Synthetic fixtures only.
 
+use std::collections::HashMap;
+
 use camerata_api_types::decisions::{DecisionState, NewDecisionReq, Scope};
 use camerata_api_types::review::EscalationReason;
 
-use super::lint_tests::{grouped, keys_of, lint_row, lint_rows, rule_groups_of};
+use super::lint_tests::{grouped, grouped_with, keys_of, lint_row, lint_rows, rule_groups_of};
 use super::*;
 use crate::decisions::{apply_to, DecisionCtx, DecisionStore};
 use crate::onboard::Finding;
@@ -183,6 +185,72 @@ fn two_lint_rules_under_one_native_rule_are_two_groups_decided_apart() {
             "jest/no-conditional-expect is still undecided"
         );
     }
+}
+
+// ── Fix 4: each security branch keeps its own place ───────────────────────────────────────────
+
+/// A tool map in which the corpus maps `lint` (a Clippy lint, without its prefix) to `native`.
+fn corpus_map(native: &str, lint: &str) -> ToolMap {
+    let selectors: HashMap<String, Vec<String>> =
+        HashMap::from([(native.to_string(), vec![lint.to_string()])]);
+    ToolMap::from_selectors(Some(&selectors))
+}
+
+#[test]
+fn a_lint_the_corpus_maps_to_a_security_rule_stays_per_place() {
+    let tools = corpus_map("SEC-NO-HARDCODED-SECRETS-1", "example_secret_literal");
+    assert!(is_security_family_lint(
+        "clippy",
+        "clippy::example_secret_literal",
+        &tools
+    ));
+    let (rows, tree) = grouped_with(
+        lint_rows("acme/core", "clippy", "clippy::example_secret_literal", 4),
+        &tools,
+    );
+    assert_per_place(&rows, &tree, "clippy::example_secret_literal", "acme/core");
+}
+
+#[test]
+fn a_lint_the_tables_give_a_security_category_is_a_security_check() {
+    // An id only the security-category table knows: its id names no security plugin, and no
+    // single floor rule shares its category, so no table maps it to a rule.
+    let id = "camerata.security.weak-hash-js";
+    assert!(crate::finding_security_category(id).is_some());
+    assert!(!is_security_lint_id("eslint", id));
+    assert!(ToolMap::builtin().native_for(id).is_none());
+    assert!(is_security_family_lint("eslint", id, &ToolMap::builtin()));
+}
+
+#[test]
+fn a_lint_stored_under_a_security_rule_keeps_its_place_when_rebuilt_with_the_built_in_tables() {
+    // The scan mapped the lint to a security rule with the corpus loaded; the built-in tables do
+    // not know the mapping. The stored rule node still says what the lint is.
+    let tools = corpus_map("SEC-NO-HARDCODED-SECRETS-1", "example_secret_literal");
+    let (mut rows, tree) = grouped_with(
+        lint_rows("acme/core", "clippy", "clippy::example_secret_literal", 4),
+        &tools,
+    );
+    assert!(rows
+        .iter()
+        .all(|f| f.group_path[1] == "rule:SEC-NO-HARDCODED-SECRETS-1"));
+    let tree = build_tree(&mut rows, &mut [], Some(tree), &ToolMap::builtin(), "run-1");
+    assert_per_place(&rows, &tree, "clippy::example_secret_literal", "acme/core");
+}
+
+#[test]
+fn a_lint_stored_under_a_style_rule_stays_one_group_when_rebuilt_with_the_built_in_tables() {
+    // The corpus maps an unlisted Clippy lint to a non-security rule: one group, and the stored
+    // rule node keeps it one group when the tree is assembled without the corpus.
+    let tools = corpus_map("RUST-NAMING-1", "example_style_lint");
+    let (mut rows, tree) = grouped_with(
+        lint_rows("acme/core", "clippy", "clippy::example_style_lint", 6),
+        &tools,
+    );
+    let tree = build_tree(&mut rows, &mut [], Some(tree), &ToolMap::builtin(), "run-1");
+    let groups = rule_groups_of(&tree, &rows, "clippy::example_style_lint", "acme/core");
+    assert_eq!(groups.len(), 1, "{groups:?}");
+    assert!(is_lint_sub_id(&groups[0].id), "{}", groups[0].id);
 }
 
 // ── The summary never claims a held place ─────────────────────────────────────────────────────
