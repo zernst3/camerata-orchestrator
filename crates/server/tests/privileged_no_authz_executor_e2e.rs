@@ -279,11 +279,11 @@ async fn privileged_no_authz_finding_reaches_curated_findings_high_and_grounded(
     assert_eq!(site.line, FN_LINE);
     assert_eq!(site.severity, "high", "{site:?}");
     // M4 (mirrors `search_path_executor_e2e.rs`): an uncalibrated High-severity deterministic
-    // finding (no `Finding::effort`) recommends "Do next", not "Do now" — `matrix_bucket` only
-    // routes High to `do_now` when `effort == Some("low")`, and a deterministic architectural
+    // finding (no `Finding::effort`) recommends First: `matrix_bucket` routes High to `do_now` unless the
+    // effort is medium or high (owner ruling 2026-11-16), and a deterministic architectural
     // finding is never calibrated.
     assert_eq!(
-        site.disposition, "Open (recommended: Next)",
+        site.disposition, "Open (recommended: First)",
         "no disposition was supplied -> stays Open, recommending its computed matrix bucket"
     );
     assert_eq!(
@@ -334,11 +334,11 @@ async fn privileged_no_authz_finding_reaches_curated_findings_high_and_grounded(
     );
     assert!(
         json.matrix
-            .do_next
+            .do_now
             .iter()
             .any(|f| f.rule_id == RULE_PRIVILEGED_NO_AUTHZ),
-        "an uncalibrated High finding lands in do_next (do_now requires effort == low): {:?}",
-        json.matrix.do_next
+        "an uncalibrated High finding lands in do_now (only a medium or high effort is Next): {:?}",
+        json.matrix.do_now
     );
 
     // Methodology sanity: nothing was dispositioned FalsePositive, so nothing is excluded.

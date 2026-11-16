@@ -275,10 +275,10 @@ async fn search_path_finding_reaches_curated_findings_with_a_grounded_citation()
     assert_eq!(site.line, GRANT_TEMPORARY_ACCESS_LINE);
     assert_eq!(site.severity, "high");
     assert!(site.detail.contains("grant_temporary_access"));
-    // M4: an uncalibrated high-severity finding recommends "Do next" (never buried as
+    // M4: an uncalibrated high-severity finding recommends First (owner ruling 2026-11-16: a high problem with no estimate is First; never buried as
     // informational — `is_informational` hard-exempts critical/high regardless of family).
     assert_eq!(
-        site.disposition, "Open (recommended: Next)",
+        site.disposition, "Open (recommended: First)",
         "no disposition was supplied -> stays Open, recommending its computed matrix bucket"
     );
     assert_eq!(
