@@ -9,6 +9,9 @@
 //! - [`restored_without_decision`] (`CheckId::RestoredWithoutDecision`): a finding the engine
 //!   threw out and the reviewer put back is held until the reviewer decides it. The restore is
 //!   not a ruling.
+//! - [`split_out_without_decision`] (`CheckId::SplitOutWithoutDecision`): a problem split out of
+//!   one the reviewer ruled out is held until it has a decision of its own; the ruling on the
+//!   first did not cover it, and a group decision never does.
 //!
 //! The evidence-unverified check of design 5.3 (`EvidenceUnverifiedWithoutDecision`) is NOT
 //! repeated here: [`super::evidence::unverified_without_decision`] (`CheckId::EvidenceUnverified`,
@@ -23,6 +26,7 @@ use super::Problem;
 use crate::engine_discard::ENGINE_RESTORED_CAPTURE;
 use crate::onboard::Finding;
 use crate::report_export::decisions_file::{DecisionRowJson, DECISIONS_FILE};
+use crate::report_export::unfold::UNFOLDED_FROM_CAPTURE;
 
 /// One problem per merged row that has no decision record naming it, that state and a reason,
 /// and one per site a live group decision covers that has no per-site record. Read from the
@@ -186,6 +190,38 @@ pub fn undecided_restored<'a>(
         .iter()
         .filter(|f| f.captures.contains_key(ENGINE_RESTORED_CAPTURE))
         .filter(|f| !decisions.has_decision(f))
+}
+
+/// The problems split out of one the reviewer ruled out ([`UNFOLDED_FROM_CAPTURE`]) that
+/// `decisions` has not decided: what [`split_out_without_decision`] refuses, as rows. A group
+/// decision never counts as the problem's own decision ([`crate::decisions::held_keys`]).
+pub fn undecided_split_out<'a>(
+    findings: &'a [Finding],
+    decisions: &'a dyn ReviewerDecisions,
+) -> impl Iterator<Item = &'a Finding> {
+    findings
+        .iter()
+        .filter(|f| f.captures.contains_key(UNFOLDED_FROM_CAPTURE))
+        .filter(|f| !decisions.has_decision(f))
+}
+
+/// One problem per problem split out of a ruled-out one that `decisions` has not decided.
+pub fn split_out_without_decision(
+    findings: &[Finding],
+    decisions: &dyn ReviewerDecisions,
+) -> Vec<Problem> {
+    undecided_split_out(findings, decisions)
+        .map(|f| {
+            Problem::new(
+                "findings.json",
+                format!("{} line {}", f.path, f.line),
+                "this problem was grouped with one the reviewer ruled out, so it was split out \
+                 into a problem of its own, and no reviewer decision is recorded for it. Open it, \
+                 then confirm it, correct it or mark it a false positive",
+                Some(f.rule_id.clone()),
+            )
+        })
+        .collect()
 }
 
 /// One problem per row the reviewer restored after the engine threw it out that `decisions` has

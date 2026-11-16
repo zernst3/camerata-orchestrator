@@ -618,7 +618,7 @@ struct StoredFileRef<'a> {
 
 /// The site keys a batch decision never covers: rows held for a ruling of their own. A row is
 /// held when its quoted evidence could not be verified, when its text is junk (M4), when it was
-/// merged into another site, or when the reviewer put it back after the engine threw it out and
+/// split out of a ruled-out problem, when it was merged into another site, or when the reviewer put it back after the engine threw it out and
 /// has not ruled on it since (A12 item 2).
 ///
 /// Every hold reason a batch decision respects lives in this function, and a new kind of hold is
@@ -639,6 +639,9 @@ pub fn held_keys(
                 .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
                 || f.captures
                     .contains_key(crate::junk_finding::JUNK_CONTENT_CAPTURE)
+                // Split out of a ruled-out problem: it needs a ruling of its own.
+                || f.captures
+                    .contains_key(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE)
         })
         .map(|f| f.site_key.clone())
         .collect();

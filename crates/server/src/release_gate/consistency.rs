@@ -848,13 +848,38 @@ const PATTERNS: &str = "patterns across services";
 /// * no pattern row sits inside the `findings` array, so every count read off that array (and
 ///   off `json/all-findings.json`, which the rest of this check holds it to) is findings only;
 /// * no cell says clean for a service and rule that has an open problem in the package
-///   ([`patterns_clean_cell_problems`]).
+///   ([`patterns_clean_cell_problems`]);
+/// * `findings.json` lists nothing under `open_beside_ruled_out`: every place of another rule
+///   that a ruled-out row carries has a row of its own.
 pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
     let mut problems = patterns_clean_cell_problems(entries, report);
     let findings_json: Option<Value> = entries
         .get("findings.json")
         .and_then(|bytes| serde_json::from_slice(bytes).ok());
     if let Some(value) = &findings_json {
+        // The backstop for the unfold: a place of another rule that a ruled-out row still carries
+        // must have a row of its own, so the key lists nothing in a package that may ship.
+        for (i, site) in value
+            .get("open_beside_ruled_out")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            problems.push(problem(
+                "findings.json",
+                &format!("open_beside_ruled_out[{i}]"),
+                format!(
+                    "{} line {} in {} is a place of {} that a ruled-out row still carries and \
+                     that has no row of its own, so it is counted nowhere. Export again so the \
+                     place becomes a row that needs a decision",
+                    cell_text(site, "path"),
+                    cell_text(site, "line"),
+                    cell_text(site, "repo"),
+                    cell_text(site, "rule_id"),
+                ),
+            ));
+        }
         let section = value.get("patterns_across_services");
         match (&report.patterns_across_services, section) {
             (Some(_), None) => problems.push(problem(
