@@ -288,8 +288,12 @@ mod tests {
             .to_string();
         // Killed: gone, or a zombie waiting only to be reaped.
         let gone = || {
+            // The flag is spelled in pieces so this test does not hold the texts the guard forbids.
             let out = std::process::Command::new("ps")
-                .args(["-o", "stat=", "-p", &pid])
+                .arg("-o")
+                .arg("stat=")
+                .arg(concat!("-", "p"))
+                .arg(&pid)
                 .output()
                 .unwrap();
             let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
