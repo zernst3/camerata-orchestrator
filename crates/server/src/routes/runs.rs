@@ -648,6 +648,9 @@ pub(crate) async fn spawn_brownfield_dev_run(
         .register_abort(&rid_for_clear2, handle.abort_handle());
 }
 
+/// Why a client engagement may not run a greenfield run.
+const CLIENT_GREENFIELD_REFUSAL: &str = "A client engagement works in a repository. Add one, or turn off Client engagement for this project.";
+
 /// path has no layer-2 bounce, so the flag is a no-op there.
 pub(crate) async fn start_governed_run(
     state: &AppState,
@@ -730,6 +733,7 @@ pub(crate) async fn start_governed_run(
         // early so the tokio::spawn closure can capture it as `'static`.
         let story_id_owned = story_id.to_string();
         let uow_data = state.uow.get_or_create(story_id);
+        let mut greenfield_project: Option<crate::project::Project> = None;
         let target = match crate::run_target::plan_run_target_for_state(state, story_id, &uow_data)
         {
             crate::run_target::RunTarget::Repository {
@@ -746,20 +750,27 @@ pub(crate) async fn start_governed_run(
                     Err(reason) => Err(reason),
                 }
             }
-            // A greenfield run reaches the model through the same agentic loop as a dev run, so a
-            // client engagement gets the same lock (backend, model, client tooling, a spend limit),
-            // checked against EVERY model the run could call, BEFORE the fleet starts or any model
-            // is called. A refusal fails the run like any other refused target.
+            // A client engagement never runs a greenfield run (a new app from scratch, no
+            // repository): only the lead goes through the API driver factory, so the rest of the
+            // fleet could still reach the Claude CLI. Refused outright, before anything is spawned.
+            // The project is read ONCE here and the lock, the controls and the backend choice below
+            // all use that one read, so they cannot disagree.
             crate::run_target::RunTarget::Greenfield => {
-                match state.projects.active().and_then(|project| {
-                    crate::dev_implement_run::greenfield_client_lock_refusal(
-                        &project,
-                        tier_map.as_ref(),
-                        model.as_deref(),
-                    )
-                }) {
-                    Some(reason) => Err(reason),
-                    None => Ok(None),
+                greenfield_project = state.projects.active();
+                match greenfield_project.as_ref() {
+                    Some(project) if project.client_engagement => {
+                        Err(CLIENT_GREENFIELD_REFUSAL.to_string())
+                    }
+                    project => match project.and_then(|project| {
+                        crate::dev_implement_run::greenfield_client_lock_refusal(
+                            project,
+                            tier_map.as_ref(),
+                            model.as_deref(),
+                        )
+                    }) {
+                        Some(reason) => Err(reason),
+                        None => Ok(None),
+                    },
                 }
             }
             crate::run_target::RunTarget::Refused { reason } => Err(reason),
@@ -835,9 +846,8 @@ pub(crate) async fn start_governed_run(
                         // The compliance-safety gate: the active project's backend setting,
                         // threaded into the lead/child driver factory. No active project floors
                         // to `ProjectBackend::Cli` (the same zero-setup default a fresh project gets).
-                        let live_backend = state
-                            .projects
-                            .active()
+                        let live_backend = greenfield_project
+                            .as_ref()
                             .map(|p| p.backend)
                             .unwrap_or_default();
                         // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
@@ -848,7 +858,7 @@ pub(crate) async fn start_governed_run(
                         // The lead and its children act as one run: one spend meter (the
                         // project's dev run limit), one read log, one governance trail.
                         let live_controls = live_fleet::greenfield_run_controls(
-                            state.projects.active().as_ref(),
+                            greenfield_project.as_ref(),
                             state.governance_log.clone(),
                             &rid,
                         );

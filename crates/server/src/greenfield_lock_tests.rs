@@ -167,11 +167,12 @@ fn a_project_with_no_limit_still_gets_a_shared_counting_meter() {
     assert_eq!(meter.limit_usd(), None);
 }
 
-/// THE ROUTE: a client-engagement project with no repositories, a tier map and no spend limit.
-/// The run fails with the spend-limit reason before the fleet is started (no lead is built).
-#[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial(process_env)]
-async fn a_client_greenfield_run_with_a_tier_map_and_no_limit_fails_before_any_lead_is_built() {
+const CLIENT_GREENFIELD_REASON: &str = "A client engagement works in a repository. Add one, or turn off Client engagement for this project.";
+
+/// THE ROUTE: a client engagement (API backend, client tooling opted in, a spend limit, no
+/// repositories) never runs a greenfield run, tiered or single-model. The run fails with the
+/// repository reason before anything is spawned (no fleet event, no lead, no CLI stage).
+async fn client_greenfield_run_is_refused(tier_map: Option<TierMap>, model: Option<String>) {
     let _live = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
     // If the refusal ever regressed, the run must still reach no model: no keys anywhere.
     let _a = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
@@ -181,18 +182,20 @@ async fn a_client_greenfield_run_with_a_tier_map_and_no_limit_fails_before_any_l
     let p = state.projects.create("P", vec![]).unwrap();
     state
         .projects
+        .set_backend(&p.id, crate::project::ProjectBackend::Api)
+        .unwrap();
+    state
+        .projects
         .set_client_engagement(&p.id, true, true)
         .unwrap();
+    state
+        .projects
+        .set_dev_run_spend_limit(&p.id, Some(500))
+        .unwrap();
 
-    let (run_id, _) = crate::start_governed_run(
-        &state,
-        "story-1",
-        None,
-        Some(TierMap::default()),
-        false,
-        RunKind::Watched,
-    )
-    .await;
+    let (run_id, _) =
+        crate::start_governed_run(&state, "story-1", model, tier_map, false, RunKind::Watched)
+            .await;
 
     let run = state.runs.get(&run_id).expect("the run exists");
     assert!(
@@ -200,11 +203,27 @@ async fn a_client_greenfield_run_with_a_tier_map_and_no_limit_fails_before_any_l
         "the run failed: {:?}",
         run.status
     );
-    let reason = run.failure_reason.clone().unwrap_or_default();
-    assert!(reason.contains("spend limit"), "{reason}");
+    assert_eq!(
+        run.failure_reason.clone().unwrap_or_default(),
+        CLIENT_GREENFIELD_REASON
+    );
     assert!(
-        run.events.iter().all(|e| e.layer != "fleet"),
-        "no fleet, so no lead: {:#?}",
+        run.events
+            .iter()
+            .all(|e| e.layer != "fleet" && e.layer != "run"),
+        "nothing was spawned or announced: {:#?}",
         run.events.iter().map(|e| &e.detail).collect::<Vec<_>>()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(process_env)]
+async fn a_client_greenfield_tiered_run_is_refused_outright() {
+    client_greenfield_run_is_refused(Some(TierMap::default()), None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(process_env)]
+async fn a_client_greenfield_single_model_run_is_refused_outright() {
+    client_greenfield_run_is_refused(None, Some("claude-sonnet-5".to_string())).await;
 }
