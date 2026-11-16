@@ -50,9 +50,12 @@
 //!
 //! # Read tools
 //!
-//! `Read`, `Glob`, `Grep`, `LS` are executed in-process directly on the filesystem.
-//! They carry no write authority and are safe to execute without gate evaluation. The
-//! results are fed back to the model as tool-result messages.
+//! `Read`, `Glob`, `Grep`, `LS` are executed in-process directly on the filesystem. They carry
+//! no write authority, but everything they return is sent to the provider in the next request,
+//! so they are JAILED: every path is confined to the worktree plus the read folders the run
+//! declared ([`ApiLoopContext::read_dirs`]), with `..`, absolute paths outside and symlinks out
+//! refused (see the `read_jail` module). The results are fed back to the model as tool-result
+//! messages.
 //!
 //! # Iteration cap
 //!
@@ -71,6 +74,10 @@ use camerata_gateway::evaluate_call;
 use serde_json::Value;
 
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
+
+mod read_jail;
+use read_jail::{execute_glob, execute_grep, execute_ls, execute_read, ReadJail};
+pub use read_jail::{ReadOutcome, ReadVerdict};
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -133,6 +140,17 @@ struct ToolInvocation {
     input: Value,
 }
 
+// ─── what a run hands the API loop ───────────────────────────────────────────
+
+/// What a run hands the in-process API loop beside the model, the rules and the worktree.
+/// Only the [`ApiAgentDriver`] path reads it; the Claude CLI path gets its read folders from
+/// the session (`camerata_agent::prepare_session`'s `--add-dir`).
+#[derive(Clone, Default)]
+pub struct ApiLoopContext {
+    /// Folders the read tools may read beside the worktree (read-only).
+    pub read_dirs: Vec<PathBuf>,
+}
+
 // ─── ApiAgentDriver ──────────────────────────────────────────────────────────
 
 /// A native, provider-agnostic agentic driver.
@@ -149,8 +167,12 @@ pub struct ApiAgentDriver {
     /// Model id to request (empty = completer's default).
     pub model: String,
     /// Optional worktree the agent's writes are jailed to. Enforced by the gateway rules
-    /// (`SEC-NO-PATH-ESCAPE-1` + worktree-prefix check below) on every `gated_write`.
+    /// (`SEC-NO-PATH-ESCAPE-1` + worktree-prefix check below) on every `gated_write`. Also the
+    /// root of the read jail.
     pub worktree: Option<PathBuf>,
+    /// Folders the read tools may read beside the worktree (a multi-repo project's sibling
+    /// clones). Read-only: `gated_write` is still jailed to `worktree` alone.
+    read_dirs: Vec<PathBuf>,
     /// When `true`, `delegate` and `fan_out` tool schemas are included in the API request.
     /// Default `false`: workers never get these, enforcing depth-1.
     pub orchestrator: bool,
@@ -231,6 +253,7 @@ impl ApiAgentDriver {
             completer,
             model: model.into(),
             worktree: None,
+            read_dirs: Vec::new(),
             orchestrator: false,
             rule_subset: Vec::new(),
             session_id,
@@ -315,6 +338,13 @@ impl ApiAgentDriver {
     /// Builder form.
     pub fn with_worktree(mut self, worktree: impl Into<PathBuf>) -> Self {
         self.worktree = Some(worktree.into());
+        self
+    }
+
+    /// Declare the folders the read tools may read beside the worktree. Builder form. Writes
+    /// are unaffected (they stay jailed to the worktree).
+    pub fn with_read_dirs(mut self, read_dirs: Vec<PathBuf>) -> Self {
+        self.read_dirs = read_dirs;
         self
     }
 
@@ -1265,10 +1295,18 @@ async fn execute_tool(
             }
             (text, denial.map(|d| d.message))
         }
-        TOOL_READ => (execute_read(inv, driver.worktree.as_deref()), None),
-        TOOL_GLOB => (execute_glob(inv, driver.worktree.as_deref()), None),
-        TOOL_GREP => (execute_grep(inv, driver.worktree.as_deref()), None),
-        TOOL_LS => (execute_ls(inv, driver.worktree.as_deref()), None),
+        TOOL_READ | TOOL_GLOB | TOOL_GREP | TOOL_LS => {
+            // Every read is confined to the worktree plus the run's declared read folders
+            // (`read_jail`); a path outside is refused with a tool error, never read.
+            let jail = ReadJail::new(driver.worktree.as_deref(), &driver.read_dirs);
+            let outcome = match inv.name.as_str() {
+                TOOL_READ => execute_read(inv, &jail),
+                TOOL_GLOB => execute_glob(inv, &jail),
+                TOOL_GREP => execute_grep(inv, &jail),
+                _ => execute_ls(inv, &jail),
+            };
+            (outcome.text, None)
+        }
         TOOL_DELEGATE if driver.orchestrator => {
             // Native orchestrator delegation. The gate is NOT reimplemented here: we
             // dispatch through the SAME gated `run_delegated` primitive the CLI
@@ -1675,176 +1713,7 @@ fn assert_in_worktree(worktree: &Path, path: &str) -> anyhow::Result<PathBuf> {
     Ok(target)
 }
 
-// ─── read-tool implementations ────────────────────────────────────────────────
-
-/// Execute a `Read` tool call: read the content of a file.
-///
-/// Expected input: `{file_path: "..."}` (Claude Code convention).
-fn execute_read(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let raw_path = match inv.input["file_path"]
-        .as_str()
-        .or_else(|| inv.input["path"].as_str())
-    {
-        Some(p) => p,
-        None => return "ERROR: Read requires `file_path` in input".to_string(),
-    };
-    let resolved = resolve_path(raw_path, worktree);
-    match std::fs::read_to_string(&resolved) {
-        Ok(content) => truncate_output(content, MAX_READ_OUTPUT_BYTES),
-        Err(e) => format!("ERROR reading `{raw_path}`: {e}"),
-    }
-}
-
-/// Execute a `Glob` tool call: list files matching a glob pattern.
-///
-/// Expected input: `{pattern: "..."}` or `{glob: "..."}`.
-fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let pattern = match inv.input["pattern"]
-        .as_str()
-        .or_else(|| inv.input["glob"].as_str())
-    {
-        Some(p) => p,
-        None => return "ERROR: Glob requires `pattern` in input".to_string(),
-    };
-
-    let base = worktree
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let full_pattern = if pattern.starts_with('/') {
-        pattern.to_string()
-    } else {
-        format!("{}/{}", base.display(), pattern)
-    };
-
-    match glob::glob(&full_pattern) {
-        Ok(paths) => {
-            let entries: Vec<String> = paths
-                .filter_map(|p| p.ok())
-                .map(|p| p.display().to_string())
-                .collect();
-            if entries.is_empty() {
-                format!("No files matched pattern `{pattern}`")
-            } else {
-                truncate_output(entries.join("\n"), MAX_READ_OUTPUT_BYTES)
-            }
-        }
-        Err(e) => format!("ERROR: Glob pattern error `{pattern}`: {e}"),
-    }
-}
-
-/// Execute a `Grep` tool call: search files for a pattern.
-///
-/// Expected input: `{pattern: "...", path: "..."}` or `{regex: "...", directory: "..."}`.
-fn execute_grep(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let search_pattern = match inv.input["pattern"]
-        .as_str()
-        .or_else(|| inv.input["regex"].as_str())
-    {
-        Some(p) => p,
-        None => return "ERROR: Grep requires `pattern` in input".to_string(),
-    };
-
-    let search_dir = inv.input["path"]
-        .as_str()
-        .or_else(|| inv.input["directory"].as_str())
-        .unwrap_or(".");
-    let resolved_dir = resolve_path(search_dir, worktree);
-
-    // Compile the regex.
-    let re = match regex::Regex::new(search_pattern) {
-        Ok(r) => r,
-        Err(e) => return format!("ERROR: invalid grep pattern `{search_pattern}`: {e}"),
-    };
-
-    let mut findings: Vec<String> = Vec::new();
-    grep_dir(&resolved_dir, &re, &mut findings, 0);
-    if findings.is_empty() {
-        format!("No matches for `{search_pattern}` in `{search_dir}`")
-    } else {
-        truncate_output(findings.join("\n"), MAX_READ_OUTPUT_BYTES)
-    }
-}
-
-/// Recursive grep helper: walks `dir` and collects `file:line:text` entries.
-fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) {
-    if depth > 8 {
-        return; // depth limit to avoid symlink loops
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Skip hidden directories (e.g. .git)
-        if path
-            .file_name()
-            .map(|n| n.to_str().unwrap_or("").starts_with('.'))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if path.is_dir() {
-            grep_dir(&path, re, out, depth + 1);
-        } else if path.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                for (lineno, line) in text.lines().enumerate() {
-                    if re.is_match(line) {
-                        out.push(format!("{}:{}:{}", path.display(), lineno + 1, line));
-                        if out.len() > 2000 {
-                            // Safety cap: avoid unbounded output.
-                            out.push("... (truncated at 2000 matches)".to_string());
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Execute an `LS` tool call: list directory contents.
-///
-/// Expected input: `{path: "..."}` or `{directory: "..."}`.
-fn execute_ls(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let dir_path = inv.input["path"]
-        .as_str()
-        .or_else(|| inv.input["directory"].as_str())
-        .unwrap_or(".");
-    let resolved = resolve_path(dir_path, worktree);
-    match std::fs::read_dir(&resolved) {
-        Ok(entries) => {
-            let mut names: Vec<String> = entries
-                .flatten()
-                .map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    if e.path().is_dir() {
-                        format!("{name}/")
-                    } else {
-                        name
-                    }
-                })
-                .collect();
-            names.sort();
-            truncate_output(names.join("\n"), MAX_READ_OUTPUT_BYTES)
-        }
-        Err(e) => format!("ERROR listing `{dir_path}`: {e}"),
-    }
-}
-
-// ─── path helpers ─────────────────────────────────────────────────────────────
-
-/// Resolve a path relative to `worktree` (if set) or the current directory.
-fn resolve_path(raw: &str, worktree: Option<&Path>) -> PathBuf {
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else if let Some(wt) = worktree {
-        wt.join(raw)
-    } else {
-        PathBuf::from(raw)
-    }
-}
+// ─── read tools: see `read_jail` ─────────────────────────────────────────────
 
 /// Truncate a string to at most `max_bytes`, appending a note when truncated.
 ///
@@ -2193,6 +2062,8 @@ fn build_claude_driver(
     governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
     // The calling project's (or chat's) resolved backend setting. See the fn doc.
     backend: crate::llm::ProjectBackend,
+    // The API loop's run context (read folders). Ignored on the CLI path.
+    api_loop: ApiLoopContext,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let key = resolve_claude_backend(creds, backend)?;
     if let Some(key) = key {
@@ -2202,7 +2073,8 @@ fn build_claude_driver(
             .with_rule_subset(rule_subset)
             .as_orchestrator(orchestrator)
             .with_shape(ApiShape::Anthropic)
-            .with_anthropic_api_key(key);
+            .with_anthropic_api_key(key)
+            .with_read_dirs(api_loop.read_dirs);
         if let Some(wt) = worktree {
             driver = driver.with_worktree(wt);
         }
@@ -2295,6 +2167,9 @@ pub fn build_agent_driver(
     // ignored for `openrouter`, which has its own independent key-presence-or-error gate
     // above and no CLI transport to guard against.
     backend: crate::llm::ProjectBackend,
+    // What the run hands the in-process API loop (its declared read folders). Only the
+    // `ApiAgentDriver` paths use it; pass `ApiLoopContext::default()` when there is none.
+    api_loop: ApiLoopContext,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -2325,7 +2200,8 @@ pub fn build_agent_driver(
             let completer = Arc::new(or_completer);
             let mut driver = ApiAgentDriver::new(completer, model_id)
                 .with_rule_subset(rule_subset)
-                .as_orchestrator(orchestrator);
+                .as_orchestrator(orchestrator)
+                .with_read_dirs(api_loop.read_dirs);
             if let Some(wt) = worktree {
                 driver = driver.with_worktree(wt);
             }
@@ -2352,6 +2228,7 @@ pub fn build_agent_driver(
             on_activity,
             governance,
             backend,
+            api_loop,
         ),
     }
 }
@@ -2513,6 +2390,10 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             None,
             // Children inherit the parent run's project backend setting.
             self.backend,
+            // A child's read jail admits the same read folders its session declares.
+            ApiLoopContext {
+                read_dirs: read_dirs.to_vec(),
+            },
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -3663,6 +3544,7 @@ mod tests {
             None,                            // on_activity — no heartbeat in this unit test
             None,                            // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli, // this test exercises routing, not the compliance gate
+            crate::api_agent_driver::ApiLoopContext::default(),
         );
         assert!(
             result.is_ok(),
@@ -3720,6 +3602,7 @@ mod tests {
             None,                            // on_activity — no heartbeat in this unit test
             None,                            // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
+            crate::api_agent_driver::ApiLoopContext::default(),
         );
         assert!(
             result.is_ok(),
@@ -3753,6 +3636,7 @@ mod tests {
             None,                            // on_activity — no heartbeat in this unit test
             None,                            // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
+            crate::api_agent_driver::ApiLoopContext::default(),
         );
         assert!(
             result.is_err(),
@@ -4169,6 +4053,7 @@ mod tests {
             None,                            // on_activity — no heartbeat in this unit test
             None,                            // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
+            crate::api_agent_driver::ApiLoopContext::default(),
         )
         .expect("build must succeed");
 
@@ -4859,6 +4744,7 @@ mod tests {
             None,  // on_activity — no heartbeat in this unit test
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Api,
+            crate::api_agent_driver::ApiLoopContext::default(),
         )
         .expect("building must not panic / spawn"); // Result — the compliance gate can fail-closed
 
@@ -4875,6 +4761,7 @@ mod tests {
             None,  // on_activity — no heartbeat in this unit test
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli,
+            crate::api_agent_driver::ApiLoopContext::default(),
         )
         .expect("building must not panic / spawn");
     }
@@ -4899,6 +4786,7 @@ mod tests {
             None,                            // on_activity
             None,                            // governance
             crate::llm::ProjectBackend::Api, // Api backend, and no key is configured
+            crate::api_agent_driver::ApiLoopContext::default(),
         );
         let err = result
             .err()
@@ -4937,6 +4825,7 @@ mod tests {
             None,  // on_activity — no heartbeat in this unit test
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Api,
+            crate::api_agent_driver::ApiLoopContext::default(),
         );
         assert!(
             result.is_ok(),
@@ -4968,6 +4857,7 @@ mod tests {
             None,  // on_activity — no heartbeat in this unit test
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli,
+            crate::api_agent_driver::ApiLoopContext::default(),
         );
         assert!(
             result.is_ok(),
@@ -5059,3 +4949,6 @@ mod model_input_tests;
 
 #[cfg(test)]
 mod truncate_tests;
+
+#[cfg(test)]
+mod read_jail_tests;

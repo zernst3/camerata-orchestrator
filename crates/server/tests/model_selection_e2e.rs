@@ -712,6 +712,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         None,                                      // on_activity heartbeat
         None,                                      // governance — no log wired in this unit test
         camerata_server::llm::ProjectBackend::Cli, // this test asserts routing, not the compliance gate
+        camerata_server::api_agent_driver::ApiLoopContext::default(),
     );
     assert!(claude.is_ok(), "claude driver builds without a key");
 
@@ -733,6 +734,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         None,                                      // on_activity heartbeat
         None,                                      // governance — no log wired in this unit test
         camerata_server::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
+        camerata_server::api_agent_driver::ApiLoopContext::default(),
     );
     assert!(or.is_ok(), "openrouter driver builds with a key");
 
@@ -753,6 +755,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         None,                                      // on_activity heartbeat
         None,                                      // governance — no log wired in this unit test
         camerata_server::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
+        camerata_server::api_agent_driver::ApiLoopContext::default(),
     );
     let msg = match err {
         Err(e) => e.to_string(),

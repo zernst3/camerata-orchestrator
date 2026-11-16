@@ -1427,6 +1427,11 @@ pub async fn execute_dev_implement_run(
         // allow/deny + agent_step this driver executes lands under `run_id`.
         governance_log.clone().map(|log| (log, run_id.clone())),
         backend,
+        // The API loop's read jail admits the sibling clones the session also declares
+        // (`--add-dir` on the CLI path), read-only.
+        crate::api_agent_driver::ApiLoopContext {
+            read_dirs: sibling_read_dirs.clone(),
+        },
     ) {
         Ok(d) => d,
         Err(e) => {
