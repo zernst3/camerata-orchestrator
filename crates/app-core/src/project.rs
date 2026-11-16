@@ -478,6 +478,15 @@ pub struct Project {
     /// when [`Self::client_engagement`] is off (nothing is withheld then).
     #[serde(default)]
     pub client_tooling_opt_in: bool,
+    /// The spend limit, in whole US cents, for one governed dev run of this project: every
+    /// provider turn of the run's in-process agents (the implementer and any child it spawns) is
+    /// priced from the model registry, and the run stops before a turn that would pass it.
+    /// `None` = no limit. A CLIENT ENGAGEMENT's dev run is refused without one
+    /// (`camerata_server::client_lock`): an unbounded agent loop on a client's metered API key is
+    /// a bill nobody agreed to. Serde default = `None` for projects persisted before this field
+    /// existed (no migration).
+    #[serde(default)]
+    pub dev_spend_limit_cents: Option<u64>,
     /// The review tree's settings: the escalation rate and floor, the reasons that may exceed
     /// the budget, and the group reviewer's model (design D3, D5, A3). Defaults to the design
     /// values for a project written before the settings existed.
@@ -1008,6 +1017,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
@@ -1052,6 +1062,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections,
@@ -1151,6 +1162,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![],
@@ -1260,6 +1272,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
@@ -1306,6 +1319,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
@@ -1345,6 +1359,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
@@ -1516,6 +1531,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
@@ -1587,6 +1603,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };
@@ -1680,6 +1697,7 @@ mod tests {
             client_name: String::new(),
             client_engagement: true,
             client_tooling_opt_in: false,
+            dev_spend_limit_cents: None,
             review: ReviewSettings::default(),
             ruleset: ProjectRuleset::default(),
         };

@@ -907,6 +907,32 @@ pub(crate) async fn set_client_engagement_handler(
     }
 }
 
+/// Body for `POST /api/projects/:id/dev-spend-limit`: whole cents, or `null` for no limit.
+#[derive(serde::Deserialize)]
+pub(crate) struct SetDevSpendLimitReq {
+    pub(crate) cents: Option<u64>,
+}
+
+/// `POST /api/projects/:id/dev-spend-limit` — set or clear the project's dev-run spend limit
+/// (`Project::dev_spend_limit_cents`). Zero is refused: it is not a limit, and a client
+/// engagement's dev run is refused without a real one.
+pub(crate) async fn set_dev_spend_limit_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetDevSpendLimitReq>,
+) -> Json<serde_json::Value> {
+    if req.cents == Some(0) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "a dev-run spend limit must be above zero; send null to clear it"
+        }));
+    }
+    match state.projects.set_dev_spend_limit(&id, req.cents) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
 /// Body for `POST /api/projects/:id/stall-thresholds`.
 #[derive(serde::Deserialize)]
 pub(crate) struct SetStallThresholdsReq {

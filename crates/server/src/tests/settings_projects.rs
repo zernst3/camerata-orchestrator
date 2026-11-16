@@ -2319,3 +2319,53 @@ async fn emit_project_local_route_runs_for_onboarded_project_no_workspace_guard(
         "message must explain the missing workspace, got: {msg}"
     );
 }
+
+/// `POST /api/projects/:id/dev-spend-limit` sets the dev-run spend limit in whole cents, clears
+/// it with `null`, and refuses zero.
+#[tokio::test]
+async fn post_dev_spend_limit_sets_clears_and_refuses_zero() {
+    let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+    let p = state.projects.create("Limits", vec![]).unwrap();
+    assert_eq!(p.dev_spend_limit_cents, None, "a new project has no limit");
+    let post = |body: &'static str| {
+        let app = router(state.clone());
+        let uri = format!("/api/projects/{}/dev-spend-limit", p.id);
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "the route exists");
+            body_json(resp).await
+        }
+    };
+
+    let set = post(r#"{"cents":2500}"#).await;
+    assert_eq!(set["ok"], true, "{set}");
+    assert_eq!(
+        state.projects.get(&p.id).unwrap().dev_spend_limit_cents,
+        Some(2_500)
+    );
+
+    let zero = post(r#"{"cents":0}"#).await;
+    assert_eq!(zero["ok"], false, "zero is refused: {zero}");
+    assert_eq!(
+        state.projects.get(&p.id).unwrap().dev_spend_limit_cents,
+        Some(2_500),
+        "a refused value changes nothing"
+    );
+
+    let cleared = post(r#"{"cents":null}"#).await;
+    assert_eq!(cleared["ok"], true, "{cleared}");
+    assert_eq!(
+        state.projects.get(&p.id).unwrap().dev_spend_limit_cents,
+        None
+    );
+}

@@ -62,6 +62,16 @@
 //! The loop is capped at [`MAX_ITERATIONS`] turns to bound runaway agents. A malformed
 //! tool-call or a repeating loop that never emits a final text response will be
 //! terminated and the partial result (or an `INCOMPLETE` marker) returned.
+//!
+//! # Spend limit
+//!
+//! Every provider turn is priced from the model registry (input, output, cache reads and
+//! writes: `anthropic_turn_response`, `openrouter_turn_cost`, `price_turn`) and recorded
+//! in the run's [`AgentRunLedger`]. With a [`SpendLimit`] on the ledger, a turn is admitted
+//! BEFORE it is sent; once the run's agents (children included, they share the ledger) cannot
+//! afford another turn, or a turn could not be priced, `run` returns a [`SpendLimitReached`]
+//! error and no further request goes out. A client engagement's dev run is refused without a
+//! limit (`dev_implement_run::dev_loop_client_lock_refusal`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -79,7 +89,9 @@ mod read_jail;
 mod run_ledger;
 use read_jail::{execute_glob, execute_grep, execute_ls, execute_read, ReadJail};
 pub use read_jail::{ReadOutcome, ReadVerdict};
-pub use run_ledger::{AgentRunLedger, ReadLogEntry};
+pub use run_ledger::{
+    AgentRunLedger, ReadLogEntry, SpendLimit, SpendLimitReached, SpendStopCause, TurnCost,
+};
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -475,6 +487,12 @@ async fn run_loop(
             cb();
         }
 
+        // ── Spend limit ────────────────────────────────────────────────────
+        // Admitted BEFORE the call: once the run's agents have spent the limit (or one more
+        // turn at the costliest turn's price would pass it, or a turn could not be priced), no
+        // further request is sent and the run stops with the reason.
+        let permit = driver.ledger.admit_turn().map_err(anyhow::Error::new)?;
+
         // ── Call the provider ──────────────────────────────────────────────
         let resp = match call_provider(
             driver,
@@ -490,10 +508,16 @@ async fn run_loop(
             // (and paid for) real work. End the run with an explicit refused outcome that
             // keeps the cost and the assistant output so far, instead of discarding it all.
             Err(e) if crate::llm::is_refusal(&e) => {
-                // The refused call was billed too: its cost belongs in the run's total.
-                if let Some(c) = crate::llm::refusal_billed(&e).and_then(|b| b.cost_usd) {
+                // The refused call was billed too: its cost belongs in the run's total and in
+                // the run ledger's spend.
+                let billed = crate::llm::refusal_billed(&e);
+                let cost = billed.and_then(|b| price_turn(&driver.model, b));
+                if let Some(c) = cost {
                     total_cost_usd += c;
                 }
+                permit
+                    .record(turn_cost(role, iteration, &driver.model, billed, cost))
+                    .await;
                 final_result = refused_result(iteration, &messages);
                 break;
             }
@@ -521,10 +545,15 @@ async fn run_loop(
             );
         }
 
-        // Accumulate cost.
-        if let Some(c) = resp.cost_usd {
+        // Price the turn from the model registry and record it in the run ledger (which is
+        // what the spend limit counts).
+        let cost = price_turn(&driver.model, &resp);
+        if let Some(c) = cost {
             total_cost_usd += c;
         }
+        permit
+            .record(turn_cost(role, iteration, &driver.model, Some(&resp), cost))
+            .await;
 
         // ── Parse the response ─────────────────────────────────────────────
         let parsed = parse_response(&resp);
@@ -590,6 +619,53 @@ async fn run_loop(
         },
         denials,
     })
+}
+
+/// The dollar cost of one provider turn: the figure the transport priced it at, else the model
+/// registry's price for its reported usage (fresh input, cache reads and 5-minute cache writes,
+/// output). `None` when neither is known, which a spend limit treats as "cannot be enforced".
+fn price_turn(model: &str, resp: &LlmResponse) -> Option<f64> {
+    resp.cost_usd.or_else(|| {
+        crate::llm::usage_cost_usd(
+            model,
+            &crate::llm::CallUsage {
+                input: resp.input_tokens,
+                output: resp.output_tokens,
+                cache_read: resp.cache_read_input_tokens,
+                cache_creation: resp.cache_creation_input_tokens,
+                cache_creation_1h: None,
+            },
+            AGENT_PRICE_BASIS,
+        )
+    })
+}
+
+/// The basis this loop's Anthropic turns are billed on: real time (no batch), and the
+/// 5-minute cache TTL the request body's `cache_control: {type: "ephemeral"}` breakpoints ask
+/// for. A write the API reports as 1-hour is still priced at the 1-hour rate.
+const AGENT_PRICE_BASIS: crate::llm::PriceBasis = crate::llm::PriceBasis {
+    batch: false,
+    cache_ttl: crate::llm::CacheTtl::FiveMinutes,
+};
+
+/// The run ledger's record of one provider turn.
+fn turn_cost(
+    role: &Role,
+    turn: usize,
+    model: &str,
+    resp: Option<&LlmResponse>,
+    cost_usd: Option<f64>,
+) -> TurnCost {
+    TurnCost {
+        agent: role.name.clone(),
+        turn,
+        model: model.to_string(),
+        input_tokens: resp.and_then(|r| r.input_tokens),
+        output_tokens: resp.and_then(|r| r.output_tokens),
+        cache_read_tokens: resp.map_or(0, |r| r.cache_read_input_tokens),
+        cache_write_tokens: resp.map_or(0, |r| r.cache_creation_input_tokens),
+        cost_usd,
+    }
 }
 
 /// The outcome text for a run the model refused part-way: it starts with `INCOMPLETE:` (the
@@ -904,7 +980,17 @@ async fn call_openrouter_with_tools(
 
     let v: Value = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("parse OpenRouter response JSON: {e}"))?;
+    Ok(openrouter_turn_response(&v, model, session_id, registry))
+}
 
+/// The [`LlmResponse`] for one OpenRouter chat-completions turn of the agent loop (pure, no
+/// HTTP): the first choice passed through as `text` for [`parse_response`], and its usage.
+fn openrouter_turn_response(
+    v: &Value,
+    model: &str,
+    session_id: &str,
+    registry: &crate::model_registry::ModelRegistry,
+) -> LlmResponse {
     // Extract text content from the first choice.
     let choice = v["choices"]
         .as_array()
@@ -930,20 +1016,39 @@ async fn call_openrouter_with_tools(
         }
     }
 
-    Ok(LlmResponse {
+    LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
         text: raw_json,
         model: model_returned,
         backend: "openrouter/api/agentic".to_string(),
-        cost_usd: None,
+        cost_usd: openrouter_turn_cost(registry, model, input_tokens, output_tokens),
         input_tokens,
         output_tokens,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         or_cache_discount,
         truncated: false,
-    })
+    }
+}
+
+/// An OpenRouter turn's dollar cost from the run's model registry: the model's list prices
+/// (USD per million tokens) times the reported prompt and completion tokens. Every prompt
+/// token is charged at the input price (a provider-side cache discount is not reported here,
+/// so the figure errs high). `None` when the registry does not list the model, its price is
+/// not known, or the reply carried no token counts.
+fn openrouter_turn_cost(
+    registry: &crate::model_registry::ModelRegistry,
+    model: &str,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+) -> Option<f64> {
+    let (input, output) = (input_tokens?, output_tokens?);
+    let entry = registry
+        .all_entries()
+        .into_iter()
+        .find(|e| e.id == model && e.price_known)?;
+    Some(input as f64 * entry.price_in / 1e6 + output as f64 * entry.price_out / 1e6)
 }
 
 /// The provider-neutral marker that terminates the Layer-2 grounding block in a prompt (emitted
@@ -1133,31 +1238,52 @@ async fn call_anthropic_with_tools(
         return Err(refusal);
     }
 
+    Ok(anthropic_turn_response(&v, model))
+}
+
+/// The [`LlmResponse`] for one Anthropic Messages API turn of the agent loop (pure, no HTTP):
+/// the full response JSON passed through as `text` for [`parse_response`], and its usage.
+fn anthropic_turn_response(v: &Value, model: &str) -> LlmResponse {
     // Pass the FULL response object through as `text`: it has the `content` array the
     // normalizer's Anthropic branch reads (`content[].type=="tool_use"` / `"text"`).
     let raw_json = serde_json::to_string(&v).unwrap_or_default();
-    let input_tokens = v["usage"]["input_tokens"].as_u64();
-    let output_tokens = v["usage"]["output_tokens"].as_u64();
-    let cache_read = v["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0);
-    let cache_creation = v["usage"]["cache_creation_input_tokens"]
+    let usage = &v["usage"];
+    let cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+    let cache_creation = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    // The Messages API's `input_tokens` EXCLUDES cache reads and writes; every other transport
+    // (and `LlmResponse::input_tokens`) folds them in, and the price function expects that.
+    let input_tokens = usage["input_tokens"]
         .as_u64()
-        .unwrap_or(0);
+        .map(|i| i + cache_read + cache_creation);
+    let output_tokens = usage["output_tokens"].as_u64();
     let model_returned = v["model"].as_str().unwrap_or(model).to_string();
+    // Priced at the model the request NAMED (the catalog may not know an echoed snapshot id).
+    let cost_usd = crate::llm::usage_cost_usd(
+        model,
+        &crate::llm::CallUsage {
+            input: input_tokens,
+            output: output_tokens,
+            cache_read,
+            cache_creation,
+            cache_creation_1h: usage["cache_creation"]["ephemeral_1h_input_tokens"].as_u64(),
+        },
+        AGENT_PRICE_BASIS,
+    );
 
-    Ok(LlmResponse {
+    LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
         text: raw_json,
         model: model_returned,
         backend: "anthropic/api/agentic".to_string(),
-        cost_usd: None,
+        cost_usd,
         input_tokens,
         output_tokens,
         cache_read_input_tokens: cache_read,
         cache_creation_input_tokens: cache_creation,
         or_cache_discount: None,
         truncated: false,
-    })
+    }
 }
 
 /// Fallback for completers that don't support tool schemas: squash the message
@@ -5036,3 +5162,6 @@ mod scripted;
 
 #[cfg(test)]
 mod read_log_tests;
+
+#[cfg(test)]
+mod spend_limit_tests;

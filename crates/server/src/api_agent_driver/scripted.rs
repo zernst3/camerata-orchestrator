@@ -23,6 +23,11 @@ impl ScriptedCompleter {
             calls: AtomicUsize::new(0),
         }
     }
+
+    /// How many provider calls the loop made.
+    pub(super) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
 }
 
 /// One assistant turn (OpenAI shape) calling `tool` once per input, ids `call-<turn>-<i>`.

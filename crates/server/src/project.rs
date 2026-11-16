@@ -162,6 +162,7 @@ impl ProjectStore {
                 // `Project::client_engagement`); the operator turns it off for their own development.
                 client_engagement: true,
                 client_tooling_opt_in: false,
+                dev_spend_limit_cents: None,
                 // Stage 2 has a default of its own too; a new project seeds it (A15).
                 review: ReviewSettings {
                     group_review_model: camerata_api_types::project::STAGE2_DEFAULT_MODEL
@@ -284,6 +285,7 @@ impl ProjectStore {
                     // `Project::client_engagement`); the operator turns it off for their own development.
                     client_engagement: true,
                     client_tooling_opt_in: false,
+                    dev_spend_limit_cents: None,
                     review: ReviewSettings::default(),
                 };
                 s.projects.push(project.clone());
@@ -409,6 +411,13 @@ impl ProjectStore {
             p.client_engagement = client_engagement;
             p.client_tooling_opt_in = client_tooling_opt_in;
         })
+    }
+
+    /// Set (or, with `None`, clear) a project's dev-run spend limit in whole cents (see
+    /// `Project::dev_spend_limit_cents`). The caller refuses zero. `None` when no project has
+    /// that id.
+    pub fn set_dev_spend_limit(&self, project_id: &str, cents: Option<u64>) -> Option<Project> {
+        self.update(project_id, |p| p.dev_spend_limit_cents = cents)
     }
 
     /// Write `chosen_option` onto `rule_id`'s selection for a single project by id — the

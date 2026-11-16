@@ -1438,6 +1438,11 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/client-engagement",
             post(set_client_engagement_handler),
         )
+        // The dev-run spend limit (whole cents), required for a client engagement's dev run.
+        .route(
+            "/api/projects/:id/dev-spend-limit",
+            post(set_dev_spend_limit_handler),
+        )
         // Stall-detection thresholds: per-project idle timeout config.
         .route(
             "/api/projects/:id/stall-thresholds",

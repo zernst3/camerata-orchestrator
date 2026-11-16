@@ -136,7 +136,7 @@ pub(crate) fn read_memory_proposals(session_dir: &std::path::Path) -> Vec<Memory
 /// lock ([`crate::client_lock`]), or `None` when it may: the backend and model must pass the
 /// lock, and since the dev loop builds and tests the repository (its layer-2 checks execute the
 /// repository's own code), a client engagement also needs the operator's opt-in to run client
-/// tooling.
+/// tooling, and, since it calls the metered API in a loop, a dev-run spend limit.
 pub(crate) fn dev_loop_client_lock_refusal(
     project: &crate::project::Project,
     model: &str,
@@ -161,7 +161,25 @@ pub(crate) fn dev_loop_client_lock_refusal(
                 .to_string(),
         );
     }
+    if project.client_engagement && dev_run_spend_limit(project).is_none() {
+        return Some(
+            "This is a client engagement, and the dev loop calls the Anthropic API in a loop on \
+             a metered key. A client dev run needs a spend limit: set the dev-run spend limit in \
+             this project's Settings. Nothing was run."
+                .to_string(),
+        );
+    }
     None
+}
+
+/// The spend limit a governed dev run of `project` is held to, if the project sets one (a
+/// zero limit is no limit; the client lock refuses a client engagement without one).
+pub(crate) fn dev_run_spend_limit(
+    project: &crate::project::Project,
+) -> Option<crate::api_agent_driver::SpendLimit> {
+    project
+        .dev_spend_limit_cents
+        .and_then(crate::api_agent_driver::SpendLimit::from_cents)
 }
 
 async fn record_governance(
@@ -1404,11 +1422,17 @@ pub async fn execute_dev_implement_run(
         fail(&runs, &uow, why);
         return;
     }
-    // The run ledger: every read the agent makes (allowed or refused) is recorded here and, with
-    // a governance log wired, as a durable `agent_read` event under THIS run's id. One ledger for
-    // the whole run, so every bounce-and-revise pass adds to the same log.
+    // The run ledger: every read the agent makes (allowed or refused) and every provider turn it
+    // pays for are recorded here and, with a governance log wired, as durable `agent_read` /
+    // `agent_turn` events under THIS run's id. One ledger for the whole run, so every
+    // bounce-and-revise pass adds to the same log and counts against the same spend limit.
     let run_ledger = {
-        let ledger = crate::api_agent_driver::AgentRunLedger::new();
+        let mut ledger = crate::api_agent_driver::AgentRunLedger::new();
+        // The project's dev-run spend limit, enforced on every provider turn of the run's
+        // in-process agents (the lock above refuses a client engagement without one).
+        if let Some(limit) = run_project.as_ref().and_then(dev_run_spend_limit) {
+            ledger = ledger.with_spend_limit(limit);
+        }
         Arc::new(match governance_log.clone() {
             Some(log) => ledger.with_governance(log, run_id.clone()),
             None => ledger,
@@ -2371,9 +2395,39 @@ mod tests {
             dev_loop_client_lock_refusal(&lock_project("api", true, false), "claude-sonnet-5")
                 .expect("no opt-in: refused");
         assert!(why.contains("Opt in to running client tooling"), "{why}");
+        // Opted in (and, since the spend-limit lock, with a dev-run spend limit set): runs.
         assert_eq!(
-            dev_loop_client_lock_refusal(&lock_project("api", true, true), "claude-sonnet-5"),
+            dev_loop_client_lock_refusal(&lock_project_with_limit(Some(2_500)), "claude-sonnet-5"),
             None
+        );
+    }
+
+    fn lock_project_with_limit(cents: Option<u64>) -> crate::project::Project {
+        crate::project::Project {
+            dev_spend_limit_cents: cents,
+            ..lock_project("api", true, true)
+        }
+    }
+
+    /// A client engagement's dev loop calls the Anthropic API on a metered key in a loop: it
+    /// is refused unless the project sets a dev-run spend limit.
+    #[test]
+    fn a_client_dev_loop_refuses_a_run_with_no_spend_limit() {
+        let why = dev_loop_client_lock_refusal(&lock_project_with_limit(None), "claude-sonnet-5");
+        assert!(
+            why.as_deref().is_some_and(|w| w.contains("spend limit")),
+            "a client dev run with no spend limit is refused: {why:?}"
+        );
+        let zero =
+            dev_loop_client_lock_refusal(&lock_project_with_limit(Some(0)), "claude-sonnet-5");
+        assert!(
+            zero.as_deref().is_some_and(|w| w.contains("spend limit")),
+            "a zero limit is no limit: {zero:?}"
+        );
+        assert_eq!(
+            dev_loop_client_lock_refusal(&lock_project_with_limit(Some(2_500)), "claude-sonnet-5"),
+            None,
+            "a client dev run with a limit, the API backend, a Claude model and the opt-in runs"
         );
     }
 
