@@ -120,3 +120,11 @@ fn rust_lifetimes_and_prose_apostrophes_do_not_fire_the_single_quote_form() {
         vec![2]
     );
 }
+
+#[test]
+fn a_tagged_template_with_an_interpolation_is_also_reported() {
+    assert_eq!(
+        sql("const rows = await sql`select * from orders where id = ${id}`;"),
+        vec![1]
+    );
+}
