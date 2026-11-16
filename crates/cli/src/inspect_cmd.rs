@@ -1063,8 +1063,8 @@ pub async fn run_inspect_pipeline_with(
         if let Some(why) = cli_version_refusal(
             matches!(backend_resolution, BackendResolution::Cli),
             seams.llm.is_some(),
-            &camerata_api_types::claude_cli::claude_program(),
             &models,
+            camerata_server::claude_version::check_run_models,
         ) {
             return Err(InspectError::Failed(why));
         }
@@ -2036,13 +2036,13 @@ mod exit_code_tests;
 fn cli_version_refusal(
     on_cli: bool,
     scripted: bool,
-    program: &std::ffi::OsStr,
     models: &[(String, String)],
+    check: impl FnOnce(&[(String, String)]) -> Result<(), String>,
 ) -> Option<String> {
     if !on_cli || scripted {
         return None;
     }
-    camerata_server::claude_version::check_models(program, models).err()
+    check(models).err()
 }
 
 #[cfg(test)]
@@ -3349,18 +3349,21 @@ mod tests {
     #[test]
     fn the_cli_version_check_runs_only_for_a_real_cli_run() {
         let missing = std::ffi::OsString::from("/nonexistent/claude");
+        let check = |m: &[(String, String)]| {
+            camerata_server::claude_version::check_models(&missing, m)
+        };
         let models = vec![(
             "the group reviewer".to_string(),
             "claude-fable-5-2".to_string(),
         )];
         // A real cli run with an unreadable Claude Code is refused (fail closed).
-        let why = cli_version_refusal(true, false, &missing, &models).expect("refused");
+        let why = cli_version_refusal(true, false, &models, check).expect("refused");
         assert!(why.contains("could not be read"), "{why}");
         // The api backend and a scripted model launch no program: nothing to check.
-        assert!(cli_version_refusal(false, false, &missing, &models).is_none());
-        assert!(cli_version_refusal(true, true, &missing, &models).is_none());
+        assert!(cli_version_refusal(false, false, &models, check).is_none());
+        assert!(cli_version_refusal(true, true, &models, check).is_none());
         // A run with no model that needs a minimum is not refused.
         let other = vec![("the scan".to_string(), "claude-opus-5-5".to_string())];
-        assert!(cli_version_refusal(true, false, &missing, &other).is_none());
+        assert!(cli_version_refusal(true, false, &other, check).is_none());
     }
 }

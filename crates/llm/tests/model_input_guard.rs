@@ -26,6 +26,8 @@ const SEND_MARKERS: &[&str] = &[
     "localhost:11434",
     "Command::new(\"claude\")",
     "Command::new(&self.program)",
+    // The one resolver of the `claude` program: whatever calls it launches a model CLI.
+    "claude_program(",
     // The paths of the model APIs, whatever host a config or a test points them at.
     "/v1/messages",
     "/chat/completions",
@@ -401,6 +403,25 @@ fn every_kind_of_send_marker_is_caught_in_an_unlisted_file() {
         let found = violations(&files);
         assert_eq!(found.len(), 1, "{what}: {found:?}");
         assert!(found[0].contains("new_sender.rs"), "{what}: {found:?}");
+    }
+}
+
+/// The one `claude` resolver is itself a send marker: a new spawn through `claude_program()`
+/// (called, bound, or imported) is a new model send site, whatever the file names around it.
+#[test]
+fn a_new_spawn_through_the_claude_resolver_is_caught() {
+    for planted in [
+        "fn go() { let mut c = tokio::process::Command::new(camerata_api_types::claude_cli::claude_program()); c.arg(\"--print\"); }",
+        "use camerata_api_types::claude_cli::claude_program;\nfn go() { let p = claude_program(); let mut c = std::process::Command::new(p); c.arg(\"--print\"); }",
+    ] {
+        let mut files = workspace_sources();
+        files.push((
+            "crates/somewhere/src/resolver_spawn.rs".to_string(),
+            planted.to_string(),
+        ));
+        let found = violations(&files);
+        assert_eq!(found.len(), 1, "{planted}: {found:?}");
+        assert!(found[0].contains("resolver_spawn.rs"), "{found:?}");
     }
 }
 
