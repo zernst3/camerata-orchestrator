@@ -198,3 +198,19 @@ async fn a_read_is_recorded_in_the_governance_log_with_path_bytes_and_outcome() 
         .unwrap_or_default()
         .contains("\"allowed\":false"));
 }
+
+#[tokio::test]
+async fn a_completed_read_of_a_file_that_starts_with_denied_is_logged_as_allowed() {
+    let f = fixture();
+    std::fs::write(f.wt.join("note.txt"), "DENIED: x\nthe rest\n").unwrap();
+    let d = driver(&f);
+    let (text, _) = execute_tool(&d, &role(), &inv("Read", json!({"file_path": "note.txt"}))).await;
+    assert!(text.starts_with("DENIED: x"), "{text}");
+    let entries = d.read_log().entries();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert!(entries[0].allowed, "a completed read was logged as refused");
+    assert_eq!(
+        entries[0].path, "note.txt",
+        "the relative path, not as asked"
+    );
+}

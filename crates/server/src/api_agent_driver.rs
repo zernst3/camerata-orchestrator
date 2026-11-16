@@ -1724,13 +1724,16 @@ async fn execute_tool(
         }
         TOOL_READ | TOOL_GLOB | TOOL_GREP | TOOL_LS => {
             let jail = read_jail(driver);
-            let text = match inv.name.as_str() {
+            let result = match inv.name.as_str() {
                 TOOL_READ => execute_read(inv, &jail),
                 TOOL_GLOB => execute_glob(inv, &jail),
                 TOOL_GREP => execute_grep(inv, &jail),
                 _ => execute_ls(inv, &jail),
             };
-            record_read(driver, &jail, inv, &text).await;
+            // `Err` is a refusal by the jail; `Ok` is a read that ran (whatever its text says).
+            let allowed = result.is_ok();
+            let text = result.unwrap_or_else(|refusal| refusal);
+            record_read(driver, &jail, inv, &text, allowed).await;
             (text, None)
         }
         TOOL_DELEGATE if driver.orchestrator => {
@@ -1810,9 +1813,14 @@ fn requested_read_path(inv: &ToolInvocation) -> String {
 /// wired (a refused read is a warning). The path is relative to the worktree when the read was
 /// allowed and as asked when it was refused, so the trail never claims a place the read did not
 /// reach.
-async fn record_read(driver: &ApiAgentDriver, jail: &ReadJail, inv: &ToolInvocation, text: &str) {
+async fn record_read(
+    driver: &ApiAgentDriver,
+    jail: &ReadJail,
+    inv: &ToolInvocation,
+    text: &str,
+    allowed: bool,
+) {
     let asked = requested_read_path(inv);
-    let allowed = !text.starts_with("DENIED");
     let path = if allowed {
         jail.logged_path(&asked)
     } else {
@@ -2303,22 +2311,19 @@ impl ReadJail {
 /// Execute a `Read` tool call: read the content of a file.
 ///
 /// Expected input: `{file_path: "..."}` (Claude Code convention).
-fn execute_read(inv: &ToolInvocation, jail: &ReadJail) -> String {
+fn execute_read(inv: &ToolInvocation, jail: &ReadJail) -> Result<String, String> {
     let raw_path = match inv.input["file_path"]
         .as_str()
         .or_else(|| inv.input["path"].as_str())
     {
         Some(p) => p,
-        None => return "ERROR: Read requires `file_path` in input".to_string(),
+        None => return Ok("ERROR: Read requires `file_path` in input".to_string()),
     };
-    let resolved = match jail.resolve(raw_path) {
-        Ok(p) => p,
-        Err(refusal) => return refusal,
-    };
-    match std::fs::read_to_string(&resolved) {
+    let resolved = jail.resolve(raw_path)?;
+    Ok(match std::fs::read_to_string(&resolved) {
         Ok(content) => truncate_output(content, MAX_READ_OUTPUT_BYTES),
         Err(e) => format!("ERROR reading `{raw_path}`: {e}"),
-    }
+    })
 }
 
 /// The part of a glob pattern before its first wildcard, cut back to a whole folder.
@@ -2337,26 +2342,26 @@ fn glob_static_prefix(pattern: &str) -> &str {
 /// Execute a `Glob` tool call: list files matching a glob pattern.
 ///
 /// Expected input: `{pattern: "..."}` or `{glob: "..."}`.
-fn execute_glob(inv: &ToolInvocation, jail: &ReadJail) -> String {
+fn execute_glob(inv: &ToolInvocation, jail: &ReadJail) -> Result<String, String> {
     let pattern = match inv.input["pattern"]
         .as_str()
         .or_else(|| inv.input["glob"].as_str())
     {
         Some(p) => p,
-        None => return "ERROR: Glob requires `pattern` in input".to_string(),
+        None => return Ok("ERROR: Glob requires `pattern` in input".to_string()),
     };
     if Path::new(pattern)
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
     {
-        return jail.refusal(pattern, "contains `..`, which can leave the jail");
+        return Err(jail.refusal(pattern, "contains `..`, which can leave the jail"));
     }
 
     let full_pattern = if pattern.starts_with('/') {
         // An absolute pattern is allowed only when the folder it starts from is in the jail.
         let prefix = glob_static_prefix(pattern);
         if prefix.is_empty() || jail.resolve(prefix).is_err() {
-            return jail.refusal(pattern, "starts outside the places this run may read");
+            return Err(jail.refusal(pattern, "starts outside the places this run may read"));
         }
         pattern.to_string()
     } else {
@@ -2366,11 +2371,13 @@ fn execute_glob(inv: &ToolInvocation, jail: &ReadJail) -> String {
                 glob::Pattern::escape(&base.display().to_string()),
                 pattern
             ),
-            None => return jail.refusal(pattern, "cannot be resolved because no worktree is set"),
+            None => {
+                return Err(jail.refusal(pattern, "cannot be resolved because no worktree is set"))
+            }
         }
     };
 
-    match glob::glob(&full_pattern) {
+    Ok(match glob::glob(&full_pattern) {
         Ok(paths) => {
             // Every match is checked again after symlinks are resolved: a link inside the
             // jail can lead a pattern that started inside it out of it.
@@ -2386,34 +2393,35 @@ fn execute_glob(inv: &ToolInvocation, jail: &ReadJail) -> String {
             }
         }
         Err(e) => format!("ERROR: Glob pattern error `{pattern}`: {e}"),
-    }
+    })
 }
 
 /// Execute a `Grep` tool call: search files for a pattern.
 ///
 /// Expected input: `{pattern: "...", path: "..."}` or `{regex: "...", directory: "..."}`.
-fn execute_grep(inv: &ToolInvocation, jail: &ReadJail) -> String {
+fn execute_grep(inv: &ToolInvocation, jail: &ReadJail) -> Result<String, String> {
     let search_pattern = match inv.input["pattern"]
         .as_str()
         .or_else(|| inv.input["regex"].as_str())
     {
         Some(p) => p,
-        None => return "ERROR: Grep requires `pattern` in input".to_string(),
+        None => return Ok("ERROR: Grep requires `pattern` in input".to_string()),
     };
 
     let search_dir = inv.input["path"]
         .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
-    let resolved_dir = match jail.resolve(search_dir) {
-        Ok(p) => p,
-        Err(refusal) => return refusal,
-    };
+    let resolved_dir = jail.resolve(search_dir)?;
 
     // Compile the regex.
     let re = match regex::Regex::new(search_pattern) {
         Ok(r) => r,
-        Err(e) => return format!("ERROR: invalid grep pattern `{search_pattern}`: {e}"),
+        Err(e) => {
+            return Ok(format!(
+                "ERROR: invalid grep pattern `{search_pattern}`: {e}"
+            ))
+        }
     };
 
     let mut findings: Vec<String> = Vec::new();
@@ -2423,11 +2431,11 @@ fn execute_grep(inv: &ToolInvocation, jail: &ReadJail) -> String {
     } else {
         grep_dir(&resolved_dir, &re, &mut findings, 0);
     }
-    if findings.is_empty() {
+    Ok(if findings.is_empty() {
         format!("No matches for `{search_pattern}` in `{search_dir}`")
     } else {
         truncate_output(findings.join("\n"), MAX_READ_OUTPUT_BYTES)
-    }
+    })
 }
 
 /// Recursive grep helper: walks `dir` and collects `file:line:text` entries. Symlinks are
@@ -2488,16 +2496,13 @@ fn grep_file(path: &Path, re: &regex::Regex, out: &mut Vec<String>) {
 /// Execute an `LS` tool call: list directory contents.
 ///
 /// Expected input: `{path: "..."}` or `{directory: "..."}`.
-fn execute_ls(inv: &ToolInvocation, jail: &ReadJail) -> String {
+fn execute_ls(inv: &ToolInvocation, jail: &ReadJail) -> Result<String, String> {
     let dir_path = inv.input["path"]
         .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
-    let resolved = match jail.resolve(dir_path) {
-        Ok(p) => p,
-        Err(refusal) => return refusal,
-    };
-    match std::fs::read_dir(&resolved) {
+    let resolved = jail.resolve(dir_path)?;
+    Ok(match std::fs::read_dir(&resolved) {
         Ok(entries) => {
             let mut names: Vec<String> = entries
                 .flatten()
@@ -2514,7 +2519,7 @@ fn execute_ls(inv: &ToolInvocation, jail: &ReadJail) -> String {
             truncate_output(names.join("\n"), MAX_READ_OUTPUT_BYTES)
         }
         Err(e) => format!("ERROR listing `{dir_path}`: {e}"),
-    }
+    })
 }
 
 // ─── path helpers ─────────────────────────────────────────────────────────────
