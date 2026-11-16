@@ -48,9 +48,12 @@ pub const CLAUDE_CODE_MIN_VERSIONS: &[(&str, (u32, u32, u32))] =
 
 /// The minimum Claude Code version for `model` on the cli backend, when one is known.
 pub fn min_claude_code_version(model: &str) -> Option<(u32, u32, u32)> {
+    let model = model.trim();
+    // The same resolution as the catalog lookup, so a dated snapshot id names its base model.
+    let base = registry_entry_for(model).map_or(model, |e| e.id);
     CLAUDE_CODE_MIN_VERSIONS
         .iter()
-        .find(|(id, _)| *id == model)
+        .find(|(id, _)| *id == base)
         .map(|(_, v)| *v)
 }
 
@@ -1441,6 +1444,15 @@ mod tests {
     use super::*;
 
     // ── Claude static catalog ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_minimum_claude_code_version_resolves_dated_and_untrimmed_ids() {
+        let min = Some((2, 1, 290));
+        assert_eq!(min_claude_code_version("claude-fable-5-2"), min);
+        assert_eq!(min_claude_code_version("claude-fable-5-2-20261101"), min);
+        assert_eq!(min_claude_code_version(" claude-fable-5-2 "), min);
+        assert_eq!(min_claude_code_version("claude-opus-5-5"), None);
+    }
 
     #[test]
     fn claude_entries_has_all_four_tiers() {
