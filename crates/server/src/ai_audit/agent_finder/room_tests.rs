@@ -35,7 +35,7 @@ fn repo() -> Vec<(String, String)> {
 }
 
 fn room() -> Room {
-    Room::build(&piece(&["src/main.rs"]), &repo(), "# checklist\n")
+    Room::build(&piece(&["src/main.rs"]), &repo(), "# checklist\n").room
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn a_write_under_the_out_folder_is_stored_and_can_be_read_back() {
 #[test]
 fn read_returns_numbered_lines_and_how_many_it_returned() {
     let big = numbered(5_000);
-    let r = Room::build(&piece(&["big.rs"]), &[f("big.rs", &big)], "");
+    let r = Room::build(&piece(&["big.rs"]), &[f("big.rs", &big)], "").room;
     let one = r.read("big.rs", 1, 3).expect("reads");
     assert_eq!(one.lines_returned, 3);
     assert_eq!(one.first_line, 1);
@@ -169,7 +169,7 @@ fn a_secret_value_in_a_source_file_is_absent_from_every_served_byte() {
         f("src/util.rs", &format!("// {secret}\npub fn go() {{}}\n")),
     ];
     let redacted = crate::onboard::redact::files_for_model(&files);
-    let r = Room::build(&piece(&["src/main.rs"]), &redacted, "# checklist\n");
+    let r = Room::build(&piece(&["src/main.rs"]), &redacted, "# checklist\n").room;
     assert!(
         r.paths().len() >= 5,
         "the room serves files: {:?}",
@@ -208,7 +208,7 @@ fn context_files_stay_within_thirty_percent_of_the_piece_and_the_rest_are_outlin
         f("src/c.rs", &format!("pub fn c() {{}}\n{}", "y".repeat(384))),
     ];
     let piece_bytes = main.len();
-    let r = Room::build(&piece(&["src/main.rs"]), &files, "");
+    let r = Room::build(&piece(&["src/main.rs"]), &files, "").room;
     let used: usize = r
         .context_files()
         .iter()
@@ -305,9 +305,185 @@ fn materialize_writes_exactly_the_rooms_files() {
 #[test]
 fn only_keeps_the_named_piece_files_and_the_harness_files() {
     let files = vec![f("a.rs", "fn a() {}\n"), f("b.rs", "fn b() {}\n")];
-    let r = Room::build(&piece(&["a.rs", "b.rs"]), &files, "# c\n");
+    let r = Room::build(&piece(&["a.rs", "b.rs"]), &files, "# c\n").room;
     let again = r.only(&["b.rs".to_string()]);
     assert_eq!(again.piece_files(), ["b.rs".to_string()]);
     assert!(!again.contains("a.rs"));
     assert!(again.contains("_camerata/checklist.md"));
+}
+
+#[test]
+fn a_piece_file_missing_from_the_repository_is_reported_and_the_rest_are_served() {
+    let built = Room::build(
+        &piece(&["src/main.rs", "src/vanished.rs"]),
+        &repo(),
+        "# checklist\n",
+    );
+    assert_eq!(built.not_served.len(), 1, "{:?}", built.not_served);
+    assert_eq!(built.not_served[0].path, "src/vanished.rs");
+    assert!(
+        built.not_served[0].reason.contains("not in the repository"),
+        "{:?}",
+        built.not_served[0]
+    );
+    // The file it could serve is a piece file with a line count; the missing one is not a piece
+    // file of the room (it stays owed through `not_served`).
+    assert_eq!(built.room.piece_files(), ["src/main.rs".to_string()]);
+    let counts = built.room.piece_line_counts();
+    assert_eq!(counts.len(), 1);
+    assert_eq!(counts[0].0, "src/main.rs");
+    assert_eq!(counts[0].1, 3);
+    assert!(Room::build(&piece(&["src/main.rs"]), &repo(), "")
+        .not_served
+        .is_empty());
+}
+
+#[test]
+fn a_client_file_under_the_rooms_own_folder_cannot_shadow_a_room_file() {
+    let mut files = repo();
+    files.push(f(
+        "_camerata/checklist.md",
+        "CLIENT FILE, NOT THE CHECKLIST\n",
+    ));
+    files.push(f("_camerata/out/problems-1.json", "[]"));
+    files.push(f("_camerata/notes.rs", "pub fn notes() {}\n"));
+    let built = Room::build(
+        &piece(&["src/main.rs", "_camerata/notes.rs"]),
+        &files,
+        "# real checklist\n",
+    );
+    let served = built
+        .room
+        .read("_camerata/checklist.md", 1, 5)
+        .expect("the room's own checklist");
+    assert!(served.text.contains("real checklist"), "{}", served.text);
+    assert!(!served.text.contains("CLIENT FILE"));
+    // The piece file with a reserved name cannot be served, so it is reported and stays owed.
+    assert_eq!(built.not_served.len(), 1, "{:?}", built.not_served);
+    assert_eq!(built.not_served[0].path, "_camerata/notes.rs");
+    assert!(built.not_served[0].reason.contains("_camerata/"));
+    assert!(!built.room.contains("_camerata/notes.rs"));
+    // The client's file under the output folder never appears as an output.
+    assert!(built.room.outputs().is_empty());
+    assert!(built
+        .room
+        .read("_camerata/out/problems-1.json", 1, 5)
+        .is_err());
+}
+
+#[test]
+fn extra_files_are_read_only_not_piece_files_and_cannot_replace_a_room_file() {
+    let room = room()
+        .with_extra_files(&[
+            f("_camerata/joints/cards.md", "card of part 1\n"),
+            f("_camerata/joints/problems.txt", "1 RULE src/a.rs title\n"),
+        ])
+        .expect("extras added");
+    assert_eq!(
+        room.extra_files(),
+        [
+            "_camerata/joints/cards.md".to_string(),
+            "_camerata/joints/problems.txt".to_string()
+        ]
+    );
+    assert!(room
+        .read("_camerata/joints/cards.md", 1, 5)
+        .expect("readable")
+        .text
+        .contains("card of part 1"));
+    assert_eq!(room.piece_files(), ["src/main.rs".to_string()]);
+    assert!(room.write("_camerata/joints/cards.md", "x").is_err());
+    // The send-again room keeps them.
+    assert!(room
+        .only(&["src/main.rs".to_string()])
+        .contains("_camerata/joints/cards.md"));
+    for bad in [
+        "_camerata/checklist.md",
+        "src/main.rs",
+        "_camerata/out/x.json",
+        "/etc/passwd",
+        "_camerata/../src/main.rs",
+    ] {
+        let err = super::Room::build(&piece(&["src/main.rs"]), &repo(), "")
+            .room
+            .with_extra_files(&[f(bad, "x")]);
+        assert!(err.is_err(), "{bad} was accepted");
+    }
+}
+
+#[test]
+fn one_read_is_limited_in_bytes_and_a_cut_read_counts_only_the_lines_it_returned() {
+    // 400 lines of 600 bytes: well under the line limit, far over the byte limit.
+    let long: String = (1..=400)
+        .map(|i| format!("{i} {}\n", "x".repeat(600)))
+        .collect();
+    let r = Room::build(&piece(&["wide.rs"]), &[f("wide.rs", &long)], "").room;
+    let out = r.read("wide.rs", 1, 400).expect("reads");
+    assert!(out.lines_returned < 400, "{}", out.lines_returned);
+    assert!(out.lines_returned > 100, "{}", out.lines_returned);
+    assert!(out.text.contains("byte limit"), "the cut is announced");
+    let numbered_part = out.text.split("(output stopped").next().unwrap_or("");
+    assert!(numbered_part.len() <= super::room::MAX_READ_BYTES);
+    assert_eq!(
+        out.text.lines().filter(|l| l.contains('\t')).count(),
+        out.lines_returned
+    );
+    // Reading on from where it stopped works.
+    let rest = r
+        .read("wide.rs", 1 + out.lines_returned, 400)
+        .expect("reads");
+    assert!(rest.lines_returned > 0);
+    // A line longer than the limit cannot be returned at all, and is not counted as read.
+    let one_line = "y".repeat(super::room::MAX_READ_BYTES + 10);
+    let r = Room::build(&piece(&["min.js"]), &[f("min.js", &one_line)], "").room;
+    let none = r.read("min.js", 1, 10).expect("reads");
+    assert_eq!(none.lines_returned, 0);
+}
+
+#[test]
+fn the_number_of_files_the_agent_may_write_is_limited_but_a_rewrite_is_free() {
+    let r = room();
+    for i in 0..super::room::MAX_WRITE_FILES {
+        r.write(&format!("{OUT_DIR}problems-{i}.json"), "[]")
+            .expect("under the limit");
+    }
+    let over = r.write(&format!("{OUT_DIR}one-too-many.json"), "[]");
+    assert!(matches!(over, Err(RoomError::Invalid(_))), "{over:?}");
+    assert_eq!(r.outputs().len(), super::room::MAX_WRITE_FILES);
+    r.write(&format!("{OUT_DIR}problems-0.json"), "[1]")
+        .expect("replacing a file adds none");
+    assert_eq!(
+        r.outputs()
+            .get(&format!("{OUT_DIR}problems-0.json"))
+            .map(String::as_str),
+        Some("[1]")
+    );
+}
+
+#[test]
+fn piece_line_counts_use_the_rule_the_read_tool_numbers_by() {
+    let files = vec![
+        f("a.rs", "one\ntwo\nthree"),
+        f("b.rs", "x\n\n\n"),
+        f("empty.rs", ""),
+    ];
+    let r = Room::build(&piece(&["a.rs", "b.rs", "empty.rs"]), &files, "").room;
+    let counts = r.piece_line_counts();
+    for (path, lines) in &counts {
+        let read = r.read(path, 1, MAX_READ_LINES).expect("reads");
+        assert_eq!(read.total_lines, *lines, "{path}");
+    }
+    assert_eq!(
+        counts,
+        vec![
+            ("a.rs".to_string(), 3),
+            ("b.rs".to_string(), 3),
+            ("empty.rs".to_string(), 0)
+        ]
+    );
+    assert!(r
+        .piece_file_text("a.rs")
+        .expect("piece file")
+        .contains("three"));
+    assert!(r.piece_file_text("_camerata/checklist.md").is_none());
 }

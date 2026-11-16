@@ -18,6 +18,15 @@ pub const CONTEXT_PERCENT: usize = 30;
 pub const MAX_GREP_HITS: usize = 200;
 /// The most bytes one written file may hold.
 pub const MAX_WRITE_BYTES: usize = 1_000_000;
+/// The most bytes of text one Read returns (the numbered lines together). A read that would pass
+/// it stops at the last whole line that fits.
+pub const MAX_READ_BYTES: usize = 100_000;
+/// The most distinct files the agent may write. Writing a path again replaces it and does not
+/// count twice.
+pub const MAX_WRITE_FILES: usize = 200;
+/// The folder the room keeps for its own files. A repository file under this name cannot be
+/// served (see [`NotServed`]), so a client file can never shadow or replace a room file.
+pub const RESERVED_DIR: &str = "_camerata";
 
 /// Why a tool call was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -51,6 +60,23 @@ pub struct GrepHit {
     pub text: String,
 }
 
+/// A piece file the room could not serve, and why. The file stays owed in coverage and is reported
+/// as not reviewed with this reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotServed {
+    pub path: String,
+    pub reason: String,
+}
+
+/// What [`Room::build`] returns: the room and the piece files it could not serve.
+#[derive(Debug)]
+pub struct BuiltRoom {
+    pub room: Room,
+    /// Piece files missing from the repository set, or named like the room's own files. Never
+    /// dropped quietly.
+    pub not_served: Vec<NotServed>,
+}
+
 /// The room. Methods take `&self`; the output files sit behind a lock so a transport can share
 /// the room across turns.
 #[derive(Debug)]
@@ -58,6 +84,8 @@ pub struct Room {
     files: BTreeMap<String, String>,
     piece_files: Vec<String>,
     context_files: Vec<String>,
+    /// Read-only files added for a call that needs more than the piece (the joints call).
+    extra_files: Vec<String>,
     out: Mutex<BTreeMap<String, String>>,
 }
 
@@ -98,8 +126,15 @@ impl Room {
     /// Build the room for `piece` from `repo_files` (the whole repository, already redacted) and
     /// the rendered checklist text. The files are redacted once more here, so a room built from
     /// raw text still serves no credential value.
-    pub fn build(piece: &Piece, repo_files: &[(String, String)], checklist_md: &str) -> Room {
-        let repo = crate::onboard::redact::files_for_model(repo_files);
+    pub fn build(piece: &Piece, repo_files: &[(String, String)], checklist_md: &str) -> BuiltRoom {
+        let reserved = |p: &str| p == RESERVED_DIR || p.starts_with(&format!("{RESERVED_DIR}/"));
+        // A repository file named like the room's own files is left out of the room entirely: it
+        // is neither served nor listed, so it cannot shadow a room file. A piece file among them
+        // stays owed and is reported below.
+        let repo: Vec<(String, String)> = crate::onboard::redact::files_for_model(repo_files)
+            .into_iter()
+            .filter(|(p, _)| !reserved(p))
+            .collect();
         let by_path: HashMap<String, usize> = repo
             .iter()
             .enumerate()
@@ -107,11 +142,26 @@ impl Room {
             .collect();
         let (imports, importers) = super::super::repo_map::import_graph(&repo, &by_path);
 
-        let mut piece_idx: Vec<usize> = piece
-            .files
-            .iter()
-            .filter_map(|p| by_path.get(p).copied())
-            .collect();
+        let mut not_served: Vec<NotServed> = Vec::new();
+        let mut piece_idx: Vec<usize> = Vec::new();
+        for path in &piece.files {
+            if let Some(&i) = by_path.get(path) {
+                piece_idx.push(i);
+            } else if reserved(path) {
+                not_served.push(NotServed {
+                    path: path.clone(),
+                    reason: format!(
+                        "its path is under {RESERVED_DIR}/, which the review room keeps for its own files"
+                    ),
+                });
+            } else {
+                not_served.push(NotServed {
+                    path: path.clone(),
+                    reason: "the file is not in the repository set the room was built from"
+                        .to_string(),
+                });
+            }
+        }
         piece_idx.sort_unstable();
         piece_idx.dedup();
         let in_piece: BTreeSet<usize> = piece_idx.iter().copied().collect();
@@ -198,12 +248,76 @@ impl Room {
         files.insert(NEIGHBOURS_PATH.to_string(), neighbours);
         files.insert(CONTEXT_LIST_PATH.to_string(), context_list);
         files.insert(CHECKLIST_PATH.to_string(), checklist_md.to_string());
-        Room {
-            files,
-            piece_files: piece_idx.iter().map(|&i| repo[i].0.clone()).collect(),
-            context_files: context_idx.iter().map(|&j| repo[j].0.clone()).collect(),
-            out: Mutex::new(BTreeMap::new()),
+        not_served.sort_by(|a, b| a.path.cmp(&b.path));
+        not_served.dedup_by(|a, b| a.path == b.path);
+        BuiltRoom {
+            room: Room {
+                files,
+                piece_files: piece_idx.iter().map(|&i| repo[i].0.clone()).collect(),
+                context_files: context_idx.iter().map(|&j| repo[j].0.clone()).collect(),
+                extra_files: Vec::new(),
+                out: Mutex::new(BTreeMap::new()),
+            },
+            not_served,
         }
+    }
+
+    /// Add read-only files that are not piece files (the cards, the leads and the problem list
+    /// of the joints call). Each path must be under `_camerata/`, outside the output folder, and
+    /// must not replace a file the room already has. They are never owed in coverage.
+    pub fn with_extra_files(mut self, extras: &[(String, String)]) -> Result<Room, RoomError> {
+        for (path, text) in extras {
+            let normal = normalize(path)
+                .filter(|p| p.starts_with(&format!("{RESERVED_DIR}/")))
+                .filter(|p| !p.starts_with(OUT_DIR))
+                .ok_or_else(|| {
+                    RoomError::Invalid(format!(
+                        "an extra file must be under {RESERVED_DIR}/ and outside {OUT_DIR}: {path}"
+                    ))
+                })?;
+            if self.files.contains_key(&normal) {
+                return Err(RoomError::Invalid(format!(
+                    "an extra file would replace a file of the room: {normal}"
+                )));
+            }
+            self.files.insert(normal.clone(), text.clone());
+            self.extra_files.push(normal);
+        }
+        self.extra_files.sort();
+        Ok(self)
+    }
+
+    /// The extra read-only files, sorted.
+    pub fn extra_files(&self) -> &[String] {
+        &self.extra_files
+    }
+
+    /// The piece files the room serves with their line counts, in path order. Every caller counts
+    /// lines through this one rule (the lines the Read tool numbers).
+    pub fn piece_line_counts(&self) -> Vec<(String, usize)> {
+        self.piece_files
+            .iter()
+            .map(|p| {
+                let lines = self.files.get(p).map_or(0, |t| t.lines().count());
+                (p.clone(), lines)
+            })
+            .collect()
+    }
+
+    /// The whole text of a piece file, numbered like a Read, with no line or byte limit. `None`
+    /// for any file that is not a piece file. For the message that sends a file again.
+    pub fn piece_file_text(&self, path: &str) -> Option<String> {
+        let path = normalize(path)?;
+        if !self.piece_files.contains(&path) {
+            return None;
+        }
+        let text = self.files.get(&path)?;
+        Some(
+            text.lines()
+                .enumerate()
+                .map(|(i, line)| format!("{:>6}\t{line}\n", i + 1))
+                .collect(),
+        )
     }
 
     /// The same room with only `paths` of the piece's files (for the send-again step). Context,
@@ -224,6 +338,7 @@ impl Room {
             files,
             piece_files,
             context_files: self.context_files.clone(),
+            extra_files: self.extra_files.clone(),
             out: Mutex::new(BTreeMap::new()),
         }
     }
@@ -280,9 +395,22 @@ impl Room {
         let take = count.min(MAX_READ_LINES);
         let mut out = String::new();
         let mut returned = 0usize;
+        let mut cut_by_bytes = false;
         for (i, line) in text.lines().enumerate().skip(first_line - 1).take(take) {
-            out.push_str(&format!("{:>6}\t{line}\n", i + 1));
+            let numbered = format!("{:>6}\t{line}\n", i + 1);
+            if out.len() + numbered.len() > MAX_READ_BYTES {
+                cut_by_bytes = true;
+                break;
+            }
+            out.push_str(&numbered);
             returned += 1;
+        }
+        if cut_by_bytes {
+            // The lines not returned are not read: the trace counts only `returned`.
+            out.push_str(&format!(
+                "(output stopped at the {MAX_READ_BYTES} byte limit; read again from line {} for the rest)\n",
+                first_line + returned
+            ));
         }
         Ok(ReadOutput {
             text: out,
@@ -383,7 +511,13 @@ impl Room {
                 "a file may hold at most {MAX_WRITE_BYTES} bytes"
             )));
         }
-        self.out_lock().insert(normal, text.to_string());
+        let mut out = self.out_lock();
+        if !out.contains_key(&normal) && out.len() >= MAX_WRITE_FILES {
+            return Err(RoomError::Invalid(format!(
+                "at most {MAX_WRITE_FILES} files may be written"
+            )));
+        }
+        out.insert(normal, text.to_string());
         Ok(())
     }
 

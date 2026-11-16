@@ -40,7 +40,7 @@ mod settings_tests;
 #[cfg(test)]
 mod types_tests;
 
-pub use room::Room;
+pub use room::{BuiltRoom, NotServed, Room};
 
 /// Which finder a run uses. `Engine` is the existing scan-pass finder (the default until the
 /// graded comparison decides); `Agent` is this module.
@@ -101,17 +101,50 @@ pub struct TurnUsage {
     pub cost_usd: Option<f64>,
 }
 
-/// Why an agent run ended.
+/// Why an agent run ended. The text of `Refused`, `TurnLimit` and `SpendLimit` is a short reason
+/// for the failure report (operator side).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStop {
     Finished,
-    TurnLimit,
-    SpendLimit,
-    Refused,
+    /// The turn limit was reached; the text says which limit and after how many turns.
+    TurnLimit(String),
+    /// The piece's spend ceiling (or the run's spend limit) stopped it; the text says which.
+    SpendLimit(String),
+    /// The model refused; the text is the refusal as the provider gave it.
+    Refused(String),
     Failed(String),
 }
 
-/// The record of one agent run over one piece.
+impl AgentStop {
+    /// Whether the run ended normally (the last turn completed).
+    pub fn is_finished(&self) -> bool {
+        matches!(self, Self::Finished)
+    }
+}
+
+/// A handle a transport hands back so a later turn can continue the same conversation (an API
+/// message history, a command line session id). Opaque to everything but the transport that made
+/// it; serialisable so a resume can keep it. Empty when the transport keeps nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConversationHandle(String);
+
+impl ConversationHandle {
+    pub fn new(inner: impl Into<String>) -> Self {
+        Self(inner.into())
+    }
+
+    /// The transport's own text (a session id, a serialised history, a key into its store).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// The record of one agent run over one piece, or of one follow-up turn on it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentRun {
     /// Every tool call, in order.
@@ -121,6 +154,13 @@ pub struct AgentRun {
     /// One entry for each model turn.
     pub usage: Vec<TurnUsage>,
     pub stop: AgentStop,
+    /// Piece files whose whole text the transport put in a message to the model in a turn that
+    /// completed. Filled ONLY by the transport, from [`FollowUp::render`]: a read through a tool
+    /// is not in this list (the trace covers it) and a caller can never add to it. Coverage
+    /// ([`coverage::coverage_of`]) treats these files as sent again.
+    pub shown_in_full: Vec<String>,
+    /// Where the conversation can be continued by [`PieceAgent::follow_up`].
+    pub conversation: ConversationHandle,
 }
 
 impl AgentRun {
@@ -131,9 +171,63 @@ impl AgentRun {
             outputs: BTreeMap::new(),
             usage: Vec::new(),
             stop,
+            shown_in_full: Vec::new(),
+            conversation: ConversationHandle::default(),
         }
     }
 }
+
+/// One follow-up turn on a conversation: the repair turn (an output file that could not be
+/// used), the missing-rules turn, or send again (the files the first run did not read).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FollowUp {
+    /// What to tell the agent.
+    pub message: String,
+    /// Piece files to put in the message in full, after the text. Empty for a turn that sends
+    /// no file.
+    pub send_files: Vec<String>,
+}
+
+impl FollowUp {
+    /// A follow-up that sends text only.
+    pub fn text(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            send_files: Vec::new(),
+        }
+    }
+
+    /// A follow-up that also sends the whole text of `files` (the send-again step).
+    pub fn with_files(message: impl Into<String>, files: &[String]) -> Self {
+        Self {
+            message: message.into(),
+            send_files: files.to_vec(),
+        }
+    }
+
+    /// The text of the user message and the files it carries in full. A file counts only when it
+    /// is a piece file of `room`; a path the room does not serve as a piece file is left out and
+    /// so is never reported as shown. Every transport builds its message with this, so what
+    /// "shown in full" means is one rule.
+    pub fn render(&self, room: &Room) -> (String, Vec<String>) {
+        let mut text = self.message.clone();
+        let mut shown = Vec::new();
+        for path in &self.send_files {
+            let Some(body) = room.piece_file_text(path) else {
+                continue;
+            };
+            if shown.contains(path) {
+                continue;
+            }
+            text.push_str(&format!("\n\n--- {path} ---\n{body}"));
+            shown.push(path.clone());
+        }
+        (text, shown)
+    }
+}
+
+/// The message that sends files again (design section 4).
+pub const SEND_AGAIN_MESSAGE: &str = "These files of your part were not read in full. Their whole text follows. Review them and add any problems to new problems files, with the next unused problem numbers.";
 
 /// The limits one piece runs under (design section 2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,6 +255,12 @@ impl PieceLimits {
 }
 
 /// A source of agent runs: the in-process tool loop, the command line tool, or a script.
+///
+/// **Paid turns are always counted.** Once a transport has sent a request that may be billed, it
+/// returns `Ok(AgentRun { stop: AgentStop::Failed(..), usage, .. })` for any later failure, with
+/// the usage of every turn that was paid for, and never `Err`. `Err` is only for a failure before
+/// anything was sent (a room that cannot be written, a missing key). A runner that sees `Err`
+/// therefore knows no money was spent. The same holds for [`PieceAgent::follow_up`].
 #[async_trait::async_trait]
 pub trait PieceAgent: Send + Sync {
     /// Review the piece held by `room` under `brief`. The agent reads and writes only through
@@ -168,16 +268,85 @@ pub trait PieceAgent: Send + Sync {
     async fn run(&self, room: &Room, brief: &str, limits: &PieceLimits)
         -> anyhow::Result<AgentRun>;
 
-    /// Send the files the first run did not read (`unread`, repo-relative paths) once more
-    /// (design section 4). `prior` is the first run. The returned run holds only this step's
-    /// trace, outputs and usage.
-    async fn send_again(
+    /// One more turn on the conversation of `prior` (its [`AgentRun::conversation`]): the
+    /// repair turn, the missing-rules turn and send again. The returned run holds only this
+    /// step's trace, outputs and usage, and its own conversation handle. Files named in
+    /// `turn.send_files` go to the model in full through [`FollowUp::render`]; the transport
+    /// lists them in [`AgentRun::shown_in_full`] only when the turn completed.
+    async fn follow_up(
         &self,
         room: &Room,
         prior: &AgentRun,
-        unread: &[String],
+        turn: &FollowUp,
         limits: &PieceLimits,
     ) -> anyhow::Result<AgentRun>;
+}
+
+/// Send the files the first run did not read (`unread`, repo-relative paths) once more (design
+/// section 4). A thin helper over [`PieceAgent::follow_up`]: the trait has no separate send
+/// again method.
+pub async fn send_again(
+    agent: &dyn PieceAgent,
+    room: &Room,
+    prior: &AgentRun,
+    unread: &[String],
+    limits: &PieceLimits,
+) -> anyhow::Result<AgentRun> {
+    agent
+        .follow_up(
+            room,
+            prior,
+            &FollowUp::with_files(SEND_AGAIN_MESSAGE, unread),
+            limits,
+        )
+        .await
+}
+
+/// Pieces in flight at once: 3 on the API, 1 on the command line backend (design section 2).
+pub fn pieces_in_flight_for(backend: crate::llm::Backend) -> usize {
+    match backend {
+        crate::llm::Backend::Api => 3,
+        crate::llm::Backend::Cli => 1,
+    }
+}
+
+/// The finder's model for a run: the explicit pick, else [`DEFAULT_FINDER_MODEL`]. Never read
+/// from the environment.
+pub fn finder_model_for(controls: &crate::cost_cap::RunControls) -> String {
+    controls
+        .finder_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(DEFAULT_FINDER_MODEL)
+        .to_string()
+}
+
+/// The one factory for a run's piece agent. `api_key` is needed (and checked) only for the API
+/// backend: a missing key is an error, never a quiet switch to the command line. `work_dir` is an
+/// engine-owned folder under the run's state folder where the command line transport writes its
+/// rooms; it is never inside a client's repository. Build 3 calls this; builds 2 and 4 fill in
+/// [`api_agent::ApiPieceAgent`] and [`cli_agent::CliPieceAgent`].
+pub fn piece_agent_for(
+    controls: &crate::cost_cap::RunControls,
+    backend: crate::llm::Backend,
+    api_key: Option<&str>,
+    work_dir: &std::path::Path,
+) -> anyhow::Result<Box<dyn PieceAgent>> {
+    let model = finder_model_for(controls);
+    match backend {
+        crate::llm::Backend::Api => {
+            let key = api_key
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("the API backend needs an Anthropic key"))?;
+            Ok(Box::new(api_agent::ApiPieceAgent::new(model, key)))
+        }
+        crate::llm::Backend::Cli => Ok(Box::new(cli_agent::CliPieceAgent::new(
+            model,
+            work_dir.to_path_buf(),
+        ))),
+    }
 }
 
 /// One step of a [`ScriptedAgent`] script.
@@ -197,15 +366,28 @@ pub enum ScriptStep {
     },
 }
 
+/// One scripted follow-up turn: the calls to play and how the turn ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptedTurn {
+    pub steps: Vec<ScriptStep>,
+    pub stop: AgentStop,
+}
+
 /// A stand-in agent that plays back a list of tool calls against the room it is given and
 /// returns the trace the room's tools produced. No model is called. Public so the runner's
-/// tests (and the transports' parity test) can use it.
+/// tests (and the transports' parity test) can use it. Like a real transport it returns
+/// `Ok(AgentRun)` with the usage even when the run ends in `Failed`.
 #[derive(Debug, Clone)]
 pub struct ScriptedAgent {
     pub first: Vec<ScriptStep>,
+    /// The script a follow-up plays when no queued turn is left.
     pub again: Vec<ScriptStep>,
     pub stop: AgentStop,
+    /// How a follow-up that plays the `again` script ends.
+    pub again_stop: AgentStop,
     pub usage_per_turn: TurnUsage,
+    queued: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ScriptedTurn>>>,
+    received: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl ScriptedAgent {
@@ -214,7 +396,10 @@ impl ScriptedAgent {
             first,
             again: Vec::new(),
             stop: AgentStop::Finished,
+            again_stop: AgentStop::Finished,
             usage_per_turn: TurnUsage::default(),
+            queued: std::sync::Arc::default(),
+            received: std::sync::Arc::default(),
         }
     }
 
@@ -230,9 +415,47 @@ impl ScriptedAgent {
         self
     }
 
+    /// How the `again` script ends (a send again that stops at the turn limit, say).
+    #[must_use]
+    pub fn with_again_stop(mut self, stop: AgentStop) -> Self {
+        self.again_stop = stop;
+        self
+    }
+
+    #[must_use]
+    pub fn with_usage(mut self, usage: TurnUsage) -> Self {
+        self.usage_per_turn = usage;
+        self
+    }
+
+    /// Queue one follow-up turn. Queued turns play in order, one for each follow-up; when the
+    /// queue is empty a follow-up plays `again`.
+    #[must_use]
+    pub fn with_follow_up(self, steps: Vec<ScriptStep>, stop: AgentStop) -> Self {
+        self.queued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(ScriptedTurn { steps, stop });
+        self
+    }
+
+    /// The user messages the follow-ups received, rendered, in order.
+    pub fn messages(&self) -> Vec<String> {
+        self.received
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Play `steps` against `room`. A refused tool call is not recorded, like a real transport
     /// that returns the refusal to the model without a trace entry for a file it never served.
-    fn play(&self, room: &Room, steps: &[ScriptStep]) -> AgentRun {
+    fn play(
+        &self,
+        room: &Room,
+        steps: &[ScriptStep],
+        stop: AgentStop,
+        shown_in_full: Vec<String>,
+    ) -> AgentRun {
         let mut trace = Vec::new();
         for step in steps {
             match step {
@@ -274,11 +497,19 @@ impl ScriptedAgent {
                 }
             }
         }
+        // Only a turn that completed shows its files to the model.
+        let shown_in_full = if stop.is_finished() {
+            shown_in_full
+        } else {
+            Vec::new()
+        };
         AgentRun {
             trace,
             outputs: room.outputs(),
             usage: vec![self.usage_per_turn.clone()],
-            stop: self.stop.clone(),
+            stop,
+            shown_in_full,
+            conversation: ConversationHandle::new("scripted"),
         }
     }
 }
@@ -291,16 +522,29 @@ impl PieceAgent for ScriptedAgent {
         _brief: &str,
         _limits: &PieceLimits,
     ) -> anyhow::Result<AgentRun> {
-        Ok(self.play(room, &self.first))
+        Ok(self.play(room, &self.first, self.stop.clone(), Vec::new()))
     }
 
-    async fn send_again(
+    async fn follow_up(
         &self,
         room: &Room,
         _prior: &AgentRun,
-        _unread: &[String],
+        turn: &FollowUp,
         _limits: &PieceLimits,
     ) -> anyhow::Result<AgentRun> {
-        Ok(self.play(room, &self.again))
+        let (text, shown) = turn.render(room);
+        self.received
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(text);
+        let queued = self
+            .queued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
+        Ok(match queued {
+            Some(t) => self.play(room, &t.steps, t.stop, shown),
+            None => self.play(room, &self.again, self.again_stop.clone(), shown),
+        })
     }
 }

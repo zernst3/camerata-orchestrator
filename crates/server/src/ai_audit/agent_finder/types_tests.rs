@@ -15,7 +15,7 @@ fn room() -> Room {
         unit: "acme/app".into(),
         files: vec!["src/a.rs".into()],
     };
-    Room::build(&piece, &files, "# checklist\n")
+    Room::build(&piece, &files, "# checklist\n").room
 }
 
 fn limits() -> PieceLimits {
@@ -107,7 +107,7 @@ async fn a_scripted_read_of_a_missing_file_returns_no_lines_and_is_recorded_as_s
 #[tokio::test]
 async fn a_scripted_agent_can_end_on_a_limit_and_send_again_plays_the_second_script() {
     let agent = ScriptedAgent::new(vec![])
-        .with_stop(AgentStop::TurnLimit)
+        .with_stop(AgentStop::TurnLimit("40 turns".into()))
         .with_again(vec![ScriptStep::Read {
             path: "src/a.rs".into(),
             first_line: 1,
@@ -115,12 +115,155 @@ async fn a_scripted_agent_can_end_on_a_limit_and_send_again_plays_the_second_scr
         }]);
     let r = room();
     let first = agent.run(&r, "brief", &limits()).await.expect("runs");
-    assert_eq!(first.stop, AgentStop::TurnLimit);
-    let again = agent
-        .send_again(&r, &first, &["src/a.rs".to_string()], &limits())
+    assert_eq!(first.stop, AgentStop::TurnLimit("40 turns".into()));
+    let again = send_again(&agent, &r, &first, &["src/a.rs".to_string()], &limits())
         .await
         .expect("runs");
     assert_eq!(again.trace.len(), 1);
+    assert_eq!(
+        again.stop,
+        AgentStop::Finished,
+        "a follow-up ends on its own"
+    );
+}
+
+#[tokio::test]
+async fn send_again_is_a_helper_over_follow_up_and_sends_the_files_in_full() {
+    let agent = ScriptedAgent::new(vec![]);
+    let r = room();
+    let first = agent.run(&r, "brief", &limits()).await.expect("runs");
+    let again = send_again(&agent, &r, &first, &["src/a.rs".to_string()], &limits())
+        .await
+        .expect("runs");
+    let messages = agent.messages();
+    assert_eq!(messages.len(), 1);
+    assert!(
+        messages[0].starts_with(SEND_AGAIN_MESSAGE),
+        "{}",
+        messages[0]
+    );
+    assert!(messages[0].contains("--- src/a.rs ---"));
+    assert!(
+        messages[0].contains("fn c() {}"),
+        "the whole file is in the message"
+    );
+    assert_eq!(again.shown_in_full, vec!["src/a.rs".to_string()]);
+    assert!(
+        first.shown_in_full.is_empty(),
+        "tool reads are not shown_in_full"
+    );
+}
+
+#[tokio::test]
+async fn a_follow_up_that_sends_no_file_shows_none_and_a_failed_turn_shows_none() {
+    let agent = ScriptedAgent::new(vec![])
+        .with_follow_up(vec![], AgentStop::Failed("provider error".into()));
+    let r = room();
+    let first = agent.run(&r, "brief", &limits()).await.expect("runs");
+    let failed = agent
+        .follow_up(
+            &r,
+            &first,
+            &FollowUp::with_files("look again", &["src/a.rs".to_string()]),
+            &limits(),
+        )
+        .await
+        .expect("runs");
+    assert_eq!(failed.stop, AgentStop::Failed("provider error".into()));
+    assert!(failed.shown_in_full.is_empty(), "the turn did not complete");
+    // The queue is empty now: the next follow-up plays the `again` script and completes.
+    let repair = agent
+        .follow_up(
+            &r,
+            &first,
+            &FollowUp::text("fix problems-1.json"),
+            &limits(),
+        )
+        .await
+        .expect("runs");
+    assert_eq!(repair.stop, AgentStop::Finished);
+    assert!(repair.shown_in_full.is_empty());
+    assert_eq!(agent.messages()[1], "fix problems-1.json");
+}
+
+#[tokio::test]
+async fn after_a_paid_turn_a_failure_is_ok_with_the_usage_never_err() {
+    let usage = TurnUsage {
+        input_tokens: 1_000,
+        output_tokens: 200,
+        cost_usd: Some(0.42),
+        ..TurnUsage::default()
+    };
+    let agent = ScriptedAgent::new(vec![ScriptStep::Ls(String::new())])
+        .with_stop(AgentStop::Failed(
+            "the provider dropped the connection".into(),
+        ))
+        .with_usage(usage.clone());
+    let r = room();
+    let run = agent
+        .run(&r, "brief", &limits())
+        .await
+        .expect("a failure after a paid turn is Ok, never Err");
+    assert_eq!(
+        run.stop,
+        AgentStop::Failed("the provider dropped the connection".into())
+    );
+    assert_eq!(run.usage, vec![usage.clone()], "the paid turn is counted");
+    let follow = agent
+        .follow_up(&r, &run, &FollowUp::text("again"), &limits())
+        .await
+        .expect("runs");
+    assert_eq!(follow.usage, vec![usage]);
+}
+
+#[test]
+fn the_stop_reasons_carry_text_and_the_run_carries_a_serialisable_conversation_handle() {
+    let stops = [
+        AgentStop::Finished,
+        AgentStop::TurnLimit("60 turns".into()),
+        AgentStop::SpendLimit("the piece ceiling of $3.00".into()),
+        AgentStop::Refused("I cannot help with that".into()),
+        AgentStop::Failed("x".into()),
+    ];
+    for stop in stops {
+        let json = serde_json::to_string(&stop).expect("serializes");
+        assert_eq!(
+            serde_json::from_str::<AgentStop>(&json).expect("round trips"),
+            stop
+        );
+    }
+    let mut run = AgentRun::empty(AgentStop::Finished);
+    assert!(run.conversation.is_empty());
+    assert!(run.shown_in_full.is_empty());
+    run.conversation = ConversationHandle::new("session-123");
+    let json = serde_json::to_string(&run).expect("serializes");
+    let back: AgentRun = serde_json::from_str(&json).expect("round trips");
+    assert_eq!(back.conversation.as_str(), "session-123");
+    assert_eq!(back, run);
+}
+
+#[test]
+fn the_factory_builds_each_backend_and_never_falls_back_quietly() {
+    let controls = crate::cost_cap::RunControls::default();
+    let dir = std::path::Path::new("/Users/auditor/.camerata/runs/r1");
+    assert!(piece_agent_for(&controls, crate::llm::Backend::Cli, None, dir).is_ok());
+    assert!(piece_agent_for(&controls, crate::llm::Backend::Api, Some("sk-test"), dir).is_ok());
+    for key in [None, Some(""), Some("   ")] {
+        let err = piece_agent_for(&controls, crate::llm::Backend::Api, key, dir)
+            .err()
+            .expect("an API run without a key is refused");
+        assert!(err.to_string().contains("key"), "{err}");
+    }
+    assert_eq!(finder_model_for(&controls), DEFAULT_FINDER_MODEL);
+    let picked = crate::cost_cap::RunControls {
+        finder_model: Some(" claude-pick ".into()),
+        ..crate::cost_cap::RunControls::default()
+    };
+    assert_eq!(finder_model_for(&picked), "claude-pick");
+    assert_eq!(pieces_in_flight_for(crate::llm::Backend::Api), 3);
+    assert_eq!(pieces_in_flight_for(crate::llm::Backend::Cli), 1);
+    let api = api_agent::ApiPieceAgent::new("m", "sk-secret-value");
+    assert!(!format!("{api:?}").contains("sk-secret-value"));
 }
 
 #[test]
@@ -134,8 +277,10 @@ fn a_finder_choice_serializes_by_name() {
 #[test]
 fn the_stub_signatures_exist_for_later_builds() {
     // Compile-time contract: these must exist with these shapes. Nothing calls them yet.
-    let _: fn() -> api_agent::ApiPieceAgent = api_agent::ApiPieceAgent::default;
-    let _: fn() -> cli_agent::CliPieceAgent = cli_agent::CliPieceAgent::default;
+    let _: fn(String, &str) -> api_agent::ApiPieceAgent =
+        |m, k| api_agent::ApiPieceAgent::new(m, k);
+    let _: fn(String, std::path::PathBuf) -> cli_agent::CliPieceAgent =
+        |m, d| cli_agent::CliPieceAgent::new(m, d);
     let _ = run::find_repo;
     let _: fn(&[crate::onboard::Finding], &[crate::onboard::Finding]) -> run_diff::RunDiff =
         run_diff::diff_runs;
