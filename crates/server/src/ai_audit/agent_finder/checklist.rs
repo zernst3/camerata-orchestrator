@@ -88,8 +88,26 @@ pub struct ChecklistFile {
 pub enum Effective {
     Problems(Vec<u32>),
     Clean(Vec<Place>),
-    /// Not applicable; the reason is set when the check changed the answer.
-    NotApplicable(Option<String>),
+    /// Not applicable. Only the agent's own `not_applicable` answer gives this state; a check
+    /// never changes an answer into it.
+    NotApplicable,
+    /// The rule was not completed: the agent's answer did not hold up (a `problems` answer whose
+    /// numbers resolve to nothing, a `clean` answer with no valid place). The text says why. A
+    /// failed part a resume retries, never a "not applicable" and never a clean.
+    NotCompleted(String),
+}
+
+impl Effective {
+    /// How bad the state is when one rule has two answers: problems over not completed over clean
+    /// over not applicable.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Problems(_) => 3,
+            Self::NotCompleted(_) => 2,
+            Self::Clean(_) => 1,
+            Self::NotApplicable => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,8 +130,11 @@ pub struct CheckOutcome {
     /// Rules on the checklist with no answer.
     pub missing: Vec<String>,
     pub bad_problem_refs: Vec<BadRef>,
-    /// Rules answered `clean` with no valid checked place; recorded as not applicable.
+    /// Rules answered `clean` with no valid checked place; recorded as not completed.
     pub downgraded_clean: Vec<String>,
+    /// Rules whose state after the checks is not completed (a downgraded `clean` answer or a
+    /// `problems` answer that resolves to no problem), in checklist order.
+    pub not_completed: Vec<String>,
     /// Citations to a rule that is not on the checklist (the problem stays uncited).
     pub foreign_citations: Vec<Citation>,
     /// Citations to a rule on the checklist about a problem that exists.
@@ -231,26 +252,59 @@ impl Checklist {
     }
 
     /// Check the agent's answers against the problems it wrote and the trace. Nothing the model
-    /// says about its own work is believed: a `clean` answer needs a place the trace shows was
-    /// read, a `problems` answer needs problems that exist, and a citation needs a listed rule.
+    /// says about its own work is believed.
+    ///
+    /// - A `clean` answer needs a place that is a file of the piece (`piece_files`, with line
+    ///   counts: not the checklist, the tree or a context file) at a line the trace shows a Read
+    ///   returned. Otherwise the rule is not completed.
+    /// - A `problems` answer needs problems that exist. When none of its numbers resolves (the
+    ///   problem moved to the leads because its path is outside the piece, say) the rule is not
+    ///   completed, never "not applicable".
+    /// - When a rule has several answers the worst one stands: problems over not completed over
+    ///   clean over not applicable.
+    /// - A citation needs a listed rule.
     pub fn check(
         &self,
         answers: &ChecklistFile,
         problems: &[Problem],
         trace: &[ToolEvent],
+        piece_files: &[(String, usize)],
     ) -> CheckOutcome {
         let numbers: Vec<u32> = problems.iter().map(|p| p.n).collect();
-        let read_paths: std::collections::BTreeSet<String> = trace
+        let line_counts: BTreeMap<String, usize> = piece_files
             .iter()
-            .filter_map(|e| match e {
-                ToolEvent::Read {
-                    path,
-                    lines_returned,
-                    ..
-                } if *lines_returned > 0 => Some(plain_path(path)),
-                _ => None,
-            })
+            .map(|(p, n)| (plain_path(p), *n))
             .collect();
+        let mut returned: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
+        for e in trace {
+            if let ToolEvent::Read {
+                path,
+                first_line,
+                lines_returned,
+                ..
+            } = e
+            {
+                if *lines_returned > 0 {
+                    let first = (*first_line).max(1);
+                    returned
+                        .entry(plain_path(path))
+                        .or_default()
+                        .push((first, first + lines_returned - 1));
+                }
+            }
+        }
+        // A place is valid when it names a file of the piece and a line a Read returned.
+        let place_is_valid = |p: &Place| -> bool {
+            let path = plain_path(&p.path);
+            let (Some(&lines), Some(line)) = (line_counts.get(&path), p.line) else {
+                return false;
+            };
+            line >= 1
+                && line <= lines
+                && returned
+                    .get(&path)
+                    .is_some_and(|ranges| ranges.iter().any(|&(a, b)| a <= line && line <= b))
+        };
         let listed: std::collections::BTreeSet<String> = self
             .rules
             .iter()
@@ -258,51 +312,102 @@ impl Checklist {
             .collect();
         let mut out = CheckOutcome::default();
         for rule in &self.rules {
-            let Some(answer) = answers
+            let given: Vec<&RuleAnswer> = answers
                 .answers
                 .iter()
-                .find(|a| a.rule.eq_ignore_ascii_case(&rule.id))
-            else {
+                .filter(|a| a.rule.eq_ignore_ascii_case(&rule.id))
+                .collect();
+            if given.is_empty() {
                 out.missing.push(rule.id.clone());
                 continue;
-            };
-            let state = match answer.kind {
-                AnswerKind::NotApplicable => Effective::NotApplicable(None),
-                AnswerKind::Problems => {
-                    let mut real = Vec::new();
-                    for &n in &answer.problems {
-                        if numbers.contains(&n) {
-                            real.push(n);
+            }
+            let mut states: Vec<(Effective, &RuleAnswer)> = Vec::new();
+            for answer in given {
+                let state = match answer.kind {
+                    AnswerKind::NotApplicable => Effective::NotApplicable,
+                    AnswerKind::Problems => {
+                        let mut real = Vec::new();
+                        for &n in &answer.problems {
+                            if numbers.contains(&n) {
+                                real.push(n);
+                            } else {
+                                out.bad_problem_refs.push(BadRef {
+                                    rule: rule.id.clone(),
+                                    problem: n,
+                                });
+                            }
+                        }
+                        if real.is_empty() {
+                            Effective::NotCompleted(
+                                "the answer named no problem that exists".to_string(),
+                            )
                         } else {
-                            out.bad_problem_refs.push(BadRef {
-                                rule: rule.id.clone(),
-                                problem: n,
-                            });
+                            Effective::Problems(real)
                         }
                     }
-                    if real.is_empty() {
-                        Effective::NotApplicable(Some(
-                            "the answer named no problem that exists".to_string(),
-                        ))
-                    } else {
-                        Effective::Problems(real)
+                    AnswerKind::Clean => {
+                        let valid: Vec<Place> = answer
+                            .places
+                            .iter()
+                            .filter(|p| place_is_valid(p))
+                            .cloned()
+                            .collect();
+                        if valid.is_empty() {
+                            out.downgraded_clean.push(rule.id.clone());
+                            Effective::NotCompleted(
+                                "no place to check was named in a file of the part at a line that was read"
+                                    .to_string(),
+                            )
+                        } else {
+                            Effective::Clean(valid)
+                        }
                     }
+                };
+                states.push((state, answer));
+            }
+            // The worst answer stands; the first of equal rank, with problem numbers and places
+            // of equal-rank answers joined.
+            let worst = states.iter().map(|(s, _)| s.rank()).max().unwrap_or(0);
+            let mut chosen: Option<(Effective, &RuleAnswer)> = None;
+            for (state, answer) in states {
+                if state.rank() != worst {
+                    continue;
                 }
-                AnswerKind::Clean => {
-                    let valid: Vec<Place> = answer
-                        .places
-                        .iter()
-                        .filter(|p| read_paths.contains(&plain_path(&p.path)))
-                        .cloned()
-                        .collect();
-                    if valid.is_empty() {
-                        out.downgraded_clean.push(rule.id.clone());
-                        Effective::NotApplicable(Some("no place to check was named".to_string()))
-                    } else {
-                        Effective::Clean(valid)
+                chosen = Some(match chosen.take() {
+                    None => (state, answer),
+                    Some((Effective::Problems(mut a), first)) => {
+                        if let Effective::Problems(b) = state {
+                            for n in b {
+                                if !a.contains(&n) {
+                                    a.push(n);
+                                }
+                            }
+                        }
+                        (Effective::Problems(a), first)
                     }
-                }
+                    Some((Effective::Clean(mut a), first)) => {
+                        if let Effective::Clean(b) = state {
+                            for p in b {
+                                if !a.contains(&p) {
+                                    a.push(p);
+                                }
+                            }
+                        }
+                        (Effective::Clean(a), first)
+                    }
+                    Some(kept) => kept,
+                });
+            }
+            let Some((state, answer)) = chosen else {
+                continue;
             };
+            // A downgraded clean that lost to a worse answer is not a downgrade of the record.
+            if !matches!(state, Effective::NotCompleted(_)) {
+                out.downgraded_clean.retain(|r| r != &rule.id);
+            } else {
+                out.not_completed.push(rule.id.clone());
+            }
+            out.downgraded_clean.dedup();
             out.effective.push(EffectiveAnswer {
                 rule: rule.id.clone(),
                 state,
