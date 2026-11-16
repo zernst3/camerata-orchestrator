@@ -2880,18 +2880,33 @@ pub(crate) async fn start_audit_job(
                         // The spend limit counts the whole run: the stored replies' cost joins it.
                         run_controls.stored_spend_usd = store.stored_usd();
                         // The group reviewer stays on the model the run started with.
-                        store
+                        // A project setting that is only the built-in default is no pick of
+                        // its own (every new project is seeded with it).
+                        let explicit =
+                            Some(run_controls.review.group_review_model.clone()).filter(|m| {
+                                m.trim() != camerata_api_types::project::STAGE2_DEFAULT_MODEL
+                            });
+                        match store
                             .record()
                             .models
-                            .keep_group_review_model(&mut run_controls);
+                            .hold_group_review_model(&mut run_controls, explicit.as_deref())
+                        {
+                            Ok(notice) => {
+                                store.add_note(&notice);
+                            }
+                            Err(why) => {
+                                body_jobs.fail(&body_jid, why);
+                                return;
+                            }
+                        }
                         // The kept model was not part of the pick the lock checked before the
                         // job started: check every model the resumed run will call, before any
                         // call.
-                        let (client_engagement, lock_backend) =
-                            engagement_project.as_ref().map_or(
-                                (true, crate::project::ProjectBackend::Cli),
-                                |p| (p.client_engagement, p.backend),
-                            );
+                        let (client_engagement, lock_backend) = engagement_project
+                            .as_ref()
+                            .map_or((true, crate::project::ProjectBackend::Cli), |p| {
+                                (p.client_engagement, p.backend)
+                            });
                         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
                         if let Some(why) = crate::client_lock::refusal_for_run_models(
                             client_engagement,

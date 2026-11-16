@@ -2273,8 +2273,29 @@ fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on()
         "claude-fable-5-2",
         "the default has moved on"
     );
-    started.keep_group_review_model(&mut resumed);
+    let notice = started
+        .hold_group_review_model(&mut resumed, None)
+        .expect("no explicit pick, nothing to refuse");
     assert_eq!(resumed.group_review_model_for(), "claude-fable-5-1");
+    assert_eq!(
+        notice,
+        "Group review stays on claude-fable-5-1, the model this run started with."
+    );
+    // The same model named explicitly is not a different pick.
+    let mut same = crate::cost_cap::RunControls::default();
+    started
+        .hold_group_review_model(&mut same, Some("claude-fable-5-1"))
+        .unwrap();
+    // A different one is refused, and the controls are left as they were.
+    let mut other = crate::cost_cap::RunControls::default();
+    let why = started
+        .hold_group_review_model(&mut other, Some("claude-opus-5-5"))
+        .expect_err("a different explicit model is refused");
+    assert!(
+        why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
+        "{why}"
+    );
+    assert_eq!(other.group_review_model_for(), "claude-fable-5-2");
 }
 
 /// A run saved before the group reviewer was recorded has nothing to keep: the current pick stands.
@@ -2283,8 +2304,9 @@ fn a_record_without_a_group_review_model_leaves_the_pick_alone() {
     let mut old = models();
     old.group_review = String::new();
     let mut resumed = controls_with_group_review("claude-opus-5-5");
-    old.keep_group_review_model(&mut resumed);
+    let notice = old.hold_group_review_model(&mut resumed, None).unwrap();
     assert_eq!(resumed.group_review_model_for(), "claude-opus-5-5");
+    assert!(notice.contains("claude-opus-5-5"), "{notice}");
 }
 
 /// A moved built-in default is kept, not refused: a resolved record whose only difference is the

@@ -1010,10 +1010,16 @@ pub async fn run_inspect_pipeline_with(
     // A resumed run is held to the whole run's spend: what its stored replies cost counts toward
     // `--max-cost-usd`, every stored dollar of it. The meter takes off again whatever a
     // checkpoint replays onto it, so a stored dollar is counted once, at every moment.
+    let mut group_review_notice: Option<String> = None;
     if let Some((store, _)) = &resumed {
         controls.stored_spend_usd = store.stored_usd();
         // The group reviewer stays on the model the run started with, whatever the default is now.
-        store.record().models.keep_group_review_model(&mut controls);
+        let notice = store
+            .record()
+            .models
+            .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
+            .map_err(InspectError::Failed)?;
+        group_review_notice = Some(notice);
         // The kept model was not part of the pick the client lock checked at the top of this
         // run, so it is checked here, on every model the resumed run will call, before any call.
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
@@ -1062,6 +1068,10 @@ pub async fn run_inspect_pipeline_with(
         // A resume prices only what remains, and says beside the limit what the stored replies
         // already count against it, before any call.
         let mut text = estimate_text.clone();
+        if let Some(notice) = &group_review_notice {
+            text.push_str(notice);
+            text.push('\n');
+        }
         if let Some(cap) = controls.max_cost_usd {
             text.push_str(&camerata_server::cost_cap::resume_limit_line(
                 cap,
