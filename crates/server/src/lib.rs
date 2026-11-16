@@ -4729,6 +4729,9 @@ mod preview_evidence_tests;
 mod cockpit_resume_tests;
 
 #[cfg(test)]
+mod greenfield_lock_tests;
+
+#[cfg(test)]
 mod model_input_chat_tests;
 
 #[cfg(test)]

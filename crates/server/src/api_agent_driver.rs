@@ -222,6 +222,8 @@ fn apply_controls(mut driver: ApiAgentDriver, controls: &DriverControls) -> ApiA
     if let Some(meter) = &controls.spend {
         driver = driver.with_spend_meter(meter.clone());
     }
+    #[cfg(test)]
+    built_spy::record(&driver);
     driver
 }
 
@@ -316,6 +318,11 @@ impl SpendMeter {
 
     pub fn limit_usd(&self) -> Option<f64> {
         self.0.limit_usd
+    }
+
+    /// True when both handles are the same meter (the run's, shared).
+    pub fn same_meter(&self, other: &SpendMeter) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, SpendState> {
@@ -3420,6 +3427,24 @@ impl ServerOrchestratorDriverFactory {
         self
     }
 
+    /// The factory the lead's delegate/fan_out children are built by: the same provider context
+    /// as the lead, under `rule_subset`, and the run's own [`DriverControls`], so a child shares
+    /// the lead's read log, spend meter and governance trail.
+    fn child_factory(&self, rule_subset: Vec<RuleId>) -> ServerChildDriverFactory {
+        ServerChildDriverFactory::new(
+            self.registry.clone(),
+            self.policy.clone(),
+            self.creds.clone(),
+            self.limiter.clone(),
+            self.gateway_bin.clone(),
+            rule_subset,
+            self.run_session_id.clone(),
+            self.gate_events_file.clone(),
+            self.backend,
+        )
+        .with_controls(self.controls.clone())
+    }
+
     /// Resolve a model id's provider, defaulting to `"claude"` for unknown ids (mirrors
     /// [`build_agent_driver`]).
     fn provider_of(&self, model_id: &str) -> String {
@@ -3494,18 +3519,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                 }
                 let completer = Arc::new(or_completer);
 
-                let child_factory = ServerChildDriverFactory::new(
-                    self.registry.clone(),
-                    self.policy.clone(),
-                    self.creds.clone(),
-                    self.limiter.clone(),
-                    self.gateway_bin.clone(),
-                    rule_subset.clone(),
-                    self.run_session_id.clone(),
-                    self.gate_events_file.clone(),
-                    self.backend,
-                )
-                .with_controls(self.controls.clone());
+                let child_factory = self.child_factory(rule_subset.clone());
 
                 let orch_config = camerata_gateway::delegate::OrchestratorConfig {
                     models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
@@ -3543,18 +3557,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     // model's provider (CLI / Anthropic API / OpenRouter), gated.
                     let rule_subset = ctx.session.role_rule_subset.clone();
 
-                    let child_factory = ServerChildDriverFactory::new(
-                        self.registry.clone(),
-                        self.policy.clone(),
-                        self.creds.clone(),
-                        self.limiter.clone(),
-                        self.gateway_bin.clone(),
-                        rule_subset.clone(),
-                        self.run_session_id.clone(),
-                        self.gate_events_file.clone(),
-                        self.backend,
-                    )
-                    .with_controls(self.controls.clone());
+                    let child_factory = self.child_factory(rule_subset.clone());
 
                     let orch_config = camerata_gateway::delegate::OrchestratorConfig {
                         models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
@@ -5935,6 +5938,10 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod built_spy;
+#[cfg(test)]
+mod greenfield_controls_tests;
 #[cfg(test)]
 mod model_input_tests;
 #[cfg(test)]

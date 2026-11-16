@@ -746,7 +746,22 @@ pub(crate) async fn start_governed_run(
                     Err(reason) => Err(reason),
                 }
             }
-            crate::run_target::RunTarget::Greenfield => Ok(None),
+            // A greenfield run reaches the model through the same agentic loop as a dev run, so a
+            // client engagement gets the same lock (backend, model, client tooling, a spend limit),
+            // checked against EVERY model the run could call, BEFORE the fleet starts or any model
+            // is called. A refusal fails the run like any other refused target.
+            crate::run_target::RunTarget::Greenfield => {
+                match state.projects.active().and_then(|project| {
+                    crate::dev_implement_run::greenfield_client_lock_refusal(
+                        &project,
+                        tier_map.as_ref(),
+                        model.as_deref(),
+                    )
+                }) {
+                    Some(reason) => Err(reason),
+                    None => Ok(None),
+                }
+            }
             crate::run_target::RunTarget::Refused { reason } => Err(reason),
         };
 
@@ -830,6 +845,13 @@ pub(crate) async fn start_governed_run(
                         let runs_for_clear = state.runs.clone();
                         let rid_for_clear = rid.clone();
                         let rid_register = rid.clone();
+                        // The lead and its children act as one run: one spend meter (the
+                        // project's dev run limit), one read log, one governance trail.
+                        let live_controls = live_fleet::greenfield_run_controls(
+                            state.projects.active().as_ref(),
+                            state.governance_log.clone(),
+                            &rid,
+                        );
                         let handle = tokio::spawn(async move {
                             live_fleet::execute_live_run_tiered(
                                 store,
@@ -845,6 +867,7 @@ pub(crate) async fn start_governed_run(
                                 live_creds,
                                 live_limiter,
                                 live_backend,
+                                live_controls,
                             )
                             .await;
                             runs_for_clear.clear_abort(&rid_for_clear);

@@ -183,6 +183,40 @@ pub(crate) fn dev_loop_client_lock_refusal(
     None
 }
 
+/// Why a greenfield run (the fleet scaffolding a new app in a throwaway folder) must not start
+/// on `project`, or `None` when it may. A greenfield run reaches the model through the same
+/// agentic loop as a dev run, so a client engagement gets the same lock, checked here against
+/// EVERY model the run could call: each model of a tier map (every chain entry, and the vision
+/// band when the project enables it), or the single model (the default strongest model when none
+/// was chosen). The first refusal wins; nothing has run yet when this is asked.
+pub(crate) fn greenfield_client_lock_refusal(
+    project: &crate::project::Project,
+    tier_map: Option<&crate::model_tier::TierMap>,
+    model: Option<&str>,
+) -> Option<String> {
+    let mut models: Vec<String> = Vec::new();
+    match tier_map {
+        Some(map) => {
+            models.extend(map.fast_chain().iter().cloned());
+            models.extend(map.balanced_chain().iter().cloned());
+            models.push(map.strongest.clone());
+            if project.vision_enabled {
+                models.extend(map.vision.iter().cloned());
+            }
+        }
+        None => models.push(
+            model
+                .map(str::to_string)
+                .unwrap_or_else(crate::model_tier::default_strongest_model),
+        ),
+    }
+    let mut seen = std::collections::HashSet::new();
+    models
+        .into_iter()
+        .filter(|m| seen.insert(m.clone()))
+        .find_map(|m| dev_loop_client_lock_refusal(project, &m))
+}
+
 async fn record_governance(
     log: &Option<Arc<camerata_persistence::GovernanceLog>>,
     event: camerata_persistence::GovernanceEvent,

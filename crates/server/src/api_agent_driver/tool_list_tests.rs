@@ -140,5 +140,9 @@ fn the_delegate_schema_asks_for_exactly_what_the_code_reads() {
     // `execute_delegate` reads `subtask` and `tier`; nothing else may be offered.
     assert_eq!(properties, ["subtask", "tier"]);
     assert_eq!(params["required"], json!(["subtask"]));
-    assert_eq!(params["additionalProperties"], json!(false), "a closed schema");
+    assert_eq!(
+        params["additionalProperties"],
+        json!(false),
+        "a closed schema"
+    );
 }

@@ -304,6 +304,26 @@ pub async fn execute_live_run(
     finish_live_run(&store, &run_id, result);
 }
 
+/// The controls a greenfield tiered run hands to its lead and every child, so they act as one
+/// run: ONE spend meter (the project's dev run limit, or an unlimited meter that still counts),
+/// ONE read log, and the governance trail tagged with `run_id`.
+pub(crate) fn greenfield_run_controls(
+    project: Option<&crate::project::Project>,
+    governance: Option<Arc<camerata_persistence::GovernanceLog>>,
+    run_id: &str,
+) -> crate::api_agent_driver::DriverControls {
+    let meter = project
+        .and_then(|p| p.dev_run_spend_limit())
+        .and_then(|usd| crate::api_agent_driver::SpendMeter::with_limit(usd).ok())
+        .unwrap_or_else(crate::api_agent_driver::SpendMeter::unlimited);
+    crate::api_agent_driver::DriverControls {
+        spend: Some(meter),
+        read_log: Some(crate::api_agent_driver::ReadLog::new()),
+        governance: governance.map(|log| (log, run_id.to_string())),
+        ..Default::default()
+    }
+}
+
 /// The TIERED live run path: identical to [`execute_live_run`] except every plan task
 /// runs on its capability band's model from the per-UoW [`TierMap`] (ORCH-MODEL-TIERING-1),
 /// with the STRONGEST tier acting as the orchestrator/lead.
@@ -339,6 +359,9 @@ pub async fn execute_live_run_tiered(
     // and threaded into the `ServerOrchestratorDriverFactory` this run builds for its
     // lead/children.
     backend: crate::llm::ProjectBackend,
+    // What the lead and every child it builds share as one run: ONE spend meter, ONE read log
+    // and the governance trail ([`greenfield_run_controls`]).
+    controls: crate::api_agent_driver::DriverControls,
 ) {
     store.set_status(&run_id, RunStatus::Executing, false);
 
@@ -451,7 +474,8 @@ pub async fn execute_live_run_tiered(
                 // LIFECYCLE-10: the lead + its delegate children write to THIS run's sink.
                 Some(sink_path.clone()),
                 backend,
-            ),
+            )
+            .with_controls(controls),
         ));
 
     let result = build_from_plan_with_tier_map_layer2_and_activity(
