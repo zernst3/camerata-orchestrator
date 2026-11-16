@@ -3249,6 +3249,9 @@ pub async fn audit_repos_with_llm_controlled(
                                 // queued before the rules are recorded, like the ones above.
                                 if let Some(extras) = &finder_extras {
                                     extras.note_before_rules(&mut pipeline_ledger, spec);
+                                    // A rule a problem was cited to has a problem, even when
+                                    // the merged row of that problem sits under another rule.
+                                    extras.add_rules_with_problems(&mut ai_counts);
                                 }
                                 // SPEND CAP: a rule the cap left unchecked on part of the code
                                 // is NOT recorded as having run, so the integrity ledger cannot

@@ -70,6 +70,8 @@ pub(super) struct PieceReport {
     pub checklist_rules: Vec<String>,
     /// The cost of the piece's turns, for the checkpoint line.
     pub usage: Vec<super::super::TurnUsage>,
+    /// Every rule an accepted `problems` answer or a citation names: each of them has a problem.
+    pub rules_with_problems: Vec<String>,
 }
 
 pub(super) fn lines_of(files: &[(String, String)], paths: &[String]) -> usize {
@@ -507,6 +509,14 @@ pub(super) fn report_of(
     );
     report.findings = super::rating::apply_agent_rating(findings, &view.output.problems);
     report.proposed = proposed;
+    let mut with_problems: Vec<String> = view
+        .citations
+        .iter()
+        .map(|c| c.rule.trim().to_ascii_uppercase())
+        .collect();
+    with_problems.sort();
+    with_problems.dedup();
+    report.rules_with_problems = with_problems;
     report.problems = view.output.problems.clone();
     report.leads = view.output.leads.clone();
     report.card = view.output.card.clone();

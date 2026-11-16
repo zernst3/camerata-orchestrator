@@ -89,6 +89,9 @@ pub struct FinderExtras {
     /// rule drives the needs a decision count, so every run records it.
     pub problems_total: usize,
     pub problems_without_rule: usize,
+    /// Every rule an accepted `problems` answer or a citation names, whichever rule the merged
+    /// row of its problem ended up under. A rule here has a problem and never reads clean.
+    pub rules_with_problems: Vec<String>,
 }
 
 impl FinderExtras {
@@ -98,6 +101,18 @@ impl FinderExtras {
     pub fn note_before_rules(&self, ledger: &mut ScanLedger, repo: &str) {
         for rule in &self.not_applicable_rules {
             ledger.note_not_applicable_rule(repo, rule.to_ascii_uppercase());
+        }
+    }
+
+    /// Count one for each rule in [`Self::rules_with_problems`] that the rows' own rule ids left at
+    /// zero (a problem cited to two rules is one row under the first; the second has a problem
+    /// too). Call it on the per-rule counts BEFORE the rules are recorded.
+    pub fn add_rules_with_problems(&self, counts: &mut HashMap<String, usize>) {
+        for rule in &self.rules_with_problems {
+            let n = counts.entry(rule.clone()).or_insert(0);
+            if *n == 0 {
+                *n = 1;
+            }
         }
     }
 
@@ -500,7 +515,12 @@ pub async fn find_repo(
     for r in &mut reports {
         failed.append(&mut r.failures);
         extras.notes.append(&mut r.notes);
+        extras
+            .rules_with_problems
+            .append(&mut r.rules_with_problems);
     }
+    extras.rules_with_problems.sort();
+    extras.rules_with_problems.dedup();
 
     // The joints between the parts, and every lead answered.
     let input = joints::gather(&reports);
