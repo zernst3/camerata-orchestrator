@@ -48,3 +48,20 @@ fn hcl_references_and_block_labels_are_not_values() {
         vec![1]
     );
 }
+
+#[test]
+fn a_module_path_in_an_import_or_require_is_not_a_value() {
+    for quiet in [
+        "const TokenService = require('../services/TokenService');",
+        "import TokenListPanel from './components/TokenListPanel';",
+        r#"import { fetchApiKey } from "../../lib/keys/fetchApiKey";"#,
+    ] {
+        assert!(lines(quiet).is_empty(), "{quiet}");
+    }
+    let opaque = body(32, ALNUM, 12);
+    assert_eq!(lines(&format!("const TokenService = '{opaque}';")), vec![1]);
+    assert_eq!(
+        lines(&format!("const apiKey = require('{opaque}');")),
+        vec![1]
+    );
+}

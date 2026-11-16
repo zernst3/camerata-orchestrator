@@ -43,6 +43,9 @@ pub enum Twin {
     QualifiedLabelName,
     /// A quoted label on a Terraform block header (`resource "type" "name" {`): a name by grammar.
     BlockHeaderLabel,
+    /// A module path in a `require(...)`, `import(...)`, `import '...'` or `from '...'`: the
+    /// language reads the literal as a module name.
+    ModulePath,
 }
 
 impl Twin {
@@ -60,6 +63,7 @@ impl Twin {
                 | Twin::FirebaseWebApiKey
                 | Twin::QualifiedLabelName
                 | Twin::BlockHeaderLabel
+                | Twin::ModulePath
         )
     }
 }
@@ -293,6 +297,26 @@ fn is_block_header_label(value: &str, context: &TwinContext<'_>) -> bool {
     labels >= 1 && rest.is_empty()
 }
 
+/// A module specifier: starts with `./` or `../`, or has a slash and no character a base64 run
+/// would add (`+`, `=`).
+fn is_module_path(value: &str) -> bool {
+    value.starts_with("./")
+        || value.starts_with("../")
+        || (value.contains('/') && !value.contains(['+', '=']))
+}
+
+/// Whether the text just before the opening quote makes the literal a module name.
+fn opens_a_module_specifier(before_value: &str) -> bool {
+    let Some(head) = before_value.strip_suffix(['"', '\'']) else {
+        return false;
+    };
+    let head = head.trim_end();
+    head.ends_with("require(")
+        || head.ends_with("import(")
+        || head.ends_with("import")
+        || head.ends_with("from")
+}
+
 fn is_context_shaped(shape: SecretShape) -> bool {
     !shape.is_vendor_shaped()
 }
@@ -376,6 +400,12 @@ pub(crate) fn classify(
         && is_qualified_label_name(value)
     {
         return Some(Twin::QualifiedLabelName);
+    }
+    if shape == SecretShape::NamedSecretLiteral
+        && opens_a_module_specifier(before_value)
+        && is_module_path(value)
+    {
+        return Some(Twin::ModulePath);
     }
     if shape == SecretShape::NamedSecretLiteral && is_block_header_label(value, context) {
         return Some(Twin::BlockHeaderLabel);
