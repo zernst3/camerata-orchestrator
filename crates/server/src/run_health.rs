@@ -39,6 +39,37 @@ pub const OUTAGE_STREAK: u32 = 3;
 /// failing within seconds of one another is a blip the run rides out.
 pub const OUTAGE_SPAN: Duration = Duration::from_secs(120);
 
+/// TEST SUPPORT: a process-wide replacement for [`OUTAGE_SPAN`], in milliseconds (`u64::MAX` =
+/// none). An end-to-end test that drives a whole run through instantly-failing stub calls cannot
+/// reach the real span; it holds an [`OutageSpanGuard`] instead. Production never sets it.
+static SPAN_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// While alive, the outage stop needs `span` of failures instead of [`OUTAGE_SPAN`]. A test that
+/// holds one must run serially (it is process-wide).
+#[must_use = "the override ends when the guard is dropped"]
+pub struct OutageSpanGuard(());
+
+impl OutageSpanGuard {
+    pub fn set(span: Duration) -> Self {
+        let ms = u64::try_from(span.as_millis()).unwrap_or(u64::MAX - 1);
+        SPAN_OVERRIDE_MS.store(ms.min(u64::MAX - 1), Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Drop for OutageSpanGuard {
+    fn drop(&mut self) {
+        SPAN_OVERRIDE_MS.store(u64::MAX, Ordering::SeqCst);
+    }
+}
+
+fn outage_span() -> Duration {
+    match SPAN_OVERRIDE_MS.load(Ordering::SeqCst) {
+        u64::MAX => OUTAGE_SPAN,
+        ms => Duration::from_millis(ms),
+    }
+}
+
 /// Time as the health counter sees it: the time since some fixed origin. Production reads the
 /// monotonic clock; a test injects its own.
 type Clock = Arc<dyn Fn() -> Duration + Send + Sync>;
@@ -134,7 +165,7 @@ impl RunHealth {
                     s.count += 1;
                     (s.count, now.saturating_sub(s.first_at))
                 };
-                if streak >= OUTAGE_STREAK && span >= OUTAGE_SPAN {
+                if streak >= OUTAGE_STREAK && span >= outage_span() {
                     self.trip(
                         FailureClass::Transport,
                         format!(
