@@ -2886,10 +2886,7 @@ pub(crate) async fn start_audit_job(
                             Some(run_controls.review.group_review_model.clone()).filter(|m| {
                                 m.trim() != camerata_api_types::project::STAGE2_DEFAULT_MODEL
                             });
-                        match store
-                            .record()
-                            .models
-                            .hold_group_review_model(&mut run_controls, explicit.as_deref())
+                        match store.hold_group_review_model(&mut run_controls, explicit.as_deref())
                         {
                             Ok(notice) => {
                                 store.add_note(&notice);

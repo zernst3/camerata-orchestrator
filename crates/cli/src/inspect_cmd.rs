@@ -1015,8 +1015,6 @@ pub async fn run_inspect_pipeline_with(
         controls.stored_spend_usd = store.stored_usd();
         // The group reviewer stays on the model the run started with, whatever the default is now.
         let notice = store
-            .record()
-            .models
             .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
             .map_err(InspectError::Failed)?;
         group_review_notice = Some(notice);

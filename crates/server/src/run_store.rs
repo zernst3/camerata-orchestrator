@@ -971,6 +971,23 @@ impl RunStore {
         self.lock_state().record.clone()
     }
 
+    /// [`ModelsRecord::hold_group_review_model`] for this run. A run saved before the group review
+    /// model was recorded takes it from the group review replies it stored, so the resume reuses
+    /// them; with none stored the current pick stands.
+    pub fn hold_group_review_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+        explicit: Option<&str>,
+    ) -> Result<String, String> {
+        let mut models = self.record().models;
+        if models.group_review.trim().is_empty() {
+            if let Some(stored) = journal::stored_group_review_model(&self.dir) {
+                models.group_review = stored;
+            }
+        }
+        models.hold_group_review_model(controls, explicit)
+    }
+
     /// The secret the prompt tokens of this run are drawn from.
     pub fn nonce_seed(&self) -> [u8; crate::prompt_frame::NONCE_BYTES] {
         let mut out = [0u8; crate::prompt_frame::NONCE_BYTES];
