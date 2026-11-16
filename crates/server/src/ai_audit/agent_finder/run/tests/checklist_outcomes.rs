@@ -259,8 +259,49 @@ async fn a_send_again_that_rewrites_the_problems_file_loses_no_earlier_problem()
 }
 
 #[tokio::test]
-async fn a_later_version_of_a_problem_number_wins() {
+async fn an_unusable_middle_version_does_not_lose_the_earlier_problems() {
+    // Run 1 writes problems 1 and 2; the send again step writes broken JSON over the file; the
+    // repair turn writes problem 3 only. The last usable version before the broken one is the
+    // base, so all three problems survive and the note about the rewrite is true.
     let script = full_script(
+        &[("src/a.rs", 6)],
+        vec![
+            problem(1, "src/a.rs", 2, "high", "fn item_2() { run(2); }"),
+            problem(2, "src/a.rs", 3, "low", "fn item_3() { run(3); }"),
+        ],
+        vec![],
+        vec![
+            answer_clean("ARCH-ONE-1", "src/a.rs", 1),
+            answer_clean("SEC-TWO-1", "src/a.rs", 2),
+        ],
+    );
+    let agent = ScriptedAgent::new(script)
+        .with_follow_up(
+            vec![ScriptStep::Write {
+                path: "_camerata/out/problems-1.json".to_string(),
+                text: "[{\"n\": 3,".to_string(),
+            }],
+            AgentStop::Finished,
+        )
+        .with_again(vec![out(
+            "problems-1.json",
+            &json!([problem(3, "src/b.rs", 2, "low", "fn item_2() { run(2); }")]),
+        )]);
+    let (rows, _, _, _, _, extras) = run(&agent).await;
+    assert_eq!(agent.messages().len(), 2, "send again, then repair");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(
+        extras
+            .notes
+            .iter()
+            .any(|n| n.contains("problems-1.json") && n.contains("were kept")),
+        "{:?}",
+        extras.notes
+    );
+}
+
+fn one_problem_script() -> Vec<ScriptStep> {
+    full_script(
         &[("src/a.rs", 6)],
         vec![problem(1, "src/a.rs", 2, "high", "fn item_2() { run(2); }")],
         vec![],
@@ -268,17 +309,56 @@ async fn a_later_version_of_a_problem_number_wins() {
             answer_clean("ARCH-ONE-1", "src/a.rs", 1),
             answer_clean("SEC-TWO-1", "src/a.rs", 2),
         ],
+    )
+}
+
+#[tokio::test]
+async fn a_later_version_of_a_problem_at_the_same_place_is_a_correction_and_wins() {
+    let agent = ScriptedAgent::new(one_problem_script()).with_follow_up(
+        vec![out(
+            "problems-1.json",
+            &json!([problem(1, "src/a.rs", 2, "low", "fn item_2() { run(2); }")]),
+        )],
+        AgentStop::Finished,
     );
-    let agent = ScriptedAgent::new(script).with_follow_up(
+    let (rows, _, _, _, _, _) = run(&agent).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].line, 2);
+    assert_eq!(
+        rows[0].severity.to_string().to_lowercase(),
+        "low",
+        "the later version is the one kept"
+    );
+}
+
+/// An intended change (round 2, defect 2): a problem number reused at a different place used to
+/// erase the earlier problem silently; now the later file is unusable, like a number used twice
+/// across files, so the agent is asked to write it again and, if it does not, the part fails.
+#[tokio::test]
+async fn a_problem_number_reused_at_a_different_place_is_a_repair_turn_then_a_failed_part() {
+    let agent = ScriptedAgent::new(one_problem_script()).with_follow_up(
         vec![out(
             "problems-1.json",
             &json!([problem(1, "src/a.rs", 4, "low", "fn item_4() { run(4); }")]),
         )],
         AgentStop::Finished,
     );
-    let (rows, _, _, _, _, _) = run(&agent).await;
-    let lines: Vec<usize> = rows.iter().map(|f| f.line).collect();
-    assert_eq!(lines, vec![4], "{rows:?}");
+    let (rows, _, _, failed, _, _) = run(&agent).await;
+    assert_ne!(rows.len(), 1, "never one row for two places: {rows:?}");
+    assert!(
+        agent
+            .messages()
+            .iter()
+            .any(|m| m.contains("problems-1.json") && m.contains("used twice")),
+        "a repair turn names the file: {:?}",
+        agent.messages()
+    );
+    assert!(
+        failed
+            .iter()
+            .any(|f| f.reason.contains("problems-1.json") && f.reason.contains("used twice")),
+        "{failed:?}"
+    );
 }
 
 #[tokio::test]

@@ -126,59 +126,104 @@ fn item_number(item: &serde_json::Value) -> Option<u64> {
     item.get("n").and_then(serde_json::Value::as_u64)
 }
 
-/// Join a later version of a problems file onto an earlier one: a number the later version holds
-/// is the later version's, a number only the earlier version holds stays. `None` when either
-/// version cannot be used (the later one then simply replaces the earlier).
+/// The place an item names: its path and line.
+fn item_place(item: &serde_json::Value) -> (Option<String>, Option<u64>) {
+    (
+        item.get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|p| p.trim().to_string()),
+        item.get("line").and_then(serde_json::Value::as_u64),
+    )
+}
+
+/// Join a later version of a problems file onto an earlier one. A number only the earlier version
+/// holds stays. A number both hold at the same path and line is a correction: the later wins. A
+/// number both hold at a different place is a clash: both stay in the text, which the reader then
+/// refuses ("problem number used twice") so the agent is asked to write the file again. `None`
+/// when either version cannot be used (the later one then simply replaces the earlier).
 fn join_problem_versions(key: &str, earlier: &str, later: &str) -> Option<String> {
     if !problems_text_is_usable(key, earlier) || !problems_text_is_usable(key, later) {
         return None;
     }
     let later_items = problem_items(later)?;
-    let later_numbers: HashSet<u64> = later_items.iter().filter_map(item_number).collect();
     let mut joined: Vec<serde_json::Value> = problem_items(earlier)?
         .into_iter()
-        .filter(|i| item_number(i).is_some_and(|n| !later_numbers.contains(&n)))
+        .filter(|old| {
+            let Some(n) = item_number(old) else {
+                return false;
+            };
+            // Dropped only when the later version corrects it, at the same place.
+            !later_items
+                .iter()
+                .any(|new| item_number(new) == Some(n) && item_place(new) == item_place(old))
+        })
         .collect();
     joined.extend(later_items);
     Some(serde_json::Value::Array(joined).to_string())
 }
 
-/// The problems files a later step wrote again over an earlier usable version, in path order.
-pub(super) fn rewritten_problem_files(runs: &[AgentRun]) -> Vec<String> {
-    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
-    let mut rewritten: Vec<String> = Vec::new();
+/// The outputs of every run joined, and the problems files whose earlier problems were kept.
+///
+/// A file that is not a problems file: a later run replaces an earlier one. A problems file keeps
+/// a join base, the LAST USABLE version joined so far; a later usable version is joined onto it
+/// (see [`join_problem_versions`]), so a step that wrote broken text in between does not lose the
+/// problems the base held. A later version that is not usable is the file's text as it stands
+/// (the reader refuses it, and the agent is asked to write it again), but it never becomes the
+/// base. The second value lists, in path order, the problems files where a later version joined
+/// onto a base that held a problem the later version did not (those problems were kept).
+fn join_outputs(runs: &[AgentRun]) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    let mut base: BTreeMap<String, String> = BTreeMap::new();
+    let mut kept: Vec<String> = Vec::new();
     for run in runs {
         for (k, v) in &run.outputs {
-            if !is_problems_file(k) {
+            if !is_problems_file(k) || !problems_text_is_usable(k, v) {
+                out.insert(k.clone(), v.clone());
                 continue;
             }
-            if let Some(prev) = seen.get(k.as_str()) {
-                if problems_text_is_usable(k, prev) && !rewritten.contains(k) {
-                    rewritten.push(k.clone());
-                }
+            let Some(earlier) = base.get(k) else {
+                base.insert(k.clone(), v.clone());
+                out.insert(k.clone(), v.clone());
+                continue;
+            };
+            let Some(joined) = join_problem_versions(k, earlier, v) else {
+                base.insert(k.clone(), v.clone());
+                out.insert(k.clone(), v.clone());
+                continue;
+            };
+            let later_numbers: HashSet<u64> = problem_items(v)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(item_number)
+                .collect();
+            let held_only_earlier = problem_items(earlier)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(item_number)
+                .any(|n| !later_numbers.contains(&n));
+            if held_only_earlier && !kept.contains(k) {
+                kept.push(k.clone());
             }
-            seen.insert(k, v);
+            if problems_text_is_usable(k, &joined) {
+                base.insert(k.clone(), joined.clone());
+            }
+            out.insert(k.clone(), joined);
         }
     }
-    rewritten.sort();
-    rewritten
+    kept.sort();
+    (out, kept)
 }
 
-/// The outputs of every run, later runs replacing earlier ones that wrote the same file.
+/// The problems files a later step wrote again where the problems only an earlier version held
+/// were kept, in path order.
+pub(super) fn rewritten_problem_files(runs: &[AgentRun]) -> Vec<String> {
+    join_outputs(runs).1
+}
+
+/// The outputs of every run, later runs replacing earlier ones that wrote the same file (a
+/// problems file is joined, not replaced).
 pub(super) fn merged_outputs(runs: &[AgentRun]) -> BTreeMap<String, String> {
-    let mut out: BTreeMap<String, String> = BTreeMap::new();
-    for run in runs {
-        for (k, v) in &run.outputs {
-            let text = match out.get(k) {
-                Some(earlier) if is_problems_file(k) => {
-                    join_problem_versions(k, earlier, v).unwrap_or_else(|| v.clone())
-                }
-                _ => v.clone(),
-            };
-            out.insert(k.clone(), text);
-        }
-    }
-    out
+    join_outputs(runs).0
 }
 
 /// The checklist answers of every run joined: an answer a later run gives for a rule replaces the
