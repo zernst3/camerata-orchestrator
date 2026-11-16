@@ -411,9 +411,10 @@ pub struct ApiAgentDriver {
     completer: Arc<dyn LlmPort>,
     /// Model id to request (empty = completer's default).
     pub model: String,
-    /// Optional worktree the agent's writes are jailed to. Enforced by the gateway rules
-    /// (`SEC-NO-PATH-ESCAPE-1` + worktree-prefix check below) on every `gated_write`.
-    pub worktree: PathBuf,
+    /// The worktree the agent's writes are jailed to. Enforced by the gateway rules
+    /// (`SEC-NO-PATH-ESCAPE-1` + worktree-prefix check below) on every `gated_write`, and the
+    /// first place the read tools may read. Private so nothing swaps it after construction.
+    worktree: PathBuf,
     /// When `true`, `delegate` and `fan_out` tool schemas are included in the API request.
     /// Default `false`: workers never get these, enforcing depth-1.
     pub orchestrator: bool,
@@ -2214,15 +2215,31 @@ struct ReadJail {
     roots: Vec<PathBuf>,
 }
 
+/// A canonical folder the jail may open, or `None` when the folder would open (nearly)
+/// everything: an empty path, a path that is not absolute once symlinks are resolved, or one with
+/// no parent (the filesystem root, which a link such as `x -> /` resolves to). An empty path in
+/// particular is a prefix of every path, so it must never become a root.
+fn usable_jail_root(p: &Path) -> Option<PathBuf> {
+    if p.as_os_str().is_empty() {
+        return None;
+    }
+    let canonical = canonicalize_existing_prefix(p);
+    if canonical.as_os_str().is_empty() || !canonical.is_absolute() || canonical.parent().is_none()
+    {
+        return None;
+    }
+    Some(canonical)
+}
+
 fn read_jail(driver: &ApiAgentDriver) -> ReadJail {
-    let mut roots = vec![canonicalize_existing_prefix(&driver.worktree)];
-    for r in &driver.read_roots {
-        roots.push(canonicalize_existing_prefix(r));
-    }
-    ReadJail {
-        base: Some(driver.worktree.clone()),
-        roots,
-    }
+    let worktree = usable_jail_root(&driver.worktree);
+    // Relative paths resolve against the worktree only while it is a usable root.
+    let base = worktree.as_ref().map(|_| driver.worktree.clone());
+    let roots = worktree
+        .into_iter()
+        .chain(driver.read_roots.iter().filter_map(|r| usable_jail_root(r)))
+        .collect();
+    ReadJail { base, roots }
 }
 
 impl ReadJail {

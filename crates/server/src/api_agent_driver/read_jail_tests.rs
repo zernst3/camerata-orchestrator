@@ -273,3 +273,45 @@ impl LlmPort for OneShotRead {
         self
     }
 }
+
+#[tokio::test]
+async fn an_empty_worktree_refuses_an_absolute_read_outside() {
+    let l = layout();
+    let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-sonnet-5", "");
+    let out = call(
+        &d,
+        "Read",
+        json!({"file_path": l.outside.join("secret.txt").display().to_string()}),
+    )
+    .await;
+    assert_refused(&out);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_folder_that_is_a_symlink_to_the_filesystem_root_opens_nothing() {
+    let l = layout();
+    let to_root = l.outside.join("to-root");
+    std::os::unix::fs::symlink("/", &to_root).unwrap();
+    let d = driver(&l).with_read_roots(vec![to_root]);
+    let out = call(
+        &d,
+        "Read",
+        json!({"file_path": l.outside.join("secret.txt").display().to_string()}),
+    )
+    .await;
+    assert_refused(&out);
+}
+
+#[tokio::test]
+async fn an_empty_or_relative_read_folder_opens_nothing() {
+    let l = layout();
+    let d = driver(&l).with_read_roots(vec![PathBuf::new(), PathBuf::from("relative")]);
+    let out = call(
+        &d,
+        "Read",
+        json!({"file_path": l.outside.join("secret.txt").display().to_string()}),
+    )
+    .await;
+    assert_refused(&out);
+}
