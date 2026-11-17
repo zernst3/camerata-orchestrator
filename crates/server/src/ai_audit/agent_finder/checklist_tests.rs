@@ -778,3 +778,25 @@ fn render_words_the_places_the_duplicate_and_the_not_applicable_rules() {
         "{text}"
     );
 }
+
+#[test]
+fn a_not_applicable_reason_is_noted_for_the_reviewer_and_none_is_no_note() {
+    let list = checklist();
+    let mut with = answer("ARCH-ALPHA-1", AnswerKind::NotApplicable);
+    with.reason = Some(" No queues here. ".into());
+    let other = answer("RUST-ZED-1", AnswerKind::NotApplicable);
+    let out = list.check(&file_of(vec![with, other]), &[], &[], &piece());
+    assert_eq!(out.not_applicable_notes.len(), 1);
+    assert_eq!(out.not_applicable_notes[0].rule, "ARCH-ALPHA-1");
+    assert_eq!(out.not_applicable_notes[0].reason, "No queues here.");
+    assert_eq!(state_of(&out, "ARCH-ALPHA-1"), Effective::NotApplicable);
+}
+
+#[test]
+fn render_shows_the_optional_reason_on_not_applicable_in_the_example() {
+    let text = checklist().render();
+    assert!(
+        text.contains("\"answer\": \"not_applicable\", \"reason\""),
+        "{text}"
+    );
+}

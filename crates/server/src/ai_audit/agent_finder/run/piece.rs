@@ -647,6 +647,12 @@ pub(super) fn report_of(
             .not_a_problem_lines
             .push(format!("{}: {} at {at}: {}", piece.key, n.rule, n.reason));
     }
+    for n in &view.outcome.not_applicable_notes {
+        report.not_a_problem_lines.push(format!(
+            "{}: {} not applicable: {}",
+            piece.key, n.rule, n.reason
+        ));
+    }
     for file in rewritten_problem_files(&runs) {
         report.notes.push(format!(
             "{}: a later step wrote {file} again; the problems only the earlier version held were kept",
