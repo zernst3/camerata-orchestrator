@@ -507,22 +507,45 @@ fn rekey_no_convention(
     }
 }
 
-/// Give each extra place a problem listed (written with no text) the text of its line.
-fn fill_site_snippets(rows: &mut [Finding], files: &[(String, String)]) {
-    for site in rows.iter_mut().flat_map(|f| f.also_locations.iter_mut()) {
-        if !site.snippet.is_empty() {
-            continue;
-        }
-        let text = files
-            .iter()
-            .find(|(p, _)| *p == site.path)
-            .and_then(|(_, t)| t.lines().nth(site.line.saturating_sub(1)));
-        if let Some(text) = text {
-            let mut snippet = text.trim().to_string();
-            crate::onboard::redact::redact_string(&mut snippet);
-            site.snippet = snippet;
-        }
+/// The text of a line of a repository file, trimmed and redacted; empty when the file or the
+/// line is not there.
+fn line_text(files: &[(String, String)], path: &str, line: usize) -> String {
+    let text = files
+        .iter()
+        .find(|(p, _)| p == path)
+        .and_then(|(_, t)| t.lines().nth(line.saturating_sub(1)));
+    let mut snippet = text.map_or_else(String::new, |t| t.trim().to_string());
+    crate::onboard::redact::redact_string(&mut snippet);
+    snippet
+}
+
+/// Add the sibling row of `primary` at another place, unless that place is the problem's own or
+/// was already added for it.
+fn add_sibling(
+    siblings: &mut Vec<Finding>,
+    primary: &Finding,
+    repo: &str,
+    path: &str,
+    line: usize,
+    snippet: String,
+) {
+    if (primary.path.as_str(), primary.line) == (path, line) {
+        return;
     }
+    let same_problem = |f: &Finding| {
+        [FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE]
+            .iter()
+            .all(|k| f.captures.get(*k) == primary.captures.get(*k))
+    };
+    if siblings
+        .iter()
+        .any(|f| same_problem(f) && (f.path.as_str(), f.line) == (path, line))
+    {
+        return;
+    }
+    siblings.push(crate::review_tree::sibling_row(
+        primary, repo, path, line, &snippet,
+    ));
 }
 
 /// Find the problems of one repository with the agent finder.
@@ -774,6 +797,18 @@ pub async fn find_repo(
         .iter()
         .map(|&i| reports[i].effective.clone())
         .collect();
+    // The problems that have a row: only those can carry the places of a rule's answer.
+    let problem_rows: HashSet<(usize, u32)> = answered
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &i)| {
+            reports[i]
+                .findings
+                .iter()
+                .filter_map(|f| f.captures.get(FINDER_PROBLEM_CAPTURE)?.parse().ok())
+                .map(move |n: u32| (at, n))
+        })
+        .collect();
     let conv = conventions::conventions_from_answers(
         repo,
         &alternatives,
@@ -781,28 +816,9 @@ pub async fn find_repo(
         &model_files,
         &selected,
         corpus,
+        &problem_rows,
     );
     extras.notes.extend(conv.notes.iter().cloned());
-    // The places of a rule whose answer cited a problem ride on that problem's row.
-    for att in &conv.attached {
-        let key = att.problem.to_string();
-        let row = answered
-            .get(att.piece)
-            .and_then(|&i| reports.get_mut(i))
-            .and_then(|r| {
-                r.findings
-                    .iter_mut()
-                    .find(|f| f.captures.get(FINDER_PROBLEM_CAPTURE) == Some(&key))
-            });
-        if let Some(row) = row {
-            for site in &att.sites {
-                let own = (row.path.as_str(), row.line) == (site.path.as_str(), site.line);
-                if !own && !row.also_locations.iter().any(|s| s.place() == site.place()) {
-                    row.also_locations.push(site.clone());
-                }
-            }
-        }
-    }
     if let Some(note) = agent.trace_note() {
         extras.notes.push(format!("{repo}: {note}"));
     }
@@ -832,6 +848,65 @@ pub async fn find_repo(
         );
     }
 
+    // Every further place of a problem is a sibling row of it: from the model's own `places` and
+    // from the places a cited rule's checklist options listed. No producer writes
+    // `also_locations`; each place is a copy of the problem at its own path, line and snippet,
+    // in the same sub-group, so the places share one fix.
+    let mut siblings: Vec<Finding> = Vec::new();
+    for r in &reports {
+        if r.findings.len() == r.problems.len() {
+            for (f, p) in r.findings.iter().zip(&r.problems) {
+                for place in &p.places {
+                    add_sibling(
+                        &mut siblings,
+                        f,
+                        repo,
+                        &place.path,
+                        place.line,
+                        line_text(&model_files, &place.path, place.line),
+                    );
+                }
+            }
+        }
+    }
+    if joints_findings.len() == joints_problems.len() {
+        for (f, p) in joints_findings.iter().zip(&joints_problems) {
+            for place in &p.places {
+                add_sibling(
+                    &mut siblings,
+                    f,
+                    repo,
+                    &place.path,
+                    place.line,
+                    line_text(&model_files, &place.path, place.line),
+                );
+            }
+        }
+    }
+    for att in &conv.attached {
+        let key = att.problem.to_string();
+        let primary = answered
+            .get(att.piece)
+            .and_then(|&i| reports.get(i))
+            .and_then(|r| {
+                r.findings
+                    .iter()
+                    .find(|f| f.captures.get(FINDER_PROBLEM_CAPTURE) == Some(&key))
+            });
+        if let Some(primary) = primary {
+            for site in &att.sites {
+                add_sibling(
+                    &mut siblings,
+                    primary,
+                    repo,
+                    &site.path,
+                    site.line,
+                    site.snippet.clone(),
+                );
+            }
+        }
+    }
+
     // Every problem so far, in piece order.
     let mut rows: Vec<Finding> = Vec::new();
     let mut proposed: Vec<ProposedRule> = Vec::new();
@@ -846,7 +921,7 @@ pub async fn find_repo(
         .iter()
         .filter(|f| !adopted_all.contains(&f.rule_id.to_ascii_uppercase()))
         .count();
-    fill_site_snippets(&mut rows, &model_files);
+    rows.extend(siblings);
     rows.extend(unresolved);
     rows.extend(conv.departures);
     rows.extend(conv.undecided);

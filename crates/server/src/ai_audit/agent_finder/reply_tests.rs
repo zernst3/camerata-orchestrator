@@ -789,35 +789,16 @@ fn places_that_are_not_a_list_are_ignored_with_a_note() {
 }
 
 #[test]
-fn places_become_the_extra_places_of_the_row() {
+fn places_are_not_written_as_also_locations_by_the_reader() {
+    // Each place becomes a sibling row in the runner (A11); the reader leaves `also_locations`
+    // empty.
     let mut p = problem_for(1, "missing authorization");
-    p.places = vec![
-        super::reply::ProblemPlace {
-            path: "src/b.rs".into(),
-            line: 3,
-            end_line: None,
-        },
-        super::reply::ProblemPlace {
-            path: "src/b.rs".into(),
-            line: 3,
-            end_line: None,
-        },
-        super::reply::ProblemPlace {
-            path: "src/a.rs".into(),
-            line: 12,
-            end_line: None,
-        },
-    ];
+    p.places = vec![super::reply::ProblemPlace {
+        path: "src/b.rs".into(),
+        line: 3,
+        end_line: None,
+    }];
     let (findings, _) = to_findings("acme/app", "p1", &[p], &BTreeMap::new(), &HashSet::new());
     assert_eq!(findings.len(), 1);
-    let sites: Vec<(&str, usize)> = findings[0]
-        .also_locations
-        .iter()
-        .map(|s| (s.path.as_str(), s.line))
-        .collect();
-    assert_eq!(
-        sites,
-        vec![("src/b.rs", 3)],
-        "de-duplicated, and not the main place"
-    );
+    assert!(findings[0].also_locations.is_empty());
 }

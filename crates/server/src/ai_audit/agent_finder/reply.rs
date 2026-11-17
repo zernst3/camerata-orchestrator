@@ -706,27 +706,6 @@ pub fn to_findings(
                 }
             }
         }
-        // The other places of the same problem ride on its row.
-        for place in &p.places {
-            if (place.path.as_str(), place.line) == (finding.path.as_str(), finding.line) {
-                continue;
-            }
-            let site = crate::onboard::MergedLocation::site(
-                repo,
-                place.path.clone(),
-                place.line,
-                finding.rule_id.clone(),
-                String::new(),
-                false,
-            );
-            if !finding
-                .also_locations
-                .iter()
-                .any(|s| s.place() == site.place())
-            {
-                finding.also_locations.push(site);
-            }
-        }
         let c = &mut finding.captures;
         let fix = crate::client_text::plain(p.fix.trim()).into_owned();
         if !fix.is_empty() {

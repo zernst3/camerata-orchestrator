@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::super::checklist::{combine_for_unit, Effective, EffectiveAnswer, Place};
 use crate::ai_audit::{RuleAlternatives, RuleRecommendation};
-use crate::onboard::{Finding, MergedLocation};
+use crate::onboard::Finding;
 use crate::scan_routing::AuditRule;
 
 /// What the conventions step produced.
@@ -28,18 +28,27 @@ pub(super) struct ConventionResult {
     pub violates: Vec<Finding>,
     /// Operator-only remarks (a listed place that could not be checked).
     pub notes: Vec<String>,
-    /// Places that ride on a problem the model cited to the rule, instead of rows of their own.
+    /// Places that become sibling rows of a problem the model cited to the rule, instead of
+    /// engine rows of their own.
     pub attached: Vec<AttachedSites>,
 }
 
-/// Places of a rule's options that become extra places of one cited problem.
+/// A place checked against the file: its path, line and the text of the line.
+#[derive(Debug, Clone)]
+pub(super) struct CheckedSite {
+    pub path: String,
+    pub line: usize,
+    pub snippet: String,
+}
+
+/// Places of a rule's options that become sibling rows of one cited problem.
 #[derive(Debug)]
 pub(super) struct AttachedSites {
     /// The index in `piece_answers` of the piece that cited the problem.
     pub piece: usize,
     /// The number of the cited problem within that piece.
     pub problem: u32,
-    pub sites: Vec<MergedLocation>,
+    pub sites: Vec<CheckedSite>,
 }
 
 /// A place checked against the repository: the path, the line and the text of the line.
@@ -57,6 +66,25 @@ fn checked_place(
     ))
 }
 
+/// The problem needing a decision for a listed place that could not be checked against the file.
+fn held_row(repo: &str, rule: &str, title: &str, option_label: &str, place: &Place) -> Finding {
+    Finding {
+        repo: repo.to_string(),
+        path: place.path.trim_start_matches("./").to_string(),
+        line: place.line.unwrap_or(0),
+        rule_id: "AI-OPEN-QUESTION".to_string(),
+        severity: "low".to_string(),
+        snippet: "A listed place could not be checked".to_string(),
+        detail: format!(
+            "A place could not be checked{}A reviewer listed this place as using \"{option_label}\" for {title} ({rule}), but it could not be found in the file. It needs a decision.",
+            crate::ai_audit::digest_parse::HEADLINE_SEP,
+        ),
+        needs_review: true,
+        located: false,
+        ..Finding::default()
+    }
+}
+
 /// Build the recommendations, departures and defect rows from the answers of a repository's
 /// pieces. `piece_answers` holds the effective answers of each piece that gave a checklist.
 pub(super) fn conventions_from_answers(
@@ -66,6 +94,7 @@ pub(super) fn conventions_from_answers(
     files: &[(String, String)],
     selected: &[AuditRule],
     corpus: &camerata_rules::RuleSet,
+    problem_rows: &std::collections::HashSet<(usize, u32)>,
 ) -> ConventionResult {
     let mut result = ConventionResult::default();
     let by_path: HashMap<&str, Vec<&str>> = files
@@ -115,7 +144,13 @@ pub(super) fn conventions_from_answers(
     for (i, answers) in filtered.iter().enumerate() {
         for a in answers {
             if let Effective::Problems(nums) = &a.state {
-                if let Some(n) = nums.iter().min() {
+                // Only a problem that has a row can carry the places; with none, the engine's
+                // own rows stand so no place vanishes.
+                if let Some(n) = nums
+                    .iter()
+                    .filter(|n| problem_rows.contains(&(i, **n)))
+                    .min()
+                {
                     cited_by_rule
                         .entry(a.rule.to_ascii_uppercase())
                         .or_insert((i, *n));
@@ -211,11 +246,14 @@ pub(super) fn conventions_from_answers(
         let Some(opt) = alt.options.iter().find(|o| o.id == chosen) else {
             continue;
         };
+        let title = corpus
+            .get_by_id(&uc.rule)
+            .map_or_else(|| uc.rule.clone(), |r| r.title.clone());
         if let Some(&(piece, problem)) = cited_by_rule.get(&uc.rule) {
             // The listed places of the option the codebase departs from (for a rule whose
             // majority option is the named defect, the places of that option) ride on the
-            // cited problem, de-duplicated; no row of the engine's own.
-            let mut sites: Vec<MergedLocation> = Vec::new();
+            // cited problem as sibling rows, de-duplicated; no row of the engine's own.
+            let mut sites: Vec<CheckedSite> = Vec::new();
             for ((rule, option), listed) in &places {
                 if rule != &uc.rule || (option == &chosen) != opt.violates {
                     continue;
@@ -229,19 +267,19 @@ pub(super) fn conventions_from_answers(
                             place.path,
                             place.line.map_or(String::new(), |l| format!(":{l}")),
                         ));
+                        let mut held = held_row(repo, &uc.rule, &title, &label_of(option), place);
+                        crate::onboard::redact::redact_finding(&mut held);
+                        result.undecided.push(held);
                         continue;
                     };
                     let mut snippet = text.trim().to_string();
                     crate::onboard::redact::redact_string(&mut snippet);
                     if !sites.iter().any(|s| (&s.path, s.line) == (&path, line)) {
-                        sites.push(MergedLocation::site(
-                            repo,
+                        sites.push(CheckedSite {
                             path,
                             line,
-                            uc.rule.clone(),
                             snippet,
-                            false,
-                        ));
+                        });
                     }
                 }
             }
@@ -276,9 +314,6 @@ pub(super) fn conventions_from_answers(
             &reasoning,
             evidence.as_deref(),
         );
-        let title = corpus
-            .get_by_id(&uc.rule)
-            .map_or_else(|| uc.rule.clone(), |r| r.title.clone());
         for ((rule, option), listed) in &places {
             if rule != &uc.rule || option == &chosen {
                 continue;
@@ -292,23 +327,7 @@ pub(super) fn conventions_from_answers(
                         place.path,
                         place.line.map_or(String::new(), |l| format!(":{l}")),
                     ));
-                    let mut held = Finding {
-                        repo: repo.to_string(),
-                        path: place.path.trim_start_matches("./").to_string(),
-                        line: place.line.unwrap_or(0),
-                        rule_id: "AI-OPEN-QUESTION".to_string(),
-                        severity: "low".to_string(),
-                        snippet: "A listed place could not be checked".to_string(),
-                        detail: format!(
-                            "A place could not be checked{}A reviewer listed this place as using \"{}\" for {title} ({}), but it could not be found in the file. It needs a decision.",
-                            crate::ai_audit::digest_parse::HEADLINE_SEP,
-                            label_of(option),
-                            uc.rule,
-                        ),
-                        needs_review: true,
-                        located: false,
-                        ..Finding::default()
-                    };
+                    let mut held = held_row(repo, &uc.rule, &title, &label_of(option), place);
                     crate::onboard::redact::redact_finding(&mut held);
                     result.undecided.push(held);
                     continue;

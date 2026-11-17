@@ -270,13 +270,18 @@ async fn a_security_fault_under_a_departure_is_a_defect_not_a_deviation() {
         "an objective fault stays a defect: {:?}",
         fault.kind
     );
-    // The rule's answer cites the problem, so the departure is not a row of its own: its place
-    // rides on the fault's row.
-    assert!(!rows.iter().any(|f| f.path == "src/b.rs" && f.line == 3));
-    assert!(fault
-        .also_locations
+    // The rule's answer cites the problem, so the departure is not an engine row: its place is
+    // a sibling row of the fault (a copy of it), never a deviation of its own.
+    let sibling = rows
         .iter()
-        .any(|s| s.path == "src/b.rs" && s.line == 3));
+        .find(|f| f.path == "src/b.rs" && f.line == 3)
+        .unwrap();
+    assert!(
+        !sibling.detail.contains("The rest of the codebase follows"),
+        "{}",
+        sibling.detail
+    );
+    assert!(fault.also_locations.is_empty());
 }
 
 #[tokio::test]
