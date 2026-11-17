@@ -244,6 +244,7 @@ fn agent_controls() -> RunControls {
 }
 
 #[test]
+#[serial_test::serial(process_env)]
 fn a_client_run_on_the_api_gets_the_run_folders_rooms_the_saved_key_and_client() {
     let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
     let creds = creds_with_key(Some("sk-test"));
@@ -265,6 +266,7 @@ fn a_client_run_on_the_api_gets_the_run_folders_rooms_the_saved_key_and_client()
 
 /// The first run from the app: the command line transport, internal mode, no key needed.
 #[test]
+#[serial_test::serial(process_env)]
 fn an_internal_run_on_the_cli_gets_internal_the_rooms_and_traces_beside_them() {
     let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
     let creds = creds_with_key(None);
@@ -292,6 +294,7 @@ fn an_internal_run_on_the_cli_gets_internal_the_rooms_and_traces_beside_them() {
 }
 
 #[test]
+#[serial_test::serial(process_env)]
 fn the_engine_finder_a_blocked_review_and_a_missing_api_key_are_handled_before_any_spend() {
     let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
     let creds = creds_with_key(None);
