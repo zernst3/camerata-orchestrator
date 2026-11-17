@@ -2806,3 +2806,41 @@ async fn a_tool_call_transcript_reply_is_refused_and_never_stored_as_good() {
         "nothing from the transcript is stored as a summary"
     );
 }
+
+// ── A reply with a corrected object after a malformed one ───────────────────────────────────────
+
+/// What a real run got from Fable on the CLI backend: an object with a stray `: ""` after an
+/// escalation reason (not valid JSON), then "Correction: ... use this one instead", then the same
+/// object with the entry fixed. The span from the first brace to the last was not one object.
+fn malformed_then_corrected() -> (String, String) {
+    let good = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "needs_more_code", "rank": 1, "why": "w"}],
+    })
+    .to_string();
+    let bad = good.replace(
+        "\"reason\":\"needs_more_code\"",
+        "\"reason\":\"needs_more_code\":\"\"",
+    );
+    assert_ne!(bad, good);
+    let reply = format!(
+        "{bad}\n\nCorrection: the object above contains a malformed entry, so please use this one instead.\n\n{good}"
+    );
+    (reply, bad)
+}
+
+#[test]
+fn a_corrected_object_after_a_malformed_one_is_read() {
+    let (reply, bad) = malformed_then_corrected();
+    let parsed = Stage2Reply::parse(&reply).expect("the corrected object is readable");
+    assert_eq!(parsed.escalations.len(), 1);
+    assert_eq!(parsed.summary, "s");
+    // The rule summary reader does the same.
+    let summary =
+        format!("{{\"summary\": \"a\" \"b\"}}\nuse this one instead:\n{{\"summary\": \"ok\"}}");
+    assert_eq!(parse_rule_summary(&summary).unwrap(), "ok");
+    // A malformed object alone cannot be read, and the refusal says where the JSON broke.
+    let why = Stage2Reply::parse(&bad).unwrap_err();
+    assert!(why.contains("not a JSON object"), "{why}");
+    assert!(why.contains("column"), "{why}");
+}
