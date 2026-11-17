@@ -1440,6 +1440,8 @@ pub(crate) async fn run_resume_plan(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // The limit the run was saved with, so the confirmation can offer to change it.
+    let mut saved_limit = None;
     if let Ok(record) = crate::run_store::read_record(&id) {
         if let Some(why) = resume_project_refusal(&state, &record) {
             return (
@@ -1448,9 +1450,14 @@ pub(crate) async fn run_resume_plan(
             )
                 .into_response();
         }
+        saved_limit = record.args["max_cost_usd"].as_f64();
     }
     match crate::run_store::preview_resume(&id) {
-        Ok(preview) => (StatusCode::OK, Json(serde_json::json!(preview))).into_response(),
+        Ok(preview) => {
+            let mut body = serde_json::json!(preview);
+            body["saved_limit_usd"] = serde_json::json!(saved_limit);
+            (StatusCode::OK, Json(body)).into_response()
+        }
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -1459,12 +1466,50 @@ pub(crate) async fn run_resume_plan(
     }
 }
 
+/// The query of `POST /api/inspections/:id/resume`. `max_cost_usd` raises the spend limit the
+/// saved run was started with (the operator approving a paused run's new estimate); absent, the
+/// saved limit stands. The limit is not part of the run's identity, so a resume accepts a new one.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct ResumeQuery {
+    #[serde(default)]
+    pub(crate) max_cost_usd: Option<f64>,
+}
+
+impl ResumeQuery {
+    /// The saved request with the limit this resume was approved at.
+    pub(crate) fn apply(&self, mut req: AuditReq) -> AuditReq {
+        if self.max_cost_usd.is_some() {
+            req.max_cost_usd = self.max_cost_usd;
+        }
+        req
+    }
+}
+
+/// True when the run's recorded reasons say the spend limit stopped it.
+pub(crate) fn reasons_name_spend_limit(reasons: &[String]) -> bool {
+    reasons.iter().any(|r| {
+        r.contains("the spend limit stopped the run")
+            || r.contains("the spend limit or an outage stopped the run")
+    })
+}
+
+/// True when the checkpoint the run left in its folder paused it.
+pub(crate) fn checkpoint_stopped(folder: &std::path::Path) -> bool {
+    std::fs::read(folder.join(crate::cost_checkpoint::CHECKPOINT_FILE))
+        .ok()
+        .and_then(|bytes| {
+            serde_json::from_slice::<crate::cost_checkpoint::CostCheckpoint>(&bytes).ok()
+        })
+        .is_some_and(|cp| cp.stopped)
+}
+
 /// Start the saved run `id` again as a background job that runs only the parts that are not
 /// done. The same job the scan button starts, with the saved request and `resume_run` set, so a
 /// refusal (the repo moved on, the rules changed, the run is in use) fails the job with the reason.
 pub(crate) async fn run_resume_start(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ResumeQuery>,
 ) -> impl IntoResponse {
     let record = match crate::run_store::read_record(&id) {
         Ok(r) => r,
@@ -1483,6 +1528,21 @@ pub(crate) async fn run_resume_start(
         )
             .into_response();
     }
+    // A raised limit is for a run the spend limit stopped (a hard stop or the checkpoint's
+    // pause); on any other run it would only change what the run may spend, so it is refused.
+    if query.max_cost_usd.is_some()
+        && !reasons_name_spend_limit(&record.incomplete_reasons)
+        && !checkpoint_stopped(&crate::run_store::runs_dir().join(&id))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "a new spend limit can be set only on a run the spend limit stopped; \
+                          this run was not stopped by its spend limit"
+            })),
+        )
+            .into_response();
+    }
     let req: AuditReq =
         match serde_json::from_value(record.args) {
             Ok(r) => r,
@@ -1497,7 +1557,7 @@ pub(crate) async fn run_resume_start(
         };
     let job_id = start_audit_job(
         &state,
-        req,
+        query.apply(req),
         AuditJobOptions {
             resume_run: Some(id),
             ..AuditJobOptions::default()

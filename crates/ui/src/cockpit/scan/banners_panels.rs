@@ -65,8 +65,11 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
     // True while the resume job runs.
     #[props(default)] busy: bool,
     #[props(default)] on_plan: Option<EventHandler<String>>,
-    #[props(default)] on_resume: Option<EventHandler<String>>,
+    // The run and the spend limit to resume at: `None` keeps the limit the run was saved with.
+    #[props(default)] on_resume: Option<EventHandler<(String, Option<f64>)>>,
 ) -> Element {
+    // What the operator typed in the confirmation's limit field; `None` shows the saved limit.
+    let mut limit_edit = use_signal(|| Option::<String>::None);
     if failed_passes.is_empty() {
         return rsx! {};
     }
@@ -162,19 +165,42 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
                         if let Some(why) = plan.refusal.clone() {
                             p { class: "onboard-gate-b scan-resume-refusal", "Cannot resume now: {why}" }
                         } else {
-                            button {
-                                class: "scan-resume-confirm",
-                                r#type: "button",
-                                disabled: busy,
-                                onclick: {
-                                    let run_id = run_id.clone();
-                                    move |_| {
-                                        if let (Some(id), Some(handler)) = (run_id.clone(), on_resume) {
-                                            handler.call(id);
+                            {
+                                let saved = plan.saved_limit_usd;
+                                let shown = limit_edit().unwrap_or_else(|| {
+                                    saved.map(|v| format!("{v:.2}")).unwrap_or_default()
+                                });
+                                let parsed = typed_limit(saved, &shown);
+                                let invalid = parsed.clone().err();
+                                rsx! {
+                                    label { class: "scan-resume-limit-row",
+                                        span { class: "scan-resume-limit-label", "Spend limit in dollars (change it to raise the limit for this resume)" }
+                                        input {
+                                            class: "scan-resume-limit",
+                                            r#type: "text",
+                                            inputmode: "decimal",
+                                            value: "{shown}",
+                                            oninput: move |e| limit_edit.set(Some(e.value())),
                                         }
                                     }
-                                },
-                                "Start: run only these parts"
+                                    if let Some(why) = invalid {
+                                        p { class: "onboard-gate-b scan-resume-refusal", "{why}" }
+                                    }
+                                    button {
+                                        class: "scan-resume-confirm",
+                                        r#type: "button",
+                                        disabled: busy || parsed.is_err(),
+                                        onclick: {
+                                            let run_id = run_id.clone();
+                                            move |_| {
+                                                if let (Some(id), Some(handler), Ok(limit)) = (run_id.clone(), on_resume, parsed.clone()) {
+                                                    handler.call((id, limit));
+                                                }
+                                            }
+                                        },
+                                        "Start: run only these parts"
+                                    }
+                                }
                             }
                         }
                     }

@@ -2198,6 +2198,13 @@ pub async fn review_groups_metered(
 ) -> GroupReviewOutcome {
     let prior = report.actual_usage.clone().unwrap_or_default();
     let meter = UsageMeter::continuing(controls.clone(), &prior);
+    // The stage's pause reaches the job state the UI polls, as the scan's own meter does.
+    if let Some((jobs, id)) = cfg.job {
+        let (jobs, id) = (jobs.clone(), id.to_string());
+        meter.set_job_sink(crate::cost_checkpoint::CheckpointSink::new(move |cp| {
+            jobs.set_cost_checkpoint(&id, cp.clone());
+        }));
+    }
     // A run the cost checkpoint paused stays paused: this fresh meter learns the stop from the
     // scan's record, so the stage sends nothing and is recorded NOT RUN (see
     // `crate::cost_checkpoint`).

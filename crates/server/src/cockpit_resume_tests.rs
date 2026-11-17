@@ -11,6 +11,7 @@
 
 use super::*;
 use axum::body::Body;
+use axum::extract::Query;
 use axum::http::Request;
 use http_body_util::BodyExt;
 
@@ -285,6 +286,9 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     let plan = body_json(plan).await;
     assert!(plan["refusal"].is_null(), "{plan}");
     assert_eq!(plan["state"], "incomplete", "{plan}");
+    // The plan carries the limit the run was saved with (null when it had none), which the
+    // confirmation prefills.
+    assert!(plan.get("saved_limit_usd").is_some(), "{plan}");
     let remaining: Vec<String> = plan["estimate"]["remaining"]
         .as_array()
         .unwrap()
@@ -300,11 +304,32 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
         "the audit part is done and is not remaining: {remaining:?}"
     );
 
+    // A raised limit is honoured only for a run the spend limit stopped: this one failed a part.
+    let refused = run_resume_start(
+        State(state.clone()),
+        Path(run_id.clone()),
+        Query(ResumeQuery {
+            max_cost_usd: Some(500.0),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let why = body_json(refused).await["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(why.contains("spend limit"), "{why}");
+
     // ── POST /api/inspections/:id/resume: the provider is back; only the failed part runs ────────
     std::fs::remove_file(&calibration_down).unwrap();
-    let resume = run_resume_start(State(state.clone()), Path(run_id.clone()))
-        .await
-        .into_response();
+    let resume = run_resume_start(
+        State(state.clone()),
+        Path(run_id.clone()),
+        Query(ResumeQuery::default()),
+    )
+    .await
+    .into_response();
     assert_eq!(resume.status(), StatusCode::OK);
     let resume_job = body_json(resume).await["job_id"]
         .as_str()
@@ -350,9 +375,13 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
             .is_some_and(|r| r.contains("already complete")),
         "{plan}"
     );
-    let again = run_resume_start(State(state.clone()), Path(run_id.clone()))
-        .await
-        .into_response();
+    let again = run_resume_start(
+        State(state.clone()),
+        Path(run_id.clone()),
+        Query(ResumeQuery::default()),
+    )
+    .await
+    .into_response();
     let again_job = body_json(again).await["job_id"]
         .as_str()
         .unwrap()
@@ -384,9 +413,13 @@ async fn the_run_endpoints_answer_404_for_an_unknown_run() {
         .as_str()
         .unwrap()
         .contains("no saved run"));
-    let resume = run_resume_start(State(state.clone()), Path("no-such-run".to_string()))
-        .await
-        .into_response();
+    let resume = run_resume_start(
+        State(state.clone()),
+        Path("no-such-run".to_string()),
+        Query(ResumeQuery::default()),
+    )
+    .await
+    .into_response();
     assert_eq!(resume.status(), StatusCode::NOT_FOUND);
 }
 
@@ -535,9 +568,13 @@ async fn a_saved_cockpit_inspection_is_listed_and_resumed_only_in_the_project_th
 
     // Resuming it from X is refused and starts nothing; the saved run is untouched.
     assert!(state.projects.set_active(&x.id));
-    let refused = run_resume_start(State(state.clone()), Path(y_run.clone()))
-        .await
-        .into_response();
+    let refused = run_resume_start(
+        State(state.clone()),
+        Path(y_run.clone()),
+        Query(ResumeQuery::default()),
+    )
+    .await
+    .into_response();
     assert_eq!(refused.status(), StatusCode::CONFLICT);
     let body = body_json(refused).await;
     assert!(body["job_id"].is_null(), "no job was started: {body}");
@@ -591,9 +628,13 @@ async fn a_saved_cockpit_inspection_is_listed_and_resumed_only_in_the_project_th
     // Neither project can resume it.
     for open in [&x.id, &y.id] {
         assert!(state.projects.set_active(open));
-        let refused = run_resume_start(State(state.clone()), Path(old_one.clone()))
-            .await
-            .into_response();
+        let refused = run_resume_start(
+            State(state.clone()),
+            Path(old_one.clone()),
+            Query(ResumeQuery::default()),
+        )
+        .await
+        .into_response();
         assert_eq!(refused.status(), StatusCode::CONFLICT);
     }
     // A run that names its project has no such note.
@@ -922,9 +963,13 @@ async fn a_cockpit_scan_killed_mid_run_is_interrupted_and_run_what_remains_compl
 
     // ── Run what remains ──────────────────────────────────────────────────────────────────
     std::fs::remove_file(&hang_flag).unwrap();
-    let resume = run_resume_start(State(state.clone()), Path(run_id.clone()))
-        .await
-        .into_response();
+    let resume = run_resume_start(
+        State(state.clone()),
+        Path(run_id.clone()),
+        Query(ResumeQuery::default()),
+    )
+    .await
+    .into_response();
     assert_eq!(resume.status(), StatusCode::OK);
     let resume_job = body_json(resume).await["job_id"]
         .as_str()
@@ -1178,9 +1223,13 @@ async fn a_cockpit_resume_is_refused_when_the_kept_group_review_model_is_not_all
     std::fs::remove_file(&rig.group_review_down).unwrap();
     let calls_before = stage_calls(&rig.log).len();
 
-    let resume = run_resume_start(State(rig.state.clone()), Path(rig.run_id.clone()))
-        .await
-        .into_response();
+    let resume = run_resume_start(
+        State(rig.state.clone()),
+        Path(rig.run_id.clone()),
+        Query(ResumeQuery::default()),
+    )
+    .await
+    .into_response();
     assert_eq!(resume.status(), StatusCode::OK);
     let job_id = body_json(resume).await["job_id"]
         .as_str()
@@ -1214,9 +1263,13 @@ fn group_review_models(model_log: &std::path::Path) -> Vec<String> {
 
 /// Run what remains for `rig`'s run; the job's final state.
 async fn resume_job(rig: &InterruptedScan) -> crate::jobs::JobState {
-    let resume = run_resume_start(State(rig.state.clone()), Path(rig.run_id.clone()))
-        .await
-        .into_response();
+    let resume = run_resume_start(
+        State(rig.state.clone()),
+        Path(rig.run_id.clone()),
+        Query(ResumeQuery::default()),
+    )
+    .await
+    .into_response();
     assert_eq!(resume.status(), StatusCode::OK);
     let job_id = body_json(resume).await["job_id"]
         .as_str()
@@ -1549,4 +1602,80 @@ async fn a_server_scan_on_an_agent_project_runs_the_agent_finder() {
         "the engine's scan pass ran: {:?}",
         stage_calls(&rig.log)
     );
+}
+
+#[test]
+fn a_resume_with_a_limit_raises_the_saved_runs_spend_limit() {
+    let saved: AuditReq =
+        serde_json::from_value(serde_json::json!({ "max_cost_usd": 260.0 })).unwrap();
+    let raised = ResumeQuery {
+        max_cost_usd: Some(320.7),
+    }
+    .apply(saved);
+    assert_eq!(raised.max_cost_usd, Some(320.7));
+    let saved: AuditReq =
+        serde_json::from_value(serde_json::json!({ "max_cost_usd": 260.0 })).unwrap();
+    let kept = ResumeQuery::default().apply(saved);
+    assert_eq!(
+        kept.max_cost_usd,
+        Some(260.0),
+        "no limit sent keeps the saved one"
+    );
+}
+
+#[test]
+fn a_raised_limit_is_honoured_only_for_a_run_the_spend_limit_stopped() {
+    let stopped = vec![
+        "the spend limit stopped the run; 2 parts did not run and were never checked".to_string(),
+    ];
+    assert!(reasons_name_spend_limit(&stopped));
+    let outage_or_limit = vec![
+        "the spend limit or an outage stopped the run; 1 part did not run and was never checked"
+            .to_string(),
+    ];
+    assert!(reasons_name_spend_limit(&outage_or_limit));
+    let failed = vec!["1 part failed (a/b, calibration)".to_string()];
+    assert!(!reasons_name_spend_limit(&failed));
+    assert!(!reasons_name_spend_limit(&[]));
+    let outage = vec!["the run stopped because the model provider could not be reached; 1 part did not run and was never checked".to_string()];
+    assert!(!reasons_name_spend_limit(&outage));
+
+    // A stopped checkpoint in the run folder is the other way a run is a spend-limit stop.
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!checkpoint_stopped(dir.path()));
+    let cp = crate::cost_checkpoint::CostCheckpoint {
+        stopped: true,
+        ..Default::default()
+    };
+    std::fs::write(
+        dir.path().join(crate::cost_checkpoint::CHECKPOINT_FILE),
+        serde_json::to_vec(&cp).unwrap(),
+    )
+    .unwrap();
+    assert!(checkpoint_stopped(dir.path()));
+    let running = crate::cost_checkpoint::CostCheckpoint::default();
+    std::fs::write(
+        dir.path().join(crate::cost_checkpoint::CHECKPOINT_FILE),
+        serde_json::to_vec(&running).unwrap(),
+    )
+    .unwrap();
+    assert!(!checkpoint_stopped(dir.path()));
+}
+
+#[test]
+fn a_limit_that_is_not_a_positive_number_is_the_smallest_limit_never_no_limit() {
+    for bad in [f64::NAN, 0.0, -5.0, f64::INFINITY, f64::NEG_INFINITY] {
+        let req: AuditReq =
+            serde_json::from_value(serde_json::json!({ "max_cost_usd": null })).unwrap();
+        let req = AuditReq {
+            max_cost_usd: Some(bad),
+            ..req
+        };
+        let controls = req.run_controls(None, None);
+        assert_eq!(
+            controls.max_cost_usd,
+            Some(f64::MIN_POSITIVE),
+            "{bad} must not remove the guard"
+        );
+    }
 }

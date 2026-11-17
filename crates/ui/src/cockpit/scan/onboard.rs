@@ -200,6 +200,7 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
                 Err(why) => ResumePlanView {
                     text: String::new(),
                     refusal: Some(why),
+                    ..ResumePlanView::default()
                 },
             };
             saved_plan.set(Some((run_id, plan)));
