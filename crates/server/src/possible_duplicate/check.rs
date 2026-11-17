@@ -469,7 +469,10 @@ async fn send_calls(
         answers: BTreeMap::new(),
     };
     for (id, pairs, shown) in plan_calls(candidates, &rows) {
-        let path = shown.first().map(|(a, _)| a.path.clone()).unwrap_or_default();
+        let path = shown
+            .first()
+            .map(|(a, _)| a.path.clone())
+            .unwrap_or_default();
         let request = LlmRequest::new(pairs_prompt(&path, &shown, &nonce))
             .with_system(system.clone())
             .with_max_tokens(scaled_max_tokens(pairs.len(), OUTPUT_TOKENS_PER_PAIR))

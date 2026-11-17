@@ -103,7 +103,9 @@ impl LlmPort for Script {
 fn all(prompt: &str, verdict: &str) -> String {
     let n = prompt.matches("\nPair ").count() + usize::from(prompt.starts_with("Pair "));
     let pairs: Vec<_> = (1..=n)
-        .map(|i| serde_json::json!({"n": i, "verdict": verdict, "reason": format!("{verdict} {i}")}))
+        .map(
+            |i| serde_json::json!({"n": i, "verdict": verdict, "reason": format!("{verdict} {i}")}),
+        )
         .collect();
     serde_json::json!({ "pairs": pairs }).to_string()
 }
@@ -160,13 +162,12 @@ async fn only_the_pair_the_model_calls_the_same_flaw_is_hinted() {
     run(&mut r, &llm).await;
     assert_eq!(llm.calls(), 2, "one call for each file");
     assert!(hinted(&r, "src/c.rs"), "the pair answered same is hinted");
-    assert!(!hinted(&r, "src/d.rs"), "the pair answered different is not");
-    // The reason the model gave is on the link, for the review detail.
-    let idx = DupIndex::new(
-        r.tree.as_ref(),
-        &r.findings,
-        r.ledger.duplicate_checks(),
+    assert!(
+        !hinted(&r, "src/d.rs"),
+        "the pair answered different is not"
     );
+    // The reason the model gave is on the link, for the review detail.
+    let idx = DupIndex::new(r.tree.as_ref(), &r.findings, r.ledger.duplicate_checks());
     let c = r.findings.iter().find(|f| f.path == "src/c.rs").unwrap();
     assert_eq!(idx.of(c)[0].reason, "same 1");
     // Both answers are stored, with the model that gave them.
@@ -196,7 +197,11 @@ async fn a_malformed_reply_gets_one_repair_turn() {
         }
     });
     run(&mut r, &llm).await;
-    assert_eq!(llm.calls(), 3, "the bad reply, its repair, and the other file");
+    assert_eq!(
+        llm.calls(),
+        3,
+        "the bad reply, its repair, and the other file"
+    );
     assert!(hinted(&r, "src/c.rs") && hinted(&r, "src/d.rs"));
     let repairs = llm
         .seen
@@ -228,10 +233,19 @@ async fn a_second_malformed_reply_leaves_no_hints_and_one_note_and_fails_nothing
         .iter()
         .filter(|n| n.contains("duplicate check did not run"))
         .collect();
-    assert_eq!(notes.len(), 1, "one operator note: {:?}", r.ledger.runner_notes());
+    assert_eq!(
+        notes.len(),
+        1,
+        "one operator note: {:?}",
+        r.ledger.runner_notes()
+    );
     assert!(r.ledger.duplicate_checks().not_run.is_some());
     assert_eq!(r.failed_passes.len(), failed_before, "no failed part");
-    assert_eq!(r.incomplete_reasons(), reasons_before, "the run is as complete as before");
+    assert_eq!(
+        r.incomplete_reasons(),
+        reasons_before,
+        "the run is as complete as before"
+    );
 }
 
 #[tokio::test]
@@ -319,11 +333,22 @@ async fn a_call_asks_about_at_most_twenty_pairs() {
     let mut r = crate::release_gate::test_scan_report();
     // 26 rows of 26 rules, one line apart in one file: many candidate pairs, none in one cause.
     r.findings = (0..26)
-        .map(|i| row(&format!("SEC-R{i}-1"), "src/big.rs", 10 + i % 3 + (i / 3) * 4, "w"))
+        .map(|i| {
+            row(
+                &format!("SEC-R{i}-1"),
+                "src/big.rs",
+                10 + i % 3 + (i / 3) * 4,
+                "w",
+            )
+        })
         .collect();
     r.assign_site_keys();
     let candidates = DupIndex::candidates(r.tree.as_ref(), &r.findings);
-    assert!(candidates.len() > MAX_PAIRS_PER_CALL, "{}", candidates.len());
+    assert!(
+        candidates.len() > MAX_PAIRS_PER_CALL,
+        "{}",
+        candidates.len()
+    );
     let llm = Script::new(|p| all(p, "different"));
     run(&mut r, &llm).await;
     for q in llm.seen.lock().unwrap().iter() {

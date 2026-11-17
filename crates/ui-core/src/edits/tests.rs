@@ -1861,5 +1861,9 @@ fn a_checked_same_place_entry_shows_the_models_reason_in_its_hint() {
     // With no reason the hint is what it always was.
     row.same_place_as[0].reason.clear();
     let plain = duplicate_entries(&row);
-    assert!(!plain[0].hint.contains("The check says"), "{}", plain[0].hint);
+    assert!(
+        !plain[0].hint.contains("The check says"),
+        "{}",
+        plain[0].hint
+    );
 }

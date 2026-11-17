@@ -644,7 +644,10 @@ pub struct ScanLedger {
     /// place, and why there is none when the check did not run. Operator-only: the review view and
     /// the internal exports read it, no client package carries it, and no gate reads it. Empty for
     /// a ledger written before the check existed.
-    #[serde(default, skip_serializing_if = "crate::possible_duplicate::check::DuplicateChecks::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::possible_duplicate::check::DuplicateChecks::is_empty"
+    )]
     duplicate_checks: crate::possible_duplicate::check::DuplicateChecks,
 }
 

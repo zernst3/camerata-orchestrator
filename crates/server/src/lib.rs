@@ -3274,31 +3274,28 @@ pub(crate) async fn start_audit_job(
                 // run asks the group reviewer the same questions and its stored replies match.
                 crate::checkpoint::with_run_checkpoints(
                     run_store.as_ref().map(|s| s.checkpoint_dir()),
-                    crate::prompt_frame::with_seed(
-                        token_seed,
-                        async {
-                            crate::ai_audit::group_review::review_scan_report(
-                                &mut report,
-                                model_seam,
-                                &review_controls,
-                                &rules,
-                                llm_backend == crate::llm::Backend::Cli,
-                                Some((&body_jobs, &body_jid)),
-                                corpus.as_ref(),
-                            )
-                            .await;
-                            // The possible-duplicate check reads the Fix ids the group reviewer
-                            // just made; a failure of it is a note, never a failed part.
-                            crate::possible_duplicate::check::check_possible_duplicates(
-                                &mut report,
-                                model_seam,
-                                &review_controls,
-                                llm_backend == crate::llm::Backend::Cli,
-                                Some((&body_jobs, &body_jid)),
-                            )
-                            .await;
-                        },
-                    ),
+                    crate::prompt_frame::with_seed(token_seed, async {
+                        crate::ai_audit::group_review::review_scan_report(
+                            &mut report,
+                            model_seam,
+                            &review_controls,
+                            &rules,
+                            llm_backend == crate::llm::Backend::Cli,
+                            Some((&body_jobs, &body_jid)),
+                            corpus.as_ref(),
+                        )
+                        .await;
+                        // The possible-duplicate check reads the Fix ids the group reviewer
+                        // just made; a failure of it is a note, never a failed part.
+                        crate::possible_duplicate::check::check_possible_duplicates(
+                            &mut report,
+                            model_seam,
+                            &review_controls,
+                            llm_backend == crate::llm::Backend::Cli,
+                            Some((&body_jobs, &body_jid)),
+                        )
+                        .await;
+                    }),
                 )
                 .await;
             }

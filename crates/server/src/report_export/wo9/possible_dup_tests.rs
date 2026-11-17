@@ -20,25 +20,24 @@ fn sealed_answered(
 ) -> crate::onboard::SealedReport {
     use crate::possible_duplicate::check::{DuplicateChecks, PairCheck};
     let first = report.clone().seal();
-    let pairs = crate::possible_duplicate::DupIndex::candidates(first.tree.as_ref(), &first.findings)
-        .into_iter()
-        .map(|c| PairCheck {
-            key_a: c.key_a,
-            key_b: c.key_b,
-            fix_a: c.fix_a,
-            fix_b: c.fix_b,
-            verdict,
-            reason: REASON.to_string(),
-            model: "scripted".to_string(),
-        })
-        .collect();
+    let pairs =
+        crate::possible_duplicate::DupIndex::candidates(first.tree.as_ref(), &first.findings)
+            .into_iter()
+            .map(|c| PairCheck {
+                key_a: c.key_a,
+                key_b: c.key_b,
+                fix_a: c.fix_a,
+                fix_b: c.fix_b,
+                verdict,
+                reason: REASON.to_string(),
+                model: "scripted".to_string(),
+            })
+            .collect();
     let mut report = report;
-    report
-        .ledger
-        .record_duplicate_checks(DuplicateChecks {
-            pairs,
-            not_run: None,
-        });
+    report.ledger.record_duplicate_checks(DuplicateChecks {
+        pairs,
+        not_run: None,
+    });
     report.seal()
 }
 

@@ -1444,31 +1444,28 @@ pub async fn run_inspect_pipeline_with(
             .collect();
         camerata_server::checkpoint::with_run_checkpoints(
             store.as_ref().map(|s| s.checkpoint_dir()),
-            camerata_server::prompt_frame::with_seed(
-                token_seed,
-                async {
-                    camerata_server::ai_audit::group_review::review_scan_report(
-                        &mut report,
-                        model_seam,
-                        &controls,
-                        &rules,
-                        llm_backend == camerata_server::llm::Backend::Cli,
-                        None,
-                        corpus.as_ref(),
-                    )
-                    .await;
-                    // The possible-duplicate check reads the Fix ids the group reviewer just
-                    // made; a failure of it is a note, never a failed part.
-                    camerata_server::possible_duplicate::check::check_possible_duplicates(
-                        &mut report,
-                        model_seam,
-                        &controls,
-                        llm_backend == camerata_server::llm::Backend::Cli,
-                        None,
-                    )
-                    .await;
-                },
-            ),
+            camerata_server::prompt_frame::with_seed(token_seed, async {
+                camerata_server::ai_audit::group_review::review_scan_report(
+                    &mut report,
+                    model_seam,
+                    &controls,
+                    &rules,
+                    llm_backend == camerata_server::llm::Backend::Cli,
+                    None,
+                    corpus.as_ref(),
+                )
+                .await;
+                // The possible-duplicate check reads the Fix ids the group reviewer just
+                // made; a failure of it is a note, never a failed part.
+                camerata_server::possible_duplicate::check::check_possible_duplicates(
+                    &mut report,
+                    model_seam,
+                    &controls,
+                    llm_backend == camerata_server::llm::Backend::Cli,
+                    None,
+                )
+                .await;
+            }),
         )
         .await;
     }
