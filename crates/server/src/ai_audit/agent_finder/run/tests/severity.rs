@@ -116,7 +116,7 @@ async fn a_category_named_by_the_label_is_kept_and_a_free_label_is_not_one() {
 }
 
 #[tokio::test]
-async fn the_rule_bounds_raise_a_low_rating_and_lower_a_critical_one_after_the_unchanged_call() {
+async fn a_rules_minimum_does_not_raise_an_agent_rating_but_its_maximum_still_lowers_one() {
     let mut rows = rows_for(
         repo_files(),
         vec![
@@ -133,13 +133,10 @@ async fn the_rule_bounds_raise_a_low_rating_and_lower_a_critical_one_after_the_u
     let raised = rows.iter().find(|f| f.line == 2).unwrap();
     assert_eq!(raised.rule_id, "ARCH-ONE-1");
     assert_eq!(
-        raised.severity, "high",
-        "a minimum of high raises a low rating"
+        raised.severity, "low",
+        "a minimum of high is guidance for the model, not a floor: its low rating stands"
     );
-    assert!(
-        !crate::severity_bounds::recorded_adjustments(raised).is_empty(),
-        "the adjustment is noted"
-    );
+    assert!(crate::severity_bounds::recorded_adjustments(raised).is_empty());
     let lowered = rows.iter().find(|f| f.line == 5).unwrap();
     assert_eq!(lowered.rule_id, "SEC-TWO-1");
     assert_eq!(

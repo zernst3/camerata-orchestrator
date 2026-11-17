@@ -336,6 +336,35 @@ pub(super) fn floor_may_apply(f: &Finding) -> bool {
     finding_class(f) == FindingClass::Security || f.rule_id.starts_with("AI-")
 }
 
+/// Whether `f` is a row the agent finder produced (it carries the `finder-problem` capture).
+pub(crate) fn is_agent_finder_row(f: &Finding) -> bool {
+    f.captures
+        .contains_key(super::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
+}
+
+/// R-8, the only floor an agent finder row still gets: unauthenticated access is at least High,
+/// Critical when the wording hits sensitive data, a write or a full compromise.
+fn agent_row_unauthenticated_floor(f: &Finding, text: &str) -> Option<(&'static str, String)> {
+    if !mentions_unauthenticated_or_full_compromise(text) {
+        return None;
+    }
+    if finder_unauthenticated_is_only_high(f, text) {
+        Some((
+            "high",
+            "Severity floor: unauthenticated access is High by default; it is Critical only \
+             when it reaches sensitive data, allows a write or is a full compromise."
+                .to_string(),
+        ))
+    } else {
+        Some((
+            "critical",
+            "Severity floor: unauthenticated access or a path to full-account compromise is \
+             always Critical."
+                .to_string(),
+        ))
+    }
+}
+
 /// The deterministic D5 severity floor for ONE finding: `None` when no rule of thumb applies,
 /// else the floor severity plus the rationale to record. Order matters — unauthenticated/full-
 /// compromise is checked first (it is the highest floor and the two conditions are mutually
@@ -349,6 +378,11 @@ pub(crate) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, S
         return None;
     }
     let text = calibration_floor_scan_text(f);
+    // Owner ruling (2026-11-17): for an agent finder row the model's rating stands. The ONE
+    // raise kept is R-8, the unauthenticated-access floor.
+    if is_agent_finder_row(f) {
+        return agent_row_unauthenticated_floor(f, &text);
+    }
     let mut floor = if mentions_unauthenticated_or_full_compromise(&text) {
         if finder_unauthenticated_is_only_high(f, &text) {
             Some((

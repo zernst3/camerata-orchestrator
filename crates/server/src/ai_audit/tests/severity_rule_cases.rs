@@ -1361,3 +1361,69 @@ fn a1_secret_shaped_rule_ids_in_a_test_file_keep_their_severity() {
         assert!(!out.in_test, "{rule} is not marked as test scope");
     }
 }
+
+// ── Round 2: a rule's minimum is guidance for an agent row; R-8 is the one raise kept ─────────
+
+fn agent_row(rule: &str, sev: &str, detail: &str) -> Finding {
+    let mut f = finding_with_detail(rule, sev, detail);
+    f.captures
+        .insert("finder-problem".to_string(), "1".to_string());
+    f
+}
+
+/// The wording floor for a cross-tenant read raised a medium agent row to critical. The model's
+/// rating stands now.
+#[test]
+fn an_agent_row_keeps_the_models_rating_under_a_wording_floor() {
+    let f = agent_row(
+        "AI-CROSS-TENANT-READ",
+        "medium",
+        "An authenticated user can read another tenant's payment records.",
+    );
+    let out = apply_severity_calibration_rule(f);
+    assert_eq!(out.severity, "medium");
+}
+
+/// The speculative-RLS guard no longer lifts an agent row either.
+#[test]
+fn an_agent_row_is_not_lifted_by_the_rls_hedge_guard() {
+    let f = agent_row(
+        "AI-SQL-INJECTION",
+        "medium",
+        "String-built SQL; RLS probably contains it.",
+    );
+    assert_eq!(apply_severity_calibration_rule(f).severity, "medium");
+}
+
+/// R-8 stays: an agent row about unauthenticated access is at least high.
+#[test]
+fn an_agent_unauthenticated_row_rated_medium_becomes_high() {
+    let f = agent_row(
+        "AI-NO-AUTH",
+        "medium",
+        "The endpoint is reachable without authentication.",
+    );
+    assert_eq!(apply_severity_calibration_rule(f).severity, "high");
+}
+
+/// R-8: critical when the wording hits a write.
+#[test]
+fn an_agent_unauthenticated_row_that_writes_becomes_critical() {
+    let f = agent_row(
+        "AI-NO-AUTH",
+        "medium",
+        "Anyone without authentication can delete and write any record.",
+    );
+    assert_eq!(apply_severity_calibration_rule(f).severity, "critical");
+}
+
+/// The engine finder's rows (no agent capture) keep today's floors.
+#[test]
+fn an_engine_finder_row_keeps_todays_floors() {
+    let f = finding_with_detail(
+        "AI-NO-AUTH",
+        "medium",
+        "The endpoint is reachable without authentication.",
+    );
+    assert_eq!(apply_severity_calibration_rule(f).severity, "critical");
+}

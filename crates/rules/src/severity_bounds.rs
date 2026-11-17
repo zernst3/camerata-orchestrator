@@ -129,6 +129,12 @@ pub trait BoundedFinding {
     fn reviewer_doubt(&self) -> Option<String> {
         None
     }
+    /// Whether the rule's `min_severity` is only guidance for this row: the model's own rating
+    /// stands and the floor never raises it (owner ruling, 2026-11-17: the agent finder's rows).
+    /// The default is `false`, so the CI gate and every other producer keep the floor.
+    fn rule_minimum_is_guidance(&self) -> bool {
+        false
+    }
     /// Hold the row for a decision: called when a floor would have raised it but a reviewer
     /// doubted it, so the human reviewer decides it. `detail` says why in the operator's words
     /// (who doubted it, and which floor was held back); it is for the operator's own package
@@ -202,7 +208,11 @@ fn floor_that_would_raise<F: BoundedFinding + ?Sized>(
     f: &F,
     rule: Option<&Rule>,
 ) -> Option<String> {
-    if !f.bound_kind().is_accusing() || f.is_unlocated() || severity == "info" {
+    if !f.bound_kind().is_accusing()
+        || f.is_unlocated()
+        || severity == "info"
+        || f.rule_minimum_is_guidance()
+    {
         return None;
     }
     let floor = normalize_severity(rule.and_then(|r| r.min_severity.as_deref())?);

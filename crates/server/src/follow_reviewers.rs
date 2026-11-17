@@ -386,6 +386,7 @@ fn take_raise_notes(f: &mut Finding, to: &str) -> Vec<String> {
 fn strongest_floor(f: &Finding, corpus: Option<&camerata_rules::RuleSet>) -> Option<String> {
     use camerata_rules::severity_bounds::{normalize_severity, severity_rank};
     let rule_floor = crate::report_export::corpus_rule_for(&f.rule_id, corpus)
+        .filter(|_| !crate::ai_audit::is_agent_finder_row(f))
         .and_then(|r| r.min_severity.as_deref())
         .map(normalize_severity);
     let phrase_floor =

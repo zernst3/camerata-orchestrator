@@ -74,6 +74,10 @@ impl BoundedFinding for Finding {
         record_adjustment(self, note);
     }
 
+    fn rule_minimum_is_guidance(&self) -> bool {
+        crate::ai_audit::is_agent_finder_row(self)
+    }
+
     fn reviewer_doubt(&self) -> Option<String> {
         crate::follow_reviewers::doubt_for_severity(self).map(|d| d.phrase().to_string())
     }
@@ -445,5 +449,50 @@ mod tests {
         let once = fs.clone();
         apply_corpus_severity_bounds(&mut fs, &set);
         assert_eq!(fs, once);
+    }
+}
+
+#[cfg(test)]
+mod agent_row_minimum_tests {
+    use super::*;
+
+    fn rule_with_min(min: &str) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule("BOUND-1", "test-fixture");
+        rule.min_severity = Some(min.to_string());
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    fn row(agent: bool) -> Finding {
+        let mut f = Finding {
+            repo: "o/r".to_string(),
+            path: "src/a.rs".to_string(),
+            line: 7,
+            rule_id: "BOUND-1".to_string(),
+            severity: "medium".to_string(),
+            kind: Some(FindingKind::Defect),
+            ..Finding::default()
+        };
+        if agent {
+            f.captures
+                .insert("finder-problem".to_string(), "1".to_string());
+        }
+        f
+    }
+
+    /// Owner ruling (2026-11-17): a rule's minimum is guidance for an agent row.
+    #[test]
+    fn an_agent_row_rated_medium_under_a_critical_minimum_stays_medium() {
+        let mut fs = vec![row(true)];
+        apply_corpus_severity_bounds(&mut fs, &rule_with_min("critical"));
+        assert_eq!(fs[0].severity, "medium");
+    }
+
+    #[test]
+    fn an_engine_finder_row_keeps_the_rule_minimum() {
+        let mut fs = vec![row(false)];
+        apply_corpus_severity_bounds(&mut fs, &rule_with_min("critical"));
+        assert_eq!(fs[0].severity, "critical");
     }
 }
