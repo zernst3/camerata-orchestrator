@@ -77,6 +77,7 @@ pub mod jobs;
 // sites (uow, lib) are unchanged.
 pub use camerata_app_core::lifecycle;
 pub mod cost_cap;
+pub mod cost_checkpoint;
 pub mod failure_report;
 pub mod rewrite_advisory;
 /// The cli backend's Claude Code version pre-flight, for callers of the server.
