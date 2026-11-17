@@ -284,13 +284,18 @@ impl StageItems for PairItems {
     }
 }
 
+/// One candidate pair with the two rows it is about.
+type PairRows<'a> = (CandidatePair, &'a Finding, &'a Finding);
+
+/// One call: its checkpoint id, its pairs and the rows each pair shows.
+type PlannedCall<'a> = (String, Vec<CandidatePair>, Vec<(&'a Finding, &'a Finding)>);
+
 /// Split the candidate pairs into calls: one file at a time, at most [`MAX_PAIRS_PER_CALL`] each.
 fn plan_calls<'a>(
     candidates: &[CandidatePair],
     rows: &HashMap<&str, &'a Finding>,
-) -> Vec<(String, Vec<CandidatePair>, Vec<(&'a Finding, &'a Finding)>)> {
-    let mut by_file: BTreeMap<(String, String), Vec<(CandidatePair, &'a Finding, &'a Finding)>> =
-        BTreeMap::new();
+) -> Vec<PlannedCall<'a>> {
+    let mut by_file: BTreeMap<(String, String), Vec<PairRows<'a>>> = BTreeMap::new();
     for c in candidates {
         let (Some(a), Some(b)) = (rows.get(c.key_a.as_str()), rows.get(c.key_b.as_str())) else {
             continue;

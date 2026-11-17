@@ -706,9 +706,10 @@ mod tests {
     /// The duplicate check's model: the project setting or `--dup-check-model`, else Sonnet 5.5,
     /// and never the environment (a variable of the likeliest names changes nothing).
     #[test]
+    #[serial_test::serial(process_env)]
     fn the_duplicate_check_model_defaults_to_sonnet_5_5_and_is_never_read_from_the_environment() {
-        let _ = std::env::set_var("CAMERATA_DUP_CHECK_MODEL", "env-model");
-        let _ = std::env::set_var("CAMERATA_DUPLICATE_CHECK_MODEL", "env-model");
+        let _a = camerata_test_env::EnvGuard::set("CAMERATA_DUP_CHECK_MODEL", "env-model");
+        let _b = camerata_test_env::EnvGuard::set("CAMERATA_DUPLICATE_CHECK_MODEL", "env-model");
         let mut controls = RunControls::default();
         assert_eq!(controls.dup_check_model_for(), "claude-sonnet-5-5");
         controls.review.dup_check_model = "  ".to_string();
