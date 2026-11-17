@@ -1155,3 +1155,97 @@ fn a_carried_row_knows_when_its_carrier_has_been_decided() {
     );
     assert!(row.carried_by.as_ref().unwrap().decided);
 }
+
+#[test]
+fn a_site_row_carries_the_possible_false_positive_flag_and_nothing_else_changes() {
+    use camerata_api_types::review::FpReason;
+    let mut in_test = row("SEC-NO-RAW-SQL-CONCAT-1", "tests/orders_test.rs", 9, "high");
+    in_test.in_test = true;
+    let plain = row("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 30, "high");
+    let sealed = sealed(vec![in_test, plain], |_| {});
+    let flagged_key = key_of(&sealed, "tests/orders_test.rs");
+    let plain_key = key_of(&sealed, "src/orders.rs");
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let rows = compose(&reviewed, &Stores::default(), |c| {
+        c.sites_page("rule:SEC-NO-RAW-SQL-CONCAT-1", None, 500)
+            .unwrap()
+    })
+    .rows;
+    assert_eq!(rows.len(), 2, "the flag adds and drops no row");
+    let flagged = rows.iter().find(|r| r.site_key == flagged_key).unwrap();
+    let other = rows.iter().find(|r| r.site_key == plain_key).unwrap();
+    assert_eq!(
+        flagged
+            .possible_false_positive
+            .as_ref()
+            .map(|p| p.reasons.clone()),
+        Some(vec![FpReason::TestCodeOnly])
+    );
+    assert!(flagged.markers.contains(&Marker::PossibleFalsePositive));
+    assert_eq!(other.possible_false_positive, None);
+    assert!(!other.markers.contains(&Marker::PossibleFalsePositive));
+    // The row is as the engine left it: same severity, same kind, no decision.
+    let source = sealed
+        .findings
+        .iter()
+        .find(|f| f.site_key == flagged_key)
+        .unwrap();
+    assert_eq!(flagged.severity, source.severity);
+    assert_eq!(flagged.kind, source.kind);
+    assert_eq!(flagged.decision, None);
+    // The client never reads a site row, but the wire leaves the key off an unflagged row.
+    let wire = serde_json::to_string(other).unwrap();
+    assert!(!wire.contains("possible_false_positive"), "{wire}");
+}
+
+#[test]
+fn a_site_row_names_the_other_cause_at_the_same_place_and_nothing_else_changes() {
+    let sql = row("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+    let authz = row("SEC-AUTHZ-4", "src/orders.rs", 12, "high");
+    let far = row("SEC-NO-RAW-SQL-CONCAT-1", "src/other.rs", 40, "high");
+    let sealed = sealed(vec![sql, authz, far], |_| {});
+    let sql_key = key_of(&sealed, "src/orders.rs");
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let sites = |node: &str| {
+        compose(&reviewed, &Stores::default(), |c| {
+            c.sites_page(node, None, 500).unwrap()
+        })
+        .rows
+    };
+    let sql_rows = sites("rule:SEC-NO-RAW-SQL-CONCAT-1");
+    let authz_rows = sites("rule:SEC-AUTHZ-4");
+    assert_eq!(
+        sql_rows.len() + authz_rows.len(),
+        3,
+        "the hint drops no row"
+    );
+    let at_orders = sql_rows.iter().find(|r| r.path == "src/orders.rs").unwrap();
+    assert_eq!(at_orders.site_key, sql_key);
+    let other = &authz_rows[0];
+    assert_eq!(at_orders.same_place_as.len(), 1);
+    assert_eq!(at_orders.same_place_as[0].key, other.site_key);
+    assert_eq!(at_orders.same_place_as[0].rule_id, "SEC-AUTHZ-4");
+    assert_eq!(at_orders.same_place_as[0].line, 12);
+    assert_eq!(at_orders.same_place_as[0].group_id, other.group_path[2]);
+    assert!(!at_orders.same_place_as[0].title.is_empty());
+    assert_eq!(other.same_place_as[0].key, at_orders.site_key);
+    for r in [at_orders, other] {
+        assert!(r.markers.contains(&Marker::PossibleDuplicate), "{r:?}");
+        assert_eq!(r.decision, None);
+    }
+    let alone = sql_rows.iter().find(|r| r.path == "src/other.rs").unwrap();
+    assert!(alone.same_place_as.is_empty());
+    assert!(!alone.markers.contains(&Marker::PossibleDuplicate));
+    // The row is as the engine left it.
+    for r in [at_orders, other] {
+        let source = sealed
+            .findings
+            .iter()
+            .find(|f| f.site_key == r.site_key)
+            .unwrap();
+        assert_eq!(r.severity, source.severity);
+        assert_eq!(r.kind, source.kind);
+    }
+    let wire = serde_json::to_string(alone).unwrap();
+    assert!(!wire.contains("same_place_as"), "{wire}");
+}

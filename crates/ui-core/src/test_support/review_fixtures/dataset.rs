@@ -11,8 +11,8 @@ use camerata_api_types::decisions::{ClientAck, DecisionState, Scope};
 use camerata_api_types::edits::EditField;
 use camerata_api_types::review::{
     DisagreementField, EscalationBudget, EscalationCandidate, EscalationReason, EscalationState,
-    OutlierReason, ReviewLevel, Stage2Disagreement, ENGINE_VERIFIED, PERSONALLY_REVIEWED,
-    REVIEWED_AS_PATTERN_PREFIX,
+    FpReason, OutlierReason, PossibleFalsePositive, ReviewLevel, Stage2Disagreement,
+    ENGINE_VERIFIED, PERSONALLY_REVIEWED, REVIEWED_AS_PATTERN_PREFIX,
 };
 use camerata_api_types::review_view::{
     BreadcrumbItem, CarriedByView, CarriedRuleView, CategoryAllocation, CorrectionRef,
@@ -21,9 +21,9 @@ use camerata_api_types::review_view::{
     ExportGateView, FlaggedByView, HeldRow, HoldReason, LaneCounts, Marker, MergedIntoView,
     MovedFromView, NeededMeSummary, NewSinceDecisionView, NodeCountsView, NodeDecisionGap,
     NodeDecisionSummary, OutlierView, PlacementView, QueueRow, QueueView, ReviewCounts,
-    ReviewSettingsView, ReviewShellView, SampleStratum, SettingsLimits, SiteRow, SitesPage,
-    Stage1View, Stage2View, StageModelsView, StaleSummary, StratumRate, SummarySource, TreeLevel,
-    TreeNodeKind, TreeNodeView, TreeView, ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX,
+    ReviewSettingsView, ReviewShellView, SamePlaceView, SampleStratum, SettingsLimits, SiteRow,
+    SitesPage, Stage1View, Stage2View, StageModelsView, StaleSummary, StratumRate, SummarySource,
+    TreeLevel, TreeNodeKind, TreeNodeView, TreeView, ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX,
     QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR, SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED,
     SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
 };
@@ -651,6 +651,8 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         added_by_reviewer: false,
         thrown_out_reason: None,
         review_flags: Vec::new(),
+        possible_false_positive: None,
+        same_place_as: Vec::new(),
     }
 }
 
@@ -702,6 +704,8 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         added_by_reviewer: false,
         thrown_out_reason: Some("junk text: a placeholder where the finding should be".to_string()),
         review_flags: Vec::new(),
+        possible_false_positive: None,
+        same_place_as: Vec::new(),
     }
 }
 
@@ -719,6 +723,7 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
         .copied()
         .filter(|m| match m {
             Marker::Held => row.held.is_some(),
+            Marker::PossibleFalsePositive => row.possible_false_positive.is_some(),
             Marker::Escalated => escalated,
             Marker::Candidate => below,
             Marker::OverBudget => over,
@@ -726,7 +731,9 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
             Marker::NewSinceDecision => row.new_since_decision.is_some(),
             Marker::Stale => stale,
             Marker::Moved => row.moved_from.is_some(),
-            Marker::PossibleDuplicate => row.possible_duplicate_of.is_some(),
+            Marker::PossibleDuplicate => {
+                row.possible_duplicate_of.is_some() || !row.same_place_as.is_empty()
+            }
             Marker::Carried => row.carried_by.is_some(),
             Marker::Edited => edited,
         })
@@ -1064,6 +1071,18 @@ pub fn build(p: &Params) -> ReviewDataSet {
             s.outlier_reason = Some(outlier_reasons[n % outlier_reasons.len()]);
             s.outlier_why = OUTLIER_WHYS[n % OUTLIER_WHYS.len()].to_string();
         }
+        // The server flags an outlier for a different object or an intended pattern as a possible
+        // false positive (reason (a)); the fixture does the same, and draws nothing from `rng` for
+        // it, so no other row's features move.
+        if rows[i].stage2.as_ref().is_some_and(|s| {
+            matches!(
+                s.outlier_reason,
+                Some(OutlierReason::DifferentObject | OutlierReason::CouldBeIntentional)
+            )
+        }) {
+            rows[i].possible_false_positive =
+                PossibleFalsePositive::from_reasons(vec![FpReason::GroupReviewerDoubt]);
+        }
     }
     // Held rows (the four reasons in turn) and merged rows without a decision.
     let hold_cycle = [
@@ -1155,6 +1174,25 @@ pub fn build(p: &Params) -> ReviewDataSet {
             line: other.line,
         };
         rows[i].possible_duplicate_of = Some(dup);
+    }
+    // The possible duplicate hint: every other row the engine linked to a neighbour is also at
+    // the same place as another cause, on both sides. Draws nothing from `rng`.
+    for (n, &i) in dup_rows.iter().enumerate().filter(|(n, _)| n % 2 == 1) {
+        let j = normal[(n * 13) % normal.len()];
+        if i == j {
+            continue;
+        }
+        let view_of = |r: &SiteRow| SamePlaceView {
+            fix_id: format!("{:012x}", r.line * 7919 + r.path.len()),
+            title: r.headline.clone(),
+            key: r.site_key.clone(),
+            rule_id: r.rule_id.clone(),
+            line: r.line,
+            group_id: r.group_path.get(2).cloned().unwrap_or_default(),
+        };
+        let (to_j, to_i) = (view_of(&rows[j]), view_of(&rows[i]));
+        rows[i].same_place_as = vec![to_j];
+        rows[j].same_place_as = vec![to_i];
     }
 
     for &i in &added_rows {

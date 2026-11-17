@@ -70,8 +70,12 @@ pub enum Marker {
     Stale,
     /// The code moved; the row has a new key.
     Moved,
-    /// Another row may describe the same thing.
+    /// Another row may describe the same thing: the engine linked it ([`SiteRow::possible_duplicate_of`])
+    /// or another cause has a row at the same place ([`SiteRow::same_place_as`]).
     PossibleDuplicate,
+    /// The engine itself has reasons to doubt the row ([`SiteRow::possible_false_positive`]). A
+    /// review aid for the operator: it changes nothing about the row.
+    PossibleFalsePositive,
     /// Another row at the same place carries this rule: it is decided there unless it is decided
     /// alone.
     Carried,
@@ -81,8 +85,11 @@ pub enum Marker {
 
 impl Marker {
     /// Every marker, in precedence order (spec section 2, "noise rule").
-    pub const PRECEDENCE: [Marker; 11] = [
+    pub const PRECEDENCE: [Marker; 12] = [
         Self::Held,
+        // Second, so the chip shows in the Markers column of every flagged row: the operator
+        // opens these rows first.
+        Self::PossibleFalsePositive,
         Self::Escalated,
         Self::Candidate,
         Self::OverBudget,
@@ -256,7 +263,7 @@ pub struct FlaggedByView {
     pub line: usize,
 }
 
-/// A possible duplicate and what it points at (spec section 2: the `dup?` chip).
+/// A possible duplicate and what it points at (spec section 2: the Possible duplicate chip).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DuplicateView {
@@ -265,6 +272,29 @@ pub struct DuplicateView {
     pub rule_id: String,
     pub path: String,
     pub line: usize,
+}
+
+/// Another cause with a row at the same place as this row (within a few lines of one file). An
+/// operator review aid: opening it shows the other cause, and nothing about either is changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamePlaceView {
+    /// The other cause's Fix id.
+    pub fix_id: String,
+    /// The other cause's title.
+    pub title: String,
+    /// The site key of the other cause's row nearest this one: the row the link opens.
+    pub key: String,
+    pub rule_id: String,
+    /// That row's line, in the same file as the row that lists it.
+    pub line: usize,
+    /// The sub-group node id of that row, for opening it.
+    pub group_id: String,
+}
+
+impl SamePlaceView {
+    /// The hint's name, everywhere a person reads it.
+    pub const TERM: &'static str = "Possible duplicate";
 }
 
 /// A rule another row at the same place carries (D2: the "Also matches" list of the carrier). It
@@ -382,6 +412,14 @@ pub struct SiteRow {
     pub thrown_out_reason: Option<String>,
     /// Review flags on the row's wording (spec A8); internal.
     pub review_flags: Vec<String>,
+    /// The engine's own reasons to doubt the row, for the operator to look at first. `None` for a
+    /// row with no reason. Operator only: no client export carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub possible_false_positive: Option<crate::review::PossibleFalsePositive>,
+    /// The other causes with a row at the same place as this row, nearest first, each once. Empty
+    /// for a row with none. Operator only: no client export carries it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub same_place_as: Vec<SamePlaceView>,
 }
 
 // ── Section 4: the shell ──────────────────────────────────────────────────────────────────
@@ -980,7 +1018,7 @@ mod tests {
         for m in Marker::PRECEDENCE {
             assert!(seen.insert(m), "{m:?} is listed twice");
         }
-        assert_eq!(seen.len(), 11);
+        assert_eq!(seen.len(), 12);
     }
 
     #[test]

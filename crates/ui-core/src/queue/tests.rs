@@ -720,3 +720,273 @@ fn a_new_since_decision_row_in_the_queue_says_the_verb_the_tree_says() {
         .text
         .contains("you decided this group"));
 }
+
+// ── Possible false positives first (a look only) ──────────────────────────────────────────
+
+/// The base queue with every third escalated row and the last candidate flagged.
+fn flagged_view() -> QueueView {
+    use camerata_api_types::review::{FpReason, PossibleFalsePositive};
+    let mut v = view();
+    for (i, r) in v.escalated.iter_mut().enumerate() {
+        if i % 3 == 2 {
+            r.site.possible_false_positive =
+                PossibleFalsePositive::from_reasons(vec![FpReason::CalibrationDoubt]);
+        }
+    }
+    if let Some(last) = v.below.last_mut() {
+        last.site.possible_false_positive =
+            PossibleFalsePositive::from_reasons(vec![FpReason::TestCodeOnly]);
+    }
+    v
+}
+
+fn drawn(l: &Layout<'_>) -> Vec<(Band, bool, String)> {
+    l.entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row(r) => Some((
+                band_of(r),
+                r.site.possible_false_positive.is_some(),
+                r.candidate.key.clone(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn possible_false_positives_first_lists_flagged_rows_first_inside_each_band() {
+    let v = flagged_view();
+    let mut state = QueueState {
+        show_below: true,
+        shown: usize::MAX,
+        ..QueueState::default()
+    };
+    let plain = layout(&v, &state);
+    state.toggle_fp_first();
+    assert!(state.fp_first);
+    let first = layout(&v, &state);
+    let got = drawn(&first);
+    // Inside each band the flagged rows come first, and the bands keep their order.
+    for band in [Band::WithinBudget, Band::OverBudget, Band::BelowLine] {
+        let flags: Vec<bool> = got
+            .iter()
+            .filter(|(b, _, _)| *b == band)
+            .map(|(_, f, _)| *f)
+            .collect();
+        let flagged = flags.iter().filter(|f| **f).count();
+        assert!(
+            flags.iter().take(flagged).all(|f| *f),
+            "{band:?}: flagged rows are not first: {flags:?}"
+        );
+    }
+    let bands: Vec<Band> = got.iter().map(|(b, _, _)| *b).collect();
+    let mut sorted = bands.clone();
+    sorted.sort();
+    assert_eq!(bands, sorted, "the bands keep their order");
+    assert!(got.iter().any(|(b, f, _)| *b == Band::WithinBudget && *f));
+    assert!(got.iter().any(|(b, f, _)| *b == Band::BelowLine && *f));
+    // A look only: the same rows, the same line in the same place, the same footer.
+    let mut a: Vec<String> = drawn(&plain).into_iter().map(|(_, _, k)| k).collect();
+    let mut b: Vec<String> = got.into_iter().map(|(_, _, k)| k).collect();
+    assert_ne!(a, b, "the order changed");
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "no row is added or dropped");
+    let line_at = |l: &Layout<'_>| l.entries.iter().position(|e| matches!(e, Entry::Line(_)));
+    assert_eq!(line_at(&plain), line_at(&first));
+    assert_eq!(plain.footer, first.footer);
+    assert_eq!(plain.hidden_escalated, first.hidden_escalated);
+    // Off again is the server's order.
+    state.toggle_fp_first();
+    assert_eq!(drawn(&layout(&v, &state)), drawn(&plain));
+}
+
+#[test]
+fn the_queue_counts_its_possible_false_positives() {
+    let v = flagged_view();
+    let want = v
+        .escalated
+        .iter()
+        .chain(&v.below)
+        .filter(|r| r.site.possible_false_positive.is_some())
+        .count();
+    assert!(want > 1);
+    assert_eq!(possible_false_positive_count(&v), want);
+    assert_eq!(
+        fp_first_label(&v, false),
+        format!("Possible false positives first ({want})")
+    );
+    assert_eq!(
+        fp_first_label(&v, true),
+        format!("Back to rank order ({want} flagged)")
+    );
+    assert_eq!(possible_false_positive_count(&view()), 0);
+}
+
+// ── Possible duplicates together (a look only) ────────────────────────────────────────────
+
+fn same_place(to: &QueueRow) -> camerata_api_types::review_view::SamePlaceView {
+    camerata_api_types::review_view::SamePlaceView {
+        fix_id: "ab12".to_string(),
+        title: "Another cause".to_string(),
+        key: to.site.site_key.clone(),
+        rule_id: to.site.rule_id.clone(),
+        line: to.site.line,
+        group_id: "sub:x/1".to_string(),
+    }
+}
+
+/// The base queue with the first and the last row of the within-budget band paired, and two
+/// candidates below the line paired.
+fn paired_view() -> QueueView {
+    let mut v = view();
+    let mut sorted: Vec<&QueueRow> = v.escalated.iter().collect();
+    sort_rows(&mut sorted);
+    let within: Vec<String> = sorted
+        .iter()
+        .filter(|r| band_of(r) == Band::WithinBudget)
+        .map(|r| r.site.site_key.clone())
+        .collect();
+    assert!(within.len() > 3, "the fixture queue is big enough");
+    let (a, b) = (within[0].clone(), within[within.len() - 1].clone());
+    let link = |v: &QueueView, key: &str| {
+        same_place(
+            v.escalated
+                .iter()
+                .chain(&v.below)
+                .find(|r| r.site.site_key == key)
+                .unwrap(),
+        )
+    };
+    let (la, lb) = (link(&v, &a), link(&v, &b));
+    for r in &mut v.escalated {
+        if r.site.site_key == a {
+            r.site.same_place_as = vec![lb.clone()];
+        } else if r.site.site_key == b {
+            r.site.same_place_as = vec![la.clone()];
+        }
+    }
+    if v.below.len() > 3 {
+        let (x, y) = (v.below[0].clone(), v.below[3].clone());
+        v.below[0].site.same_place_as = vec![same_place(&y)];
+        v.below[3].site.same_place_as = vec![same_place(&x)];
+    }
+    v
+}
+
+fn keys(l: &Layout<'_>) -> Vec<String> {
+    l.entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row(r) => Some(r.site.site_key.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn possible_duplicates_together_puts_paired_rows_side_by_side_inside_their_band() {
+    let v = paired_view();
+    let mut state = QueueState {
+        show_below: true,
+        shown: usize::MAX,
+        ..QueueState::default()
+    };
+    let plain = layout(&v, &state);
+    let plain_keys = keys(&plain);
+    state.toggle_dup_together();
+    assert!(state.dup_together);
+    let together = layout(&v, &state);
+    let got = keys(&together);
+    let paired: Vec<String> = v
+        .escalated
+        .iter()
+        .filter(|r| !r.site.same_place_as.is_empty())
+        .map(|r| r.site.site_key.clone())
+        .collect();
+    let (first, last) = (
+        plain_keys
+            .iter()
+            .find(|k| paired.contains(k))
+            .unwrap()
+            .clone(),
+        plain_keys
+            .iter()
+            .rev()
+            .find(|k| paired.contains(k))
+            .unwrap()
+            .clone(),
+    );
+    let at = |k: &str| got.iter().position(|x| x == k).unwrap();
+    assert_eq!(at(&last), at(&first) + 1, "the pair is side by side");
+    assert_ne!(plain_keys, got, "the order changed");
+    // A look only: the same rows, the same band order, the same line and footer.
+    let (mut a, mut b) = (plain_keys.clone(), got.clone());
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "no row is added or dropped");
+    let bands: Vec<Band> = together
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row(r) => Some(band_of(r)),
+            _ => None,
+        })
+        .collect();
+    let mut sorted = bands.clone();
+    sorted.sort();
+    assert_eq!(bands, sorted, "the bands keep their order");
+    let line_at = |l: &Layout<'_>| l.entries.iter().position(|e| matches!(e, Entry::Line(_)));
+    assert_eq!(line_at(&plain), line_at(&together));
+    assert_eq!(plain.footer, together.footer);
+    // Off again is the server's order.
+    state.toggle_dup_together();
+    assert_eq!(keys(&layout(&v, &state)), plain_keys);
+}
+
+#[test]
+fn a_pair_split_across_bands_stays_in_its_bands() {
+    let mut v = view();
+    let below = v.below[0].clone();
+    let above = v.escalated[0].clone();
+    v.escalated[0].site.same_place_as = vec![same_place(&below)];
+    v.below[0].site.same_place_as = vec![same_place(&above)];
+    let state = QueueState {
+        show_below: true,
+        shown: usize::MAX,
+        dup_together: true,
+        ..QueueState::default()
+    };
+    let plain_state = QueueState {
+        dup_together: false,
+        ..state.clone()
+    };
+    assert_eq!(
+        keys(&layout(&v, &state)),
+        keys(&layout(&v, &plain_state)),
+        "nothing moves across the line"
+    );
+}
+
+#[test]
+fn the_queue_counts_its_possible_duplicates() {
+    let v = paired_view();
+    let want = v
+        .escalated
+        .iter()
+        .chain(&v.below)
+        .filter(|r| !r.site.same_place_as.is_empty())
+        .count();
+    assert!(want >= 2);
+    assert_eq!(possible_duplicate_count(&v), want);
+    assert_eq!(
+        dup_together_label(&v, false),
+        format!("Possible duplicates together ({want})")
+    );
+    assert_eq!(
+        dup_together_label(&v, true),
+        format!("Back to rank order ({want} paired)")
+    );
+    assert_eq!(possible_duplicate_count(&view()), 0);
+}

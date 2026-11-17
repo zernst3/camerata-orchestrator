@@ -556,7 +556,7 @@ pub struct MergeCandidate {
     /// `path:line`.
     pub label: String,
     pub rule_id: String,
-    /// "possible duplicate" for the row the engine linked.
+    /// "Possible duplicate" for the row the engine linked.
     pub note: Option<String>,
 }
 
@@ -577,10 +577,30 @@ fn merge_matches(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<MergeCa
                     key: dup.key.clone(),
                     label: format!("{}:{}", dup.path, dup.line),
                     rule_id: dup.rule_id.clone(),
-                    note: Some("possible duplicate".to_string()),
+                    note: Some("Possible duplicate".to_string()),
                 });
             }
         }
+    }
+    // The other causes at this place: one row each, listed after the engine's own link.
+    for other in &row.same_place_as {
+        if other.key == row.site_key || out.iter().any(|c| c.key == other.key) {
+            continue;
+        }
+        if ctx
+            .pool
+            .iter()
+            .find(|p| p.key == other.key)
+            .is_some_and(|p| p.merged)
+        {
+            continue;
+        }
+        out.push(MergeCandidate {
+            key: other.key.clone(),
+            label: format!("{}:{}", row.path, other.line),
+            rule_id: other.rule_id.clone(),
+            note: Some("same place".to_string()),
+        });
     }
     let query = query.trim().to_lowercase();
     for site in &ctx.pool {
@@ -1376,6 +1396,65 @@ pub fn flagged_by_line(row: &SiteRow) -> Option<String> {
 }
 
 /// The possible-duplicate line: `SEC-KEY-2 at web/env.ts:3`, with the engine's hint.
+/// The detail's Possible false positive lines: each reason the engine has to doubt the row, as
+/// its short name and its sentence, in the order the row lists them. Empty for a row with none.
+pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, &'static str)> {
+    row.possible_false_positive
+        .iter()
+        .flat_map(|p| &p.reasons)
+        .map(|r| (r.label(), r.sentence()))
+        .collect()
+}
+
+/// One entry of the detail's "Possible duplicate of" line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateEntry {
+    /// A key no other entry of the line shares (the site key of the other row, or `engine-link`),
+    /// for the list, whatever the labels say.
+    pub key: String,
+    /// What the line shows: the engine's `SEC-KEY-2 at web/env.ts:3`, or the other cause's title.
+    pub label: String,
+    /// The hover text.
+    pub hint: String,
+    /// Where the label opens: the other cause's row (site key, rule id, sub-group). `None` for the
+    /// engine's own link, which is plain text.
+    pub goto: Option<(String, String, String)>,
+}
+
+/// The entries of the "Possible duplicate of" line: the engine's link first, then each other
+/// cause with a row at the same place, nearest first, each row once. Empty for a row with none.
+pub fn duplicate_entries(row: &SiteRow) -> Vec<DuplicateEntry> {
+    let mut out = Vec::new();
+    if let Some((label, hint)) = duplicate_line(row) {
+        out.push(DuplicateEntry {
+            key: "engine-link".to_string(),
+            label,
+            hint,
+            goto: None,
+        });
+    }
+    let linked = row.possible_duplicate_of.as_ref().map(|d| d.key.as_str());
+    for other in &row.same_place_as {
+        if Some(other.key.as_str()) == linked {
+            continue;
+        }
+        out.push(DuplicateEntry {
+            key: other.key.clone(),
+            label: other.title.clone(),
+            hint: format!(
+                "{} at line {}, another cause at the same place",
+                other.rule_id, other.line
+            ),
+            goto: Some((
+                other.key.clone(),
+                other.rule_id.clone(),
+                other.group_id.clone(),
+            )),
+        });
+    }
+    out
+}
+
 pub fn duplicate_line(row: &SiteRow) -> Option<(String, String)> {
     let d = row.possible_duplicate_of.as_ref()?;
     Some((
@@ -1537,6 +1616,7 @@ pub fn reduce(
                 .possible_duplicate_of
                 .as_ref()
                 .map(|d| d.key.clone())
+                .or_else(|| row.same_place_as.first().map(|o| o.key.clone()))
                 .filter(|k| *k != row.site_key),
             reason: String::new(),
             error: None,
@@ -1702,6 +1782,12 @@ pub fn commit(
                         .as_ref()
                         .filter(|dup| Some(&dup.key) == d.target.as_ref())
                         .map(|dup| format!("{}:{}", dup.path, dup.line))
+                })
+                .or_else(|| {
+                    row.same_place_as
+                        .iter()
+                        .find(|o| Some(&o.key) == d.target.as_ref())
+                        .map(|o| format!("{}:{}", row.path, o.line))
                 })
                 .unwrap_or_else(|| "the other site".to_string());
             Ok(DetailWrite::Decision {

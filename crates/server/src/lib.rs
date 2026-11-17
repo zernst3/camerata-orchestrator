@@ -166,11 +166,13 @@ mod mechanical_gate;
 pub mod model_profile_cascade;
 pub mod model_registry;
 pub mod model_tier;
+/// M4: wording problems recorded as review flags on the row (one list in one capture), never as a
+/// failure that locks a run or an export. See the module doc comment.
+pub mod possible_duplicate;
+pub mod possible_false_positive;
 pub mod provider_policy;
 pub mod rate_limit;
 pub mod release_gate;
-/// M4: wording problems recorded as review flags on the row (one list in one capture), never as a
-/// failure that locks a run or an export. See the module doc comment.
 pub mod review_flags;
 /// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
 /// per-stage row-accounting, so a rule that never ran can never be reported as

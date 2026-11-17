@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::edits::EditField;
-use camerata_api_types::review::EscalationBudget;
+use camerata_api_types::review::{EscalationBudget, FpReason, PossibleFalsePositive};
 use camerata_api_types::review_view::{
     EscalationBudgetOutcome, EscalationBudgetReq, HeldRow, HoldReason, Marker, SiteRow, TreeLevel,
     SITES_PAGE_SIZE,
@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 71] = [
+pub const FIXTURE_IDS: [&str; 73] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -43,6 +43,8 @@ pub const FIXTURE_IDS: [&str; 71] = [
     "queue/detail-form-open",
     "queue/merge-picker-empty-pool",
     "queue/place",
+    "queue/possible-false-positive",
+    "queue/possible-duplicate",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",
@@ -583,6 +585,110 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 first.site.carries.clone_from(&carrier.carries);
             }
             queue_state(&ds, queue)
+        }
+        "queue/possible-false-positive" => {
+            // "Possible false positives first" on: inside each band the flagged rows lead, each
+            // with its chip, and the first of them is focused so the detail lists its reasons.
+            let ds = base();
+            let mut queue = ds.queue(false, 0, 100);
+            for (i, r) in queue.escalated.iter_mut().enumerate() {
+                let reasons = match i % 9 {
+                    4 => vec![
+                        FpReason::ConventionRuleAtMediumOrHigher,
+                        FpReason::ModelOnly,
+                    ],
+                    7 => vec![FpReason::SeverityFromRuleMinimum],
+                    _ => continue,
+                };
+                r.site.possible_false_positive = PossibleFalsePositive::from_reasons(reasons);
+                r.site.markers = super::dataset::markers_for(&r.site);
+            }
+            let focused = queue
+                .escalated
+                .iter()
+                .find(|r| r.site.possible_false_positive.is_some())
+                .map(|r| r.candidate.key.clone());
+            let mut fx = queue_state(&ds, queue);
+            if let Body::Queue(q) = &mut fx.body {
+                q.selected_site = focused;
+            }
+            fx
+        }
+        "queue/possible-duplicate" => {
+            // "Possible duplicates together" on: two causes with a row at the same place sit side
+            // by side inside their band, each with its chip, and the first of them is focused so
+            // the detail names the other cause.
+            let ds = base();
+            let mut queue = ds.queue(false, 0, 100);
+            let mut sorted: Vec<&camerata_api_types::review_view::QueueRow> =
+                queue.escalated.iter().collect();
+            crate::queue::sort_rows(&mut sorted);
+            let within: Vec<String> = sorted
+                .iter()
+                .filter(|r| crate::queue::band_of(r) == crate::queue::Band::WithinBudget)
+                .map(|r| r.site.site_key.clone())
+                .collect();
+            // The first and the last row of the band: far apart in rank order, so the look moves
+            // one of them.
+            let (a, b) = (within[0].clone(), within[within.len() - 1].clone());
+            let view_of = |q: &camerata_api_types::review_view::QueueView, key: &str| {
+                let r = q
+                    .escalated
+                    .iter()
+                    .find(|r| r.site.site_key == key)
+                    .map(|r| &r.site)
+                    .expect("the paired row is in the queue");
+                camerata_api_types::review_view::SamePlaceView {
+                    fix_id: format!("{:012x}", r.line * 7919 + r.path.len()),
+                    title: r.headline.clone(),
+                    key: r.site_key.clone(),
+                    rule_id: r.rule_id.clone(),
+                    line: r.line,
+                    group_id: r.group_path.get(2).cloned().unwrap_or_default(),
+                }
+            };
+            // The partner sits at the same place: the same file, two lines on.
+            let (path, repo, line) = {
+                let first = queue
+                    .escalated
+                    .iter()
+                    .find(|r| r.site.site_key == a)
+                    .expect("the first row is in the queue");
+                (
+                    first.site.path.clone(),
+                    first.site.repo.clone(),
+                    first.site.line,
+                )
+            };
+            for r in &mut queue.escalated {
+                if r.site.site_key == b {
+                    r.site.path = path.clone();
+                    r.site.repo = repo.clone();
+                    let was = r.site.line;
+                    r.site.line = line + 2;
+                    // The headline names its line ("... at line 321"): it follows the move.
+                    r.site.headline = r
+                        .site
+                        .headline
+                        .replace(&format!("line {was}"), &format!("line {}", r.site.line));
+                }
+            }
+            let (to_a, to_b) = (view_of(&queue, &a), view_of(&queue, &b));
+            for r in &mut queue.escalated {
+                if r.site.site_key == a {
+                    r.site.same_place_as = vec![to_b.clone()];
+                } else if r.site.site_key == b {
+                    r.site.same_place_as = vec![to_a.clone()];
+                } else {
+                    continue;
+                }
+                r.site.markers = super::dataset::markers_for(&r.site);
+            }
+            let mut fx = queue_state(&ds, queue);
+            if let Body::Queue(q) = &mut fx.body {
+                q.selected_site = Some(a);
+            }
+            fx
         }
         "detail/carrier" => {
             let ds = base();

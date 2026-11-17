@@ -25,13 +25,15 @@
 //! "Show below the line" is then a flag on the view state: it sends no request and writes
 //! nothing. Only "Show 100 more candidates" reads another page.
 
+use camerata_api_types::review::PossibleFalsePositive;
 use camerata_api_types::review_view::{EscalationBudgetOutcome, QueueRow, QueueView, SiteRow};
 use camerata_ui::review_io::ReviewApi;
 use camerata_ui_core::edits::DetailContext;
 use camerata_ui_core::queue::{
-    band_of, budget_line, counts_line, decision_text, detail_context, empty_text,
-    has_needed_me_box, keys_hint, layout, needed_me_checked, needed_me_enabled, needed_me_line,
-    needed_me_write, node_cell, node_door, node_title, queue_command, queue_keys_armed,
+    band_of, budget_line, counts_line, decision_text, detail_context, dup_together_label,
+    empty_text, fp_first_label, has_needed_me_box, keys_hint, layout, needed_me_checked,
+    needed_me_enabled, needed_me_line, needed_me_write, node_cell, node_door, node_title,
+    possible_duplicate_count, possible_false_positive_count, queue_command, queue_keys_armed,
     rate_changed_text, reason_cell, site_door, Band, Entry, Layout, QueueCommand, QueueState,
     NEEDED_ME_HINT, ROWS_PER_PAGE,
 };
@@ -110,6 +112,12 @@ pub(crate) fn QueueScreen(
     #[props(default)] on_focus: Callback<PaneFocus>,
     #[props(default)] on_focus_row: Callback<String>,
     #[props(default)] on_toggle_below: Callback<()>,
+    /// "Possible false positives first": a look only, like "Show below the line".
+    #[props(default)]
+    on_toggle_fp_first: Callback<()>,
+    /// "Possible duplicates together": a look only, like "Show below the line".
+    #[props(default)]
+    on_toggle_dup_together: Callback<()>,
     #[props(default)] on_more: Callback<()>,
     #[props(default)] on_more_below: Callback<()>,
     #[props(default)] on_needed_me: Callback<String>,
@@ -182,7 +190,14 @@ pub(crate) fn QueueScreen(
                     }
                 }
                 if let Some(v) = view.as_ref() {
-                    QueueHead { view: v.clone(), on_settings }
+                    QueueHead {
+                        view: v.clone(),
+                        fp_first: state.fp_first,
+                        dup_together: state.dup_together,
+                        on_settings,
+                        on_toggle_fp_first,
+                        on_toggle_dup_together,
+                    }
                     if empty {
                         p { class: "pane-empty review-queue-empty", "{empty_text(v)}" }
                     }
@@ -284,9 +299,19 @@ fn entry_owned(e: &Entry<'_>) -> OwnedEntry {
 
 // ── The head ──────────────────────────────────────────────────────────────────────────────
 
-/// The title, the budget sentence, the counts and Needed me.
+/// The title, the budget sentence, the counts, Needed me and the "Possible false positives
+/// first" look (only when a loaded row is flagged).
 #[component]
-fn QueueHead(view: QueueView, on_settings: Callback<()>) -> Element {
+fn QueueHead(
+    view: QueueView,
+    fp_first: bool,
+    dup_together: bool,
+    on_settings: Callback<()>,
+    on_toggle_fp_first: Callback<()>,
+    on_toggle_dup_together: Callback<()>,
+) -> Element {
+    let flagged = possible_false_positive_count(&view);
+    let paired = possible_duplicate_count(&view);
     rsx! {
         div { class: "review-queue-head",
             div { class: "review-queue-title",
@@ -301,6 +326,28 @@ fn QueueHead(view: QueueView, on_settings: Callback<()>) -> Element {
             }
             p { class: "review-queue-counts", "{counts_line(&view)}" }
             p { class: "review-queue-needed", "{needed_me_line(&view.needed_me)}" }
+            if flagged > 0 {
+                div { class: "review-queue-fp",
+                    button {
+                        class: "btn-edit-sm review-queue-fp-first",
+                        "aria-pressed": if fp_first { "true" } else { "false" },
+                        title: "A look only. It lists the rows the engine has reasons to doubt first inside each band. Every row stays, and nothing is sent or written.",
+                        onclick: move |_| on_toggle_fp_first.call(()),
+                        "{fp_first_label(&view, fp_first)}"
+                    }
+                }
+            }
+            if paired > 0 {
+                div { class: "review-queue-fp",
+                    button {
+                        class: "btn-edit-sm review-queue-dup-together",
+                        "aria-pressed": if dup_together { "true" } else { "false" },
+                        title: "A look only. It lists rows of causes at the same place side by side inside each band. Every row stays, and nothing is sent or written.",
+                        onclick: move |_| on_toggle_dup_together.call(()),
+                        "{dup_together_label(&view, dup_together)}"
+                    }
+                }
+            }
         }
     }
 }
@@ -432,6 +479,22 @@ fn QueueRowView(
                     " "
                 }
                 "{reason_cell(&row)}"
+                if site.possible_false_positive.is_some() {
+                    " "
+                    span {
+                        class: "mark-fp",
+                        title: "{camerata_ui_core::tree::possible_false_positive_tip(site)}",
+                        "{PossibleFalsePositive::TERM}"
+                    }
+                }
+                if site.possible_duplicate_of.is_some() || !site.same_place_as.is_empty() {
+                    " "
+                    span {
+                        class: "mark-dup",
+                        title: "{camerata_ui_core::tree::possible_duplicate_tip(site)}",
+                        "{camerata_api_types::review_view::SamePlaceView::TERM}"
+                    }
+                }
                 if let Some(chip) = camerata_ui_core::tree::place::also_match_chip(site) {
                     " "
                     span { class: "{chip.class}", title: "{chip.tip}", "{chip.label}" }
@@ -1250,6 +1313,8 @@ pub(crate) fn QueueHost(
             },
             on_focus_row: move |key: String| state.write().focus(&key),
             on_toggle_below: move |()| state.write().toggle_below(),
+            on_toggle_fp_first: move |()| state.write().toggle_fp_first(),
+            on_toggle_dup_together: move |()| state.write().toggle_dup_together(),
             on_more: move |()| state.write().show_more(),
             on_more_below: more_below,
             on_needed_me: needed_me,

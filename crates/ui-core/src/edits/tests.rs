@@ -565,7 +565,7 @@ fn the_merge_picker_lists_the_duplicate_first_then_a_search_over_path_line_and_r
     };
     let list = merge_candidates(&row, &ctx, "");
     assert_eq!(list[0].key, other.site_key, "the link comes first");
-    assert_eq!(list[0].note.as_deref(), Some("possible duplicate"));
+    assert_eq!(list[0].note.as_deref(), Some("Possible duplicate"));
     assert!(list.len() <= MERGE_LIST_MAX);
     assert!(list.iter().all(|c| c.key != row.site_key), "never itself");
     assert_eq!(
@@ -1121,6 +1121,43 @@ fn also_flagged_by_and_the_possible_duplicate_are_lines_only_when_there_is_somet
 }
 
 #[test]
+fn the_detail_lists_each_possible_false_positive_reason_with_its_sentence() {
+    use camerata_api_types::review::{FpReason, PossibleFalsePositive};
+    let mut row = plain();
+    row.possible_false_positive = None;
+    assert!(possible_false_positive_lines(&row).is_empty());
+    row.possible_false_positive = PossibleFalsePositive::from_reasons(vec![
+        FpReason::ModelOnly,
+        FpReason::GroupReviewerDoubt,
+    ]);
+    assert_eq!(
+        possible_false_positive_lines(&row),
+        vec![
+            (
+                FpReason::GroupReviewerDoubt.label(),
+                FpReason::GroupReviewerDoubt.sentence()
+            ),
+            (FpReason::ModelOnly.label(), FpReason::ModelOnly.sentence()),
+        ]
+    );
+    // The flag is a look only: the row is still Unresolved and every field is as it was.
+    let before = plain();
+    let mut flagged = before.clone();
+    flagged.possible_false_positive =
+        PossibleFalsePositive::from_reasons(vec![FpReason::TestCodeOnly]);
+    assert_eq!(flagged.severity, before.severity);
+    assert_eq!(flagged.decision, before.decision);
+    let ctx = DetailContext::default();
+    for field in [EditField::Severity, EditField::Kind, EditField::Headline] {
+        assert_eq!(
+            field_state(&flagged, field, &ctx).value,
+            field_state(&before, field, &ctx).value,
+            "{field:?}"
+        );
+    }
+}
+
+#[test]
 fn the_review_level_reads_in_words_and_a_held_row_has_none() {
     assert_eq!(
         review_level_text(Some(&ReviewLevel::PersonallyReviewed)).as_deref(),
@@ -1673,4 +1710,134 @@ fn a_thrown_out_row_opens_no_edit_form() {
         reduce(DetailMode::Viewing, &DetailAction::PickField, &kept, &ctx()),
         DetailMode::PickField
     );
+}
+
+// ── Same place as (the possible duplicate hint) ───────────────────────────────────────────
+
+fn same_place(key: &str, line: usize) -> camerata_api_types::review_view::SamePlaceView {
+    camerata_api_types::review_view::SamePlaceView {
+        fix_id: "ab12".into(),
+        title: "Another cause".into(),
+        key: key.into(),
+        rule_id: "SEC-OTHER-1".into(),
+        line,
+        group_id: "sub:SEC-OTHER-1/1".into(),
+    }
+}
+
+#[test]
+fn the_merge_door_of_the_hint_offers_the_other_cause_first_and_opens_on_it() {
+    let all = rows();
+    let mut row = all[0].clone();
+    row.possible_duplicate_of = None;
+    let other = all
+        .iter()
+        .find(|r| r.site_key != row.site_key)
+        .unwrap()
+        .clone();
+    row.same_place_as = vec![same_place(&other.site_key, row.line + 2)];
+    let ctx = DetailContext {
+        pool: pool_of(&all),
+        ..ctx()
+    };
+    let list = merge_candidates(&row, &ctx, "");
+    assert_eq!(list[0].key, other.site_key, "the other cause comes first");
+    assert_eq!(list[0].note.as_deref(), Some("same place"));
+    assert_eq!(list[0].label, format!("{}:{}", row.path, row.line + 2));
+    assert_eq!(
+        list.iter().filter(|c| c.key == other.site_key).count(),
+        1,
+        "listed once"
+    );
+    let mode = reduce(DetailMode::Viewing, &DetailAction::BeginMerge, &row, &ctx);
+    let DetailMode::Merge(d) = mode else {
+        panic!("a merge form");
+    };
+    assert_eq!(d.target.as_deref(), Some(other.site_key.as_str()));
+    // The engine's own duplicate link still wins the default.
+    let mut linked = row.clone();
+    linked.possible_duplicate_of = Some(DuplicateView {
+        key: "dup-key".into(),
+        hint: "h".into(),
+        rule_id: "SEC-KEY-2".into(),
+        path: "web/env.ts".into(),
+        line: 3,
+    });
+    let DetailMode::Merge(d) = reduce(
+        DetailMode::Viewing,
+        &DetailAction::BeginMerge,
+        &linked,
+        &ctx,
+    ) else {
+        panic!("a merge form");
+    };
+    assert_eq!(d.target.as_deref(), Some("dup-key"));
+    // A row with no hint offers nothing extra.
+    let mut plain_row = row.clone();
+    plain_row.same_place_as.clear();
+    assert!(merge_candidates(&plain_row, &ctx, "")
+        .iter()
+        .all(|c| c.note.as_deref() != Some("same place")));
+    assert!(duplicate_entries(&plain_row).is_empty());
+    assert_eq!(duplicate_entries(&row).len(), 1);
+}
+
+#[test]
+fn the_possible_duplicate_line_lists_the_engine_link_then_the_same_place_causes_once() {
+    let all = rows();
+    let mut row = all[0].clone();
+    let (a, b) = (&all[1], &all[2]);
+    row.possible_duplicate_of = Some(DuplicateView {
+        key: a.site_key.clone(),
+        hint: "same line, different family".into(),
+        rule_id: a.rule_id.clone(),
+        path: a.path.clone(),
+        line: a.line,
+    });
+    // The engine's own target is also a same-place cause: listed once, as the engine link.
+    row.same_place_as = vec![
+        same_place(&a.site_key, row.line + 1),
+        same_place(&b.site_key, row.line + 2),
+    ];
+    let entries = duplicate_entries(&row);
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[0].goto, None, "the engine link comes first");
+    assert!(entries[0].label.contains(&a.rule_id), "{:?}", entries[0]);
+    assert_eq!(entries[1].label, "Another cause");
+    // The same-place entry opens its row with its key, rule and group.
+    assert_eq!(
+        entries[1].goto,
+        Some((
+            b.site_key.clone(),
+            "SEC-OTHER-1".to_string(),
+            "sub:SEC-OTHER-1/1".to_string()
+        ))
+    );
+    // Only the engine link, or only the hint, is one entry.
+    let mut only_hint = row.clone();
+    only_hint.possible_duplicate_of = None;
+    assert_eq!(duplicate_entries(&only_hint).len(), 2);
+    let mut only_link = row;
+    only_link.same_place_as.clear();
+    assert_eq!(duplicate_entries(&only_link).len(), 1);
+}
+
+#[test]
+fn two_same_place_causes_with_the_same_title_stay_two_entries_with_their_own_keys() {
+    let all = rows();
+    let mut row = all[0].clone();
+    row.possible_duplicate_of = None;
+    let mut a = same_place(&all[1].site_key, row.line + 1);
+    let mut b = same_place(&all[2].site_key, row.line + 2);
+    a.title = "Same title".into();
+    b.title = "Same title".into();
+    row.same_place_as = vec![a, b];
+    let entries = duplicate_entries(&row);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].label, entries[1].label);
+    assert_ne!(
+        entries[0].key, entries[1].key,
+        "a span key is never the label"
+    );
+    assert_eq!(entries[0].key, all[1].site_key);
 }

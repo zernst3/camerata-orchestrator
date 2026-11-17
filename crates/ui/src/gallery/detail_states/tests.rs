@@ -303,7 +303,7 @@ fn detail_merge_picker_lists_the_possible_duplicate_first() {
     let html = plain_text(&page("detail/merge-picker-duplicate-first"));
     let first_item = html.find("site-detail-candidate").expect("a candidate");
     let list = &html[first_item..];
-    let note = list.find("possible duplicate").expect("the duplicate note");
+    let note = list.find("Possible duplicate").expect("the duplicate note");
     let label = list
         .find(&format!("{}:{}", dup.path, dup.line))
         .expect("its label");

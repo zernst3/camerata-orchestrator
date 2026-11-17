@@ -16,7 +16,7 @@ fn count(html: &str, needle: &str) -> usize {
 
 #[test]
 fn every_queue_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 11, "every queue state is built");
+    assert_eq!(states().len(), 13, "every queue state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -325,4 +325,183 @@ fn the_merge_picker_on_an_empty_pool_says_what_the_pool_is_and_the_remedy_that_w
         "{html}"
     );
     assert!(html.contains("site-detail-merge-form"));
+}
+
+#[test]
+fn the_possible_false_positive_page_lists_flagged_rows_first_with_their_chip_and_reasons() {
+    use camerata_api_types::review::FpReason;
+    let html = page("queue/possible-false-positive");
+    let Some(StateFixture {
+        body: Body::Queue(body),
+        ..
+    }) = fixture("queue/possible-false-positive")
+    else {
+        panic!("no fixture");
+    };
+    let Loaded::Ready(v) = &body.queue else {
+        panic!("the queue is loaded");
+    };
+    let flagged = v
+        .escalated
+        .iter()
+        .filter(|r| r.site.possible_false_positive.is_some())
+        .count();
+    assert!(flagged >= 2, "{flagged}");
+    // The look is on, and its button says how many rows are flagged.
+    assert!(
+        html.contains(&format!("Back to rank order ({flagged} flagged)")),
+        "{html}"
+    );
+    assert!(html.contains("aria-pressed=\"true\""));
+    // Every flagged row carries the chip, and the first rows drawn are the flagged ones.
+    assert_eq!(
+        count(&html, "class=\"mark-fp\""),
+        flagged + 1,
+        "one chip per flagged row in the table, and one in the detail head"
+    );
+    let state = QueueState {
+        fp_first: true,
+        ..QueueState::default()
+    };
+    let l = layout(v, &state);
+    // Inside each band the flagged rows lead; the bands keep their order around the line.
+    let drawn: Vec<(camerata_ui_core::queue::Band, bool)> = l
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row(r) => Some((
+                camerata_ui_core::queue::band_of(r),
+                r.site.possible_false_positive.is_some(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut bands: Vec<_> = drawn.iter().map(|(b, _)| *b).collect();
+    bands.dedup();
+    for band in bands {
+        let flags: Vec<bool> = drawn
+            .iter()
+            .filter(|(b, _)| *b == band)
+            .map(|(_, f)| *f)
+            .collect();
+        let n = flags.iter().filter(|f| **f).count();
+        assert!(flags[..n].iter().all(|f| *f), "{band:?}: {flags:?}");
+    }
+    assert!(
+        drawn.first().is_some_and(|(_, f)| *f),
+        "the first row drawn is flagged"
+    );
+    // The focused row's reasons, each with its sentence, in the detail.
+    assert!(html.contains("site-detail-fp"), "{html}");
+    for reason in [
+        FpReason::ConventionRuleAtMediumOrHigher,
+        FpReason::ModelOnly,
+    ] {
+        assert!(html.contains(reason.label()), "{reason:?}");
+        assert!(
+            html.contains(&reason.sentence().replace('\'', "&#39;")),
+            "{reason:?}"
+        );
+    }
+    // A look only: the line is still drawn once and every escalated row is still there.
+    assert_eq!(count(&html, "class=\"queue-line\""), 1);
+    assert_eq!(l.row_count(), v.escalated.len().min(ROWS_PER_PAGE));
+}
+
+#[test]
+fn a_queue_with_no_flagged_row_draws_no_possible_false_positive_button() {
+    let html = page("queue/over-budget");
+    assert!(!html.contains("review-queue-fp-first"));
+    assert!(!html.contains("Possible false positives first"));
+}
+
+#[test]
+fn the_possible_duplicate_page_lists_paired_rows_together_with_their_chip_and_the_other_cause() {
+    use camerata_ui_core::queue::{band_of, Band};
+    let html = page("queue/possible-duplicate");
+    let Some(StateFixture {
+        body: Body::Queue(body),
+        ..
+    }) = fixture("queue/possible-duplicate")
+    else {
+        panic!("no fixture");
+    };
+    let Loaded::Ready(v) = &body.queue else {
+        panic!("the queue is loaded");
+    };
+    let paired: Vec<&camerata_api_types::review_view::QueueRow> = v
+        .escalated
+        .iter()
+        .filter(|r| !r.site.same_place_as.is_empty())
+        .collect();
+    assert_eq!(paired.len(), 2);
+    // The pair is at the same place: one file, lines within the server's `NEAR_LINES` (3).
+    const NEAR_LINES: usize = 3;
+    assert_eq!(paired[0].site.path, paired[1].site.path);
+    assert_eq!(paired[0].site.repo, paired[1].site.repo);
+    assert!(paired[0].site.line.abs_diff(paired[1].site.line) <= NEAR_LINES);
+    for r in &paired {
+        let other = &r.site.same_place_as[0];
+        assert!(other.line.abs_diff(r.site.line) <= NEAR_LINES);
+        // The link's title names the partner's actual line, not the one it had before it moved.
+        assert!(
+            other.title.contains(&format!("line {}", other.line)),
+            "{} vs line {}",
+            other.title,
+            other.line
+        );
+    }
+    // The look is on and its button says how many rows are paired.
+    assert!(html.contains("Back to rank order (2 paired)"), "{html}");
+    assert!(html.contains("review-queue-dup-together"));
+    // Every paired row carries the chip in the table, and one in the detail head.
+    let chipped = v
+        .escalated
+        .iter()
+        .take(ROWS_PER_PAGE)
+        .filter(|r| r.site.possible_duplicate_of.is_some() || !r.site.same_place_as.is_empty())
+        .count();
+    assert!(chipped >= 2);
+    // One chip a row in the table (either source), and one in the detail head.
+    assert_eq!(count(&html, "class=\"mark-dup\""), chipped + 1, "{html}");
+    assert!(!html.contains("mark-dupfix") && !html.contains("dup?"));
+    // The pair is drawn side by side inside its band.
+    let state = QueueState {
+        dup_together: true,
+        ..QueueState::default()
+    };
+    let l = layout(v, &state);
+    let drawn: Vec<(Band, bool)> = l
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row(r) => Some((band_of(r), !r.site.same_place_as.is_empty())),
+            _ => None,
+        })
+        .collect();
+    let at: Vec<usize> = drawn
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, p))| *p)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(at.len(), 2);
+    assert_eq!(at[1], at[0] + 1, "side by side: {drawn:?}");
+    // The focused row's detail names the other cause and offers the merge door.
+    let other = &paired[1].site.headline;
+    assert!(html.contains("Possible duplicate of"), "{html}");
+    assert!(!html.contains("Same place as"));
+    assert!(html.contains("site-detail-same-place-link"));
+    assert!(html.contains(&other.replace('\'', "&#39;")) || html.contains(other.as_str()));
+    assert_eq!(count(&html, "merge into"), 1, "one merge door");
+    // A look only: the line is still drawn once and every escalated row is still there.
+    assert_eq!(count(&html, "class=\"queue-line\""), 1);
+    assert_eq!(l.row_count(), v.escalated.len().min(ROWS_PER_PAGE));
+}
+
+#[test]
+fn a_queue_with_no_paired_row_draws_no_possible_duplicate_button() {
+    let html = page("queue/over-budget");
+    assert!(!html.contains("review-queue-dup-together"));
+    assert!(!html.contains("Possible duplicates together"));
 }

@@ -6,8 +6,8 @@ use camerata_api_types::edits::{Edit, EditField};
 use camerata_api_types::review::EscalationState;
 use camerata_api_types::review_view::{
     BreadcrumbItem, CarriedByView, CarriedRuleView, DecisionView, DuplicateView, EditView,
-    EscalationStatus, FlaggedByView, Marker, MergedIntoView, NewSinceDecisionView, SiteRow,
-    Stage1View, Stage2View,
+    EscalationStatus, FlaggedByView, Marker, MergedIntoView, NewSinceDecisionView, SamePlaceView,
+    SiteRow, Stage1View, Stage2View,
 };
 
 use super::ReviewComposer;
@@ -155,6 +155,9 @@ impl<'a> ReviewComposer<'a> {
         if self.hold_of(key).is_some() {
             out.push(Marker::Held);
         }
+        if self.possible_false_positive(f).is_some() {
+            out.push(Marker::PossibleFalsePositive);
+        }
         match candidate {
             Some(c) if c.escalated => {
                 out.push(Marker::Escalated);
@@ -177,7 +180,7 @@ impl<'a> ReviewComposer<'a> {
         if self.inputs.moved.contains_key(key) {
             out.push(Marker::Moved);
         }
-        if f.possible_duplicate_of.is_some() {
+        if f.possible_duplicate_of.is_some() || !self.dup.of(f).is_empty() {
             out.push(Marker::PossibleDuplicate);
         }
         if self.carried_by_view(key).is_some() {
@@ -187,6 +190,51 @@ impl<'a> ReviewComposer<'a> {
             out.push(Marker::Edited);
         }
         out
+    }
+
+    /// The engine's reasons to doubt `f`, for the operator. A row the engine threw out is in no
+    /// package and carries none.
+    pub(super) fn possible_false_positive(
+        &self,
+        f: &Finding,
+    ) -> Option<camerata_api_types::review::PossibleFalsePositive> {
+        if crate::engine_discard::reason_of(f).is_some() {
+            return None;
+        }
+        self.fp.of(f)
+    }
+
+    /// The other causes with a row at the same place as `f`, for the operator, each with its title.
+    pub(super) fn same_place_as(&self, f: &Finding) -> Vec<SamePlaceView> {
+        self.dup
+            .of(f)
+            .iter()
+            .map(|link| SamePlaceView {
+                fix_id: link.fix_id.clone(),
+                title: self.cause_title(link),
+                key: link.key.clone(),
+                rule_id: link.rule_id.clone(),
+                line: link.line,
+                group_id: link.group_id.clone(),
+            })
+            .collect()
+    }
+
+    /// The title of the cause a link points at: its rule group's label, or, for a rule's "no
+    /// shared cause found" group, the headline of the row the link opens.
+    fn cause_title(&self, link: &crate::possible_duplicate::DupLink) -> String {
+        let label = self
+            .node_at
+            .get(link.group_id.as_str())
+            .zip(self.tree)
+            .map(|(i, tree)| tree.nodes[*i].label.clone())
+            .filter(|l| !l.trim().is_empty() && !link.group_id.ends_with("/0"));
+        label.unwrap_or_else(|| {
+            self.row(&link.key)
+                .map(crate::ai_audit::finding_headline)
+                .filter(|h| !h.trim().is_empty())
+                .unwrap_or_else(|| link.rule_id.clone())
+        })
     }
 
     /// The flagged-by entries of `f`.
@@ -335,6 +383,8 @@ impl<'a> ReviewComposer<'a> {
                 .is_some_and(|v| v == REVIEWER_PROVENANCE),
             thrown_out_reason: crate::engine_discard::reason_of(f).map(str::to_string),
             review_flags: crate::review_flags::flags_of(f),
+            possible_false_positive: self.possible_false_positive(f),
+            same_place_as: self.same_place_as(f),
         }
     }
 }
