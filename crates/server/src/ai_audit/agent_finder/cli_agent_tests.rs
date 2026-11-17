@@ -1429,7 +1429,86 @@ fn saved_result_stream(saved: &str, tool: &str, input: Value) -> String {
 }
 
 fn parse_saved(stream: &str) -> super::ParsedSession {
-    parse_session(stream, &[PathBuf::from(SAVED_ROOM)], &BTreeMap::new())
+    super::parse_session_in(
+        stream,
+        &[PathBuf::from(SAVED_ROOM)],
+        &BTreeMap::new(),
+        Path::new("/Users/auditor/.claude"),
+    )
+}
+
+fn user_result(id: &str, content: &str, num_lines: Option<u64>) -> String {
+    let mut r = json!({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": id, "content": content}]}});
+    if let Some(n) = num_lines {
+        r["toolUseResult"] = json!({"type": "text", "file": {"numLines": n}});
+    }
+    r.to_string()
+}
+
+fn tool_use(id: &str, name: &str, input: Value) -> String {
+    json!({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": id, "name": name, "input": input}]}})
+    .to_string()
+}
+
+/// Hardening: only Claude Code's own `<persisted-output>` framing announces a saved file. A room
+/// file whose text says "Full output saved to:" does not.
+#[test]
+fn a_file_that_says_it_was_saved_elsewhere_announces_nothing() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    let stream = [
+        tool_use("r0", "Read", json!({"file_path": "src/a.rs"})),
+        user_result(
+            "r0",
+            &format!("1\t// Full output saved to: {saved}\n"),
+            None,
+        ),
+        tool_use("r1", "Read", json!({"file_path": saved})),
+        user_result("r1", "1\tx", None),
+    ]
+    .join("\n");
+    let parsed = parse_saved(&stream);
+    assert_eq!(parsed.outside, vec![saved]);
+}
+
+/// Hardening: the part before `.claude` must be Claude Code's own state folder.
+#[test]
+fn a_saved_path_under_another_dot_claude_folder_stays_outside() {
+    let saved = format!(
+        "/Users/auditor/other/.claude/projects/{SAVED_PROJECT}/df722648-ec6a/tool-results/toolu_011jz.txt"
+    );
+    let parsed = parse_saved(&saved_result_stream(
+        &saved,
+        "Read",
+        json!({"file_path": saved}),
+    ));
+    assert_eq!(parsed.outside, vec![saved]);
+}
+
+/// Hardening: a Read result in the persisted-output framing showed only a preview, so it covers
+/// nothing even when the tool reports many lines.
+#[test]
+fn a_read_that_came_back_as_a_saved_preview_covers_no_lines() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    let framed = format!(
+        "<persisted-output>\nOutput too large (90KB). Full output saved to: {saved}\n\nPreview (first 2KB):\n1\ta\n</persisted-output>"
+    );
+    let stream = [
+        tool_use("r0", "Read", json!({"file_path": "src/a.rs"})),
+        user_result("r0", &framed, Some(500)),
+    ]
+    .join("\n");
+    let parsed = parse_saved(&stream);
+    let covered: usize = parsed
+        .trace
+        .iter()
+        .map(|e| match e {
+            ToolEvent::Read { lines_returned, .. } => *lines_returned,
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(covered, 0, "{:?}", parsed.trace);
 }
 
 /// The saved file of the agent's own earlier call is not outside the room and covers nothing.
