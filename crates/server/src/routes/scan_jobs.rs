@@ -616,6 +616,16 @@ fn is_security_family_lint(
     existing: &crate::onboard::Finding,
     selectors: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> bool {
+    let mapped_to_security_rule = crate::ai_audit::finding_class(existing)
+        == crate::ai_audit::FindingClass::Security
+        && (preview.rule_id == existing.rule_id
+            || preview_is_native_rule_tool(&preview.rule_id, &existing.rule_id, selectors));
+    lint_id_is_security(preview) || mapped_to_security_rule
+}
+
+/// Whether a style linter's row is by its own id one of the linter's security checks: an
+/// `eslint-plugin-security` id (`security/...`) or a Ruff `S` rule (flake8-bandit).
+pub(crate) fn lint_id_is_security(preview: &crate::onboard::Finding) -> bool {
     let id = preview.rule_id.to_ascii_lowercase();
     let last = id.rsplit(['/', ':']).next().unwrap_or(&id);
     let is_ruff_s = last.len() == 4
@@ -630,15 +640,11 @@ fn is_security_family_lint(
         .rev()
         .skip(1)
         .any(|segment| segment.contains("security"));
-    let mapped_to_security_rule = crate::ai_audit::finding_class(existing)
-        == crate::ai_audit::FindingClass::Security
-        && (preview.rule_id == existing.rule_id
-            || preview_is_native_rule_tool(&preview.rule_id, &existing.rule_id, selectors));
-    is_ruff_s || is_security_plugin || mapped_to_security_rule
+    is_ruff_s || is_security_plugin
 }
 
 /// Whether `f` is a style linter's preview row.
-fn is_style_linter_row(f: &crate::onboard::Finding) -> bool {
+pub(crate) fn is_style_linter_row(f: &crate::onboard::Finding) -> bool {
     f.preview
         && f.preview_tool
             .as_deref()
@@ -916,7 +922,12 @@ pub(crate) fn join_repo_previews(
         files,
         root,
     );
-    report.findings.extend(deduped);
+    // One row per tool rule with all its places, folded into an agent row of the same rule
+    // family when there is one (calibration round 2, change A).
+    let grouped = crate::tool_row_groups::group_tool_rows(deduped);
+    let left =
+        crate::tool_row_groups::fold_into_agent_rows(&mut report.findings, grouped, selectors);
+    report.findings.extend(left);
 }
 
 /// Corrects the ledger's `RuleTier::ExternalTool` entries to reflect what the scan-time

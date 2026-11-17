@@ -185,6 +185,7 @@ pub mod terminal;
 pub mod test_git;
 pub mod test_tamper;
 pub mod tool_provisioning;
+mod tool_row_groups;
 pub mod transcript;
 pub mod uow;
 pub mod update_branch_run;

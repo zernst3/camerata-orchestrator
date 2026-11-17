@@ -84,7 +84,14 @@ pub fn unfold_also_locations(findings: &mut Vec<Finding>) -> usize {
     let mut originals = std::mem::take(findings);
     let sites: Vec<Vec<MergedLocation>> = originals
         .iter_mut()
-        .map(|f| std::mem::take(&mut f.also_locations))
+        .map(|f| {
+            // Places a tool row group holds on purpose stay on the row (round 2, change A).
+            if crate::tool_row_groups::holds_grouped_places(f) {
+                Vec::new()
+            } else {
+                std::mem::take(&mut f.also_locations)
+            }
+        })
         .collect();
     let mut stands: std::collections::HashMap<SiteIdentity, Stands> =
         std::collections::HashMap::new();
