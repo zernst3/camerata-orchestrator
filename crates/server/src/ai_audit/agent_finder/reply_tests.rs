@@ -760,7 +760,7 @@ fn places_parse_and_a_problem_without_them_has_none() {
 }
 
 #[test]
-fn a_bad_or_out_of_piece_place_is_dropped_with_a_note_and_never_fails_the_file() {
+fn a_bad_place_is_dropped_with_a_note_and_an_out_of_piece_place_becomes_a_lead() {
     let mut p = entry(1, "src/a.rs");
     p["places"] = serde_json::json!([
         {"path": "src/b.rs", "line": 3},
@@ -773,8 +773,18 @@ fn a_bad_or_out_of_piece_place_is_dropped_with_a_note_and_never_fails_the_file()
     assert!(out.unusable.is_empty(), "{:?}", out.unusable);
     assert_eq!(out.problems.len(), 1);
     assert_eq!(out.problems[0].places.len(), 1);
-    assert_eq!(out.notes.len(), 3, "{:?}", out.notes);
-    assert!(out.notes.iter().any(|n| n.contains("src/elsewhere.rs")));
+    assert_eq!(out.notes.len(), 2, "{:?}", out.notes);
+    // A place outside the part is a lead, exactly as a problem whose own path is outside is.
+    assert_eq!(out.leads.len(), 1, "{:?}", out.leads);
+    assert_eq!(
+        (
+            out.leads[0].path.as_str(),
+            out.leads[0].line,
+            out.leads[0].source_problem
+        ),
+        ("src/elsewhere.rs", 9, Some(1))
+    );
+    assert_eq!(out.leads[0].severity.as_deref(), Some("high"));
 }
 
 #[test]

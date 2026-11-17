@@ -379,3 +379,247 @@ async fn a_stored_report_of_sibling_rows_reloads_with_the_same_rows() {
     b.sort();
     assert_eq!(a, b);
 }
+
+/// The rows through the real grouping and the real json/all-findings.json export: for each row,
+/// (path, line, rule id, fix id).
+fn exported_fix_ids(
+    rows: Vec<Finding>,
+    files: &[(String, String)],
+) -> Vec<(String, u64, String, String)> {
+    use crate::review_tree::{collapse_identical, group_semantic, SubgroupAllocator, ToolMap};
+    let tools = ToolMap::builtin();
+    let collapsed = collapse_identical(rows, &tools);
+    let (grouped, nodes) =
+        group_semantic(collapsed.rows, files, &tools, &mut SubgroupAllocator::new());
+    let mut report = crate::onboard::build_report(vec![REPO.to_string()], Vec::new(), 4, grouped);
+    report.tree = Some(crate::review_tree::ReviewTree {
+        nodes,
+        ..crate::review_tree::ReviewTree::default()
+    });
+    report.attach_tree();
+    let sealed = report.seal();
+    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &Default::default());
+    let exports = crate::xlsx_export::build_json_exports(
+        &reviewed,
+        None,
+        &crate::report_export::ReportOptions::default(),
+    )
+    .unwrap();
+    let bytes = &exports
+        .iter()
+        .find(|(n, _)| n == "json/all-findings.json")
+        .unwrap()
+        .1;
+    let all: Value = serde_json::from_slice(bytes).unwrap();
+    all.as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap().to_string(),
+                r["line"].as_u64().unwrap(),
+                r["rule_id"].as_str().unwrap().to_string(),
+                r["fix_id"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_problem_with_places_in_three_files_is_one_fix_in_the_real_export() {
+    let files: Vec<(String, String)> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|n| (format!("src/{n}.rs"), rust_file(40)))
+        .collect();
+    let mut first = problem(1, "src/a.rs", 4, "medium", "fn item_4() { run(4); }");
+    first["places"] = json!([
+        {"path": "src/a.rs", "line": 30},
+        {"path": "src/b.rs", "line": 2},
+        {"path": "src/c.rs", "line": 3}
+    ]);
+    let mut second = problem(2, "src/d.rs", 5, "medium", "fn item_5() { run(5); }");
+    second["title"] = json!("Another lookup skips the layer");
+    second["what"] = json!("This lookup goes round the repository layer.");
+    second["fix"] = json!("Move the lookup behind the repository.");
+    let agent = ScriptedAgent::new(full_script(
+        &[
+            ("src/a.rs", 6),
+            ("src/b.rs", 6),
+            ("src/c.rs", 6),
+            ("src/d.rs", 6),
+        ],
+        vec![first, second],
+        vec![
+            json!({"n": 1, "rule": "ARCH-ONE-1"}),
+            json!({"n": 2, "rule": "ARCH-ONE-1"}),
+        ],
+        vec![
+            json!({"rule": "ARCH-ONE-1", "answer": "problems", "problems": [1, 2]}),
+            answer_clean("SEC-TWO-1", "src/b.rs", 1),
+        ],
+    ));
+    let (rows, _, _, failed, _, _) =
+        run_with(&agent, &files, &rules(), &corpus(), &options()).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let exported = exported_fix_ids(rows, &files);
+    let fix_of = |path: &str, line: u64| {
+        exported
+            .iter()
+            .find(|(p, l, r, _)| p == path && *l == line && r == "ARCH-ONE-1")
+            .unwrap_or_else(|| panic!("{path}:{line} in {exported:?}"))
+            .3
+            .clone()
+    };
+    let one = fix_of("src/a.rs", 4);
+    assert!(!one.is_empty(), "{exported:?}");
+    assert_eq!(fix_of("src/a.rs", 30), one, "{exported:?}");
+    assert_eq!(fix_of("src/b.rs", 2), one, "{exported:?}");
+    assert_eq!(fix_of("src/c.rs", 3), one, "{exported:?}");
+    assert_ne!(
+        fix_of("src/d.rs", 5),
+        one,
+        "another problem of the same rule in another file keeps its own Fix"
+    );
+}
+
+/// A problem at src/a.rs:4 listing `places`, with the rule answered `problems` for it.
+async fn run_with_places(files: &[(String, String)], places: Value) -> Vec<Finding> {
+    let mut p = problem(1, "src/a.rs", 4, "medium", "fn item_4() { run(4); }");
+    p["places"] = places;
+    let line_counts: Vec<(&str, usize)> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.lines().count()))
+        .collect();
+    let agent = ScriptedAgent::new(full_script(
+        &line_counts,
+        vec![p],
+        vec![json!({"n": 1, "rule": "ARCH-ONE-1"})],
+        vec![
+            json!({"rule": "ARCH-ONE-1", "answer": "problems", "problems": [1]}),
+            answer_clean("SEC-TWO-1", "src/b.rs", 1),
+        ],
+    ));
+    let (rows, _, _, failed, _, _) = run_with(&agent, files, &rules(), &corpus(), &options()).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    rows
+}
+
+#[tokio::test]
+async fn a_model_place_on_a_line_that_does_not_exist_is_a_held_row_not_an_empty_sibling() {
+    let rows = run_with_places(&repo_files(), json!([{"path": "src/b.rs", "line": 9999}])).await;
+    let held = rows
+        .iter()
+        .find(|f| f.path == "src/b.rs" && f.line == 9999)
+        .unwrap_or_else(|| panic!("the place is a row: {rows:?}"));
+    assert!(held.needs_review && !held.located, "{held:?}");
+    assert_eq!(held.rule_id, "AI-OPEN-QUESTION");
+    assert!(held.detail.contains("needs a decision"));
+    assert!(
+        rows.iter().all(|f| !f.snippet.is_empty()),
+        "no row with an empty snippet: {rows:?}"
+    );
+    assert!(rows
+        .iter()
+        .all(|f| f.rule_id != "ARCH-ONE-1" || f.line == 4));
+}
+
+#[tokio::test]
+async fn a_model_place_on_a_blank_line_is_a_held_row() {
+    let files = vec![
+        ("src/a.rs".to_string(), rust_file(6)),
+        (
+            "src/b.rs".to_string(),
+            "fn x() {}\n\nfn y() {}\n".to_string(),
+        ),
+    ];
+    let rows = run_with_places(&files, json!([{"path": "src/b.rs", "line": 2}])).await;
+    let held = rows
+        .iter()
+        .find(|f| f.path == "src/b.rs" && f.line == 2)
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    assert!(held.needs_review && !held.located, "{held:?}");
+    assert_eq!(held.rule_id, "AI-OPEN-QUESTION");
+}
+
+#[test]
+fn when_findings_and_problems_do_not_line_up_each_listed_place_is_a_held_row() {
+    use super::super::super::reply::{Problem, ProblemPlace};
+    let place = |p: &str, l: usize| ProblemPlace {
+        path: p.into(),
+        line: l,
+        end_line: None,
+    };
+    let problem_with = |n: u32, places: Vec<ProblemPlace>| Problem {
+        n,
+        path: "src/a.rs".into(),
+        line: 4,
+        end_line: None,
+        severity: "medium".into(),
+        title: "A title".into(),
+        code: "c".into(),
+        what: "w".into(),
+        why: "y".into(),
+        fix: "f".into(),
+        sure: true,
+        effort: "low".into(),
+        label: "l".into(),
+        places,
+    };
+    let problems = vec![
+        problem_with(1, vec![place("src/a.rs", 2), place("src/b.rs", 3)]),
+        problem_with(2, vec![place("src/b.rs", 1)]),
+    ];
+    let mut out = Vec::new();
+    // No findings at all for two problems: the lengths differ.
+    super::super::places_as_rows(REPO, &[], &problems, &repo_files(), &mut out);
+    assert_eq!(out.len(), 3, "one held row for each listed place: {out:?}");
+    assert!(out
+        .iter()
+        .all(|f| f.needs_review && !f.located && f.rule_id == "AI-OPEN-QUESTION"));
+}
+
+#[tokio::test]
+async fn a_cited_placeholder_problem_does_not_carry_the_rules_places() {
+    // The model's problem 1 is a placeholder the parser throws out. It has a row (marked), but it
+    // must not stand for the rule, so the engine's own rows keep the listed places.
+    let mut p = problem(1, "src/a.rs", 4, "medium", "x");
+    p["title"] = json!("placeholder");
+    p["what"] = json!("x");
+    p["why"] = json!("");
+    let agent = ScriptedAgent::new(full_script(
+        &[("src/a.rs", 6), ("src/b.rs", 4)],
+        vec![p],
+        vec![json!({"n": 1, "rule": "ARCH-LAYER-1"})],
+        vec![
+            answer_clean("ARCH-ONE-1", "src/a.rs", 1),
+            json!({
+                "rule": "ARCH-LAYER-1", "answer": "problems", "problems": [1],
+                "options": [
+                    {"id": "repo", "count": 8, "places": ["src/a.rs:1"]},
+                    {"id": "direct", "count": 2, "places": ["src/a.rs:2", "src/b.rs:3"]}
+                ]
+            }),
+        ],
+    ));
+    let (rows, _, _, failed, _, _) = run_with(
+        &agent,
+        &repo_files(),
+        &layer_rules(),
+        &corpus_with_layer(false),
+        &options(),
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let live: Vec<_> = layer_rows(&rows)
+        .into_iter()
+        .filter(|f| !crate::engine_discard::is_discarded(f))
+        .collect();
+    assert_eq!(
+        places_of(&live),
+        vec![("src/a.rs".to_string(), 2), ("src/b.rs".to_string(), 3)],
+        "the engine's departure rows stand: {rows:?}"
+    );
+    assert!(live
+        .iter()
+        .all(|f| f.detail.contains("The rest of the codebase follows")));
+}

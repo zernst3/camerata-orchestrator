@@ -507,16 +507,51 @@ fn rekey_no_convention(
     }
 }
 
-/// The text of a line of a repository file, trimmed and redacted; empty when the file or the
-/// line is not there.
-fn line_text(files: &[(String, String)], path: &str, line: usize) -> String {
-    let text = files
+/// The listed places of the problems as rows (`findings` and `problems` are in the same order).
+/// A place that checks out against its file is a sibling row of its problem. A place that cannot
+/// be checked (no such line, a blank one) is a problem needing a decision, and when the findings
+/// and problems do not line up every listed place is one, so no place vanishes.
+fn places_as_rows(
+    repo: &str,
+    findings: &[Finding],
+    problems: &[Problem],
+    files: &[(String, String)],
+    out: &mut Vec<Finding>,
+) {
+    let by_path: HashMap<&str, Vec<&str>> = files
         .iter()
-        .find(|(p, _)| p == path)
-        .and_then(|(_, t)| t.lines().nth(line.saturating_sub(1)));
-    let mut snippet = text.map_or_else(String::new, |t| t.trim().to_string());
-    crate::onboard::redact::redact_string(&mut snippet);
-    snippet
+        .map(|(p, t)| (p.as_str(), t.lines().collect()))
+        .collect();
+    let aligned = findings.len() == problems.len();
+    for (i, p) in problems.iter().enumerate() {
+        for place in &p.places {
+            let at = checklist::Place {
+                path: place.path.clone(),
+                line: Some(place.line),
+            };
+            let checked = if aligned {
+                conventions::checked_place(&by_path, &at)
+            } else {
+                None
+            };
+            match checked {
+                Some((path, line, text)) => {
+                    let mut snippet = text.trim().to_string();
+                    crate::onboard::redact::redact_string(&mut snippet);
+                    add_sibling(out, &findings[i], repo, &path, line, snippet);
+                }
+                None => {
+                    let held = conventions::held_problem_place_row(repo, &p.title, place);
+                    let held_already = out.iter().any(|f| {
+                        f.rule_id == held.rule_id && (&f.path, f.line) == (&held.path, held.line)
+                    });
+                    if !held_already {
+                        out.push(held);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Add the sibling row of `primary` at another place, unless that place is the problem's own or
@@ -805,6 +840,8 @@ pub async fn find_repo(
             reports[i]
                 .findings
                 .iter()
+                // A problem the engine threw out (a placeholder) is no report of the rule.
+                .filter(|f| !crate::engine_discard::is_discarded(f))
                 .filter_map(|f| f.captures.get(FINDER_PROBLEM_CAPTURE)?.parse().ok())
                 .map(move |n: u32| (at, n))
         })
@@ -854,35 +891,15 @@ pub async fn find_repo(
     // in the same sub-group, so the places share one fix.
     let mut siblings: Vec<Finding> = Vec::new();
     for r in &reports {
-        if r.findings.len() == r.problems.len() {
-            for (f, p) in r.findings.iter().zip(&r.problems) {
-                for place in &p.places {
-                    add_sibling(
-                        &mut siblings,
-                        f,
-                        repo,
-                        &place.path,
-                        place.line,
-                        line_text(&model_files, &place.path, place.line),
-                    );
-                }
-            }
-        }
+        places_as_rows(repo, &r.findings, &r.problems, &model_files, &mut siblings);
     }
-    if joints_findings.len() == joints_problems.len() {
-        for (f, p) in joints_findings.iter().zip(&joints_problems) {
-            for place in &p.places {
-                add_sibling(
-                    &mut siblings,
-                    f,
-                    repo,
-                    &place.path,
-                    place.line,
-                    line_text(&model_files, &place.path, place.line),
-                );
-            }
-        }
-    }
+    places_as_rows(
+        repo,
+        &joints_findings,
+        &joints_problems,
+        &model_files,
+        &mut siblings,
+    );
     for att in &conv.attached {
         let key = att.problem.to_string();
         let primary = answered

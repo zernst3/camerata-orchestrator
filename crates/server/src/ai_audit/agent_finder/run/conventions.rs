@@ -52,13 +52,17 @@ pub(super) struct AttachedSites {
 }
 
 /// A place checked against the repository: the path, the line and the text of the line.
-fn checked_place(
+pub(super) fn checked_place(
     files: &HashMap<&str, Vec<&str>>,
     place: &Place,
 ) -> Option<(String, usize, String)> {
     let line = place.line?;
     let lines = files.get(place.path.trim_start_matches("./"))?;
     let text = lines.get(line.checked_sub(1)?)?;
+    // A blank line cites no code: it cannot be checked.
+    if text.trim().is_empty() {
+        return None;
+    }
     Some((
         place.path.trim_start_matches("./").to_string(),
         line,
@@ -83,6 +87,32 @@ fn held_row(repo: &str, rule: &str, title: &str, option_label: &str, place: &Pla
         located: false,
         ..Finding::default()
     }
+}
+
+/// The problem needing a decision for a further place of a problem that could not be checked
+/// against the file (no such line, or a blank one).
+pub(super) fn held_problem_place_row(
+    repo: &str,
+    title: &str,
+    place: &super::super::reply::ProblemPlace,
+) -> Finding {
+    let mut held = Finding {
+        repo: repo.to_string(),
+        path: place.path.trim_start_matches("./").to_string(),
+        line: place.line,
+        rule_id: "AI-OPEN-QUESTION".to_string(),
+        severity: "low".to_string(),
+        snippet: "A listed place could not be checked".to_string(),
+        detail: format!(
+            "A place could not be checked{}A reviewer listed this place as another place of \"{title}\", but it could not be found in the file. It needs a decision.",
+            crate::ai_audit::digest_parse::HEADLINE_SEP,
+        ),
+        needs_review: true,
+        located: false,
+        ..Finding::default()
+    };
+    crate::onboard::redact::redact_finding(&mut held);
+    held
 }
 
 /// Build the recommendations, departures and defect rows from the answers of a repository's

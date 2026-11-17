@@ -31,8 +31,10 @@ fn promote(primary: &Finding, site: &MergedLocation) -> Finding {
 
 /// A sibling row of `primary` at another place of the same problem, written by a producer that
 /// found one thing in several places: a copy of the problem with its own repo, path, line and
-/// snippet, in the same sub-group, so the places share one fix. Built the way [`promote`] builds
-/// the row of an absorbed site.
+/// snippet, built the way [`promote`] builds the row of an absorbed site. It carries the
+/// problem's finder captures, and grouping reads them (`cluster_rows`) to put the rows of one
+/// problem in one sub-group, so the places share one fix; the copy has no sub-group of its own
+/// until then.
 pub fn sibling_row(
     primary: &Finding,
     repo: &str,

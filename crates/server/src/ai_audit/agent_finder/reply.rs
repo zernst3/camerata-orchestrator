@@ -515,10 +515,16 @@ pub fn parse_outputs_joined(
                                 p.places.push(place);
                             }
                         } else {
-                            out.notes.push(format!(
-                                "problem {}: the place {}:{} is outside this part, so it was dropped",
-                                p.n, place.path, place.line
-                            ));
+                            // A place outside the part is a lead, as a problem whose own path is
+                            // outside the part is.
+                            out.leads.push(Lead {
+                                n: 0,
+                                path: place.path,
+                                line: place.line,
+                                what: lead_text(&format!("{}. {}", p.title, p.what)),
+                                source_problem: Some(p.n),
+                                severity: Some(p.severity.clone()),
+                            });
                         }
                     }
                     out.problems.push(p);
