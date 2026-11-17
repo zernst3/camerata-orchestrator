@@ -647,6 +647,26 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                     group_id: r.group_path.get(2).cloned().unwrap_or_default(),
                 }
             };
+            // The partner sits at the same place: the same file, two lines on.
+            let (path, repo, line) = {
+                let first = queue
+                    .escalated
+                    .iter()
+                    .find(|r| r.site.site_key == a)
+                    .expect("the first row is in the queue");
+                (
+                    first.site.path.clone(),
+                    first.site.repo.clone(),
+                    first.site.line,
+                )
+            };
+            for r in &mut queue.escalated {
+                if r.site.site_key == b {
+                    r.site.path = path.clone();
+                    r.site.repo = repo.clone();
+                    r.site.line = line + 2;
+                }
+            }
             let (to_a, to_b) = (view_of(&queue, &a), view_of(&queue, &b));
             for r in &mut queue.escalated {
                 if r.site.site_key == a {

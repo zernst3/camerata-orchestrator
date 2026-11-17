@@ -435,6 +435,15 @@ fn the_possible_duplicate_page_lists_paired_rows_together_with_their_chip_and_th
         .filter(|r| !r.site.same_place_as.is_empty())
         .collect();
     assert_eq!(paired.len(), 2);
+    // The pair is at the same place: one file, lines within the server's `NEAR_LINES` (3).
+    const NEAR_LINES: usize = 3;
+    assert_eq!(paired[0].site.path, paired[1].site.path);
+    assert_eq!(paired[0].site.repo, paired[1].site.repo);
+    assert!(paired[0].site.line.abs_diff(paired[1].site.line) <= NEAR_LINES);
+    for r in &paired {
+        let other = &r.site.same_place_as[0];
+        assert_eq!(other.line.abs_diff(r.site.line) <= NEAR_LINES, true);
+    }
     // The look is on and its button says how many rows are paired.
     assert!(html.contains("Back to rank order (2 paired)"), "{html}");
     assert!(html.contains("review-queue-dup-together"));
