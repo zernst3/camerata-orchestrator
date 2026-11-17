@@ -68,14 +68,6 @@ fn agent_rows_with_none_of_the_reasons_get_no_flag() {
         convention_agent_row("low"),
         convention_agent_row("info"),
         open_question_row(),
-        {
-            // An agent row whose model rating is unsure: unsure is the agent's own wording of its
-            // rating, not one of the engine's reasons.
-            let mut f = agent_row();
-            f.captures
-                .insert(FINDER_SURE_CAPTURE.to_string(), "unsure".to_string());
-            f
-        },
     ];
     let index = FpIndex::new(&rows);
     for f in &rows {
@@ -189,4 +181,32 @@ fn the_flag_on_an_agent_row_changes_nothing_on_the_row() {
     assert_eq!(rows[0].severity, before.severity);
     assert_eq!(rows[0].needs_review, before.needs_review);
     assert_eq!(rows[0].captures, before.captures);
+}
+
+#[test]
+fn an_agent_row_the_finder_marked_unsure_is_flagged_for_the_models_own_doubt() {
+    let mut f = agent_row();
+    f.captures
+        .insert(FINDER_SURE_CAPTURE.to_string(), "unsure".to_string());
+    assert_eq!(reasons(&f), vec![FpReason::FinderUnsure]);
+    // It is its own reason: calibration doubt stays off.
+    assert!(!reasons(&f).contains(&FpReason::CalibrationDoubt));
+    let rows = [f.clone()];
+    assert_eq!(
+        FpIndex::new(&rows).of(&f).map(|p| p.reasons),
+        Some(vec![FpReason::FinderUnsure])
+    );
+    // A sure row is not flagged, and a row that is not an agent row never is, whatever it carries.
+    let mut sure = agent_row();
+    sure.captures
+        .insert(FINDER_SURE_CAPTURE.to_string(), "yes".to_string());
+    assert_eq!(reasons(&sure), Vec::<FpReason>::new());
+    let mut engine = agent_row();
+    engine.captures.clear();
+    engine
+        .captures
+        .insert(FINDER_SURE_CAPTURE.to_string(), "unsure".to_string());
+    engine.needs_review = false;
+    assert!(!is_agent_row(&engine));
+    assert!(!reasons(&engine).contains(&FpReason::FinderUnsure));
 }

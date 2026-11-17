@@ -1370,6 +1370,11 @@ pub const INTERNAL_GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         FP_REASON_WHERE,
     ),
     e(
+        FpReason::FinderUnsure.label(),
+        FpReason::FinderUnsure.sentence(),
+        FP_REASON_WHERE,
+    ),
+    e(
         POSSIBLE_DUPLICATE,
         "Another fix has a problem within a few lines of this one in the same file, so the two may \
          be one problem found twice. The fix ids are in the Possible duplicate of column. Both \

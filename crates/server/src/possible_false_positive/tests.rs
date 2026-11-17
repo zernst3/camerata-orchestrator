@@ -330,6 +330,8 @@ fn every_reason_is_reachable_and_listed_once_in_order() {
     let mut want: Vec<FpReason> = FpReason::ALL
         .into_iter()
         .filter(|r| *r != FpReason::ConventionRuleAtMediumOrHigher)
+        // Agent rows only (agent_tests.rs): this is an engine row.
+        .filter(|r| *r != FpReason::FinderUnsure)
         .collect();
     want.sort();
     assert_eq!(flag.reasons, want);

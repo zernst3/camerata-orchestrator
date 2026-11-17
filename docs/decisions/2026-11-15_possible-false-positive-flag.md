@@ -51,3 +51,5 @@ as the 2026-10-16 ruling on `could_be_intentional`.
 ## On the agent finder's rows (2026-11-17)
 
 An agent finder row (it carries the finder's captures, or is an open question) is held for review by construction, has no confidence and keeps the model's own rating. So on those rows reason (b) fires only on a recorded low confidence (never held-for-review alone), (g) never fires, and (f) fires only when a recorded raise (the unauthenticated-access floor) lifted the severity above the model's rating. Reasons (a), (c), (d) and (e) work as before wherever their data exists. An agent row is not counted as a deterministic row at its place. The old engine finder's results are unchanged.
+
+Coordinator ruling (2026-11-17): the agent finder's own "unsure" (the `finder-sure` capture) is the model's own doubt, so it is an eighth reason, `finder_unsure` ("Finder unsure"). It fires on agent rows only, and calibration doubt is not reused for it. The engine finder's results are unchanged.

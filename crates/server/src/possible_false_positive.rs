@@ -120,6 +120,7 @@ pub fn reasons_of(f: &Finding, deterministic_peer: bool) -> Vec<FpReason> {
             FpReason::ModelOnly,
             !agent && !deterministic_peer && !is_deterministic(f) && low_confidence(f),
         ),
+        (FpReason::FinderUnsure, agent && finder_unsure(f)),
     ];
     checks
         .into_iter()
@@ -209,6 +210,14 @@ fn severity_from_rule_minimum(f: &Finding) -> bool {
         .filter(|d| d.field == DisagreementField::Severity)
         .all(|d| rank(&d.mine) < shown);
     raised_by_minimum && stage1_below && stage2_below
+}
+
+/// (h) The agent finder marked the row `unsure`: the model's own doubt, kept apart from
+/// calibration's (agent rows carry no confidence).
+fn finder_unsure(f: &Finding) -> bool {
+    f.captures
+        .get(crate::ai_audit::agent_finder::reply::FINDER_SURE_CAPTURE)
+        .is_some_and(|v| v == "unsure")
 }
 
 /// (f) for an agent row: the model's own rating stands, so only a recorded raise (the R-8

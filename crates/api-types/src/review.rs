@@ -587,11 +587,13 @@ pub enum FpReason {
     /// Only the model reported the row, no deterministic row is at the same place, and its
     /// confidence is not high.
     ModelOnly,
+    /// The agent finder that reported the row marked it unsure: the model's own doubt.
+    FinderUnsure,
 }
 
 impl FpReason {
     /// Every reason, in the order a row lists them.
-    pub const ALL: [FpReason; 7] = [
+    pub const ALL: [FpReason; 8] = [
         Self::GroupReviewerDoubt,
         Self::CalibrationDoubt,
         Self::TestCodeOnly,
@@ -599,6 +601,7 @@ impl FpReason {
         Self::EvidenceNotFound,
         Self::SeverityFromRuleMinimum,
         Self::ModelOnly,
+        Self::FinderUnsure,
     ];
 
     /// The wire name (`group_reviewer_doubt`).
@@ -611,6 +614,7 @@ impl FpReason {
             Self::EvidenceNotFound => "evidence_not_found",
             Self::SeverityFromRuleMinimum => "severity_from_rule_minimum",
             Self::ModelOnly => "model_only",
+            Self::FinderUnsure => "finder_unsure",
         }
     }
 
@@ -629,6 +633,7 @@ impl FpReason {
             Self::EvidenceNotFound => "Evidence not found",
             Self::SeverityFromRuleMinimum => "Severity from the rule minimum",
             Self::ModelOnly => "Model only",
+            Self::FinderUnsure => "Finder unsure",
         }
     }
 
@@ -658,6 +663,9 @@ impl FpReason {
             Self::ModelOnly => {
                 "Only the model reported it and no deterministic check found the same place. Its \
                  confidence is low."
+            }
+            Self::FinderUnsure => {
+                "The model that found it said it was not sure the problem is real."
             }
         }
     }
