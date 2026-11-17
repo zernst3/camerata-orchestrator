@@ -1396,3 +1396,103 @@ async fn each_call_leaves_its_stream_records_outside_the_room() {
         .trace_note()
         .is_some_and(|n| n.contains("finder-traces")));
 }
+
+// ── Claude Code's own saved tool result ─────────────────────────────────────────────────────────
+
+const SAVED_ROOM: &str = "/Users/someone/work/state/camerata/runs/r1/finder-rooms/room-3d4f-ab_c";
+const SAVED_PROJECT: &str =
+    "-Users-someone-work-state-camerata-runs-r1-finder-rooms-room-3d4f-ab-c";
+
+fn saved_path(project: &str, session: &str, sub: &str) -> String {
+    format!("/Users/someone/.claude/projects/{project}/{session}/{sub}/toolu_011jz.txt")
+}
+
+/// A stream where a Grep result was too large and Claude Code saved it to `saved`, then the model
+/// ran `tool` with `input` on `named`.
+fn saved_result_stream(saved: &str, tool: &str, input: Value) -> String {
+    let lines = [
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "g1", "name": "Grep", "input": {"pattern": "x"}}]}}),
+        json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "g1", "content": format!(
+                "<persisted-output>\nOutput too large (25.2KB). Full output saved to: {saved}\n\nPreview (first 2KB):\n1:a\n</persisted-output>")}]}}),
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "r1", "name": tool, "input": input}]}}),
+        json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "r1", "content": "15\tline"}]}}),
+    ];
+    lines
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_saved(stream: &str) -> super::ParsedSession {
+    parse_session(stream, &[PathBuf::from(SAVED_ROOM)], &BTreeMap::new())
+}
+
+/// The saved file of the agent's own earlier call is not outside the room and covers nothing.
+#[test]
+fn a_read_of_the_saved_result_of_its_own_call_is_not_outside() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    let parsed = parse_saved(&saved_result_stream(
+        &saved,
+        "Read",
+        json!({"file_path": saved, "offset": 15}),
+    ));
+    assert!(parsed.outside.is_empty(), "{:?}", parsed.outside);
+    assert!(
+        !parsed
+            .trace
+            .iter()
+            .any(|e| matches!(e, ToolEvent::Read { .. })),
+        "{:?}",
+        parsed.trace
+    );
+}
+
+#[test]
+fn a_saved_result_path_that_is_not_the_one_announced_stays_outside() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    let cases = [
+        saved_path(SAVED_PROJECT, "other-session", "tool-results"),
+        saved_path(SAVED_PROJECT, "df722648-ec6a", "memory"),
+        saved_path(
+            "-Users-someone-work-state-camerata-runs-r1-finder-rooms-room-OTHER",
+            "df722648-ec6a",
+            "tool-results",
+        ),
+        format!("/Users/someone/.claude/projects/{SAVED_PROJECT}/df722648-ec6a/tool-results/../../x.txt"),
+    ];
+    for path in cases {
+        let parsed = parse_saved(&saved_result_stream(
+            &saved,
+            "Read",
+            json!({"file_path": path}),
+        ));
+        assert_eq!(parsed.outside, vec![path.clone()], "{path}");
+    }
+}
+
+/// Only a Read gets the exception, and only when the announced path is in this room's project
+/// folder (a result saved elsewhere is not trusted just because a result said so).
+#[test]
+fn only_a_read_of_the_saved_result_is_exempt() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    for (tool, input) in [
+        ("Grep", json!({"pattern": "x", "path": saved})),
+        ("Glob", json!({"pattern": saved})),
+        ("Write", json!({"file_path": saved, "content": "x"})),
+    ] {
+        let parsed = parse_saved(&saved_result_stream(&saved, tool, input));
+        assert!(!parsed.outside.is_empty(), "{tool}");
+    }
+    let foreign = saved_path("-Users-someone-elsewhere", "df722648-ec6a", "tool-results");
+    let parsed = parse_saved(&saved_result_stream(
+        &foreign,
+        "Read",
+        json!({"file_path": foreign}),
+    ));
+    assert_eq!(parsed.outside, vec![foreign]);
+}

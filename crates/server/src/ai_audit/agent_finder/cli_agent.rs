@@ -516,6 +516,57 @@ fn escapes(value: &str) -> bool {
     bad(&segment, first)
 }
 
+/// The text of a tool result.
+fn result_text(result: &Value) -> String {
+    match &result["content"] {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// The path Claude Code says it saved a large tool result to ("Full output saved to: <path>").
+fn saved_result_path(text: &str) -> Option<String> {
+    let rest = text.split("Full output saved to: ").nth(1)?;
+    let path = rest.lines().next()?.trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// Whether a Read names, exactly, a file Claude Code announced in this call's stream as the saved
+/// copy of one of its tool results, and that file is of the shape
+/// `<home>/.claude/projects/<this room's project folder>/<session>/tool-results/<file>`. The
+/// project folder is the room's absolute path with every character that is not a letter or digit
+/// replaced by `-`. The stream's own session id is not the folder's name, so the announcement
+/// stands in for the session check.
+fn is_own_saved_result(path: &str, saved: &[String], roots: &[PathBuf]) -> bool {
+    if !saved.iter().any(|s| s == path) {
+        return false;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let Some(at) = parts.iter().position(|p| *p == ".claude") else {
+        return false;
+    };
+    let tail = &parts[at + 1..];
+    if tail.len() != 5 || tail[0] != "projects" || tail[3] != "tool-results" {
+        return false;
+    }
+    if tail.iter().any(|p| p.is_empty() || *p == ".." || *p == ".") {
+        return false;
+    }
+    roots.iter().any(|root| {
+        let derived: String = root
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        derived == tail[1]
+    })
+}
+
 /// How many lines a tool result returned: the tool's own count when the record carries it, else
 /// the numbered lines of the text.
 fn lines_returned(record: &Value, result: &Value) -> usize {
@@ -571,6 +622,8 @@ pub(crate) fn parse_session(
     // is no longer in the agent's context.
     let mut compacted_at = 0usize;
     let mut assistant_records = 0usize;
+    // Files Claude Code saved for a large result of this call's own tools.
+    let mut saved: Vec<String> = Vec::new();
     for line in text.lines() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -648,6 +701,7 @@ pub(crate) fn parse_session(
             Some("user") => {
                 for b in &blocks {
                     if b["type"] == "tool_result" {
+                        saved.extend(saved_result_path(&result_text(b)));
                         if let Some(id) = b["tool_use_id"].as_str() {
                             let failed = b["is_error"].as_bool() == Some(true);
                             let lines = if failed {
@@ -688,6 +742,11 @@ pub(crate) fn parse_session(
         }
         match u.name.as_str() {
             "Read" => {
+                // Claude Code's own saved copy of an earlier result of this call: not outside,
+                // and it covers no room file.
+                if is_own_saved_result(&text_of("file_path"), &saved, roots) {
+                    continue;
+                }
                 let Some(path) = place(text_of("file_path"), false) else {
                     continue;
                 };
