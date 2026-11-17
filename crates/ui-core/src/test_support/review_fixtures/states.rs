@@ -637,7 +637,7 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                     .iter()
                     .find(|r| r.site.site_key == key)
                     .map(|r| &r.site)
-                    .unwrap();
+                    .expect("the paired row is in the queue");
                 camerata_api_types::review_view::SamePlaceView {
                     fix_id: format!("{:012x}", r.line * 7919 + r.path.len()),
                     title: r.headline.clone(),
