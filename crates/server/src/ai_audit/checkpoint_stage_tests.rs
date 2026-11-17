@@ -263,3 +263,20 @@ fn a_limit_typed_from_the_rounded_estimate_does_not_pause() {
     m.begin_pieces(2, 0);
     assert!(!m.projection_stops_piece());
 }
+
+#[test]
+fn the_pause_records_the_hard_limits_reserve_for_the_resume_advice() {
+    let m = UsageMeter::with_controls(plain(5.0, CheckpointPlan::default(), None));
+    m.begin_pieces(4, 0);
+    pay(&m, 3.0);
+    m.piece_finished(Some(3.0), 0);
+    assert!(m.projection_stops_piece());
+    let stop = m.checkpoint_stop().unwrap();
+    // The largest call so far cost $3.00: the hard limit holds that back for a piece in flight.
+    assert!((stop.reserve_usd - 3.0).abs() < 1e-9, "{stop:?}");
+    assert!(
+        stop.pause_message().contains("at least $15.00."),
+        "{}",
+        stop.pause_message()
+    );
+}

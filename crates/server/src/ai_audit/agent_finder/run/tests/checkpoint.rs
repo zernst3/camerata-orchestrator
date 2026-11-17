@@ -138,8 +138,9 @@ async fn a_projection_over_the_limit_stops_before_the_next_piece_and_spends_noth
         stop.pause_message(),
         "Paused before going over the approved amount. Approved $5.00, spent $3.00, 1 piece left. \
          New estimate $6.00 (+$1.00). Approve to continue: resume with a spend limit of at least \
-         $6.00."
+         $9.00."
     );
+    // The advised limit holds back the hard limit's reserve: the largest call so far, $3.00.
     let record = meter.cost_cap_record().expect("a limit was set");
     assert_eq!(record.cause(), CAUSE_PROJECTED);
     assert!(record.stopped_the_run());
@@ -151,7 +152,10 @@ async fn a_projection_over_the_limit_stops_before_the_next_piece_and_spends_noth
         .map(CostCheckpoint::operator_text)
         .collect();
     assert_eq!(lines.len(), 2, "{lines:?}");
-    assert_eq!(lines[0], "Spent $3.00 of $5.00 approved; projected $6.00");
+    assert_eq!(
+        lines[0],
+        "Spent $3.00 of $5.00 approved; projected $6.00 for the finder stage"
+    );
     assert_eq!(lines[1], stop.pause_message());
     // Recorded in the run folder.
     let on_disk: CostCheckpoint = serde_json::from_slice(

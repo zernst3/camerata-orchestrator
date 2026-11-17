@@ -175,6 +175,15 @@ pub struct CostCheckpoint {
     /// The stage the run stopped before (`agent finder` or a later stage's name).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stopped_before: String,
+    /// What the hard limit holds back for the pieces in flight (the admission rule refuses a new
+    /// piece once spent plus pieces in flight x the largest call reaches the limit). The advised
+    /// resume limit adds it, so a resume at exactly that figure is not refused its last pieces.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reserve_usd: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// A dollar figure rounded UP to whole cents, so a limit set to it covers the estimate.
@@ -187,7 +196,7 @@ impl CostCheckpoint {
     #[must_use]
     pub fn progress_line(&self) -> String {
         format!(
-            "Spent ${:.2} of ${:.2} approved; projected ${:.2}",
+            "Spent ${:.2} of ${:.2} approved; projected ${:.2} for the finder stage",
             self.spent_usd, self.approved_usd, self.projected_usd
         )
     }
@@ -212,7 +221,7 @@ impl CostCheckpoint {
              limit of at least ${:.2}.",
             self.approved_usd,
             self.spent_usd,
-            ceil_cents(estimate),
+            ceil_cents(estimate + self.reserve_usd),
         )
     }
 
@@ -330,6 +339,7 @@ mod tests {
             new_estimate_usd: Some(318.20),
             difference_usd: Some(58.20),
             stopped_before: "agent finder".into(),
+            reserve_usd: 0.0,
         }
     }
 
@@ -393,7 +403,7 @@ mod tests {
         };
         assert_eq!(
             cp.operator_text(),
-            "Spent $231.40 of $260.00 approved; projected $318.20"
+            "Spent $231.40 of $260.00 approved; projected $318.20 for the finder stage"
         );
     }
 
@@ -450,5 +460,25 @@ mod tests {
         let plan = CheckpointPlan::from_stored(dir.path()).unwrap();
         assert_eq!(plan.pieces, 4);
         assert!((plan.per_piece_usd - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_advised_resume_limit_includes_the_hard_limits_reserve() {
+        let cp = CostCheckpoint {
+            reserve_usd: 2.5,
+            ..stopped()
+        };
+        let text = cp.pause_message();
+        assert!(text.contains("New estimate $318.20 (+$58.20)"), "{text}");
+        assert!(text.contains("at least $320.70."), "{text}");
+    }
+
+    #[test]
+    fn the_progress_line_says_it_covers_the_finder_stage() {
+        let cp = CostCheckpoint {
+            stopped: false,
+            ..stopped()
+        };
+        assert!(cp.progress_line().ends_with("for the finder stage"));
     }
 }

@@ -2114,6 +2114,10 @@ fn render_outage(outage: &camerata_server::run_health::OutageRecord) -> String {
     )
 }
 
+/// How every pause message starts: a pause note older than the record (a late piece refreshes
+/// the stop) is not printed a second time.
+const PAUSE_NOTE_START: &str = "Paused before going over the approved amount";
+
 /// The spend-limit block of the final report: what was set, what was spent, and, when the limit
 /// stopped the run, that the export is incomplete and what was not run. Operator-only (dollar
 /// figures live here, never in the export).
@@ -2164,7 +2168,11 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
     } else {
         out.push_str(" (not reached)");
     }
-    for note in cap.notes.iter().filter(|n| Some(*n) != pause.as_ref()) {
+    for note in cap
+        .notes
+        .iter()
+        .filter(|n| pause.is_none() || !n.starts_with(PAUSE_NOTE_START))
+    {
         write!(out, "\n  {note}").ok();
     }
     out.push('\n');
@@ -2452,6 +2460,7 @@ mod tests {
                 new_estimate_usd: Some(6.0),
                 difference_usd: Some(1.0),
                 stopped_before: "agent finder".into(),
+                reserve_usd: 0.0,
             }),
             cap_usd: 5.0,
             spent_usd: 3.0,
@@ -2464,6 +2473,37 @@ mod tests {
         );
         assert!(!text.contains("REACHED"), "{text}");
         assert!(!text.contains(" -- "), "{text}");
+    }
+
+    /// A late piece refreshes the stop, so the note stored at the first pause is older than the
+    /// record: the report says the pause once.
+    #[test]
+    fn a_pause_is_rendered_once_whatever_older_pause_notes_were_stored() {
+        use camerata_server::cost_cap::CostCapRecord;
+        use camerata_server::cost_checkpoint::CostCheckpoint;
+        let stop = |spent: f64| CostCheckpoint {
+            approved_usd: 5.0,
+            spent_usd: spent,
+            projected_usd: 8.0,
+            pieces_done: 1,
+            pieces_left: 1,
+            stopped: true,
+            new_estimate_usd: Some(8.0),
+            difference_usd: Some(3.0),
+            stopped_before: "agent finder".into(),
+            reserve_usd: 0.0,
+        };
+        let record = CostCapRecord {
+            cap_usd: 5.0,
+            spent_usd: 6.0,
+            checkpoint: Some(stop(6.0)),
+            notes: vec![stop(3.0).pause_message(), "another note".into()],
+            ..CostCapRecord::default()
+        };
+        let text = render_cost_cap(&record);
+        assert_eq!(text.matches("Paused before").count(), 1, "{text}");
+        assert!(text.contains("spent $6.00, 1 piece left"), "{text}");
+        assert!(text.contains("another note"), "{text}");
     }
 
     /// A resume whose stored replies already cost more than the limit (tutorly, 2026-11-06:

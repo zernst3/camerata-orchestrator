@@ -2820,6 +2820,7 @@ fn paused_checkpoint() -> crate::cost_checkpoint::CostCheckpoint {
         new_estimate_usd: Some(120.0),
         difference_usd: Some(20.0),
         stopped_before: "agent finder".into(),
+        reserve_usd: 0.0,
     }
 }
 
