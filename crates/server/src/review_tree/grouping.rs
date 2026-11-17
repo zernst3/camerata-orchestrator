@@ -291,6 +291,34 @@ pub(super) fn cluster_rows(
                 }
             }
         }
+        // The rows of one problem the model reported at several places (a problem and its
+        // sibling rows) are one cause, in whatever files they lie: they share one fix.
+        let mut by_problem: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+        for &i in rows {
+            let captures = &findings[i].captures;
+            if let (Some(piece), Some(problem)) = (
+                captures.get(crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE),
+                captures.get(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE),
+            ) {
+                by_problem
+                    .entry((piece.as_str(), problem.as_str()))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        for members in by_problem.values().filter(|m| m.len() > 1) {
+            for pair in members.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                if findings[a].rule_id == findings[b].rule_id {
+                    uf.union(a, b);
+                    edges.push(Edge {
+                        a,
+                        b,
+                        signal: CauseSignal::SameProblem,
+                    });
+                }
+            }
+        }
         // Rows of different files that name the same captured object.
         let mut by_value: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for &i in rows {

@@ -49,3 +49,11 @@ fn the_briefs_hold_no_dash_characters() {
         assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'));
     }
 }
+
+#[test]
+fn both_briefs_tell_the_model_to_list_the_other_places_of_one_problem() {
+    let sentence = "When the same thing is wrong in several places, write it once at the clearest place and list the others in `places`.";
+    for text in [PIECE_BRIEF, JOINTS_BRIEF] {
+        assert!(text.contains(sentence), "{text}");
+    }
+}

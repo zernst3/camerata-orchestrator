@@ -158,6 +158,14 @@ impl BookkeepingCaptures {
                 {
                     continue;
                 }
+                // Which problem of which part a row is of stays too: grouping reads it, so the
+                // rows of one problem reported at several places are one cause. Neither names
+                // an object (both are bookkeeping keys), so they cannot fuse two rows.
+                if *key == crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE
+                    || *key == crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE
+                {
+                    continue;
+                }
 
                 if let Some(value) = f.captures.remove(*key) {
                     taken.push(((*key).to_string(), value));
@@ -4467,6 +4475,43 @@ mod tests {
                  only tier that can evaluate it: {semantic:?}"
             );
         }
+    }
+
+    /// Which problem of which part a row is of stays on the row through the merge stages, so
+    /// grouping can put the rows of one problem in one sub-group.
+    #[test]
+    fn the_finder_problem_captures_stay_on_the_rows_when_bookkeeping_is_held_aside() {
+        let mut f = Finding::default();
+        for (k, v) in [
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE,
+                "acme/app#1",
+            ),
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE,
+                "3",
+            ),
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE,
+                "Fix it.",
+            ),
+        ] {
+            f.captures.insert(k.to_string(), v.to_string());
+        }
+        let mut rows = vec![f];
+        BookkeepingCaptures::default().take(&mut rows);
+        assert!(rows[0]
+            .captures
+            .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE));
+        assert!(rows[0]
+            .captures
+            .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE));
+        assert!(
+            !rows[0]
+                .captures
+                .contains_key(crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE),
+            "the others are still held aside"
+        );
     }
 
     /// A capture that records bookkeeping (a severity-adjustment sentence, a history status, the

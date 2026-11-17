@@ -45,6 +45,7 @@ fn problem_for(n: u32, label: &str) -> Problem {
         sure: true,
         effort: "low".into(),
         label: label.into(),
+        places: Vec::new(),
     }
 }
 
@@ -740,4 +741,74 @@ fn the_word_for_sure_is_read_tolerantly_and_anything_else_is_unusable() {
         "{}",
         out.unusable[0].reason
     );
+}
+
+#[test]
+fn places_parse_and_a_problem_without_them_has_none() {
+    let mut with = entry(1, "src/a.rs");
+    with["places"] = serde_json::json!([
+        {"path": "src/b.rs", "line": 3},
+        {"path": "./src/a.rs", "line": 20, "end_line": 22}
+    ]);
+    let json = serde_json::json!([with, entry(2, "src/b.rs")]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.unusable.is_empty() && out.notes.is_empty(), "{out:?}");
+    assert_eq!(out.problems[0].places.len(), 2);
+    assert_eq!(out.problems[0].places[1].path, "src/a.rs");
+    assert_eq!(out.problems[0].places[1].end_line, Some(22));
+    assert!(out.problems[1].places.is_empty());
+}
+
+#[test]
+fn a_bad_place_is_dropped_with_a_note_and_an_out_of_piece_place_becomes_a_lead() {
+    let mut p = entry(1, "src/a.rs");
+    p["places"] = serde_json::json!([
+        {"path": "src/b.rs", "line": 3},
+        {"path": "src/elsewhere.rs", "line": 9},
+        {"path": "src/b.rs"},
+        "src/b.rs:4"
+    ]);
+    let json = serde_json::json!([p]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.unusable.is_empty(), "{:?}", out.unusable);
+    assert_eq!(out.problems.len(), 1);
+    assert_eq!(out.problems[0].places.len(), 1);
+    assert_eq!(out.notes.len(), 2, "{:?}", out.notes);
+    // A place outside the part is a lead, exactly as a problem whose own path is outside is.
+    assert_eq!(out.leads.len(), 1, "{:?}", out.leads);
+    assert_eq!(
+        (
+            out.leads[0].path.as_str(),
+            out.leads[0].line,
+            out.leads[0].source_problem
+        ),
+        ("src/elsewhere.rs", 9, Some(1))
+    );
+    assert_eq!(out.leads[0].severity.as_deref(), Some("high"));
+}
+
+#[test]
+fn places_that_are_not_a_list_are_ignored_with_a_note() {
+    let mut p = entry(1, "src/a.rs");
+    p["places"] = serde_json::json!("src/b.rs:3");
+    let json = serde_json::json!([p]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert_eq!(out.problems.len(), 1);
+    assert!(out.problems[0].places.is_empty());
+    assert_eq!(out.notes.len(), 1);
+}
+
+#[test]
+fn places_are_not_written_as_also_locations_by_the_reader() {
+    // Each place becomes a sibling row in the runner (A11); the reader leaves `also_locations`
+    // empty.
+    let mut p = problem_for(1, "missing authorization");
+    p.places = vec![super::reply::ProblemPlace {
+        path: "src/b.rs".into(),
+        line: 3,
+        end_line: None,
+    }];
+    let (findings, _) = to_findings("acme/app", "p1", &[p], &BTreeMap::new(), &HashSet::new());
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0].also_locations.is_empty());
 }

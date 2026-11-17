@@ -517,6 +517,82 @@ fn rekey_no_convention(
     }
 }
 
+/// The listed places of the problems as rows (`findings` and `problems` are in the same order).
+/// A place that checks out against its file is a sibling row of its problem. A place that cannot
+/// be checked (no such line, a blank one) is a problem needing a decision, and when the findings
+/// and problems do not line up every listed place is one, so no place vanishes.
+fn places_as_rows(
+    repo: &str,
+    findings: &[Finding],
+    problems: &[Problem],
+    files: &[(String, String)],
+    out: &mut Vec<Finding>,
+) {
+    let by_path: HashMap<&str, Vec<&str>> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.lines().collect()))
+        .collect();
+    let aligned = findings.len() == problems.len();
+    for (i, p) in problems.iter().enumerate() {
+        for place in &p.places {
+            let at = checklist::Place {
+                path: place.path.clone(),
+                line: Some(place.line),
+            };
+            let checked = if aligned {
+                conventions::checked_place(&by_path, &at)
+            } else {
+                None
+            };
+            match checked {
+                Some((path, line, text)) => {
+                    let mut snippet = text.trim().to_string();
+                    crate::onboard::redact::redact_string(&mut snippet);
+                    add_sibling(out, &findings[i], repo, &path, line, snippet);
+                }
+                None => {
+                    let held = conventions::held_problem_place_row(repo, &p.title, place);
+                    let held_already = out.iter().any(|f| {
+                        f.rule_id == held.rule_id && (&f.path, f.line) == (&held.path, held.line)
+                    });
+                    if !held_already {
+                        out.push(held);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Add the sibling row of `primary` at another place, unless that place is the problem's own or
+/// was already added for it.
+fn add_sibling(
+    siblings: &mut Vec<Finding>,
+    primary: &Finding,
+    repo: &str,
+    path: &str,
+    line: usize,
+    snippet: String,
+) {
+    if (primary.path.as_str(), primary.line) == (path, line) {
+        return;
+    }
+    let same_problem = |f: &Finding| {
+        [FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE]
+            .iter()
+            .all(|k| f.captures.get(*k) == primary.captures.get(*k))
+    };
+    if siblings
+        .iter()
+        .any(|f| same_problem(f) && (f.path.as_str(), f.line) == (path, line))
+    {
+        return;
+    }
+    siblings.push(crate::review_tree::sibling_row(
+        primary, repo, path, line, &snippet,
+    ));
+}
+
 /// Find the problems of one repository with the agent finder.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn find_repo(
@@ -762,10 +838,29 @@ pub async fn find_repo(
         selected.iter().map(|r| r.id.as_str()),
         &options.chosen_options,
     );
-    let piece_answers: Vec<Vec<checklist::EffectiveAnswer>> = reports
+    let answered: Vec<usize> = reports
         .iter()
-        .filter(|r| !r.effective.is_empty())
-        .map(|r| r.effective.clone())
+        .enumerate()
+        .filter(|(_, r)| !r.effective.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let piece_answers: Vec<Vec<checklist::EffectiveAnswer>> = answered
+        .iter()
+        .map(|&i| reports[i].effective.clone())
+        .collect();
+    // The problems that have a row: only those can carry the places of a rule's answer.
+    let problem_rows: HashSet<(usize, u32)> = answered
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &i)| {
+            reports[i]
+                .findings
+                .iter()
+                // A problem the engine threw out (a placeholder) is no report of the rule.
+                .filter(|f| !crate::engine_discard::is_discarded(f))
+                .filter_map(|f| f.captures.get(FINDER_PROBLEM_CAPTURE)?.parse().ok())
+                .map(move |n: u32| (at, n))
+        })
         .collect();
     let conv = conventions::conventions_from_answers(
         repo,
@@ -774,6 +869,7 @@ pub async fn find_repo(
         &model_files,
         &selected,
         corpus,
+        &problem_rows,
     );
     extras.notes.extend(conv.notes.iter().cloned());
     if let Some(note) = agent.trace_note() {
@@ -805,6 +901,45 @@ pub async fn find_repo(
         );
     }
 
+    // Every further place of a problem is a sibling row of it: from the model's own `places` and
+    // from the places a cited rule's checklist options listed. No producer writes
+    // `also_locations`; each place is a copy of the problem at its own path, line and snippet,
+    // in the same sub-group, so the places share one fix.
+    let mut siblings: Vec<Finding> = Vec::new();
+    for r in &reports {
+        places_as_rows(repo, &r.findings, &r.problems, &model_files, &mut siblings);
+    }
+    places_as_rows(
+        repo,
+        &joints_findings,
+        &joints_problems,
+        &model_files,
+        &mut siblings,
+    );
+    for att in &conv.attached {
+        let key = att.problem.to_string();
+        let primary = answered
+            .get(att.piece)
+            .and_then(|&i| reports.get(i))
+            .and_then(|r| {
+                r.findings
+                    .iter()
+                    .find(|f| f.captures.get(FINDER_PROBLEM_CAPTURE) == Some(&key))
+            });
+        if let Some(primary) = primary {
+            for site in &att.sites {
+                add_sibling(
+                    &mut siblings,
+                    primary,
+                    repo,
+                    &site.path,
+                    site.line,
+                    site.snippet.clone(),
+                );
+            }
+        }
+    }
+
     // Every problem so far, in piece order.
     let mut rows: Vec<Finding> = Vec::new();
     let mut proposed: Vec<ProposedRule> = Vec::new();
@@ -819,6 +954,7 @@ pub async fn find_repo(
         .iter()
         .filter(|f| !adopted_all.contains(&f.rule_id.to_ascii_uppercase()))
         .count();
+    rows.extend(siblings);
     rows.extend(unresolved);
     rows.extend(conv.departures);
     rows.extend(conv.undecided);
