@@ -78,6 +78,7 @@ fn problem(n: u32, path: &str) -> Problem {
         effort: "low".into(),
         label: "some label".into(),
         business: String::new(),
+        unsure_why: String::new(),
         places: Vec::new(),
     }
 }

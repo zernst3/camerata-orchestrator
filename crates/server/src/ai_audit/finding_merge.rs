@@ -1016,6 +1016,7 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE,
     crate::ai_audit::agent_finder::reply::FINDER_BUSINESS_CAPTURE,
     crate::ai_audit::agent_finder::reply::FINDER_WHY_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_UNSURE_WHY_CAPTURE,
     crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE,
     crate::ai_audit::agent_finder::reply::FINDER_END_LINE_CAPTURE,
     crate::ai_audit::agent_finder::reply::FINDER_RULES_CAPTURE,

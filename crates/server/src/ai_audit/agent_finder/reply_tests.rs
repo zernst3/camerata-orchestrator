@@ -7,7 +7,7 @@ use super::reply::{
     citation_map, parse_leads_answers, parse_outputs, scan_reply, to_findings, LeadOutcome,
     Problem, FINDER_BUSINESS_CAPTURE, FINDER_EFFORT_CAPTURE, FINDER_END_LINE_CAPTURE, FINDER_FIX_CAPTURE,
     FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE, FINDER_RULES_CAPTURE, FINDER_SURE_CAPTURE,
-    FINDER_WHY_CAPTURE,
+    FINDER_UNSURE_WHY_CAPTURE, FINDER_WHY_CAPTURE,
 };
 
 fn entry(n: u32, path: &str) -> serde_json::Value {
@@ -47,6 +47,7 @@ fn problem_for(n: u32, label: &str) -> Problem {
         effort: "low".into(),
         label: label.into(),
         business: String::new(),
+        unsure_why: String::new(),
         places: Vec::new(),
     }
 }
@@ -341,7 +342,8 @@ fn a_secret_in_the_models_quote_is_redacted_by_the_parser() {
         .contains(secret));
 }
 
-const ALL_FINDER_KEYS: [&str; 9] = [
+const ALL_FINDER_KEYS: [&str; 10] = [
+    FINDER_UNSURE_WHY_CAPTURE,
     FINDER_BUSINESS_CAPTURE,
     FINDER_WHY_CAPTURE,
     FINDER_PIECE_CAPTURE,
@@ -356,6 +358,7 @@ const ALL_FINDER_KEYS: [&str; 9] = [
 #[test]
 fn every_finder_capture_key_is_named_once_and_listed_as_bookkeeping() {
     let names = [
+        "finder-unsure-why",
         "finder-business",
         "finder-why",
         "finder-piece",
@@ -1010,4 +1013,33 @@ fn the_row_carries_the_technical_reason_on_its_own() {
         findings[0].captures.get("finder-why").map(String::as_str),
         Some("Any caller can delete any record.")
     );
+}
+
+#[test]
+fn unsure_why_is_read_tolerantly_and_rides_on_the_row_cleaned() {
+    let mut with = entry(1, "src/a.rs");
+    with["sure"] = serde_json::json!("unsure");
+    with["unsure_why"] = serde_json::json!("The caller may be checked elsewhere \u{2014} not shown.");
+    let mut blank = entry(2, "src/b.rs");
+    blank["sure"] = serde_json::json!("unsure");
+    blank["unsure_why"] = serde_json::json!("  ");
+    let mut odd = entry(3, "src/b.rs");
+    odd["unsure_why"] = serde_json::json!(5);
+    let json = serde_json::json!([with, blank, odd, entry(4, "src/a.rs")]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.unusable.is_empty(), "{:?}", out.unusable);
+    assert_eq!(out.problems.len(), 4);
+    assert!(out.problems[0].unsure_why.contains("checked elsewhere"));
+    assert!(out.problems[1..].iter().all(|p| p.unsure_why.is_empty()));
+
+    let (findings, _) = to_findings(
+        "acme/app",
+        "k",
+        &out.problems,
+        &BTreeMap::new(),
+        &HashSet::new(),
+    );
+    let text = findings[0].captures.get("finder-unsure-why").expect("capture");
+    assert!(text.contains("checked elsewhere") && !text.contains('\u{2014}'), "{text}");
+    assert!(!findings[1].captures.contains_key("finder-unsure-why"));
 }
