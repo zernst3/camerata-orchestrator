@@ -952,6 +952,8 @@ fn apply_splits(tree: &mut ReviewTree, rows: &mut [Finding], moves: &[SplitMove]
                         outliers: moved_outliers,
                         summary: None,
                         summary_source: TextSource::Reviewer,
+                        why_business: None,
+                        why_technical: None,
                         escalations: Vec::new(),
                         flags: Vec::new(),
                     },

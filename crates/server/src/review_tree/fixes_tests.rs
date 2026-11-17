@@ -18,6 +18,8 @@ fn node(id: &str) -> TreeNode {
         outliers: Vec::new(),
         summary: None,
         summary_source: TextSource::Model,
+        why_business: None,
+        why_technical: None,
         escalations: Vec::new(),
         flags: Vec::new(),
     }

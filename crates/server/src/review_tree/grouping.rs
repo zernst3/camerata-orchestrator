@@ -192,6 +192,8 @@ pub fn group_semantic(
             outliers,
             summary: None,
             summary_source: TextSource::Model,
+            why_business: None,
+            why_technical: None,
             escalations: Vec::new(),
             flags: Vec::new(),
         });
