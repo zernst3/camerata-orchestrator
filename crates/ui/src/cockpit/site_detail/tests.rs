@@ -557,7 +557,7 @@ fn the_merge_picker_lists_the_possible_duplicate_first_and_marks_the_pick() {
     assert!(html.contains("the row stays in the tree"));
     let list = html.find("site-detail-candidates").unwrap();
     let dup = html[list..]
-        .find("<span class=\"mark-dup\">possible duplicate")
+        .find("<span class=\"mark-dup\">Possible duplicate")
         .unwrap();
     let first_row = html[list..].find("<li").unwrap();
     assert!(first_row < dup, "the linked duplicate is a row of the list");
