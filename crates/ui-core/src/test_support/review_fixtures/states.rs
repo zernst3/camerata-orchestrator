@@ -664,7 +664,13 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 if r.site.site_key == b {
                     r.site.path = path.clone();
                     r.site.repo = repo.clone();
+                    let was = r.site.line;
                     r.site.line = line + 2;
+                    // The headline names its line ("... at line 321"): it follows the move.
+                    r.site.headline = r
+                        .site
+                        .headline
+                        .replace(&format!("line {was}"), &format!("line {}", r.site.line));
                 }
             }
             let (to_a, to_b) = (view_of(&queue, &a), view_of(&queue, &b));

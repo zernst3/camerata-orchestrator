@@ -443,6 +443,13 @@ fn the_possible_duplicate_page_lists_paired_rows_together_with_their_chip_and_th
     for r in &paired {
         let other = &r.site.same_place_as[0];
         assert!(other.line.abs_diff(r.site.line) <= NEAR_LINES);
+        // The link's title names the partner's actual line, not the one it had before it moved.
+        assert!(
+            other.title.contains(&format!("line {}", other.line)),
+            "{} vs line {}",
+            other.title,
+            other.line
+        );
     }
     // The look is on and its button says how many rows are paired.
     assert!(html.contains("Back to rank order (2 paired)"), "{html}");

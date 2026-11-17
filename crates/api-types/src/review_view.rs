@@ -263,7 +263,7 @@ pub struct FlaggedByView {
     pub line: usize,
 }
 
-/// A possible duplicate and what it points at (spec section 2: the `dup?` chip).
+/// A possible duplicate and what it points at (spec section 2: the Possible duplicate chip).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DuplicateView {
