@@ -1467,6 +1467,24 @@ impl ResumeQuery {
     }
 }
 
+/// True when the run's recorded reasons say the spend limit stopped it.
+pub(crate) fn reasons_name_spend_limit(reasons: &[String]) -> bool {
+    reasons.iter().any(|r| {
+        r.contains("the spend limit stopped the run")
+            || r.contains("the spend limit or an outage stopped the run")
+    })
+}
+
+/// True when the checkpoint the run left in its folder paused it.
+pub(crate) fn checkpoint_stopped(folder: &std::path::Path) -> bool {
+    std::fs::read(folder.join(crate::cost_checkpoint::CHECKPOINT_FILE))
+        .ok()
+        .and_then(|bytes| {
+            serde_json::from_slice::<crate::cost_checkpoint::CostCheckpoint>(&bytes).ok()
+        })
+        .is_some_and(|cp| cp.stopped)
+}
+
 /// Start the saved run `id` again as a background job that runs only the parts that are not
 /// done. The same job the scan button starts, with the saved request and `resume_run` set, so a
 /// refusal (the repo moved on, the rules changed, the run is in use) fails the job with the reason.
@@ -1489,6 +1507,21 @@ pub(crate) async fn run_resume_start(
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": why })),
+        )
+            .into_response();
+    }
+    // A raised limit is for a run the spend limit stopped (a hard stop or the checkpoint's
+    // pause); on any other run it would only change what the run may spend, so it is refused.
+    if query.max_cost_usd.is_some()
+        && !reasons_name_spend_limit(&record.incomplete_reasons)
+        && !checkpoint_stopped(&crate::run_store::runs_dir().join(&id))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "a new spend limit can be set only on a run the spend limit stopped; \
+                          this run was not stopped by its spend limit"
+            })),
         )
             .into_response();
     }

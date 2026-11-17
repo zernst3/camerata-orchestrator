@@ -301,6 +301,23 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
         "the audit part is done and is not remaining: {remaining:?}"
     );
 
+    // A raised limit is honoured only for a run the spend limit stopped: this one failed a part.
+    let refused = run_resume_start(
+        State(state.clone()),
+        Path(run_id.clone()),
+        Query(ResumeQuery {
+            max_cost_usd: Some(500.0),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let why = body_json(refused).await["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(why.contains("spend limit"), "{why}");
+
     // ── POST /api/inspections/:id/resume: the provider is back; only the failed part runs ────────
     std::fs::remove_file(&calibration_down).unwrap();
     let resume = run_resume_start(
@@ -1601,4 +1618,61 @@ fn a_resume_with_a_limit_raises_the_saved_runs_spend_limit() {
         Some(260.0),
         "no limit sent keeps the saved one"
     );
+}
+
+#[test]
+fn a_raised_limit_is_honoured_only_for_a_run_the_spend_limit_stopped() {
+    let stopped = vec![
+        "the spend limit stopped the run; 2 parts did not run and were never checked".to_string(),
+    ];
+    assert!(reasons_name_spend_limit(&stopped));
+    let outage_or_limit = vec![
+        "the spend limit or an outage stopped the run; 1 part did not run and was never checked"
+            .to_string(),
+    ];
+    assert!(reasons_name_spend_limit(&outage_or_limit));
+    let failed = vec!["1 part failed (a/b, calibration)".to_string()];
+    assert!(!reasons_name_spend_limit(&failed));
+    assert!(!reasons_name_spend_limit(&[]));
+    let outage = vec!["the run stopped because the model provider could not be reached; 1 part did not run and was never checked".to_string()];
+    assert!(!reasons_name_spend_limit(&outage));
+
+    // A stopped checkpoint in the run folder is the other way a run is a spend-limit stop.
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!checkpoint_stopped(dir.path()));
+    let cp = crate::cost_checkpoint::CostCheckpoint {
+        stopped: true,
+        ..Default::default()
+    };
+    std::fs::write(
+        dir.path().join(crate::cost_checkpoint::CHECKPOINT_FILE),
+        serde_json::to_vec(&cp).unwrap(),
+    )
+    .unwrap();
+    assert!(checkpoint_stopped(dir.path()));
+    let running = crate::cost_checkpoint::CostCheckpoint::default();
+    std::fs::write(
+        dir.path().join(crate::cost_checkpoint::CHECKPOINT_FILE),
+        serde_json::to_vec(&running).unwrap(),
+    )
+    .unwrap();
+    assert!(!checkpoint_stopped(dir.path()));
+}
+
+#[test]
+fn a_limit_that_is_not_a_positive_number_is_the_smallest_limit_never_no_limit() {
+    for bad in [f64::NAN, 0.0, -5.0, f64::INFINITY, f64::NEG_INFINITY] {
+        let req: AuditReq =
+            serde_json::from_value(serde_json::json!({ "max_cost_usd": null })).unwrap();
+        let req = AuditReq {
+            max_cost_usd: Some(bad),
+            ..req
+        };
+        let controls = req.run_controls(None, None);
+        assert_eq!(
+            controls.max_cost_usd,
+            Some(f64::MIN_POSITIVE),
+            "{bad} must not remove the guard"
+        );
+    }
 }
