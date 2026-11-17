@@ -45,6 +45,7 @@ fn problem_for(n: u32, label: &str) -> Problem {
         sure: true,
         effort: "low".into(),
         label: label.into(),
+        places: Vec::new(),
     }
 }
 
@@ -739,5 +740,84 @@ fn the_word_for_sure_is_read_tolerantly_and_anything_else_is_unusable() {
         out.unusable[0].reason.contains("yes or unsure"),
         "{}",
         out.unusable[0].reason
+    );
+}
+
+#[test]
+fn places_parse_and_a_problem_without_them_has_none() {
+    let mut with = entry(1, "src/a.rs");
+    with["places"] = serde_json::json!([
+        {"path": "src/b.rs", "line": 3},
+        {"path": "./src/a.rs", "line": 20, "end_line": 22}
+    ]);
+    let json = serde_json::json!([with, entry(2, "src/b.rs")]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.unusable.is_empty() && out.notes.is_empty(), "{out:?}");
+    assert_eq!(out.problems[0].places.len(), 2);
+    assert_eq!(out.problems[0].places[1].path, "src/a.rs");
+    assert_eq!(out.problems[0].places[1].end_line, Some(22));
+    assert!(out.problems[1].places.is_empty());
+}
+
+#[test]
+fn a_bad_or_out_of_piece_place_is_dropped_with_a_note_and_never_fails_the_file() {
+    let mut p = entry(1, "src/a.rs");
+    p["places"] = serde_json::json!([
+        {"path": "src/b.rs", "line": 3},
+        {"path": "src/elsewhere.rs", "line": 9},
+        {"path": "src/b.rs"},
+        "src/b.rs:4"
+    ]);
+    let json = serde_json::json!([p]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.unusable.is_empty(), "{:?}", out.unusable);
+    assert_eq!(out.problems.len(), 1);
+    assert_eq!(out.problems[0].places.len(), 1);
+    assert_eq!(out.notes.len(), 3, "{:?}", out.notes);
+    assert!(out.notes.iter().any(|n| n.contains("src/elsewhere.rs")));
+}
+
+#[test]
+fn places_that_are_not_a_list_are_ignored_with_a_note() {
+    let mut p = entry(1, "src/a.rs");
+    p["places"] = serde_json::json!("src/b.rs:3");
+    let json = serde_json::json!([p]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert_eq!(out.problems.len(), 1);
+    assert!(out.problems[0].places.is_empty());
+    assert_eq!(out.notes.len(), 1);
+}
+
+#[test]
+fn places_become_the_extra_places_of_the_row() {
+    let mut p = problem_for(1, "missing authorization");
+    p.places = vec![
+        super::reply::ProblemPlace {
+            path: "src/b.rs".into(),
+            line: 3,
+            end_line: None,
+        },
+        super::reply::ProblemPlace {
+            path: "src/b.rs".into(),
+            line: 3,
+            end_line: None,
+        },
+        super::reply::ProblemPlace {
+            path: "src/a.rs".into(),
+            line: 12,
+            end_line: None,
+        },
+    ];
+    let (findings, _) = to_findings("acme/app", "p1", &[p], &BTreeMap::new(), &HashSet::new());
+    assert_eq!(findings.len(), 1);
+    let sites: Vec<(&str, usize)> = findings[0]
+        .also_locations
+        .iter()
+        .map(|s| (s.path.as_str(), s.line))
+        .collect();
+    assert_eq!(
+        sites,
+        vec![("src/b.rs", 3)],
+        "de-duplicated, and not the main place"
     );
 }

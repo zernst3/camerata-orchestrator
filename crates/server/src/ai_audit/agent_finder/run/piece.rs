@@ -628,6 +628,9 @@ pub(super) fn report_of(
             .notes
             .push(format!("{}: the file {} {}", piece.key, u.file, u.reason));
     }
+    for n in &view.output.notes {
+        report.notes.push(format!("{}: {n}", piece.key));
+    }
     for file in rewritten_problem_files(&runs) {
         report.notes.push(format!(
             "{}: a later step wrote {file} again; the problems only the earlier version held were kept",
