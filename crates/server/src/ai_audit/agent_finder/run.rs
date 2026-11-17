@@ -562,7 +562,9 @@ fn places_as_rows(
                 None => {
                     let held = conventions::held_problem_place_row(repo, &p.title, place);
                     let held_already = out.iter().any(|f| {
-                        f.rule_id == held.rule_id && (&f.path, f.line) == (&held.path, held.line)
+                        f.rule_id == held.rule_id
+                            && (&f.path, f.line) == (&held.path, held.line)
+                            && f.detail == held.detail
                     });
                     if !held_already {
                         out.push(held);

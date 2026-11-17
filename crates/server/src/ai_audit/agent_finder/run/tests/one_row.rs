@@ -582,6 +582,46 @@ async fn a_text_place_with_a_malformed_line_is_one_held_row_and_no_lead() {
 }
 
 #[tokio::test]
+async fn two_problems_listing_the_same_path_only_place_keep_two_held_rows() {
+    let files = repo_files();
+    let mut p1 = problem(1, "src/a.rs", 4, "medium", "fn item_4() { run(4); }");
+    p1["places"] = json!(["src/b.rs"]);
+    let mut p2 = problem(2, "src/a.rs", 5, "medium", "fn item_5() { run(5); }");
+    p2["places"] = json!(["src/b.rs"]);
+    let line_counts: Vec<(&str, usize)> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.lines().count()))
+        .collect();
+    let agent = ScriptedAgent::new(full_script(
+        &line_counts,
+        vec![p1, p2],
+        vec![
+            json!({"n": 1, "rule": "ARCH-ONE-1"}),
+            json!({"n": 2, "rule": "SEC-TWO-1"}),
+        ],
+        vec![
+            json!({"rule": "ARCH-ONE-1", "answer": "problems", "problems": [1]}),
+            json!({"rule": "SEC-TWO-1", "answer": "problems", "problems": [2]}),
+        ],
+    ));
+    let (rows, _, _, failed, _, _) =
+        run_with(&agent, &files, &rules(), &corpus(), &options()).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let held: Vec<_> = rows
+        .iter()
+        .filter(|f| f.rule_id == "AI-OPEN-QUESTION" && f.path == "src/b.rs")
+        .collect();
+    assert_eq!(held.len(), 2, "{rows:?}");
+    for n in ["Problem 1 needs a fix", "Problem 2 needs a fix"] {
+        assert_eq!(
+            held.iter().filter(|f| f.detail.contains(n)).count(),
+            1,
+            "{n}: {held:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_place_with_no_path_makes_no_row() {
     let before = run_with_places(&repo_files(), json!([])).await;
     let rows = run_with_places(&repo_files(), json!([7, {"line": 3}, ""])).await;
