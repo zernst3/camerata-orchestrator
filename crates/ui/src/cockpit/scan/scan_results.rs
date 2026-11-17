@@ -189,6 +189,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     let on_resume = EventHandler::new(move |run_id: String| {
         resume_plan_shown.set(None);
         job_failed_message.set(None);
+        cost_checkpoint.set(None);
+        approve_step.set(ApproveStep::default());
         auditing.set(true);
         spawn(async move {
             let result = run_what_remains(

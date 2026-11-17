@@ -30,10 +30,10 @@ impl ApproveStep {
         }
     }
 
-    /// "Back" from the confirmation.
+    /// "Back" from the confirmation, or from "Stop here" (which is not a dead end).
     pub(in crate::cockpit) fn back(self) -> Self {
         match self {
-            Self::Confirm => Self::Pause,
+            Self::Confirm | Self::Left => Self::Pause,
             other => other,
         }
     }
@@ -209,6 +209,16 @@ pub(in crate::cockpit) fn CostCheckpointPanel(
                         p { class: "onboard-gate-hint cost-panel-left",
                             "The run stays paused. It can be resumed later."
                         }
+                        button {
+                            class: "btn-secondary cost-back",
+                            r#type: "button",
+                            onclick: move |_| {
+                                if let Some(handler) = on_back {
+                                    handler.call(());
+                                }
+                            },
+                            "Back"
+                        }
                     },
                 }
             }
@@ -334,6 +344,12 @@ mod tests {
         assert!(left.contains("The run stays paused"), "{left}");
         assert!(!left.contains("Confirm and resume"), "{left}");
         assert!(!left.contains("Approve and continue"), "{left}");
+        assert!(
+            left.contains("cost-back"),
+            "the way back is offered: {left}"
+        );
+        let again = html(Some(paused()), ApproveStep::Left.back());
+        assert!(again.contains("Approve and continue"), "{again}");
     }
 
     #[test]
@@ -388,6 +404,8 @@ mod tests {
         assert_eq!(asked.stop().limit_to_resume(&cp), None);
         assert_eq!(ApproveStep::Pause.stop(), ApproveStep::Left);
         assert_eq!(ApproveStep::Left.ask(), ApproveStep::Left);
+        // Stop here is not a dead end: Back returns to the pause with its buttons.
+        assert_eq!(ApproveStep::Left.back(), ApproveStep::Pause);
         assert_eq!(ApproveStep::Left.limit_to_resume(&cp), None);
         // A checkpoint that did not stop the run has nothing to resume.
         assert_eq!(ApproveStep::Confirm.limit_to_resume(&running()), None);
