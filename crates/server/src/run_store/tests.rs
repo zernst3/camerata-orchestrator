@@ -115,6 +115,7 @@ fn models() -> ModelsRecord {
         mode: "parallel".to_string(),
         resolved: true,
         group_review: String::new(),
+        finder: String::new(),
     }
 }
 
@@ -2414,4 +2415,59 @@ fn a_record_with_no_model_and_no_stored_replies_says_the_model_it_will_use() {
         notice.contains("claude-opus-5-5") && notice.contains("did not record"),
         "{notice}"
     );
+}
+
+// ---- a run keeps its finder for life ----
+
+fn controls_with_finder(
+    finder: crate::ai_audit::agent_finder::FinderChoice,
+) -> crate::cost_cap::RunControls {
+    crate::cost_cap::RunControls {
+        finder,
+        ..crate::cost_cap::RunControls::default()
+    }
+}
+
+#[test]
+fn a_run_records_the_finder_its_controls_chose() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    for (choice, word) in [
+        (FinderChoice::Agent, "agent"),
+        (FinderChoice::Engine, "engine"),
+    ] {
+        let rec =
+            ModelsRecord::from_picks(None, None, &controls_with_finder(choice), "cli", "parallel");
+        assert_eq!(rec.finder, word);
+    }
+}
+
+#[test]
+fn the_finder_hold_keeps_the_recorded_finder_and_defaults_to_the_engine() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let record = |word: &str| ModelsRecord {
+        finder: word.to_string(),
+        ..models()
+    };
+    // The project now says agent; the run started on the engine, or recorded nothing (an older run).
+    for recorded in ["engine", ""] {
+        let mut c = controls_with_finder(FinderChoice::Agent);
+        let note = record(recorded).hold_finder(&mut c);
+        assert_eq!(c.finder, FinderChoice::Engine, "recorded {recorded:?}");
+        assert_eq!(
+            note.as_deref(),
+            Some("The finder stays on engine, the one this run started with.")
+        );
+    }
+    // The project now says engine; the run started on the agent.
+    let mut c = controls_with_finder(FinderChoice::Engine);
+    let note = record("agent").hold_finder(&mut c);
+    assert_eq!(c.finder, FinderChoice::Agent);
+    assert_eq!(
+        note.as_deref(),
+        Some("The finder stays on agent, the one this run started with.")
+    );
+    // Nothing differs: no note.
+    let mut c = controls_with_finder(FinderChoice::Agent);
+    assert_eq!(record("agent").hold_finder(&mut c), None);
+    assert_eq!(c.finder, FinderChoice::Agent);
 }

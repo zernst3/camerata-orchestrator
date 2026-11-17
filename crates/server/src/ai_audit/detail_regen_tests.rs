@@ -2395,6 +2395,7 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
                 mode: "parallel".to_string(),
                 resolved: true,
                 group_review: String::new(),
+                finder: String::new(),
             },
             ai_scan_key: crate::scan_cache::AiScanKey {
                 audit_model: "claude-a".to_string(),

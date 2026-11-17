@@ -2428,7 +2428,7 @@ async fn onboard_audit(
             .as_ref()
             .map(project_chosen_options)
             .unwrap_or_default();
-        let audit = crate::onboard::audit_repos_controlled(
+        let audit = Box::pin(crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
             &sources,
             &selected,
@@ -2449,7 +2449,7 @@ async fn onboard_audit(
             corpus.as_ref(),
             &chosen_options,
             run_controls,
-        );
+        ));
         let (mut report, mut manifest) =
             crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
                 .await;
@@ -2945,6 +2945,11 @@ pub(crate) async fn start_audit_job(
                         prior = store.load_prior_manifest();
                         // The spend limit counts the whole run: the stored replies' cost joins it.
                         run_controls.stored_spend_usd = store.stored_usd();
+                        // The run keeps the finder it started with, whatever the project's
+                        // setting is now (a mid-run switch would mix two finders' work).
+                        if let Some(notice) = store.hold_finder(&mut run_controls) {
+                            store.add_note(&notice);
+                        }
                         // The group reviewer stays on the model the run started with.
                         // A project setting that is only the built-in default is no pick of
                         // its own (every new project is seeded with it).
@@ -3078,7 +3083,7 @@ pub(crate) async fn start_audit_job(
                     return;
                 }
             };
-            let audit = crate::checkpoint::with_run_checkpoints(
+            let audit = Box::pin(crate::checkpoint::with_run_checkpoints(
                 run_store.as_ref().map(|s| s.checkpoint_dir()),
                 crate::prompt_frame::with_seed(
                     token_seed,
@@ -3104,7 +3109,7 @@ pub(crate) async fn start_audit_job(
                         run_controls,
                     ),
                 ),
-            );
+            ));
             let (mut report, mut manifest) =
                 crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
                     .await;

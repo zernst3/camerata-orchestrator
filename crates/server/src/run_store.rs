@@ -240,6 +240,20 @@ pub struct ModelsRecord {
     /// names no model, and refuses a resume that names a different one.
     #[serde(default)]
     pub group_review: String,
+    /// The finder the run started with, `agent` or `engine`, so a resume keeps it (a run keeps its
+    /// finder for life) even after the project's setting changes. Empty for a run saved before it
+    /// was recorded, which ran the engine finder. Not part of [`Self::matches_for_resume`], so
+    /// older runs still resume: [`Self::hold_finder`] keeps it.
+    #[serde(default)]
+    pub finder: String,
+}
+
+/// The word a finder is recorded as.
+fn finder_word(finder: crate::ai_audit::agent_finder::FinderChoice) -> &'static str {
+    match finder {
+        crate::ai_audit::agent_finder::FinderChoice::Agent => "agent",
+        crate::ai_audit::agent_finder::FinderChoice::Engine => "engine",
+    }
 }
 
 impl ModelsRecord {
@@ -266,7 +280,28 @@ impl ModelsRecord {
             mode: mode.to_string(),
             resolved: true,
             group_review: controls.group_review_model_for(),
+            finder: finder_word(controls.finder).to_string(),
         }
+    }
+
+    /// Hold a resumed run to the finder it started with, and return the run note when that
+    /// differs from what the controls chose (the project's setting now). `agent` recorded gives
+    /// the agent finder; anything else, the empty record of an older run included, gives the
+    /// engine.
+    pub fn hold_finder(&self, controls: &mut crate::cost_cap::RunControls) -> Option<String> {
+        let recorded = if self.finder.trim() == "agent" {
+            crate::ai_audit::agent_finder::FinderChoice::Agent
+        } else {
+            crate::ai_audit::agent_finder::FinderChoice::Engine
+        };
+        let differs = controls.finder != recorded;
+        controls.finder = recorded;
+        differs.then(|| {
+            format!(
+                "The finder stays on {}, the one this run started with.",
+                finder_word(recorded)
+            )
+        })
     }
 
     /// Hold a resumed run to the group review model it started with, and return the one line the
@@ -988,6 +1023,11 @@ impl RunStore {
             }
         }
         models.hold_group_review_model(controls, explicit)
+    }
+
+    /// [`ModelsRecord::hold_finder`] for this run.
+    pub fn hold_finder(&self, controls: &mut crate::cost_cap::RunControls) -> Option<String> {
+        self.record().models.hold_finder(controls)
     }
 
     /// The secret the prompt tokens of this run are drawn from.
