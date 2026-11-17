@@ -103,3 +103,13 @@ fn the_table_has_a_heading_and_a_line_for_each_unit() {
     assert!(lines[1].contains("api") && lines[1].contains('3') && lines[1].contains("100"));
     assert!(lines[2].contains("web") && lines[2].contains('5') && lines[2].contains("200"));
 }
+
+#[test]
+fn the_repo_line_shows_the_estimate_figures_and_the_range() {
+    let e = estimate_agent_finder(&[piece("acme", 10, 4_000), piece("acme", 12, 6_000)]);
+    let line = agent_finder_repo_line("acme/api", e.pieces, e.expected_usd, e.low_usd, e.high_usd);
+    assert_eq!(
+        line,
+        "acme/api: finder stage about $13.10 (range $7.86 to $23.58), 2 piece(s)"
+    );
+}
