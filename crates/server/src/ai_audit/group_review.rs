@@ -430,14 +430,61 @@ fn array_of<'v>(obj: &'v Obj, key: &str) -> Result<&'v Vec<serde_json::Value>, S
 const SEVERITY_LABELS: [&str; 4] = ["critical", "high", "medium", "low"];
 const REAL_LABELS: [&str; 3] = ["yes", "no", "unclear"];
 
+/// The JSON object of a reply. The span from the first brace to the last is read first (a fence
+/// or prose around one object). When that is not one object, the top-level `{...}` blocks are
+/// tried, and only the final one counts: a model that wrote a malformed object and then a
+/// corrected one means the corrected one, and a valid object followed by a malformed correction
+/// is refused, never read as the stale first one. A reply with no readable object is refused, and the
+/// refusal says where the JSON broke.
+fn reply_object(raw: &str) -> Result<serde_json::Value, String> {
+    let Some(span) = extract_json_object(raw) else {
+        return Err("the reply is not a JSON object".to_string());
+    };
+    let first_error = match serde_json::from_str::<serde_json::Value>(span) {
+        Ok(v) if v.is_object() => return Ok(v),
+        Ok(_) => return Err("the reply is not a JSON object".to_string()),
+        Err(e) => e,
+    };
+    let (mut depth, mut start, mut in_string, mut escaped) = (0usize, 0usize, false, false);
+    let mut last: Option<&str> = None;
+    for (i, c) in raw.char_indices() {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' if depth > 0 => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    last = Some(&raw[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    last.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+        .filter(serde_json::Value::is_object)
+        .ok_or_else(|| format!("the reply is not a JSON object ({first_error})"))
+}
+
 impl Stage2Reply {
     /// Read a reply. `Err` carries the reason it is turned down: not JSON, a field the schema
     /// does not have, a reason outside the closed lists, a value of the wrong kind. Whether an
     /// index names a member of the group is not judged here (see [`apply_rule`]).
     pub fn parse(raw: &str) -> Result<Self, String> {
-        let json = extract_json_object(raw)
-            .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
-            .ok_or_else(|| "the reply is not a JSON object".to_string())?;
+        let json = reply_object(raw)?;
         let top = exact_object(
             &json,
             &[
@@ -554,9 +601,7 @@ impl Stage2Reply {
 
 /// The rule-level summary reply: exactly `{"summary": "..."}`.
 pub(crate) fn parse_rule_summary(raw: &str) -> Result<String, String> {
-    let json = extract_json_object(raw)
-        .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
-        .ok_or_else(|| "the reply is not a JSON object".to_string())?;
+    let json = reply_object(raw)?;
     let o = exact_object(&json, &["summary"], "the reply")?;
     prose_of(o, "summary", "the reply")
 }

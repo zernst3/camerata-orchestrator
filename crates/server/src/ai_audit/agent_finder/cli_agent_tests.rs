@@ -1396,3 +1396,182 @@ async fn each_call_leaves_its_stream_records_outside_the_room() {
         .trace_note()
         .is_some_and(|n| n.contains("finder-traces")));
 }
+
+// ── Claude Code's own saved tool result ─────────────────────────────────────────────────────────
+
+const SAVED_ROOM: &str = "/Users/auditor/work/state/camerata/runs/r1/finder-rooms/room-3d4f-ab_c";
+const SAVED_PROJECT: &str =
+    "-Users-auditor-work-state-camerata-runs-r1-finder-rooms-room-3d4f-ab-c";
+
+fn saved_path(project: &str, session: &str, sub: &str) -> String {
+    format!("/Users/auditor/.claude/projects/{project}/{session}/{sub}/toolu_011jz.txt")
+}
+
+/// A stream where a Grep result was too large and Claude Code saved it to `saved`, then the model
+/// ran `tool` with `input` on `named`.
+fn saved_result_stream(saved: &str, tool: &str, input: Value) -> String {
+    let lines = [
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "g1", "name": "Grep", "input": {"pattern": "x"}}]}}),
+        json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "g1", "content": format!(
+                "<persisted-output>\nOutput too large (25.2KB). Full output saved to: {saved}\n\nPreview (first 2KB):\n1:a\n</persisted-output>")}]}}),
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "r1", "name": tool, "input": input}]}}),
+        json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "r1", "content": "15\tline"}]}}),
+    ];
+    lines
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_saved(stream: &str) -> super::ParsedSession {
+    super::parse_session_in(
+        stream,
+        &[PathBuf::from(SAVED_ROOM)],
+        &BTreeMap::new(),
+        Path::new("/Users/auditor/.claude"),
+    )
+}
+
+fn user_result(id: &str, content: &str, num_lines: Option<u64>) -> String {
+    let mut r = json!({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": id, "content": content}]}});
+    if let Some(n) = num_lines {
+        r["toolUseResult"] = json!({"type": "text", "file": {"numLines": n}});
+    }
+    r.to_string()
+}
+
+fn tool_use(id: &str, name: &str, input: Value) -> String {
+    json!({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": id, "name": name, "input": input}]}})
+    .to_string()
+}
+
+/// Hardening: only Claude Code's own `<persisted-output>` framing announces a saved file. A room
+/// file whose text says "Full output saved to:" does not.
+#[test]
+fn a_file_that_says_it_was_saved_elsewhere_announces_nothing() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    let stream = [
+        tool_use("r0", "Read", json!({"file_path": "src/a.rs"})),
+        user_result(
+            "r0",
+            &format!("1\t// Full output saved to: {saved}\n"),
+            None,
+        ),
+        tool_use("r1", "Read", json!({"file_path": saved})),
+        user_result("r1", "1\tx", None),
+    ]
+    .join("\n");
+    let parsed = parse_saved(&stream);
+    assert_eq!(parsed.outside, vec![saved]);
+}
+
+/// Hardening: the part before `.claude` must be Claude Code's own state folder.
+#[test]
+fn a_saved_path_under_another_dot_claude_folder_stays_outside() {
+    let saved = format!(
+        "/Users/auditor/other/.claude/projects/{SAVED_PROJECT}/df722648-ec6a/tool-results/toolu_011jz.txt"
+    );
+    let parsed = parse_saved(&saved_result_stream(
+        &saved,
+        "Read",
+        json!({"file_path": saved}),
+    ));
+    assert_eq!(parsed.outside, vec![saved]);
+}
+
+/// Hardening: a Read result in the persisted-output framing showed only a preview, so it covers
+/// nothing even when the tool reports many lines.
+#[test]
+fn a_read_that_came_back_as_a_saved_preview_covers_no_lines() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    let framed = format!(
+        "<persisted-output>\nOutput too large (90KB). Full output saved to: {saved}\n\nPreview (first 2KB):\n1\ta\n</persisted-output>"
+    );
+    let stream = [
+        tool_use("r0", "Read", json!({"file_path": "src/a.rs"})),
+        user_result("r0", &framed, Some(500)),
+    ]
+    .join("\n");
+    let parsed = parse_saved(&stream);
+    let covered: usize = parsed
+        .trace
+        .iter()
+        .map(|e| match e {
+            ToolEvent::Read { lines_returned, .. } => *lines_returned,
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(covered, 0, "{:?}", parsed.trace);
+}
+
+/// The saved file of the agent's own earlier call is not outside the room and covers nothing.
+#[test]
+fn a_read_of_the_saved_result_of_its_own_call_is_not_outside() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    let parsed = parse_saved(&saved_result_stream(
+        &saved,
+        "Read",
+        json!({"file_path": saved, "offset": 15}),
+    ));
+    assert!(parsed.outside.is_empty(), "{:?}", parsed.outside);
+    assert!(
+        !parsed
+            .trace
+            .iter()
+            .any(|e| matches!(e, ToolEvent::Read { .. })),
+        "{:?}",
+        parsed.trace
+    );
+}
+
+#[test]
+fn a_saved_result_path_that_is_not_the_one_announced_stays_outside() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    let cases = [
+        saved_path(SAVED_PROJECT, "other-session", "tool-results"),
+        saved_path(SAVED_PROJECT, "df722648-ec6a", "memory"),
+        saved_path(
+            "-Users-auditor-work-state-camerata-runs-r1-finder-rooms-room-OTHER",
+            "df722648-ec6a",
+            "tool-results",
+        ),
+        format!("/Users/auditor/.claude/projects/{SAVED_PROJECT}/df722648-ec6a/tool-results/../../x.txt"),
+    ];
+    for path in cases {
+        let parsed = parse_saved(&saved_result_stream(
+            &saved,
+            "Read",
+            json!({"file_path": path}),
+        ));
+        assert_eq!(parsed.outside, vec![path.clone()], "{path}");
+    }
+}
+
+/// Only a Read gets the exception, and only when the announced path is in this room's project
+/// folder (a result saved elsewhere is not trusted just because a result said so).
+#[test]
+fn only_a_read_of_the_saved_result_is_exempt() {
+    let saved = saved_path(SAVED_PROJECT, "df722648-ec6a", "tool-results");
+    for (tool, input) in [
+        ("Grep", json!({"pattern": "x", "path": saved})),
+        ("Glob", json!({"pattern": saved})),
+        ("Write", json!({"file_path": saved, "content": "x"})),
+    ] {
+        let parsed = parse_saved(&saved_result_stream(&saved, tool, input));
+        assert!(!parsed.outside.is_empty(), "{tool}");
+    }
+    let foreign = saved_path("-Users-auditor-elsewhere", "df722648-ec6a", "tool-results");
+    let parsed = parse_saved(&saved_result_stream(
+        &foreign,
+        "Read",
+        json!({"file_path": foreign}),
+    ));
+    assert_eq!(parsed.outside, vec![foreign]);
+}

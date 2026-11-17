@@ -2897,4 +2897,50 @@ async fn a_group_review_priced_over_the_approved_amount_is_not_started() {
         (stop.new_estimate_usd.unwrap() - (5.0 + price)).abs() < 1e-9,
         "{stop:?}"
     );
+
+// ── A reply with a corrected object after a malformed one ───────────────────────────────────────
+
+/// What a real run got from Fable on the CLI backend: an object with a stray `: ""` after an
+/// escalation reason (not valid JSON), then "Correction: ... use this one instead", then the same
+/// object with the entry fixed. The span from the first brace to the last was not one object.
+fn malformed_then_corrected() -> (String, String) {
+    let good = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "needs_more_code", "rank": 1, "why": "w"}],
+    })
+    .to_string();
+    let bad = good.replace(
+        "\"reason\":\"needs_more_code\"",
+        "\"reason\":\"needs_more_code\":\"\"",
+    );
+    assert_ne!(bad, good);
+    let reply = format!(
+        "{bad}\n\nCorrection: the object above contains a malformed entry, so please use this one instead.\n\n{good}"
+    );
+    (reply, bad)
+}
+
+#[test]
+fn a_corrected_object_after_a_malformed_one_is_read() {
+    let (reply, bad) = malformed_then_corrected();
+    let parsed = Stage2Reply::parse(&reply).expect("the corrected object is readable");
+    assert_eq!(parsed.escalations.len(), 1);
+    assert_eq!(parsed.summary, "s");
+    // The rule summary reader does the same.
+    let summary = "{\"summary\": \"a\" \"b\"}\nuse this one instead:\n{\"summary\": \"ok\"}";
+    assert_eq!(parse_rule_summary(summary).unwrap(), "ok");
+    // A malformed object alone cannot be read, and the refusal says where the JSON broke.
+    let why = Stage2Reply::parse(&bad).unwrap_err();
+    assert!(why.contains("not a JSON object"), "{why}");
+    assert!(why.contains("column"), "{why}");
+}
+
+/// Only the final block counts: a valid object, prose, then a malformed "correction" is refused,
+/// never read as the stale first object.
+#[test]
+fn a_malformed_correction_after_a_valid_object_is_refused() {
+    let (reply, bad) = malformed_then_corrected();
+    let good = reply.rsplit_once("\n\n").unwrap().1.to_string();
+    let stale = format!("{good}\n\nCorrection: use this one instead.\n\n{bad}");
+    assert!(Stage2Reply::parse(&stale).is_err());
 }
