@@ -16,7 +16,7 @@ fn count(html: &str, needle: &str) -> usize {
 
 #[test]
 fn every_queue_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 11, "every queue state is built");
+    assert_eq!(states().len(), 12, "every queue state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -325,4 +325,92 @@ fn the_merge_picker_on_an_empty_pool_says_what_the_pool_is_and_the_remedy_that_w
         "{html}"
     );
     assert!(html.contains("site-detail-merge-form"));
+}
+
+#[test]
+fn the_possible_false_positive_page_lists_flagged_rows_first_with_their_chip_and_reasons() {
+    use camerata_api_types::review::FpReason;
+    let html = page("queue/possible-false-positive");
+    let Some(StateFixture {
+        body: Body::Queue(body),
+        ..
+    }) = fixture("queue/possible-false-positive")
+    else {
+        panic!("no fixture");
+    };
+    let Loaded::Ready(v) = &body.queue else {
+        panic!("the queue is loaded");
+    };
+    let flagged = v
+        .escalated
+        .iter()
+        .filter(|r| r.site.possible_false_positive.is_some())
+        .count();
+    assert!(flagged >= 2, "{flagged}");
+    // The look is on, and its button says how many rows are flagged.
+    assert!(
+        html.contains(&format!("Back to rank order ({flagged} flagged)")),
+        "{html}"
+    );
+    assert!(html.contains("aria-pressed=\"true\""));
+    // Every flagged row carries the chip, and the first rows drawn are the flagged ones.
+    assert_eq!(
+        count(&html, "class=\"mark-fp\""),
+        flagged + 1,
+        "one chip per flagged row in the table, and one in the detail head"
+    );
+    let state = QueueState {
+        fp_first: true,
+        ..QueueState::default()
+    };
+    let l = layout(v, &state);
+    // Inside each band the flagged rows lead; the bands keep their order around the line.
+    let drawn: Vec<(camerata_ui_core::queue::Band, bool)> = l
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row(r) => Some((
+                camerata_ui_core::queue::band_of(r),
+                r.site.possible_false_positive.is_some(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut bands: Vec<_> = drawn.iter().map(|(b, _)| *b).collect();
+    bands.dedup();
+    for band in bands {
+        let flags: Vec<bool> = drawn
+            .iter()
+            .filter(|(b, _)| *b == band)
+            .map(|(_, f)| *f)
+            .collect();
+        let n = flags.iter().filter(|f| **f).count();
+        assert!(flags[..n].iter().all(|f| *f), "{band:?}: {flags:?}");
+    }
+    assert!(
+        drawn.first().is_some_and(|(_, f)| *f),
+        "the first row drawn is flagged"
+    );
+    // The focused row's reasons, each with its sentence, in the detail.
+    assert!(html.contains("site-detail-fp"), "{html}");
+    for reason in [
+        FpReason::ConventionRuleAtMediumOrHigher,
+        FpReason::ModelOnly,
+    ] {
+        assert!(html.contains(reason.label()), "{reason:?}");
+        assert!(
+            html.contains(&reason.sentence().replace('\'', "&#39;")),
+            "{reason:?}"
+        );
+    }
+    // A look only: the line is still drawn once and every escalated row is still there.
+    assert_eq!(count(&html, "class=\"queue-line\""), 1);
+    assert_eq!(l.row_count(), v.escalated.len().min(ROWS_PER_PAGE));
+}
+
+#[test]
+fn a_queue_with_no_flagged_row_draws_no_possible_false_positive_button() {
+    let html = page("queue/over-budget");
+    assert!(!html.contains("review-queue-fp-first"));
+    assert!(!html.contains("Possible false positives first"));
 }

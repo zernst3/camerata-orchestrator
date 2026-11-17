@@ -117,6 +117,8 @@ pub struct ReviewComposer<'a> {
     gate: ExportGateView,
     held: HashMap<String, HoldReason>,
     verdicts: HashMap<&'a str, &'a EngineCheckVerdict>,
+    /// The engine's reasons to doubt each kept row, worked out once for the report.
+    fp: crate::possible_false_positive::FpIndex,
 }
 
 impl<'a> ReviewComposer<'a> {
@@ -243,6 +245,7 @@ impl<'a> ReviewComposer<'a> {
             gate,
             held,
             verdicts,
+            fp: crate::possible_false_positive::FpIndex::new(&report.findings),
         }
     }
 

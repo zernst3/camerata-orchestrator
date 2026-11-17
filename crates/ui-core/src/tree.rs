@@ -24,7 +24,9 @@ pub mod state;
 
 use camerata_api_types::audit::FindingKind;
 use camerata_api_types::decisions::DecisionState;
-use camerata_api_types::review::{EscalationReason, EscalationState, OutlierReason};
+use camerata_api_types::review::{
+    EscalationReason, EscalationState, OutlierReason, PossibleFalsePositive,
+};
 use camerata_api_types::review_view::{Marker, NodeCountsView, SiteRow, TreeLevel};
 
 // ── What a screen is showing ──────────────────────────────────────────────────────────────
@@ -354,6 +356,11 @@ pub fn marker_chips(row: &SiteRow) -> Vec<Chip> {
                     tip: dup.map_or_else(String::new, |d| d.hint.clone()),
                 }
             }
+            Marker::PossibleFalsePositive => Chip {
+                class: "mark-fp",
+                label: PossibleFalsePositive::TERM.to_string(),
+                tip: possible_false_positive_tip(row),
+            },
             Marker::Carried => {
                 let by = row.carried_by.as_ref();
                 Chip {
@@ -374,6 +381,19 @@ pub fn marker_chips(row: &SiteRow) -> Vec<Chip> {
         chips.push(chip);
     }
     chips
+}
+
+/// The hover text of the Possible false positive chip: every reason the engine has, as its
+/// sentence, and what the flag does not do.
+pub fn possible_false_positive_tip(row: &SiteRow) -> String {
+    let mut parts = vec!["The engine has reasons to doubt this row.".to_string()];
+    parts.extend(
+        row.possible_false_positive
+            .as_ref()
+            .map(PossibleFalsePositive::sentences),
+    );
+    parts.push("It stays a problem until you rule it out.".to_string());
+    parts.join(" ")
 }
 
 fn escalation_tip(row: &SiteRow, over: bool) -> String {

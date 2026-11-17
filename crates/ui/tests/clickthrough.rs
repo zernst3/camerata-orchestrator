@@ -524,6 +524,38 @@ fn lowering_the_line_sends_nothing_but_the_queue_reload() {
     stack.assert_no_model_calls();
 }
 
+#[test]
+fn a_secret_escalated_from_a_test_fixture_is_not_flagged_as_a_possible_false_positive() {
+    // The seed's queue holds sec-05: a hardcoded secret in tests/fixtures/keys.rs, escalated as a
+    // rule misfit. A real secret committed in a test is still a secret, so the engine does not
+    // flag it for test scope, and nothing else in the queue gives it a reason to doubt a row.
+    let stack = Stack::open(Seed::Base);
+    stack.click(".triage-tab", "Escalations");
+    stack.wait_for("the queue rows", "T.count('.queue-row') > 0");
+    // The budget is 2, so sec-05 is a candidate below the line: show it (a look only).
+    stack.click(".review-queue-below button", "Show below the line");
+    stack.wait_for("the candidates", "T.count('.mark-cand') === 2");
+    assert!(
+        stack.js_bool(
+            "[...document.querySelectorAll('.queue-row .col-loc')].some(c => c.textContent.includes('keys.rs'))"
+        ),
+        "the test fixture secret is in the queue: {}",
+        stack.page_text()
+    );
+    assert_eq!(
+        stack.js("T.count('.queue-row .mark-fp')"),
+        0,
+        "no queued row carries the Possible false positive chip"
+    );
+    assert_eq!(
+        stack.js("T.count('.review-queue-fp-first')"),
+        0,
+        "with no flagged row the queue offers no Possible false positives first look"
+    );
+    stack.assert_shell_counts(&BASE);
+    stack.assert_no_model_calls();
+}
+
 /// Go to the Engine Check card that shows `place` (a `path:line`), with real clicks on Next.
 fn go_to_card(stack: &Stack, place: &str) {
     stack.click(".triage-tab", "Engine Check");

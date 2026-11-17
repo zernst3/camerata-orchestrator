@@ -547,6 +547,7 @@ fn problem_cols(lay: &Layout, waiting: bool) -> Vec<Col> {
             Col::technical(v::H_REVIEW_FLAGS, 36.0),
             Col::technical(v::H_HELD, 40.0),
             Col::technical(v::H_ESCALATED, 10.0),
+            Col::technical(v::POSSIBLE_FALSE_POSITIVE, 40.0),
         ]);
         for h in crate::report_export::row_facts::INTERNAL_TRIAGE_HEADERS {
             cols.push(Col::technical(h, 28.0));
@@ -624,7 +625,13 @@ fn problem_cells(row: &FindingRow, lay: &Layout) -> RowCells {
     if lay.internal {
         c.put(v::H_REVIEW_FLAGS, Cell::wrap(&row.review_flags))
             .put(v::H_HELD, Cell::wrap(&row.held))
-            .put(v::H_ESCALATED, yes(row.facts.escalated));
+            .put(v::H_ESCALATED, yes(row.facts.escalated))
+            .put(
+                v::POSSIBLE_FALSE_POSITIVE,
+                Cell::wrap(v::possible_false_positive_cell(
+                    row.possible_false_positive.as_ref(),
+                )),
+            );
         if let Some(triage) = &row.internal_triage {
             for (h, cell) in crate::report_export::row_facts::INTERNAL_TRIAGE_HEADERS
                 .iter()
@@ -817,6 +824,17 @@ fn place_cells(rep: &FindingRow, lay: &Layout) -> RowCells {
         .put(
             v::H_ESCALATED,
             yes(members.iter().any(|r| r.facts.escalated)),
+        )
+        .put(
+            v::POSSIBLE_FALSE_POSITIVE,
+            Cell::wrap(
+                distinct(
+                    members.iter().map(|r| {
+                        v::possible_false_positive_cell(r.possible_false_positive.as_ref())
+                    }),
+                )
+                .join("; "),
+            ),
         );
     }
     c
@@ -1688,6 +1706,9 @@ pub(super) struct StartFacts<'a> {
     pub totals: &'a crate::report_export::ReportCounts,
     /// The one line that says what the rules checked came to.
     pub coverage_summary: String,
+    /// On an internal workbook: the rows flagged as possible false positives and how many of
+    /// them are decided. `None` on a client workbook, which never mentions the flag.
+    pub possible_false_positives: Option<(usize, usize)>,
 }
 
 fn thousands(n: usize) -> String {
@@ -1948,5 +1969,14 @@ pub(super) fn write_start_here(
     r += 1;
     ws.write_text(r, 0, v::P_WHAT_WE_CHECKED)?;
     ws.write_text(r, 1, &facts.coverage_summary)?;
+    if let Some((flagged, decided)) = facts.possible_false_positives {
+        r += 1;
+        ws.write_text(r, 0, v::P_POSSIBLE_FALSE_POSITIVES)?;
+        ws.write_text(
+            r,
+            1,
+            v::possible_false_positive_count_line(flagged, decided),
+        )?;
+    }
     Ok(())
 }

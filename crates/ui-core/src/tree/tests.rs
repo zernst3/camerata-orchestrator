@@ -1,7 +1,7 @@
 //! Tests of the row and node-header pieces (this module's root).
 
 use super::*;
-use camerata_api_types::review::OutlierReason;
+use camerata_api_types::review::{FpReason, OutlierReason, PossibleFalsePositive};
 use camerata_api_types::review_view::{HoldReason, Marker, SiteRow};
 use camerata_api_types::review_view::{NodeCountsView, TreeLevel};
 
@@ -32,6 +32,12 @@ fn row_with(markers: &[Marker]) -> SiteRow {
         if let Some(s) = r.stage2.as_mut() {
             s.outlier_reason = Some(OutlierReason::DifferentObject);
         }
+    }
+    if markers.contains(&Marker::PossibleFalsePositive) {
+        r.possible_false_positive = PossibleFalsePositive::from_reasons(vec![
+            FpReason::TestCodeOnly,
+            FpReason::ConventionRuleAtMediumOrHigher,
+        ]);
     }
     r
 }
@@ -178,6 +184,7 @@ fn thousands_groups_digits() {
 fn every_marker_has_its_chip_class_from_the_spec_table() {
     let expect = [
         (Marker::Held, "mark-held"),
+        (Marker::PossibleFalsePositive, "mark-fp"),
         (Marker::Escalated, "mark-esc"),
         (Marker::Candidate, "mark-cand"),
         (Marker::OverBudget, "mark-over"),
@@ -226,6 +233,43 @@ fn the_markers_column_shows_two_chips_in_precedence_and_folds_the_rest() {
     assert_eq!(two.shown.len(), 2);
     assert_eq!(two.fold_label(), None, "two chips fit");
     assert!(marker_cell(&plain_row()).shown.is_empty());
+}
+
+#[test]
+fn a_possible_false_positive_chip_names_the_flag_and_lists_every_reason_on_hover() {
+    let row = row_with(&[Marker::PossibleFalsePositive]);
+    let chips = marker_chips(&row);
+    assert_eq!(chips.len(), 1);
+    assert_eq!(chips[0].label, "Possible false positive");
+    for reason in [
+        FpReason::TestCodeOnly,
+        FpReason::ConventionRuleAtMediumOrHigher,
+    ] {
+        assert!(
+            chips[0].tip.contains(reason.sentence()),
+            "{reason:?} is missing from {:?}",
+            chips[0].tip
+        );
+    }
+    assert!(!chips[0].tip.contains(FpReason::ModelOnly.sentence()));
+}
+
+#[test]
+fn a_flagged_row_shows_the_chip_in_the_markers_column_after_held() {
+    let row = row_with(&[
+        Marker::Held,
+        Marker::PossibleFalsePositive,
+        Marker::Escalated,
+    ]);
+    let shown: Vec<&str> = marker_cell(&row).shown.iter().map(|c| c.class).collect();
+    assert_eq!(shown, vec!["mark-held", "mark-fp"]);
+    let flagged_only = row_with(&[Marker::PossibleFalsePositive, Marker::Escalated]);
+    let shown: Vec<&str> = marker_cell(&flagged_only)
+        .shown
+        .iter()
+        .map(|c| c.class)
+        .collect();
+    assert_eq!(shown, vec!["mark-fp", "mark-esc"]);
 }
 
 #[test]

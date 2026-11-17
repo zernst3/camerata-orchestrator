@@ -72,6 +72,9 @@ pub enum Marker {
     Moved,
     /// Another row may describe the same thing.
     PossibleDuplicate,
+    /// The engine itself has reasons to doubt the row ([`SiteRow::possible_false_positive`]). A
+    /// review aid for the operator: it changes nothing about the row.
+    PossibleFalsePositive,
     /// Another row at the same place carries this rule: it is decided there unless it is decided
     /// alone.
     Carried,
@@ -81,8 +84,11 @@ pub enum Marker {
 
 impl Marker {
     /// Every marker, in precedence order (spec section 2, "noise rule").
-    pub const PRECEDENCE: [Marker; 11] = [
+    pub const PRECEDENCE: [Marker; 12] = [
         Self::Held,
+        // Second, so the chip shows in the Markers column of every flagged row: the operator
+        // opens these rows first.
+        Self::PossibleFalsePositive,
         Self::Escalated,
         Self::Candidate,
         Self::OverBudget,
@@ -382,6 +388,10 @@ pub struct SiteRow {
     pub thrown_out_reason: Option<String>,
     /// Review flags on the row's wording (spec A8); internal.
     pub review_flags: Vec<String>,
+    /// The engine's own reasons to doubt the row, for the operator to look at first. `None` for a
+    /// row with no reason. Operator only: no client export carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub possible_false_positive: Option<crate::review::PossibleFalsePositive>,
 }
 
 // ── Section 4: the shell ──────────────────────────────────────────────────────────────────
@@ -980,7 +990,7 @@ mod tests {
         for m in Marker::PRECEDENCE {
             assert!(seen.insert(m), "{m:?} is listed twice");
         }
-        assert_eq!(seen.len(), 11);
+        assert_eq!(seen.len(), 12);
     }
 
     #[test]

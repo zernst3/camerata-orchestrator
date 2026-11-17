@@ -19,16 +19,18 @@
 
 use camerata_api_types::decisions::Decision;
 use camerata_api_types::edits::{Edit, EditField, FindingAdded};
+use camerata_api_types::review::PossibleFalsePositive;
 use camerata_api_types::review_view::SiteRow;
 use camerata_ui_core::edits::{
     ack_detail, ack_line, ack_state, added_message, added_outcome, chord_hint, chord_letter,
     commit, control_for, decision_line, duplicate_line, edit_tip, field_label, field_state,
     flagged_by_line, head_chips, held_line, is_thrown_out, merge_candidate_total, merge_candidates,
-    merge_shown_line, reapply_decision_request, reapply_done_message, reduce, review_level_text,
-    severity_note, snippet_at_line, split_choice_from_value, split_option_value, stage1_line,
-    stage2_line, stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome,
-    Control, DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState,
-    LineAction, LineTone, Snippet, SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
+    merge_shown_line, possible_false_positive_lines, reapply_decision_request,
+    reapply_done_message, reduce, review_level_text, severity_note, snippet_at_line,
+    split_choice_from_value, split_option_value, stage1_line, stage2_line, stale_edit_line,
+    stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control, DetailAction,
+    DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction, LineTone, Snippet,
+    SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
 };
 use camerata_ui_core::tree::{file_line, is_outlier, kind_tag_of, severity_badge, severity_label};
 use camerata_ui_core::triage::TriageState;
@@ -153,6 +155,7 @@ pub(crate) fn SiteDetailView(
     let stage2 = stage2_line(&row);
     let flagged = flagged_by_line(&row);
     let duplicate = duplicate_line(&row);
+    let fp_lines = possible_false_positive_lines(&row);
     let sev_note = severity_note(&row);
     let mode = panel.mode.clone();
     let picking = mode == DetailMode::PickField;
@@ -341,6 +344,21 @@ pub(crate) fn SiteDetailView(
                             move |_| on_event.call(DetailEvent::GoTo(key.clone(), rule.clone(), node.clone()))
                         },
                         "Go to carrier"
+                    }
+                }
+            }
+            if !fp_lines.is_empty() {
+                div { class: "site-detail-line site-detail-fp",
+                    span { class: "site-detail-label", "{PossibleFalsePositive::TERM}" }
+                    div { class: "site-detail-value",
+                        ul { class: "site-detail-fp-reasons",
+                            for (label, sentence) in fp_lines {
+                                li { key: "{label}",
+                                    span { class: "site-detail-fp-label", "{label}." }
+                                    " {sentence}"
+                                }
+                            }
+                        }
                     }
                 }
             }

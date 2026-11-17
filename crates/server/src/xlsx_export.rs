@@ -277,6 +277,12 @@ pub struct FindingRow {
     /// and a client workbook has no such column.
     #[serde(skip)]
     internal_triage: Option<crate::report_export::InternalTriage>,
+    /// The engine's own reasons to doubt the row ([`crate::possible_false_positive`]), on an
+    /// INTERNAL package only: its workbook's technical band and its data files. `None`, and so
+    /// absent from the file, for a row with no reason and for every row of a client package: no
+    /// client file carries the key. The flag never changes any other field of the row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    possible_false_positive: Option<crate::possible_false_positive::PossibleFalsePositive>,
 }
 
 /// One row of the `Dependencies` sheet — the `DEP_AUDIT_RULE_ID` carve-out, same as the
@@ -436,6 +442,9 @@ fn partition_rows_for(
     // see `sanitize_report_findings`'s doc comment for why this is the one shared ingestion
     // point rather than a per-artifact patch.
     let report = &sanitize_report_findings(report);
+    // The engine's reasons to doubt each row: the operator's review aid, on an internal package
+    // only. Worked out by the one function the review view also calls.
+    let fp_index = internal.then(|| crate::possible_false_positive::FpIndex::new(&report.findings));
     let mut rows = Vec::new();
     let mut dep_rows = Vec::new();
     // The repos that flag a credential under the same name, for the display-only note on each
@@ -677,6 +686,7 @@ fn partition_rows_for(
                 String::new()
             },
             internal_triage: internal.then(|| crate::report_export::internal_triage(f)),
+            possible_false_positive: fp_index.as_ref().and_then(|index| index.of(f)),
         });
     }
 
@@ -732,6 +742,25 @@ const SOURCE_ROWS_SHEET: &str = vocabulary::ALL_SOURCE_ROWS;
 /// Data rows per All source rows sheet. A sheet holds 1,048,576 rows including the header; a report with
 /// more rows than this continues on "All source rows (2)" and so on rather than dropping any.
 const SOURCE_ROWS_SHEET_MAX_ROWS: usize = 1_000_000;
+
+/// How many rows carry the possible false positive flag, and how many of those a reviewer has
+/// decided: ruled out, or any decision other than none yet. Ruled-out rows count, so the second
+/// number reaches the first once every flagged row is decided.
+fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
+    let flagged: Vec<&FindingRow> = rows
+        .iter()
+        .filter(|r| r.possible_false_positive.is_some())
+        .collect();
+    let decided = flagged
+        .iter()
+        .filter(|r| {
+            r.is_fp
+                || r.disposition_kind
+                    .is_some_and(|d| d != Disposition::Unresolved)
+        })
+        .count();
+    (flagged.len(), decided)
+}
 
 /// What a cell ends with when prose (not a site list) had to be cut to fit. The full text is in
 /// `findings.json` and the `json/` and `csv/` files of the same export, none of which has a cell
@@ -2263,6 +2292,7 @@ pub fn build_workbook_with_counts(
                 report_counts.rows.not_checked,
                 multi_repo,
             ),
+            possible_false_positives: opts.internal.then(|| possible_false_positive_counts(&rows)),
         },
     )
     .context("writing the Start here sheet")?;

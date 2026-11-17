@@ -11,8 +11,8 @@ use camerata_api_types::decisions::{ClientAck, DecisionState, Scope};
 use camerata_api_types::edits::EditField;
 use camerata_api_types::review::{
     DisagreementField, EscalationBudget, EscalationCandidate, EscalationReason, EscalationState,
-    OutlierReason, ReviewLevel, Stage2Disagreement, ENGINE_VERIFIED, PERSONALLY_REVIEWED,
-    REVIEWED_AS_PATTERN_PREFIX,
+    FpReason, OutlierReason, PossibleFalsePositive, ReviewLevel, Stage2Disagreement,
+    ENGINE_VERIFIED, PERSONALLY_REVIEWED, REVIEWED_AS_PATTERN_PREFIX,
 };
 use camerata_api_types::review_view::{
     BreadcrumbItem, CarriedByView, CarriedRuleView, CategoryAllocation, CorrectionRef,
@@ -651,6 +651,7 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         added_by_reviewer: false,
         thrown_out_reason: None,
         review_flags: Vec::new(),
+        possible_false_positive: None,
     }
 }
 
@@ -702,6 +703,7 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         added_by_reviewer: false,
         thrown_out_reason: Some("junk text: a placeholder where the finding should be".to_string()),
         review_flags: Vec::new(),
+        possible_false_positive: None,
     }
 }
 
@@ -719,6 +721,7 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
         .copied()
         .filter(|m| match m {
             Marker::Held => row.held.is_some(),
+            Marker::PossibleFalsePositive => row.possible_false_positive.is_some(),
             Marker::Escalated => escalated,
             Marker::Candidate => below,
             Marker::OverBudget => over,
@@ -1063,6 +1066,18 @@ pub fn build(p: &Params) -> ReviewDataSet {
         if let Some(s) = rows[i].stage2.as_mut() {
             s.outlier_reason = Some(outlier_reasons[n % outlier_reasons.len()]);
             s.outlier_why = OUTLIER_WHYS[n % OUTLIER_WHYS.len()].to_string();
+        }
+        // The server flags an outlier for a different object or an intended pattern as a possible
+        // false positive (reason (a)); the fixture does the same, and draws nothing from `rng` for
+        // it, so no other row's features move.
+        if rows[i].stage2.as_ref().is_some_and(|s| {
+            matches!(
+                s.outlier_reason,
+                Some(OutlierReason::DifferentObject | OutlierReason::CouldBeIntentional)
+            )
+        }) {
+            rows[i].possible_false_positive =
+                PossibleFalsePositive::from_reasons(vec![FpReason::GroupReviewerDoubt]);
         }
     }
     // Held rows (the four reasons in turn) and merged rows without a decision.

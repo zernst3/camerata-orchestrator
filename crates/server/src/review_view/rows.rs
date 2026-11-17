@@ -155,6 +155,9 @@ impl<'a> ReviewComposer<'a> {
         if self.hold_of(key).is_some() {
             out.push(Marker::Held);
         }
+        if self.possible_false_positive(f).is_some() {
+            out.push(Marker::PossibleFalsePositive);
+        }
         match candidate {
             Some(c) if c.escalated => {
                 out.push(Marker::Escalated);
@@ -187,6 +190,18 @@ impl<'a> ReviewComposer<'a> {
             out.push(Marker::Edited);
         }
         out
+    }
+
+    /// The engine's reasons to doubt `f`, for the operator. A row the engine threw out is in no
+    /// package and carries none.
+    pub(super) fn possible_false_positive(
+        &self,
+        f: &Finding,
+    ) -> Option<camerata_api_types::review::PossibleFalsePositive> {
+        if crate::engine_discard::reason_of(f).is_some() {
+            return None;
+        }
+        self.fp.of(f)
     }
 
     /// The flagged-by entries of `f`.
@@ -335,6 +350,7 @@ impl<'a> ReviewComposer<'a> {
                 .is_some_and(|v| v == REVIEWER_PROVENANCE),
             thrown_out_reason: crate::engine_discard::reason_of(f).map(str::to_string),
             review_flags: crate::review_flags::flags_of(f),
+            possible_false_positive: self.possible_false_positive(f),
         }
     }
 }

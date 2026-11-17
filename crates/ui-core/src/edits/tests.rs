@@ -1121,6 +1121,43 @@ fn also_flagged_by_and_the_possible_duplicate_are_lines_only_when_there_is_somet
 }
 
 #[test]
+fn the_detail_lists_each_possible_false_positive_reason_with_its_sentence() {
+    use camerata_api_types::review::{FpReason, PossibleFalsePositive};
+    let mut row = plain();
+    row.possible_false_positive = None;
+    assert!(possible_false_positive_lines(&row).is_empty());
+    row.possible_false_positive = PossibleFalsePositive::from_reasons(vec![
+        FpReason::ModelOnly,
+        FpReason::GroupReviewerDoubt,
+    ]);
+    assert_eq!(
+        possible_false_positive_lines(&row),
+        vec![
+            (
+                FpReason::GroupReviewerDoubt.label(),
+                FpReason::GroupReviewerDoubt.sentence()
+            ),
+            (FpReason::ModelOnly.label(), FpReason::ModelOnly.sentence()),
+        ]
+    );
+    // The flag is a look only: the row is still Unresolved and every field is as it was.
+    let before = plain();
+    let mut flagged = before.clone();
+    flagged.possible_false_positive =
+        PossibleFalsePositive::from_reasons(vec![FpReason::TestCodeOnly]);
+    assert_eq!(flagged.severity, before.severity);
+    assert_eq!(flagged.decision, before.decision);
+    let ctx = DetailContext::default();
+    for field in [EditField::Severity, EditField::Kind, EditField::Headline] {
+        assert_eq!(
+            field_state(&flagged, field, &ctx).value,
+            field_state(&before, field, &ctx).value,
+            "{field:?}"
+        );
+    }
+}
+
+#[test]
 fn the_review_level_reads_in_words_and_a_held_row_has_none() {
     assert_eq!(
         review_level_text(Some(&ReviewLevel::PersonallyReviewed)).as_deref(),
