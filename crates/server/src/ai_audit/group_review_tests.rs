@@ -2897,6 +2897,7 @@ async fn a_group_review_priced_over_the_approved_amount_is_not_started() {
         (stop.new_estimate_usd.unwrap() - (5.0 + price)).abs() < 1e-9,
         "{stop:?}"
     );
+}
 
 // ── A reply with a corrected object after a malformed one ───────────────────────────────────────
 
