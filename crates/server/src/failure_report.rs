@@ -85,6 +85,12 @@ pub struct FailureReport {
     /// Operator only. `serde(default)` so a report written before it existed still loads.
     #[serde(default)]
     pub runner_notes: Vec<String>,
+    /// What the agent finder judged not a problem here: one line each (part, rule, place,
+    /// reason). Operator only. Unlike the runner notes, a run with any of these writes the
+    /// report even when nothing failed, because the reviewer has to see them. `serde(default)`
+    /// so a report written before it existed still loads.
+    #[serde(default)]
+    pub judged_not_a_problem: Vec<String>,
 }
 
 /// The entries for every failed part of `report`. A disclosed scope limit (a tool not run by
@@ -166,6 +172,12 @@ pub fn build(report: &crate::onboard::ScanReport) -> FailureReport {
             .iter()
             .map(|n| camerata_secrets::redact_str(n).into_owned())
             .collect(),
+        judged_not_a_problem: report
+            .ledger
+            .not_a_problem_notes()
+            .iter()
+            .map(|n| camerata_secrets::redact_str(n).into_owned())
+            .collect(),
     }
 }
 
@@ -174,6 +186,7 @@ impl FailureReport {
         self.entries.is_empty()
             && self.standard_fixes.is_empty()
             && self.detail_fallbacks.is_empty()
+            && self.judged_not_a_problem.is_empty()
     }
 
     /// The entries that still fail.
@@ -250,6 +263,19 @@ impl FailureReport {
                     "\n- {} {}:{} {}: {}",
                     s.repo, s.path, s.line, s.rule_id, s.reasons
                 ));
+            }
+            out.push('\n');
+        }
+        if !self.judged_not_a_problem.is_empty() {
+            out.push_str(&format!(
+                "\n## Judged not a problem here ({})\n\nThe model found the letter of a rule \
+                 unmet at these places and judged it harmless. No client row was made. Read them: \
+                 a reason that excuses something the code needs is a signal the rule text or the \
+                 model's judgment is off.\n",
+                self.judged_not_a_problem.len()
+            ));
+            for note in &self.judged_not_a_problem {
+                out.push_str(&format!("\n- {note}"));
             }
             out.push('\n');
         }
@@ -380,6 +406,7 @@ pub fn merge_history(previous: &FailureReport, current: &FailureReport) -> Failu
         standard_fixes: current.standard_fixes.clone(),
         detail_fallbacks: current.detail_fallbacks.clone(),
         runner_notes: current.runner_notes.clone(),
+        judged_not_a_problem: current.judged_not_a_problem.clone(),
     }
 }
 
@@ -500,6 +527,27 @@ mod tests {
         scan.ledger
             .record_runner_notes(vec!["Batch msgbatch_x is gone.".to_string()]);
         assert!(build(&scan).is_empty());
+    }
+
+    #[test]
+    fn what_was_judged_not_a_problem_here_is_written_even_when_nothing_failed() {
+        let mut scan = report_with(Vec::new());
+        scan.ledger.record_not_a_problem_notes(vec![
+            "acme/api: piece-1: ARCH-X-1 at src/a.rs:2: The input is checked first.".to_string(),
+        ]);
+        let fr = build(&scan);
+        assert!(fr.entries.is_empty() && !fr.is_empty());
+        let md = fr.render_md();
+        assert!(md.contains("## Judged not a problem here (1)"), "{md}");
+        assert!(md.contains("The input is checked first."), "{md}");
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_file = dir.path().join("ledger.json");
+        let paths = write(&ledger_file, &fr)
+            .unwrap()
+            .expect("a report is written");
+        assert!(paths.0.exists() && paths.1.exists());
+        let merged = merge_history(&FailureReport::default(), &fr);
+        assert_eq!(merged.judged_not_a_problem, fr.judged_not_a_problem);
     }
 
     #[test]

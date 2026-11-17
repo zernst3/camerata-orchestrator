@@ -271,11 +271,11 @@ impl Checklist {
              2. Answer every rule. Give one answer for each rule, no exceptions, under `answers`: \
              `problems` (with the numbers of your problems), `clean` (with up to three places you \
              checked, each a file and line you read), `not_a_problem_here` (the letter of the rule \
-             is not met at one place, and you judge it is not a problem here: give that one place \
-             as `place`, a file and line, and one sentence as `reason`; this reports nothing to the \
-             client, it tells the reviewer what you saw), or `not_applicable` when nothing in this \
-             part is what the rule is about. Give one place and one sentence of reason, no more. \
-             For a rule with options, also say how many places follow each option, and name up to \
+             is not met at one place, and you judge it is not a problem here, never for something \
+             this code needs and does not have: give that one place as `place`, a file and line you \
+             read, and one sentence as `reason`, no more; this reports nothing to the client, it \
+             tells the reviewer what you saw), or `not_applicable` when nothing in this part is \
+             what the rule is about. For a rule with options, also say how many places follow each option, and name up to \
              ten places for each.\n\
              3. Add. Add a problem only if you would report it to this client on your own \
              judgment. Rate it yourself: the severity a rule shows is a guide, not a rule. If a \
@@ -410,16 +410,24 @@ impl Checklist {
                 let state = match answer.kind {
                     AnswerKind::NotApplicable => Effective::NotApplicable,
                     AnswerKind::NotAProblemHere => {
-                        if let (Some(place), Some(reason)) =
-                            (answer.places.first(), answer.reason.as_ref())
-                        {
-                            out.not_a_problem_notes.push(NotAProblemNote {
-                                rule: rule.id.clone(),
-                                place: place.clone(),
-                                reason: reason.trim().to_string(),
-                            });
+                        // The place gets the same check as a `clean` place: a file of the
+                        // piece, at a line a Read returned. Otherwise the rule is not completed
+                        // and no note is kept.
+                        match (answer.places.first(), answer.reason.as_ref()) {
+                            (Some(place), Some(reason)) if place_is_valid(place) => {
+                                out.not_a_problem_notes.push(NotAProblemNote {
+                                    rule: rule.id.clone(),
+                                    place: place.clone(),
+                                    reason: reason.trim().to_string(),
+                                });
+                                Effective::NotAProblemHere
+                            }
+                            _ => Effective::NotCompleted(
+                                "the place named for not_a_problem_here was not in a file of the \
+                                 part at a line that was read"
+                                    .to_string(),
+                            ),
                         }
-                        Effective::NotAProblemHere
                     }
                     AnswerKind::Problems => {
                         let mut real = Vec::new();

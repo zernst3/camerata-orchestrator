@@ -1967,6 +1967,20 @@ pub fn render_ledger_summary(
         }
     }
 
+    // What the model judged not a problem here: always listed when there is any, so the reviewer
+    // reads it with the run, failures or none.
+    if !ledger.not_a_problem_notes().is_empty() {
+        writeln!(
+            out,
+            "\n== JUDGED NOT A PROBLEM HERE ({}) ==",
+            ledger.not_a_problem_notes().len()
+        )
+        .ok();
+        for note in ledger.not_a_problem_notes() {
+            writeln!(out, "  {note}").ok();
+        }
+    }
+
     if verbose {
         // One line per (rule, repo): a rule that ran on one repo and not on another is two
         // lines, each naming its repo.
@@ -3511,6 +3525,20 @@ mod tests {
         assert!(text.contains("acme/widgets"), "{text}");
         assert!(text.contains("commodity taint pass"), "{text}");
         assert!(text.contains("semgrep absent"), "{text}");
+    }
+
+    /// What the model judged not a problem here is listed in the closing report with no failure
+    /// present, and the section is absent when there is nothing to list.
+    #[test]
+    fn render_ledger_summary_lists_what_was_judged_not_a_problem_here() {
+        let mut ledger = ScanLedger::new();
+        assert!(!render_ledger_summary(&ledger, &[], false).contains("JUDGED NOT A PROBLEM HERE"));
+        ledger.record_not_a_problem_notes(vec![
+            "acme/w: piece-1: ARCH-X-1 at src/a.rs:2: The input is checked first.".to_string(),
+        ]);
+        let text = render_ledger_summary(&ledger, &[], false);
+        assert!(text.contains("JUDGED NOT A PROBLEM HERE (1)"), "{text}");
+        assert!(text.contains("The input is checked first."), "{text}");
     }
 
     /// What the batch runner told the operator about spend the ledger cannot count (a lost or

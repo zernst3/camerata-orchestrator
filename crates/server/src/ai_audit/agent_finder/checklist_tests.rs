@@ -616,7 +616,18 @@ fn not_a_problem_at(rule: &str, path: &str, line: usize, reason: &str) -> RuleAn
 fn render_offers_the_fourth_answer_and_leaves_adding_to_the_models_judgment() {
     let text = checklist().render();
     assert!(text.contains("not_a_problem_here"), "{text}");
-    assert!(text.contains("one place and one sentence"), "{text}");
+    assert!(
+        text.contains("and one sentence as `reason`, no more"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Give one place and one sentence of reason, no more."),
+        "the limit lives inside the answer's own clause: {text}"
+    );
+    assert!(
+        text.contains("never for something this code needs and does not have"),
+        "{text}"
+    );
     assert!(text.contains("Answer every rule"), "{text}");
     assert!(text.contains("on your own judgment"), "{text}");
     assert!(text.contains("Rate it yourself"), "{text}");
@@ -657,7 +668,7 @@ fn a_not_a_problem_here_answer_makes_no_row_and_is_noted_for_the_reviewer() {
         not_a_problem_at("RUST-ZED-1", "src/lib.rs", 3, "The cast is checked above."),
         answer("ARCH-ALPHA-1", AnswerKind::NotApplicable),
     ]);
-    let out = list.check(&file, &[], &[], &piece());
+    let out = list.check(&file, &[], &[read("src/lib.rs")], &piece());
     assert_eq!(state_of(&out, "RUST-ZED-1"), Effective::NotAProblemHere);
     assert!(out.not_completed.is_empty() && out.missing.is_empty());
     assert!(out.valid_citations.is_empty());
@@ -685,4 +696,52 @@ fn not_a_problem_here_ranks_between_clean_and_not_applicable() {
     assert_eq!(run(&nph, &na), (Effective::NotAProblemHere, 1));
     assert!(matches!(run(&nph, &clean), (Effective::Clean(_), 1)));
     assert!(matches!(run(&clean, &nph), (Effective::Clean(_), 1)));
+}
+
+#[test]
+fn a_not_a_problem_here_place_that_was_not_read_or_is_outside_the_piece_is_not_completed() {
+    let list = checklist();
+    let other = answer("ARCH-ALPHA-1", AnswerKind::NotApplicable);
+    for (path, line) in [
+        ("src/lib.rs", 5),
+        ("src/elsewhere.rs", 1),
+        ("src/lib.rs", 99),
+    ] {
+        let file = file_of(vec![
+            not_a_problem_at("RUST-ZED-1", path, line, "Fine."),
+            other.clone(),
+        ]);
+        // Only line 1 was read.
+        let trace = [ToolEvent::Read {
+            path: "src/lib.rs".into(),
+            first_line: 1,
+            line_count: 10,
+            lines_returned: 2,
+        }];
+        let out = list.check(&file, &[], &trace, &piece());
+        assert!(
+            matches!(state_of(&out, "RUST-ZED-1"), Effective::NotCompleted(_)),
+            "{path}:{line}"
+        );
+        assert_eq!(out.not_completed, vec!["RUST-ZED-1".to_string()]);
+        assert!(out.not_a_problem_notes.is_empty(), "{path}:{line}");
+    }
+}
+
+#[test]
+fn a_not_a_problem_here_place_that_was_read_gives_the_note() {
+    let list = checklist();
+    let file = file_of(vec![
+        not_a_problem_at("RUST-ZED-1", "src/lib.rs", 2, "Fine."),
+        answer("ARCH-ALPHA-1", AnswerKind::NotApplicable),
+    ]);
+    let trace = [ToolEvent::Read {
+        path: "src/lib.rs".into(),
+        first_line: 1,
+        line_count: 10,
+        lines_returned: 2,
+    }];
+    let out = list.check(&file, &[], &trace, &piece());
+    assert_eq!(state_of(&out, "RUST-ZED-1"), Effective::NotAProblemHere);
+    assert_eq!(out.not_a_problem_notes.len(), 1);
 }

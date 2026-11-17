@@ -3357,6 +3357,15 @@ pub async fn audit_repos_with_llm_controlled(
                                     for note in &extras.notes {
                                         meter.record_note(format!("{spec}: {note}"));
                                     }
+                                    // What the model judged not a problem here: the operator's
+                                    // own list, kept even when nothing failed.
+                                    pipeline_ledger.record_not_a_problem_notes(
+                                        extras
+                                            .not_a_problem_notes
+                                            .iter()
+                                            .map(|n| format!("{spec}: {n}"))
+                                            .collect(),
+                                    );
                                     meter.record_note(format!(
                                         "{spec}: the agent finder wrote {} problems, {} of them citing no rule",
                                         extras.problems_total, extras.problems_without_rule
