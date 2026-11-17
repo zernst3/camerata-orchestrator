@@ -255,6 +255,7 @@ async fn a_cut_off_reply_is_not_retried_when_the_switch_is_off() {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let files = files();
     let (recs, unfinished) = recommend_alternatives(

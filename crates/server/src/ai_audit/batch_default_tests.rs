@@ -311,6 +311,7 @@ fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 

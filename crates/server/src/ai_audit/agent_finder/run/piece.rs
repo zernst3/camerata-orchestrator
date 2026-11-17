@@ -967,9 +967,7 @@ pub(super) fn not_run_report(
 ) -> PieceReport {
     let cause = shared
         .meter
-        .map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| {
-            crate::cost_cap::cause_for(m.cost_unknown())
-        });
+        .map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| m.stop_cause());
     let reason = if outage {
         "NOT RUN: the run stopped because the model provider could not be reached before this part was reviewed. This inspection is incomplete.".to_string()
     } else {

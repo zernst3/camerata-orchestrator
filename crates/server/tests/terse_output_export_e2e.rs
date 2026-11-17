@@ -183,6 +183,7 @@ async fn export_text(regeneration_down: bool) -> (String, Vec<camerata_server::o
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
+        checkpoint: Default::default(),
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
