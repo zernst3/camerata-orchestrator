@@ -367,7 +367,10 @@ pub fn possible_false_positive_cell(
     flag.map(|p| {
         p.reasons
             .iter()
-            .map(|r| r.label())
+            .map(|r| match p.specifics.get(r) {
+                Some(own) => format!("{}: {own}", r.label()),
+                None => r.label().to_string(),
+            })
             .collect::<Vec<_>>()
             .join("; ")
     })

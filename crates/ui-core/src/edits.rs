@@ -1398,11 +1398,10 @@ pub fn flagged_by_line(row: &SiteRow) -> Option<String> {
 /// The possible-duplicate line: `SEC-KEY-2 at web/env.ts:3`, with the engine's hint.
 /// The detail's Possible false positive lines: each reason the engine has to doubt the row, as
 /// its short name and its sentence, in the order the row lists them. Empty for a row with none.
-pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, &'static str)> {
+pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, String)> {
     row.possible_false_positive
         .iter()
-        .flat_map(|p| &p.reasons)
-        .map(|r| (r.label(), r.sentence()))
+        .flat_map(|p| p.reasons.iter().map(move |r| (r.label(), p.sentence_of(*r))))
         .collect()
 }
 

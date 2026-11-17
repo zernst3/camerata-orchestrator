@@ -1135,11 +1135,36 @@ fn the_detail_lists_each_possible_false_positive_reason_with_its_sentence() {
         vec![
             (
                 FpReason::GroupReviewerDoubt.label(),
-                FpReason::GroupReviewerDoubt.sentence()
+                FpReason::GroupReviewerDoubt.sentence().to_string()
             ),
-            (FpReason::ModelOnly.label(), FpReason::ModelOnly.sentence()),
+            (
+                FpReason::ModelOnly.label(),
+                FpReason::ModelOnly.sentence().to_string()
+            ),
         ]
     );
+    // A reason with the row's own sentence shows it after the standard one; the others do not.
+    let mut flag = PossibleFalsePositive::from_reasons(vec![
+        FpReason::ModelOnly,
+        FpReason::FinderUnsure,
+    ])
+    .expect("flag");
+    flag.specifics.insert(
+        FpReason::FinderUnsure,
+        "The caller may be checked elsewhere.".to_string(),
+    );
+    row.possible_false_positive = Some(flag);
+    let lines = possible_false_positive_lines(&row);
+    assert_eq!(lines[0].1, FpReason::ModelOnly.sentence());
+    assert_eq!(
+        lines[1].1,
+        format!(
+            "{} The caller may be checked elsewhere.",
+            FpReason::FinderUnsure.sentence()
+        )
+    );
+    assert!(crate::tree::possible_false_positive_tip(&row)
+        .contains("The caller may be checked elsewhere."));
     // The flag is a look only: the row is still Unresolved and every field is as it was.
     let before = plain();
     let mut flagged = before.clone();

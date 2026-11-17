@@ -210,3 +210,64 @@ fn an_agent_row_the_finder_marked_unsure_is_flagged_for_the_models_own_doubt() {
     assert!(!is_agent_row(&engine));
     assert!(!reasons(&engine).contains(&FpReason::FinderUnsure));
 }
+
+// ── The row's own sentence beside the reason ─────────────────────────────────────────────────
+
+#[test]
+fn a_finder_unsure_row_carries_the_finders_own_sentence() {
+    use crate::ai_audit::agent_finder::reply::FINDER_UNSURE_WHY_CAPTURE;
+    let mut f = agent_row();
+    f.captures
+        .insert(FINDER_SURE_CAPTURE.to_string(), "unsure".to_string());
+    f.captures.insert(
+        FINDER_UNSURE_WHY_CAPTURE.to_string(),
+        "The caller may be checked in a layer not shown.".to_string(),
+    );
+    let flag = FpIndex::new(&[f.clone()]).of(&f).expect("flagged");
+    assert_eq!(
+        flag.specifics.get(&FpReason::FinderUnsure).map(String::as_str),
+        Some("The caller may be checked in a layer not shown.")
+    );
+    assert!(flag.sentences().ends_with("The caller may be checked in a layer not shown."));
+}
+
+#[test]
+fn a_group_reviewer_doubt_row_carries_the_reviewers_own_why() {
+    use camerata_api_types::review::{DisagreementField, Stage2Disagreement};
+    let mut by_disagreement = agent_row();
+    by_disagreement.review.stage2_disagreement.push(Stage2Disagreement {
+        field: DisagreementField::Real,
+        stage1: "yes".to_string(),
+        mine: "no".to_string(),
+        why: "The value is a constant, not request input.".to_string(),
+    });
+    let mut by_outlier = agent_row();
+    by_outlier.review.outlier_reason = Some(OutlierReason::DifferentObject);
+    by_outlier.review.outlier_why = "It queries a lookup table, not orders.".to_string();
+    for (f, want) in [
+        (by_disagreement, "The value is a constant, not request input."),
+        (by_outlier, "It queries a lookup table, not orders."),
+    ] {
+        let flag = FpIndex::new(&[f.clone()]).of(&f).expect("flagged");
+        assert_eq!(
+            flag.specifics.get(&FpReason::GroupReviewerDoubt).map(String::as_str),
+            Some(want)
+        );
+    }
+}
+
+#[test]
+fn a_reason_without_a_row_sentence_shows_only_its_standard_sentence() {
+    let mut f = agent_row();
+    f.captures
+        .insert(FINDER_SURE_CAPTURE.to_string(), "unsure".to_string());
+    let flag = FpIndex::new(&[f.clone()]).of(&f).expect("flagged");
+    assert!(flag.specifics.is_empty());
+    assert_eq!(flag.sentences(), FpReason::FinderUnsure.sentence());
+    // And a reviewer's why that is blank adds nothing.
+    let mut g = agent_row();
+    g.review.outlier_reason = Some(OutlierReason::CouldBeIntentional);
+    g.review.outlier_why = "  ".to_string();
+    let flag = FpIndex::new(&[g.clone()]).of(&g).expect("flagged");
+    assert!(flag.specifics.is_empty());
+}

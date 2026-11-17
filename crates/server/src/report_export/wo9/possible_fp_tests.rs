@@ -208,3 +208,72 @@ fn the_flag_changes_no_severity_kind_escalation_row_count_or_decision() {
     };
     assert_eq!(rows_of(&client), rows_of(&internal));
 }
+
+const UNSURE_MARKER: &str = "UNSURE-WHY-MARKER";
+const DOUBT_MARKER: &str = "DOUBT-WHY-MARKER";
+
+/// One finder row that is unsure with a sentence and one the group reviewer doubts with a why.
+fn sealed_with_row_sentences() -> crate::onboard::SealedReport {
+    use crate::ai_audit::agent_finder::reply::{
+        FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE, FINDER_SURE_CAPTURE,
+        FINDER_UNSURE_WHY_CAPTURE,
+    };
+    use camerata_api_types::review::{DisagreementField, Stage2Disagreement};
+    let mut report = crate::release_gate::test_scan_report();
+    let mut unsure = sql_row("src/a.rs", 10);
+    for (k, v) in [
+        (FINDER_PROBLEM_CAPTURE, "1"),
+        (FINDER_PIECE_CAPTURE, "p"),
+        (FINDER_SURE_CAPTURE, "unsure"),
+        (FINDER_UNSURE_WHY_CAPTURE, UNSURE_MARKER),
+    ] {
+        unsure.captures.insert(k.to_string(), v.to_string());
+    }
+    let mut doubted = sql_row("src/b.rs", 20);
+    doubted.review.stage2_disagreement.push(Stage2Disagreement {
+        field: DisagreementField::Real,
+        stage1: "yes".to_string(),
+        mine: "no".to_string(),
+        why: DOUBT_MARKER.to_string(),
+    });
+    report.findings = vec![unsure, doubted];
+    report.seal()
+}
+
+#[test]
+fn a_client_package_carries_neither_row_sentence() {
+    let reviewed = apply_overlay(&sealed_with_row_sentences(), &[], &[], &[]);
+    let package = package_of(&reviewed, &client_options());
+    let mut text = package.data_json.clone();
+    let entries = read_zip_entries(&release(package).expect("releases").bytes).expect("zip");
+    for (name, bytes) in &entries {
+        if name.ends_with(".xlsx") {
+            text.push_str(&xlsx_strings(bytes).expect("strings").join("\n"));
+        } else if !name.ends_with(".pdf") {
+            text.push_str(&String::from_utf8_lossy(bytes));
+        }
+    }
+    assert!(!text.contains(UNSURE_MARKER) && !text.contains(DOUBT_MARKER));
+}
+
+#[test]
+fn the_internal_workbook_cell_names_the_reason_then_the_row_sentence() {
+    let reviewed = apply_overlay(&sealed_with_row_sentences(), &[], &[], &[]);
+    let entries = internal_entries(&reviewed);
+    let xlsx = workbook(&entries);
+    let grid = sheet_table(&xlsx, v::ALL_PROBLEMS);
+    let col = grid[0]
+        .iter()
+        .position(|h| h == v::POSSIBLE_FALSE_POSITIVE)
+        .expect("column");
+    let file = grid[0].iter().position(|h| h == v::H_FILE).expect("File");
+    let cell_of = |path: &str| grid[1..].iter().find(|r| r[file] == path).unwrap()[col].clone();
+    assert_eq!(
+        cell_of("src/a.rs"),
+        format!("{}: {UNSURE_MARKER}", FpReason::FinderUnsure.label())
+    );
+    assert_eq!(
+        cell_of("src/b.rs"),
+        format!("{}: {DOUBT_MARKER}", FpReason::GroupReviewerDoubt.label())
+    );
+}
