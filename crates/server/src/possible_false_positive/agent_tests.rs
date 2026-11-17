@@ -223,7 +223,9 @@ fn a_finder_unsure_row_carries_the_finders_own_sentence() {
         FINDER_UNSURE_WHY_CAPTURE.to_string(),
         "The caller may be checked in a layer not shown.".to_string(),
     );
-    let flag = FpIndex::new(&[f.clone()]).of(&f).expect("flagged");
+    let flag = FpIndex::new(std::slice::from_ref(&f))
+        .of(&f)
+        .expect("flagged");
     assert_eq!(
         flag.specifics
             .get(&FpReason::FinderUnsure)
@@ -258,7 +260,9 @@ fn a_group_reviewer_doubt_row_carries_the_reviewers_own_why() {
         ),
         (by_outlier, "It queries a lookup table, not orders."),
     ] {
-        let flag = FpIndex::new(&[f.clone()]).of(&f).expect("flagged");
+        let flag = FpIndex::new(std::slice::from_ref(&f))
+            .of(&f)
+            .expect("flagged");
         assert_eq!(
             flag.specifics
                 .get(&FpReason::GroupReviewerDoubt)
@@ -273,13 +277,17 @@ fn a_reason_without_a_row_sentence_shows_only_its_standard_sentence() {
     let mut f = agent_row();
     f.captures
         .insert(FINDER_SURE_CAPTURE.to_string(), "unsure".to_string());
-    let flag = FpIndex::new(&[f.clone()]).of(&f).expect("flagged");
+    let flag = FpIndex::new(std::slice::from_ref(&f))
+        .of(&f)
+        .expect("flagged");
     assert!(flag.specifics.is_empty());
     assert_eq!(flag.sentences(), FpReason::FinderUnsure.sentence());
     // And a reviewer's why that is blank adds nothing.
     let mut g = agent_row();
     g.review.outlier_reason = Some(OutlierReason::CouldBeIntentional);
     g.review.outlier_why = "  ".to_string();
-    let flag = FpIndex::new(&[g.clone()]).of(&g).expect("flagged");
+    let flag = FpIndex::new(std::slice::from_ref(&g))
+        .of(&g)
+        .expect("flagged");
     assert!(flag.specifics.is_empty());
 }
