@@ -1199,9 +1199,10 @@ pub async fn run_inspect_pipeline_with(
                 let joints = total.joints_calls as f64
                     * camerata_ui_core::scan::AGENT_FINDER_USD_PER_JOINTS_CALL;
                 controls.checkpoint.plan = Some(camerata_server::cost_checkpoint::CheckpointPlan {
+                    pieces: total.pieces,
                     per_piece_usd: ((total.expected_usd - joints) / total.pieces as f64).max(0.0),
-                    later_stages_usd: joints,
-                    assumed_problems: None,
+                    joints_usd: joints,
+                    ..camerata_server::cost_checkpoint::CheckpointPlan::default()
                 });
             }
         }
@@ -1252,6 +1253,11 @@ pub async fn run_inspect_pipeline_with(
     };
     // The cost checkpoint records into the run's folder and prints each line as the run goes.
     if let Some(s) = &store {
+        // A resume has no pre-flight estimate: it starts from what the earlier attempt recorded.
+        if controls.checkpoint.plan.is_none() {
+            controls.checkpoint.plan =
+                camerata_server::cost_checkpoint::CheckpointPlan::from_stored(s.dir());
+        }
         controls.checkpoint.run_folder = Some(s.dir().to_path_buf());
     }
     controls.checkpoint.sink = camerata_server::cost_checkpoint::CheckpointSink::new(|cp| {
@@ -2116,7 +2122,23 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
         "spend limit: ${:.2}, spent ${:.2}",
         cap.cap_usd, cap.spent_usd
     );
-    if cap.stopped_the_run() {
+    let pause = cap
+        .checkpoint
+        .as_ref()
+        .filter(|c| c.stopped)
+        .map(camerata_server::cost_checkpoint::CostCheckpoint::pause_message);
+    if let Some(message) = &pause {
+        // The cost checkpoint paused the run before it went over the approved amount: not the
+        // limit reached, and nothing was spent past it.
+        write!(
+            out,
+            ". {message} This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) were NOT \
+             RUN (listed under FAILED PASSES).",
+            cap.not_run_passes.len(),
+            cap.not_run_stages.len()
+        )
+        .ok();
+    } else if cap.stopped_the_run() {
         // The limit was reached, or it could not be enforced because a call's cost could not be
         // determined: two different things, and the operator is told which (the note that
         // follows names the model and the call).
@@ -2142,7 +2164,7 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
     } else {
         out.push_str(" (not reached)");
     }
-    for note in &cap.notes {
+    for note in cap.notes.iter().filter(|n| Some(*n) != pause.as_ref()) {
         write!(out, "\n  {note}").ok();
     }
     out.push('\n');
@@ -2412,6 +2434,36 @@ mod tests {
             ..record
         };
         assert!(render_cost_cap(&reached).contains("-- REACHED."));
+    }
+
+    /// A run the cost checkpoint paused is reported as a pause, never as the limit reached.
+    #[test]
+    fn a_paused_run_renders_the_pause_message_not_reached() {
+        use camerata_server::cost_cap::CostCapRecord;
+        // A run the cost checkpoint paused is not a limit reached.
+        let paused = CostCapRecord {
+            checkpoint: Some(camerata_server::cost_checkpoint::CostCheckpoint {
+                approved_usd: 5.0,
+                spent_usd: 3.0,
+                projected_usd: 6.0,
+                pieces_done: 1,
+                pieces_left: 1,
+                stopped: true,
+                new_estimate_usd: Some(6.0),
+                difference_usd: Some(1.0),
+                stopped_before: "agent finder".into(),
+            }),
+            cap_usd: 5.0,
+            spent_usd: 3.0,
+            ..CostCapRecord::default()
+        };
+        let text = render_cost_cap(&paused);
+        assert!(
+            text.contains("Paused before going over the approved amount"),
+            "{text}"
+        );
+        assert!(!text.contains("REACHED"), "{text}");
+        assert!(!text.contains(" -- "), "{text}");
     }
 
     /// A resume whose stored replies already cost more than the limit (tutorly, 2026-11-06:
