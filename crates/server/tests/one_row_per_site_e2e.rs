@@ -486,12 +486,6 @@ fn no_producer_source_writes_also_locations() {
         if test_only.contains(path) {
             continue;
         }
-        // Owner ruling 2026-11-17 (calibration round 2): one row per external tool rule with all
-        // its places in `also_locations`, folded into the agent's row of the same family. The
-        // one module that does it is exempt; the loader's unfold leaves those rows alone.
-        if path.ends_with("server/src/tool_row_groups.rs") {
-            continue;
-        }
         for (line, text) in producer_writes(source, ALLOWED) {
             let rel = path.strip_prefix(&crates).unwrap_or(path);
             offences.push(format!("{}:{line}: {text}", rel.display()));
