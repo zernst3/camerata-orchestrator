@@ -75,7 +75,9 @@ impl BoundedFinding for Finding {
     }
 
     fn rule_minimum_is_guidance(&self) -> bool {
+        // The agent finder's rows, and a style linter's rows that are not security checks.
         crate::ai_audit::is_agent_finder_row(self)
+            || (crate::is_style_linter_row(self) && !crate::lint_id_is_security(self))
     }
 
     fn reviewer_doubt(&self) -> Option<String> {
@@ -494,5 +496,17 @@ mod agent_row_minimum_tests {
         let mut fs = vec![row(false)];
         apply_corpus_severity_bounds(&mut fs, &rule_with_min("critical"));
         assert_eq!(fs[0].severity, "critical");
+    }
+
+    /// A style linter's row that is not a security check: the rule minimum is guidance.
+    #[test]
+    fn a_style_lint_row_under_a_rule_with_a_high_minimum_stays_low() {
+        let mut f = row(false);
+        f.severity = "low".to_string();
+        f.preview = true;
+        f.preview_tool = Some("eslint".to_string());
+        let mut fs = vec![f];
+        apply_corpus_severity_bounds(&mut fs, &rule_with_min("high"));
+        assert_eq!(fs[0].severity, "low");
     }
 }

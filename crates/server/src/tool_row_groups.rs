@@ -60,53 +60,109 @@ fn cause_path_of(agent: &Finding, tools: &crate::review_tree::ToolMap) -> Vec<St
     vec![placed.category, placed.rule, sub]
 }
 
-/// Give every row of one (repo, tool, tool rule) one shared place in the tree (one cause), or the
-/// place of the agent row whose rule family it matches.
+/// The tools whose rows share one cause per tool rule: the style and security linters. The
+/// camerata-arch rows are per-site detectors; they stay as the audit and the group reviewer
+/// placed them.
+const CAUSE_TOOLS: &[&str] = &["eslint", "ruff", "clippy", "semgrep"];
+
+fn is_cause_tool(tool: &str) -> bool {
+    CAUSE_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(tool))
+}
+
+/// The step that decides the tool causes. It runs AFTER the group reviewer, which re-sorts the
+/// rows of a rule into its own sub-groups, so it is the one place that decides them. Rebuilds
+/// the review tree when it moved any row, so the tree and the Fixes agree with the rows.
+pub fn settle_tool_causes(
+    report: &mut crate::onboard::ScanReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let selectors = corpus.map(crate::native_tool_selectors);
+    if share_tool_causes(&mut report.findings, selectors.as_ref()) {
+        report.attach_tree();
+    }
+}
+
+/// The next unused sub-group id under `rule_node` (`rule:X` gives `sub:X/N`).
+fn fresh_sub(findings: &[Finding], rule_node: &str) -> String {
+    let bare = rule_node.strip_prefix("rule:").unwrap_or(rule_node);
+    let prefix = format!("sub:{bare}/");
+    let top = findings
+        .iter()
+        .filter_map(|f| f.group_path.get(2))
+        .filter_map(|s| s.strip_prefix(&prefix))
+        .filter_map(|n| n.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("{prefix}{}", top + 1)
+}
+
+/// Give every row of one (repo, tool, tool rule) of a style or security linter one shared place
+/// in the tree (one cause). Returns whether any row moved.
+///
+/// * The family has exactly one agent cause in the repository: the rows take that cause.
+/// * The family has several agent causes: the rows keep one cause of their own, in a sub-group
+///   no agent row is in.
+/// * No agent row of the family: the rows share the first place any of them already has, else
+///   the residual sub-group of their rule.
 pub(crate) fn share_tool_causes(
     findings: &mut [Finding],
     selectors: Option<&HashMap<String, Vec<String>>>,
-) {
+) -> bool {
     let tools = crate::review_tree::ToolMap::from_selectors(selectors);
     let mut groups: BTreeMap<(String, String, String), Vec<usize>> = BTreeMap::new();
     for (i, f) in findings.iter().enumerate() {
-        if let Some(tool) = &f.preview_tool {
+        if let Some(tool) = f.preview_tool.as_deref().filter(|t| is_cause_tool(t)) {
             groups
-                .entry((f.repo.clone(), tool.clone(), f.rule_id.clone()))
+                .entry((f.repo.clone(), tool.to_string(), f.rule_id.clone()))
                 .or_default()
                 .push(i);
         }
     }
+    let mut moved = false;
     for ((repo, tool, _rule), mut idxs) in groups {
         idxs.sort_by(|&a, &b| {
             (&findings[a].path, findings[a].line).cmp(&(&findings[b].path, findings[b].line))
         });
         let head = &findings[idxs[0]];
         let family = crate::review_tree::family_of(head, &tools);
-        let agent = findings.iter().find(|a| {
-            a.captures
-                .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
-                && a.repo == repo
-                && (crate::review_tree::family_of(a, &tools) == family
-                    || crate::preview_is_native_rule_tool(&head.rule_id, &a.rule_id, selectors))
-        });
-        let (path, folded) = match agent {
-            Some(a) => (Some(cause_path_of(a, &tools)), true),
-            None => (
-                idxs.iter()
-                    .map(|&i| &findings[i].group_path)
-                    .find(|p| is_whole_path(p))
-                    .cloned(),
-                false,
-            ),
+        let agent_paths: Vec<Vec<String>> = findings
+            .iter()
+            .filter(|a| {
+                a.captures
+                    .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
+                    && a.repo == repo
+                    && (crate::review_tree::family_of(a, &tools) == family
+                        || crate::preview_is_native_rule_tool(&head.rule_id, &a.rule_id, selectors))
+            })
+            .map(|a| cause_path_of(a, &tools))
+            .collect();
+        let causes: std::collections::BTreeSet<&String> =
+            agent_paths.iter().map(|p| &p[2]).collect();
+        let own = idxs
+            .iter()
+            .map(|&i| &findings[i].group_path)
+            .find(|p| is_whole_path(p))
+            .cloned()
+            .unwrap_or_else(|| cause_path_of(head, &tools));
+        let (path, folded) = match causes.len() {
+            0 => (own, false),
+            1 => (agent_paths[0].clone(), true),
+            _ => {
+                let sub = fresh_sub(findings, &own[1]);
+                (vec![own[0].clone(), own[1].clone(), sub], false)
+            }
         };
-        let Some(path) = path else { continue };
         for &i in &idxs {
-            findings[i].group_path = path.clone();
+            if findings[i].group_path != path {
+                findings[i].group_path = path.clone();
+                moved = true;
+            }
             if folded {
                 crate::note_also_seen_by(&mut findings[i], &tool);
             }
         }
     }
+    moved
 }
 
 #[cfg(test)]
@@ -153,6 +209,7 @@ mod tests {
         report.findings = existing;
         crate::join_repo_previews(&mut report, previews, None, None, &[], None);
         report.assign_site_keys();
+        settle_tool_causes(&mut report, None);
         report
     }
 
@@ -310,5 +367,95 @@ mod tests {
             .map(|f| (f.path.clone(), f.line, f.group_path.clone()))
             .collect();
         assert_eq!(before, after);
+    }
+
+    fn placed(mut f: Finding, sub: u32) -> Finding {
+        let rule = format!("rule:{}", f.rule_id);
+        f.group_path = vec![
+            "cat:security".to_string(),
+            rule,
+            format!("sub:{}/{sub}", f.rule_id),
+        ];
+        f
+    }
+
+    #[test]
+    fn with_two_agent_causes_in_the_family_the_tool_rows_keep_their_own_single_cause() {
+        let a = placed(
+            agent_row("SEC-NO-UNSAFE-DESERIALIZATION-1", "src/a.rs", 9, "high"),
+            1,
+        );
+        let b = placed(
+            agent_row("SEC-NO-UNSAFE-DESERIALIZATION-1", "src/b.rs", 4, "high"),
+            2,
+        );
+        let previews: Vec<Finding> = (0..3)
+            .map(|i| {
+                tool_row(
+                    "semgrep",
+                    "camerata.security.yaml-unsafe-load",
+                    &format!("src/t{i}.rs"),
+                    2,
+                    "high",
+                )
+            })
+            .collect();
+        let report = joined(vec![a, b], previews);
+        let agents = fix_ids(&report, "SEC-NO-UNSAFE-DESERIALIZATION-1");
+        let tools = fix_ids(&report, "camerata.security.yaml-unsafe-load");
+        assert_ne!(agents[0], agents[1], "two agent causes");
+        assert!(
+            tools.iter().all(|t| *t == tools[0] && !t.is_empty()),
+            "{tools:?}"
+        );
+        assert!(!agents.contains(&tools[0]), "neither agent row's cause");
+    }
+
+    #[test]
+    fn two_camerata_arch_rows_of_one_rule_stay_separate_causes() {
+        let a = placed(
+            tool_row(
+                crate::onboard::ARCH_PREVIEW_TOOL,
+                "ARCH-LAYERING-1",
+                "src/a.rs",
+                2,
+                "high",
+            ),
+            1,
+        );
+        let b = placed(
+            tool_row(
+                crate::onboard::ARCH_PREVIEW_TOOL,
+                "ARCH-LAYERING-1",
+                "src/b.rs",
+                3,
+                "high",
+            ),
+            2,
+        );
+        let report = joined(vec![a, b], Vec::new());
+        let ids = fix_ids(&report, "ARCH-LAYERING-1");
+        assert_ne!(ids[0], ids[1], "the group reviewer's causes are left alone");
+    }
+
+    #[test]
+    fn a_critical_row_on_a_line_the_lint_group_also_flags_keeps_its_own_fix() {
+        let lint: Vec<Finding> = ["a.js", "b.js", "c.js"]
+            .iter()
+            .map(|p| tool_row("eslint", "no-unused-vars", p, 1, "low"))
+            .collect();
+        let mut secret = tool_row(
+            "eslint",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "b.js",
+            1,
+            "critical",
+        );
+        secret.preview = false;
+        secret.preview_tool = None;
+        let report = joined(vec![secret], lint);
+        let lint_fix = fix_ids(&report, "no-unused-vars");
+        let secret_fix = fix_ids(&report, "SEC-NO-HARDCODED-SECRETS-1");
+        assert_ne!(lint_fix[0], secret_fix[0]);
     }
 }

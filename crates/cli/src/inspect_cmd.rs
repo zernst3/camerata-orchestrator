@@ -1425,6 +1425,8 @@ pub async fn run_inspect_pipeline_with(
         )
         .await;
     }
+    // The tool causes are decided after the group reviewer, which re-sorts the rows of a rule.
+    camerata_server::settle_tool_causes(&mut report, corpus.as_ref());
 
     // The incremental baseline becomes reusable only when the scan is complete: a run with a
     // failed or unrun part leaves the previous baseline in place, and its own stored replies are

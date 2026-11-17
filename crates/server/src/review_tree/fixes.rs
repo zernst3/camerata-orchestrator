@@ -141,12 +141,13 @@ impl Candidate {
     /// Whether `self` contains every place of `other`, a whole-file place counting for the lines
     /// of its file when `self` is at least as severe as `other`'s worst row.
     fn covers(&self, other: &Self) -> bool {
-        other.places.iter().all(|p| {
-            self.places.contains(p)
-                || (p.line > 0
-                    && self.worst <= other.worst
-                    && self.whole_files.contains(&(p.repo.clone(), p.path.clone())))
-        })
+        // A set absorbs another only if it is at least as severe: a critical row on a line a
+        // low lint group also flags keeps its own Fix.
+        self.worst <= other.worst
+            && other.places.iter().all(|p| {
+                self.places.contains(p)
+                    || (p.line > 0 && self.whole_files.contains(&(p.repo.clone(), p.path.clone())))
+            })
     }
 }
 

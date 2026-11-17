@@ -2806,3 +2806,84 @@ async fn a_tool_call_transcript_reply_is_refused_and_never_stored_as_good() {
         "nothing from the transcript is stored as a summary"
     );
 }
+
+/// Round 2: the tool causes are decided AFTER the group reviewer. The reviewer re-sorts the rows
+/// of a rule node into its own sub-groups; one agent row plus 25 tool rows of a family-mapped
+/// rule, split by the reviewer into three sub-groups apart from the agent's, still end as one
+/// cause (one Fix), with every place its own row and the tree consistent.
+#[tokio::test]
+async fn tool_rows_the_reviewer_split_into_three_sub_groups_end_as_one_cause_with_the_agent_row() {
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.code_lines = 40_000;
+    let mut agent = site("SEC-NO-UNSAFE-DESERIALIZATION-1", 0, "high");
+    agent.path = "src/a_agent.rs".to_string();
+    agent.captures.insert(
+        crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE.to_string(),
+        "1".to_string(),
+    );
+    report.findings.push(agent);
+    for i in 0..25 {
+        let mut f = site("camerata.security.yaml-unsafe-load", i, "high");
+        f.path = format!("src/t{i:02}.js");
+        f.preview = true;
+        f.preview_tool = Some("semgrep".to_string());
+        report.findings.push(f);
+    }
+    report.assign_site_keys();
+    let llm = Reviewer::new(|call| {
+        // Index 0 is the agent row (its path sorts first); the 25 tool rows follow.
+        let tools: Vec<usize> = call.indices.iter().copied().filter(|&i| i != 0).collect();
+        let third = tools.len() / 3;
+        Ok(reply(
+            "One family.",
+            &[
+                ("Agent", "the agent's", vec![0]),
+                ("T1", "first", tools[..third].to_vec()),
+                ("T2", "second", tools[third..2 * third].to_vec()),
+                ("T3", "third", tools[2 * third..].to_vec()),
+            ],
+            &[],
+            &[],
+            &[],
+        ))
+    });
+    let rules = vec![(
+        "SEC-NO-UNSAFE-DESERIALIZATION-1".to_string(),
+        "No unsafe deserialization.".to_string(),
+    )];
+    let controls = crate::cost_cap::RunControls::default();
+    review_scan_report(&mut report, &llm, &controls, &rules, false, None, None).await;
+    let split: BTreeSet<&str> = report
+        .findings
+        .iter()
+        .map(|f| f.group_path[2].as_str())
+        .collect();
+    assert_eq!(split.len(), 4, "the reviewer split the rows: {split:?}");
+
+    crate::tool_row_groups::settle_tool_causes(&mut report, None);
+
+    assert_eq!(report.findings.len(), 26);
+    assert!(report.findings.iter().all(|f| f.also_locations.is_empty()));
+    let index = crate::review_tree::FixIndex::new(report.tree.as_ref(), &report.findings);
+    let fixes: BTreeSet<String> = report.findings.iter().map(|f| index.fix_id_of(f)).collect();
+    assert_eq!(fixes.len(), 1, "one exported fix id: {fixes:?}");
+    assert!(!fixes.iter().next().unwrap().is_empty());
+    // The tree agrees with the rows: every sub-group node lists exactly the keys of the rows
+    // whose path names it, and every row is in exactly one sub-group.
+    let t = tree(&report);
+    let mut seen = 0;
+    for n in t.nodes.iter().filter(|n| n.level == NodeLevel::Subgroup) {
+        let want: BTreeSet<&str> = report
+            .findings
+            .iter()
+            .filter(|f| f.group_path[2] == n.id)
+            .map(|f| f.site_key.as_str())
+            .collect();
+        let have: BTreeSet<&str> = n.members.iter().map(String::as_str).collect();
+        assert_eq!(want, have, "node {}", n.id);
+        seen += have.len();
+    }
+    assert_eq!(seen, 26);
+    assert!(t.fix_merge_block().is_integral());
+}

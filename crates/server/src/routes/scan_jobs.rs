@@ -915,6 +915,11 @@ pub(crate) fn join_repo_previews(
     files: &[(String, String)],
     root: Option<&std::path::Path>,
 ) {
+    // Style-lint rows are rated low before they meet the rows already there (calibration round
+    // 2, change A). The tool causes are decided later, after the group reviewer
+    // ([`crate::settle_tool_causes`]).
+    let mut previews = previews;
+    crate::tool_row_groups::rate_style_lint_rows(&mut previews);
     let mut deduped = dedup_scan_previews_with(&mut report.findings, previews, selectors, corpus);
     crate::onboard::evidence_check::verify_and_record(
         &mut report.ledger,
@@ -922,11 +927,7 @@ pub(crate) fn join_repo_previews(
         files,
         root,
     );
-    // Style-lint rows are rated low; every tool row of one rule then shares one cause, or joins
-    // the agent row's cause when the rule family matches (calibration round 2, change A).
-    crate::tool_row_groups::rate_style_lint_rows(&mut deduped);
     report.findings.extend(deduped);
-    crate::tool_row_groups::share_tool_causes(&mut report.findings, selectors);
 }
 
 /// Corrects the ledger's `RuleTier::ExternalTool` entries to reflect what the scan-time

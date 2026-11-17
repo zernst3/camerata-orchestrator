@@ -44,10 +44,10 @@ fn report() -> crate::onboard::ScanReport {
 #[test]
 fn a_tool_row_whose_snippet_is_not_at_its_line_is_flagged_and_held() {
     let mut report = report();
-    // Two different tool rules, so the rows stay two rows (rows of one tool rule group).
-    let mut second = tool_row(6, "child_process.exec(userInput)");
-    second.rule_id = "SEC-NO-EXEC-1".to_string();
-    let previews = vec![tool_row(6, "eval(req.query.code);"), second];
+    let previews = vec![
+        tool_row(6, "eval(req.query.code);"),
+        tool_row(6, "child_process.exec(userInput)"),
+    ];
     crate::join_repo_previews(&mut report, previews, None, None, &files(), None);
     assert_eq!(report.findings.len(), 2, "no tool row is dropped");
     let flagged: Vec<&Finding> = report

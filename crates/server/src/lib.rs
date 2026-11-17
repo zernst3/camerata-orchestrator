@@ -186,6 +186,7 @@ pub mod test_git;
 pub mod test_tamper;
 pub mod tool_provisioning;
 mod tool_row_groups;
+pub use tool_row_groups::settle_tool_causes;
 pub mod transcript;
 pub mod uow;
 pub mod update_branch_run;
@@ -2571,6 +2572,8 @@ async fn onboard_audit(
             )
             .await;
         }
+        // The tool causes are decided after the group reviewer, which re-sorts the rows of a rule.
+        settle_tool_causes(&mut report, corpus.as_ref());
 
         // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
         // After a scan completes, write one floor/catch record for each ACTIVE floor
@@ -3222,6 +3225,9 @@ pub(crate) async fn start_audit_job(
                 )
                 .await;
             }
+            // The tool causes are decided after the group reviewer, which re-sorts the rows of a
+            // rule.
+            settle_tool_causes(&mut report, corpus.as_ref());
 
             // The run is complete when no part failed or was left out; a scan that is not can be
             // resumed with "Run what remains". The export is the operator's own later step.
