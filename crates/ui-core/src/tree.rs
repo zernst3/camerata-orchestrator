@@ -345,26 +345,15 @@ pub fn marker_chips(row: &SiteRow) -> Vec<Chip> {
                     .map_or_else(|| "moved".to_string(), |l| format!("moved, was line {l}")),
                 tip: "The code moved; the row has a new key.".to_string(),
             },
-            Marker::PossibleDuplicate => {
-                let dup = row.possible_duplicate_of.as_ref();
-                Chip {
-                    class: "mark-dup",
-                    label: dup.map_or_else(
-                        || "dup?".to_string(),
-                        |d| format!("dup? {} at {}:{}", d.rule_id, base_name(&d.path), d.line),
-                    ),
-                    tip: dup.map_or_else(String::new, |d| d.hint.clone()),
-                }
-            }
+            Marker::PossibleDuplicate => Chip {
+                class: "mark-dup",
+                label: SamePlaceView::TERM.to_string(),
+                tip: possible_duplicate_tip(row),
+            },
             Marker::PossibleFalsePositive => Chip {
                 class: "mark-fp",
                 label: PossibleFalsePositive::TERM.to_string(),
                 tip: possible_false_positive_tip(row),
-            },
-            Marker::PossibleDuplicateCause => Chip {
-                class: "mark-dupfix",
-                label: SamePlaceView::TERM.to_string(),
-                tip: possible_duplicate_tip(row),
             },
             Marker::Carried => {
                 let by = row.carried_by.as_ref();
@@ -401,17 +390,26 @@ pub fn possible_false_positive_tip(row: &SiteRow) -> String {
     parts.join(" ")
 }
 
-/// The hover text of the Possible duplicate chip: the other causes at this place, and what the
-/// hint does not do.
+/// The hover text of the Possible duplicate chip: the engine's link, the other causes at this
+/// place, and what the hint does not do.
 pub fn possible_duplicate_tip(row: &SiteRow) -> String {
-    let mut parts = vec![format!(
-        "Another cause has a row at the same place ({}).",
-        row.same_place_as
-            .iter()
-            .map(|o| o.title.as_str())
-            .collect::<Vec<_>>()
-            .join("; ")
-    )];
+    let mut parts = Vec::new();
+    if let Some(d) = row.possible_duplicate_of.as_ref() {
+        parts.push(format!(
+            "The engine linked it to {} at {}:{}. {}",
+            d.rule_id, d.path, d.line, d.hint
+        ));
+    }
+    if !row.same_place_as.is_empty() {
+        parts.push(format!(
+            "Another cause has a row at the same place ({}).",
+            row.same_place_as
+                .iter()
+                .map(|o| o.title.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
     parts.push(
         "It may be the same problem found twice. It stays a problem until you rule on it."
             .to_string(),

@@ -1778,6 +1778,46 @@ fn the_merge_door_of_the_hint_offers_the_other_cause_first_and_opens_on_it() {
     assert!(merge_candidates(&plain_row, &ctx, "")
         .iter()
         .all(|c| c.note.as_deref() != Some("same place")));
-    assert!(same_place_lines(&plain_row).is_empty());
-    assert_eq!(same_place_lines(&row).len(), 1);
+    assert!(duplicate_entries(&plain_row).is_empty());
+    assert_eq!(duplicate_entries(&row).len(), 1);
+}
+
+#[test]
+fn the_possible_duplicate_line_lists_the_engine_link_then_the_same_place_causes_once() {
+    let all = rows();
+    let mut row = all[0].clone();
+    let (a, b) = (&all[1], &all[2]);
+    row.possible_duplicate_of = Some(DuplicateView {
+        key: a.site_key.clone(),
+        hint: "same line, different family".into(),
+        rule_id: a.rule_id.clone(),
+        path: a.path.clone(),
+        line: a.line,
+    });
+    // The engine's own target is also a same-place cause: listed once, as the engine link.
+    row.same_place_as = vec![
+        same_place(&a.site_key, row.line + 1),
+        same_place(&b.site_key, row.line + 2),
+    ];
+    let entries = duplicate_entries(&row);
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[0].goto, None, "the engine link comes first");
+    assert!(entries[0].label.contains(&a.rule_id), "{:?}", entries[0]);
+    assert_eq!(entries[1].label, "Another cause");
+    // The same-place entry opens its row with its key, rule and group.
+    assert_eq!(
+        entries[1].goto,
+        Some((
+            b.site_key.clone(),
+            "SEC-OTHER-1".to_string(),
+            "sub:SEC-OTHER-1/1".to_string()
+        ))
+    );
+    // Only the engine link, or only the hint, is one entry.
+    let mut only_hint = row.clone();
+    only_hint.possible_duplicate_of = None;
+    assert_eq!(duplicate_entries(&only_hint).len(), 2);
+    let mut only_link = row;
+    only_link.same_place_as.clear();
+    assert_eq!(duplicate_entries(&only_link).len(), 1);
 }

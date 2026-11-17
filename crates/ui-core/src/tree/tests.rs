@@ -185,7 +185,6 @@ fn every_marker_has_its_chip_class_from_the_spec_table() {
     let expect = [
         (Marker::Held, "mark-held"),
         (Marker::PossibleFalsePositive, "mark-fp"),
-        (Marker::PossibleDuplicateCause, "mark-dupfix"),
         (Marker::Escalated, "mark-esc"),
         (Marker::Candidate, "mark-cand"),
         (Marker::OverBudget, "mark-over"),
@@ -337,8 +336,8 @@ fn the_chips_that_carry_a_date_or_a_line_say_it() {
         .find(|c| c.class == "mark-dup")
         .unwrap();
     let d = dup.possible_duplicate_of.as_ref().unwrap();
-    assert!(chip.label.starts_with("dup? "), "{}", chip.label);
-    assert!(chip.label.contains(&d.rule_id), "{}", chip.label);
+    assert_eq!(chip.label, "Possible duplicate");
+    assert!(chip.tip.contains(&d.hint), "{}", chip.tip);
 }
 
 #[test]
@@ -447,12 +446,16 @@ fn nothing_these_pieces_say_contains_an_em_dash() {
 }
 
 #[test]
-fn the_possible_duplicate_chip_comes_after_the_possible_false_positive_chip_and_says_what_it_is() {
-    use camerata_api_types::review_view::SamePlaceView;
-    let mut row = row_with(&[
-        Marker::PossibleFalsePositive,
-        Marker::PossibleDuplicateCause,
-    ]);
+fn a_row_with_both_duplicate_sources_gets_exactly_one_possible_duplicate_chip() {
+    use camerata_api_types::review_view::{DuplicateView, SamePlaceView};
+    let mut row = row_with(&[Marker::PossibleFalsePositive, Marker::PossibleDuplicate]);
+    row.possible_duplicate_of = Some(DuplicateView {
+        key: "k1".to_string(),
+        hint: "same line, different family".to_string(),
+        rule_id: "SEC-B-1".to_string(),
+        path: "src/a.rs".to_string(),
+        line: 11,
+    });
     row.same_place_as = vec![SamePlaceView {
         fix_id: "ab12".to_string(),
         title: "Raw SQL built from the request".to_string(),
@@ -462,18 +465,28 @@ fn the_possible_duplicate_chip_comes_after_the_possible_false_positive_chip_and_
         group_id: "sub:x/1".to_string(),
     }];
     let chips = marker_chips(&row);
-    assert_eq!(chips[0].class, "mark-fp");
-    assert_eq!(chips[1].class, "mark-dupfix");
-    assert_eq!(chips[1].label, "Possible duplicate");
+    let dups: Vec<_> = chips.iter().filter(|c| c.class == "mark-dup").collect();
+    assert_eq!(dups.len(), 1, "{chips:?}");
+    assert_eq!(dups[0].label, "Possible duplicate");
     assert!(
-        chips[1].tip.contains("Raw SQL built from the request"),
+        dups[0].tip.contains("same line, different family"),
         "{}",
-        chips[1].tip
+        dups[0].tip
     );
-    assert!(chips[1].tip.contains("stays a problem"), "{}", chips[1].tip);
-    let pos = |m| Marker::PRECEDENCE.iter().position(|x| *x == m).unwrap();
+    assert!(
+        dups[0].tip.contains("Raw SQL built from the request"),
+        "{}",
+        dups[0].tip
+    );
+    assert!(dups[0].tip.contains("stays a problem"), "{}", dups[0].tip);
+    assert!(chips.iter().all(|c| !c.label.starts_with("dup?")));
+    // Only the same-place source: still the one chip.
+    row.possible_duplicate_of = None;
     assert_eq!(
-        pos(Marker::PossibleDuplicateCause),
-        pos(Marker::PossibleFalsePositive) + 1
+        marker_chips(&row)
+            .iter()
+            .filter(|c| c.class == "mark-dup")
+            .count(),
+        1
     );
 }

@@ -724,7 +724,6 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
         .filter(|m| match m {
             Marker::Held => row.held.is_some(),
             Marker::PossibleFalsePositive => row.possible_false_positive.is_some(),
-            Marker::PossibleDuplicateCause => !row.same_place_as.is_empty(),
             Marker::Escalated => escalated,
             Marker::Candidate => below,
             Marker::OverBudget => over,
@@ -732,7 +731,9 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
             Marker::NewSinceDecision => row.new_since_decision.is_some(),
             Marker::Stale => stale,
             Marker::Moved => row.moved_from.is_some(),
-            Marker::PossibleDuplicate => row.possible_duplicate_of.is_some(),
+            Marker::PossibleDuplicate => {
+                row.possible_duplicate_of.is_some() || !row.same_place_as.is_empty()
+            }
             Marker::Carried => row.carried_by.is_some(),
             Marker::Edited => edited,
         })

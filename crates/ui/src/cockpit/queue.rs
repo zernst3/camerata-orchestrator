@@ -487,10 +487,10 @@ fn QueueRowView(
                         "{PossibleFalsePositive::TERM}"
                     }
                 }
-                if !site.same_place_as.is_empty() {
+                if site.possible_duplicate_of.is_some() || !site.same_place_as.is_empty() {
                     " "
                     span {
-                        class: "mark-dupfix",
+                        class: "mark-dup",
                         title: "{camerata_ui_core::tree::possible_duplicate_tip(site)}",
                         "{camerata_api_types::review_view::SamePlaceView::TERM}"
                     }

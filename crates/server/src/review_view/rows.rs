@@ -158,9 +158,6 @@ impl<'a> ReviewComposer<'a> {
         if self.possible_false_positive(f).is_some() {
             out.push(Marker::PossibleFalsePositive);
         }
-        if !self.dup.of(f).is_empty() {
-            out.push(Marker::PossibleDuplicateCause);
-        }
         match candidate {
             Some(c) if c.escalated => {
                 out.push(Marker::Escalated);
@@ -183,7 +180,7 @@ impl<'a> ReviewComposer<'a> {
         if self.inputs.moved.contains_key(key) {
             out.push(Marker::Moved);
         }
-        if f.possible_duplicate_of.is_some() {
+        if f.possible_duplicate_of.is_some() || !self.dup.of(f).is_empty() {
             out.push(Marker::PossibleDuplicate);
         }
         if self.carried_by_view(key).is_some() {

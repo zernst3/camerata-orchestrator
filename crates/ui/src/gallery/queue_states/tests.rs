@@ -439,7 +439,16 @@ fn the_possible_duplicate_page_lists_paired_rows_together_with_their_chip_and_th
     assert!(html.contains("Back to rank order (2 paired)"), "{html}");
     assert!(html.contains("review-queue-dup-together"));
     // Every paired row carries the chip in the table, and one in the detail head.
-    assert_eq!(count(&html, "class=\"mark-dupfix\""), 3, "{html}");
+    let chipped = v
+        .escalated
+        .iter()
+        .take(ROWS_PER_PAGE)
+        .filter(|r| r.site.possible_duplicate_of.is_some() || !r.site.same_place_as.is_empty())
+        .count();
+    assert!(chipped >= 2);
+    // One chip a row in the table (either source), and one in the detail head.
+    assert_eq!(count(&html, "class=\"mark-dup\""), chipped + 1, "{html}");
+    assert!(!html.contains("mark-dupfix") && !html.contains("dup?"));
     // The pair is drawn side by side inside its band.
     let state = QueueState {
         dup_together: true,
@@ -464,10 +473,11 @@ fn the_possible_duplicate_page_lists_paired_rows_together_with_their_chip_and_th
     assert_eq!(at[1], at[0] + 1, "side by side: {drawn:?}");
     // The focused row's detail names the other cause and offers the merge door.
     let other = &paired[1].site.headline;
-    assert!(html.contains("Same place as"), "{html}");
+    assert!(html.contains("Possible duplicate of"), "{html}");
+    assert!(!html.contains("Same place as"));
     assert!(html.contains("site-detail-same-place-link"));
     assert!(html.contains(&other.replace('\'', "&#39;")) || html.contains(other.as_str()));
-    assert!(html.contains("site-detail-same-place-merge"));
+    assert_eq!(count(&html, "merge into"), 1, "one merge door");
     // A look only: the line is still drawn once and every escalated row is still there.
     assert_eq!(count(&html, "class=\"queue-line\""), 1);
     assert_eq!(l.row_count(), v.escalated.len().min(ROWS_PER_PAGE));

@@ -70,14 +70,12 @@ pub enum Marker {
     Stale,
     /// The code moved; the row has a new key.
     Moved,
-    /// Another row may describe the same thing.
+    /// Another row may describe the same thing: the engine linked it ([`SiteRow::possible_duplicate_of`])
+    /// or another cause has a row at the same place ([`SiteRow::same_place_as`]).
     PossibleDuplicate,
     /// The engine itself has reasons to doubt the row ([`SiteRow::possible_false_positive`]). A
     /// review aid for the operator: it changes nothing about the row.
     PossibleFalsePositive,
-    /// A row of another cause is at the same place ([`SiteRow::same_place_as`]), so the two may be
-    /// one problem found twice. A review aid for the operator: it changes nothing about the row.
-    PossibleDuplicateCause,
     /// Another row at the same place carries this rule: it is decided there unless it is decided
     /// alone.
     Carried,
@@ -87,13 +85,11 @@ pub enum Marker {
 
 impl Marker {
     /// Every marker, in precedence order (spec section 2, "noise rule").
-    pub const PRECEDENCE: [Marker; 13] = [
+    pub const PRECEDENCE: [Marker; 12] = [
         Self::Held,
         // Second, so the chip shows in the Markers column of every flagged row: the operator
         // opens these rows first.
         Self::PossibleFalsePositive,
-        // Third: a hint for the operator, after the flag it travels with.
-        Self::PossibleDuplicateCause,
         Self::Escalated,
         Self::Candidate,
         Self::OverBudget,
@@ -299,8 +295,6 @@ pub struct SamePlaceView {
 impl SamePlaceView {
     /// The hint's name, everywhere a person reads it.
     pub const TERM: &'static str = "Possible duplicate";
-    /// What the detail says before the other cause's title.
-    pub const LABEL: &'static str = "Same place as";
 }
 
 /// A rule another row at the same place carries (D2: the "Also matches" list of the carrier). It
@@ -1024,7 +1018,7 @@ mod tests {
         for m in Marker::PRECEDENCE {
             assert!(seen.insert(m), "{m:?} is listed twice");
         }
-        assert_eq!(seen.len(), 13);
+        assert_eq!(seen.len(), 12);
     }
 
     #[test]

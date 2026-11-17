@@ -1994,7 +1994,6 @@ mod tests {
             entry.meaning,
             "Possible duplicates together (3)",
             "2 fixes may duplicate another, 1 decided",
-            "Same place as",
         ] {
             assert_eq!(banned_synonym_in(text), None, "{text:?}");
         }

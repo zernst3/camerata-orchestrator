@@ -1230,12 +1230,12 @@ fn a_site_row_names_the_other_cause_at_the_same_place_and_nothing_else_changes()
     assert!(!at_orders.same_place_as[0].title.is_empty());
     assert_eq!(other.same_place_as[0].key, at_orders.site_key);
     for r in [at_orders, other] {
-        assert!(r.markers.contains(&Marker::PossibleDuplicateCause), "{r:?}");
+        assert!(r.markers.contains(&Marker::PossibleDuplicate), "{r:?}");
         assert_eq!(r.decision, None);
     }
     let alone = sql_rows.iter().find(|r| r.path == "src/other.rs").unwrap();
     assert!(alone.same_place_as.is_empty());
-    assert!(!alone.markers.contains(&Marker::PossibleDuplicateCause));
+    assert!(!alone.markers.contains(&Marker::PossibleDuplicate));
     // The row is as the engine left it.
     for r in [at_orders, other] {
         let source = sealed

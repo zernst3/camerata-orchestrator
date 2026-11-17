@@ -1406,10 +1406,48 @@ pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, &'stat
         .collect()
 }
 
-/// The detail's "Same place as" entries: each other cause with a row at this place, nearest first.
-/// Empty for a row with none.
-pub fn same_place_lines(row: &SiteRow) -> &[camerata_api_types::review_view::SamePlaceView] {
-    &row.same_place_as
+/// One entry of the detail's "Possible duplicate of" line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateEntry {
+    /// What the line shows: the engine's `SEC-KEY-2 at web/env.ts:3`, or the other cause's title.
+    pub label: String,
+    /// The hover text.
+    pub hint: String,
+    /// Where the label opens: the other cause's row (site key, rule id, sub-group). `None` for the
+    /// engine's own link, which is plain text.
+    pub goto: Option<(String, String, String)>,
+}
+
+/// The entries of the "Possible duplicate of" line: the engine's link first, then each other
+/// cause with a row at the same place, nearest first, each row once. Empty for a row with none.
+pub fn duplicate_entries(row: &SiteRow) -> Vec<DuplicateEntry> {
+    let mut out = Vec::new();
+    if let Some((label, hint)) = duplicate_line(row) {
+        out.push(DuplicateEntry {
+            label,
+            hint,
+            goto: None,
+        });
+    }
+    let linked = row.possible_duplicate_of.as_ref().map(|d| d.key.as_str());
+    for other in &row.same_place_as {
+        if Some(other.key.as_str()) == linked {
+            continue;
+        }
+        out.push(DuplicateEntry {
+            label: other.title.clone(),
+            hint: format!(
+                "{} at line {}, another cause at the same place",
+                other.rule_id, other.line
+            ),
+            goto: Some((
+                other.key.clone(),
+                other.rule_id.clone(),
+                other.group_id.clone(),
+            )),
+        });
+    }
+    out
 }
 
 pub fn duplicate_line(row: &SiteRow) -> Option<(String, String)> {

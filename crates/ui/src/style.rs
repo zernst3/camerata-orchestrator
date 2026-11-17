@@ -6996,7 +6996,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
    Chips sit beside `.kind-chip` and take its sizing. Each class is one row of the spec's chip
    table; the markers column draws at most two and folds the rest into a "+N". */
 .mark-esc, .mark-cand, .mark-over, .mark-outlier, .mark-new, .mark-stale, .mark-moved,
-.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried, .mark-fp, .mark-dupfix {
+.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried, .mark-fp {
   display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
   border-radius: 999px; padding: 1px 8px; white-space: nowrap; border: 1px solid transparent;
 }
@@ -7017,13 +7017,11 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 /* Possible false positive: a dashed violet outline, so it reads as a question and not a verdict.
    The reasons are its hover text and the detail's lines. */
 .mark-fp { background: transparent; border: 1px dashed #a78bfa; color: #c4b5fd; cursor: help; }
-/* Possible duplicate (another cause at the same place): a dashed teal outline, a question and not a
-   verdict. The other cause is its hover text and the detail's "Same place as" line. */
-.mark-dupfix { background: transparent; border: 1px dashed #5eead4; color: #99f6e4; cursor: help; }
 .site-detail-same-place-item { margin-right: 8px; }
 .site-detail-same-place-link { max-width: 100%; }
-/* Possible duplicate: a gray outline. */
-.mark-dup { background: transparent; border-color: var(--ink-faint); color: var(--ink-soft); }
+/* Possible duplicate (the engine's link or another cause at the same place): a gray outline. The
+   other row is its hover text and the detail's "Possible duplicate of" line. */
+.mark-dup { background: transparent; border-color: var(--ink-faint); color: var(--ink-soft); cursor: help; }
 /* Also matches (a row that carries other rules at its place) and carried (a row another row at
    its place carries): gray outlines, so neither reads as a warning. */
 .mark-also { background: transparent; border-color: var(--accent); color: var(--ink-soft); }
