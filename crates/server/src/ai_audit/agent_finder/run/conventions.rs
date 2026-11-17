@@ -75,6 +75,7 @@ pub(super) fn held_problem_place_row(
     title: &str,
     place: &super::super::reply::ProblemPlace,
 ) -> Finding {
+    let title = crate::client_text::plain(title.trim());
     let mut held = Finding {
         repo: repo.to_string(),
         path: place.path.trim_start_matches("./").to_string(),

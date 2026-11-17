@@ -621,6 +621,45 @@ async fn two_problems_listing_the_same_path_only_place_keep_two_held_rows() {
     }
 }
 
+#[test]
+fn a_held_place_row_holds_no_dash_from_the_problem_title() {
+    use super::super::super::reply::{Problem, ProblemPlace};
+    let problem = Problem {
+        n: 1,
+        path: "src/a.rs".into(),
+        line: 4,
+        end_line: None,
+        severity: "medium".into(),
+        title: "Missing check \u{2014} on the caller \u{2013} again".into(),
+        code: "c".into(),
+        what: "w".into(),
+        why: "y".into(),
+        fix: "f".into(),
+        sure: true,
+        effort: "low".into(),
+        label: "l".into(),
+        places: vec![ProblemPlace {
+            path: "src/b.rs".into(),
+            line: 0,
+            end_line: None,
+        }],
+    };
+    let mut out = Vec::new();
+    super::super::places_as_rows(REPO, &[], &[problem], &repo_files(), &mut out);
+    assert_eq!(out.len(), 1, "{out:?}");
+    // The detail's own headline separator is a dash by design; the title is what is checked.
+    let detail = out[0]
+        .detail
+        .replace(crate::ai_audit::digest_parse::HEADLINE_SEP, " ");
+    for text in [&out[0].snippet, &detail] {
+        assert!(
+            !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+            "{text}"
+        );
+        assert!(text.contains("Missing check"), "{text}");
+    }
+}
+
 #[tokio::test]
 async fn a_place_with_no_path_makes_no_row() {
     let before = run_with_places(&repo_files(), json!([])).await;
