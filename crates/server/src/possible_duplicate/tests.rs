@@ -30,7 +30,7 @@ fn fix_of(f: &Finding) -> String {
 }
 
 fn index(rows: &[Finding]) -> DupIndex {
-    DupIndex::with_fix_ids(rows, fix_of)
+    DupIndex::with_fix_ids(rows, fix_of, |_| None)
 }
 
 #[test]
@@ -89,6 +89,12 @@ fn a_residual_sub_group_counts_each_place_as_its_own_cause() {
     let idx = index(&rows);
     assert_eq!(idx.of(&rows[0]).len(), 1);
     assert_eq!(idx.of(&rows[1]).len(), 1);
+    // The other place shares the row's own Fix, so the export names the place with the Fix id.
+    assert_eq!(idx.fix_ids_of(&rows[0]), vec!["sub:SEC-A-1/0 line 12"]);
+    assert_eq!(idx.fix_ids_of(&rows[1]), vec!["sub:SEC-A-1/0 line 10"]);
+    // A different Fix is named by its id alone.
+    let mixed = [row("a.rs", 10, "sub:SEC-A-1/0"), row("a.rs", 12, "sub:y/1")];
+    assert_eq!(index(&mixed).fix_ids_of(&mixed[0]), vec!["sub:y/1"]);
     // The same place twice in a residual sub-group is one cause.
     let mut again = row("a.rs", 10, "sub:SEC-A-1/0");
     again.site_key = "second".to_string();
@@ -131,4 +137,45 @@ fn working_out_the_hint_changes_nothing_on_the_rows() {
     let before = rows.clone();
     let _ = index(&rows);
     assert_eq!(rows, before);
+}
+
+#[test]
+fn a_row_the_engine_threw_out_never_pairs() {
+    let mut thrown = row("a.rs", 12, "sub:y/1");
+    crate::engine_discard::mark(&mut thrown, "its headline is a placeholder");
+    let rows = [row("a.rs", 10, "sub:x/1"), thrown];
+    assert!(index(&rows).of(&rows[0]).is_empty());
+    assert!(index(&rows).of(&rows[1]).is_empty());
+}
+
+#[test]
+fn a_row_already_merged_into_another_never_pairs() {
+    let mut merged = row("a.rs", 12, "sub:y/1");
+    merged.captures.insert(
+        crate::report_export::overlay::MERGED_INTO_CAPTURE.to_string(),
+        "some-other-key".to_string(),
+    );
+    let rows = [row("a.rs", 10, "sub:x/1"), merged];
+    assert!(index(&rows).of(&rows[0]).is_empty());
+    assert!(index(&rows).of(&rows[1]).is_empty());
+}
+
+#[test]
+fn a_rule_carried_at_the_same_place_under_another_fix_never_pairs() {
+    // The carrier and the row it carries are one place: the same line, two rules, two Fixes.
+    let rows = [row("a.rs", 10, "sub:x/1"), row("a.rs", 10, "sub:y/1")];
+    let carried = DupIndex::with_fix_ids(&rows, fix_of, |_| Some("place-1".to_string()));
+    assert!(carried.of(&rows[0]).is_empty());
+    assert!(carried.of(&rows[1]).is_empty());
+    // A third cause two lines away is still a pair with each of them.
+    let rows = [
+        row("a.rs", 10, "sub:x/1"),
+        row("a.rs", 10, "sub:y/1"),
+        row("a.rs", 12, "sub:z/1"),
+    ];
+    let idx = DupIndex::with_fix_ids(&rows, fix_of, |f| {
+        (f.line == 10).then(|| "place-1".to_string())
+    });
+    assert_eq!(idx.fix_ids_of(&rows[0]), vec!["sub:z/1"]);
+    assert_eq!(idx.fix_ids_of(&rows[2]), vec!["sub:x/1", "sub:y/1"]);
 }

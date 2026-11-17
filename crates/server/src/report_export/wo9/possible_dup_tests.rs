@@ -241,3 +241,46 @@ fn the_start_here_count_counts_a_ruled_out_hinted_fix_as_decided() {
         Some("2 fixes may duplicate another, 1 decided")
     );
 }
+
+#[test]
+fn two_places_of_one_residual_group_name_the_fix_and_the_place_in_the_workbook_cell() {
+    // Two rows of one rule, two lines apart, with nothing that ties them to one cause: the rule's
+    // residual group holds both, each place is its own cause, and they share a Fix id.
+    let mut report = crate::release_gate::test_scan_report();
+    report.findings = vec![sql_row("src/r.rs", 10), sql_row("src/r.rs", 12)];
+    let sealed = report.seal();
+    let fix = fix_id_of_rule(&sealed, "SEC-NO-RAW-SQL-CONCAT-1", "src/r.rs");
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let entries = internal_entries(&reviewed);
+    let rows = findings_rows(&entries);
+    let mut cells: Vec<(u64, String)> = rows
+        .iter()
+        .map(|r| {
+            let ids = r["possible_duplicate_of"].as_array().expect("a hint");
+            assert_eq!(ids.len(), 1);
+            (
+                r["line"].as_u64().unwrap(),
+                ids[0].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    cells.sort();
+    assert_eq!(
+        cells,
+        vec![
+            (10, format!("{fix} line 12")),
+            (12, format!("{fix} line 10"))
+        ]
+    );
+    // The workbook cell says the same.
+    let grid = sheet_table(&workbook(&entries), v::ALL_PROBLEMS);
+    let col = grid[0]
+        .iter()
+        .position(|h| h == v::POSSIBLE_DUPLICATE_OF)
+        .unwrap();
+    let all: Vec<&str> = grid[1..].iter().map(|r| r[col].as_str()).collect();
+    assert!(
+        all.iter().any(|c| c.contains(&format!("{fix} line "))),
+        "{all:?}"
+    );
+}

@@ -43,6 +43,9 @@ pub struct DupLink {
     pub group_id: String,
     /// How many lines apart the two rows are.
     pub distance: usize,
+    /// Whether the other cause has the same Fix id as the row (two places of one rule's residual
+    /// sub-group, each its own cause), so the Fix id alone does not tell them apart.
+    pub same_fix: bool,
 }
 
 /// For each row (by site key), the other causes with a row at the same place.
@@ -57,13 +60,19 @@ struct Entry<'a> {
     fix_id: String,
     /// What makes the row's cause: its Fix id, and for a residual sub-group its place too.
     cause: (String, Option<usize>),
+    /// The place node the row is carried at, when it shares its place with another row.
+    place: Option<String>,
 }
 
 /// Whether the row says something is wrong at its place (a defect, a departure or no kind), as
 /// the Fixes count them, and sits at a line of a file.
 fn is_problem_at_a_line(f: &Finding) -> bool {
     use camerata_api_types::audit::FindingKind;
-    f.line > 0
+    // A row the engine threw out is in no package, and a row the reviewer merged into another is
+    // already ruled on: neither is a candidate for the hint.
+    !crate::engine_discard::is_discarded(f)
+        && crate::report_export::overlay::merged_target(f).is_none()
+        && f.line > 0
         && !f.path.is_empty()
         && !f.site_key.is_empty()
         && matches!(
@@ -81,11 +90,26 @@ impl DupIndex {
     /// Index the rows of one report: the rows a review or an export reads.
     pub fn new(tree: Option<&ReviewTree>, findings: &[Finding]) -> Self {
         let fixes = FixIndex::new(tree, findings);
-        Self::with_fix_ids(findings, |f| fixes.fix_id_of(f))
+        // A rule carried by another row at the same place is that row's, not another cause.
+        let place_of: HashMap<&str, &str> = tree
+            .into_iter()
+            .flat_map(|t| &t.places)
+            .flat_map(|p| p.members.iter().map(move |m| (m.as_str(), p.id.as_str())))
+            .collect();
+        Self::with_fix_ids(
+            findings,
+            |f| fixes.fix_id_of(f),
+            |f| place_of.get(f.site_key.as_str()).map(|p| (*p).to_string()),
+        )
     }
 
-    /// Index `findings`, the Fix of each row given by `fix_of` (empty for a row in none).
-    pub(crate) fn with_fix_ids(findings: &[Finding], fix_of: impl Fn(&Finding) -> String) -> Self {
+    /// Index `findings`, the Fix of each row given by `fix_of` (empty for a row in none) and the
+    /// carried place it shares with other rows by `place_of`.
+    pub(crate) fn with_fix_ids(
+        findings: &[Finding],
+        fix_of: impl Fn(&Finding) -> String,
+        place_of: impl Fn(&Finding) -> Option<String>,
+    ) -> Self {
         let mut files: BTreeMap<(&str, &str), Vec<Entry<'_>>> = BTreeMap::new();
         for f in findings.iter().filter(|f| is_problem_at_a_line(f)) {
             let fix_id = fix_of(f);
@@ -96,7 +120,12 @@ impl DupIndex {
             files
                 .entry((f.repo.as_str(), f.path.as_str()))
                 .or_default()
-                .push(Entry { f, fix_id, cause });
+                .push(Entry {
+                    f,
+                    fix_id,
+                    cause,
+                    place: place_of(f),
+                });
         }
         let mut by_key: HashMap<String, Vec<DupLink>> = HashMap::new();
         for entries in files.values_mut() {
@@ -107,17 +136,17 @@ impl DupIndex {
                     if distance > NEAR_LINES {
                         break;
                     }
-                    if a.cause == b.cause {
+                    if a.cause == b.cause || (a.place.is_some() && a.place == b.place) {
                         continue;
                     }
                     by_key
                         .entry(a.f.site_key.clone())
                         .or_default()
-                        .push(link_to(b, distance));
+                        .push(link_to(b, distance, a.fix_id == b.fix_id));
                     by_key
                         .entry(b.f.site_key.clone())
                         .or_default()
-                        .push(link_to(a, distance));
+                        .push(link_to(a, distance, a.fix_id == b.fix_id));
                 }
             }
         }
@@ -143,13 +172,24 @@ impl DupIndex {
         self.by_key.get(&f.site_key).map_or(&[], Vec::as_slice)
     }
 
-    /// The Fix ids of the other causes, in the order [`Self::of`] lists them.
+    /// The other causes as the internal exports name them, in the order [`Self::of`] lists them:
+    /// the Fix id, and when it is the row's own Fix (two places of a residual sub-group) the Fix id
+    /// and the place, like `ab12 line 14`, so the cell never reads as a row duplicating itself.
     pub fn fix_ids_of(&self, f: &Finding) -> Vec<String> {
-        self.of(f).iter().map(|l| l.fix_id.clone()).collect()
+        self.of(f)
+            .iter()
+            .map(|l| {
+                if l.same_fix {
+                    format!("{} line {}", l.fix_id, l.line)
+                } else {
+                    l.fix_id.clone()
+                }
+            })
+            .collect()
     }
 }
 
-fn link_to(other: &Entry<'_>, distance: usize) -> DupLink {
+fn link_to(other: &Entry<'_>, distance: usize, same_fix: bool) -> DupLink {
     DupLink {
         fix_id: other.fix_id.clone(),
         key: other.f.site_key.clone(),
@@ -157,6 +197,7 @@ fn link_to(other: &Entry<'_>, distance: usize) -> DupLink {
         line: other.f.line,
         group_id: other.f.group_path.get(2).cloned().unwrap_or_default(),
         distance,
+        same_fix,
     }
 }
 
