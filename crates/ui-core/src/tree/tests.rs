@@ -185,6 +185,7 @@ fn every_marker_has_its_chip_class_from_the_spec_table() {
     let expect = [
         (Marker::Held, "mark-held"),
         (Marker::PossibleFalsePositive, "mark-fp"),
+        (Marker::PossibleDuplicateCause, "mark-dupfix"),
         (Marker::Escalated, "mark-esc"),
         (Marker::Candidate, "mark-cand"),
         (Marker::OverBudget, "mark-over"),
@@ -443,4 +444,28 @@ fn nothing_these_pieces_say_contains_an_em_dash() {
     for n in &data().tree.nodes {
         assert!(!counts_line(&n.counts).contains('\u{2014}'));
     }
+}
+
+#[test]
+fn the_possible_duplicate_chip_comes_after_the_possible_false_positive_chip_and_says_what_it_is() {
+    use camerata_api_types::review_view::SamePlaceView;
+    let mut row = row_with(&[Marker::PossibleFalsePositive, Marker::PossibleDuplicateCause]);
+    row.same_place_as = vec![SamePlaceView {
+        fix_id: "ab12".to_string(),
+        title: "Raw SQL built from the request".to_string(),
+        key: "k".to_string(),
+        rule_id: "SEC-A-1".to_string(),
+        group_id: "sub:x/1".to_string(),
+    }];
+    let chips = marker_chips(&row);
+    assert_eq!(chips[0].class, "mark-fp");
+    assert_eq!(chips[1].class, "mark-dupfix");
+    assert_eq!(chips[1].label, "Possible duplicate");
+    assert!(chips[1].tip.contains("Raw SQL built from the request"), "{}", chips[1].tip);
+    assert!(chips[1].tip.contains("stays a problem"), "{}", chips[1].tip);
+    let pos = |m| Marker::PRECEDENCE.iter().position(|x| *x == m).unwrap();
+    assert_eq!(
+        pos(Marker::PossibleDuplicateCause),
+        pos(Marker::PossibleFalsePositive) + 1
+    );
 }

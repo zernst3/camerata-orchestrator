@@ -652,6 +652,7 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         thrown_out_reason: None,
         review_flags: Vec::new(),
         possible_false_positive: None,
+        same_place_as: Vec::new(),
     }
 }
 
@@ -704,6 +705,7 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         thrown_out_reason: Some("junk text: a placeholder where the finding should be".to_string()),
         review_flags: Vec::new(),
         possible_false_positive: None,
+        same_place_as: Vec::new(),
     }
 }
 
@@ -722,6 +724,7 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
         .filter(|m| match m {
             Marker::Held => row.held.is_some(),
             Marker::PossibleFalsePositive => row.possible_false_positive.is_some(),
+            Marker::PossibleDuplicateCause => !row.same_place_as.is_empty(),
             Marker::Escalated => escalated,
             Marker::Candidate => below,
             Marker::OverBudget => over,

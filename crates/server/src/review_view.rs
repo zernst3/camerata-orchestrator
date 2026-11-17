@@ -119,6 +119,8 @@ pub struct ReviewComposer<'a> {
     verdicts: HashMap<&'a str, &'a EngineCheckVerdict>,
     /// The engine's reasons to doubt each kept row, worked out once for the report.
     fp: crate::possible_false_positive::FpIndex,
+    /// The other causes with a row at the same place as each kept row, worked out once.
+    dup: crate::possible_duplicate::DupIndex,
 }
 
 impl<'a> ReviewComposer<'a> {
@@ -246,6 +248,7 @@ impl<'a> ReviewComposer<'a> {
             held,
             verdicts,
             fp: crate::possible_false_positive::FpIndex::new(&report.findings),
+            dup: crate::possible_duplicate::DupIndex::new(tree, &report.findings),
         }
     }
 

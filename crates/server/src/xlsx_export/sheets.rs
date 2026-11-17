@@ -548,6 +548,7 @@ fn problem_cols(lay: &Layout, waiting: bool) -> Vec<Col> {
             Col::technical(v::H_HELD, 40.0),
             Col::technical(v::H_ESCALATED, 10.0),
             Col::technical(v::POSSIBLE_FALSE_POSITIVE, 40.0),
+            Col::technical(v::POSSIBLE_DUPLICATE_OF, 28.0),
         ]);
         for h in crate::report_export::row_facts::INTERNAL_TRIAGE_HEADERS {
             cols.push(Col::technical(h, 28.0));
@@ -631,6 +632,10 @@ fn problem_cells(row: &FindingRow, lay: &Layout) -> RowCells {
                 Cell::wrap(v::possible_false_positive_cell(
                     row.possible_false_positive.as_ref(),
                 )),
+            )
+            .put(
+                v::POSSIBLE_DUPLICATE_OF,
+                Cell::wrap(v::possible_duplicate_cell(&row.possible_duplicate_of)),
             );
         if let Some(triage) = &row.internal_triage {
             for (h, cell) in crate::report_export::row_facts::INTERNAL_TRIAGE_HEADERS
@@ -832,6 +837,17 @@ fn place_cells(rep: &FindingRow, lay: &Layout) -> RowCells {
                     members.iter().map(|r| {
                         v::possible_false_positive_cell(r.possible_false_positive.as_ref())
                     }),
+                )
+                .join("; "),
+            ),
+        )
+        .put(
+            v::POSSIBLE_DUPLICATE_OF,
+            Cell::wrap(
+                distinct(
+                    members
+                        .iter()
+                        .map(|r| v::possible_duplicate_cell(&r.possible_duplicate_of)),
                 )
                 .join("; "),
             ),
@@ -1709,6 +1725,9 @@ pub(super) struct StartFacts<'a> {
     /// On an internal workbook: the rows flagged as possible false positives and how many of
     /// them are decided. `None` on a client workbook, which never mentions the flag.
     pub possible_false_positives: Option<(usize, usize)>,
+    /// On an internal workbook: the fixes that may duplicate another and how many of them are
+    /// decided. `None` on a client workbook, which never mentions the hint.
+    pub possible_duplicates: Option<(usize, usize)>,
 }
 
 fn thousands(n: usize) -> String {
@@ -1977,6 +1996,11 @@ pub(super) fn write_start_here(
             1,
             v::possible_false_positive_count_line(flagged, decided),
         )?;
+    }
+    if let Some((hinted, decided)) = facts.possible_duplicates {
+        r += 1;
+        ws.write_text(r, 0, v::P_POSSIBLE_DUPLICATES)?;
+        ws.write_text(r, 1, v::possible_duplicate_count_line(hinted, decided))?;
     }
     Ok(())
 }

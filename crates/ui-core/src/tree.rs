@@ -27,7 +27,9 @@ use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::review::{
     EscalationReason, EscalationState, OutlierReason, PossibleFalsePositive,
 };
-use camerata_api_types::review_view::{Marker, NodeCountsView, SiteRow, TreeLevel};
+use camerata_api_types::review_view::{
+    Marker, NodeCountsView, SamePlaceView, SiteRow, TreeLevel,
+};
 
 // ── What a screen is showing ──────────────────────────────────────────────────────────────
 
@@ -361,6 +363,11 @@ pub fn marker_chips(row: &SiteRow) -> Vec<Chip> {
                 label: PossibleFalsePositive::TERM.to_string(),
                 tip: possible_false_positive_tip(row),
             },
+            Marker::PossibleDuplicateCause => Chip {
+                class: "mark-dupfix",
+                label: SamePlaceView::TERM.to_string(),
+                tip: possible_duplicate_tip(row),
+            },
             Marker::Carried => {
                 let by = row.carried_by.as_ref();
                 Chip {
@@ -393,6 +400,21 @@ pub fn possible_false_positive_tip(row: &SiteRow) -> String {
             .map(PossibleFalsePositive::sentences),
     );
     parts.push("It stays a problem until you rule it out.".to_string());
+    parts.join(" ")
+}
+
+/// The hover text of the Possible duplicate chip: the other causes at this place, and what the
+/// hint does not do.
+pub fn possible_duplicate_tip(row: &SiteRow) -> String {
+    let mut parts = vec![format!(
+        "Another cause has a row at the same place ({}).",
+        row.same_place_as
+            .iter()
+            .map(|o| o.title.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    )];
+    parts.push("It may be the same problem found twice. It stays a problem until you rule on it.".to_string());
     parts.join(" ")
 }
 

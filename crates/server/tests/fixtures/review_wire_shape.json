@@ -58,6 +58,7 @@
     "markers": [
       "held",
       "possible_false_positive",
+      "possible_duplicate_cause",
       "escalated",
       "candidate",
       "over_budget",

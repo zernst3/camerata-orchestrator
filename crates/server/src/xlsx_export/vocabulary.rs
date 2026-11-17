@@ -383,6 +383,27 @@ pub fn possible_false_positive_count_line(flagged: usize, decided: usize) -> Str
     }
 }
 
+/// The hint on a row whose place another fix also has a problem at, and the internal column that
+/// lists those fixes. Reviewers only: a hinted row stays a problem until a reviewer rules on it.
+pub const POSSIBLE_DUPLICATE: &str = camerata_api_types::review_view::SamePlaceView::TERM;
+/// The internal column's header: the Fix ids of the other fixes at the same place.
+pub const POSSIBLE_DUPLICATE_OF: &str = "Possible duplicate of";
+
+/// The internal column's cell: the other fixes' ids, in the row's order. Empty for a row with none.
+pub fn possible_duplicate_cell(fix_ids: &[String]) -> String {
+    fix_ids.join("; ")
+}
+
+/// The internal Start here count: how many fixes may duplicate another and how many of those are
+/// decided (every hinted problem of the fix confirmed, ruled out or given any decision).
+pub fn possible_duplicate_count_line(hinted: usize, decided: usize) -> String {
+    if hinted == 1 {
+        format!("1 fix may duplicate another, {decided} decided")
+    } else {
+        format!("{hinted} fixes may duplicate another, {decided} decided")
+    }
+}
+
 // The Glossary and Start here tables.
 pub const H_TERM: &str = "Term";
 pub const H_PLAIN_MEANING: &str = "Plain meaning";
@@ -451,6 +472,8 @@ pub const P_FILES_SCANNED: &str = "Files scanned";
 pub const P_CODE_VOLUME: &str = "Code volume";
 pub const P_GENERATED: &str = "Generated";
 pub const P_WHAT_WE_CHECKED: &str = "What we checked";
+/// The internal Start here line's label for the possible duplicate count.
+pub const P_POSSIBLE_DUPLICATES: &str = "Possible duplicates";
 /// The internal Start here line's label for the possible false positive count.
 pub const P_POSSIBLE_FALSE_POSITIVES: &str = "Possible false positives";
 pub const P_PREPARED_BY: &str = "Prepared by";
@@ -1346,6 +1369,14 @@ pub const INTERNAL_GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         FpReason::ModelOnly.sentence(),
         FP_REASON_WHERE,
     ),
+    e(
+        POSSIBLE_DUPLICATE,
+        "Another fix has a problem within a few lines of this one in the same file, so the two may \
+         be one problem found twice. The fix ids are in the Possible duplicate of column. Both \
+         stay problems until a reviewer rules on them: the hint never hides, merges or lowers \
+         anything. Reviewers only.",
+        "The technical columns and Start here of an internal export; the review screens",
+    ),
 ];
 
 /// Where a reader meets a reason of the Possible false positive flag.
@@ -1496,7 +1527,7 @@ pub const CONCEPTS: &[Concept] = &[
 /// [`CONCEPTS`] (which holds the client's terms; every one of those has a client Glossary entry).
 /// "Possible false positive" is the engine doubting a row that stays a problem until a reviewer
 /// rules it out; a removed false alarm is still "Ruled out".
-pub const INTERNAL_TERMS: &[&str] = &[POSSIBLE_FALSE_POSITIVE];
+pub const INTERNAL_TERMS: &[&str] = &[POSSIBLE_FALSE_POSITIVE, POSSIBLE_DUPLICATE];
 
 /// The retired word found in `text`, with the term that replaced it. A word counts only as a
 /// whole word (so "website" does not match "site"); machine file names are removed first. A
@@ -1938,6 +1969,46 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn possible_duplicate_is_a_reviewers_only_term_that_no_retired_word_refuses() {
+        assert!(INTERNAL_TERMS.contains(&POSSIBLE_DUPLICATE));
+        let entry = INTERNAL_GLOSSARY_ENTRIES
+            .iter()
+            .find(|e| e.term == POSSIBLE_DUPLICATE)
+            .expect("the hint is defined");
+        assert!(entry.meaning.contains("stay problems"), "{:?}", entry.meaning);
+        assert!(GLOSSARY_ENTRIES.iter().all(|e| e.term != POSSIBLE_DUPLICATE));
+        assert!(CONCEPTS.iter().all(|c| c.term != POSSIBLE_DUPLICATE));
+        for text in [
+            POSSIBLE_DUPLICATE,
+            POSSIBLE_DUPLICATE_OF,
+            P_POSSIBLE_DUPLICATES,
+            entry.meaning,
+            "Possible duplicates together (3)",
+            "2 fixes may duplicate another, 1 decided",
+            "Same place as",
+        ] {
+            assert_eq!(banned_synonym_in(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_possible_duplicate_count_reads_in_plain_words() {
+        assert_eq!(
+            possible_duplicate_count_line(1, 0),
+            "1 fix may duplicate another, 0 decided"
+        );
+        assert_eq!(
+            possible_duplicate_count_line(4, 2),
+            "4 fixes may duplicate another, 2 decided"
+        );
+        assert_eq!(
+            possible_duplicate_cell(&["ab12".to_string(), "cd34".to_string()]),
+            "ab12; cd34"
+        );
+        assert_eq!(possible_duplicate_cell(&[]), "");
     }
 
     #[test]

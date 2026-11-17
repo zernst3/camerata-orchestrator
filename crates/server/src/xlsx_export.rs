@@ -283,6 +283,12 @@ pub struct FindingRow {
     /// client file carries the key. The flag never changes any other field of the row.
     #[serde(skip_serializing_if = "Option::is_none")]
     possible_false_positive: Option<crate::possible_false_positive::PossibleFalsePositive>,
+    /// The Fix ids of the other causes with a row at the same place as this row
+    /// ([`crate::possible_duplicate`]), on an INTERNAL package only, like
+    /// [`Self::possible_false_positive`]: absent for a row with none and for every row of a client
+    /// package. The hint never changes any other field of the row.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    possible_duplicate_of: Vec<String>,
 }
 
 /// One row of the `Dependencies` sheet — the `DEP_AUDIT_RULE_ID` carve-out, same as the
@@ -445,6 +451,8 @@ fn partition_rows_for(
     // The engine's reasons to doubt each row: the operator's review aid, on an internal package
     // only. Worked out by the one function the review view also calls.
     let fp_index = internal.then(|| crate::possible_false_positive::FpIndex::new(&report.findings));
+    let dup_index = internal
+        .then(|| crate::possible_duplicate::DupIndex::new(report.tree.as_ref(), &report.findings));
     let mut rows = Vec::new();
     let mut dep_rows = Vec::new();
     // The repos that flag a credential under the same name, for the display-only note on each
@@ -687,6 +695,10 @@ fn partition_rows_for(
             },
             internal_triage: internal.then(|| crate::report_export::internal_triage(f)),
             possible_false_positive: fp_index.as_ref().and_then(|index| index.of(f)),
+            possible_duplicate_of: dup_index
+                .as_ref()
+                .map(|index| index.fix_ids_of(f))
+                .unwrap_or_default(),
         });
     }
 
@@ -760,6 +772,21 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
         })
         .count();
     (flagged.len(), decided)
+}
+
+/// How many causes (Fixes) have a row hinted as a possible duplicate of another cause, and how many
+/// of those are decided: every hinted row of the Fix ruled out or given any decision. Ruled-out
+/// rows count, so the second number reaches the first once every hinted Fix is decided.
+fn possible_duplicate_counts(rows: &[FindingRow]) -> (usize, usize) {
+    let mut fixes: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
+    for r in rows.iter().filter(|r| !r.possible_duplicate_of.is_empty()) {
+        let decided = r.is_fp
+            || r.disposition_kind
+                .is_some_and(|d| d != Disposition::Unresolved);
+        let all = fixes.entry(r.facts.fix_id.as_str()).or_insert(true);
+        *all &= decided;
+    }
+    (fixes.len(), fixes.values().filter(|d| **d).count())
 }
 
 /// What a cell ends with when prose (not a site list) had to be cut to fit. The full text is in
@@ -2293,6 +2320,7 @@ pub fn build_workbook_with_counts(
                 multi_repo,
             ),
             possible_false_positives: opts.internal.then(|| possible_false_positive_counts(&rows)),
+            possible_duplicates: opts.internal.then(|| possible_duplicate_counts(&rows)),
         },
     )
     .context("writing the Start here sheet")?;
