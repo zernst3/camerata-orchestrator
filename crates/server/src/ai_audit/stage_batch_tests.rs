@@ -1706,6 +1706,7 @@ fn cap_meter() -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 
@@ -2051,6 +2052,7 @@ async fn a_window_of_large_requests_is_refused_at_admission_though_the_old_const
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let mut c = ctx(&api.realtime, Some(&api));
     c.meter = Some(&meter);
@@ -2104,6 +2106,7 @@ async fn a_window_of_small_requests_under_the_limit_is_still_admitted() {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let mut c = ctx(&api.realtime, Some(&api));
     c.meter = Some(&meter);

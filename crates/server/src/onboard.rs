@@ -2416,6 +2416,13 @@ pub async fn audit_repos_with_llm_controlled(
         controls.fix_model_for(model, calibration_model),
     ));
     let meter = std::sync::Arc::new(crate::ai_audit::UsageMeter::with_controls(controls.clone()));
+    // The cost checkpoint reaches the job state the UI polls.
+    if let Some((jobs, id)) = job {
+        let (jobs, id) = (jobs.clone(), id.to_string());
+        meter.set_job_sink(crate::cost_checkpoint::CheckpointSink::new(move |cp| {
+            jobs.set_cost_checkpoint(&id, cp.clone());
+        }));
+    }
     // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
     // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
     // question, so a changed rule set or an AI-off prior scan does not invalidate them); a
@@ -2879,10 +2886,7 @@ pub async fn audit_repos_with_llm_controlled(
                                 meter.is_resume(),
                             );
                         let unavailable = if clone_blocked {
-                            format!(
-                                "{} before the judge ran",
-                                crate::cost_cap::cause_for(meter.cost_unknown())
-                            )
+                            format!("{} before the judge ran", meter.stop_cause())
                         } else {
                             ai_blocked_reason
                                 .clone()
@@ -3043,10 +3047,7 @@ pub async fn audit_repos_with_llm_controlled(
                              provider could not be reached)"
                         )
                     } else {
-                        format!(
-                            "{spec}: AI review not run ({})",
-                            crate::cost_cap::cause_for(meter.cost_unknown())
-                        )
+                        format!("{spec}: AI review not run ({})", meter.stop_cause())
                     });
                     for (rid, _) in &semantic {
                         pipeline_ledger.record_rule(
@@ -3061,7 +3062,7 @@ pub async fn audit_repos_with_llm_controlled(
                             } else {
                                 format!(
                                     "not run: {} before any pass checked it",
-                                    crate::cost_cap::cause_for(meter.cost_unknown())
+                                    meter.stop_cause()
                                 )
                             }),
                             0,
@@ -3080,7 +3081,7 @@ pub async fn audit_repos_with_llm_controlled(
                             format!(
                                 "NOT RUN: {} before this repository was reviewed. This \
                                  inspection is incomplete.",
-                                crate::cost_cap::cause_for(meter.cost_unknown())
+                                meter.stop_cause()
                             )
                         },
                         files_not_reviewed: files.len(),

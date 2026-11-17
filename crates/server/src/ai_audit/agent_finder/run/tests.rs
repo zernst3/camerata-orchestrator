@@ -224,6 +224,7 @@ impl PieceAgent for ByPiece {
 }
 
 mod checklist_outcomes;
+mod checkpoint;
 mod contract;
 mod conventions;
 mod coverage;

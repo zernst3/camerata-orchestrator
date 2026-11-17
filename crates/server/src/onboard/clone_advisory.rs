@@ -340,10 +340,7 @@ async fn judge_rule(
                 Err(_) => {
                     stopped_by_limit = true;
                     first_failure.get_or_insert_with(|| {
-                        format!(
-                            "{} before this batch was sent",
-                            crate::cost_cap::cause_for(m.cost_unknown())
-                        )
+                        format!("{} before this batch was sent", m.stop_cause())
                     });
                     append(feedback, session, "batch not sent: the spend limit");
                     break;

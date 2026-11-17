@@ -123,6 +123,9 @@ pub struct RunControls {
     pub finder_model: Option<String>,
     /// `--finder-force-pieces K` (internal runs only): split every unit into at least K pieces.
     pub finder_force_pieces: Option<usize>,
+    /// The cost checkpoint's settings: the pre-flight figures it projects from, the run folder
+    /// it records into and the sink that prints it. The approved amount is `max_cost_usd`.
+    pub checkpoint: crate::cost_checkpoint::CheckpointSettings,
 }
 
 impl RunControls {
@@ -447,6 +450,10 @@ pub struct CostCapRecord {
     /// run says which of the two happened (see [`Self::cause`]).
     #[serde(default)]
     pub cost_unknown: bool,
+    /// The latest cost checkpoint (see [`crate::cost_checkpoint`]); when it stopped the run, the
+    /// cause is [`crate::cost_checkpoint::CAUSE_PROJECTED`].
+    #[serde(default)]
+    pub checkpoint: Option<crate::cost_checkpoint::CostCheckpoint>,
 }
 
 /// The cause the spend limit's disclosures name when a call's cost was unknown. No dollar
@@ -475,6 +482,8 @@ impl CostCapRecord {
     pub fn cause(&self) -> &'static str {
         if self.cost_unknown {
             CAUSE_COST_UNKNOWN
+        } else if self.checkpoint.as_ref().is_some_and(|c| c.stopped) {
+            crate::cost_checkpoint::CAUSE_PROJECTED
         } else {
             CAUSE_LIMIT_REACHED
         }
@@ -522,6 +531,9 @@ impl CostCapRecord {
             }
         }
         self.cost_unknown |= later.cost_unknown;
+        if self.checkpoint.as_ref().is_none_or(|c| !c.stopped) && later.checkpoint.is_some() {
+            self.checkpoint = later.checkpoint;
+        }
     }
 
     pub fn failed_passes(&self) -> Vec<crate::ai_audit::FailedPass> {
@@ -784,6 +796,7 @@ mod tests {
                 class: camerata_llm::failure::FailureClass::SpendLimit,
             }],
             notes: vec![],
+            checkpoint: None,
         };
         let failed = record.failed_passes();
         assert_eq!(failed.len(), 3, "2 chunks + 1 stage: {failed:?}");
@@ -889,6 +902,7 @@ mod tests {
             notes: Vec::new(),
             repos_not_finished: Vec::new(),
             cost_unknown: true,
+            checkpoint: None,
         };
         assert!(record.stopped_the_run());
         let failed = record.failed_passes();

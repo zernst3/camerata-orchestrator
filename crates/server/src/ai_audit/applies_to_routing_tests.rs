@@ -111,6 +111,7 @@ fn meter(applies_to_routing: bool) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 
@@ -690,6 +691,7 @@ async fn run_routed_batch_default_off(
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let rules = three_group_rules();
     let plan = plan_routes(&rules, &files(), applies_to_routing);

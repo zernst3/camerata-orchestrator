@@ -93,6 +93,7 @@ fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 
@@ -398,6 +399,7 @@ fn with_cap(cap: f64, hint: Option<f64>) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 
@@ -517,6 +519,7 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let files = vec![("a.rs".to_string(), "fn a() {}".to_string())];
     let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];

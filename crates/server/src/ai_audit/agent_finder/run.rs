@@ -378,7 +378,13 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
         }
         Work::Fresh(_) => {
             let _permit = match shared.meter {
-                Some(m) => match m.admit().await {
+                Some(m) => match if m.projection_stops_piece() {
+                    // The projected total is over the approved amount: the spend limit's own
+                    // stop, with its own reason (see `crate::cost_checkpoint`).
+                    Err(crate::ai_audit::CapReached)
+                } else {
+                    m.admit().await
+                } {
                     Ok(p) => Some(p),
                     Err(crate::ai_audit::CapReached) => {
                         m.record_not_run(crate::cost_cap::NotRunPass {
@@ -428,6 +434,10 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
                 };
             let report = piece::report_of(shared, index, &piece, &room, &not_served, &list, runs);
             if report.failures.is_empty() {
+                if let Some(m) = shared.meter {
+                    let cost: f64 = report.usage.iter().filter_map(|u| u.cost_usd).sum();
+                    m.piece_finished(Some(cost), report.problems.len());
+                }
                 if let Ok(text) = serde_json::to_string(&StoredPiece {
                     runs: report.runs.clone(),
                 }) {
@@ -562,6 +572,13 @@ pub async fn find_repo(
             );
         }
     }
+    if let Some(m) = meter {
+        let held = works
+            .iter()
+            .filter(|w| !matches!(w, Work::Fresh(_)))
+            .count();
+        m.begin_pieces(works.len(), held);
+    }
     let shared = Shared {
         agent,
         repo,
@@ -632,9 +649,8 @@ pub async fn find_repo(
                 match admitted {
                     Err(crate::ai_audit::CapReached) => {
                         let outage = meter.is_some_and(UsageMeter::outage_stopped);
-                        let cause = meter.map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| {
-                            crate::cost_cap::cause_for(m.cost_unknown())
-                        });
+                        let cause =
+                            meter.map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| m.stop_cause());
                         failed.push(FailedPass {
                             repo: repo.to_string(),
                             pass: "agent finder, joints between parts".to_string(),

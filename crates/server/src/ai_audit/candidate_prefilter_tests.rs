@@ -102,6 +102,7 @@ async fn run_with(
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let plan = plan_routes(rules, files, true);
     let repo_map = RepoMap::new(files, &run_nonce(), repo_map::REPO_TREE_TOKEN_BUDGET);
@@ -713,6 +714,7 @@ async fn run_batch(
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let plan = plan_routes(rules, files, true);
     let repo_map = RepoMap::new(files, &run_nonce(), repo_map::REPO_TREE_TOKEN_BUDGET);

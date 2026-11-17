@@ -370,6 +370,9 @@ mod spend_limit_stages_tests;
 mod resume_limit_tests;
 
 #[cfg(test)]
+mod checkpoint_stage_tests;
+
+#[cfg(test)]
 mod fix_model_tests;
 
 #[cfg(test)]

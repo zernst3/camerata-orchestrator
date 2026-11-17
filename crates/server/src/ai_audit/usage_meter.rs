@@ -44,7 +44,13 @@ pub struct UsageMeter {
     /// The outage stop: a run-wide counter of consecutive transport failures. Once it trips,
     /// admission refuses every new part. See [`crate::run_health`].
     health: crate::run_health::RunHealth,
+    /// The cost checkpoint's tally and stop (see [`crate::cost_checkpoint`]).
+    checkpoint: std::sync::Mutex<crate::cost_checkpoint::CheckpointState>,
+    /// Where the cockpit's job state hears of each checkpoint.
+    job_sink: std::sync::Mutex<crate::cost_checkpoint::CheckpointSink>,
 }
+
+mod checkpoint;
 
 /// Why a pass was not admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +252,10 @@ impl UsageMeter {
         if self.health.is_stopped() {
             return Admission::CapReached;
         }
+        // The cost checkpoint stopped the run: nothing more is sent.
+        if self.checkpoint_stopped() {
+            return Admission::CapReached;
+        }
         let mut budget = self.budget();
         if let Some(cap) = self.controls.max_cost_usd {
             // A call's cost was unknowable, so the cap cannot be enforced: admit nothing more.
@@ -367,7 +377,8 @@ impl UsageMeter {
                 || budget.cost_unknown
         };
         if !self.cap_reached() && !already_stopped {
-            return false;
+            // Under the limit: the projection for the stages still to come may not be.
+            return self.projection_stops_stage(repo, stage);
         }
         self.record_stage_not_run(repo, stage, false);
         true
@@ -482,6 +493,8 @@ impl UsageMeter {
             notes: budget.notes.clone(),
             repos_not_finished: budget.repos_not_finished.clone(),
             cost_unknown: budget.cost_unknown,
+            // The pause when there is one: a later checkpoint never replaces it.
+            checkpoint: self.checkpoint_stop().or_else(|| self.latest_checkpoint()),
         })
     }
 
@@ -585,6 +598,7 @@ pub const STAGE_FIX: &str = "fix-specific generation";
 pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
 pub const STAGE_DEEP: &str = "deep compliance tier";
 pub const STAGE_FINDER: &str = "agent finder";
+pub const STAGE_GROUP_REVIEW: &str = "group review";
 
 /// The run estimate's whole-run dollars for a batch scan over `chunks` and `batches`, priced at
 /// `model` (scan and calibration alike; `camerata_ui_core::scan::estimate_run_cost_bounds`, the

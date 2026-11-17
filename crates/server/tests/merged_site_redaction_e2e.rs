@@ -136,6 +136,7 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
+        checkpoint: Default::default(),
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,

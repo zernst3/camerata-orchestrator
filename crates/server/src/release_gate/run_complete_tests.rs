@@ -269,6 +269,7 @@ fn a_spend_limit_stop_is_flagged_in_the_refusal() {
             }],
             notes: Vec::new(),
             repos_not_finished: Vec::new(),
+            checkpoint: None,
         });
     let sealed = report.seal();
     let refusal = crate::report_export::require_complete_run(&sealed, &client_options())

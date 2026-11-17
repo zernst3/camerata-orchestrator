@@ -2167,6 +2167,26 @@ pub(super) fn fold_spend_into_report(report: &mut ScanReport, meter: &UsageMeter
     }
 }
 
+/// What the group review is estimated to cost for `sites` rows and `rules` rules on `model`, in
+/// dollars, by the pre-flight's own estimate. `None` when the model has no list price.
+pub(crate) fn group_review_estimate_usd(
+    model: &str,
+    sites: usize,
+    rules: usize,
+    cli_backend: bool,
+) -> Option<f64> {
+    use camerata_api_types::project::ProjectBackend;
+    let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
+    let backend = if cli_backend {
+        ProjectBackend::Cli
+    } else {
+        ProjectBackend::Api
+    };
+    let e = camerata_ui_core::scan::group_review_estimate(sites as f64, rules, backend);
+    let out = e.output_tokens * camerata_ui_core::scan::output_scale(model);
+    Some((e.input_tokens * price.price_in + out * price.price_out) / 1_000_000.0)
+}
+
 /// [`review_groups`] on a meter that continues the scan's own: the whole run's spend counts toward
 /// a spend limit, and what the stage spent, was refused or lost to an outage is folded back into
 /// the report's usage, ledger and failed parts. This is what the command line and the app call.
@@ -2178,7 +2198,39 @@ pub async fn review_groups_metered(
 ) -> GroupReviewOutcome {
     let prior = report.actual_usage.clone().unwrap_or_default();
     let meter = UsageMeter::continuing(controls.clone(), &prior);
-    let outcome = review_groups(report, llm, cfg, Some(&meter)).await;
+    // A run the cost checkpoint paused stays paused: this fresh meter learns the stop from the
+    // scan's record, so the stage sends nothing and is recorded NOT RUN (see
+    // `crate::cost_checkpoint`).
+    if let Some(stop) = report
+        .ledger
+        .cost_cap()
+        .and_then(|c| c.checkpoint.as_ref())
+        .filter(|c| c.stopped)
+    {
+        meter.seed_checkpoint_stop(stop);
+    }
+    let repo = report.repos.join(", ");
+    // The stage is priced from the rows it will read; over the approved amount, it does not start.
+    let stage_usd = group_review_estimate_usd(
+        cfg.model,
+        report.findings.len(),
+        cfg.rules.len(),
+        cfg.cli_backend,
+    );
+    let paused = if meter.checkpoint_stopped() {
+        meter.record_stage_not_run(&repo, STAGE_GROUP_REVIEW, false);
+        true
+    } else if meter.cap_reached() {
+        // The limit itself is reached: the stage's own admission refuses each call, as before.
+        false
+    } else {
+        stage_usd.is_some_and(|usd| meter.priced_stage_stops(&repo, STAGE_GROUP_REVIEW, usd))
+    };
+    let outcome = if paused {
+        GroupReviewOutcome::default()
+    } else {
+        review_groups(report, llm, cfg, Some(&meter)).await
+    };
 
     // Usage: the meter started from the scan's, so its snapshot is the whole run's.
     if meter.snapshot().calls > 0 {

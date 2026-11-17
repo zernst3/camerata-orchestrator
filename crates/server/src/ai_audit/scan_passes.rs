@@ -1751,7 +1751,7 @@ pub(super) async fn run_passes_batch(
                             m.record_note(format!(
                                 "the truncation retry of batch item {} was not run: {}",
                                 w.custom_id,
-                                crate::cost_cap::cause_for(m.cost_unknown())
+                                m.stop_cause()
                             ));
                         }
                         return (w, resp);

@@ -293,6 +293,7 @@ impl InspectArgs {
             finder: self.finder.finder,
             finder_model: self.finder.model.clone(),
             finder_force_pieces: self.finder.force_pieces,
+            checkpoint: camerata_server::cost_checkpoint::CheckpointSettings::default(),
         })
     }
 }
@@ -1181,6 +1182,31 @@ pub async fn run_inspect_pipeline_with(
         });
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
+        // The cost checkpoint's pre-flight figures for the agent finder: the cost of one piece,
+        // from the finder's own estimate, and the joints call that follows the pieces. The estimate
+        // prices the finder stage only, so the later stages (group review, fix) have no figure yet.
+        if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent {
+            let parts: Vec<_> = facts
+                .iter()
+                .map(|r| {
+                    camerata_server::preflight::agent_finder_estimate(
+                        r,
+                        controls.finder_force_pieces,
+                    )
+                })
+                .collect();
+            let total = camerata_ui_core::scan::sum_agent_finder(&parts);
+            if total.pieces > 0 {
+                let joints = total.joints_calls as f64
+                    * camerata_ui_core::scan::AGENT_FINDER_USD_PER_JOINTS_CALL;
+                controls.checkpoint.plan = Some(camerata_server::cost_checkpoint::CheckpointPlan {
+                    pieces: total.pieces,
+                    per_piece_usd: ((total.expected_usd - joints) / total.pieces as f64).max(0.0),
+                    joints_usd: joints,
+                    ..camerata_server::cost_checkpoint::CheckpointPlan::default()
+                });
+            }
+        }
         preflight_text = Some(pf.text);
     }
 
@@ -1226,6 +1252,18 @@ pub async fn run_inspect_pipeline_with(
             }
         }
     };
+    // The cost checkpoint records into the run's folder and prints each line as the run goes.
+    if let Some(s) = &store {
+        // A resume has no pre-flight estimate: it starts from what the earlier attempt recorded.
+        if controls.checkpoint.plan.is_none() {
+            controls.checkpoint.plan =
+                camerata_server::cost_checkpoint::CheckpointPlan::from_stored(s.dir());
+        }
+        controls.checkpoint.run_folder = Some(s.dir().to_path_buf());
+    }
+    controls.checkpoint.sink = camerata_server::cost_checkpoint::CheckpointSink::new(|cp| {
+        println!("{}", cp.operator_text());
+    });
     // Delimiter tokens drawn from the run's own seed, so a resumed run asks the model the same
     // questions as the run it resumes and a stored reply still matches its prompt.
     let token_seed = store.as_ref().map(|s| s.nonce_seed());
@@ -2065,6 +2103,10 @@ fn render_outage(outage: &camerata_server::run_health::OutageRecord) -> String {
     )
 }
 
+/// How every pause message starts: a pause note older than the record (a late piece refreshes
+/// the stop) is not printed a second time.
+const PAUSE_NOTE_START: &str = "Paused before going over the approved amount";
+
 /// The spend-limit block of the final report: what was set, what was spent, and, when the limit
 /// stopped the run, that the export is incomplete and what was not run. Operator-only (dollar
 /// figures live here, never in the export).
@@ -2073,7 +2115,23 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
         "spend limit: ${:.2}, spent ${:.2}",
         cap.cap_usd, cap.spent_usd
     );
-    if cap.stopped_the_run() {
+    let pause = cap
+        .checkpoint
+        .as_ref()
+        .filter(|c| c.stopped)
+        .map(camerata_server::cost_checkpoint::CostCheckpoint::pause_message);
+    if let Some(message) = &pause {
+        // The cost checkpoint paused the run before it went over the approved amount: not the
+        // limit reached, and nothing was spent past it.
+        write!(
+            out,
+            ". {message} This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) were NOT \
+             RUN (listed under FAILED PASSES).",
+            cap.not_run_passes.len(),
+            cap.not_run_stages.len()
+        )
+        .ok();
+    } else if cap.stopped_the_run() {
         // The limit was reached, or it could not be enforced because a call's cost could not be
         // determined: two different things, and the operator is told which (the note that
         // follows names the model and the call).
@@ -2099,7 +2157,11 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
     } else {
         out.push_str(" (not reached)");
     }
-    for note in &cap.notes {
+    for note in cap
+        .notes
+        .iter()
+        .filter(|n| pause.is_none() || !n.starts_with(PAUSE_NOTE_START))
+    {
         write!(out, "\n  {note}").ok();
     }
     out.push('\n');
@@ -2267,6 +2329,7 @@ mod tests {
             cost_cap: Some(CostCapRecord {
                 repos_not_finished: Vec::new(),
                 cost_unknown: false,
+                checkpoint: None,
                 cap_usd: 5.0,
                 spent_usd: 5.4,
                 not_run_passes: vec![NotRunPass {
@@ -2327,6 +2390,7 @@ mod tests {
         let record = CostCapRecord {
             repos_not_finished: Vec::new(),
             cost_unknown: true,
+            checkpoint: None,
             cap_usd: 10.0,
             spent_usd: 0.0095,
             not_run_passes: vec![NotRunPass {
@@ -2367,6 +2431,68 @@ mod tests {
             ..record
         };
         assert!(render_cost_cap(&reached).contains("-- REACHED."));
+    }
+
+    /// A run the cost checkpoint paused is reported as a pause, never as the limit reached.
+    #[test]
+    fn a_paused_run_renders_the_pause_message_not_reached() {
+        use camerata_server::cost_cap::CostCapRecord;
+        // A run the cost checkpoint paused is not a limit reached.
+        let paused = CostCapRecord {
+            checkpoint: Some(camerata_server::cost_checkpoint::CostCheckpoint {
+                approved_usd: 5.0,
+                spent_usd: 3.0,
+                projected_usd: 6.0,
+                pieces_done: 1,
+                pieces_left: 1,
+                stopped: true,
+                new_estimate_usd: Some(6.0),
+                difference_usd: Some(1.0),
+                stopped_before: "agent finder".into(),
+                reserve_usd: 0.0,
+            }),
+            cap_usd: 5.0,
+            spent_usd: 3.0,
+            ..CostCapRecord::default()
+        };
+        let text = render_cost_cap(&paused);
+        assert!(
+            text.contains("Paused before going over the approved amount"),
+            "{text}"
+        );
+        assert!(!text.contains("REACHED"), "{text}");
+        assert!(!text.contains(" -- "), "{text}");
+    }
+
+    /// A late piece refreshes the stop, so the note stored at the first pause is older than the
+    /// record: the report says the pause once.
+    #[test]
+    fn a_pause_is_rendered_once_whatever_older_pause_notes_were_stored() {
+        use camerata_server::cost_cap::CostCapRecord;
+        use camerata_server::cost_checkpoint::CostCheckpoint;
+        let stop = |spent: f64| CostCheckpoint {
+            approved_usd: 5.0,
+            spent_usd: spent,
+            projected_usd: 8.0,
+            pieces_done: 1,
+            pieces_left: 1,
+            stopped: true,
+            new_estimate_usd: Some(8.0),
+            difference_usd: Some(3.0),
+            stopped_before: "agent finder".into(),
+            reserve_usd: 0.0,
+        };
+        let record = CostCapRecord {
+            cap_usd: 5.0,
+            spent_usd: 6.0,
+            checkpoint: Some(stop(6.0)),
+            notes: vec![stop(3.0).pause_message(), "another note".into()],
+            ..CostCapRecord::default()
+        };
+        let text = render_cost_cap(&record);
+        assert_eq!(text.matches("Paused before").count(), 1, "{text}");
+        assert!(text.contains("spent $6.00, 1 piece left"), "{text}");
+        assert!(text.contains("another note"), "{text}");
     }
 
     /// A resume whose stored replies already cost more than the limit (tutorly, 2026-11-06:
