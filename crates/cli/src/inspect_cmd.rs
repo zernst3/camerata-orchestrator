@@ -282,6 +282,7 @@ impl InspectArgs {
                 over_budget_reasons: defaults.over_budget_reasons,
                 group_review_model: self.group_review_model.clone().unwrap_or_default(),
                 sample_size_per_run: defaults.sample_size_per_run,
+                finder: defaults.finder,
             },
             efficiency,
             max_cost_usd,
@@ -1268,27 +1269,15 @@ pub async fn run_inspect_pipeline_with(
     // The agent finder's setup: one value, built once here and carried into the audit. The run
     // builds the agent from it on its own shared meter. A test that already stands an agent in
     // (`with_agent_override`) keeps its own. A missing key stops the run before the first call.
-    let finder_setup: Option<camerata_server::ai_audit::agent_finder::run::FinderSetup> =
-        if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent
-            && !ai_review_blocked
-            && !camerata_server::ai_audit::agent_finder::run::agent_override_is_set()
-        {
-            let rooms_dir = store
-                .as_ref()
-                .map_or_else(camerata_state_dir, |s| s.dir().to_path_buf())
-                .join("finder-rooms");
-            Some(
-                finder::finder_setup(
-                    llm_backend,
-                    camerata_server::credentials::anthropic_api_key(creds),
-                    rooms_dir,
-                    args.client_engagement,
-                )
-                .map_err(InspectError::Failed)?,
-            )
-        } else {
-            None
-        };
+    let finder_setup = camerata_server::ai_audit::agent_finder::run::finder_setup_for_run(
+        &controls,
+        ai_review_blocked,
+        llm_backend,
+        creds,
+        store.as_ref().map(|s| s.dir()),
+        args.client_engagement,
+    )
+    .map_err(InspectError::Failed)?;
     let no_chosen_options: HashMap<String, String> = HashMap::new();
     let (mut report, manifest) = {
         let audit = Box::pin(camerata_server::checkpoint::with_run_checkpoints(
@@ -1318,12 +1307,12 @@ pub async fn run_inspect_pipeline_with(
                 ),
             ),
         ));
-        let (mut report, manifest) = match finder_setup {
-            Some(setup) => {
-                camerata_server::ai_audit::agent_finder::run::with_finder_setup(setup, audit).await
-            }
-            None => audit.await,
-        };
+        let (mut report, manifest) =
+            camerata_server::ai_audit::agent_finder::run::with_optional_finder_setup(
+                finder_setup,
+                audit,
+            )
+            .await;
         if seams.llm.is_none() {
             report.provenance.model_sessions = sessions.snapshot();
         }

@@ -2247,3 +2247,28 @@ async fn set_credential_for_non_anthropic_name_does_not_touch_the_anthropic_cach
 }
 
 // ── GET /api/models/registry — backend-aware Claude portion (Feature A) ────────
+
+/// The project's finder setting is the run's finder: an agent project runs the agent finder, a
+/// new project runs the engine, and the setting is read when the run starts (never the
+/// environment).
+#[test]
+fn the_projects_finder_reaches_the_audit_runs_controls() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let state = AppState::seeded();
+    let project = state
+        .projects()
+        .create("Finder wiring", vec!["me/repo".to_string()])
+        .expect("create active project");
+    let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Engine);
+    let settings = camerata_api_types::project::ReviewSettings {
+        finder: camerata_api_types::project::ProjectFinder::Agent,
+        ..project.review
+    };
+    state
+        .projects()
+        .set_review_settings(&project.id, settings)
+        .unwrap()
+        .unwrap();
+    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Agent);
+}
