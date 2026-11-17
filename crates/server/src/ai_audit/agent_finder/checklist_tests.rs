@@ -105,6 +105,7 @@ fn answer(rule: &str, kind: AnswerKind) -> RuleAnswer {
         kind,
         problems: vec![],
         places: vec![],
+        reason: None,
         options: vec![],
     }
 }
@@ -599,4 +600,89 @@ fn a_downgraded_clean_that_loses_to_a_problems_answer_is_not_a_downgrade() {
     assert_eq!(state_of(&out, "RUST-ZED-1"), Effective::Problems(vec![1]));
     assert!(out.downgraded_clean.is_empty());
     assert!(out.not_completed.is_empty());
+}
+
+fn not_a_problem_at(rule: &str, path: &str, line: usize, reason: &str) -> RuleAnswer {
+    let mut a = answer(rule, AnswerKind::NotAProblemHere);
+    a.places = vec![Place {
+        path: path.into(),
+        line: Some(line),
+    }];
+    a.reason = Some(reason.into());
+    a
+}
+
+#[test]
+fn render_offers_the_fourth_answer_and_leaves_adding_to_the_models_judgment() {
+    let text = checklist().render();
+    assert!(text.contains("not_a_problem_here"), "{text}");
+    assert!(text.contains("one place and one sentence"), "{text}");
+    assert!(text.contains("Answer every rule"), "{text}");
+    assert!(text.contains("on your own judgment"), "{text}");
+    assert!(text.contains("Rate it yourself"), "{text}");
+    assert!(
+        text.contains("this code needs and does not have, that is a problem"),
+        "{text}"
+    );
+}
+
+#[test]
+fn render_shows_severity_as_guidance_never_as_a_minimum() {
+    let text = checklist().render();
+    assert!(
+        text.contains("Suggested severity: medium, at most high"),
+        "{text}"
+    );
+    assert!(!text.contains("at least"), "{text}");
+    let mut list = checklist();
+    list.rules[0].directive =
+        "Report at high severity when the key is shared. Flag as high severity: 'Your key'. \
+         Emit a medium-severity finding. Severity is High."
+            .to_string();
+    let text = list.render();
+    assert!(
+        text.contains("Usually high when the key is shared."),
+        "{text}"
+    );
+    assert!(text.contains("Usually high: 'Your key'."), "{text}");
+    assert!(text.contains("a finding (usually medium)"), "{text}");
+    assert!(text.contains("Usually High."), "{text}");
+    assert!(!text.contains("Report at high severity"), "{text}");
+}
+
+#[test]
+fn a_not_a_problem_here_answer_makes_no_row_and_is_noted_for_the_reviewer() {
+    let list = checklist();
+    let file = file_of(vec![
+        not_a_problem_at("RUST-ZED-1", "src/lib.rs", 3, "The cast is checked above."),
+        answer("ARCH-ALPHA-1", AnswerKind::NotApplicable),
+    ]);
+    let out = list.check(&file, &[], &[], &piece());
+    assert_eq!(state_of(&out, "RUST-ZED-1"), Effective::NotAProblemHere);
+    assert!(out.not_completed.is_empty() && out.missing.is_empty());
+    assert!(out.valid_citations.is_empty());
+    assert_eq!(out.not_a_problem_notes.len(), 1);
+    let n = &out.not_a_problem_notes[0];
+    assert_eq!(n.rule, "RUST-ZED-1");
+    assert_eq!(n.place.path, "src/lib.rs");
+    assert_eq!(n.place.line, Some(3));
+    assert_eq!(n.reason, "The cast is checked above.");
+}
+
+#[test]
+fn not_a_problem_here_ranks_between_clean_and_not_applicable() {
+    let list = checklist();
+    let trace = [read("src/lib.rs")];
+    let nph = not_a_problem_at("RUST-ZED-1", "src/lib.rs", 3, "fine");
+    let clean = clean_at("RUST-ZED-1", "src/lib.rs", Some(1));
+    let na = answer("RUST-ZED-1", AnswerKind::NotApplicable);
+    let other = answer("ARCH-ALPHA-1", AnswerKind::NotApplicable);
+    let run = |a: &RuleAnswer, b: &RuleAnswer| {
+        let file = file_of(vec![a.clone(), b.clone(), other.clone()]);
+        let out = list.check(&file, &[], &trace, &piece());
+        (state_of(&out, "RUST-ZED-1"), out.not_a_problem_notes.len())
+    };
+    assert_eq!(run(&nph, &na), (Effective::NotAProblemHere, 1));
+    assert!(matches!(run(&nph, &clean), (Effective::Clean(_), 1)));
+    assert!(matches!(run(&clean, &nph), (Effective::Clean(_), 1)));
 }

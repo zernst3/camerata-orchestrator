@@ -481,7 +481,7 @@ fn rules_message(view: &View) -> String {
             view.outcome.not_completed.join(", ")
         ));
     }
-    text.push_str("Answer each rule `problems`, `clean` or `not_applicable`, as before.");
+    text.push_str("Answer each rule `problems`, `clean`, `not_a_problem_here` (with its one place and one sentence of reason) or `not_applicable`, as before.");
     text
 }
 
@@ -630,6 +630,17 @@ pub(super) fn report_of(
     }
     for n in &view.output.notes {
         report.notes.push(format!("{}: {n}", piece.key));
+    }
+    // What the agent judged not a problem here: shown to the reviewer, never a client row.
+    for n in &view.outcome.not_a_problem_notes {
+        let at = n
+            .place
+            .line
+            .map_or_else(|| n.place.path.clone(), |l| format!("{}:{l}", n.place.path));
+        report.notes.push(format!(
+            "{}: {} at {at} is not a problem here: {}",
+            piece.key, n.rule, n.reason
+        ));
     }
     for file in rewritten_problem_files(&runs) {
         report.notes.push(format!(

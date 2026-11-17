@@ -336,12 +336,17 @@ fn parse_checklist(v: &serde_json::Value) -> Result<ChecklistFile, String> {
             .map_err(at)?
             .trim()
             .to_ascii_uppercase();
-        let kind = match one_of(a, "answer", &["problems", "clean", "not_applicable"])
-            .map_err(|e| format!("answer {} {e}", i + 1))?
-            .as_str()
+        let kind = match one_of(
+            a,
+            "answer",
+            &["problems", "clean", "not_applicable", "not_a_problem_here"],
+        )
+        .map_err(|e| format!("answer {} {e}", i + 1))?
+        .as_str()
         {
             "problems" => AnswerKind::Problems,
             "clean" => AnswerKind::Clean,
+            "not_a_problem_here" => AnswerKind::NotAProblemHere,
             _ => AnswerKind::NotApplicable,
         };
         let problems = match a.get("problems") {
@@ -357,7 +362,30 @@ fn parse_checklist(v: &serde_json::Value) -> Result<ChecklistFile, String> {
                 ))
             }
         };
-        let places = parse_places(a.get("places")).map_err(|e| format!("answer {} {e}", i + 1))?;
+        let mut places =
+            parse_places(a.get("places")).map_err(|e| format!("answer {} {e}", i + 1))?;
+        let mut reason = None;
+        if kind == AnswerKind::NotAProblemHere {
+            // One place (`place`, or the first of `places`) and one sentence of reason.
+            let place = match a.get("place") {
+                Some(p) if !p.is_null() => {
+                    parse_place(p).map_err(|e| format!("answer {} {e}", i + 1))?
+                }
+                _ => places.first().cloned().ok_or_else(|| {
+                    format!(
+                        "answer {} is `not_a_problem_here` and needs a `place`",
+                        i + 1
+                    )
+                })?,
+            };
+            places = vec![place];
+            reason = Some(
+                text_field(a, "reason", false)
+                    .map_err(|e| format!("answer {} {e}", i + 1))?
+                    .trim()
+                    .to_string(),
+            );
+        }
         let mut options = Vec::new();
         match a.get("options") {
             None | Some(serde_json::Value::Null) => {}
@@ -380,6 +408,7 @@ fn parse_checklist(v: &serde_json::Value) -> Result<ChecklistFile, String> {
             kind,
             problems,
             places,
+            reason,
             options,
         });
     }

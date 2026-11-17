@@ -812,3 +812,34 @@ fn places_are_not_written_as_also_locations_by_the_reader() {
     assert_eq!(findings.len(), 1);
     assert!(findings[0].also_locations.is_empty());
 }
+
+#[test]
+fn a_not_a_problem_here_answer_is_parsed_with_its_place_and_reason() {
+    let checklist = serde_json::json!({"answers": [
+        {"rule": "arch-alpha-1", "answer": "not_a_problem_here",
+         "place": {"path": "src/a.rs", "line": 3}, "reason": "Checked by the caller."}
+    ]})
+    .to_string();
+    let out = parse_outputs(&outputs(&[("checklist.json", checklist)]), &piece_files());
+    let file = out.checklist.expect("parsed");
+    assert_eq!(file.answers[0].kind, AnswerKind::NotAProblemHere);
+    assert_eq!(file.answers[0].places[0].path, "src/a.rs");
+    assert_eq!(file.answers[0].places[0].line, Some(3));
+    assert_eq!(
+        file.answers[0].reason.as_deref(),
+        Some("Checked by the caller.")
+    );
+}
+
+#[test]
+fn a_not_a_problem_here_answer_without_a_place_or_a_reason_is_unusable() {
+    for bad in [
+        serde_json::json!({"rule": "R-1", "answer": "not_a_problem_here", "reason": "x"}),
+        serde_json::json!({"rule": "R-1", "answer": "not_a_problem_here", "place": "src/a.rs:1"}),
+    ] {
+        let text = serde_json::json!({"answers": [bad]}).to_string();
+        let out = parse_outputs(&outputs(&[("checklist.json", text)]), &piece_files());
+        assert!(out.checklist.is_none());
+        assert!(!out.unusable.is_empty());
+    }
+}

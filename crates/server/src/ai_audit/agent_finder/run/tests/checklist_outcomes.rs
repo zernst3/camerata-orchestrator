@@ -406,3 +406,33 @@ async fn a_stray_problems_file_that_is_a_problems_list_is_read_as_one() {
         assert_eq!((rows[0].path.as_str(), rows[0].line), ("src/b.rs", 3));
     }
 }
+
+#[tokio::test]
+async fn a_not_a_problem_here_answer_makes_no_row_is_noted_for_the_reviewer_and_is_not_partial() {
+    let script = full_script(
+        &[("src/a.rs", 6), ("src/b.rs", 4)],
+        vec![],
+        vec![],
+        vec![
+            json!({"rule": "ARCH-ONE-1", "answer": "not_a_problem_here",
+                   "place": {"path": "src/a.rs", "line": 2}, "reason": "The input is checked first."}),
+            answer_clean("SEC-TWO-1", "src/a.rs", 1),
+        ],
+    );
+    let agent = ScriptedAgent::new(script);
+    let (findings, _, _, failed, _, extras) = run(&agent).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(findings.is_empty(), "{findings:?}");
+    assert!(extras.partial_rules.is_empty());
+    assert!(
+        extras.not_applicable_rules.is_empty(),
+        "assessed is not judged not applicable"
+    );
+    assert!(
+        extras.notes.iter().any(|n| n.contains("ARCH-ONE-1")
+            && n.contains("src/a.rs:2")
+            && n.contains("The input is checked first.")),
+        "{:?}",
+        extras.notes
+    );
+}

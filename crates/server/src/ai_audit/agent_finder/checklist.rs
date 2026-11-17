@@ -41,12 +41,15 @@ pub struct Place {
     pub line: Option<usize>,
 }
 
-/// The three answers a rule can get.
+/// The four answers a rule can get.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnswerKind {
     Problems,
     Clean,
     NotApplicable,
+    /// The letter of the rule is not met at one place, and the agent judges it is not a problem
+    /// here. One place and one sentence of reason; it makes no row.
+    NotAProblemHere,
 }
 
 /// How many places follow one option of a rule, and up to ten of them.
@@ -64,8 +67,10 @@ pub struct RuleAnswer {
     pub kind: AnswerKind,
     /// For `Problems`: the numbers of the problems that break the rule.
     pub problems: Vec<u32>,
-    /// For `Clean`: up to three places checked.
+    /// For `Clean`: up to three places checked. For `NotAProblemHere`: the one place.
     pub places: Vec<Place>,
+    /// For `NotAProblemHere`: the one sentence of reason.
+    pub reason: Option<String>,
     pub options: Vec<OptionCount>,
 }
 
@@ -91,6 +96,12 @@ pub enum Effective {
     /// Not applicable. Only the agent's own `not_applicable` answer gives this state; a check
     /// never changes an answer into it.
     NotApplicable,
+    /// Every answer the agent gave for the rule was `not_a_problem_here`: it looked, found the
+    /// letter of the rule unmet at a place it judged harmless, and reported no problem. Not clean
+    /// (nothing was shown to comply), not a problem, and not "not applicable" (the rule's concern
+    /// is present). Rules in this state make no row and count as assessed; the place and the
+    /// reason are in [`CheckOutcome::not_a_problem_notes`].
+    NotAProblemHere,
     /// The rule was not completed: the agent's answer did not hold up (a `problems` answer whose
     /// numbers resolve to nothing, a `clean` answer with no valid place). The text says why. A
     /// failed part a resume retries, never a "not applicable" and never a clean.
@@ -99,12 +110,13 @@ pub enum Effective {
 
 impl Effective {
     /// How bad the state is when one rule has two answers: problems over not completed over clean
-    /// over not applicable.
+    /// over not a problem here over not applicable.
     fn rank(&self) -> u8 {
         match self {
-            Self::Problems(_) => 3,
-            Self::NotCompleted(_) => 2,
-            Self::Clean(_) => 1,
+            Self::Problems(_) => 4,
+            Self::NotCompleted(_) => 3,
+            Self::Clean(_) => 2,
+            Self::NotAProblemHere => 1,
             Self::NotApplicable => 0,
         }
     }
@@ -124,6 +136,14 @@ pub struct BadRef {
     pub problem: u32,
 }
 
+/// One `not_a_problem_here` answer, kept for the reviewer. Never a client row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotAProblemNote {
+    pub rule: String,
+    pub place: Place,
+    pub reason: String,
+}
+
 /// The result of the checks on one piece's answers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CheckOutcome {
@@ -141,6 +161,8 @@ pub struct CheckOutcome {
     pub valid_citations: Vec<Citation>,
     /// One answer for each checklist rule that has one, after the checks.
     pub effective: Vec<EffectiveAnswer>,
+    /// Every `not_a_problem_here` answer given, whichever answer stood for its rule.
+    pub not_a_problem_notes: Vec<NotAProblemNote>,
 }
 
 /// A unit's picture of one rule that offers options, from adding its pieces' option counts.
@@ -197,6 +219,35 @@ pub fn build(
     Checklist { rules: out }
 }
 
+/// A rule's directive with its severity orders turned into guidance. The engine no longer holds
+/// an agent's row to a rule's minimum, so the text must not say it does: "Report at high
+/// severity when" reads "Usually high when", "Flag as high severity" reads "Usually high",
+/// "emit a high-severity finding" reads "emit a finding (usually high)", "Severity is High."
+/// reads "Usually high.".
+fn as_severity_guidance(directive: &str) -> String {
+    static PATTERNS: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            (r"(?i)\breport at (\w+) severity when\b", "Usually $1 when"),
+            (r"(?i)\bflag (?:it )?as (\w+) severity\b", "Usually $1"),
+            (
+                r"(?i)\b(emit|report) an? (\w+)[- ]severity finding\b",
+                "$1 a finding (usually $2)",
+            ),
+            (r"\bSeverity is (\w+)\.", "Usually $1."),
+        ]
+        .into_iter()
+        .filter_map(|(p, r)| regex::Regex::new(p).ok().map(|re| (re, r)))
+        .collect()
+    });
+    let mut text = directive.to_string();
+    for (re, with) in patterns {
+        text = re.replace_all(&text, *with).into_owned();
+    }
+    text
+}
+
 /// A path the way the room names it.
 fn plain_path(path: &str) -> String {
     path.trim_start_matches("./").to_string()
@@ -219,26 +270,38 @@ impl Checklist {
              no rule stays as it is.\n\
              2. Answer every rule. Give one answer for each rule, no exceptions, under `answers`: \
              `problems` (with the numbers of your problems), `clean` (with up to three places you \
-             checked, each a file and line you read), or `not_applicable` when nothing in this part \
-             is what the rule is about. For a rule with options, also say how many places follow \
-             each option, and name up to ten places for each.\n\
-             3. Add. A problem that a rule turns up and that you did not report goes into a new \
-             problems file with that rule's id as its `label`.\n\n\
+             checked, each a file and line you read), `not_a_problem_here` (the letter of the rule \
+             is not met at one place, and you judge it is not a problem here: give that one place \
+             as `place`, a file and line, and one sentence as `reason`; this reports nothing to the \
+             client, it tells the reviewer what you saw), or `not_applicable` when nothing in this \
+             part is what the rule is about. Give one place and one sentence of reason, no more. \
+             For a rule with options, also say how many places follow each option, and name up to \
+             ten places for each.\n\
+             3. Add. Add a problem only if you would report it to this client on your own \
+             judgment. Rate it yourself: the severity a rule shows is a guide, not a rule. If a \
+             rule asks for something this code needs and does not have, that is a problem: write \
+             it. A problem you add goes into a new problems file with that rule's id as its \
+             `label`.\n\n\
              `checklist.json` looks like this:\n\n\
              {\"citations\": [{\"n\": 1, \"rule\": \"RULE-ID\"}], \"answers\": [{\"rule\": \"RULE-ID\", \
              \"answer\": \"clean\", \"places\": [{\"path\": \"src/a.rs\", \"line\": 10}], \"options\": \
-             [{\"id\": \"option-id\", \"count\": 3, \"places\": [\"src/a.rs:10\"]}]}]}\n\n\
+             [{\"id\": \"option-id\", \"count\": 3, \"places\": [\"src/a.rs:10\"]}]}, \
+             {\"rule\": \"OTHER-ID\", \"answer\": \"not_a_problem_here\", \"place\": {\"path\": \
+             \"src/b.rs\", \"line\": 7}, \"reason\": \"One sentence.\"}]}\n\n\
              # Rules\n",
         );
         for rule in &self.rules {
             out.push_str(&format!("\n## {}: {}\n", rule.id, rule.title));
-            out.push_str(&format!("Directive: {}\n", rule.directive));
+            out.push_str(&format!(
+                "Directive: {}\n",
+                as_severity_guidance(&rule.directive)
+            ));
             match (&rule.min_severity, &rule.max_severity) {
                 (Some(lo), Some(hi)) => {
-                    out.push_str(&format!("Severity: at least {lo}, at most {hi}\n"));
+                    out.push_str(&format!("Suggested severity: {lo}, at most {hi}\n"));
                 }
-                (Some(lo), None) => out.push_str(&format!("Severity: at least {lo}\n")),
-                (None, Some(hi)) => out.push_str(&format!("Severity: at most {hi}\n")),
+                (Some(lo), None) => out.push_str(&format!("Suggested severity: {lo}\n")),
+                (None, Some(hi)) => out.push_str(&format!("Suggested severity: at most {hi}\n")),
                 (None, None) => {}
             }
             if !rule.options.is_empty() {
@@ -346,6 +409,18 @@ impl Checklist {
             for answer in given {
                 let state = match answer.kind {
                     AnswerKind::NotApplicable => Effective::NotApplicable,
+                    AnswerKind::NotAProblemHere => {
+                        if let (Some(place), Some(reason)) =
+                            (answer.places.first(), answer.reason.as_ref())
+                        {
+                            out.not_a_problem_notes.push(NotAProblemNote {
+                                rule: rule.id.clone(),
+                                place: place.clone(),
+                                reason: reason.trim().to_string(),
+                            });
+                        }
+                        Effective::NotAProblemHere
+                    }
                     AnswerKind::Problems => {
                         let mut real = Vec::new();
                         for &n in &answer.problems {
