@@ -257,7 +257,30 @@ pub(super) fn conventions_from_answers(
         if cited_by_rule.contains(&uc.rule) {
             // A problem the model wrote is the report of this rule. The option places are census
             // only (the counts above): they never become rows, so none takes that problem's
-            // headline, rule or severity.
+            // headline, rule or severity. Each place dropped is left as an operator note.
+            for ((rule, option), listed) in &places {
+                if rule != &uc.rule || (option == &chosen) != opt.violates {
+                    continue;
+                }
+                for place in listed {
+                    let at = format!(
+                        "{}{}",
+                        place.path,
+                        place.line.map_or(String::new(), |l| format!(":{l}"))
+                    );
+                    let state = if checked_place(&by_path, place).is_some() {
+                        "checked against the file"
+                    } else {
+                        "could not be checked against the file"
+                    };
+                    result.notes.push(format!(
+                        "{}: a listed place of the option \"{}\" (id {option}) at {at} {state}; \
+                         the rule is cited by a problem the model wrote, so it makes no row",
+                        uc.rule,
+                        label_of(option),
+                    ));
+                }
+            }
             continue;
         }
         if opt.violates {

@@ -293,7 +293,16 @@ async fn a_cited_rules_unchecked_option_place_makes_no_row() {
     )
     .await;
     assert!(failed.is_empty(), "{failed:?}");
-    let _ = extras;
+    assert!(
+        extras.notes.iter().any(|n| n.contains("src/missing.rs")),
+        "{:?}",
+        extras.notes
+    );
+    assert!(
+        extras.notes.iter().any(|n| n.contains("src/a.rs:2")),
+        "{:?}",
+        extras.notes
+    );
     assert!(
         rows.iter().all(|f| f.path != "src/missing.rs"),
         "census only, no row: {rows:?}"
@@ -351,7 +360,17 @@ fn a_problems_answer_whose_cited_problem_has_no_row_keeps_its_places_as_engine_r
     );
     let present = run(&[(0, 7)]);
     assert!(present.departures.is_empty());
-    assert!(present.undecided.is_empty(), "census only: no rows");
+    assert!(missing.notes.is_empty(), "{:?}", missing.notes);
+    for place in ["src/a.rs:2", "src/b.rs:3"] {
+        assert!(
+            present
+                .notes
+                .iter()
+                .any(|n| n.contains(place) && n.contains("direct")),
+            "{place}: {:?}",
+            present.notes
+        );
+    }
 }
 
 #[tokio::test]
