@@ -409,7 +409,16 @@ pub enum Stage {
     Calibration,
     GroupReview,
     Fix,
+    /// Not a model: the project's finder (`agent` or `engine`). It rides the same route but has
+    /// its own row, so it is not in [`Stage::ALL`].
+    Finder,
 }
+
+/// The finder choices the row offers: the word the route takes and what a person reads.
+pub const FINDER_CHOICES: [(&str, &str); 2] = [
+    ("agent", "Agent (one model reviews each part)"),
+    ("engine", "Engine (rule by rule)"),
+];
 
 impl Stage {
     pub const ALL: [Stage; 4] = [
@@ -426,6 +435,7 @@ impl Stage {
             Stage::Calibration => "calibration",
             Stage::GroupReview => "group_review",
             Stage::Fix => "fix",
+            Stage::Finder => "finder",
         }
     }
 
@@ -436,6 +446,7 @@ impl Stage {
             Stage::Calibration => "Calibration (stage 1)",
             Stage::GroupReview => "Group review (stage 2)",
             Stage::Fix => "Fix model",
+            Stage::Finder => "Finder",
         }
     }
 
@@ -443,6 +454,7 @@ impl Stage {
     pub fn hint(self) -> &'static str {
         match self {
             Stage::Scan | Stage::Fix => "",
+            Stage::Finder => "agent: one model reviews each part; engine: rule by rule",
             Stage::Calibration => "per site, batched",
             Stage::GroupReview => "one call per rule group, real time",
         }
@@ -455,6 +467,7 @@ impl Stage {
             Stage::Calibration => &models.calibration,
             Stage::GroupReview => &models.group_review,
             Stage::Fix => &models.fix,
+            Stage::Finder => &models.finder,
         }
     }
 

@@ -811,6 +811,11 @@ pub(crate) async fn set_step_model(
     if req.step.trim().eq_ignore_ascii_case("group_review") {
         return set_group_review_model(&state, &id, req.model.trim());
     }
+    // The finder is a word (`agent` or `engine`), not a model; it lives with the review settings
+    // and rides the same route as the group reviewer's model.
+    if req.step.trim().eq_ignore_ascii_case("finder") {
+        return set_project_finder(&state, &id, req.model.trim());
+    }
     let Some(step) = parse_step_kind(&req.step) else {
         return Json(serde_json::json!({ "ok": false, "message": "unknown step" }));
     };
@@ -836,6 +841,28 @@ fn set_group_review_model(state: &AppState, id: &str, model: &str) -> Json<serde
     };
     let settings = camerata_api_types::project::ReviewSettings {
         group_review_model: model.to_string(),
+        ..project.review
+    };
+    match state.projects.set_review_settings(id, settings) {
+        Some(Ok(p)) => Json(serde_json::json!({ "ok": true, "project": p })),
+        Some(Err(message)) => Json(serde_json::json!({ "ok": false, "message": message })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Set the project's finder (`step: "finder"` on the step-models route). The other review
+/// settings are kept as they are. Anything but `agent` or `engine` is refused.
+fn set_project_finder(state: &AppState, id: &str, word: &str) -> Json<serde_json::Value> {
+    let Some(finder) = camerata_api_types::project::ProjectFinder::parse(word) else {
+        return Json(
+            serde_json::json!({ "ok": false, "message": "the finder must be agent or engine" }),
+        );
+    };
+    let Some(project) = state.projects.get(id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    let settings = camerata_api_types::project::ReviewSettings {
+        finder,
         ..project.review
     };
     match state.projects.set_review_settings(id, settings) {

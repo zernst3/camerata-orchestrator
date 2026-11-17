@@ -260,6 +260,36 @@ pub const STAGE1_DEFAULT_MODEL: &str = "claude-opus-5-5";
 /// `--group-review-model` flag or the project setting (A13).
 pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-2";
 
+/// Which finder a project's scans use. `Engine` (the default until the calibration passes) is the
+/// rule by rule scan; `Agent` has one model review each part of the code. The server turns it
+/// into the run's finder choice. Set only on the project, never by the environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectFinder {
+    #[default]
+    Engine,
+    Agent,
+}
+
+impl ProjectFinder {
+    /// The word the settings route and the screen use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectFinder::Engine => "engine",
+            ProjectFinder::Agent => "agent",
+        }
+    }
+
+    /// Read the word back; `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "engine" => Some(ProjectFinder::Engine),
+            "agent" => Some(ProjectFinder::Agent),
+            _ => None,
+        }
+    }
+}
+
 /// The project's review-tree settings (design D3, D5 and A3): how many escalations a run may put
 /// in the architect's queue, which reasons may exceed that number, and the group reviewer's
 /// model. Every field `serde(default)`s so a project written before the settings existed loads
@@ -287,6 +317,10 @@ pub struct ReviewSettings {
     /// written before the setting existed loads with [`DEFAULT_SAMPLE_SIZE_PER_RUN`].
     #[serde(default = "default_sample_size_per_run")]
     pub sample_size_per_run: usize,
+    /// Which finder the project's scans use. A project written before the setting existed loads
+    /// with the default.
+    #[serde(default)]
+    pub finder: ProjectFinder,
 }
 
 /// The default `sample_size_per_run`: the size design A2b suggests for an early engagement.
@@ -359,6 +393,7 @@ impl Default for ReviewSettings {
             over_budget_reasons: default_over_budget_reasons(),
             group_review_model: String::new(),
             sample_size_per_run: default_sample_size_per_run(),
+            finder: ProjectFinder::default(),
         }
     }
 }

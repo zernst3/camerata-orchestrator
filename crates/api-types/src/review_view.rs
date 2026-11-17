@@ -871,6 +871,10 @@ pub struct StageModelsView {
     /// The group review, stage 2.
     pub group_review: String,
     pub fix: String,
+    /// The project's finder, `agent` or `engine` (not a model: it sits here beside the stage
+    /// models because it is the same lane's setting, sent through the same route).
+    #[serde(default)]
+    pub finder: String,
 }
 
 /// The escalation formula (spec section 9).
