@@ -108,7 +108,7 @@ fn fix_ids_of(
 }
 
 #[tokio::test]
-async fn a_cited_problems_answer_gives_sibling_rows_not_departure_rows() {
+async fn a_cited_rules_option_places_are_census_only_and_make_no_rows() {
     let (rows, _, _, failed, _, _) = run_cited(
         cited_script(
             json!([
@@ -125,12 +125,8 @@ async fn a_cited_problems_answer_gives_sibling_rows_not_departure_rows() {
     let layer = layer_rows(&rows);
     assert_eq!(
         places_of(&layer),
-        vec![
-            ("src/a.rs".to_string(), 2),
-            ("src/a.rs".to_string(), 4),
-            ("src/b.rs".to_string(), 3)
-        ],
-        "the model's problem and one sibling for each listed place: {rows:?}"
+        vec![("src/a.rs".to_string(), 4)],
+        "only the model's own problem; option places are census: {rows:?}"
     );
     assert!(
         layer
@@ -139,13 +135,34 @@ async fn a_cited_problems_answer_gives_sibling_rows_not_departure_rows() {
         "no engine departure text"
     );
     assert!(rows.iter().all(|f| f.also_locations.is_empty()), "A11");
-    let sibling = layer.iter().find(|f| f.path == "src/b.rs").unwrap();
-    assert!(
-        sibling.snippet.starts_with("fn item_3"),
-        "{}",
-        sibling.snippet
+}
+
+#[tokio::test]
+async fn a_cited_problems_own_places_still_become_sibling_rows_beside_the_census() {
+    let mut p = problem(1, "src/a.rs", 4, "medium", "fn item_4() { run(4); }");
+    p["places"] = json!([{"path": "src/b.rs", "line": 3}]);
+    let script = full_script(
+        &[("src/a.rs", 6), ("src/b.rs", 4)],
+        vec![p],
+        vec![json!({"n": 1, "rule": "ARCH-LAYER-1"})],
+        vec![
+            answer_clean("ARCH-ONE-1", "src/a.rs", 1),
+            json!({
+                "rule": "ARCH-LAYER-1", "answer": "problems", "problems": [1],
+                "options": [
+                    {"id": "repo", "count": 8, "places": ["src/a.rs:1"]},
+                    {"id": "direct", "count": 2, "places": ["src/a.rs:2"]}
+                ]
+            }),
+        ],
     );
-    assert_eq!(sibling.severity, "medium", "the problem's own rating");
+    let (rows, _, _, failed, _, _) = run_cited(script, false).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(
+        places_of(&layer_rows(&rows)),
+        vec![("src/a.rs".to_string(), 4), ("src/b.rs".to_string(), 3)],
+        "{rows:?}"
+    );
 }
 
 #[tokio::test]
@@ -167,11 +184,7 @@ async fn a_cited_problems_answer_on_a_violates_option_gives_no_judged_to_follow_
     let layer = layer_rows(&rows);
     assert_eq!(
         places_of(&layer),
-        vec![
-            ("src/a.rs".to_string(), 4),
-            ("src/b.rs".to_string(), 3),
-            ("src/b.rs".to_string(), 4)
-        ],
+        vec![("src/a.rs".to_string(), 4)],
         "{rows:?}"
     );
     assert!(layer.iter().all(|f| !f.detail.contains("judged to follow")));
@@ -266,7 +279,7 @@ async fn a_problem_listing_six_places_is_six_rows_in_one_fix() {
 }
 
 #[tokio::test]
-async fn a_cited_rules_unchecked_place_is_a_held_row_not_only_a_note() {
+async fn a_cited_rules_unchecked_option_place_makes_no_row() {
     let (rows, _, _, failed, _, extras) = run_cited(
         cited_script(
             json!([
@@ -280,13 +293,20 @@ async fn a_cited_rules_unchecked_place_is_a_held_row_not_only_a_note() {
     )
     .await;
     assert!(failed.is_empty(), "{failed:?}");
-    assert!(extras.notes.iter().any(|n| n.contains("src/missing.rs")));
-    let held = rows
-        .iter()
-        .find(|f| f.path == "src/missing.rs")
-        .unwrap_or_else(|| panic!("the unchecked place is a row: {rows:?}"));
-    assert!(held.needs_review && !held.located);
-    assert!(held.detail.contains("needs a decision"), "{}", held.detail);
+    assert!(
+        extras.notes.iter().any(|n| n.contains("src/missing.rs")),
+        "{:?}",
+        extras.notes
+    );
+    assert!(
+        extras.notes.iter().any(|n| n.contains("src/a.rs:2")),
+        "{:?}",
+        extras.notes
+    );
+    assert!(
+        rows.iter().all(|f| f.path != "src/missing.rs"),
+        "census only, no row: {rows:?}"
+    );
 }
 
 #[test]
@@ -338,11 +358,19 @@ fn a_problems_answer_whose_cited_problem_has_no_row_keeps_its_places_as_engine_r
         2,
         "no row to carry the places, so the engine rows stand"
     );
-    assert!(missing.attached.is_empty());
     let present = run(&[(0, 7)]);
     assert!(present.departures.is_empty());
-    assert_eq!(present.attached.len(), 1);
-    assert_eq!(present.attached[0].sites.len(), 2);
+    assert!(missing.notes.is_empty(), "{:?}", missing.notes);
+    for place in ["src/a.rs:2", "src/b.rs:3"] {
+        assert!(
+            present
+                .notes
+                .iter()
+                .any(|n| n.contains(place) && n.contains("direct")),
+            "{place}: {:?}",
+            present.notes
+        );
+    }
 }
 
 #[tokio::test]

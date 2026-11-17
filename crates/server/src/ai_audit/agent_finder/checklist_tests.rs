@@ -745,3 +745,58 @@ fn a_not_a_problem_here_place_that_was_read_gives_the_note() {
     assert_eq!(state_of(&out, "RUST-ZED-1"), Effective::NotAProblemHere);
     assert_eq!(out.not_a_problem_notes.len(), 1);
 }
+
+#[test]
+fn render_words_the_places_the_duplicate_and_the_not_applicable_rules() {
+    let text = checklist().render();
+    assert!(
+        text.contains(
+            "When your answer is `problems`, put the places that break the rule in the `places` \
+             of the problem they are an instance of, and under options give the counts only. \
+             For any other answer, under options give the counts and up to ten places for each \
+             option."
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("name places only for the option the code should follow"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "If an earlier problem already covers the place for the same reason, cite it \
+             (step 1); never write a second problem."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "`not_applicable` only when this part has no code of the kind the rule governs; \
+             give one sentence saying what is absent. If the code is here and the safeguard is \
+             missing, that is a problem, not `not_applicable`."
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_not_applicable_reason_is_noted_for_the_reviewer_and_none_is_no_note() {
+    let list = checklist();
+    let mut with = answer("ARCH-ALPHA-1", AnswerKind::NotApplicable);
+    with.reason = Some(" No queues here. ".into());
+    let other = answer("RUST-ZED-1", AnswerKind::NotApplicable);
+    let out = list.check(&file_of(vec![with, other]), &[], &[], &piece());
+    assert_eq!(out.not_applicable_notes.len(), 1);
+    assert_eq!(out.not_applicable_notes[0].rule, "ARCH-ALPHA-1");
+    assert_eq!(out.not_applicable_notes[0].reason, "No queues here.");
+    assert_eq!(state_of(&out, "ARCH-ALPHA-1"), Effective::NotApplicable);
+}
+
+#[test]
+fn render_shows_the_optional_reason_on_not_applicable_in_the_example() {
+    let text = checklist().render();
+    assert!(
+        text.contains("\"answer\": \"not_applicable\", \"reason\""),
+        "{text}"
+    );
+}

@@ -386,6 +386,14 @@ fn parse_checklist(v: &serde_json::Value) -> Result<ChecklistFile, String> {
                     .to_string(),
             );
         }
+        if kind == AnswerKind::NotApplicable {
+            // An optional one-sentence note for the reviewer; it makes no row.
+            reason = a
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .map(|r| r.trim().to_string())
+                .filter(|r| !r.is_empty());
+        }
         let mut options = Vec::new();
         match a.get("options") {
             None | Some(serde_json::Value::Null) => {}

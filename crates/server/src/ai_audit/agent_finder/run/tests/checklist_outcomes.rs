@@ -519,3 +519,39 @@ async fn a_not_a_problem_here_place_that_was_not_read_makes_the_rule_not_complet
     assert!(extras.not_a_problem_notes.is_empty());
     assert!(extras.not_a_problem_rules.is_empty());
 }
+
+#[tokio::test]
+async fn a_not_applicable_reason_is_an_operator_note_and_no_row_and_none_means_no_note() {
+    let script = |with_reason: bool| {
+        let mut na = json!({"rule": "ARCH-ONE-1", "answer": "not_applicable"});
+        if with_reason {
+            na["reason"] = json!("There are no queues in this part.");
+        }
+        full_script(
+            &[("src/a.rs", 6), ("src/b.rs", 4)],
+            vec![],
+            vec![],
+            vec![na, answer_clean("SEC-TWO-1", "src/a.rs", 1)],
+        )
+    };
+    let agent = ScriptedAgent::new(script(true));
+    let (findings, _, _, failed, _, extras) = run(&agent).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(findings.is_empty(), "{findings:?}");
+    assert_eq!(
+        extras.not_a_problem_notes.len(),
+        1,
+        "{:?}",
+        extras.not_a_problem_notes
+    );
+    assert!(
+        extras.not_a_problem_notes[0].contains("ARCH-ONE-1")
+            && extras.not_a_problem_notes[0].contains("There are no queues in this part."),
+        "{:?}",
+        extras.not_a_problem_notes
+    );
+    let agent = ScriptedAgent::new(script(false));
+    let (_, _, _, failed, _, extras) = run(&agent).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(extras.not_a_problem_notes.is_empty());
+}

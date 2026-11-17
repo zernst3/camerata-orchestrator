@@ -267,16 +267,10 @@ async fn a_security_fault_under_a_departure_is_a_defect_not_a_deviation() {
         "an objective fault stays a defect: {:?}",
         fault.kind
     );
-    // The rule's answer cites the problem, so the departure is not an engine row: its place is
-    // a sibling row of the fault (a copy of it), never a deviation of its own.
-    let sibling = rows
-        .iter()
-        .find(|f| f.path == "src/b.rs" && f.line == 3)
-        .unwrap();
+    // The rule's answer cites the problem, so the departure is census only: no row at all.
     assert!(
-        !sibling.detail.contains("The rest of the codebase follows"),
-        "{}",
-        sibling.detail
+        rows.iter().all(|f| !(f.path == "src/b.rs" && f.line == 3)),
+        "{rows:?}"
     );
     assert!(fault.also_locations.is_empty());
 }

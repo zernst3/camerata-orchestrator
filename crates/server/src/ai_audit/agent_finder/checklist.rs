@@ -69,7 +69,8 @@ pub struct RuleAnswer {
     pub problems: Vec<u32>,
     /// For `Clean`: up to three places checked. For `NotAProblemHere`: the one place.
     pub places: Vec<Place>,
-    /// For `NotAProblemHere`: the one sentence of reason.
+    /// For `NotAProblemHere`: the one sentence of reason. For `NotApplicable`: an optional
+    /// sentence saying what is absent (reviewer only, no row).
     pub reason: Option<String>,
     pub options: Vec<OptionCount>,
 }
@@ -144,6 +145,13 @@ pub struct NotAProblemNote {
     pub reason: String,
 }
 
+/// One `not_applicable` answer that gave a reason, kept for the reviewer. Never a client row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotApplicableNote {
+    pub rule: String,
+    pub reason: String,
+}
+
 /// The result of the checks on one piece's answers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CheckOutcome {
@@ -163,6 +171,8 @@ pub struct CheckOutcome {
     pub effective: Vec<EffectiveAnswer>,
     /// Every `not_a_problem_here` answer given, whichever answer stood for its rule.
     pub not_a_problem_notes: Vec<NotAProblemNote>,
+    /// Every `not_applicable` answer given with a reason.
+    pub not_applicable_notes: Vec<NotApplicableNote>,
 }
 
 /// A unit's picture of one rule that offers options, from adding its pieces' option counts.
@@ -274,20 +284,28 @@ impl Checklist {
              is not met at one place, and you judge it is not a problem here, never for something \
              this code needs and does not have: give that one place as `place`, a file and line you \
              read, and one sentence as `reason`, no more; this reports nothing to the client, it \
-             tells the reviewer what you saw), or `not_applicable` when nothing in this part is \
-             what the rule is about. For a rule with options, also say how many places follow each option, and name up to \
-             ten places for each.\n\
+             tells the reviewer what you saw), or `not_applicable`. \
+             `not_applicable` only when this part has no code of the kind the rule governs; \
+             give one sentence saying what is absent. If the code is here and the safeguard is \
+             missing, that is a problem, not `not_applicable`. \
+             When your answer is `problems`, put the places that break the rule in the `places` \
+             of the problem they are an instance of, and under options give the counts only. \
+             For any other answer, under options give the counts and up to ten places for each \
+             option.\n\
              3. Add. Add a problem only if you would report it to this client on your own \
              judgment. Rate it yourself: the severity a rule shows is a guide, not a rule. If a \
              rule asks for something this code needs and does not have, that is a problem: write \
-             it. A problem you add goes into a new problems file with that rule's id as its \
-             `label`.\n\n\
+             it. If an earlier problem already covers the place for the same reason, cite it \
+             (step 1); never write a second problem. A problem you add goes into a new problems \
+             file with that rule's id as its `label`.\n\n\
              `checklist.json` looks like this:\n\n\
              {\"citations\": [{\"n\": 1, \"rule\": \"RULE-ID\"}], \"answers\": [{\"rule\": \"RULE-ID\", \
              \"answer\": \"clean\", \"places\": [{\"path\": \"src/a.rs\", \"line\": 10}], \"options\": \
              [{\"id\": \"option-id\", \"count\": 3, \"places\": [\"src/a.rs:10\"]}]}, \
              {\"rule\": \"OTHER-ID\", \"answer\": \"not_a_problem_here\", \"place\": {\"path\": \
-             \"src/b.rs\", \"line\": 7}, \"reason\": \"One sentence.\"}]}\n\n\
+             \"src/b.rs\", \"line\": 7}, \"reason\": \"One sentence.\"}, \
+             {\"rule\": \"THIRD-ID\", \"answer\": \"not_applicable\", \"reason\": \"One sentence \
+             saying what is absent.\"}]}\n\n\
              # Rules\n",
         );
         for rule in &self.rules {
@@ -408,7 +426,17 @@ impl Checklist {
             let mut states: Vec<(Effective, &RuleAnswer)> = Vec::new();
             for answer in given {
                 let state = match answer.kind {
-                    AnswerKind::NotApplicable => Effective::NotApplicable,
+                    AnswerKind::NotApplicable => {
+                        if let Some(reason) =
+                            answer.reason.as_ref().filter(|r| !r.trim().is_empty())
+                        {
+                            out.not_applicable_notes.push(NotApplicableNote {
+                                rule: rule.id.clone(),
+                                reason: reason.trim().to_string(),
+                            });
+                        }
+                        Effective::NotApplicable
+                    }
                     AnswerKind::NotAProblemHere => {
                         // The place gets the same check as a `clean` place: a file of the
                         // piece, at a line a Read returned. Otherwise the rule is not completed

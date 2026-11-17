@@ -910,8 +910,8 @@ pub async fn find_repo(
         );
     }
 
-    // Every further place of a problem is a sibling row of it: from the model's own `places` and
-    // from the places a cited rule's checklist options listed. No producer writes
+    // Every further place of a problem is a sibling row of it, from the model's own `places` (a
+    // cited rule's option places are census only). No producer writes
     // `also_locations`; each place is a copy of the problem at its own path, line and snippet,
     // in the same sub-group, so the places share one fix.
     let mut siblings: Vec<Finding> = Vec::new();
@@ -925,29 +925,6 @@ pub async fn find_repo(
         &model_files,
         &mut siblings,
     );
-    for att in &conv.attached {
-        let key = att.problem.to_string();
-        let primary = answered
-            .get(att.piece)
-            .and_then(|&i| reports.get(i))
-            .and_then(|r| {
-                r.findings
-                    .iter()
-                    .find(|f| f.captures.get(FINDER_PROBLEM_CAPTURE) == Some(&key))
-            });
-        if let Some(primary) = primary {
-            for site in &att.sites {
-                add_sibling(
-                    &mut siblings,
-                    primary,
-                    repo,
-                    &site.path,
-                    site.line,
-                    site.snippet.clone(),
-                );
-            }
-        }
-    }
 
     // Every problem so far, in piece order.
     let mut rows: Vec<Finding> = Vec::new();
