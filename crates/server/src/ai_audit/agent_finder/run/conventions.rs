@@ -9,7 +9,7 @@
 //! The listed places of an option that is not the convention become departures: one problem for
 //! each place, from the agent's own listing and checked against the file here.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::super::checklist::{combine_for_unit, Effective, EffectiveAnswer, Place};
 use crate::ai_audit::{RuleAlternatives, RuleRecommendation};
@@ -151,7 +151,7 @@ pub(super) fn conventions_from_answers(
     }
     // A rule whose answer cites a problem the model wrote: that problem is the report of it, so
     // the engine adds no row of its own; the rule's option places are census only.
-    let mut cited_by_rule: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cited_by_rule: HashSet<String> = HashSet::new();
     for (i, answers) in filtered.iter().enumerate() {
         for a in answers {
             if let Effective::Problems(nums) = &a.state {
