@@ -291,6 +291,18 @@ impl RuleLedgerEntry {
                 reason: why.clone(),
             };
         }
+        // The agent finder looked and judged the rule's letter unmet but harmless. That is not
+        // "checked and compliant", so the cell is never clean; and it is not a problem or an
+        // absent concern either. The closest state the matrix and its release-gate check already
+        // know is not reviewed ("never to be read as clean"), with a reason that says what
+        // happened. The model's own lines are in the operator's "Judged not a problem here" list.
+        if self.judged_not_a_problem {
+            return CellState::NotReviewed {
+                reason: "the model judged the rule's wording unmet here but not a problem; not \
+                         shown compliant (see the operator's notes)"
+                    .to_string(),
+            };
+        }
         // A deterministic architectural rule that evaluated no file in scope had nothing to look
         // at on this repo. That is not a clean result, and in the patterns matrix it must not
         // read as "this service handles the rule differently" against a service that violates

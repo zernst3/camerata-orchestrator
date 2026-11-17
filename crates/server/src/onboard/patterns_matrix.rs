@@ -448,6 +448,23 @@ mod tests {
     }
 
     #[test]
+    fn a_service_whose_rule_was_judged_not_a_problem_here_is_never_a_clean_cell() {
+        // Violated in a; in b the model looked and judged the rule's letter unmet but harmless.
+        // That is not "checked and compliant": no clean cell, so no row, and the cell says so.
+        let mut r = report(&["acme/a", "acme/b"]);
+        ran(&mut r, "acme/a", RULE, 1);
+        r.ledger.note_not_a_problem_rule("acme/b", RULE);
+        ran(&mut r, "acme/b", RULE, 0);
+        r.findings.push(finding("acme/a", RULE, None));
+        let m = build(&r);
+        assert!(m.rows.is_empty(), "{:?}", m.rows);
+        assert!(matches!(
+            r.ledger.cell_state(RULE, "acme/b", true),
+            CellState::NotReviewed { reason } if reason.contains("not shown")
+        ));
+    }
+
+    #[test]
     fn a_service_with_nothing_recorded_is_not_reviewed_never_clean() {
         let mut r = report(&["acme/a", "acme/b", "acme/c"]);
         ran(&mut r, "acme/a", RULE, 1);
