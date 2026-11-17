@@ -2806,3 +2806,94 @@ async fn a_tool_call_transcript_reply_is_refused_and_never_stored_as_good() {
         "nothing from the transcript is stored as a summary"
     );
 }
+
+// ── The cost checkpoint and the group review ───────────────────────────────────────────────
+
+fn paused_checkpoint() -> crate::cost_checkpoint::CostCheckpoint {
+    crate::cost_checkpoint::CostCheckpoint {
+        approved_usd: 100.0,
+        spent_usd: 5.0,
+        projected_usd: 120.0,
+        pieces_done: 1,
+        pieces_left: 3,
+        stopped: true,
+        new_estimate_usd: Some(120.0),
+        difference_usd: Some(20.0),
+        stopped_before: "agent finder".into(),
+    }
+}
+
+fn spent_report(rows: usize) -> ScanReport {
+    let mut report = report_of(&[(SQL, rows)]);
+    report.actual_usage = Some(ActualUsage {
+        input_tokens: 1_000,
+        output_tokens: 100,
+        cost_usd: 5.0,
+        calls: 10,
+        cost_complete: true,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        resumed_cost_usd: 0.0,
+    });
+    report
+}
+
+#[tokio::test]
+async fn a_run_the_checkpoint_paused_sends_no_group_review_call() {
+    let mut report = spent_report(3);
+    report
+        .ledger
+        .record_cost_cap(crate::cost_cap::CostCapRecord {
+            cap_usd: 100.0,
+            spent_usd: 5.0,
+            checkpoint: Some(paused_checkpoint()),
+            ..crate::cost_cap::CostCapRecord::default()
+        });
+    let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
+    let rules: Vec<(String, String)> = Vec::new();
+    let controls = crate::cost_cap::RunControls {
+        max_cost_usd: Some(100.0),
+        ..crate::cost_cap::RunControls::default()
+    };
+    review_groups_metered(&mut report, &llm, &cfg(&rules), &controls).await;
+    assert!(llm.calls().is_empty(), "a paused run sends nothing");
+    assert!((report.actual_usage.as_ref().unwrap().cost_usd - 5.0).abs() < 1e-9);
+    let cap = report.ledger.cost_cap().unwrap();
+    assert!(cap
+        .not_run_stages
+        .iter()
+        .any(|s| s.stage == STAGE_GROUP_REVIEW));
+    let part = report
+        .failed_passes
+        .iter()
+        .find(|f| f.reason.contains(crate::cost_checkpoint::CAUSE_PROJECTED))
+        .unwrap_or_else(|| panic!("{:?}", report.failed_passes));
+    assert_eq!(part.class, FailureClass::SpendLimit);
+}
+
+#[tokio::test]
+async fn a_group_review_priced_over_the_approved_amount_is_not_started() {
+    let rules: Vec<(String, String)> = Vec::new();
+    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false)
+        .expect("the test model is priced");
+    assert!(price > 0.0);
+    let mut report = spent_report(3);
+    // Room for the spend plus half the stage's price: the stage would go over.
+    let controls = crate::cost_cap::RunControls {
+        max_cost_usd: Some(5.0 + price / 2.0),
+        ..crate::cost_cap::RunControls::default()
+    };
+    let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
+    review_groups_metered(&mut report, &llm, &cfg(&rules), &controls).await;
+    assert!(llm.calls().is_empty());
+    let stop = report
+        .ledger
+        .cost_cap()
+        .and_then(|c| c.checkpoint.clone())
+        .expect("the pause is on the record");
+    assert!(stop.stopped);
+    assert!(
+        (stop.new_estimate_usd.unwrap() - (5.0 + price)).abs() < 1e-9,
+        "{stop:?}"
+    );
+}
