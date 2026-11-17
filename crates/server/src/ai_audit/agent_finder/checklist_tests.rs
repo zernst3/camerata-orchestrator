@@ -752,9 +752,14 @@ fn render_words_the_places_the_duplicate_and_the_not_applicable_rules() {
     assert!(
         text.contains(
             "When your answer is `problems`, put the places that break the rule in the `places` \
-             of the problem they are an instance of. Under options give the counts, and name \
-             places only for the option the code should follow."
+             of the problem they are an instance of, and under options give the counts only. \
+             For any other answer, under options give the counts and up to ten places for each \
+             option."
         ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("name places only for the option the code should follow"),
         "{text}"
     );
     assert!(

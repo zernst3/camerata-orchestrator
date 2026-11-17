@@ -279,8 +279,9 @@ impl Checklist {
              give one sentence saying what is absent. If the code is here and the safeguard is \
              missing, that is a problem, not `not_applicable`. \
              When your answer is `problems`, put the places that break the rule in the `places` \
-             of the problem they are an instance of. Under options give the counts, and name \
-             places only for the option the code should follow.\n\
+             of the problem they are an instance of, and under options give the counts only. \
+             For any other answer, under options give the counts and up to ten places for each \
+             option.\n\
              3. Add. Add a problem only if you would report it to this client on your own \
              judgment. Rate it yourself: the severity a rule shows is a guide, not a rule. If a \
              rule asks for something this code needs and does not have, that is a problem: write \
