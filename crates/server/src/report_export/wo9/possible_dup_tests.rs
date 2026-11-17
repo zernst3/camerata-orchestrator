@@ -89,6 +89,8 @@ fn a_client_package_carries_no_hint_no_term_and_no_count() {
         if name.ends_with(".xlsx") {
             text.push_str(&xlsx_strings(bytes).expect("strings").join("\n"));
         } else if !name.ends_with(".pdf") {
+            // A .pdf is skipped: only `review_view` and `xlsx_export` reference this index, and
+            // neither draws into the PDF, which builds from the report JSON.
             text.push_str(&String::from_utf8_lossy(bytes));
         }
     }
