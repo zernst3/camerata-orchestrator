@@ -507,6 +507,24 @@ fn rekey_no_convention(
     }
 }
 
+/// Give each extra place a problem listed (written with no text) the text of its line.
+fn fill_site_snippets(rows: &mut [Finding], files: &[(String, String)]) {
+    for site in rows.iter_mut().flat_map(|f| f.also_locations.iter_mut()) {
+        if !site.snippet.is_empty() {
+            continue;
+        }
+        let text = files
+            .iter()
+            .find(|(p, _)| *p == site.path)
+            .and_then(|(_, t)| t.lines().nth(site.line.saturating_sub(1)));
+        if let Some(text) = text {
+            let mut snippet = text.trim().to_string();
+            crate::onboard::redact::redact_string(&mut snippet);
+            site.snippet = snippet;
+        }
+    }
+}
+
 /// Find the problems of one repository with the agent finder.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn find_repo(
@@ -746,10 +764,15 @@ pub async fn find_repo(
         selected.iter().map(|r| r.id.as_str()),
         &options.chosen_options,
     );
-    let piece_answers: Vec<Vec<checklist::EffectiveAnswer>> = reports
+    let answered: Vec<usize> = reports
         .iter()
-        .filter(|r| !r.effective.is_empty())
-        .map(|r| r.effective.clone())
+        .enumerate()
+        .filter(|(_, r)| !r.effective.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let piece_answers: Vec<Vec<checklist::EffectiveAnswer>> = answered
+        .iter()
+        .map(|&i| reports[i].effective.clone())
         .collect();
     let conv = conventions::conventions_from_answers(
         repo,
@@ -760,6 +783,26 @@ pub async fn find_repo(
         corpus,
     );
     extras.notes.extend(conv.notes.iter().cloned());
+    // The places of a rule whose answer cited a problem ride on that problem's row.
+    for att in &conv.attached {
+        let key = att.problem.to_string();
+        let row = answered
+            .get(att.piece)
+            .and_then(|&i| reports.get_mut(i))
+            .and_then(|r| {
+                r.findings
+                    .iter_mut()
+                    .find(|f| f.captures.get(FINDER_PROBLEM_CAPTURE) == Some(&key))
+            });
+        if let Some(row) = row {
+            for site in &att.sites {
+                let own = (row.path.as_str(), row.line) == (site.path.as_str(), site.line);
+                if !own && !row.also_locations.iter().any(|s| s.place() == site.place()) {
+                    row.also_locations.push(site.clone());
+                }
+            }
+        }
+    }
     if let Some(note) = agent.trace_note() {
         extras.notes.push(format!("{repo}: {note}"));
     }
@@ -803,6 +846,7 @@ pub async fn find_repo(
         .iter()
         .filter(|f| !adopted_all.contains(&f.rule_id.to_ascii_uppercase()))
         .count();
+    fill_site_snippets(&mut rows, &model_files);
     rows.extend(unresolved);
     rows.extend(conv.departures);
     rows.extend(conv.undecided);

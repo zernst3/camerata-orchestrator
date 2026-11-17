@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::super::checklist::{combine_for_unit, Effective, EffectiveAnswer, Place};
 use crate::ai_audit::{RuleAlternatives, RuleRecommendation};
-use crate::onboard::Finding;
+use crate::onboard::{Finding, MergedLocation};
 use crate::scan_routing::AuditRule;
 
 /// What the conventions step produced.
@@ -28,6 +28,18 @@ pub(super) struct ConventionResult {
     pub violates: Vec<Finding>,
     /// Operator-only remarks (a listed place that could not be checked).
     pub notes: Vec<String>,
+    /// Places that ride on a problem the model cited to the rule, instead of rows of their own.
+    pub attached: Vec<AttachedSites>,
+}
+
+/// Places of a rule's options that become extra places of one cited problem.
+#[derive(Debug)]
+pub(super) struct AttachedSites {
+    /// The index in `piece_answers` of the piece that cited the problem.
+    pub piece: usize,
+    /// The number of the cited problem within that piece.
+    pub problem: u32,
+    pub sites: Vec<MergedLocation>,
 }
 
 /// A place checked against the repository: the path, the line and the text of the line.
@@ -93,6 +105,20 @@ pub(super) fn conventions_from_answers(
                     if !list.contains(p) && list.len() < 10 {
                         list.push(p.clone());
                     }
+                }
+            }
+        }
+    }
+    // A rule whose answer cites a problem the model wrote: that problem is the report of it, so
+    // the engine adds no row of its own. The first cited problem takes the rule's places.
+    let mut cited_by_rule: HashMap<String, (usize, u32)> = HashMap::new();
+    for (i, answers) in filtered.iter().enumerate() {
+        for a in answers {
+            if let Effective::Problems(nums) = &a.state {
+                if let Some(n) = nums.iter().min() {
+                    cited_by_rule
+                        .entry(a.rule.to_ascii_uppercase())
+                        .or_insert((i, *n));
                 }
             }
         }
@@ -185,6 +211,49 @@ pub(super) fn conventions_from_answers(
         let Some(opt) = alt.options.iter().find(|o| o.id == chosen) else {
             continue;
         };
+        if let Some(&(piece, problem)) = cited_by_rule.get(&uc.rule) {
+            // The listed places of the option the codebase departs from (for a rule whose
+            // majority option is the named defect, the places of that option) ride on the
+            // cited problem, de-duplicated; no row of the engine's own.
+            let mut sites: Vec<MergedLocation> = Vec::new();
+            for ((rule, option), listed) in &places {
+                if rule != &uc.rule || (option == &chosen) != opt.violates {
+                    continue;
+                }
+                for place in listed {
+                    let Some((path, line, text)) = checked_place(&by_path, place) else {
+                        result.notes.push(format!(
+                            "{}: a listed place of the option \"{}\" ({}{}) could not be checked against the file",
+                            uc.rule,
+                            label_of(option),
+                            place.path,
+                            place.line.map_or(String::new(), |l| format!(":{l}")),
+                        ));
+                        continue;
+                    };
+                    let mut snippet = text.trim().to_string();
+                    crate::onboard::redact::redact_string(&mut snippet);
+                    if !sites.iter().any(|s| (&s.path, s.line) == (&path, line)) {
+                        sites.push(MergedLocation::site(
+                            repo,
+                            path,
+                            line,
+                            uc.rule.clone(),
+                            snippet,
+                            false,
+                        ));
+                    }
+                }
+            }
+            if !sites.is_empty() {
+                result.attached.push(AttachedSites {
+                    piece,
+                    problem,
+                    sites,
+                });
+            }
+            continue;
+        }
         if opt.violates {
             // The codebase follows the rule's own named defect: one defect problem.
             if let Some(f) = crate::ai_audit::routing::apply_alternative_decision(
