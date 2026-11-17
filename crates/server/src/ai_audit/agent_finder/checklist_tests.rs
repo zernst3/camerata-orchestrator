@@ -765,7 +765,9 @@ fn render_words_the_places_the_duplicate_and_the_not_applicable_rules() {
     assert!(
         text.contains(
             "If an earlier problem already covers the place for the same reason, cite it \
-             (step 1); never write a second problem."
+             (step 1) and write no second problem. If the reason is different, it is a new \
+             problem, even at the same place. When you are in doubt whether something is a \
+             problem, write it with `sure: unsure`."
         ),
         "{text}"
     );

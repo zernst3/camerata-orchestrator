@@ -302,7 +302,9 @@ impl Checklist {
              judgment. Rate it yourself: the severity a rule shows is a guide, not a rule. If a \
              rule asks for something this code needs and does not have, that is a problem: write \
              it. If an earlier problem already covers the place for the same reason, cite it \
-             (step 1); never write a second problem. A problem you add goes into a new problems \
+             (step 1) and write no second problem. If the reason is different, it is a new \
+             problem, even at the same place. When you are in doubt whether something is a \
+             problem, write it with `sure: unsure`. A problem you add goes into a new problems \
              file with that rule's id as its `label`.\n\n\
              `checklist.json` looks like this:\n\n\
              {\"citations\": [{\"n\": 1, \"rule\": \"RULE-ID\"}], \"answers\": [{\"rule\": \"RULE-ID\", \
