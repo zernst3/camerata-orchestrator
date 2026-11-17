@@ -21,7 +21,7 @@ use camerata_ui_core::review_settings::{
     budget_line, effect_sentence, field_action, field_hint, formula_apply_state, model_groups,
     preview_is_current, preview_request, reason_choices, reason_label, reason_locked, reasons_note,
     revert_field, sample_apply_state, sample_hint, sample_size, toggle_reason, ApplyState, Field,
-    FieldAction, SettingsDraft, SettingsEvent, Stage,
+    FieldAction, SettingsDraft, SettingsEvent, Stage, FINDER_CHOICES,
 };
 use dioxus::prelude::*;
 
@@ -139,6 +139,28 @@ pub fn ReviewSettingsView(props: ReviewSettingsViewProps) -> Element {
                 }
             }
             p { class: "audit-model-hint review-settings-note", "{MODELS_NOTE}" }
+
+            // ── Finder (agent or engine) ──
+            {
+                let current = Stage::Finder.current(&props.view.stage_models).to_string();
+                rsx! {
+                    div { class: "audit-model-row",
+                        label { class: "audit-model-label", r#for: "rs-finder", "Finder" }
+                        select {
+                            id: "rs-finder",
+                            class: "audit-model-select",
+                            disabled: locked || busy,
+                            onchange: move |e: Event<FormData>| {
+                                on_event.call(SettingsEvent::Model(Stage::Finder, e.value()));
+                            },
+                            for (word , text) in FINDER_CHOICES {
+                                option { key: "{word}", value: "{word}", selected: current == word, "{text}" }
+                            }
+                        }
+                        span { class: "audit-model-hint", "{Stage::Finder.hint()}" }
+                    }
+                }
+            }
 
             // ── Escalation formula ──
             h3 { class: "scan-section-h", "Escalation formula" }

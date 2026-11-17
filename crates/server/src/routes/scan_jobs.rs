@@ -1538,6 +1538,7 @@ impl AuditReq {
         // active project's.
         if let Some(project) = state.projects.active() {
             controls.review = project.review.clone();
+            controls.finder = project.review.finder.into();
         }
         controls
     }

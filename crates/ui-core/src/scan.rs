@@ -1705,6 +1705,23 @@ pub fn sum_agent_finder(parts: &[AgentFinderEstimate]) -> AgentFinderEstimate {
     }
 }
 
+/// The finder stage's line under the pre-audit estimate when the project's finder is the agent:
+/// `acme/api: finder stage about $4.20 (range $2.52 to $7.56), 3 piece(s)`. The figures are the
+/// ones [`estimate_agent_finder`] produced (the server sends them per repo); there is no second
+/// estimate.
+pub fn agent_finder_repo_line(
+    repo: &str,
+    pieces: usize,
+    expected_usd: f64,
+    low_usd: f64,
+    high_usd: f64,
+) -> String {
+    format!(
+        "{repo}: finder stage about ${expected_usd:.2} (range ${low_usd:.2} to ${high_usd:.2}), \
+         {pieces} piece(s)"
+    )
+}
+
 /// The pieces table as lines of text: a heading, then one line for each unit.
 pub fn agent_finder_table_lines(estimate: &AgentFinderEstimate) -> Vec<String> {
     let width = estimate

@@ -358,6 +358,12 @@ impl ReviewWrites for FixtureReviewSource {
                 "calibration" => &mut s.stage_models.calibration,
                 "group_review" => &mut s.stage_models.group_review,
                 "fix" => &mut s.stage_models.fix,
+                "finder" => {
+                    if !matches!(model.trim(), "agent" | "engine") {
+                        return Err(refused("the finder must be agent or engine".to_string()));
+                    }
+                    &mut s.stage_models.finder
+                }
                 other => return Err(refused(format!("unknown step: {other}"))),
             };
             if model.trim().is_empty() && step != "fix" {

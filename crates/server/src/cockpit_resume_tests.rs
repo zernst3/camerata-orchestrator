@@ -424,6 +424,7 @@ fn saved_cockpit_run(
             mode: "parallel".to_string(),
             resolved: true,
             group_review: String::new(),
+            finder: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
         args,
@@ -456,6 +457,7 @@ fn saved_cockpit_run_in(
             mode: "parallel".to_string(),
             resolved: true,
             group_review: String::new(),
+            finder: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
         args: serde_json::to_value(audit_request()).unwrap(),
@@ -987,6 +989,8 @@ struct InterruptedScan {
     /// The file whose presence is the outage this scan ran under (the group review's, or the
     /// stage 503 file); removing it ends the outage.
     outage_flag: std::path::PathBuf,
+    /// The first scan's final job state.
+    job: crate::jobs::JobState,
 }
 
 async fn interrupted_scan() -> InterruptedScan {
@@ -996,6 +1000,16 @@ async fn interrupted_scan() -> InterruptedScan {
 /// As [`interrupted_scan`], with the group review call failing the way `mode` says: `down` is a
 /// reply that is not JSON, `transport` is a connection failure with no reply at all.
 async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
+    scan_rig(mode, false).await
+}
+
+/// The same rig, with the project's finder set to the agent and no assumption about how the scan
+/// ends (the fake `claude` plays the model for the engine's passes, not for the agent finder).
+async fn interrupted_scan_with_finder() -> InterruptedScan {
+    scan_rig("down", true).await
+}
+
+async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
     let state_dir = root.path().join("state");
@@ -1064,8 +1078,43 @@ async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
     state
         .settings
         .set_repo_path("acme/one", Some(repo.to_string_lossy().into_owned()));
+    if agent_finder {
+        let project = state.projects.get(&project.id).unwrap();
+        state
+            .projects
+            .set_review_settings(
+                &project.id,
+                camerata_api_types::project::ReviewSettings {
+                    finder: camerata_api_types::project::ProjectFinder::Agent,
+                    ..project.review
+                },
+            )
+            .unwrap()
+            .unwrap();
+    }
     let job_id = start_audit_job(&state, audit_request(), AuditJobOptions::default()).await;
     let job = finished(&state, &job_id).await;
+    if agent_finder {
+        // Whatever the job's status, the run's folder is the only one in the state folder.
+        let run_id = std::fs::read_dir(crate::run_store::runs_dir())
+            .expect("the scan made a run folder")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .next()
+            .expect("the scan saved a run");
+        return InterruptedScan {
+            _root: root,
+            _guards: guards,
+            state,
+            project_id: project.id,
+            run_id,
+            log,
+            model_log,
+            group_review_down,
+            outage_flag,
+            job,
+        };
+    }
     assert_eq!(job.status, "done", "{:?}", job.message);
     let first = state.get_last_scan(&project.id).unwrap();
     let run_id = first.run_id.clone().expect("the scan was saved as a run");
@@ -1083,6 +1132,7 @@ async fn interrupted_scan_with(mode: &str) -> InterruptedScan {
         model_log,
         group_review_down,
         outage_flag,
+        job,
     }
 }
 
@@ -1422,5 +1472,81 @@ async fn group_review_outage_ends_in_bounded_time(mode: &str) {
     assert_eq!(
         crate::run_store::read_record(&rig.run_id).unwrap().status,
         crate::run_store::RunStatus::Complete
+    );
+}
+
+// ---- a run keeps its finder for life, and a server scan on an agent project runs the agent ----
+
+/// A run that started on the engine finder resumes on it even when the project's finder was
+/// changed to the agent in between: the run says so once, records the engine, and builds no rooms.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_resume_keeps_the_finder_the_run_started_with_and_says_so() {
+    if !camerata_test_env::python3_on_path_for("a_cockpit_resume_keeps_the_finder_the_run") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    let project = rig.state.projects.get(&rig.project_id).unwrap();
+    rig.state
+        .projects
+        .set_review_settings(
+            &rig.project_id,
+            camerata_api_types::project::ReviewSettings {
+                finder: camerata_api_types::project::ProjectFinder::Agent,
+                ..project.review
+            },
+        )
+        .expect("the project exists")
+        .expect("the setting is accepted");
+    std::fs::remove_file(&rig.outage_flag).unwrap();
+    let job = resume_job(&rig).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+    let notice = "The finder stays on engine, the one this run started with.";
+    let record = crate::run_store::read_record(&rig.run_id).unwrap();
+    assert_eq!(
+        record.notes.iter().filter(|n| n.as_str() == notice).count(),
+        1,
+        "{:?}",
+        record.notes
+    );
+    assert_eq!(record.models.finder, "engine");
+    assert!(
+        !crate::run_store::runs_dir()
+            .join(&rig.run_id)
+            .join("finder-rooms")
+            .exists(),
+        "the engine finder builds no rooms"
+    );
+}
+
+/// The one server scan with an agent project: the agent finder runs (its rooms are built in the
+/// run's folder, with the setup the server built), not the engine's scan pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_server_scan_on_an_agent_project_runs_the_agent_finder() {
+    if !camerata_test_env::python3_on_path_for("a_server_scan_on_an_agent_project") {
+        return;
+    }
+    let rig = interrupted_scan_with_finder().await;
+    let job = &rig.job;
+    let message = job.message.clone().unwrap_or_default();
+    assert!(!message.contains("needs a finder setup"), "{message}");
+    if let Some(report) = rig.state.get_last_scan(&rig.project_id) {
+        let err = report.ai_error.clone().unwrap_or_default();
+        assert!(!err.contains("needs a finder setup"), "{err}");
+    }
+    let rooms = crate::run_store::runs_dir()
+        .join(&rig.run_id)
+        .join("finder-rooms");
+    let made = std::fs::read_dir(&rooms)
+        .unwrap_or_else(|e| panic!("{} was not made: {e}", rooms.display()))
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("room-"))
+        .count();
+    assert!(made >= 1, "no room was built in {}", rooms.display());
+    assert!(
+        !stage_calls(&rig.log).iter().any(|s| s == "audit"),
+        "the engine's scan pass ran: {:?}",
+        stage_calls(&rig.log)
     );
 }

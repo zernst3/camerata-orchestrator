@@ -1030,6 +1030,78 @@ impl std::fmt::Debug for FinderSetup {
     }
 }
 
+/// The finder setup for a run: the rooms folder (an engine-owned folder, never inside the
+/// client's repository), the saved Anthropic key and the kind of engagement, built once here and
+/// carried into the audit. The run builds the agent from it on its own shared meter. `Err` before
+/// anything is spent when the API backend has no key. The ONE place a [`FinderSetup`] is built
+/// outside tests: the command line and the server's scan path both come through
+/// [`finder_setup_for_run`], which calls this.
+pub fn finder_setup(
+    backend: crate::llm::Backend,
+    api_key: Option<String>,
+    rooms_dir: std::path::PathBuf,
+    client_engagement: bool,
+) -> Result<FinderSetup, String> {
+    let api_key = api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty());
+    if backend == crate::llm::Backend::Api && api_key.is_none() {
+        return Err("the API backend needs an Anthropic key".to_string());
+    }
+    Ok(FinderSetup {
+        rooms_dir,
+        api_key,
+        engagement: if client_engagement {
+            EngagementKind::Client
+        } else {
+            EngagementKind::Internal
+        },
+    })
+}
+
+/// The setup a run carries, or `None` when it runs the engine finder. Only a run whose controls
+/// choose the agent finder, whose AI review is not blocked, and that has no test agent standing
+/// in gets one. The rooms folder is `finder-rooms` inside the run's own folder (`run_dir`), else
+/// inside the per-user state folder. The key comes from the saved credentials, never the
+/// environment of the caller's choosing.
+pub fn finder_setup_for_run(
+    controls: &RunControls,
+    ai_review_blocked: bool,
+    backend: crate::llm::Backend,
+    creds: &dyn crate::credentials::CredentialStore,
+    run_dir: Option<&std::path::Path>,
+    client_engagement: bool,
+) -> Result<Option<FinderSetup>, String> {
+    if controls.finder != super::FinderChoice::Agent || ai_review_blocked || agent_override_is_set()
+    {
+        return Ok(None);
+    }
+    let rooms_dir = run_dir
+        .map_or_else(
+            crate::scan_cache::state_dir::dir,
+            std::path::Path::to_path_buf,
+        )
+        .join("finder-rooms");
+    finder_setup(
+        backend,
+        crate::credentials::anthropic_api_key(creds),
+        rooms_dir,
+        client_engagement,
+    )
+    .map(Some)
+}
+
+/// Run `fut` with `setup` as the run's finder setup when there is one, else as it is.
+pub async fn with_optional_finder_setup<F: std::future::Future>(
+    setup: Option<FinderSetup>,
+    fut: F,
+) -> F::Output {
+    match setup {
+        Some(setup) => with_finder_setup(setup, fut).await,
+        None => fut.await,
+    }
+}
+
 tokio::task_local! {
     static FINDER_SETUP: std::sync::Arc<FinderSetup>;
 }

@@ -2404,8 +2404,31 @@ async fn onboard_audit(
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
         _ => crate::llm::Backend::Cli,
     };
+    // The agent finder's setup, built by the one function the command line uses (this request has
+    // no run folder of its own, so the rooms go under the per-user state folder).
+    let finder_setup = match crate::ai_audit::agent_finder::run::finder_setup_for_run(
+        &run_controls,
+        ai_review_blocked,
+        review_backend,
+        state.credential_store.as_ref(),
+        None,
+        active_project.as_ref().is_none_or(|p| p.client_engagement),
+    ) {
+        Ok(setup) => setup,
+        Err(why) => {
+            let mut r = crate::onboard::ScanReport::gated(&repos);
+            r.gated = false;
+            r.ai_error = Some(why.clone());
+            r.message = Some(why);
+            return Json(r);
+        }
+    };
     let outcome = std::panic::AssertUnwindSafe(async move {
-        let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
+        let chosen_options = active_project
+            .as_ref()
+            .map(project_chosen_options)
+            .unwrap_or_default();
+        let audit = Box::pin(crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
             &sources,
             &selected,
@@ -2424,13 +2447,12 @@ async fn onboard_audit(
             Some(state.usage_ledger.clone()),
             backend_resolution,
             corpus.as_ref(),
-            &active_project
-                .as_ref()
-                .map(project_chosen_options)
-                .unwrap_or_default(),
+            &chosen_options,
             run_controls,
-        )
-        .await;
+        ));
+        let (mut report, mut manifest) =
+            crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
+                .await;
         // A repo that could not be read is on the report as not inspected, never just absent,
         // and the manifest is corrected for it before it is stored.
         record_unresolved_repos_before_storing(
@@ -2682,6 +2704,10 @@ pub(crate) async fn start_audit_job(
         .and_then(|id| state.projects.get(id))
         .or_else(|| state.projects.active());
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // The finder is the job's own project's setting (the named project, else the active one).
+    if let Some(p) = &active_project {
+        run_controls.finder = p.review.finder.into();
+    }
     // The client-engagement lock, before any repository is located or read: the job fails at
     // once with the reason, and nothing is spawned.
     if let Some(why) = client_lock_refusal_for_scan(
@@ -2919,6 +2945,11 @@ pub(crate) async fn start_audit_job(
                         prior = store.load_prior_manifest();
                         // The spend limit counts the whole run: the stored replies' cost joins it.
                         run_controls.stored_spend_usd = store.stored_usd();
+                        // The run keeps the finder it started with, whatever the project's
+                        // setting is now (a mid-run switch would mix two finders' work).
+                        if let Some(notice) = store.hold_finder(&mut run_controls) {
+                            store.add_note(&notice);
+                        }
                         // The group reviewer stays on the model the run started with.
                         // A project setting that is only the built-in default is no pick of
                         // its own (every new project is seeded with it).
@@ -3033,7 +3064,26 @@ pub(crate) async fn start_audit_job(
                 &backend_resolution,
                 crate::llm::BackendResolution::Blocked { .. }
             );
-            let (mut report, mut manifest) = crate::checkpoint::with_run_checkpoints(
+            // The agent finder's setup, built by the one function the command line uses: the
+            // rooms folder inside the run's own folder, the saved key, the project's engagement
+            // kind. A missing key stops the run before the first call.
+            let finder_setup = match crate::ai_audit::agent_finder::run::finder_setup_for_run(
+                &run_controls,
+                ai_review_blocked,
+                llm_backend,
+                state.credential_store.as_ref(),
+                run_store.as_ref().map(|s| s.dir()),
+                engagement_project
+                    .as_ref()
+                    .is_none_or(|p| p.client_engagement),
+            ) {
+                Ok(setup) => setup,
+                Err(why) => {
+                    body_jobs.fail(&body_jid, why);
+                    return;
+                }
+            };
+            let audit = Box::pin(crate::checkpoint::with_run_checkpoints(
                 run_store.as_ref().map(|s| s.checkpoint_dir()),
                 crate::prompt_frame::with_seed(
                     token_seed,
@@ -3059,8 +3109,10 @@ pub(crate) async fn start_audit_job(
                         run_controls,
                     ),
                 ),
-            )
-            .await;
+            ));
+            let (mut report, mut manifest) =
+                crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
+                    .await;
             report.provenance.model_sessions = sessions.snapshot();
             // A repo that could not be read is on the report as not inspected, never just
             // absent, and the manifest is corrected for it before it is stored.

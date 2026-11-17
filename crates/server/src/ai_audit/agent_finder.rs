@@ -51,6 +51,15 @@ pub enum FinderChoice {
     Agent,
 }
 
+impl From<camerata_api_types::project::ProjectFinder> for FinderChoice {
+    fn from(f: camerata_api_types::project::ProjectFinder) -> Self {
+        match f {
+            camerata_api_types::project::ProjectFinder::Engine => FinderChoice::Engine,
+            camerata_api_types::project::ProjectFinder::Agent => FinderChoice::Agent,
+        }
+    }
+}
+
 /// The finder's default model when `--finder-model` and the project settings name none.
 pub const DEFAULT_FINDER_MODEL: &str = "claude-fable-5-2";
 

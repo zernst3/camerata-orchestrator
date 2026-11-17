@@ -643,6 +643,7 @@
     },
     "stage_models": {
       "calibration": "string",
+      "finder": "string",
       "fix": "string",
       "group_review": "string",
       "scan": "string"

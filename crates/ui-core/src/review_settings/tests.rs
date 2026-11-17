@@ -555,6 +555,7 @@ fn each_stage_names_the_step_the_server_route_takes_and_reads_its_own_saved_mode
         calibration: "b".into(),
         group_review: "c".into(),
         fix: String::new(),
+        finder: "agent".into(),
     };
     let current: Vec<&str> = Stage::ALL.iter().map(|s| s.current(&m)).collect();
     assert_eq!(current, ["a", "b", "c", ""]);
