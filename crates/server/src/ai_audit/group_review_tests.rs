@@ -2945,3 +2945,29 @@ fn a_malformed_correction_after_a_valid_object_is_refused() {
     let stale = format!("{good}\n\nCorrection: use this one instead.\n\n{bad}");
     assert!(Stage2Reply::parse(&stale).is_err());
 }
+
+#[tokio::test]
+async fn a_group_review_pause_reaches_the_job_state_the_ui_polls() {
+    let rules: Vec<(String, String)> = Vec::new();
+    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false)
+        .expect("the test model is priced");
+    let mut report = spent_report(3);
+    let controls = crate::cost_cap::RunControls {
+        max_cost_usd: Some(5.0 + price / 2.0),
+        ..crate::cost_cap::RunControls::default()
+    };
+    let jobs = crate::jobs::JobStore::new();
+    let id = jobs.create("scan", None);
+    let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
+    let mut config = cfg(&rules);
+    config.job = Some((&jobs, id.as_str()));
+    review_groups_metered(&mut report, &llm, &config, &controls).await;
+    assert!(llm.calls().is_empty());
+    let cp = jobs
+        .get(&id)
+        .unwrap()
+        .cost_checkpoint
+        .expect("the pause is on the job");
+    assert!(cp.stopped, "{cp:?}");
+    assert_eq!(cp.stopped_before, STAGE_GROUP_REVIEW);
+}
