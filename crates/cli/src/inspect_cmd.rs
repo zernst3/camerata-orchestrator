@@ -292,6 +292,7 @@ impl InspectArgs {
             finder: self.finder.finder,
             finder_model: self.finder.model.clone(),
             finder_force_pieces: self.finder.force_pieces,
+            checkpoint: camerata_server::cost_checkpoint::CheckpointSettings::default(),
         })
     }
 }
@@ -1180,6 +1181,30 @@ pub async fn run_inspect_pipeline_with(
         });
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
+        // The cost checkpoint's pre-flight figures for the agent finder: the cost of one piece,
+        // from the finder's own estimate, and the joints call that follows the pieces. The estimate
+        // prices the finder stage only, so the later stages (group review, fix) have no figure yet.
+        if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent {
+            let parts: Vec<_> = facts
+                .iter()
+                .map(|r| {
+                    camerata_server::preflight::agent_finder_estimate(
+                        r,
+                        controls.finder_force_pieces,
+                    )
+                })
+                .collect();
+            let total = camerata_ui_core::scan::sum_agent_finder(&parts);
+            if total.pieces > 0 {
+                let joints = total.joints_calls as f64
+                    * camerata_ui_core::scan::AGENT_FINDER_USD_PER_JOINTS_CALL;
+                controls.checkpoint.plan = Some(camerata_server::cost_checkpoint::CheckpointPlan {
+                    per_piece_usd: ((total.expected_usd - joints) / total.pieces as f64).max(0.0),
+                    later_stages_usd: joints,
+                    assumed_problems: None,
+                });
+            }
+        }
         preflight_text = Some(pf.text);
     }
 
@@ -1225,6 +1250,13 @@ pub async fn run_inspect_pipeline_with(
             }
         }
     };
+    // The cost checkpoint records into the run's folder and prints each line as the run goes.
+    if let Some(s) = &store {
+        controls.checkpoint.run_folder = Some(s.dir().to_path_buf());
+    }
+    controls.checkpoint.sink = camerata_server::cost_checkpoint::CheckpointSink::new(|cp| {
+        println!("{}", cp.operator_text());
+    });
     // Delimiter tokens drawn from the run's own seed, so a resumed run asks the model the same
     // questions as the run it resumes and a stored reply still matches its prompt.
     let token_seed = store.as_ref().map(|s| s.nonce_seed());
@@ -2278,6 +2310,7 @@ mod tests {
             cost_cap: Some(CostCapRecord {
                 repos_not_finished: Vec::new(),
                 cost_unknown: false,
+                checkpoint: None,
                 cap_usd: 5.0,
                 spent_usd: 5.4,
                 not_run_passes: vec![NotRunPass {
@@ -2338,6 +2371,7 @@ mod tests {
         let record = CostCapRecord {
             repos_not_finished: Vec::new(),
             cost_unknown: true,
+            checkpoint: None,
             cap_usd: 10.0,
             spent_usd: 0.0095,
             not_run_passes: vec![NotRunPass {
