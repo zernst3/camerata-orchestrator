@@ -2836,9 +2836,8 @@ fn a_corrected_object_after_a_malformed_one_is_read() {
     assert_eq!(parsed.escalations.len(), 1);
     assert_eq!(parsed.summary, "s");
     // The rule summary reader does the same.
-    let summary =
-        format!("{{\"summary\": \"a\" \"b\"}}\nuse this one instead:\n{{\"summary\": \"ok\"}}");
-    assert_eq!(parse_rule_summary(&summary).unwrap(), "ok");
+    let summary = "{\"summary\": \"a\" \"b\"}\nuse this one instead:\n{\"summary\": \"ok\"}";
+    assert_eq!(parse_rule_summary(summary).unwrap(), "ok");
     // A malformed object alone cannot be read, and the refusal says where the JSON broke.
     let why = Stage2Reply::parse(&bad).unwrap_err();
     assert!(why.contains("not a JSON object"), "{why}");

@@ -1399,12 +1399,12 @@ async fn each_call_leaves_its_stream_records_outside_the_room() {
 
 // ── Claude Code's own saved tool result ─────────────────────────────────────────────────────────
 
-const SAVED_ROOM: &str = "/Users/someone/work/state/camerata/runs/r1/finder-rooms/room-3d4f-ab_c";
+const SAVED_ROOM: &str = "/Users/auditor/work/state/camerata/runs/r1/finder-rooms/room-3d4f-ab_c";
 const SAVED_PROJECT: &str =
-    "-Users-someone-work-state-camerata-runs-r1-finder-rooms-room-3d4f-ab-c";
+    "-Users-auditor-work-state-camerata-runs-r1-finder-rooms-room-3d4f-ab-c";
 
 fn saved_path(project: &str, session: &str, sub: &str) -> String {
-    format!("/Users/someone/.claude/projects/{project}/{session}/{sub}/toolu_011jz.txt")
+    format!("/Users/auditor/.claude/projects/{project}/{session}/{sub}/toolu_011jz.txt")
 }
 
 /// A stream where a Grep result was too large and Claude Code saved it to `saved`, then the model
@@ -1459,11 +1459,11 @@ fn a_saved_result_path_that_is_not_the_one_announced_stays_outside() {
         saved_path(SAVED_PROJECT, "other-session", "tool-results"),
         saved_path(SAVED_PROJECT, "df722648-ec6a", "memory"),
         saved_path(
-            "-Users-someone-work-state-camerata-runs-r1-finder-rooms-room-OTHER",
+            "-Users-auditor-work-state-camerata-runs-r1-finder-rooms-room-OTHER",
             "df722648-ec6a",
             "tool-results",
         ),
-        format!("/Users/someone/.claude/projects/{SAVED_PROJECT}/df722648-ec6a/tool-results/../../x.txt"),
+        format!("/Users/auditor/.claude/projects/{SAVED_PROJECT}/df722648-ec6a/tool-results/../../x.txt"),
     ];
     for path in cases {
         let parsed = parse_saved(&saved_result_stream(
@@ -1488,7 +1488,7 @@ fn only_a_read_of_the_saved_result_is_exempt() {
         let parsed = parse_saved(&saved_result_stream(&saved, tool, input));
         assert!(!parsed.outside.is_empty(), "{tool}");
     }
-    let foreign = saved_path("-Users-someone-elsewhere", "df722648-ec6a", "tool-results");
+    let foreign = saved_path("-Users-auditor-elsewhere", "df722648-ec6a", "tool-results");
     let parsed = parse_saved(&saved_result_stream(
         &foreign,
         "Read",
