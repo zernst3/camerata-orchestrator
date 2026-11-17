@@ -179,3 +179,67 @@ fn a_rule_carried_at_the_same_place_under_another_fix_never_pairs() {
     assert_eq!(idx.fix_ids_of(&rows[0]), vec!["sub:z/1"]);
     assert_eq!(idx.fix_ids_of(&rows[2]), vec!["sub:x/1", "sub:y/1"]);
 }
+
+#[test]
+fn a_carried_pair_is_kept_apart_through_the_real_tree() {
+    // Two rules at one line are one place (a carrier and the row it carries); a third cause two
+    // lines away pairs with each of them. The place comes from the real tree, not a closure.
+    let row_in = |rule: &str, path: &str, line: usize| Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: "high".to_string(),
+        snippet: format!("call_{rule}_{line}()"),
+        detail: format!("{rule} problem at {line}"),
+        ..Finding::default()
+    };
+    let mut report = crate::release_gate::test_scan_report();
+    // Each of the two rules at line 10 has a place of its own elsewhere, so their places only
+    // overlap and they stay two Fixes: the place, not the Fix, is what keeps them apart.
+    report.findings = vec![
+        row_in("SEC-NO-RAW-SQL-CONCAT-1", "src/c.rs", 10),
+        row_in("SEC-NO-RAW-SQL-CONCAT-1", "src/d.rs", 5),
+        row_in("ARCH-LAYERING-1", "src/c.rs", 10),
+        row_in("ARCH-LAYERING-1", "src/e.rs", 7),
+        row_in("SEC-AUTHZ-4", "src/c.rs", 12),
+    ];
+    let sealed = report.seal();
+    let tree = sealed.tree.as_ref().expect("a tree");
+    assert!(
+        tree.places
+            .iter()
+            .any(|p| p.line == 10 && p.members.len() == 2),
+        "the two rules at line 10 are one place: {:?}",
+        tree.places
+    );
+    let idx = DupIndex::new(sealed.tree.as_ref(), &sealed.findings);
+    let at = |rule: &str| {
+        sealed
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule && f.path == "src/c.rs")
+            .unwrap()
+    };
+    let (sql, layering, authz) = (
+        at("SEC-NO-RAW-SQL-CONCAT-1"),
+        at("ARCH-LAYERING-1"),
+        at("SEC-AUTHZ-4"),
+    );
+    let fixes = crate::review_tree::FixIndex::new(sealed.tree.as_ref(), &sealed.findings);
+    assert_ne!(
+        fixes.fix_id_of(sql),
+        fixes.fix_id_of(layering),
+        "two Fixes at one place, so only the place keeps them apart"
+    );
+    assert_eq!(
+        idx.of(sql).len(),
+        1,
+        "only the third cause: {:?}",
+        idx.of(sql)
+    );
+    assert_eq!(idx.of(sql)[0].key, authz.site_key);
+    assert_eq!(idx.of(layering).len(), 1);
+    assert_eq!(idx.of(layering)[0].key, authz.site_key);
+    assert_eq!(idx.of(authz).len(), 2);
+}
