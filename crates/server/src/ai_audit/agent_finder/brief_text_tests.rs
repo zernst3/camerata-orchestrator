@@ -90,3 +90,25 @@ fn the_piece_brief_says_two_faults_are_two_problems() {
 fn the_joints_brief_says_two_faults_are_two_problems() {
     assert!(JOINTS_BRIEF.contains(ONE_FAULT_SENTENCE), "{JOINTS_BRIEF}");
 }
+
+const BUSINESS_FIELD: &str = "`why` (why it matters technically: what breaks and under what \
+    conditions), `business` (why it matters to the client's business: what can go wrong for the \
+    product, its data, its users or the people who work on it, and when it starts to matter. \
+    Pick the one consequence that fits, such as data that quietly goes wrong, the cost of \
+    changing it later, someone new working on the code, an outside review of the code, the \
+    running bill as usage grows, AI coding tools copying the pattern, or exposure of data or \
+    access. Say what can happen, never what will happen, and give no figures, times or costs \
+    the code does not show.)";
+
+#[test]
+fn the_piece_brief_field_list_describes_why_and_business() {
+    assert!(PIECE_BRIEF.contains(BUSINESS_FIELD), "{PIECE_BRIEF}");
+    // The first paragraph keeps its words; the new text is in the field list only.
+    let first = PIECE_BRIEF.split("\n\n").next().unwrap_or("");
+    assert!(!first.contains("business"));
+}
+
+#[test]
+fn the_joints_brief_field_list_names_business() {
+    assert!(JOINTS_BRIEF.contains("`why`, `business`, `fix`"), "{JOINTS_BRIEF}");
+}

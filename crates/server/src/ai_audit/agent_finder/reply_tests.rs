@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use super::checklist::AnswerKind;
 use super::reply::{
     citation_map, parse_leads_answers, parse_outputs, scan_reply, to_findings, LeadOutcome,
-    Problem, FINDER_EFFORT_CAPTURE, FINDER_END_LINE_CAPTURE, FINDER_FIX_CAPTURE,
+    Problem, FINDER_BUSINESS_CAPTURE, FINDER_EFFORT_CAPTURE, FINDER_END_LINE_CAPTURE, FINDER_FIX_CAPTURE,
     FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE, FINDER_RULES_CAPTURE, FINDER_SURE_CAPTURE,
 };
 
@@ -45,6 +45,7 @@ fn problem_for(n: u32, label: &str) -> Problem {
         sure: true,
         effort: "low".into(),
         label: label.into(),
+        business: String::new(),
         places: Vec::new(),
     }
 }
@@ -339,7 +340,8 @@ fn a_secret_in_the_models_quote_is_redacted_by_the_parser() {
         .contains(secret));
 }
 
-const ALL_FINDER_KEYS: [&str; 7] = [
+const ALL_FINDER_KEYS: [&str; 8] = [
+    FINDER_BUSINESS_CAPTURE,
     FINDER_PIECE_CAPTURE,
     FINDER_SURE_CAPTURE,
     FINDER_EFFORT_CAPTURE,
@@ -352,6 +354,7 @@ const ALL_FINDER_KEYS: [&str; 7] = [
 #[test]
 fn every_finder_capture_key_is_named_once_and_listed_as_bookkeeping() {
     let names = [
+        "finder-business",
         "finder-piece",
         "finder-sure",
         "finder-effort",
@@ -941,4 +944,52 @@ fn a_not_applicable_answer_keeps_an_optional_reason_and_needs_none() {
     );
     assert_eq!(file.answers[1].kind, AnswerKind::NotApplicable);
     assert_eq!(file.answers[1].reason, None);
+}
+
+#[test]
+fn a_problem_with_a_business_field_keeps_it() {
+    let mut e = entry(1, "src/a.rs");
+    e["business"] = serde_json::json!("Records can be deleted by people who should not.");
+    let json = serde_json::json!([e]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.unusable.is_empty(), "{:?}", out.unusable);
+    assert_eq!(
+        out.problems[0].business,
+        "Records can be deleted by people who should not."
+    );
+}
+
+#[test]
+fn a_problem_without_a_business_field_or_with_a_blank_one_is_kept_with_no_business_text() {
+    let mut blank = entry(2, "src/b.rs");
+    blank["business"] = serde_json::json!("   ");
+    let mut wrong_kind = entry(3, "src/b.rs");
+    wrong_kind["business"] = serde_json::json!(7);
+    let json = serde_json::json!([entry(1, "src/a.rs"), blank, wrong_kind]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.unusable.is_empty(), "{:?}", out.unusable);
+    assert_eq!(out.problems.len(), 3);
+    assert!(out.problems.iter().all(|p| p.business.is_empty()));
+}
+
+#[test]
+fn the_row_carries_the_business_text_cleaned_for_the_client() {
+    let mut p = problem_for(1, "x y");
+    p.business = "Data can quietly go wrong \u{2014} and nobody sees it.".into();
+    let (findings, _) = to_findings("acme/app", "k", &[p], &BTreeMap::new(), &HashSet::new());
+    let text = findings[0]
+        .captures
+        .get("finder-business")
+        .expect("the business text rides on the row");
+    assert!(!text.contains('\u{2014}'), "{text}");
+    assert!(text.contains("quietly go wrong"));
+    // A problem with no business text carries no capture at all.
+    let (plain, _) = to_findings(
+        "acme/app",
+        "k",
+        &[problem_for(2, "x y")],
+        &BTreeMap::new(),
+        &HashSet::new(),
+    );
+    assert!(!plain[0].captures.contains_key("finder-business"));
 }

@@ -638,6 +638,7 @@ fn a_held_place_row_holds_no_dash_from_the_problem_title() {
         sure: true,
         effort: "low".into(),
         label: "l".into(),
+        business: String::new(),
         places: vec![ProblemPlace {
             path: "src/b.rs".into(),
             line: 0,
@@ -707,6 +708,7 @@ fn when_findings_and_problems_do_not_line_up_each_listed_place_is_a_held_row() {
         sure: true,
         effort: "low".into(),
         label: "l".into(),
+        business: String::new(),
         places,
     };
     let problems = vec![
