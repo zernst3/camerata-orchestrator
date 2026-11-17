@@ -463,6 +463,7 @@ fn a_row_with_both_duplicate_sources_gets_exactly_one_possible_duplicate_chip() 
         rule_id: "SEC-A-1".to_string(),
         line: 12,
         group_id: "sub:x/1".to_string(),
+        reason: Default::default(),
     }];
     let chips = marker_chips(&row);
     let dups: Vec<_> = chips.iter().filter(|c| c.class == "mark-dup").collect();

@@ -290,6 +290,10 @@ pub struct SamePlaceView {
     pub line: usize,
     /// The sub-group node id of that row, for opening it.
     pub group_id: String,
+    /// The model's one-line reason for calling the two write-ups the same flaw (the possible-
+    /// duplicate check). Empty when none was given.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 impl SamePlaceView {

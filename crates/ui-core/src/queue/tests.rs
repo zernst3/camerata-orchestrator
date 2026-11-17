@@ -834,6 +834,7 @@ fn same_place(to: &QueueRow) -> camerata_api_types::review_view::SamePlaceView {
         rule_id: to.site.rule_id.clone(),
         line: to.site.line,
         group_id: "sub:x/1".to_string(),
+        reason: Default::default(),
     }
 }
 
