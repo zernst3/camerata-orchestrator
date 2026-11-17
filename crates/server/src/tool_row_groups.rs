@@ -1,44 +1,25 @@
-//! External tool rows, one row per tool rule (calibration round 2, change A).
+//! External tool rows share one cause per tool rule (calibration round 2, change A).
 //!
-//! A tool such as eslint reports one rule at every place it fires, which used to give one report
-//! row per place (25 rows of one rule). Owner ruling (2026-11-17): ONE row per tool rule with all
-//! its places, folded into the agent's row when the agent already reported the same thing,
-//! style-lint rules rated low, every place still counted (no open violations).
+//! A tool such as eslint reports one rule at many places. Design amendment A11 keeps one row per
+//! site, so every place stays its own row (this module never writes `also_locations`), and the
+//! client counts CAUSES (distinct Fix ids). A Fix is a set of sub-groups, and a row's sub-group is
+//! the third segment of its `group_path` (`review_tree::build`), so a cause is shared by giving
+//! rows the same `group_path`:
 //!
-//! * [`group_tool_rows`]: rows of the same (repo, tool, tool rule) become one row; the head is
-//!   the first place by path and line and every other place sits in `also_locations`.
-//! * [`fold_into_agent_rows`]: a grouped row whose rule is in the same family as an agent row's
-//!   rule (`review_tree::family_of`) in the same repository becomes extra places on that agent
-//!   row, anywhere in the repository, with the tool named in `also_seen_by`.
+//! * every row of one (repo, tool, tool rule), the camerata-arch rows included, takes one
+//!   `group_path`, so they are one sub-group and one Fix;
+//! * when the rule family (`review_tree::family_of`) matches an agent row in the same repository,
+//!   the tool rows take that agent row's `group_path` instead and join its cause. The agent row's
+//!   rating is untouched, and the tool is named in `also_seen_by` on each tool row.
 //!
-//! A row that holds grouped places carries the `also_seen_by` mark, which the loader's unfold
-//! ([`crate::review_tree::unfold_also_locations`]) reads as "these places are meant to stay".
+//! Style-lint rows are rated low ([`rate_style_lint_rows`]); a lint's security checks keep the
+//! tool's own severity.
 
-use crate::onboard::{Finding, MergedLocation};
-use std::collections::HashMap;
+use crate::onboard::Finding;
+use std::collections::{BTreeMap, HashMap};
 
-/// Whether `f` holds places that were grouped on purpose (see the module docs).
-pub(crate) fn holds_grouped_places(f: &Finding) -> bool {
-    f.captures
-        .get(crate::ALSO_SEEN_BY_CAPTURE)
-        .is_some_and(|v| !v.is_empty())
-}
-
-fn place_of(f: &Finding) -> MergedLocation {
-    MergedLocation::site(
-        f.repo.clone(),
-        f.path.clone(),
-        f.line,
-        f.rule_id.clone(),
-        f.snippet.clone(),
-        false,
-    )
-    .with_rating(f.severity.clone(), crate::ai_audit::finding_headline(f))
-}
-
-/// Rate a style linter's row low: a style linter's severity is a strictness preference, not a
-/// judgement about harm. Its security checks (an `eslint-plugin-security` id, a Ruff `S` rule)
-/// keep the tool's own severity.
+/// Rate a style linter's row low: its severity is a strictness preference, not a judgement about
+/// harm. Its security checks (an `eslint-plugin-security` id, a Ruff `S` rule) keep the tool's.
 fn rate_style_lint_low(f: &mut Finding) {
     if !crate::is_style_linter_row(f)
         || crate::lint_id_is_security(f)
@@ -58,104 +39,80 @@ fn rate_style_lint_low(f: &mut Finding) {
     );
 }
 
-/// One row per (repo, tool, tool rule). A row with no tool, or one whose snippet failed the
-/// evidence check, stays its own row.
-pub(crate) fn group_tool_rows(rows: Vec<Finding>) -> Vec<Finding> {
-    let mut order: Vec<Vec<Finding>> = Vec::new();
-    let mut index: HashMap<(String, String, String), usize> = HashMap::new();
-    for mut row in rows {
-        rate_style_lint_low(&mut row);
-        let groupable = row.preview_tool.is_some()
-            && !row
-                .captures
-                .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE);
-        if !groupable {
-            order.push(vec![row]);
-            continue;
-        }
-        let key = (
-            row.repo.clone(),
-            row.preview_tool.clone().unwrap_or_default(),
-            row.rule_id.clone(),
-        );
-        match index.get(&key) {
-            Some(&i) => order[i].push(row),
-            None => {
-                index.insert(key, order.len());
-                order.push(vec![row]);
-            }
-        }
-    }
-    order
-        .into_iter()
-        .map(|mut members| {
-            members.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
-            let mut it = members.into_iter();
-            let mut head = it.next().expect("a group has a member");
-            let rest: Vec<Finding> = it.collect();
-            if !rest.is_empty() {
-                head.also_locations.extend(rest.iter().map(place_of));
-                for r in &rest {
-                    head.flagged_by.push(crate::flagged_by_of(r));
-                }
-                if let Some(tool) = head.preview_tool.clone() {
-                    crate::note_also_seen_by(&mut head, &tool);
-                }
-            }
-            head
-        })
-        .collect()
+/// [`rate_style_lint_low`] over a batch of rows.
+pub(crate) fn rate_style_lint_rows(rows: &mut [Finding]) {
+    rows.iter_mut().for_each(rate_style_lint_low);
 }
 
-/// Fold each grouped tool row into an agent row of the same rule family in the same repository.
-/// Returns the tool rows that found no agent row; those stay their own rows.
-pub(crate) fn fold_into_agent_rows(
-    existing: &mut [Finding],
-    groups: Vec<Finding>,
+/// A complete, well-formed place: a category node, a rule node and a sub-group node.
+fn is_whole_path(path: &[String]) -> bool {
+    matches!(path, [c, r, s] if c.starts_with("cat:") && r.starts_with("rule:") && s.starts_with("sub:"))
+}
+
+/// The place an agent row has, or will get when the tree is built (the residual sub-group of its
+/// rule).
+fn cause_path_of(agent: &Finding, tools: &crate::review_tree::ToolMap) -> Vec<String> {
+    if is_whole_path(&agent.group_path) {
+        return agent.group_path.clone();
+    }
+    let placed = crate::review_tree::place_row(agent, tools);
+    let sub = crate::review_tree::residual_sub_id(&placed.rule);
+    vec![placed.category, placed.rule, sub]
+}
+
+/// Give every row of one (repo, tool, tool rule) one shared place in the tree (one cause), or the
+/// place of the agent row whose rule family it matches.
+pub(crate) fn share_tool_causes(
+    findings: &mut [Finding],
     selectors: Option<&HashMap<String, Vec<String>>>,
-) -> Vec<Finding> {
+) {
     let tools = crate::review_tree::ToolMap::from_selectors(selectors);
-    let mut left = Vec::with_capacity(groups.len());
-    for head in groups {
-        let family = crate::review_tree::family_of(&head, &tools);
-        let target = existing.iter().position(|a| {
+    let mut groups: BTreeMap<(String, String, String), Vec<usize>> = BTreeMap::new();
+    for (i, f) in findings.iter().enumerate() {
+        if let Some(tool) = &f.preview_tool {
+            groups
+                .entry((f.repo.clone(), tool.clone(), f.rule_id.clone()))
+                .or_default()
+                .push(i);
+        }
+    }
+    for ((repo, tool, _rule), mut idxs) in groups {
+        idxs.sort_by(|&a, &b| {
+            (&findings[a].path, findings[a].line).cmp(&(&findings[b].path, findings[b].line))
+        });
+        let head = &findings[idxs[0]];
+        let family = crate::review_tree::family_of(head, &tools);
+        let agent = findings.iter().find(|a| {
             a.captures
                 .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
-                && a.repo == head.repo
+                && a.repo == repo
                 && (crate::review_tree::family_of(a, &tools) == family
                     || crate::preview_is_native_rule_tool(&head.rule_id, &a.rule_id, selectors))
         });
-        let Some(i) = target else {
-            left.push(head);
-            continue;
+        let (path, folded) = match agent {
+            Some(a) => (Some(cause_path_of(a, &tools)), true),
+            None => (
+                idxs.iter()
+                    .map(|&i| &findings[i].group_path)
+                    .find(|p| is_whole_path(p))
+                    .cloned(),
+                false,
+            ),
         };
-        let agent = &mut existing[i];
-        let mut places = vec![place_of(&head)];
-        places.extend(head.also_locations.iter().cloned());
-        for p in places {
-            let own = p.repo == agent.repo && p.path == agent.path && p.line == agent.line;
-            let held = agent.also_locations.iter().any(|l| {
-                l.repo == p.repo && l.path == p.path && l.line == p.line && l.rule_id == p.rule_id
-            });
-            if !own && !held {
-                agent.also_locations.push(p);
+        let Some(path) = path else { continue };
+        for &i in &idxs {
+            findings[i].group_path = path.clone();
+            if folded {
+                crate::note_also_seen_by(&mut findings[i], &tool);
             }
         }
-        if head.rule_id != agent.rule_id && !agent.also_matches.contains(&head.rule_id) {
-            agent.also_matches.push(head.rule_id.clone());
-        }
-        agent.flagged_by.push(crate::flagged_by_of(&head));
-        agent.flagged_by.extend(head.flagged_by.iter().cloned());
-        // "Tool also found": the tool is named on the row and its places are listed.
-        let tool = head.preview_tool.as_deref().unwrap_or("tool");
-        crate::note_also_seen_by(agent, tool);
     }
-    left
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review_tree::FixIndex;
 
     fn tool_row(tool: &str, rule: &str, path: &str, line: usize, sev: &str) -> Finding {
         Finding {
@@ -167,6 +124,7 @@ mod tests {
             snippet: format!("code at {path}:{line}"),
             preview: true,
             preview_tool: Some(tool.to_string()),
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
             ..Finding::default()
         }
     }
@@ -178,7 +136,8 @@ mod tests {
             line,
             rule_id: rule.to_string(),
             severity: sev.to_string(),
-            snippet: "agent snippet".to_string(),
+            snippet: format!("agent code at {path}:{line}"),
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
             ..Finding::default()
         };
         f.captures.insert(
@@ -188,10 +147,28 @@ mod tests {
         f
     }
 
+    /// The report as the scan has it: the audit's rows, the tool rows joined, the tree built.
+    fn joined(existing: Vec<Finding>, previews: Vec<Finding>) -> crate::onboard::ScanReport {
+        let mut report = crate::release_gate::test_scan_report();
+        report.findings = existing;
+        crate::join_repo_previews(&mut report, previews, None, None, &[], None);
+        report.assign_site_keys();
+        report
+    }
+
+    fn fix_ids(report: &crate::onboard::ScanReport, rule: &str) -> Vec<String> {
+        let index = FixIndex::new(report.tree.as_ref(), &report.findings);
+        report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == rule)
+            .map(|f| index.fix_id_of(f))
+            .collect()
+    }
+
     #[test]
-    fn twenty_five_rows_of_one_eslint_rule_become_one_low_row_with_all_places() {
+    fn twenty_five_eslint_rows_of_one_rule_stay_rows_low_and_share_one_fix() {
         let rows: Vec<Finding> = (0..25)
-            .rev()
             .map(|i| {
                 tool_row(
                     "eslint",
@@ -202,55 +179,44 @@ mod tests {
                 )
             })
             .collect();
-        let out = group_tool_rows(rows);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].severity, "low");
-        assert_eq!(out[0].path, "src/f00.js", "head is the first place by path");
-        assert_eq!(out[0].also_locations.len(), 24);
-        assert_eq!(out[0].distinct_site_count(), 25);
+        let report = joined(Vec::new(), rows);
+        assert_eq!(report.findings.len(), 25, "every place stays its own row");
+        assert!(report.findings.iter().all(|f| f.severity == "low"));
+        assert!(report.findings.iter().all(|f| f.also_locations.is_empty()));
+        let ids = fix_ids(&report, "no-unused-vars");
+        assert!(!ids[0].is_empty());
+        assert!(ids.iter().all(|i| *i == ids[0]), "one cause: {ids:?}");
     }
 
     #[test]
     fn an_eslint_security_rule_keeps_its_own_severity() {
-        let rows = vec![
-            tool_row(
-                "eslint",
-                "security/detect-eval-with-expression",
-                "a.js",
-                1,
-                "high",
-            ),
-            tool_row(
-                "eslint",
-                "security/detect-eval-with-expression",
-                "b.js",
-                2,
-                "high",
-            ),
-        ];
-        let out = group_tool_rows(rows);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].severity, "high");
-    }
-
-    #[test]
-    fn different_tool_rules_stay_separate_rows() {
-        let rows = vec![
-            tool_row("eslint", "no-unused-vars", "a.js", 1, "low"),
-            tool_row("eslint", "no-undef", "a.js", 2, "low"),
-        ];
-        assert_eq!(group_tool_rows(rows).len(), 2);
-    }
-
-    #[test]
-    fn a_semgrep_row_in_the_family_of_an_agent_row_folds_into_it() {
-        let mut existing = vec![agent_row(
-            "SEC-NO-UNSAFE-DESERIALIZATION-1",
-            "src/a.rs",
-            9,
+        let rows = vec![tool_row(
+            "eslint",
+            "security/detect-eval-with-expression",
+            "a.js",
+            1,
             "high",
         )];
-        let groups = group_tool_rows(vec![
+        let report = joined(Vec::new(), rows);
+        assert_eq!(report.findings[0].severity, "high");
+    }
+
+    #[test]
+    fn two_tool_rules_are_two_fixes() {
+        let rows = vec![
+            tool_row("eslint", "no-unused-vars", "a.js", 1, "low"),
+            tool_row("eslint", "no-undef", "b.js", 2, "low"),
+        ];
+        let report = joined(Vec::new(), rows);
+        let a = fix_ids(&report, "no-unused-vars");
+        let b = fix_ids(&report, "no-undef");
+        assert_ne!(a[0], b[0]);
+    }
+
+    #[test]
+    fn a_semgrep_row_in_the_family_of_an_agent_row_shares_the_agent_rows_fix() {
+        let agent = agent_row("SEC-NO-UNSAFE-DESERIALIZATION-1", "src/a.rs", 9, "high");
+        let previews = vec![
             tool_row(
                 "semgrep",
                 "camerata.security.yaml-unsafe-load",
@@ -265,40 +231,84 @@ mod tests {
                 8,
                 "high",
             ),
-        ]);
-        let left = fold_into_agent_rows(&mut existing, groups, None);
-        assert!(left.is_empty(), "{left:?}");
-        assert_eq!(existing.len(), 1);
-        assert_eq!(existing[0].also_locations.len(), 2);
-        assert_eq!(existing[0].severity, "high");
+        ];
+        let report = joined(vec![agent], previews);
+        assert_eq!(report.findings.len(), 3, "every place stays its own row");
+        let agent_fix = fix_ids(&report, "SEC-NO-UNSAFE-DESERIALIZATION-1");
+        let tool_fix = fix_ids(&report, "camerata.security.yaml-unsafe-load");
+        assert!(!agent_fix[0].is_empty());
+        assert_eq!(tool_fix, vec![agent_fix[0].clone(), agent_fix[0].clone()]);
+        let agent_row = report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-UNSAFE-DESERIALIZATION-1")
+            .unwrap();
         assert_eq!(
-            existing[0]
+            agent_row.severity, "high",
+            "the agent's rating is untouched"
+        );
+        assert!(report
+            .findings
+            .iter()
+            .filter(|f| f.preview_tool.is_some())
+            .all(|f| f
                 .captures
                 .get(crate::ALSO_SEEN_BY_CAPTURE)
-                .map(String::as_str),
-            Some("semgrep")
-        );
-        assert!(holds_grouped_places(&existing[0]));
+                .map(String::as_str)
+                == Some("semgrep")));
     }
 
     #[test]
-    fn a_camerata_arch_rule_with_no_agent_row_stays_its_own_row_at_its_own_severity() {
-        let mut existing = vec![agent_row(
-            "SEC-NO-HARDCODED-SECRETS-1",
-            "src/a.rs",
-            9,
-            "high",
-        )];
-        let groups = group_tool_rows(vec![tool_row(
-            crate::onboard::ARCH_PREVIEW_TOOL,
-            "ARCH-LAYERING-1",
-            "src/a.rs",
-            2,
-            "high",
-        )]);
-        let left = fold_into_agent_rows(&mut existing, groups, None);
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].severity, "high");
-        assert!(existing[0].also_locations.is_empty());
+    fn a_camerata_arch_rule_with_no_agent_row_is_its_own_single_fix() {
+        let agent = agent_row("SEC-NO-UNSAFE-DESERIALIZATION-1", "src/a.rs", 9, "high");
+        let arch: Vec<Finding> = (0..3)
+            .map(|i| {
+                tool_row(
+                    crate::onboard::ARCH_PREVIEW_TOOL,
+                    "ARCH-LAYERING-1",
+                    &format!("src/l{i}.rs"),
+                    2,
+                    "high",
+                )
+            })
+            .collect();
+        let report = joined(vec![agent], arch);
+        let arch_fix = fix_ids(&report, "ARCH-LAYERING-1");
+        let agent_fix = fix_ids(&report, "SEC-NO-UNSAFE-DESERIALIZATION-1");
+        assert!(arch_fix.iter().all(|i| *i == arch_fix[0] && !i.is_empty()));
+        assert_ne!(arch_fix[0], agent_fix[0]);
+        assert!(report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "ARCH-LAYERING-1")
+            .all(|f| f.severity == "high"));
+    }
+
+    #[test]
+    fn a_stored_report_reloads_with_the_same_rows() {
+        let rows: Vec<Finding> = (0..5)
+            .map(|i| {
+                tool_row(
+                    "eslint",
+                    "no-unused-vars",
+                    &format!("src/f{i}.js"),
+                    3,
+                    "medium",
+                )
+            })
+            .collect();
+        let mut report = joined(Vec::new(), rows);
+        let before: Vec<(String, usize, Vec<String>)> = report
+            .findings
+            .iter()
+            .map(|f| (f.path.clone(), f.line, f.group_path.clone()))
+            .collect();
+        report.normalize_loaded();
+        let after: Vec<(String, usize, Vec<String>)> = report
+            .findings
+            .iter()
+            .map(|f| (f.path.clone(), f.line, f.group_path.clone()))
+            .collect();
+        assert_eq!(before, after);
     }
 }

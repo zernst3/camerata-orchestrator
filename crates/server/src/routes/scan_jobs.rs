@@ -922,12 +922,11 @@ pub(crate) fn join_repo_previews(
         files,
         root,
     );
-    // One row per tool rule with all its places, folded into an agent row of the same rule
-    // family when there is one (calibration round 2, change A).
-    let grouped = crate::tool_row_groups::group_tool_rows(deduped);
-    let left =
-        crate::tool_row_groups::fold_into_agent_rows(&mut report.findings, grouped, selectors);
-    report.findings.extend(left);
+    // Style-lint rows are rated low; every tool row of one rule then shares one cause, or joins
+    // the agent row's cause when the rule family matches (calibration round 2, change A).
+    crate::tool_row_groups::rate_style_lint_rows(&mut deduped);
+    report.findings.extend(deduped);
+    crate::tool_row_groups::share_tool_causes(&mut report.findings, selectors);
 }
 
 /// Corrects the ledger's `RuleTier::ExternalTool` entries to reflect what the scan-time

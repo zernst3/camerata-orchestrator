@@ -31,7 +31,7 @@ pub use fixes::{
 };
 pub use grouping::{group_semantic, residual_sub_id, sub_id, SubgroupAllocator};
 pub use mapping::{
-    family_of, is_external_tool_row, rule_node_for, RulePlacement, ToolMap, OTHER_TOOLS,
+    family_of, is_external_tool_row, place_row, rule_node_for, RulePlacement, ToolMap, OTHER_TOOLS,
     UNCATEGORISED,
 };
 pub use places::{
