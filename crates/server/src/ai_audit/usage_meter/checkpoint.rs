@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::cost_checkpoint::{
-    projected_total, CheckpointSink, CheckpointState, CostCheckpoint, ProjectionInput,
+    over_limit, projected_total, CheckpointSink, CheckpointState, CostCheckpoint, ProjectionInput,
     CAUSE_PROJECTED, CHECKPOINT_FILE,
 };
 
@@ -49,7 +49,14 @@ impl UsageMeter {
                 st.fresh_done += 1;
                 st.fresh_cost_usd += cost;
             }
-            let cp = self.build_checkpoint(&st, cap, None);
+            let mut cp = self.build_checkpoint(&st, cap, None);
+            // A piece that was already in flight when the run paused finishes after the pause:
+            // the record stays the pause, with the spend and the work done brought up to date.
+            if let Some(stop) = &st.stop {
+                let before = stop.stopped_before.clone();
+                self.mark_stopped(&mut cp, &before);
+                st.stop = Some(cp.clone());
+            }
             st.latest = Some(cp.clone());
             cp
         };
@@ -66,19 +73,14 @@ impl UsageMeter {
     ) -> CostCheckpoint {
         let plan = self.controls.checkpoint.plan.clone().unwrap_or_default();
         let spent = self.limit_spend_usd();
-        // At a stage boundary the finder is over: a piece that did not finish is not run again in
-        // this attempt, so no piece is left to price.
+        let planned = plan.pieces.max(st.pieces_total);
+        // While the finder runs: every piece planned and not done. At a stage boundary the
+        // finder is over for the repository: a piece that did not finish is not run again in
+        // this attempt, but the pieces of repositories not begun yet still are.
         let pieces_left = if later_spent.is_some() {
-            0
+            planned.saturating_sub(st.pieces_total)
         } else {
-            st.pieces_total.saturating_sub(st.pieces_done)
-        };
-        let later_spent = later_spent.unwrap_or(0.0);
-        let later_scaled = match plan.assumed_problems {
-            Some(assumed) if assumed > 0 => {
-                plan.later_stages_usd * st.problems_found as f64 / assumed as f64
-            }
-            _ => plan.later_stages_usd,
+            planned.saturating_sub(st.pieces_done)
         };
         let projected = projected_total(&ProjectionInput {
             spent_usd: spent,
@@ -86,10 +88,17 @@ impl UsageMeter {
             finished_pieces: st.fresh_done,
             finished_cost_usd: st.fresh_cost_usd,
             preflight_per_piece_usd: plan.per_piece_usd,
-            // The scaling is applied once, above, so the pure function sees the scaled figure.
-            later_stages_usd: (later_scaled - later_spent).max(0.0),
-            assumed_problems: None,
+            joints_usd: if later_spent.is_some() {
+                0.0
+            } else {
+                plan.joints_usd
+            },
+            later_stages_usd: plan.later_stages_usd,
+            later_spent_usd: later_spent.unwrap_or(0.0),
+            assumed_problems: plan.assumed_problems,
             problems_found: st.problems_found,
+            pieces_done: st.pieces_done,
+            pieces_planned: planned,
         });
         CostCheckpoint {
             approved_usd: cap,
@@ -114,7 +123,7 @@ impl UsageMeter {
                 return true;
             }
             let mut cp = self.build_checkpoint(&st, cap, None);
-            if cp.projected_usd <= cap + 1e-9 {
+            if !over_limit(cp.projected_usd, cap) {
                 return false;
             }
             self.mark_stopped(&mut cp, STAGE_FINDER);
@@ -141,7 +150,7 @@ impl UsageMeter {
             }
             let baseline = *st.later_baseline_usd.get_or_insert(spent);
             let mut cp = self.build_checkpoint(&st, cap, Some((spent - baseline).max(0.0)));
-            if cp.projected_usd <= cap + 1e-9 {
+            if !over_limit(cp.projected_usd, cap) {
                 return false;
             }
             self.mark_stopped(&mut cp, stage);
@@ -155,6 +164,45 @@ impl UsageMeter {
         true
     }
 
+    /// Before a stage whose cost is priced from its own input (the group review, from its row
+    /// count): true (and the stage is recorded NOT RUN) when the spend plus `stage_usd` is over
+    /// the approved amount. The new estimate is that sum.
+    pub(crate) fn priced_stage_stops(&self, repo: &str, stage: &str, stage_usd: f64) -> bool {
+        let Some(cap) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let cp = {
+            let mut st = self.checkpoint_state();
+            if st.stop.is_some() {
+                return true;
+            }
+            let mut cp = self.build_checkpoint(&st, cap, Some(0.0));
+            cp.projected_usd = cp.spent_usd + stage_usd;
+            if !over_limit(cp.projected_usd, cap) {
+                return false;
+            }
+            cp.pieces_left = 0;
+            self.mark_stopped(&mut cp, stage);
+            st.stop = Some(cp.clone());
+            st.latest = Some(cp.clone());
+            cp
+        };
+        self.record_stage_not_run(repo, stage, false);
+        self.record_note(cp.pause_message());
+        self.publish_checkpoint(&cp);
+        true
+    }
+
+    /// A stage that runs on a meter continuing the scan's learns the run was paused: the stop is
+    /// the scan's checkpoint, carried on its report. Sticky, like the original.
+    pub(crate) fn seed_checkpoint_stop(&self, cp: &CostCheckpoint) {
+        let mut st = self.checkpoint_state();
+        if st.stop.is_none() {
+            st.stop = Some(cp.clone());
+            st.latest = Some(cp.clone());
+        }
+    }
+
     fn mark_stopped(&self, cp: &mut CostCheckpoint, before: &str) {
         cp.stopped = true;
         cp.new_estimate_usd = Some(cp.projected_usd);
@@ -163,7 +211,7 @@ impl UsageMeter {
     }
 
     /// True once the checkpoint stopped the run.
-    pub(super) fn checkpoint_stopped(&self) -> bool {
+    pub(crate) fn checkpoint_stopped(&self) -> bool {
         self.checkpoint_state().stop.is_some()
     }
 

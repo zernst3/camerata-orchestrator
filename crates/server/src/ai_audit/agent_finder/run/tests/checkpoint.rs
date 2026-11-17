@@ -62,6 +62,7 @@ fn controls(
                 per_piece_usd: 1.0,
                 later_stages_usd: 0.0,
                 assumed_problems: None,
+                ..CheckpointPlan::default()
             }),
             run_folder: folder.map(std::path::Path::to_path_buf),
             sink: CheckpointSink::new(move |cp| seen.lock().unwrap().push(cp.clone())),
@@ -230,4 +231,40 @@ async fn the_pre_flight_figure_stops_a_run_before_its_first_piece_when_it_is_ove
         failed.iter().all(|f| f.reason.contains(CAUSE_PROJECTED)),
         "{failed:?}"
     );
+}
+
+#[tokio::test]
+async fn a_two_repository_run_pauses_in_the_first_with_the_whole_runs_pieces_priced() {
+    let seen: Lines = Lines::default();
+    // The run plans 4 pieces (2 for each repository) at $1.00; each really costs $3.00.
+    let mut c = controls(10.0, 0.0, None, &seen);
+    c.checkpoint.plan.as_mut().unwrap().pieces = 4;
+    let meter = UsageMeter::with_controls(c.clone());
+    let agent = agents(3.0);
+    let (_, _, _, failed, _, _) = go(&agent, &meter, &c).await;
+    // After the first piece: 3 spent + 3 pieces of the run left at 3 = 12, over 10.
+    let stop = meter
+        .checkpoint_stop()
+        .expect("paused in the first repository");
+    assert_eq!(stop.pieces_left, 3, "{stop:?}");
+    assert!(
+        (stop.new_estimate_usd.unwrap() - 12.0).abs() < 1e-9,
+        "{stop:?}"
+    );
+    assert!(!failed.is_empty());
+    // The second repository starts nothing.
+    let other = find_repo(
+        &agent,
+        "acme/web",
+        &repo_files(),
+        &rules(),
+        &corpus(),
+        &c,
+        &two_pieces(),
+        Some(&meter),
+    )
+    .await
+    .unwrap();
+    assert_eq!(agent.seen.lock().unwrap().len(), 1, "one piece in all");
+    assert!(!other.3.is_empty());
 }
