@@ -7,6 +7,7 @@ use super::reply::{
     citation_map, parse_leads_answers, parse_outputs, scan_reply, to_findings, LeadOutcome,
     Problem, FINDER_BUSINESS_CAPTURE, FINDER_EFFORT_CAPTURE, FINDER_END_LINE_CAPTURE, FINDER_FIX_CAPTURE,
     FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE, FINDER_RULES_CAPTURE, FINDER_SURE_CAPTURE,
+    FINDER_WHY_CAPTURE,
 };
 
 fn entry(n: u32, path: &str) -> serde_json::Value {
@@ -340,8 +341,9 @@ fn a_secret_in_the_models_quote_is_redacted_by_the_parser() {
         .contains(secret));
 }
 
-const ALL_FINDER_KEYS: [&str; 8] = [
+const ALL_FINDER_KEYS: [&str; 9] = [
     FINDER_BUSINESS_CAPTURE,
+    FINDER_WHY_CAPTURE,
     FINDER_PIECE_CAPTURE,
     FINDER_SURE_CAPTURE,
     FINDER_EFFORT_CAPTURE,
@@ -355,6 +357,7 @@ const ALL_FINDER_KEYS: [&str; 8] = [
 fn every_finder_capture_key_is_named_once_and_listed_as_bookkeeping() {
     let names = [
         "finder-business",
+        "finder-why",
         "finder-piece",
         "finder-sure",
         "finder-effort",
@@ -992,4 +995,19 @@ fn the_row_carries_the_business_text_cleaned_for_the_client() {
         &HashSet::new(),
     );
     assert!(!plain[0].captures.contains_key("finder-business"));
+}
+
+#[test]
+fn the_row_carries_the_technical_reason_on_its_own() {
+    let (findings, _) = to_findings(
+        "acme/app",
+        "k",
+        &[problem_for(1, "x y")],
+        &BTreeMap::new(),
+        &HashSet::new(),
+    );
+    assert_eq!(
+        findings[0].captures.get("finder-why").map(String::as_str),
+        Some("Any caller can delete any record.")
+    );
 }

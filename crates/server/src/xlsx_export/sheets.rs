@@ -507,6 +507,8 @@ fn problem_cols(lay: &Layout, waiting: bool) -> Vec<Col> {
         Col::plain(v::H_REPO, 18.0),
         Col::plain(v::H_RULES, 40.0),
         Col::plain(v::H_AREA, 18.0),
+        Col::plain(v::H_WHY_BUSINESS, 50.0),
+        Col::plain(v::H_WHY_TECHNICAL, 50.0),
         Col::plain(v::H_WHAT_TO_DO_HERE, 70.0),
         Col::plain(v::H_FIX_TYPE, 14.0),
         Col::plain(v::H_EFFORT, 10.0),
@@ -573,6 +575,8 @@ fn problem_cells(row: &FindingRow, lay: &Layout) -> RowCells {
         .put(v::H_REPO, Cell::text(&row.repo))
         .put(v::H_RULES, rules_cell(row))
         .put(v::H_AREA, Cell::text(&row.category))
+        .put(v::H_WHY_BUSINESS, Cell::wrap(&row.why_business))
+        .put(v::H_WHY_TECHNICAL, Cell::wrap(&row.why_technical))
         .put(
             v::H_WHAT_TO_DO_HERE,
             Cell::wrap(
@@ -908,7 +912,8 @@ pub(super) fn fix_plan_table(lay: &Layout, no_tree_note: &str) -> Table {
             Col::plain(v::H_FIX, 40.0),
             Col::plain(v::H_FIX_ORDER, 10.0),
             Col::plain(v::H_WHAT_IS_WRONG, 60.0),
-            Col::plain(v::H_WHY_IT_MATTERS, 50.0),
+            Col::plain(v::H_WHY_BUSINESS, 50.0),
+            Col::plain(v::H_WHY_TECHNICAL, 50.0),
             Col::plain(v::H_WHAT_TO_DO, 60.0),
             Col::plain(v::H_EXAMPLE, 50.0),
             Col::plain(v::H_SEVERITY, 10.0),
@@ -961,23 +966,16 @@ pub(super) fn fix_plan_table(lay: &Layout, no_tree_note: &str) -> Table {
                 None => Cell::Empty,
             },
         };
-        let what_is_wrong = if g.cause.is_empty() {
-            g.summary.clone()
-        } else {
-            g.cause.clone()
-        };
-        let why = if g.cause.is_empty() {
-            String::new()
-        } else {
-            g.summary.clone()
-        };
+        // The reviewer's summary is for the reviewer: no client column is filled from it.
+        let what_is_wrong = g.cause.clone();
         let mut cells = RowCells::default();
         cells
             .put(v::H_ORDER, Cell::Num((i + 1) as f64))
             .put(v::H_FIX, Cell::wrap(&g.label))
             .put(v::H_FIX_ORDER, Cell::text(v::fix_class_label(g.class)))
             .put(v::H_WHAT_IS_WRONG, Cell::wrap(what_is_wrong))
-            .put(v::H_WHY_IT_MATTERS, Cell::wrap(why))
+            .put(v::H_WHY_BUSINESS, Cell::wrap(&g.why_business))
+            .put(v::H_WHY_TECHNICAL, Cell::wrap(&g.why_technical))
             .put(v::H_WHAT_TO_DO, Cell::wrap(&g.fix))
             .put(v::H_EXAMPLE, Cell::wrap(&g.worked_example))
             .put(

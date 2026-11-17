@@ -182,7 +182,8 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Reviewed by | How closely the places of a fix were reviewed. | Fix plan |
 | Go to places | A link to the first place of a fix on All problems. | Fix plan |
 | What is wrong | The cause the places of a fix share. | Fix plan |
-| Why it matters | What the problem puts at risk. | Fix plan |
+| Why it matters to the business | What can go wrong for the product, its data, its users or the people who work on it, and when it starts to matter. | Fix plan; All problems; Needs a decision |
+| Why it matters technically | What breaks and under what conditions. | Fix plan; All problems; Needs a decision |
 | What to do | The change that makes the fix. | Fix plan; Departures; Dependencies |
 | What to do here | The change to make at this place. | All problems; Needs a decision |
 | File | The file a problem was seen in. | Every table of problems |

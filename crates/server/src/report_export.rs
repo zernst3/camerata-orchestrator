@@ -1908,7 +1908,12 @@ pub fn build_report_json_with_counts(
                 rule_id: f.rule_id.clone(),
                 severity: f.severity.clone(),
                 hours_label,
-                impact: business_impact_for_rule(&f.rule_id).map(str::to_string),
+                // The Fix's business reason when there is one; else the rule's own authored
+                // sentence. Never the technical reason or the reviewer's summary.
+                impact: fix
+                    .map(|x| x.why_business.clone())
+                    .filter(|t| !t.is_empty())
+                    .or_else(|| business_impact_for_rule(&f.rule_id).map(str::to_string)),
             }
         })
         .collect();
@@ -2636,6 +2641,7 @@ mod wo9 {
     mod stage2_tests;
     pub(super) mod support;
     mod tree_tests;
+    mod why_tests;
     mod workbook_tests;
 }
 

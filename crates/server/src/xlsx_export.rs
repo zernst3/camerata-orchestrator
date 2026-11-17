@@ -175,6 +175,14 @@ pub struct FindingRow {
     status: String,
     snippet: String,
     detail: String,
+    /// Why the problem matters to the client's business, from the finder's `business` (empty for
+    /// a row with none). Cleaned for the client. Workbook only: `findings.json` keeps its fields.
+    #[serde(skip)]
+    why_business: String,
+    /// Why the problem matters technically, the finder's `why` on its own (empty for a row with
+    /// none). Workbook only, like [`Self::why_business`].
+    #[serde(skip)]
+    why_technical: String,
     /// **P2 (2026-09-29): the PRIMARY fix, shown FIRST** — a codebase-specific remediation
     /// for THIS finding, generated at scan time by
     /// [`crate::ai_audit::generate_fix_specifics`] (see `report_export::CuratedSiteJson::
@@ -649,6 +657,16 @@ fn partition_rows_for(
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail,
+            why_business: f
+                .captures
+                .get(crate::ai_audit::agent_finder::reply::FINDER_BUSINESS_CAPTURE)
+                .cloned()
+                .unwrap_or_default(),
+            why_technical: f
+                .captures
+                .get(crate::ai_audit::agent_finder::reply::FINDER_WHY_CAPTURE)
+                .cloned()
+                .unwrap_or_default(),
             fix_specific: f
                 .fix_specific
                 .as_deref()

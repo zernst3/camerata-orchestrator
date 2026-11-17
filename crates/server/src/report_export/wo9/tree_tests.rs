@@ -86,10 +86,8 @@ fn findings_json_carries_the_tree_with_counts_from_the_rows() {
         .expect("the sub-group");
     assert_eq!(sub["level"], "subgroup");
     assert_eq!(sub["parent"], "rule:SEC-NO-RAW-SQL-CONCAT-1");
-    assert_eq!(
-        sub["summary"],
-        "Three handlers build SQL from request values."
-    );
+    // The summary is what the reviewer reads: a client file carries none.
+    assert_eq!(sub["summary"], "");
     assert_eq!(sub["cause"], "the query is built from a request value");
     assert_eq!(sub["sites"], 3);
     assert_eq!(sub["review_levels"]["personally_reviewed"], 1);
@@ -114,7 +112,6 @@ fn findings_json_carries_the_tree_with_counts_from_the_rows() {
         "Group",
         "Parent group id",
         "Cause",
-        "Summary",
         "Places",
     ] {
         assert!(
@@ -124,6 +121,7 @@ fn findings_json_carries_the_tree_with_counts_from_the_rows() {
         );
     }
     assert!(!grid[0].iter().any(|h| h == "Review flags"), "client sheet");
+    assert!(!grid[0].iter().any(|h| h == "Summary"), "client sheet");
 }
 
 #[test]

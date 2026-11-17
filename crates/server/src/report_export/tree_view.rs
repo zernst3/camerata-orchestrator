@@ -102,6 +102,8 @@ pub fn tree_view(reviewed: &ReviewedReport, internal: bool) -> Vec<TreeNodeView>
         .filter(|n| !is_thrown_out_id(&n.id))
         .map(|n| {
             let (view_flags, label, cause, summary) = checked_text(n);
+            // The summary is what the reviewer reads: only an internal package carries it.
+            let summary = if internal { summary } else { String::new() };
             let counts = tree.counts(&n.id);
             TreeNodeView {
                 id: n.id.clone(),
