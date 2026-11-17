@@ -75,13 +75,16 @@ pub(super) fn held_problem_place_row(
     title: &str,
     place: &super::super::reply::ProblemPlace,
 ) -> Finding {
+    let title = crate::client_text::plain(title.trim());
     let mut held = Finding {
         repo: repo.to_string(),
         path: place.path.trim_start_matches("./").to_string(),
         line: place.line,
         rule_id: "AI-OPEN-QUESTION".to_string(),
         severity: "low".to_string(),
-        snippet: "A listed place could not be checked".to_string(),
+        // The title is in the snippet so the later same-place merge, which compares snippets,
+        // keeps one held row for each problem that listed the place.
+        snippet: format!("The place listed for \"{title}\" could not be checked"),
         detail: format!(
             "A place could not be checked{}A reviewer listed this place as another place of \"{title}\", but it could not be found in the file. It needs a decision.",
             crate::ai_audit::digest_parse::HEADLINE_SEP,

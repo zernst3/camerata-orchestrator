@@ -552,6 +552,122 @@ async fn a_model_place_on_a_line_that_does_not_exist_is_a_held_row_not_an_empty_
 }
 
 #[tokio::test]
+async fn a_text_place_makes_a_sibling_row_and_a_path_only_place_one_held_row() {
+    let rows = run_with_places(&repo_files(), json!(["src/b.rs:3"])).await;
+    let sibling = rows
+        .iter()
+        .find(|f| f.path == "src/b.rs" && f.line == 3)
+        .unwrap_or_else(|| panic!("the text place is a row: {rows:?}"));
+    assert!(sibling.located && !sibling.needs_review, "{sibling:?}");
+    let rows = run_with_places(&repo_files(), json!(["src/b.rs"])).await;
+    let held: Vec<_> = rows
+        .iter()
+        .filter(|f| f.path == "src/b.rs" && f.rule_id == "AI-OPEN-QUESTION")
+        .collect();
+    assert_eq!(held.len(), 1, "{rows:?}");
+    assert!(held[0].needs_review && !held[0].located, "{:?}", held[0]);
+    assert!(held[0].detail.contains("needs a decision"));
+}
+
+#[tokio::test]
+async fn a_text_place_with_a_malformed_line_is_one_held_row_and_no_lead() {
+    let rows = run_with_places(&repo_files(), json!(["src/b.rs:abc"])).await;
+    let held: Vec<_> = rows
+        .iter()
+        .filter(|f| f.rule_id == "AI-OPEN-QUESTION" && f.path == "src/b.rs")
+        .collect();
+    assert_eq!(held.len(), 1, "{rows:?}");
+    assert!(held[0].needs_review && !held[0].located, "{:?}", held[0]);
+    assert!(rows.iter().all(|f| f.path != "src/b.rs:abc"), "{rows:?}");
+}
+
+#[tokio::test]
+async fn two_problems_listing_the_same_path_only_place_keep_two_held_rows() {
+    let files = repo_files();
+    let mut p1 = problem(1, "src/a.rs", 4, "medium", "fn item_4() { run(4); }");
+    p1["places"] = json!(["src/b.rs"]);
+    let mut p2 = problem(2, "src/a.rs", 5, "medium", "fn item_5() { run(5); }");
+    p2["places"] = json!(["src/b.rs"]);
+    let line_counts: Vec<(&str, usize)> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.lines().count()))
+        .collect();
+    let agent = ScriptedAgent::new(full_script(
+        &line_counts,
+        vec![p1, p2],
+        vec![
+            json!({"n": 1, "rule": "ARCH-ONE-1"}),
+            json!({"n": 2, "rule": "SEC-TWO-1"}),
+        ],
+        vec![
+            json!({"rule": "ARCH-ONE-1", "answer": "problems", "problems": [1]}),
+            json!({"rule": "SEC-TWO-1", "answer": "problems", "problems": [2]}),
+        ],
+    ));
+    let (rows, _, _, failed, _, _) =
+        run_with(&agent, &files, &rules(), &corpus(), &options()).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let held: Vec<_> = rows
+        .iter()
+        .filter(|f| f.rule_id == "AI-OPEN-QUESTION" && f.path == "src/b.rs")
+        .collect();
+    assert_eq!(held.len(), 2, "{rows:?}");
+    for n in ["Problem 1 needs a fix", "Problem 2 needs a fix"] {
+        assert_eq!(
+            held.iter().filter(|f| f.detail.contains(n)).count(),
+            1,
+            "{n}: {held:?}"
+        );
+    }
+}
+
+#[test]
+fn a_held_place_row_holds_no_dash_from_the_problem_title() {
+    use super::super::super::reply::{Problem, ProblemPlace};
+    let problem = Problem {
+        n: 1,
+        path: "src/a.rs".into(),
+        line: 4,
+        end_line: None,
+        severity: "medium".into(),
+        title: "Missing check \u{2014} on the caller \u{2013} again".into(),
+        code: "c".into(),
+        what: "w".into(),
+        why: "y".into(),
+        fix: "f".into(),
+        sure: true,
+        effort: "low".into(),
+        label: "l".into(),
+        places: vec![ProblemPlace {
+            path: "src/b.rs".into(),
+            line: 0,
+            end_line: None,
+        }],
+    };
+    let mut out = Vec::new();
+    super::super::places_as_rows(REPO, &[], &[problem], &repo_files(), &mut out);
+    assert_eq!(out.len(), 1, "{out:?}");
+    // The detail's own headline separator is a dash by design; the title is what is checked.
+    let detail = out[0]
+        .detail
+        .replace(crate::ai_audit::digest_parse::HEADLINE_SEP, " ");
+    for text in [&out[0].snippet, &detail] {
+        assert!(
+            !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+            "{text}"
+        );
+        assert!(text.contains("Missing check"), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn a_place_with_no_path_makes_no_row() {
+    let before = run_with_places(&repo_files(), json!([])).await;
+    let rows = run_with_places(&repo_files(), json!([7, {"line": 3}, ""])).await;
+    assert_eq!(rows.len(), before.len(), "{rows:?}");
+}
+
+#[tokio::test]
 async fn a_model_place_on_a_blank_line_is_a_held_row() {
     let files = vec![
         ("src/a.rs".to_string(), rust_file(6)),

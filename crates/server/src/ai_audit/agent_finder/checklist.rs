@@ -288,6 +288,12 @@ impl Checklist {
              `not_applicable` only when this part has no code of the kind the rule governs; \
              give one sentence saying what is absent. If the code is here and the safeguard is \
              missing, that is a problem, not `not_applicable`. \
+             `not_a_problem_here` only when you are sure the place does no harm. If your \
+             reason would name a real cost and call it small, that is a problem at low \
+             severity, not `not_a_problem_here`. If your reason would be that another of your \
+             problems reports it, answer `problems` with that problem's number, and if that \
+             problem does not name this place, add the place to its `places` or write it as \
+             its own problem. \
              When your answer is `problems`, put the places that break the rule in the `places` \
              of the problem they are an instance of, and under options give the counts only. \
              For any other answer, under options give the counts and up to ten places for each \
@@ -296,7 +302,9 @@ impl Checklist {
              judgment. Rate it yourself: the severity a rule shows is a guide, not a rule. If a \
              rule asks for something this code needs and does not have, that is a problem: write \
              it. If an earlier problem already covers the place for the same reason, cite it \
-             (step 1); never write a second problem. A problem you add goes into a new problems \
+             (step 1) and write no second problem. If the reason is different, it is a new \
+             problem, even at the same place. When you are in doubt whether something is a \
+             problem, write it with `sure: unsure`. A problem you add goes into a new problems \
              file with that rule's id as its `label`.\n\n\
              `checklist.json` looks like this:\n\n\
              {\"citations\": [{\"n\": 1, \"rule\": \"RULE-ID\"}], \"answers\": [{\"rule\": \"RULE-ID\", \

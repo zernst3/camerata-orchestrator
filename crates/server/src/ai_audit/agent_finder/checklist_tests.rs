@@ -765,7 +765,9 @@ fn render_words_the_places_the_duplicate_and_the_not_applicable_rules() {
     assert!(
         text.contains(
             "If an earlier problem already covers the place for the same reason, cite it \
-             (step 1); never write a second problem."
+             (step 1) and write no second problem. If the reason is different, it is a new \
+             problem, even at the same place. When you are in doubt whether something is a \
+             problem, write it with `sure: unsure`."
         ),
         "{text}"
     );
@@ -777,6 +779,22 @@ fn render_words_the_places_the_duplicate_and_the_not_applicable_rules() {
         ),
         "{text}"
     );
+}
+
+#[test]
+fn render_words_the_dismissal_rule_between_not_applicable_and_the_problems_answer() {
+    let text = checklist().render();
+    let dismissal = "`not_a_problem_here` only when you are sure the place does no harm. If your \
+         reason would name a real cost and call it small, that is a problem at low severity, \
+         not `not_a_problem_here`. If your reason would be that another of your problems \
+         reports it, answer `problems` with that problem's number, and if that problem does \
+         not name this place, add the place to its `places` or write it as its own problem.";
+    assert!(text.contains(dismissal), "{text}");
+    let after = "that is a problem, not `not_applicable`. ";
+    let before = "When your answer is `problems`,";
+    let a = text.find(after).expect("not_applicable sentence") + after.len();
+    assert_eq!(text.find(dismissal), Some(a), "{text}");
+    assert_eq!(text[a + dismissal.len()..].find(before), Some(1), "{text}");
 }
 
 #[test]

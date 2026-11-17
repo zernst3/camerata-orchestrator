@@ -64,3 +64,29 @@ fn no_agent_brief_claims_a_severity_minimum() {
         assert!(!brief.contains("at least"), "{brief}");
     }
 }
+
+const PLACES_SENTENCE: &str = "list the others in `places`. Each entry of `places` is an object \
+     with `path`, `line` and `end_line`.";
+const ONE_FAULT_SENTENCE: &str = "Each entry of `places` is an object with `path`, `line` and \
+     `end_line`. When two different things are wrong, write two problems, each with its own \
+     severity, even in the same place.";
+
+#[test]
+fn the_piece_brief_says_a_place_is_an_object() {
+    assert!(PIECE_BRIEF.contains(PLACES_SENTENCE), "{PIECE_BRIEF}");
+}
+
+#[test]
+fn the_joints_brief_says_a_place_is_an_object() {
+    assert!(JOINTS_BRIEF.contains(PLACES_SENTENCE), "{JOINTS_BRIEF}");
+}
+
+#[test]
+fn the_piece_brief_says_two_faults_are_two_problems() {
+    assert!(PIECE_BRIEF.contains(ONE_FAULT_SENTENCE), "{PIECE_BRIEF}");
+}
+
+#[test]
+fn the_joints_brief_says_two_faults_are_two_problems() {
+    assert!(JOINTS_BRIEF.contains(ONE_FAULT_SENTENCE), "{JOINTS_BRIEF}");
+}
