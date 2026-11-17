@@ -843,3 +843,21 @@ fn a_not_a_problem_here_answer_without_a_place_or_a_reason_is_unusable() {
         assert!(!out.unusable.is_empty());
     }
 }
+
+#[test]
+fn a_not_applicable_answer_keeps_an_optional_reason_and_needs_none() {
+    let checklist = serde_json::json!({"answers": [
+        {"rule": "arch-alpha-1", "answer": "not_applicable", "reason": "No HTTP code here."},
+        {"rule": "arch-beta-1", "answer": "not_applicable"}
+    ]})
+    .to_string();
+    let out = parse_outputs(&outputs(&[("checklist.json", checklist)]), &piece_files());
+    let file = out.checklist.expect("parsed");
+    assert_eq!(file.answers[0].kind, AnswerKind::NotApplicable);
+    assert_eq!(
+        file.answers[0].reason.as_deref(),
+        Some("No HTTP code here.")
+    );
+    assert_eq!(file.answers[1].kind, AnswerKind::NotApplicable);
+    assert_eq!(file.answers[1].reason, None);
+}

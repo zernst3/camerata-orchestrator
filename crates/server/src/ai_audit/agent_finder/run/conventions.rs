@@ -28,27 +28,6 @@ pub(super) struct ConventionResult {
     pub violates: Vec<Finding>,
     /// Operator-only remarks (a listed place that could not be checked).
     pub notes: Vec<String>,
-    /// Places that become sibling rows of a problem the model cited to the rule, instead of
-    /// engine rows of their own.
-    pub attached: Vec<AttachedSites>,
-}
-
-/// A place checked against the file: its path, line and the text of the line.
-#[derive(Debug, Clone)]
-pub(super) struct CheckedSite {
-    pub path: String,
-    pub line: usize,
-    pub snippet: String,
-}
-
-/// Places of a rule's options that become sibling rows of one cited problem.
-#[derive(Debug)]
-pub(super) struct AttachedSites {
-    /// The index in `piece_answers` of the piece that cited the problem.
-    pub piece: usize,
-    /// The number of the cited problem within that piece.
-    pub problem: u32,
-    pub sites: Vec<CheckedSite>,
 }
 
 /// A place checked against the repository: the path, the line and the text of the line.
@@ -171,21 +150,15 @@ pub(super) fn conventions_from_answers(
         }
     }
     // A rule whose answer cites a problem the model wrote: that problem is the report of it, so
-    // the engine adds no row of its own. The first cited problem takes the rule's places.
-    let mut cited_by_rule: HashMap<String, (usize, u32)> = HashMap::new();
+    // the engine adds no row of its own; the rule's option places are census only.
+    let mut cited_by_rule: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, answers) in filtered.iter().enumerate() {
         for a in answers {
             if let Effective::Problems(nums) = &a.state {
                 // Only a problem that has a row can carry the places; with none, the engine's
                 // own rows stand so no place vanishes.
-                if let Some(n) = nums
-                    .iter()
-                    .filter(|n| problem_rows.contains(&(i, **n)))
-                    .min()
-                {
-                    cited_by_rule
-                        .entry(a.rule.to_ascii_uppercase())
-                        .or_insert((i, *n));
+                if nums.iter().any(|n| problem_rows.contains(&(i, *n))) {
+                    cited_by_rule.insert(a.rule.to_ascii_uppercase());
                 }
             }
         }
@@ -281,47 +254,10 @@ pub(super) fn conventions_from_answers(
         let title = corpus
             .get_by_id(&uc.rule)
             .map_or_else(|| uc.rule.clone(), |r| r.title.clone());
-        if let Some(&(piece, problem)) = cited_by_rule.get(&uc.rule) {
-            // The listed places of the option the codebase departs from (for a rule whose
-            // majority option is the named defect, the places of that option) ride on the
-            // cited problem as sibling rows, de-duplicated; no row of the engine's own.
-            let mut sites: Vec<CheckedSite> = Vec::new();
-            for ((rule, option), listed) in &places {
-                if rule != &uc.rule || (option == &chosen) != opt.violates {
-                    continue;
-                }
-                for place in listed {
-                    let Some((path, line, text)) = checked_place(&by_path, place) else {
-                        result.notes.push(format!(
-                            "{}: a listed place of the option \"{}\" ({}{}) could not be checked against the file",
-                            uc.rule,
-                            label_of(option),
-                            place.path,
-                            place.line.map_or(String::new(), |l| format!(":{l}")),
-                        ));
-                        let mut held = held_row(repo, &uc.rule, &title, &label_of(option), place);
-                        crate::onboard::redact::redact_finding(&mut held);
-                        result.undecided.push(held);
-                        continue;
-                    };
-                    let mut snippet = text.trim().to_string();
-                    crate::onboard::redact::redact_string(&mut snippet);
-                    if !sites.iter().any(|s| (&s.path, s.line) == (&path, line)) {
-                        sites.push(CheckedSite {
-                            path,
-                            line,
-                            snippet,
-                        });
-                    }
-                }
-            }
-            if !sites.is_empty() {
-                result.attached.push(AttachedSites {
-                    piece,
-                    problem,
-                    sites,
-                });
-            }
+        if cited_by_rule.contains(&uc.rule) {
+            // A problem the model wrote is the report of this rule. The option places are census
+            // only (the counts above): they never become rows, so none takes that problem's
+            // headline, rule or severity.
             continue;
         }
         if opt.violates {

@@ -745,3 +745,31 @@ fn a_not_a_problem_here_place_that_was_read_gives_the_note() {
     assert_eq!(state_of(&out, "RUST-ZED-1"), Effective::NotAProblemHere);
     assert_eq!(out.not_a_problem_notes.len(), 1);
 }
+
+#[test]
+fn render_words_the_places_the_duplicate_and_the_not_applicable_rules() {
+    let text = checklist().render();
+    assert!(
+        text.contains(
+            "When your answer is `problems`, put the places that break the rule in the `places` \
+             of the problem they are an instance of. Under options give the counts, and name \
+             places only for the option the code should follow."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "If an earlier problem already covers the place for the same reason, cite it \
+             (step 1); never write a second problem."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "`not_applicable` only when this part has no code of the kind the rule governs; \
+             give one sentence saying what is absent. If the code is here and the safeguard is \
+             missing, that is a problem, not `not_applicable`."
+        ),
+        "{text}"
+    );
+}

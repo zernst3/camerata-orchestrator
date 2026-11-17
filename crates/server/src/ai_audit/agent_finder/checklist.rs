@@ -274,14 +274,19 @@ impl Checklist {
              is not met at one place, and you judge it is not a problem here, never for something \
              this code needs and does not have: give that one place as `place`, a file and line you \
              read, and one sentence as `reason`, no more; this reports nothing to the client, it \
-             tells the reviewer what you saw), or `not_applicable` when nothing in this part is \
-             what the rule is about. For a rule with options, also say how many places follow each option, and name up to \
-             ten places for each.\n\
+             tells the reviewer what you saw), or `not_applicable`. \
+             `not_applicable` only when this part has no code of the kind the rule governs; \
+             give one sentence saying what is absent. If the code is here and the safeguard is \
+             missing, that is a problem, not `not_applicable`. \
+             When your answer is `problems`, put the places that break the rule in the `places` \
+             of the problem they are an instance of. Under options give the counts, and name \
+             places only for the option the code should follow.\n\
              3. Add. Add a problem only if you would report it to this client on your own \
              judgment. Rate it yourself: the severity a rule shows is a guide, not a rule. If a \
              rule asks for something this code needs and does not have, that is a problem: write \
-             it. A problem you add goes into a new problems file with that rule's id as its \
-             `label`.\n\n\
+             it. If an earlier problem already covers the place for the same reason, cite it \
+             (step 1); never write a second problem. A problem you add goes into a new problems \
+             file with that rule's id as its `label`.\n\n\
              `checklist.json` looks like this:\n\n\
              {\"citations\": [{\"n\": 1, \"rule\": \"RULE-ID\"}], \"answers\": [{\"rule\": \"RULE-ID\", \
              \"answer\": \"clean\", \"places\": [{\"path\": \"src/a.rs\", \"line\": 10}], \"options\": \
