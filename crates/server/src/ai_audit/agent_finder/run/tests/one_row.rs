@@ -552,6 +552,31 @@ async fn a_model_place_on_a_line_that_does_not_exist_is_a_held_row_not_an_empty_
 }
 
 #[tokio::test]
+async fn a_text_place_makes_a_sibling_row_and_a_path_only_place_one_held_row() {
+    let rows = run_with_places(&repo_files(), json!(["src/b.rs:3"])).await;
+    let sibling = rows
+        .iter()
+        .find(|f| f.path == "src/b.rs" && f.line == 3)
+        .unwrap_or_else(|| panic!("the text place is a row: {rows:?}"));
+    assert!(sibling.located && !sibling.needs_review, "{sibling:?}");
+    let rows = run_with_places(&repo_files(), json!(["src/b.rs"])).await;
+    let held: Vec<_> = rows
+        .iter()
+        .filter(|f| f.path == "src/b.rs" && f.rule_id == "AI-OPEN-QUESTION")
+        .collect();
+    assert_eq!(held.len(), 1, "{rows:?}");
+    assert!(held[0].needs_review && !held[0].located, "{:?}", held[0]);
+    assert!(held[0].detail.contains("needs a decision"));
+}
+
+#[tokio::test]
+async fn a_place_with_no_path_makes_no_row() {
+    let before = run_with_places(&repo_files(), json!([])).await;
+    let rows = run_with_places(&repo_files(), json!([7, {"line": 3}, ""])).await;
+    assert_eq!(rows.len(), before.len(), "{rows:?}");
+}
+
+#[tokio::test]
 async fn a_model_place_on_a_blank_line_is_a_held_row() {
     let files = vec![
         ("src/a.rs".to_string(), rust_file(6)),

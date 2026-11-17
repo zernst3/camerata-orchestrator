@@ -760,20 +760,21 @@ fn places_parse_and_a_problem_without_them_has_none() {
 }
 
 #[test]
-fn a_bad_place_is_dropped_with_a_note_and_an_out_of_piece_place_becomes_a_lead() {
+fn an_entry_with_no_path_is_dropped_with_a_note_and_an_out_of_piece_place_becomes_a_lead() {
     let mut p = entry(1, "src/a.rs");
     p["places"] = serde_json::json!([
         {"path": "src/b.rs", "line": 3},
         {"path": "src/elsewhere.rs", "line": 9},
-        {"path": "src/b.rs"},
-        "src/b.rs:4"
+        {"line": 5},
+        7,
+        ""
     ]);
     let json = serde_json::json!([p]).to_string();
     let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
     assert!(out.unusable.is_empty(), "{:?}", out.unusable);
     assert_eq!(out.problems.len(), 1);
     assert_eq!(out.problems[0].places.len(), 1);
-    assert_eq!(out.notes.len(), 2, "{:?}", out.notes);
+    assert_eq!(out.notes.len(), 3, "{:?}", out.notes);
     // A place outside the part is a lead, exactly as a problem whose own path is outside is.
     assert_eq!(out.leads.len(), 1, "{:?}", out.leads);
     assert_eq!(
@@ -785,6 +786,39 @@ fn a_bad_place_is_dropped_with_a_note_and_an_out_of_piece_place_becomes_a_lead()
         ("src/elsewhere.rs", 9, Some(1))
     );
     assert_eq!(out.leads[0].severity.as_deref(), Some("high"));
+}
+
+#[test]
+fn a_place_written_as_text_path_and_line_parses() {
+    let mut p = entry(1, "src/a.rs");
+    p["places"] = serde_json::json!(["src/b.rs:12", "./src/b.rs:20-25"]);
+    let json = serde_json::json!([p]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+    let places = &out.problems[0].places;
+    assert_eq!(places.len(), 2, "{places:?}");
+    assert_eq!(
+        (places[0].path.as_str(), places[0].line, places[0].end_line),
+        ("src/b.rs", 12, None)
+    );
+    assert_eq!(
+        (places[1].path.as_str(), places[1].line, places[1].end_line),
+        ("src/b.rs", 20, Some(25))
+    );
+}
+
+#[test]
+fn a_place_with_a_path_and_no_usable_line_becomes_a_place_at_line_zero() {
+    let mut p = entry(1, "src/a.rs");
+    p["places"] = serde_json::json!(["src/a.rs", {"path": "src/b.rs"}]);
+    let json = serde_json::json!([p]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+    let places = &out.problems[0].places;
+    assert_eq!(places.len(), 2, "{places:?}");
+    assert_eq!(places[0].path, "src/a.rs");
+    assert_eq!(places[1].path, "src/b.rs");
+    assert!(places.iter().all(|x| x.line == 0));
 }
 
 #[test]

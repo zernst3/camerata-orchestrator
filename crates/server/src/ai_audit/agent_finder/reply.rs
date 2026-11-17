@@ -216,7 +216,7 @@ fn parse_problem(v: &serde_json::Value) -> Result<Problem, String> {
 }
 
 /// The further places of a problem, read tolerantly: a missing or non-list `places` is none, and
-/// an entry that is not a path with a line is dropped with a remark, never failing the file.
+/// an entry with no path is dropped with a remark, never failing the file.
 fn parse_problem_places(
     v: &serde_json::Value,
     n: u32,
@@ -234,32 +234,60 @@ fn parse_problem_places(
     };
     let mut out = Vec::new();
     for (i, item) in items.iter().enumerate() {
-        let path = item
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .map(|s| plain_path(s.trim()))
-            .filter(|s| !s.is_empty());
-        let line = item
-            .get("line")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok());
-        let end_line = item
-            .get("end_line")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok());
-        match (path, line) {
-            (Some(path), Some(line)) => out.push(ProblemPlace {
+        let (path, line, end_line) = match item {
+            serde_json::Value::String(text) => split_place_text(text),
+            _ => {
+                let number = |key: &str| {
+                    item.get(key)
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|n| usize::try_from(n).ok())
+                };
+                (
+                    item.get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|s| plain_path(s.trim()))
+                        .filter(|s| !s.is_empty()),
+                    number("line"),
+                    number("end_line"),
+                )
+            }
+        };
+        match path {
+            // A path with no usable line is a place at line 0, which the runner holds as a
+            // problem needing a decision, so nothing the model listed vanishes.
+            Some(path) => out.push(ProblemPlace {
                 path,
-                line,
+                line: line.unwrap_or(0),
                 end_line,
             }),
-            _ => notes.push(format!(
-                "problem {n}: place {} has no usable path and line, so it was dropped",
+            None => notes.push(format!(
+                "problem {n}: place {} has no path, so it was dropped",
                 i + 1
             )),
         }
     }
     out
+}
+
+/// A place written as text: `path:line`, `path:line-end` or just `path`.
+fn split_place_text(text: &str) -> (Option<String>, Option<usize>, Option<usize>) {
+    let text = text.trim();
+    if let Some((path, span)) = text.rsplit_once(':') {
+        let (start, end) = match span.split_once('-') {
+            Some((a, b)) => (a, Some(b)),
+            None => (span, None),
+        };
+        let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+        if digits(start) && end.is_none_or(digits) && !path.trim().is_empty() {
+            return (
+                Some(plain_path(path.trim())),
+                start.parse().ok(),
+                end.and_then(|e| e.parse().ok()),
+            );
+        }
+    }
+    let path = plain_path(text);
+    ((!path.is_empty()).then_some(path), None, None)
 }
 
 /// The array in a file that holds either an array or an object with the array under `key`.
