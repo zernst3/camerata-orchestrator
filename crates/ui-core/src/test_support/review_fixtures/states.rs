@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 72] = [
+pub const FIXTURE_IDS: [&str; 73] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -44,6 +44,7 @@ pub const FIXTURE_IDS: [&str; 72] = [
     "queue/merge-picker-empty-pool",
     "queue/place",
     "queue/possible-false-positive",
+    "queue/possible-duplicate",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",
@@ -610,6 +611,56 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
             let mut fx = queue_state(&ds, queue);
             if let Body::Queue(q) = &mut fx.body {
                 q.selected_site = focused;
+            }
+            fx
+        }
+        "queue/possible-duplicate" => {
+            // "Possible duplicates together" on: two causes with a row at the same place sit side
+            // by side inside their band, each with its chip, and the first of them is focused so
+            // the detail names the other cause.
+            let ds = base();
+            let mut queue = ds.queue(false, 0, 100);
+            let mut sorted: Vec<&camerata_api_types::review_view::QueueRow> =
+                queue.escalated.iter().collect();
+            crate::queue::sort_rows(&mut sorted);
+            let within: Vec<String> = sorted
+                .iter()
+                .filter(|r| crate::queue::band_of(r) == crate::queue::Band::WithinBudget)
+                .map(|r| r.site.site_key.clone())
+                .collect();
+            // The first and the last row of the band: far apart in rank order, so the look moves
+            // one of them.
+            let (a, b) = (within[0].clone(), within[within.len() - 1].clone());
+            let view_of = |q: &camerata_api_types::review_view::QueueView, key: &str| {
+                let r = q
+                    .escalated
+                    .iter()
+                    .find(|r| r.site.site_key == key)
+                    .map(|r| &r.site)
+                    .unwrap();
+                camerata_api_types::review_view::SamePlaceView {
+                    fix_id: format!("{:012x}", r.line * 7919 + r.path.len()),
+                    title: r.headline.clone(),
+                    key: r.site_key.clone(),
+                    rule_id: r.rule_id.clone(),
+                    line: r.line,
+                    group_id: r.group_path.get(2).cloned().unwrap_or_default(),
+                }
+            };
+            let (to_a, to_b) = (view_of(&queue, &a), view_of(&queue, &b));
+            for r in &mut queue.escalated {
+                if r.site.site_key == a {
+                    r.site.same_place_as = vec![to_b.clone()];
+                } else if r.site.site_key == b {
+                    r.site.same_place_as = vec![to_a.clone()];
+                } else {
+                    continue;
+                }
+                r.site.markers = super::dataset::markers_for(&r.site);
+            }
+            let mut fx = queue_state(&ds, queue);
+            if let Body::Queue(q) = &mut fx.body {
+                q.selected_site = Some(a);
             }
             fx
         }

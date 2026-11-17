@@ -1711,3 +1711,73 @@ fn a_thrown_out_row_opens_no_edit_form() {
         DetailMode::PickField
     );
 }
+
+// ── Same place as (the possible duplicate hint) ───────────────────────────────────────────
+
+fn same_place(key: &str, line: usize) -> camerata_api_types::review_view::SamePlaceView {
+    camerata_api_types::review_view::SamePlaceView {
+        fix_id: "ab12".into(),
+        title: "Another cause".into(),
+        key: key.into(),
+        rule_id: "SEC-OTHER-1".into(),
+        line,
+        group_id: "sub:SEC-OTHER-1/1".into(),
+    }
+}
+
+#[test]
+fn the_merge_door_of_the_hint_offers_the_other_cause_first_and_opens_on_it() {
+    let all = rows();
+    let mut row = all[0].clone();
+    row.possible_duplicate_of = None;
+    let other = all
+        .iter()
+        .find(|r| r.site_key != row.site_key)
+        .unwrap()
+        .clone();
+    row.same_place_as = vec![same_place(&other.site_key, row.line + 2)];
+    let ctx = DetailContext {
+        pool: pool_of(&all),
+        ..ctx()
+    };
+    let list = merge_candidates(&row, &ctx, "");
+    assert_eq!(list[0].key, other.site_key, "the other cause comes first");
+    assert_eq!(list[0].note.as_deref(), Some("same place"));
+    assert_eq!(list[0].label, format!("{}:{}", row.path, row.line + 2));
+    assert_eq!(
+        list.iter().filter(|c| c.key == other.site_key).count(),
+        1,
+        "listed once"
+    );
+    let mode = reduce(DetailMode::Viewing, &DetailAction::BeginMerge, &row, &ctx);
+    let DetailMode::Merge(d) = mode else {
+        panic!("a merge form");
+    };
+    assert_eq!(d.target.as_deref(), Some(other.site_key.as_str()));
+    // The engine's own duplicate link still wins the default.
+    let mut linked = row.clone();
+    linked.possible_duplicate_of = Some(DuplicateView {
+        key: "dup-key".into(),
+        hint: "h".into(),
+        rule_id: "SEC-KEY-2".into(),
+        path: "web/env.ts".into(),
+        line: 3,
+    });
+    let DetailMode::Merge(d) = reduce(
+        DetailMode::Viewing,
+        &DetailAction::BeginMerge,
+        &linked,
+        &ctx,
+    ) else {
+        panic!("a merge form");
+    };
+    assert_eq!(d.target.as_deref(), Some("dup-key"));
+    // A row with no hint offers nothing extra.
+    let mut plain_row = row.clone();
+    plain_row.same_place_as.clear();
+    assert!(merge_candidates(&plain_row, &ctx, "")
+        .iter()
+        .all(|c| c.note.as_deref() != Some("same place")));
+    assert!(same_place_lines(&plain_row).is_empty());
+    assert_eq!(same_place_lines(&row).len(), 1);
+}

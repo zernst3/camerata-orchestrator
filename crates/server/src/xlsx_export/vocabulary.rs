@@ -1978,8 +1978,14 @@ mod tests {
             .iter()
             .find(|e| e.term == POSSIBLE_DUPLICATE)
             .expect("the hint is defined");
-        assert!(entry.meaning.contains("stay problems"), "{:?}", entry.meaning);
-        assert!(GLOSSARY_ENTRIES.iter().all(|e| e.term != POSSIBLE_DUPLICATE));
+        assert!(
+            entry.meaning.contains("stay problems"),
+            "{:?}",
+            entry.meaning
+        );
+        assert!(GLOSSARY_ENTRIES
+            .iter()
+            .all(|e| e.term != POSSIBLE_DUPLICATE));
         assert!(CONCEPTS.iter().all(|c| c.term != POSSIBLE_DUPLICATE));
         for text in [
             POSSIBLE_DUPLICATE,

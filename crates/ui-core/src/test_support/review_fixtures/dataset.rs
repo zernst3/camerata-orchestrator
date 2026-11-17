@@ -21,9 +21,9 @@ use camerata_api_types::review_view::{
     ExportGateView, FlaggedByView, HeldRow, HoldReason, LaneCounts, Marker, MergedIntoView,
     MovedFromView, NeededMeSummary, NewSinceDecisionView, NodeCountsView, NodeDecisionGap,
     NodeDecisionSummary, OutlierView, PlacementView, QueueRow, QueueView, ReviewCounts,
-    ReviewSettingsView, ReviewShellView, SampleStratum, SettingsLimits, SiteRow, SitesPage,
-    Stage1View, Stage2View, StageModelsView, StaleSummary, StratumRate, SummarySource, TreeLevel,
-    TreeNodeKind, TreeNodeView, TreeView, ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX,
+    ReviewSettingsView, ReviewShellView, SamePlaceView, SampleStratum, SettingsLimits, SiteRow,
+    SitesPage, Stage1View, Stage2View, StageModelsView, StaleSummary, StratumRate, SummarySource,
+    TreeLevel, TreeNodeKind, TreeNodeView, TreeView, ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX,
     QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR, SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED,
     SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
 };
@@ -1173,6 +1173,25 @@ pub fn build(p: &Params) -> ReviewDataSet {
             line: other.line,
         };
         rows[i].possible_duplicate_of = Some(dup);
+    }
+    // The possible duplicate hint: every other row the engine linked to a neighbour is also at
+    // the same place as another cause, on both sides. Draws nothing from `rng`.
+    for (n, &i) in dup_rows.iter().enumerate().filter(|(n, _)| n % 2 == 1) {
+        let j = normal[(n * 13) % normal.len()];
+        if i == j {
+            continue;
+        }
+        let view_of = |r: &SiteRow| SamePlaceView {
+            fix_id: format!("{:012x}", r.line * 7919 + r.path.len()),
+            title: r.headline.clone(),
+            key: r.site_key.clone(),
+            rule_id: r.rule_id.clone(),
+            line: r.line,
+            group_id: r.group_path.get(2).cloned().unwrap_or_default(),
+        };
+        let (to_j, to_i) = (view_of(&rows[j]), view_of(&rows[i]));
+        rows[i].same_place_as = vec![to_j];
+        rows[j].same_place_as = vec![to_i];
     }
 
     for &i in &added_rows {

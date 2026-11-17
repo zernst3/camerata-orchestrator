@@ -148,7 +148,10 @@ fn an_internal_package_carries_the_hint_in_the_workbook_findings_json_and_start_
         .filter(|r| r[file] == "src/orders.rs")
         .map(|r| r[col].as_str())
         .collect();
-    assert!(hinted_cells.iter().all(|c| !c.is_empty()), "{hinted_cells:?}");
+    assert!(
+        hinted_cells.iter().all(|c| !c.is_empty()),
+        "{hinted_cells:?}"
+    );
     assert!(grid[1..]
         .iter()
         .filter(|r| r[file] == "src/alone.rs")
@@ -195,9 +198,14 @@ fn the_hint_changes_no_severity_kind_escalation_row_count_or_decision() {
         "apart from the internal keys every row is the same, in the same order"
     );
     let order = |rows: Vec<serde_json::Value>| -> Vec<String> {
-        rows.iter().map(|r| r["site_id"].as_str().unwrap().to_string()).collect()
+        rows.iter()
+            .map(|r| r["site_id"].as_str().unwrap().to_string())
+            .collect()
     };
-    assert_eq!(order(findings_rows(&client)), order(findings_rows(&internal)));
+    assert_eq!(
+        order(findings_rows(&client)),
+        order(findings_rows(&internal))
+    );
     let rows_of = |entries: &BTreeMap<String, Vec<u8>>| {
         let grid = sheet_table(&workbook(entries), v::ALL_PROBLEMS);
         let sev = grid[0].iter().position(|h| h == v::H_SEVERITY).unwrap();

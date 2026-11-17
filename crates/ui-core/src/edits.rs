@@ -582,6 +582,26 @@ fn merge_matches(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<MergeCa
             }
         }
     }
+    // The other causes at this place: one row each, listed after the engine's own link.
+    for other in &row.same_place_as {
+        if other.key == row.site_key || out.iter().any(|c| c.key == other.key) {
+            continue;
+        }
+        if ctx
+            .pool
+            .iter()
+            .find(|p| p.key == other.key)
+            .is_some_and(|p| p.merged)
+        {
+            continue;
+        }
+        out.push(MergeCandidate {
+            key: other.key.clone(),
+            label: format!("{}:{}", row.path, other.line),
+            rule_id: other.rule_id.clone(),
+            note: Some("same place".to_string()),
+        });
+    }
     let query = query.trim().to_lowercase();
     for site in &ctx.pool {
         if site.key == row.site_key || site.merged || out.iter().any(|c| c.key == site.key) {
@@ -1386,6 +1406,12 @@ pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, &'stat
         .collect()
 }
 
+/// The detail's "Same place as" entries: each other cause with a row at this place, nearest first.
+/// Empty for a row with none.
+pub fn same_place_lines(row: &SiteRow) -> &[camerata_api_types::review_view::SamePlaceView] {
+    &row.same_place_as
+}
+
 pub fn duplicate_line(row: &SiteRow) -> Option<(String, String)> {
     let d = row.possible_duplicate_of.as_ref()?;
     Some((
@@ -1547,6 +1573,7 @@ pub fn reduce(
                 .possible_duplicate_of
                 .as_ref()
                 .map(|d| d.key.clone())
+                .or_else(|| row.same_place_as.first().map(|o| o.key.clone()))
                 .filter(|k| *k != row.site_key),
             reason: String::new(),
             error: None,
@@ -1712,6 +1739,12 @@ pub fn commit(
                         .as_ref()
                         .filter(|dup| Some(&dup.key) == d.target.as_ref())
                         .map(|dup| format!("{}:{}", dup.path, dup.line))
+                })
+                .or_else(|| {
+                    row.same_place_as
+                        .iter()
+                        .find(|o| Some(&o.key) == d.target.as_ref())
+                        .map(|o| format!("{}:{}", row.path, o.line))
                 })
                 .unwrap_or_else(|| "the other site".to_string());
             Ok(DetailWrite::Decision {

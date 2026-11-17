@@ -6996,7 +6996,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
    Chips sit beside `.kind-chip` and take its sizing. Each class is one row of the spec's chip
    table; the markers column draws at most two and folds the rest into a "+N". */
 .mark-esc, .mark-cand, .mark-over, .mark-outlier, .mark-new, .mark-stale, .mark-moved,
-.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried, .mark-fp {
+.mark-held, .mark-dup, .mark-qc, .mark-edited, .mark-also, .mark-carried, .mark-fp, .mark-dupfix {
   display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
   border-radius: 999px; padding: 1px 8px; white-space: nowrap; border: 1px solid transparent;
 }
@@ -7017,6 +7017,11 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 /* Possible false positive: a dashed violet outline, so it reads as a question and not a verdict.
    The reasons are its hover text and the detail's lines. */
 .mark-fp { background: transparent; border: 1px dashed #a78bfa; color: #c4b5fd; cursor: help; }
+/* Possible duplicate (another cause at the same place): a dashed teal outline, a question and not a
+   verdict. The other cause is its hover text and the detail's "Same place as" line. */
+.mark-dupfix { background: transparent; border: 1px dashed #5eead4; color: #99f6e4; cursor: help; }
+.site-detail-same-place-item { margin-right: 8px; }
+.site-detail-same-place-link { max-width: 100%; }
 /* Possible duplicate: a gray outline. */
 .mark-dup { background: transparent; border-color: var(--ink-faint); color: var(--ink-soft); }
 /* Also matches (a row that carries other rules at its place) and carried (a row another row at
@@ -7183,6 +7188,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .review-queue-needed { color: var(--ink-faint); }
 .review-queue-fp { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 12.5px; color: var(--ink-soft); }
 .review-queue-fp .btn-edit-sm[aria-pressed="true"] { border-color: #a78bfa; color: #c4b5fd; }
+.review-queue-fp .review-queue-dup-together[aria-pressed="true"] { border-color: #5eead4; color: #99f6e4; }
 .site-detail-fp-reasons { margin: 0; padding-left: 16px; }
 .site-detail-fp-reasons li { margin: 0 0 2px; }
 .site-detail-fp-label { font-weight: 700; color: #c4b5fd; }

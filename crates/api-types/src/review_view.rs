@@ -290,6 +290,8 @@ pub struct SamePlaceView {
     /// The site key of the other cause's row nearest this one: the row the link opens.
     pub key: String,
     pub rule_id: String,
+    /// That row's line, in the same file as the row that lists it.
+    pub line: usize,
     /// The sub-group node id of that row, for opening it.
     pub group_id: String,
 }

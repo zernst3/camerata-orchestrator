@@ -27,9 +27,7 @@ use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::review::{
     EscalationReason, EscalationState, OutlierReason, PossibleFalsePositive,
 };
-use camerata_api_types::review_view::{
-    Marker, NodeCountsView, SamePlaceView, SiteRow, TreeLevel,
-};
+use camerata_api_types::review_view::{Marker, NodeCountsView, SamePlaceView, SiteRow, TreeLevel};
 
 // ── What a screen is showing ──────────────────────────────────────────────────────────────
 
@@ -414,7 +412,10 @@ pub fn possible_duplicate_tip(row: &SiteRow) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     )];
-    parts.push("It may be the same problem found twice. It stays a problem until you rule on it.".to_string());
+    parts.push(
+        "It may be the same problem found twice. It stays a problem until you rule on it."
+            .to_string(),
+    );
     parts.join(" ")
 }
 

@@ -37,6 +37,8 @@ pub struct DupLink {
     pub key: String,
     /// That row's rule id.
     pub rule_id: String,
+    /// That row's line.
+    pub line: usize,
     /// That row's sub-group node id.
     pub group_id: String,
     /// How many lines apart the two rows are.
@@ -152,6 +154,7 @@ fn link_to(other: &Entry<'_>, distance: usize) -> DupLink {
         fix_id: other.fix_id.clone(),
         key: other.f.site_key.clone(),
         rule_id: other.f.rule_id.clone(),
+        line: other.f.line,
         group_id: other.f.group_path.get(2).cloned().unwrap_or_default(),
         distance,
     }

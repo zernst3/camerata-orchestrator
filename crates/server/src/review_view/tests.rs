@@ -1214,13 +1214,18 @@ fn a_site_row_names_the_other_cause_at_the_same_place_and_nothing_else_changes()
     };
     let sql_rows = sites("rule:SEC-NO-RAW-SQL-CONCAT-1");
     let authz_rows = sites("rule:SEC-AUTHZ-4");
-    assert_eq!(sql_rows.len() + authz_rows.len(), 3, "the hint drops no row");
+    assert_eq!(
+        sql_rows.len() + authz_rows.len(),
+        3,
+        "the hint drops no row"
+    );
     let at_orders = sql_rows.iter().find(|r| r.path == "src/orders.rs").unwrap();
     assert_eq!(at_orders.site_key, sql_key);
     let other = &authz_rows[0];
     assert_eq!(at_orders.same_place_as.len(), 1);
     assert_eq!(at_orders.same_place_as[0].key, other.site_key);
     assert_eq!(at_orders.same_place_as[0].rule_id, "SEC-AUTHZ-4");
+    assert_eq!(at_orders.same_place_as[0].line, 12);
     assert_eq!(at_orders.same_place_as[0].group_id, other.group_path[2]);
     assert!(!at_orders.same_place_as[0].title.is_empty());
     assert_eq!(other.same_place_as[0].key, at_orders.site_key);
@@ -1233,7 +1238,11 @@ fn a_site_row_names_the_other_cause_at_the_same_place_and_nothing_else_changes()
     assert!(!alone.markers.contains(&Marker::PossibleDuplicateCause));
     // The row is as the engine left it.
     for r in [at_orders, other] {
-        let source = sealed.findings.iter().find(|f| f.site_key == r.site_key).unwrap();
+        let source = sealed
+            .findings
+            .iter()
+            .find(|f| f.site_key == r.site_key)
+            .unwrap();
         assert_eq!(r.severity, source.severity);
         assert_eq!(r.kind, source.kind);
     }

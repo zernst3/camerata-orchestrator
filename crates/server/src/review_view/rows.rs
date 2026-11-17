@@ -6,8 +6,8 @@ use camerata_api_types::edits::{Edit, EditField};
 use camerata_api_types::review::EscalationState;
 use camerata_api_types::review_view::{
     BreadcrumbItem, CarriedByView, CarriedRuleView, DecisionView, DuplicateView, EditView,
-    EscalationStatus, FlaggedByView, Marker, MergedIntoView, NewSinceDecisionView, SamePlaceView, SiteRow,
-    Stage1View, Stage2View,
+    EscalationStatus, FlaggedByView, Marker, MergedIntoView, NewSinceDecisionView, SamePlaceView,
+    SiteRow, Stage1View, Stage2View,
 };
 
 use super::ReviewComposer;
@@ -217,6 +217,7 @@ impl<'a> ReviewComposer<'a> {
                 title: self.cause_title(link),
                 key: link.key.clone(),
                 rule_id: link.rule_id.clone(),
+                line: link.line,
                 group_id: link.group_id.clone(),
             })
             .collect()

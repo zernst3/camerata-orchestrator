@@ -16,7 +16,7 @@ fn count(html: &str, needle: &str) -> usize {
 
 #[test]
 fn every_queue_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 12, "every queue state is built");
+    assert_eq!(states().len(), 13, "every queue state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -413,4 +413,69 @@ fn a_queue_with_no_flagged_row_draws_no_possible_false_positive_button() {
     let html = page("queue/over-budget");
     assert!(!html.contains("review-queue-fp-first"));
     assert!(!html.contains("Possible false positives first"));
+}
+
+#[test]
+fn the_possible_duplicate_page_lists_paired_rows_together_with_their_chip_and_the_other_cause() {
+    use camerata_ui_core::queue::{band_of, Band};
+    let html = page("queue/possible-duplicate");
+    let Some(StateFixture {
+        body: Body::Queue(body),
+        ..
+    }) = fixture("queue/possible-duplicate")
+    else {
+        panic!("no fixture");
+    };
+    let Loaded::Ready(v) = &body.queue else {
+        panic!("the queue is loaded");
+    };
+    let paired: Vec<&camerata_api_types::review_view::QueueRow> = v
+        .escalated
+        .iter()
+        .filter(|r| !r.site.same_place_as.is_empty())
+        .collect();
+    assert_eq!(paired.len(), 2);
+    // The look is on and its button says how many rows are paired.
+    assert!(html.contains("Back to rank order (2 paired)"), "{html}");
+    assert!(html.contains("review-queue-dup-together"));
+    // Every paired row carries the chip in the table, and one in the detail head.
+    assert_eq!(count(&html, "class=\"mark-dupfix\""), 3, "{html}");
+    // The pair is drawn side by side inside its band.
+    let state = QueueState {
+        dup_together: true,
+        ..QueueState::default()
+    };
+    let l = layout(v, &state);
+    let drawn: Vec<(Band, bool)> = l
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row(r) => Some((band_of(r), !r.site.same_place_as.is_empty())),
+            _ => None,
+        })
+        .collect();
+    let at: Vec<usize> = drawn
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, p))| *p)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(at.len(), 2);
+    assert_eq!(at[1], at[0] + 1, "side by side: {drawn:?}");
+    // The focused row's detail names the other cause and offers the merge door.
+    let other = &paired[1].site.headline;
+    assert!(html.contains("Same place as"), "{html}");
+    assert!(html.contains("site-detail-same-place-link"));
+    assert!(html.contains(&other.replace('\'', "&#39;")) || html.contains(other.as_str()));
+    assert!(html.contains("site-detail-same-place-merge"));
+    // A look only: the line is still drawn once and every escalated row is still there.
+    assert_eq!(count(&html, "class=\"queue-line\""), 1);
+    assert_eq!(l.row_count(), v.escalated.len().min(ROWS_PER_PAGE));
+}
+
+#[test]
+fn a_queue_with_no_paired_row_draws_no_possible_duplicate_button() {
+    let html = page("queue/over-budget");
+    assert!(!html.contains("review-queue-dup-together"));
+    assert!(!html.contains("Possible duplicates together"));
 }

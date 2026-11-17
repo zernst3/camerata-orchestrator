@@ -26,11 +26,11 @@ use camerata_ui_core::edits::{
     commit, control_for, decision_line, duplicate_line, edit_tip, field_label, field_state,
     flagged_by_line, head_chips, held_line, is_thrown_out, merge_candidate_total, merge_candidates,
     merge_shown_line, possible_false_positive_lines, reapply_decision_request,
-    reapply_done_message, reduce, review_level_text, severity_note, snippet_at_line,
-    split_choice_from_value, split_option_value, stage1_line, stage2_line, stale_edit_line,
-    stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control, DetailAction,
-    DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction, LineTone, Snippet,
-    SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
+    reapply_done_message, reduce, review_level_text, same_place_lines, severity_note,
+    snippet_at_line, split_choice_from_value, split_option_value, stage1_line, stage2_line,
+    stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control,
+    DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction,
+    LineTone, Snippet, SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
 };
 use camerata_ui_core::tree::{file_line, is_outlier, kind_tag_of, severity_badge, severity_label};
 use camerata_ui_core::triage::TriageState;
@@ -156,6 +156,7 @@ pub(crate) fn SiteDetailView(
     let flagged = flagged_by_line(&row);
     let duplicate = duplicate_line(&row);
     let fp_lines = possible_false_positive_lines(&row);
+    let same_place = same_place_lines(&row).to_vec();
     let sev_note = severity_note(&row);
     let mode = panel.mode.clone();
     let picking = mode == DetailMode::PickField;
@@ -308,6 +309,35 @@ pub(crate) fn SiteDetailView(
                         onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginMerge)),
                         "merge into"
                     }
+                    }
+                }
+            }
+            if !same_place.is_empty() {
+                div { class: "site-detail-line site-detail-same-place",
+                    span { class: "site-detail-label", "{camerata_api_types::review_view::SamePlaceView::LABEL}" }
+                    div { class: "site-detail-value",
+                        for other in same_place {
+                            span { key: "{other.key}", class: "site-detail-same-place-item",
+                                button {
+                                    class: "btn-edit-sm site-detail-same-place-link",
+                                    title: "Open the other cause. It may be the same problem found twice, and it stays a problem until you rule on it.",
+                                    onclick: {
+                                        let (key, rule, node) = (other.key.clone(), other.rule_id.clone(), other.group_id.clone());
+                                        move |_| on_event.call(DetailEvent::GoTo(key.clone(), rule.clone(), node.clone()))
+                                    },
+                                    "{other.title}"
+                                }
+                                " {other.rule_id} at line {other.line}"
+                            }
+                        }
+                        if !thrown_out {
+                            button {
+                                class: "btn-edit-sm site-detail-same-place-merge",
+                                title: "Merge this row into the other cause's row (M). You give the reason.",
+                                onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginMerge)),
+                                "merge into"
+                            }
+                        }
                     }
                 }
             }
