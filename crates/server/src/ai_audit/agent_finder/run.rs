@@ -86,6 +86,12 @@ pub struct FinderExtras {
     pub partial_rules: Vec<PartialRule>,
     /// Rules every piece that was asked answered "not applicable" (and none was left partial).
     pub not_applicable_rules: Vec<String>,
+    /// Rules every piece that was asked answered "not a problem here" or "not applicable" (at
+    /// least one the former, none left partial): the model looked and judged it harmless, so the
+    /// rule is never recorded as verified clean.
+    pub not_a_problem_rules: Vec<String>,
+    /// One line for each "not a problem here" answer (piece, rule, place, reason). Operator only.
+    pub not_a_problem_notes: Vec<String>,
     /// Operator-only remarks: stray files an agent wrote, listed places that could not be checked.
     pub notes: Vec<String>,
     /// How many problems the agents wrote, and how many of them cite no rule. The share with no
@@ -104,6 +110,9 @@ impl FinderExtras {
     pub fn note_before_rules(&self, ledger: &mut ScanLedger, repo: &str) {
         for rule in &self.not_applicable_rules {
             ledger.note_not_applicable_rule(repo, rule.to_ascii_uppercase());
+        }
+        for rule in &self.not_a_problem_rules {
+            ledger.note_not_a_problem_rule(repo, rule.to_ascii_uppercase());
         }
     }
 
@@ -1105,7 +1114,7 @@ pub async fn find_repo(
     verified.extend(parked);
 
     // The extras: coverage, partial rules, rules every piece found not applicable.
-    let mut rule_pieces: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut rule_pieces: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     for r in &reports {
         for rule in &r.checklist_rules {
             let entry = rule_pieces.entry(rule.to_ascii_uppercase()).or_default();
@@ -1116,6 +1125,12 @@ pub async fn find_repo(
             {
                 entry.1 += 1;
             }
+            if r.not_a_problem_here
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(rule))
+            {
+                entry.2 += 1;
+            }
         }
     }
     for r in &mut reports {
@@ -1123,6 +1138,9 @@ pub async fn find_repo(
             extras.coverage.push(c);
         }
         extras.partial_rules.append(&mut r.partial_rules);
+        extras
+            .not_a_problem_notes
+            .append(&mut r.not_a_problem_lines);
     }
     let partial_ids: HashSet<String> = extras
         .partial_rules
@@ -1130,8 +1148,15 @@ pub async fn find_repo(
         .map(|p| p.rule_id.to_ascii_uppercase())
         .collect();
     extras.not_applicable_rules = rule_pieces
+        .iter()
+        .filter(|(rule, (asked, na, _))| *asked > 0 && asked == na && !partial_ids.contains(*rule))
+        .map(|(rule, _)| rule.clone())
+        .collect();
+    extras.not_a_problem_rules = rule_pieces
         .into_iter()
-        .filter(|(rule, (asked, na))| *asked > 0 && asked == na && !partial_ids.contains(rule))
+        .filter(|(rule, (asked, na, nph))| {
+            *asked > 0 && *nph > 0 && asked == &(na + nph) && !partial_ids.contains(rule)
+        })
         .map(|(rule, _)| rule)
         .collect();
     Ok((verified, proposed, recs, failed, stage_samples, extras))

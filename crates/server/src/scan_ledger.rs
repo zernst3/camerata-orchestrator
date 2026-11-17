@@ -177,6 +177,14 @@ pub struct RuleLedgerEntry {
     /// genuinely looked, found nothing" case).
     #[serde(default)]
     pub not_applicable: bool,
+    /// Set when every answer the agent finder gave for this rule on this repo was "not a problem
+    /// here" (or "not applicable", with at least one of the former): the model looked and judged
+    /// the letter of the rule unmet but harmless. That is not "checked and compliant", so the
+    /// rule is never [`Self::verified_clean`]; it is not a problem row and not judged not
+    /// applicable either. Set via [`ScanLedger::note_not_a_problem_rule`]. `serde(default)` so a
+    /// ledger written before it existed still loads.
+    #[serde(default)]
+    pub judged_not_a_problem: bool,
     /// Set when the rule ran on SOME of the code and the scan was stopped before it ran on the
     /// rest (today: the spend limit). The rule did run (`ran` is true, its findings are real),
     /// but it was NOT checked everywhere, so it is never [`Self::verified_clean`], the
@@ -283,6 +291,18 @@ impl RuleLedgerEntry {
                 reason: why.clone(),
             };
         }
+        // The agent finder looked and judged the rule's letter unmet but harmless. That is not
+        // "checked and compliant", so the cell is never clean; and it is not a problem or an
+        // absent concern either. The closest state the matrix and its release-gate check already
+        // know is not reviewed ("never to be read as clean"), with a reason that says what
+        // happened. The model's own lines are in the operator's "Judged not a problem here" list.
+        if self.judged_not_a_problem {
+            return CellState::NotReviewed {
+                reason: "the model judged the rule's wording unmet here but not a problem; not \
+                         shown compliant (see the operator's notes)"
+                    .to_string(),
+            };
+        }
         // A deterministic architectural rule that evaluated no file in scope had nothing to look
         // at on this repo. That is not a clean result, and in the patterns matrix it must not
         // read as "this service handles the rule differently" against a service that violates
@@ -309,6 +329,7 @@ impl RuleLedgerEntry {
         self.ran
             && self.findings_emitted == 0
             && !self.not_applicable
+            && !self.judged_not_a_problem
             && self.partial_reason.is_none()
     }
 }
@@ -509,6 +530,14 @@ pub struct ScanLedger {
     /// Transient scan-time plumbing only.
     #[serde(skip)]
     not_applicable_pending: BTreeSet<(String, String)>,
+    /// Rule ids queued for [`RuleLedgerEntry::judged_not_a_problem`]; same shape as
+    /// `not_applicable_pending`. Transient.
+    #[serde(skip)]
+    not_a_problem_pending: BTreeSet<(String, String)>,
+    /// The agent finder's "judged not a problem here" notes, one line each (rule, place, reason),
+    /// for the operator. Never in an export. `serde(default)` so an older ledger still loads.
+    #[serde(default)]
+    not_a_problem_notes: Vec<String>,
     /// What this scan was actually FED. See [`ScanInputFacts`].
     #[serde(default)]
     input: ScanInputFacts,
@@ -1664,6 +1693,24 @@ impl ScanLedger {
             .insert((repo.to_string(), rule_id.into()));
     }
 
+    /// Queue the "judged not a problem here" fact for `rule_id` on `repo` (see
+    /// [`RuleLedgerEntry::judged_not_a_problem`]); consumed by [`Self::record_rule`] like
+    /// [`Self::note_not_applicable_rule`].
+    pub fn note_not_a_problem_rule(&mut self, repo: &str, rule_id: impl Into<String>) {
+        self.not_a_problem_pending
+            .insert((repo.to_string(), rule_id.into()));
+    }
+
+    /// Append the finder's "judged not a problem here" lines for the operator.
+    pub fn record_not_a_problem_notes(&mut self, notes: Vec<String>) {
+        self.not_a_problem_notes.extend(notes);
+    }
+
+    /// What the agent finder judged not a problem here, one line each. Operator only.
+    pub fn not_a_problem_notes(&self) -> &[String] {
+        &self.not_a_problem_notes
+    }
+
     /// Record (or, for a rule already seen for this repo this scan, ACCUMULATE) one rule's
     /// outcome for `repo`. The entry is kept per (rule, repo): a rule that ran on one repo and
     /// was skipped on another is two entries, and the merged view ([`Self::rule`]) says so
@@ -1697,6 +1744,9 @@ impl ScanLedger {
         let not_applicable = self
             .not_applicable_pending
             .contains(&(repo.to_string(), rule_id.clone()));
+        let judged_not_a_problem = self
+            .not_a_problem_pending
+            .contains(&(repo.to_string(), rule_id.clone()));
         let key = (rule_id.clone(), repo.to_string());
         self.rules
             .entry(key.clone())
@@ -1713,6 +1763,7 @@ impl ScanLedger {
                     e.coverage_note = coverage_note.clone();
                 }
                 e.not_applicable = e.not_applicable || not_applicable;
+                e.judged_not_a_problem = e.judged_not_a_problem || judged_not_a_problem;
             })
             .or_insert(RuleLedgerEntry {
                 rule_id: rule_id.clone(),
@@ -1724,6 +1775,7 @@ impl ScanLedger {
                 findings_emitted,
                 coverage_note,
                 not_applicable,
+                judged_not_a_problem,
                 partial_reason: None,
                 repos_not_run: Vec::new(),
                 not_run_reason: None,
@@ -1889,6 +1941,7 @@ impl ScanLedger {
                     findings_emitted: 0,
                     coverage_note: Some(CORPUS_LOAD_FAILED_NOTE.to_string()),
                     not_applicable: false,
+                    judged_not_a_problem: false,
                     partial_reason: None,
                     repos_not_run: Vec::new(),
                     not_run_reason: None,
@@ -2063,6 +2116,10 @@ impl ScanLedger {
             || self
                 .not_applicable_pending
                 .contains(&(repo.to_string(), rule_id.clone()));
+        let judged_not_a_problem = self.rules.get(&key).is_some_and(|e| e.judged_not_a_problem)
+            || self
+                .not_a_problem_pending
+                .contains(&(repo.to_string(), rule_id.clone()));
         self.rules.insert(
             key.clone(),
             RuleLedgerEntry {
@@ -2075,6 +2132,7 @@ impl ScanLedger {
                 findings_emitted,
                 coverage_note,
                 not_applicable,
+                judged_not_a_problem,
                 partial_reason: None,
                 repos_not_run: Vec::new(),
                 not_run_reason: None,
@@ -2631,6 +2689,9 @@ fn merge_rule_entries(entries: &[&RuleLedgerEntry]) -> RuleLedgerEntry {
                 .collect();
             !applying.is_empty() && applying.iter().all(|e| e.not_applicable)
         },
+        // Any repo that judged the rule not a problem here keeps the merged rule from reading
+        // verified clean: it is not checked and compliant everywhere.
+        judged_not_a_problem: entries.iter().any(|e| e.judged_not_a_problem),
         partial_reason: (!parts.is_empty()).then(|| parts.join("; ")),
         repos_not_run: gaps
             .iter()
@@ -3386,6 +3447,29 @@ mod tests {
                 .contains(&"ARCH-API-VERSIONING-1".to_string()),
             "must appear in its own not_applicable outcome bucket"
         );
+    }
+
+    /// A rule the agent finder judged only "not a problem here" is never verified clean, and sits
+    /// in no other bucket either (not not-applicable, not excluded). An older ledger without the
+    /// mark still loads and reads as before.
+    #[test]
+    fn a_rule_judged_only_not_a_problem_here_is_in_no_outcome_bucket() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_not_a_problem_rule("", "ARCH-X-1");
+        for rule in ["ARCH-X-1", "ARCH-Y-1"] {
+            ledger.record_rule("", rule, RuleTier::Semantic, true, None, 5, 0);
+        }
+        let entry = ledger.rule("ARCH-X-1").expect("recorded");
+        assert!(entry.judged_not_a_problem && !entry.verified_clean());
+        assert_eq!(ledger.healthy_rule_ids(), vec!["ARCH-Y-1".to_string()]);
+        assert!(ledger.not_applicable_rule_ids().is_empty());
+        assert!(ledger.excluded_rules().is_empty());
+        let mut old = serde_json::to_value(entry).expect("serializes");
+        old.as_object_mut()
+            .expect("object")
+            .remove("judged_not_a_problem");
+        let loaded: RuleLedgerEntry = serde_json::from_value(old).expect("an older entry loads");
+        assert!(!loaded.judged_not_a_problem && loaded.verified_clean());
     }
 
     /// The positive twin: a rule recorded with `ran && findings_emitted == 0` WITHOUT ever

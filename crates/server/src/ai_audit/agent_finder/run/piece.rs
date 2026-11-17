@@ -59,6 +59,11 @@ pub(super) struct PieceReport {
     pub partial_rules: Vec<PartialRule>,
     /// Rules this piece answered "not applicable".
     pub not_applicable: Vec<String>,
+    /// Rules whose answer in this piece stood as "not a problem here".
+    pub not_a_problem_here: Vec<String>,
+    /// One line for each "not a problem here" answer (rule, place, reason), for the operator's
+    /// own list. Never a client row.
+    pub not_a_problem_lines: Vec<String>,
     pub failures: Vec<FailedPass>,
     /// Operator-only remarks (stray files).
     pub notes: Vec<String>,
@@ -476,12 +481,13 @@ fn rules_message(view: &View) -> String {
     if !view.outcome.not_completed.is_empty() {
         text.push_str(&format!(
             "These rules have an answer that could not be accepted: {}. A `clean` answer needs up \
-             to three places you read, each a file of this part and a line; a `problems` answer \
-             needs the numbers of problems you wrote.\n",
+             to three places you read, each a file of this part and a line; a `not_a_problem_here` \
+             answer needs its one place the same way; a `problems` answer needs the numbers of \
+             problems you wrote.\n",
             view.outcome.not_completed.join(", ")
         ));
     }
-    text.push_str("Answer each rule `problems`, `clean` or `not_applicable`, as before.");
+    text.push_str("Answer each rule `problems`, `clean`, `not_a_problem_here` (with its one place and one sentence of reason) or `not_applicable`, as before.");
     text
 }
 
@@ -631,6 +637,16 @@ pub(super) fn report_of(
     for n in &view.output.notes {
         report.notes.push(format!("{}: {n}", piece.key));
     }
+    // What the agent judged not a problem here: shown to the reviewer, never a client row.
+    for n in &view.outcome.not_a_problem_notes {
+        let at = n
+            .place
+            .line
+            .map_or_else(|| n.place.path.clone(), |l| format!("{}:{l}", n.place.path));
+        report
+            .not_a_problem_lines
+            .push(format!("{}: {} at {at}: {}", piece.key, n.rule, n.reason));
+    }
     for file in rewritten_problem_files(&runs) {
         report.notes.push(format!(
             "{}: a later step wrote {file} again; the problems only the earlier version held were kept",
@@ -671,6 +687,13 @@ pub(super) fn report_of(
         .effective
         .iter()
         .filter(|e| matches!(e.state, Effective::NotApplicable))
+        .map(|e| e.rule.clone())
+        .collect();
+    report.not_a_problem_here = view
+        .outcome
+        .effective
+        .iter()
+        .filter(|e| matches!(e.state, Effective::NotAProblemHere))
         .map(|e| e.rule.clone())
         .collect();
 

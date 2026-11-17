@@ -143,6 +143,8 @@ pub(super) fn conventions_from_answers(
         .map(|answers| {
             answers
                 .iter()
+                // Option counts of a `not_a_problem_here` answer are dropped on purpose: a place the
+                // model judged harmless is not evidence of how the unit does the thing.
                 .filter(|a| matches!(a.state, Effective::Problems(_) | Effective::Clean(_)))
                 .map(|a| {
                     let mut a = a.clone();

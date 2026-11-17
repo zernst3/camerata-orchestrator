@@ -406,3 +406,116 @@ async fn a_stray_problems_file_that_is_a_problems_list_is_read_as_one() {
         assert_eq!((rows[0].path.as_str(), rows[0].line), ("src/b.rs", 3));
     }
 }
+
+#[tokio::test]
+async fn a_not_a_problem_here_answer_makes_no_row_is_noted_for_the_reviewer_and_is_not_partial() {
+    let script = full_script(
+        &[("src/a.rs", 6), ("src/b.rs", 4)],
+        vec![],
+        vec![],
+        vec![
+            json!({"rule": "ARCH-ONE-1", "answer": "not_a_problem_here",
+                   "place": {"path": "src/a.rs", "line": 2}, "reason": "The input is checked first."}),
+            answer_clean("SEC-TWO-1", "src/a.rs", 1),
+        ],
+    );
+    let agent = ScriptedAgent::new(script);
+    let (findings, _, _, failed, _, extras) = run(&agent).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(findings.is_empty(), "{findings:?}");
+    assert!(extras.partial_rules.is_empty());
+    assert!(
+        extras.not_applicable_rules.is_empty(),
+        "assessed is not judged not applicable"
+    );
+    // The ledger never reads the rule as verified clean, and it is in no other bucket.
+    let mut ledger = crate::scan_ledger::ScanLedger::default();
+    extras.note_before_rules(&mut ledger, REPO);
+    for rule in ["ARCH-ONE-1", "SEC-TWO-1"] {
+        ledger.record_rule(
+            REPO,
+            rule,
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            2,
+            0,
+        );
+    }
+    extras.note_after_rules(&mut ledger, REPO);
+    assert_eq!(ledger.healthy_rule_ids(), vec!["SEC-TWO-1".to_string()]);
+    assert!(ledger.not_applicable_rule_ids().is_empty());
+    assert!(ledger.excluded_rules().is_empty());
+    assert!(
+        extras
+            .not_a_problem_notes
+            .iter()
+            .any(|n| n.contains("ARCH-ONE-1")
+                && n.contains("src/a.rs:2")
+                && n.contains("The input is checked first.")),
+        "{:?}",
+        extras.not_a_problem_notes
+    );
+    assert_eq!(extras.not_a_problem_rules, vec!["ARCH-ONE-1".to_string()]);
+}
+
+#[tokio::test]
+async fn a_rule_answered_not_a_problem_here_in_one_piece_and_clean_in_another_is_not_marked() {
+    let nph = |path: &str| {
+        json!({"rule": "ARCH-ONE-1", "answer": "not_a_problem_here",
+               "place": {"path": path, "line": 2}, "reason": "Fine here."})
+    };
+    let a = ScriptedAgent::new(full_script(
+        &[("src/a.rs", 6)],
+        vec![],
+        vec![],
+        vec![nph("src/a.rs"), answer_clean("SEC-TWO-1", "src/a.rs", 2)],
+    ));
+    let b = ScriptedAgent::new(full_script(
+        &[("src/b.rs", 4)],
+        vec![],
+        vec![],
+        vec![
+            answer_clean("ARCH-ONE-1", "src/b.rs", 1),
+            answer_clean("SEC-TWO-1", "src/b.rs", 2),
+        ],
+    ));
+    let joints = ScriptedAgent::new(vec![
+        out("problems-1.json", &json!([])),
+        out("leads-answers.json", &json!([])),
+    ]);
+    let agent = ByPiece::new(vec![("src/a.rs", a), ("src/b.rs", b), ("joints", joints)]);
+    let mut opts = options();
+    opts.force_pieces = Some(2);
+    let (_, _, _, failed, _, extras) =
+        run_with(&agent, &repo_files(), &rules(), &corpus(), &opts).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(extras.not_a_problem_rules.is_empty(), "{extras:?}");
+    assert_eq!(
+        extras.not_a_problem_notes.len(),
+        1,
+        "the note is still kept"
+    );
+}
+
+#[tokio::test]
+async fn a_not_a_problem_here_place_that_was_not_read_makes_the_rule_not_completed() {
+    let script = full_script(
+        &[("src/a.rs", 6), ("src/b.rs", 4)],
+        vec![],
+        vec![],
+        vec![
+            json!({"rule": "ARCH-ONE-1", "answer": "not_a_problem_here",
+                   "place": {"path": "src/elsewhere.rs", "line": 2}, "reason": "Fine."}),
+            answer_clean("SEC-TWO-1", "src/a.rs", 1),
+        ],
+    );
+    let agent = ScriptedAgent::new(script);
+    let (_, _, _, failed, _, extras) = run(&agent).await;
+    assert!(
+        failed.iter().any(|f| f.reason.contains("ARCH-ONE-1")),
+        "{failed:?}"
+    );
+    assert!(extras.not_a_problem_notes.is_empty());
+    assert!(extras.not_a_problem_rules.is_empty());
+}

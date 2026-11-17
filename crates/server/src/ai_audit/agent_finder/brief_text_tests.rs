@@ -57,3 +57,10 @@ fn both_briefs_tell_the_model_to_list_the_other_places_of_one_problem() {
         assert!(text.contains(sentence), "{text}");
     }
 }
+
+#[test]
+fn no_agent_brief_claims_a_severity_minimum() {
+    for brief in [PIECE_BRIEF, JOINTS_BRIEF] {
+        assert!(!brief.contains("at least"), "{brief}");
+    }
+}
