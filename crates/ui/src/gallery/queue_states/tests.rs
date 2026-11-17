@@ -442,7 +442,7 @@ fn the_possible_duplicate_page_lists_paired_rows_together_with_their_chip_and_th
     assert!(paired[0].site.line.abs_diff(paired[1].site.line) <= NEAR_LINES);
     for r in &paired {
         let other = &r.site.same_place_as[0];
-        assert_eq!(other.line.abs_diff(r.site.line) <= NEAR_LINES, true);
+        assert!(other.line.abs_diff(r.site.line) <= NEAR_LINES);
     }
     // The look is on and its button says how many rows are paired.
     assert!(html.contains("Back to rank order (2 paired)"), "{html}");
