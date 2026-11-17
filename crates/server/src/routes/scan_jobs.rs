@@ -1448,12 +1448,32 @@ pub(crate) async fn run_resume_plan(
     }
 }
 
+/// The query of `POST /api/inspections/:id/resume`. `max_cost_usd` raises the spend limit the
+/// saved run was started with (the operator approving a paused run's new estimate); absent, the
+/// saved limit stands. The limit is not part of the run's identity, so a resume accepts a new one.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct ResumeQuery {
+    #[serde(default)]
+    pub(crate) max_cost_usd: Option<f64>,
+}
+
+impl ResumeQuery {
+    /// The saved request with the limit this resume was approved at.
+    pub(crate) fn apply(&self, mut req: AuditReq) -> AuditReq {
+        if self.max_cost_usd.is_some() {
+            req.max_cost_usd = self.max_cost_usd;
+        }
+        req
+    }
+}
+
 /// Start the saved run `id` again as a background job that runs only the parts that are not
 /// done. The same job the scan button starts, with the saved request and `resume_run` set, so a
 /// refusal (the repo moved on, the rules changed, the run is in use) fails the job with the reason.
 pub(crate) async fn run_resume_start(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ResumeQuery>,
 ) -> impl IntoResponse {
     let record = match crate::run_store::read_record(&id) {
         Ok(r) => r,
@@ -1486,7 +1506,7 @@ pub(crate) async fn run_resume_start(
         };
     let job_id = start_audit_job(
         &state,
-        req,
+        query.apply(req),
         AuditJobOptions {
             resume_run: Some(id),
             ..AuditJobOptions::default()

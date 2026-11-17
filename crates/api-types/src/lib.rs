@@ -61,6 +61,7 @@
 
 pub mod audit;
 pub mod claude_cli;
+pub mod cost_checkpoint;
 pub mod credentials;
 pub mod decisions;
 pub mod edits;
