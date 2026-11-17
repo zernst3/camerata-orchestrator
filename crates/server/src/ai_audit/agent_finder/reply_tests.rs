@@ -843,6 +843,18 @@ fn a_windows_drive_path_in_a_text_place_keeps_its_drive() {
 }
 
 #[test]
+fn an_object_place_may_name_its_path_as_file() {
+    let mut p = entry(1, "src/a.rs");
+    p["places"] = serde_json::json!([{"file": "src/b.rs", "line": 4}]);
+    let json = serde_json::json!([p]).to_string();
+    let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+    let places = &out.problems[0].places;
+    assert_eq!(places.len(), 1, "{places:?}");
+    assert_eq!((places[0].path.as_str(), places[0].line), ("src/b.rs", 4));
+}
+
+#[test]
 fn a_place_with_a_path_and_no_usable_line_becomes_a_place_at_line_zero() {
     let mut p = entry(1, "src/a.rs");
     p["places"] = serde_json::json!(["src/a.rs", {"path": "src/b.rs"}]);

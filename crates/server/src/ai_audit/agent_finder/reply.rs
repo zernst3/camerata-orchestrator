@@ -244,6 +244,7 @@ fn parse_problem_places(
                 };
                 (
                     item.get("path")
+                        .or_else(|| item.get("file"))
                         .and_then(serde_json::Value::as_str)
                         .map(|s| plain_path(s.trim()))
                         .filter(|s| !s.is_empty()),
