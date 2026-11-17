@@ -126,6 +126,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 Err(why) => resume_plan_shown.set(Some(ResumePlanView {
                     text: String::new(),
                     refusal: Some(why),
+                    ..ResumePlanView::default()
                 })),
             }
         });
@@ -186,7 +187,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
             }
         });
     });
-    let on_resume = EventHandler::new(move |run_id: String| {
+    let on_resume = EventHandler::new(move |(run_id, limit): (String, Option<f64>)| {
         resume_plan_shown.set(None);
         job_failed_message.set(None);
         cost_checkpoint.set(None);
@@ -195,7 +196,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
         spawn(async move {
             let result = run_what_remains(
                 loading_count,
-                || async { resume_start(&run_id).await },
+                || async move { resume_start_at(&run_id, limit).await },
                 |jid| async move {
                     active_audit_job.set(Some(jid.clone()));
                     poll_job(

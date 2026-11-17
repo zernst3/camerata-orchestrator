@@ -1429,6 +1429,8 @@ pub(crate) async fn run_resume_plan(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // The limit the run was saved with, so the confirmation can offer to change it.
+    let mut saved_limit = None;
     if let Ok(record) = crate::run_store::read_record(&id) {
         if let Some(why) = resume_project_refusal(&state, &record) {
             return (
@@ -1437,9 +1439,14 @@ pub(crate) async fn run_resume_plan(
             )
                 .into_response();
         }
+        saved_limit = record.args["max_cost_usd"].as_f64();
     }
     match crate::run_store::preview_resume(&id) {
-        Ok(preview) => (StatusCode::OK, Json(serde_json::json!(preview))).into_response(),
+        Ok(preview) => {
+            let mut body = serde_json::json!(preview);
+            body["saved_limit_usd"] = serde_json::json!(saved_limit);
+            (StatusCode::OK, Json(body)).into_response()
+        }
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": e.to_string() })),

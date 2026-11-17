@@ -67,6 +67,27 @@ where
     Some(start(run_id.to_string(), limit).await)
 }
 
+/// What the operator typed in the resume confirmation's spend limit field, against the limit the
+/// run was saved with: `Ok(None)` (send no override) when it is blank or the same to the cent,
+/// `Ok(Some(limit))` when it changed, `Err` when it is not a positive dollar amount.
+pub(in crate::cockpit) fn typed_limit(
+    saved: Option<f64>,
+    typed: &str,
+) -> Result<Option<f64>, String> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return Ok(None);
+    }
+    let usd: f64 = typed
+        .parse()
+        .map_err(|_| "the spend limit must be a number of dollars".to_string())?;
+    if !usd.is_finite() || usd <= 0.0 {
+        return Err("the spend limit must be a positive number of dollars".to_string());
+    }
+    let same = saved.is_some_and(|s| (s * 100.0).round() == (usd * 100.0).round());
+    Ok((!same).then_some(usd))
+}
+
 /// "1 piece" or "4 pieces".
 fn pieces(n: usize) -> String {
     if n == 1 {
@@ -458,6 +479,69 @@ mod tests {
         let plain: JobStateView =
             serde_json::from_value(serde_json::json!({ "status": "running" })).unwrap();
         assert!(plain.cost_checkpoint.is_none());
+    }
+
+    #[test]
+    fn a_typed_limit_is_sent_only_when_it_differs_from_the_saved_one() {
+        // Unchanged (to the cent), blank: no override.
+        assert_eq!(typed_limit(Some(260.0), "260.00"), Ok(None));
+        assert_eq!(typed_limit(Some(260.0), " 260 "), Ok(None));
+        assert_eq!(typed_limit(Some(260.0), ""), Ok(None));
+        // Changed: the override, which reaches the resume URL.
+        let changed = typed_limit(Some(260.0), "320.7").unwrap();
+        assert_eq!(changed, Some(320.7));
+        assert_eq!(
+            resume_url("http://x", "r1", changed),
+            "http://x/api/inspections/r1/resume?max_cost_usd=320.70"
+        );
+        assert_eq!(
+            resume_url(
+                "http://x",
+                "r1",
+                typed_limit(Some(260.0), "260.00").unwrap()
+            ),
+            "http://x/api/inspections/r1/resume"
+        );
+        // A run saved with no limit: a typed one is an override.
+        assert_eq!(typed_limit(None, "50"), Ok(Some(50.0)));
+        // Not a positive number: refused, never sent.
+        for bad in ["abc", "0", "-5", "NaN", "inf"] {
+            assert!(typed_limit(Some(260.0), bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_resume_confirmation_carries_a_spend_limit_field_prefilled_with_the_saved_limit() {
+        let plan = ResumePlanView {
+            text: "Resume: what remains\n".into(),
+            saved_limit_usd: Some(260.0),
+            ..ResumePlanView::default()
+        };
+        let page = render_fragment(ConfirmHarness, ConfirmProps { plan: Some(plan) });
+        assert!(page.contains("scan-resume-limit"), "{page}");
+        assert!(page.contains("value=\"260.00\""), "{page}");
+        assert!(page.contains("Start: run only these parts"), "{page}");
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct ConfirmProps {
+        plan: Option<ResumePlanView>,
+    }
+
+    #[component]
+    fn ConfirmHarness(props: ConfirmProps) -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "p".to_string(),
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+                run_id: Some("r1".to_string()),
+                plan: props.plan,
+            }
+        }
     }
 
     #[test]

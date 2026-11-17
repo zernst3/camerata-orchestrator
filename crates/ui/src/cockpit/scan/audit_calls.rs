@@ -669,6 +669,10 @@ pub(in crate::cockpit) struct ResumePlanView {
     /// Why the resume cannot start now, in plain words; `None` when it can.
     #[serde(default)]
     pub refusal: Option<String>,
+    /// The spend limit the run was saved with; `None` when it had none. The confirmation
+    /// prefills its limit field with it.
+    #[serde(default)]
+    pub saved_limit_usd: Option<f64>,
 }
 
 /// Fetch the resume plan of a saved run.

@@ -306,6 +306,7 @@ mod tests {
                 ResumePlanView {
                     text: "Resume: what remains\n  - calibration (was running)\n".to_string(),
                     refusal: None,
+                    ..ResumePlanView::default()
                 },
             )),
         );
@@ -318,6 +319,7 @@ mod tests {
                 ResumePlanView {
                     text: "Resume: what remains\n".to_string(),
                     refusal: Some("the repo moved on".to_string()),
+                    ..ResumePlanView::default()
                 },
             )),
         );

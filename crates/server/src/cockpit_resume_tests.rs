@@ -286,6 +286,9 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     let plan = body_json(plan).await;
     assert!(plan["refusal"].is_null(), "{plan}");
     assert_eq!(plan["state"], "incomplete", "{plan}");
+    // The plan carries the limit the run was saved with (null when it had none), which the
+    // confirmation prefills.
+    assert!(plan.get("saved_limit_usd").is_some(), "{plan}");
     let remaining: Vec<String> = plan["estimate"]["remaining"]
         .as_array()
         .unwrap()

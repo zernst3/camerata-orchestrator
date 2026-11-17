@@ -680,6 +680,7 @@ fn failure_with_plan_harness() -> Element {
             plan: Some(ResumePlanView {
                 text: "Resume: what remains\n  - acme/api: fix text (failed)\n".to_string(),
                 refusal: None,
+                ..ResumePlanView::default()
             }),
         }
         IncompletePassesBanner {
@@ -693,6 +694,7 @@ fn failure_with_plan_harness() -> Element {
             plan: Some(ResumePlanView {
                 text: String::new(),
                 refusal: Some("repository acme/api is at commit 1234567890 now".to_string()),
+                ..ResumePlanView::default()
             }),
         }
     }
