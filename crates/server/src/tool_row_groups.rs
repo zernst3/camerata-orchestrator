@@ -147,6 +147,9 @@ pub(crate) fn share_tool_causes(
         let (path, folded) = match causes.len() {
             0 => (own, false),
             1 => (agent_paths[0].clone(), true),
+            // Several agent causes: keep the rows' current sub-group when no agent row is in it
+            // (so a second run changes nothing), else a fresh one.
+            _ if !causes.contains(&own[2]) => (own, false),
             _ => {
                 let sub = fresh_sub(findings, &own[1]);
                 (vec![own[0].clone(), own[1].clone(), sub], false)
@@ -457,5 +460,41 @@ mod tests {
         let lint_fix = fix_ids(&report, "no-unused-vars");
         let secret_fix = fix_ids(&report, "SEC-NO-HARDCODED-SECRETS-1");
         assert_ne!(lint_fix[0], secret_fix[0]);
+    }
+
+    #[test]
+    fn settling_twice_leaves_the_same_fix_ids() {
+        let a = placed(
+            agent_row("SEC-NO-UNSAFE-DESERIALIZATION-1", "src/a.rs", 9, "high"),
+            1,
+        );
+        let b = placed(
+            agent_row("SEC-NO-UNSAFE-DESERIALIZATION-1", "src/b.rs", 4, "high"),
+            2,
+        );
+        let previews: Vec<Finding> = (0..3)
+            .map(|i| {
+                tool_row(
+                    "semgrep",
+                    "camerata.security.yaml-unsafe-load",
+                    &format!("src/t{i}.rs"),
+                    2,
+                    "high",
+                )
+            })
+            .collect();
+        let mut report = joined(vec![a, b], previews);
+        let ids = |r: &crate::onboard::ScanReport| -> Vec<String> {
+            let index = FixIndex::new(r.tree.as_ref(), &r.findings);
+            r.findings.iter().map(|f| index.fix_id_of(f)).collect()
+        };
+        let paths = |r: &crate::onboard::ScanReport| -> Vec<Vec<String>> {
+            r.findings.iter().map(|f| f.group_path.clone()).collect()
+        };
+        let (before, before_paths) = (ids(&report), paths(&report));
+        settle_tool_causes(&mut report, None);
+        settle_tool_causes(&mut report, None);
+        assert_eq!(ids(&report), before);
+        assert_eq!(paths(&report), before_paths);
     }
 }
