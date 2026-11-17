@@ -2843,3 +2843,13 @@ fn a_corrected_object_after_a_malformed_one_is_read() {
     assert!(why.contains("not a JSON object"), "{why}");
     assert!(why.contains("column"), "{why}");
 }
+
+/// Only the final block counts: a valid object, prose, then a malformed "correction" is refused,
+/// never read as the stale first object.
+#[test]
+fn a_malformed_correction_after_a_valid_object_is_refused() {
+    let (reply, bad) = malformed_then_corrected();
+    let good = reply.rsplit_once("\n\n").unwrap().1.to_string();
+    let stale = format!("{good}\n\nCorrection: use this one instead.\n\n{bad}");
+    assert!(Stage2Reply::parse(&stale).is_err());
+}

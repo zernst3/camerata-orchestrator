@@ -432,8 +432,9 @@ const REAL_LABELS: [&str; 3] = ["yes", "no", "unclear"];
 
 /// The JSON object of a reply. The span from the first brace to the last is read first (a fence
 /// or prose around one object). When that is not one object, the top-level `{...}` blocks are
-/// tried, the last readable one winning: a model that wrote a malformed object and then a
-/// corrected one means the corrected one. A reply with no readable object is refused, and the
+/// tried, and only the final one counts: a model that wrote a malformed object and then a
+/// corrected one means the corrected one, and a valid object followed by a malformed correction
+/// is refused, never read as the stale first one. A reply with no readable object is refused, and the
 /// refusal says where the JSON broke.
 fn reply_object(raw: &str) -> Result<serde_json::Value, String> {
     let Some(span) = extract_json_object(raw) else {
@@ -444,8 +445,8 @@ fn reply_object(raw: &str) -> Result<serde_json::Value, String> {
         Ok(_) => return Err("the reply is not a JSON object".to_string()),
         Err(e) => e,
     };
-    let mut found = None;
     let (mut depth, mut start, mut in_string, mut escaped) = (0usize, 0usize, false, false);
+    let mut last: Option<&str> = None;
     for (i, c) in raw.char_indices() {
         if in_string {
             match (escaped, c) {
@@ -467,17 +468,15 @@ fn reply_object(raw: &str) -> Result<serde_json::Value, String> {
             '}' if depth > 0 => {
                 depth -= 1;
                 if depth == 0 {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw[start..=i]) {
-                        if v.is_object() {
-                            found = Some(v);
-                        }
-                    }
+                    last = Some(&raw[start..=i]);
                 }
             }
             _ => {}
         }
     }
-    found.ok_or_else(|| format!("the reply is not a JSON object ({first_error})"))
+    last.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+        .filter(serde_json::Value::is_object)
+        .ok_or_else(|| format!("the reply is not a JSON object ({first_error})"))
 }
 
 impl Stage2Reply {
