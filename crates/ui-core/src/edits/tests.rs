@@ -1144,11 +1144,9 @@ fn the_detail_lists_each_possible_false_positive_reason_with_its_sentence() {
         ]
     );
     // A reason with the row's own sentence shows it after the standard one; the others do not.
-    let mut flag = PossibleFalsePositive::from_reasons(vec![
-        FpReason::ModelOnly,
-        FpReason::FinderUnsure,
-    ])
-    .expect("flag");
+    let mut flag =
+        PossibleFalsePositive::from_reasons(vec![FpReason::ModelOnly, FpReason::FinderUnsure])
+            .expect("flag");
     flag.specifics.insert(
         FpReason::FinderUnsure,
         "The caller may be checked elsewhere.".to_string(),

@@ -1401,7 +1401,11 @@ pub fn flagged_by_line(row: &SiteRow) -> Option<String> {
 pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, String)> {
     row.possible_false_positive
         .iter()
-        .flat_map(|p| p.reasons.iter().map(move |r| (r.label(), p.sentence_of(*r))))
+        .flat_map(|p| {
+            p.reasons
+                .iter()
+                .map(move |r| (r.label(), p.sentence_of(*r)))
+        })
         .collect()
 }
 

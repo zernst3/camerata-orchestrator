@@ -107,7 +107,10 @@ fn the_fix_plan_says_why_it_matters_to_the_business_and_technically() {
     let row = grid
         .iter()
         .skip(1)
-        .find(|r| cell(&grid, r, "Rules").contains("SEC-NO-RAW-SQL-CONCAT-1") || cell(&grid, r, "What is wrong").contains("request value"))
+        .find(|r| {
+            cell(&grid, r, "Rules").contains("SEC-NO-RAW-SQL-CONCAT-1")
+                || cell(&grid, r, "What is wrong").contains("request value")
+        })
         .expect("the SQL fix row");
     assert!(cell(&grid, row, "Why it matters to the business").contains(BUSINESS_MARKER));
     assert!(cell(&grid, row, "Why it matters technically").contains(TECHNICAL_MARKER));
@@ -146,7 +149,9 @@ fn the_glossary_names_both_reasons_and_not_the_retired_single_one() {
     let entries = released_entries(&reviewed, &client_options());
     let xlsx = workbook(&entries);
     let strings = crate::release_gate::xlsx_strings(&xlsx).unwrap();
-    assert!(strings.iter().any(|s| s == "Why it matters to the business"));
+    assert!(strings
+        .iter()
+        .any(|s| s == "Why it matters to the business"));
     assert!(strings.iter().any(|s| s == "Why it matters technically"));
     assert!(!strings.iter().any(|s| s == "Why it matters"));
 }
@@ -157,12 +162,11 @@ fn the_pdfs_data_carries_only_the_business_text() {
     let reviewed = apply_overlay(&sealed, &[], &[], &[]);
     let package = package_of(&reviewed, &client_options());
     let data = &package.data_json;
-    assert!(data.contains(BUSINESS_MARKER), "the business text is printed");
-    for marker in [
-        SUMMARY_MARKER,
-        TECHNICAL_MARKER,
-        ROW_TECHNICAL_MARKER,
-    ] {
+    assert!(
+        data.contains(BUSINESS_MARKER),
+        "the business text is printed"
+    );
+    for marker in [SUMMARY_MARKER, TECHNICAL_MARKER, ROW_TECHNICAL_MARKER] {
         assert!(!data.contains(marker), "the PDF's data carries {marker}");
     }
 }

@@ -225,32 +225,44 @@ fn a_finder_unsure_row_carries_the_finders_own_sentence() {
     );
     let flag = FpIndex::new(&[f.clone()]).of(&f).expect("flagged");
     assert_eq!(
-        flag.specifics.get(&FpReason::FinderUnsure).map(String::as_str),
+        flag.specifics
+            .get(&FpReason::FinderUnsure)
+            .map(String::as_str),
         Some("The caller may be checked in a layer not shown.")
     );
-    assert!(flag.sentences().ends_with("The caller may be checked in a layer not shown."));
+    assert!(flag
+        .sentences()
+        .ends_with("The caller may be checked in a layer not shown."));
 }
 
 #[test]
 fn a_group_reviewer_doubt_row_carries_the_reviewers_own_why() {
     use camerata_api_types::review::{DisagreementField, Stage2Disagreement};
     let mut by_disagreement = agent_row();
-    by_disagreement.review.stage2_disagreement.push(Stage2Disagreement {
-        field: DisagreementField::Real,
-        stage1: "yes".to_string(),
-        mine: "no".to_string(),
-        why: "The value is a constant, not request input.".to_string(),
-    });
+    by_disagreement
+        .review
+        .stage2_disagreement
+        .push(Stage2Disagreement {
+            field: DisagreementField::Real,
+            stage1: "yes".to_string(),
+            mine: "no".to_string(),
+            why: "The value is a constant, not request input.".to_string(),
+        });
     let mut by_outlier = agent_row();
     by_outlier.review.outlier_reason = Some(OutlierReason::DifferentObject);
     by_outlier.review.outlier_why = "It queries a lookup table, not orders.".to_string();
     for (f, want) in [
-        (by_disagreement, "The value is a constant, not request input."),
+        (
+            by_disagreement,
+            "The value is a constant, not request input.",
+        ),
         (by_outlier, "It queries a lookup table, not orders."),
     ] {
         let flag = FpIndex::new(&[f.clone()]).of(&f).expect("flagged");
         assert_eq!(
-            flag.specifics.get(&FpReason::GroupReviewerDoubt).map(String::as_str),
+            flag.specifics
+                .get(&FpReason::GroupReviewerDoubt)
+                .map(String::as_str),
             Some(want)
         );
     }

@@ -700,7 +700,10 @@ impl PossibleFalsePositive {
 
     /// The flag with the row's own sentences; a blank one is left out.
     #[must_use]
-    pub fn with_specifics(mut self, specifics: impl IntoIterator<Item = (FpReason, String)>) -> Self {
+    pub fn with_specifics(
+        mut self,
+        specifics: impl IntoIterator<Item = (FpReason, String)>,
+    ) -> Self {
         for (reason, text) in specifics {
             let text = text.trim();
             if !text.is_empty() && self.reasons.contains(&reason) {

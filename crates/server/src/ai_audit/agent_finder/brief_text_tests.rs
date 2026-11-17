@@ -110,7 +110,10 @@ fn the_piece_brief_field_list_describes_why_and_business() {
 
 #[test]
 fn the_joints_brief_field_list_names_business() {
-    assert!(JOINTS_BRIEF.contains("`why`, `business`, `fix`"), "{JOINTS_BRIEF}");
+    assert!(
+        JOINTS_BRIEF.contains("`why`, `business`, `fix`"),
+        "{JOINTS_BRIEF}"
+    );
 }
 
 const UNSURE_SENTENCE: &str = "When `sure` is `unsure`, add `unsure_why`: one sentence saying what the code you could see does not settle.";
@@ -119,10 +122,15 @@ const UNSURE_SENTENCE: &str = "When `sure` is `unsure`, add `unsure_why`: one se
 fn both_briefs_ask_for_unsure_why_inside_the_sure_description() {
     let at = PIECE_BRIEF.find("`sure` (`yes`").expect("the sure field");
     let sentence = PIECE_BRIEF.find(UNSURE_SENTENCE).expect("the sentence");
-    let effort = PIECE_BRIEF.find("`effort` to fix").expect("the effort field");
+    let effort = PIECE_BRIEF
+        .find("`effort` to fix")
+        .expect("the effort field");
     assert!(at < sentence && sentence < effort, "{PIECE_BRIEF}");
     assert!(PIECE_BRIEF.contains("does not settle it. When `sure` is `unsure`"));
     // The joints brief names the fields in a list; the sentence follows that list.
     assert!(JOINTS_BRIEF.contains(UNSURE_SENTENCE), "{JOINTS_BRIEF}");
-    assert!(JOINTS_BRIEF.contains("`sure`, `unsure_why`, `effort`"), "{JOINTS_BRIEF}");
+    assert!(
+        JOINTS_BRIEF.contains("`sure`, `unsure_why`, `effort`"),
+        "{JOINTS_BRIEF}"
+    );
 }

@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, HashSet};
 use super::checklist::AnswerKind;
 use super::reply::{
     citation_map, parse_leads_answers, parse_outputs, scan_reply, to_findings, LeadOutcome,
-    Problem, FINDER_BUSINESS_CAPTURE, FINDER_EFFORT_CAPTURE, FINDER_END_LINE_CAPTURE, FINDER_FIX_CAPTURE,
-    FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE, FINDER_RULES_CAPTURE, FINDER_SURE_CAPTURE,
-    FINDER_UNSURE_WHY_CAPTURE, FINDER_WHY_CAPTURE,
+    Problem, FINDER_BUSINESS_CAPTURE, FINDER_EFFORT_CAPTURE, FINDER_END_LINE_CAPTURE,
+    FINDER_FIX_CAPTURE, FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE, FINDER_RULES_CAPTURE,
+    FINDER_SURE_CAPTURE, FINDER_UNSURE_WHY_CAPTURE, FINDER_WHY_CAPTURE,
 };
 
 fn entry(n: u32, path: &str) -> serde_json::Value {
@@ -1019,7 +1019,8 @@ fn the_row_carries_the_technical_reason_on_its_own() {
 fn unsure_why_is_read_tolerantly_and_rides_on_the_row_cleaned() {
     let mut with = entry(1, "src/a.rs");
     with["sure"] = serde_json::json!("unsure");
-    with["unsure_why"] = serde_json::json!("The caller may be checked elsewhere \u{2014} not shown.");
+    with["unsure_why"] =
+        serde_json::json!("The caller may be checked elsewhere \u{2014} not shown.");
     let mut blank = entry(2, "src/b.rs");
     blank["sure"] = serde_json::json!("unsure");
     blank["unsure_why"] = serde_json::json!("  ");
@@ -1039,7 +1040,13 @@ fn unsure_why_is_read_tolerantly_and_rides_on_the_row_cleaned() {
         &BTreeMap::new(),
         &HashSet::new(),
     );
-    let text = findings[0].captures.get("finder-unsure-why").expect("capture");
-    assert!(text.contains("checked elsewhere") && !text.contains('\u{2014}'), "{text}");
+    let text = findings[0]
+        .captures
+        .get("finder-unsure-why")
+        .expect("capture");
+    assert!(
+        text.contains("checked elsewhere") && !text.contains('\u{2014}'),
+        "{text}"
+    );
     assert!(!findings[1].captures.contains_key("finder-unsure-why"));
 }

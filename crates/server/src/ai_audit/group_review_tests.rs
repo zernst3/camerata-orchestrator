@@ -3085,7 +3085,10 @@ fn the_prompt_asks_for_the_two_client_reasons_apart_from_the_reviewers_summary()
         "give no figures, times or costs the code does not show",
         "`why_technical` says what breaks and under what conditions",
     ] {
-        assert!(prompt.contains(needle), "the prompt lacks {needle}\n{prompt}");
+        assert!(
+            prompt.contains(needle),
+            "the prompt lacks {needle}\n{prompt}"
+        );
     }
     assert!(!prompt.contains('\u{2014}') && !prompt.contains('\u{2013}'));
 }
@@ -3101,14 +3104,19 @@ fn a_reply_with_the_two_client_reasons_keeps_them_and_one_without_keeps_none() {
     });
     let parsed = Stage2Reply::parse(&with.to_string()).expect("reads");
     assert!(!parsed.subgroups[0].why_business.contains('\u{2014}'));
-    assert!(parsed.subgroups[0].why_business.starts_with("Data can quietly"));
-    assert!(parsed.subgroups[0].why_technical.starts_with("A write skips"));
+    assert!(parsed.subgroups[0]
+        .why_business
+        .starts_with("Data can quietly"));
+    assert!(parsed.subgroups[0]
+        .why_technical
+        .starts_with("A write skips"));
     let without = serde_json::json!({
         "summary": "s",
         "subgroups": [{"label": "l", "cause": "c", "summary": "x", "members": [0]}],
         "outliers": [], "escalations": [], "disagreements": []
     });
-    let parsed = Stage2Reply::parse(&without.to_string()).expect("a missing field is not a failure");
+    let parsed =
+        Stage2Reply::parse(&without.to_string()).expect("a missing field is not a failure");
     assert_eq!(parsed.subgroups[0].why_business, "");
     assert_eq!(parsed.subgroups[0].why_technical, "");
 }
