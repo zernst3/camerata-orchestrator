@@ -1,6 +1,7 @@
 //! The scan results component.
 
 use super::*;
+use camerata_api_types::cost_checkpoint::CostCheckpoint;
 
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
@@ -129,6 +130,62 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
             }
         });
     });
+    // The cost panel: the run's checkpoint from the polled job, and where the operator stands on
+    // approving a pause. The run resumes only from the confirming click (`resume_on_approval`).
+    let mut cost_checkpoint = use_signal(|| Option::<CostCheckpoint>::None);
+    let mut approve_step = use_signal(ApproveStep::default);
+    let on_approve_confirm = EventHandler::new(move |()| {
+        let (Some(cp), Some(run_id)) = (
+            cost_checkpoint.peek().clone(),
+            audit.peek().as_ref().and_then(|a| a.run_id.clone()),
+        ) else {
+            return;
+        };
+        let step = *approve_step.peek();
+        job_failed_message.set(None);
+        auditing.set(true);
+        cost_checkpoint.set(None);
+        approve_step.set(ApproveStep::Pause);
+        let paused = cp.clone();
+        spawn(async move {
+            let result = run_what_remains(
+                loading_count,
+                || async move {
+                    match resume_on_approval(step, &cp, &run_id, |id, usd| async move {
+                        resume_start_at(&id, Some(usd)).await
+                    })
+                    .await
+                    {
+                        Some(started) => started,
+                        None => Err("the approval was not confirmed".to_string()),
+                    }
+                },
+                |jid| async move {
+                    active_audit_job.set(Some(jid.clone()));
+                    poll_job(
+                        jid,
+                        audit,
+                        auditing,
+                        job_progress,
+                        det_progress,
+                        cost_checkpoint,
+                        active_audit_job,
+                        scan_idle_ms,
+                        job_failed_message,
+                        loading_count,
+                    )
+                    .await;
+                },
+            )
+            .await;
+            if let Err(why) = result {
+                // The run is still paused: keep the pause on screen beside the reason.
+                cost_checkpoint.set(Some(paused));
+                auditing.set(false);
+                job_failed_message.set(Some(why));
+            }
+        });
+    });
     let on_resume = EventHandler::new(move |run_id: String| {
         resume_plan_shown.set(None);
         job_failed_message.set(None);
@@ -145,6 +202,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         auditing,
                         job_progress,
                         det_progress,
+                        cost_checkpoint,
                         active_audit_job,
                         scan_idle_ms,
                         job_failed_message,
@@ -169,6 +227,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 auditing,
                 job_progress,
                 det_progress,
+                cost_checkpoint,
                 active_audit_job,
                 scan_idle_ms,
                 job_failed_message,
@@ -1281,6 +1340,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             detail_finding.set(None);
                             job_progress.set(None);
                             det_progress.set(None);
+                            cost_checkpoint.set(None);
+                            approve_step.set(ApproveStep::default());
                             // Clear any PREVIOUS run's failure banner — a fresh scan starting
                             // is not itself a failure, and a stale message here would look
                             // like this new run already failed before it even began.
@@ -1317,6 +1378,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                         auditing,
                                         job_progress,
                                         det_progress,
+                                        cost_checkpoint,
                                         active_audit_job,
                                         scan_idle_ms,
                                         job_failed_message,
@@ -1861,6 +1923,18 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 // Background-job FAILURE banner (silent-death fix): rendered UNCONDITIONALLY,
                 // not gated on `audited.is_some()` below — a failed or vanished job never
                 // produces a report, so this is the only place a failure would ever surface.
+                // The run's cost against the amount approved, live and after it ends; a pause
+                // before going over offers the one-click approval. Nothing without a spend limit.
+                CostCheckpointPanel {
+                    checkpoint: cost_checkpoint(),
+                    run_id: audit().as_ref().and_then(|a| a.run_id.clone()),
+                    step: approve_step(),
+                    busy: auditing(),
+                    on_ask: Some(EventHandler::new(move |()| { let next = approve_step.peek().ask(); approve_step.set(next); })),
+                    on_back: Some(EventHandler::new(move |()| { let next = approve_step.peek().back(); approve_step.set(next); })),
+                    on_stop: Some(EventHandler::new(move |()| { let next = approve_step.peek().stop(); approve_step.set(next); })),
+                    on_confirm: Some(on_approve_confirm),
+                }
                 ScanJobFailedBanner { message: job_failed_message() }
                 // Live feedback: open this to watch the AI's actual prompt + output for
                 // the audit (so you can trust it's really working, not hung). Shown ONLY for

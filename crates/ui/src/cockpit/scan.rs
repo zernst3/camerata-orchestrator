@@ -101,6 +101,7 @@ pub(super) use camerata_ui_core::adopt::{
 
 mod audit_calls;
 mod banners_panels;
+mod cost_panel;
 mod exports;
 mod findings_table;
 mod onboard;
@@ -111,6 +112,7 @@ mod scan_results;
 mod wire;
 pub use audit_calls::*;
 pub use banners_panels::*;
+pub use cost_panel::*;
 pub use exports::*;
 pub use findings_table::*;
 pub use onboard::*;

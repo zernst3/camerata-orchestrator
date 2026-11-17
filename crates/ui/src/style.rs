@@ -2952,6 +2952,12 @@ html, body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap;
 }
 
+/* Cost panel on the scan screen: spent against approved, and the pause's approval. */
+.cost-panel .cost-bar { max-width: none; margin: 8px 0; }
+.cost-panel-line { font-size: 12.5px; color: var(--ink-soft); margin: 2px 0; }
+.cost-panel-pause { margin-top: 8px; }
+.cost-panel-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
 /* Scan-type selector (Part C): the two "what to scan" checkboxes. */
 .scan-type-selector { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
 
