@@ -565,7 +565,7 @@ fn the_merge_picker_lists_the_duplicate_first_then_a_search_over_path_line_and_r
     };
     let list = merge_candidates(&row, &ctx, "");
     assert_eq!(list[0].key, other.site_key, "the link comes first");
-    assert_eq!(list[0].note.as_deref(), Some("possible duplicate"));
+    assert_eq!(list[0].note.as_deref(), Some("Possible duplicate"));
     assert!(list.len() <= MERGE_LIST_MAX);
     assert!(list.iter().all(|c| c.key != row.site_key), "never itself");
     assert_eq!(
@@ -1820,4 +1820,24 @@ fn the_possible_duplicate_line_lists_the_engine_link_then_the_same_place_causes_
     let mut only_link = row;
     only_link.same_place_as.clear();
     assert_eq!(duplicate_entries(&only_link).len(), 1);
+}
+
+#[test]
+fn two_same_place_causes_with_the_same_title_stay_two_entries_with_their_own_keys() {
+    let all = rows();
+    let mut row = all[0].clone();
+    row.possible_duplicate_of = None;
+    let mut a = same_place(&all[1].site_key, row.line + 1);
+    let mut b = same_place(&all[2].site_key, row.line + 2);
+    a.title = "Same title".into();
+    b.title = "Same title".into();
+    row.same_place_as = vec![a, b];
+    let entries = duplicate_entries(&row);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].label, entries[1].label);
+    assert_ne!(
+        entries[0].key, entries[1].key,
+        "a span key is never the label"
+    );
+    assert_eq!(entries[0].key, all[1].site_key);
 }

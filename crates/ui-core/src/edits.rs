@@ -556,7 +556,7 @@ pub struct MergeCandidate {
     /// `path:line`.
     pub label: String,
     pub rule_id: String,
-    /// "possible duplicate" for the row the engine linked.
+    /// "Possible duplicate" for the row the engine linked.
     pub note: Option<String>,
 }
 
@@ -577,7 +577,7 @@ fn merge_matches(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<MergeCa
                     key: dup.key.clone(),
                     label: format!("{}:{}", dup.path, dup.line),
                     rule_id: dup.rule_id.clone(),
-                    note: Some("possible duplicate".to_string()),
+                    note: Some("Possible duplicate".to_string()),
                 });
             }
         }
@@ -1409,6 +1409,9 @@ pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, &'stat
 /// One entry of the detail's "Possible duplicate of" line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateEntry {
+    /// A key no other entry of the line shares (the site key of the other row, or `engine-link`),
+    /// for the list, whatever the labels say.
+    pub key: String,
     /// What the line shows: the engine's `SEC-KEY-2 at web/env.ts:3`, or the other cause's title.
     pub label: String,
     /// The hover text.
@@ -1424,6 +1427,7 @@ pub fn duplicate_entries(row: &SiteRow) -> Vec<DuplicateEntry> {
     let mut out = Vec::new();
     if let Some((label, hint)) = duplicate_line(row) {
         out.push(DuplicateEntry {
+            key: "engine-link".to_string(),
             label,
             hint,
             goto: None,
@@ -1435,6 +1439,7 @@ pub fn duplicate_entries(row: &SiteRow) -> Vec<DuplicateEntry> {
             continue;
         }
         out.push(DuplicateEntry {
+            key: other.key.clone(),
             label: other.title.clone(),
             hint: format!(
                 "{} at line {}, another cause at the same place",

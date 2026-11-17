@@ -302,7 +302,7 @@ pub(crate) fn SiteDetailView(
                     span { class: "site-detail-label", "Possible duplicate of" }
                     div { class: "site-detail-value",
                         for entry in duplicates {
-                            span { key: "{entry.label}", class: "site-detail-same-place-item",
+                            span { key: "{entry.key}", class: "site-detail-same-place-item",
                                 if let Some((key, rule, node)) = entry.goto.clone() {
                                     button {
                                         class: "btn-edit-sm site-detail-same-place-link",
