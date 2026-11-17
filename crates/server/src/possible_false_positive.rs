@@ -60,6 +60,18 @@ impl FpIndex {
 fn is_deterministic(f: &Finding) -> bool {
     crate::ai_audit::finding_origin(f) == crate::ai_audit::Origin::Deterministic
         && !is_reviewer_added(f)
+        && !is_agent_row(f)
+}
+
+/// Whether the agent finder wrote `f`: a problem (it carries the finder's captures) or one of its
+/// open questions. These rows carry no confidence, so they would read as deterministic; they are
+/// model rows. They are also all held for review by construction (`needs_review`), which says
+/// nothing about doubt, and the model's own rating stands except for the R-8 raise.
+pub fn is_agent_row(f: &Finding) -> bool {
+    use crate::ai_audit::agent_finder::reply::{FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE};
+    f.captures.contains_key(FINDER_PROBLEM_CAPTURE)
+        || f.captures.contains_key(FINDER_PIECE_CAPTURE)
+        || f.rule_id == "AI-OPEN-QUESTION"
 }
 
 /// Whether the reviewer added `f` by hand: the engine has nothing to doubt about it.
@@ -75,9 +87,17 @@ pub fn reasons_of(f: &Finding, deterministic_peer: bool) -> Vec<FpReason> {
     if is_reviewer_added(f) {
         return Vec::new();
     }
+    let agent = is_agent_row(f);
     let checks = [
         (FpReason::GroupReviewerDoubt, group_reviewer_doubts(f)),
-        (FpReason::CalibrationDoubt, calibration_doubts(f)),
+        (
+            FpReason::CalibrationDoubt,
+            if agent {
+                low_confidence(f)
+            } else {
+                calibration_doubts(f)
+            },
+        ),
         (FpReason::TestCodeOnly, in_test_code_only(f)),
         (
             FpReason::ConventionRuleAtMediumOrHigher,
@@ -90,11 +110,15 @@ pub fn reasons_of(f: &Finding, deterministic_peer: bool) -> Vec<FpReason> {
         ),
         (
             FpReason::SeverityFromRuleMinimum,
-            severity_from_rule_minimum(f),
+            if agent {
+                agent_severity_raised(f)
+            } else {
+                severity_from_rule_minimum(f)
+            },
         ),
         (
             FpReason::ModelOnly,
-            !deterministic_peer && !is_deterministic(f) && low_confidence(f),
+            !agent && !deterministic_peer && !is_deterministic(f) && low_confidence(f),
         ),
     ];
     checks
@@ -187,5 +211,18 @@ fn severity_from_rule_minimum(f: &Finding) -> bool {
     raised_by_minimum && stage1_below && stage2_below
 }
 
+/// (f) for an agent row: the model's own rating stands, so only a recorded raise (the R-8
+/// unauthenticated-access floor) lifted the severity above it. A severity the reviewer set is the
+/// reviewer's own.
+fn agent_severity_raised(f: &Finding) -> bool {
+    !crate::report_export::overlay::reviewer_edited_field(f, EditField::Severity)
+        && crate::severity_bounds::recorded_adjustments(f)
+            .iter()
+            .any(|n| n.starts_with("severity raised from "))
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod agent_tests;

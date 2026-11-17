@@ -47,3 +47,7 @@ Should a client export be refused while a flagged row is still undecided? Recomm
 Show the count instead (internal Start here: "N rows flagged as possible false positives, M
 decided"). Refusing would turn a review aid into a gate on the engine's doubt, the same reasoning
 as the 2026-10-16 ruling on `could_be_intentional`.
+
+## On the agent finder's rows (2026-11-17)
+
+An agent finder row (it carries the finder's captures, or is an open question) is held for review by construction, has no confidence and keeps the model's own rating. So on those rows reason (b) fires only on a recorded low confidence (never held-for-review alone), (g) never fires, and (f) fires only when a recorded raise (the unauthenticated-access floor) lifted the severity above the model's rating. Reasons (a), (c), (d) and (e) work as before wherever their data exists. An agent row is not counted as a deterministic row at its place. The old engine finder's results are unchanged.
