@@ -104,6 +104,7 @@ fn args(
         fix_model: fix_model.map(str::to_string),
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,

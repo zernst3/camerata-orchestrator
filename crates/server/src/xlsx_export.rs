@@ -451,8 +451,13 @@ fn partition_rows_for(
     // The engine's reasons to doubt each row: the operator's review aid, on an internal package
     // only. Worked out by the one function the review view also calls.
     let fp_index = internal.then(|| crate::possible_false_positive::FpIndex::new(&report.findings));
-    let dup_index = internal
-        .then(|| crate::possible_duplicate::DupIndex::new(report.tree.as_ref(), &report.findings));
+    let dup_index = internal.then(|| {
+        crate::possible_duplicate::DupIndex::new(
+            report.tree.as_ref(),
+            &report.findings,
+            report.ledger.duplicate_checks(),
+        )
+    });
     let mut rows = Vec::new();
     let mut dep_rows = Vec::new();
     // The repos that flag a credential under the same name, for the display-only note on each

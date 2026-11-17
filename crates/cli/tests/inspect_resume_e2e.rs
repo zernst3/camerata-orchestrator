@@ -310,6 +310,7 @@ fn args(repos: &[&Path], names: &[&str], export: &Path) -> InspectArgs {
         fix_model: None,
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,

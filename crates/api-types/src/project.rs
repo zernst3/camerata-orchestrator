@@ -260,6 +260,11 @@ pub const STAGE1_DEFAULT_MODEL: &str = "claude-opus-5-5";
 /// `--group-review-model` flag or the project setting (A13).
 pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-2";
 
+/// The model the possible-duplicate check runs on when no duplicate check model is set by the
+/// `--dup-check-model` flag or the project setting: the one question it asks of a pair of
+/// write-ups is small and bounded, so it is Sonnet 5.5.
+pub const DUP_CHECK_DEFAULT_MODEL: &str = "claude-sonnet-5-5";
+
 /// Which finder a project's scans use. `Engine` (the default until the calibration passes) is the
 /// rule by rule scan; `Agent` has one model review each part of the code. The server turns it
 /// into the run's finder choice. Set only on the project, never by the environment.
@@ -313,6 +318,11 @@ pub struct ReviewSettings {
     /// Set only here or by the `--group-review-model` flag, never by the environment.
     #[serde(default)]
     pub group_review_model: String,
+    /// The possible-duplicate check's model. Empty means not set: the run uses
+    /// [`DUP_CHECK_DEFAULT_MODEL`]. Set only here or by the `--dup-check-model` flag, never by
+    /// the environment. A project written before the setting existed loads it empty.
+    #[serde(default)]
+    pub dup_check_model: String,
     /// How many rows the Engine Check draws per run (design A2b). 0 turns the lane off. A project
     /// written before the setting existed loads with [`DEFAULT_SAMPLE_SIZE_PER_RUN`].
     #[serde(default = "default_sample_size_per_run")]
@@ -392,6 +402,7 @@ impl Default for ReviewSettings {
             escalation_floor: default_escalation_floor(),
             over_budget_reasons: default_over_budget_reasons(),
             group_review_model: String::new(),
+            dup_check_model: String::new(),
             sample_size_per_run: default_sample_size_per_run(),
             finder: ProjectFinder::default(),
         }
@@ -402,6 +413,19 @@ impl Default for ReviewSettings {
 mod review_settings_tests {
     use super::*;
     use crate::review::EscalationReason;
+
+    #[test]
+    fn the_duplicate_check_model_is_unset_by_default_and_its_built_in_default_is_sonnet_5_5() {
+        assert_eq!(DUP_CHECK_DEFAULT_MODEL, "claude-sonnet-5-5");
+        assert!(ReviewSettings::default().dup_check_model.is_empty());
+        // A project written before the setting existed loads with it unset.
+        let old: ReviewSettings =
+            serde_json::from_str(r#"{"group_review_model":"claude-opus-5-5"}"#).unwrap();
+        assert!(old.dup_check_model.is_empty());
+        let set: ReviewSettings =
+            serde_json::from_str(r#"{"dup_check_model":"claude-haiku-5-5"}"#).unwrap();
+        assert_eq!(set.dup_check_model, "claude-haiku-5-5");
+    }
 
     #[test]
     fn the_review_settings_default_to_the_design_values() {

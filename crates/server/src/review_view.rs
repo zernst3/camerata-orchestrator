@@ -248,7 +248,11 @@ impl<'a> ReviewComposer<'a> {
             held,
             verdicts,
             fp: crate::possible_false_positive::FpIndex::new(&report.findings),
-            dup: crate::possible_duplicate::DupIndex::new(tree, &report.findings),
+            dup: crate::possible_duplicate::DupIndex::new(
+                tree,
+                &report.findings,
+                report.ledger.duplicate_checks(),
+            ),
         }
     }
 

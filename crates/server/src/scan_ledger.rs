@@ -640,6 +640,12 @@ pub struct ScanLedger {
     /// tool trace, never from what it said). Empty for a run of the other finder.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     finder_coverage: Vec<FinderRepoCoverage>,
+    /// What the possible-duplicate check's model said about each candidate pair of rows at one
+    /// place, and why there is none when the check did not run. Operator-only: the review view and
+    /// the internal exports read it, no client package carries it, and no gate reads it. Empty for
+    /// a ledger written before the check existed.
+    #[serde(default, skip_serializing_if = "crate::possible_duplicate::check::DuplicateChecks::is_empty")]
+    duplicate_checks: crate::possible_duplicate::check::DuplicateChecks,
 }
 
 /// The agent finder's coverage for one repository: one record for each piece.
@@ -1392,6 +1398,19 @@ impl ScanLedger {
     /// running total, and a second call means a second scan that should have its own ledger.
     pub fn record_input(&mut self, input: ScanInputFacts) {
         self.input = input;
+    }
+
+    /// Record the possible-duplicate check's answers. Overwrites: one scan, one record.
+    pub fn record_duplicate_checks(
+        &mut self,
+        checks: crate::possible_duplicate::check::DuplicateChecks,
+    ) {
+        self.duplicate_checks = checks;
+    }
+
+    /// The possible-duplicate check's stored answers (empty when it did not run).
+    pub fn duplicate_checks(&self) -> &crate::possible_duplicate::check::DuplicateChecks {
+        &self.duplicate_checks
     }
 
     /// Record the scan's per-stage cost telemetry. Overwrites: one scan, one record.

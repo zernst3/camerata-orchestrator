@@ -213,7 +213,9 @@ fn a_carried_pair_is_kept_apart_through_the_real_tree() {
         "the two rules at line 10 are one place: {:?}",
         tree.places
     );
-    let idx = DupIndex::new(sealed.tree.as_ref(), &sealed.findings);
+    // The model says `same` to every candidate, so the index lists the candidates themselves.
+    let checks = super::check::tests_support::every_candidate_same(sealed.tree.as_ref(), &sealed.findings);
+    let idx = DupIndex::new(sealed.tree.as_ref(), &sealed.findings, &checks);
     let at = |rule: &str| {
         sealed
             .findings
