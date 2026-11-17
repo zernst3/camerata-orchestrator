@@ -808,6 +808,41 @@ fn a_place_written_as_text_path_and_line_parses() {
 }
 
 #[test]
+fn a_text_place_with_a_malformed_line_part_keeps_its_real_path() {
+    let cases: [(&str, usize, Option<usize>); 6] = [
+        ("src/b.rs:abc", 0, None),
+        ("src/b.rs:12-", 12, None),
+        ("src/b.rs:-5", 0, None),
+        ("src/b.rs:12:5", 12, None),
+        ("src/b.rs: 12", 12, None),
+        ("src/b.rs:12-20", 12, Some(20)),
+    ];
+    for (text, line, end) in cases {
+        let mut p = entry(1, "src/a.rs");
+        p["places"] = serde_json::json!([text]);
+        let json = serde_json::json!([p]).to_string();
+        let out = parse_outputs(&outputs(&[("problems-1.json", json)]), &piece_files());
+        assert!(
+            out.notes.is_empty() && out.leads.is_empty(),
+            "{text}: {out:?}"
+        );
+        let places = &out.problems[0].places;
+        assert_eq!(places.len(), 1, "{text}: {places:?}");
+        assert_eq!(places[0].path, "src/b.rs", "{text}");
+        assert_eq!((places[0].line, places[0].end_line), (line, end), "{text}");
+    }
+}
+
+#[test]
+fn a_windows_drive_path_in_a_text_place_keeps_its_drive() {
+    let (path, line, end) = super::reply::split_place_text("C:\\a\\b.rs:12");
+    assert_eq!(
+        (path.as_deref(), line, end),
+        (Some("C:\\a\\b.rs"), Some(12), None)
+    );
+}
+
+#[test]
 fn a_place_with_a_path_and_no_usable_line_becomes_a_place_at_line_zero() {
     let mut p = entry(1, "src/a.rs");
     p["places"] = serde_json::json!(["src/a.rs", {"path": "src/b.rs"}]);

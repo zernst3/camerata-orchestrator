@@ -269,25 +269,33 @@ fn parse_problem_places(
     out
 }
 
-/// A place written as text: `path:line`, `path:line-end` or just `path`.
-fn split_place_text(text: &str) -> (Option<String>, Option<usize>, Option<usize>) {
+/// A place written as text: `path:line`, `path:line-end` or just `path`. The path is everything
+/// before the first colon (a Windows drive colon is skipped); a line part that is not a number
+/// leaves line 0, so the real path is kept and the runner holds the place for a decision.
+pub(super) fn split_place_text(text: &str) -> (Option<String>, Option<usize>, Option<usize>) {
     let text = text.trim();
-    if let Some((path, span)) = text.rsplit_once(':') {
-        let (start, end) = match span.split_once('-') {
-            Some((a, b)) => (a, Some(b)),
-            None => (span, None),
-        };
-        let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-        if digits(start) && end.is_none_or(digits) && !path.trim().is_empty() {
-            return (
-                Some(plain_path(path.trim())),
-                start.parse().ok(),
-                end.and_then(|e| e.parse().ok()),
-            );
-        }
-    }
-    let path = plain_path(text);
-    ((!path.is_empty()).then_some(path), None, None)
+    let bytes = text.as_bytes();
+    let drive = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let from = if drive { 2 } else { 0 };
+    let (path, rest) = match text[from..].find(':') {
+        Some(i) => (&text[..from + i], &text[from + i + 1..]),
+        None => (text, ""),
+    };
+    let leading_digits = |s: &str| -> (Option<usize>, usize) {
+        let n = s.chars().take_while(char::is_ascii_digit).count();
+        (s[..n].parse().ok(), n)
+    };
+    let (line, used) = leading_digits(rest.trim_start());
+    let after = &rest.trim_start()[used..];
+    let end = match (line, after.strip_prefix('-')) {
+        (Some(_), Some(tail)) => leading_digits(tail).0,
+        _ => None,
+    };
+    let path = plain_path(path.trim());
+    ((!path.is_empty()).then_some(path), line, end)
 }
 
 /// The array in a file that holds either an array or an object with the array under `key`.

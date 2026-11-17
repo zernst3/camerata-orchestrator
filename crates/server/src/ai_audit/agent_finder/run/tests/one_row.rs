@@ -570,6 +570,18 @@ async fn a_text_place_makes_a_sibling_row_and_a_path_only_place_one_held_row() {
 }
 
 #[tokio::test]
+async fn a_text_place_with_a_malformed_line_is_one_held_row_and_no_lead() {
+    let rows = run_with_places(&repo_files(), json!(["src/b.rs:abc"])).await;
+    let held: Vec<_> = rows
+        .iter()
+        .filter(|f| f.rule_id == "AI-OPEN-QUESTION" && f.path == "src/b.rs")
+        .collect();
+    assert_eq!(held.len(), 1, "{rows:?}");
+    assert!(held[0].needs_review && !held[0].located, "{:?}", held[0]);
+    assert!(rows.iter().all(|f| f.path != "src/b.rs:abc"), "{rows:?}");
+}
+
+#[tokio::test]
 async fn a_place_with_no_path_makes_no_row() {
     let before = run_with_places(&repo_files(), json!([])).await;
     let rows = run_with_places(&repo_files(), json!([7, {"line": 3}, ""])).await;
