@@ -288,6 +288,12 @@ impl Checklist {
              `not_applicable` only when this part has no code of the kind the rule governs; \
              give one sentence saying what is absent. If the code is here and the safeguard is \
              missing, that is a problem, not `not_applicable`. \
+             `not_a_problem_here` only when you are sure the place does no harm. If your \
+             reason would name a real cost and call it small, that is a problem at low \
+             severity, not `not_a_problem_here`. If your reason would be that another of your \
+             problems reports it, answer `problems` with that problem's number, and if that \
+             problem does not name this place, add the place to its `places` or write it as \
+             its own problem. \
              When your answer is `problems`, put the places that break the rule in the `places` \
              of the problem they are an instance of, and under options give the counts only. \
              For any other answer, under options give the counts and up to ten places for each \

@@ -780,6 +780,22 @@ fn render_words_the_places_the_duplicate_and_the_not_applicable_rules() {
 }
 
 #[test]
+fn render_words_the_dismissal_rule_between_not_applicable_and_the_problems_answer() {
+    let text = checklist().render();
+    let dismissal = "`not_a_problem_here` only when you are sure the place does no harm. If your \
+         reason would name a real cost and call it small, that is a problem at low severity, \
+         not `not_a_problem_here`. If your reason would be that another of your problems \
+         reports it, answer `problems` with that problem's number, and if that problem does \
+         not name this place, add the place to its `places` or write it as its own problem.";
+    assert!(text.contains(dismissal), "{text}");
+    let after = "that is a problem, not `not_applicable`. ";
+    let before = "When your answer is `problems`,";
+    let a = text.find(after).expect("not_applicable sentence") + after.len();
+    assert_eq!(text.find(dismissal), Some(a), "{text}");
+    assert_eq!(text[a + dismissal.len()..].find(before), Some(1), "{text}");
+}
+
+#[test]
 fn a_not_applicable_reason_is_noted_for_the_reviewer_and_none_is_no_note() {
     let list = checklist();
     let mut with = answer("ARCH-ALPHA-1", AnswerKind::NotApplicable);
