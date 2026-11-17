@@ -245,6 +245,9 @@ pub(super) fn report_of(
         };
         fail(why, class);
     }
+    for n in &out.notes {
+        report.notes.push(format!("joints: {n}"));
+    }
     let (known, stray): (Vec<_>, Vec<_>) = std::mem::take(&mut out.unusable)
         .into_iter()
         .partition(is_known_file);

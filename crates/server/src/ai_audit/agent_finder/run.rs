@@ -378,7 +378,13 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
         }
         Work::Fresh(_) => {
             let _permit = match shared.meter {
-                Some(m) => match m.admit().await {
+                Some(m) => match if m.projection_stops_piece() {
+                    // The projected total is over the approved amount: the spend limit's own
+                    // stop, with its own reason (see `crate::cost_checkpoint`).
+                    Err(crate::ai_audit::CapReached)
+                } else {
+                    m.admit().await
+                } {
                     Ok(p) => Some(p),
                     Err(crate::ai_audit::CapReached) => {
                         m.record_not_run(crate::cost_cap::NotRunPass {
@@ -428,6 +434,10 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
                 };
             let report = piece::report_of(shared, index, &piece, &room, &not_served, &list, runs);
             if report.failures.is_empty() {
+                if let Some(m) = shared.meter {
+                    let cost: f64 = report.usage.iter().filter_map(|u| u.cost_usd).sum();
+                    m.piece_finished(Some(cost), report.problems.len());
+                }
                 if let Ok(text) = serde_json::to_string(&StoredPiece {
                     runs: report.runs.clone(),
                 }) {
@@ -507,6 +517,82 @@ fn rekey_no_convention(
     }
 }
 
+/// The listed places of the problems as rows (`findings` and `problems` are in the same order).
+/// A place that checks out against its file is a sibling row of its problem. A place that cannot
+/// be checked (no such line, a blank one) is a problem needing a decision, and when the findings
+/// and problems do not line up every listed place is one, so no place vanishes.
+fn places_as_rows(
+    repo: &str,
+    findings: &[Finding],
+    problems: &[Problem],
+    files: &[(String, String)],
+    out: &mut Vec<Finding>,
+) {
+    let by_path: HashMap<&str, Vec<&str>> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.lines().collect()))
+        .collect();
+    let aligned = findings.len() == problems.len();
+    for (i, p) in problems.iter().enumerate() {
+        for place in &p.places {
+            let at = checklist::Place {
+                path: place.path.clone(),
+                line: Some(place.line),
+            };
+            let checked = if aligned {
+                conventions::checked_place(&by_path, &at)
+            } else {
+                None
+            };
+            match checked {
+                Some((path, line, text)) => {
+                    let mut snippet = text.trim().to_string();
+                    crate::onboard::redact::redact_string(&mut snippet);
+                    add_sibling(out, &findings[i], repo, &path, line, snippet);
+                }
+                None => {
+                    let held = conventions::held_problem_place_row(repo, &p.title, place);
+                    let held_already = out.iter().any(|f| {
+                        f.rule_id == held.rule_id && (&f.path, f.line) == (&held.path, held.line)
+                    });
+                    if !held_already {
+                        out.push(held);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Add the sibling row of `primary` at another place, unless that place is the problem's own or
+/// was already added for it.
+fn add_sibling(
+    siblings: &mut Vec<Finding>,
+    primary: &Finding,
+    repo: &str,
+    path: &str,
+    line: usize,
+    snippet: String,
+) {
+    if (primary.path.as_str(), primary.line) == (path, line) {
+        return;
+    }
+    let same_problem = |f: &Finding| {
+        [FINDER_PIECE_CAPTURE, FINDER_PROBLEM_CAPTURE]
+            .iter()
+            .all(|k| f.captures.get(*k) == primary.captures.get(*k))
+    };
+    if siblings
+        .iter()
+        .any(|f| same_problem(f) && (f.path.as_str(), f.line) == (path, line))
+    {
+        return;
+    }
+    siblings.push(crate::review_tree::sibling_row(
+        primary, repo, path, line, &snippet,
+    ));
+}
+
 /// Find the problems of one repository with the agent finder.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn find_repo(
@@ -561,6 +647,13 @@ pub async fn find_repo(
                 &piece::response_of(options, &line_usage(line)),
             );
         }
+    }
+    if let Some(m) = meter {
+        let held = works
+            .iter()
+            .filter(|w| !matches!(w, Work::Fresh(_)))
+            .count();
+        m.begin_pieces(works.len(), held);
     }
     let shared = Shared {
         agent,
@@ -632,9 +725,8 @@ pub async fn find_repo(
                 match admitted {
                     Err(crate::ai_audit::CapReached) => {
                         let outage = meter.is_some_and(UsageMeter::outage_stopped);
-                        let cause = meter.map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| {
-                            crate::cost_cap::cause_for(m.cost_unknown())
-                        });
+                        let cause =
+                            meter.map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| m.stop_cause());
                         failed.push(FailedPass {
                             repo: repo.to_string(),
                             pass: "agent finder, joints between parts".to_string(),
@@ -746,10 +838,29 @@ pub async fn find_repo(
         selected.iter().map(|r| r.id.as_str()),
         &options.chosen_options,
     );
-    let piece_answers: Vec<Vec<checklist::EffectiveAnswer>> = reports
+    let answered: Vec<usize> = reports
         .iter()
-        .filter(|r| !r.effective.is_empty())
-        .map(|r| r.effective.clone())
+        .enumerate()
+        .filter(|(_, r)| !r.effective.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let piece_answers: Vec<Vec<checklist::EffectiveAnswer>> = answered
+        .iter()
+        .map(|&i| reports[i].effective.clone())
+        .collect();
+    // The problems that have a row: only those can carry the places of a rule's answer.
+    let problem_rows: HashSet<(usize, u32)> = answered
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &i)| {
+            reports[i]
+                .findings
+                .iter()
+                // A problem the engine threw out (a placeholder) is no report of the rule.
+                .filter(|f| !crate::engine_discard::is_discarded(f))
+                .filter_map(|f| f.captures.get(FINDER_PROBLEM_CAPTURE)?.parse().ok())
+                .map(move |n: u32| (at, n))
+        })
         .collect();
     let conv = conventions::conventions_from_answers(
         repo,
@@ -758,6 +869,7 @@ pub async fn find_repo(
         &model_files,
         &selected,
         corpus,
+        &problem_rows,
     );
     extras.notes.extend(conv.notes.iter().cloned());
     if let Some(note) = agent.trace_note() {
@@ -789,6 +901,45 @@ pub async fn find_repo(
         );
     }
 
+    // Every further place of a problem is a sibling row of it: from the model's own `places` and
+    // from the places a cited rule's checklist options listed. No producer writes
+    // `also_locations`; each place is a copy of the problem at its own path, line and snippet,
+    // in the same sub-group, so the places share one fix.
+    let mut siblings: Vec<Finding> = Vec::new();
+    for r in &reports {
+        places_as_rows(repo, &r.findings, &r.problems, &model_files, &mut siblings);
+    }
+    places_as_rows(
+        repo,
+        &joints_findings,
+        &joints_problems,
+        &model_files,
+        &mut siblings,
+    );
+    for att in &conv.attached {
+        let key = att.problem.to_string();
+        let primary = answered
+            .get(att.piece)
+            .and_then(|&i| reports.get(i))
+            .and_then(|r| {
+                r.findings
+                    .iter()
+                    .find(|f| f.captures.get(FINDER_PROBLEM_CAPTURE) == Some(&key))
+            });
+        if let Some(primary) = primary {
+            for site in &att.sites {
+                add_sibling(
+                    &mut siblings,
+                    primary,
+                    repo,
+                    &site.path,
+                    site.line,
+                    site.snippet.clone(),
+                );
+            }
+        }
+    }
+
     // Every problem so far, in piece order.
     let mut rows: Vec<Finding> = Vec::new();
     let mut proposed: Vec<ProposedRule> = Vec::new();
@@ -803,6 +954,7 @@ pub async fn find_repo(
         .iter()
         .filter(|f| !adopted_all.contains(&f.rule_id.to_ascii_uppercase()))
         .count();
+    rows.extend(siblings);
     rows.extend(unresolved);
     rows.extend(conv.departures);
     rows.extend(conv.undecided);
@@ -1027,6 +1179,78 @@ impl std::fmt::Debug for FinderSetup {
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("engagement", &self.engagement)
             .finish()
+    }
+}
+
+/// The finder setup for a run: the rooms folder (an engine-owned folder, never inside the
+/// client's repository), the saved Anthropic key and the kind of engagement, built once here and
+/// carried into the audit. The run builds the agent from it on its own shared meter. `Err` before
+/// anything is spent when the API backend has no key. The ONE place a [`FinderSetup`] is built
+/// outside tests: the command line and the server's scan path both come through
+/// [`finder_setup_for_run`], which calls this.
+pub fn finder_setup(
+    backend: crate::llm::Backend,
+    api_key: Option<String>,
+    rooms_dir: std::path::PathBuf,
+    client_engagement: bool,
+) -> Result<FinderSetup, String> {
+    let api_key = api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty());
+    if backend == crate::llm::Backend::Api && api_key.is_none() {
+        return Err("the API backend needs an Anthropic key".to_string());
+    }
+    Ok(FinderSetup {
+        rooms_dir,
+        api_key,
+        engagement: if client_engagement {
+            EngagementKind::Client
+        } else {
+            EngagementKind::Internal
+        },
+    })
+}
+
+/// The setup a run carries, or `None` when it runs the engine finder. Only a run whose controls
+/// choose the agent finder, whose AI review is not blocked, and that has no test agent standing
+/// in gets one. The rooms folder is `finder-rooms` inside the run's own folder (`run_dir`), else
+/// inside the per-user state folder. The key comes from the saved credentials, never the
+/// environment of the caller's choosing.
+pub fn finder_setup_for_run(
+    controls: &RunControls,
+    ai_review_blocked: bool,
+    backend: crate::llm::Backend,
+    creds: &dyn crate::credentials::CredentialStore,
+    run_dir: Option<&std::path::Path>,
+    client_engagement: bool,
+) -> Result<Option<FinderSetup>, String> {
+    if controls.finder != super::FinderChoice::Agent || ai_review_blocked || agent_override_is_set()
+    {
+        return Ok(None);
+    }
+    let rooms_dir = run_dir
+        .map_or_else(
+            crate::scan_cache::state_dir::dir,
+            std::path::Path::to_path_buf,
+        )
+        .join("finder-rooms");
+    finder_setup(
+        backend,
+        crate::credentials::anthropic_api_key(creds),
+        rooms_dir,
+        client_engagement,
+    )
+    .map(Some)
+}
+
+/// Run `fut` with `setup` as the run's finder setup when there is one, else as it is.
+pub async fn with_optional_finder_setup<F: std::future::Future>(
+    setup: Option<FinderSetup>,
+    fut: F,
+) -> F::Output {
+    match setup {
+        Some(setup) => with_finder_setup(setup, fut).await,
+        None => fut.await,
     }
 }
 

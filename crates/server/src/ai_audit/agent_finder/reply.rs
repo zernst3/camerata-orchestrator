@@ -28,6 +28,16 @@ pub struct Problem {
     /// `low`, `medium` or `high`.
     pub effort: String,
     pub label: String,
+    /// The other places where the same thing is wrong (the main place is `path`/`line`).
+    pub places: Vec<ProblemPlace>,
+}
+
+/// One further place of a problem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemPlace {
+    pub path: String,
+    pub line: usize,
+    pub end_line: Option<usize>,
 }
 
 /// The captures a finder problem carries for the operator. All of them are bookkeeping keys
@@ -76,6 +86,8 @@ pub struct PieceOutput {
     /// The agent's own list of files it did not read in full. Never used for coverage.
     pub unread: Option<Vec<String>>,
     pub unusable: Vec<Unusable>,
+    /// Operator-only remarks: a further place of a problem that was dropped, and why.
+    pub notes: Vec<String>,
     /// How many `problems-<n>.json` files were seen, usable or not. A run that wrote none has
     /// nothing to report and the runner fails the piece (output never vanishes silently).
     pub problems_files: usize,
@@ -199,7 +211,55 @@ fn parse_problem(v: &serde_json::Value) -> Result<Problem, String> {
         sure,
         effort: one_of(v, "effort", &EFFORTS)?,
         label: text_field(v, "label", false)?,
+        places: Vec::new(),
     })
+}
+
+/// The further places of a problem, read tolerantly: a missing or non-list `places` is none, and
+/// an entry that is not a path with a line is dropped with a remark, never failing the file.
+fn parse_problem_places(
+    v: &serde_json::Value,
+    n: u32,
+    notes: &mut Vec<String>,
+) -> Vec<ProblemPlace> {
+    let items = match v.get("places") {
+        None | Some(serde_json::Value::Null) => return Vec::new(),
+        Some(serde_json::Value::Array(items)) => items,
+        Some(_) => {
+            notes.push(format!(
+                "problem {n}: `places` is not a list, so it was ignored"
+            ));
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let path = item
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| plain_path(s.trim()))
+            .filter(|s| !s.is_empty());
+        let line = item
+            .get("line")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok());
+        let end_line = item
+            .get("end_line")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok());
+        match (path, line) {
+            (Some(path), Some(line)) => out.push(ProblemPlace {
+                path,
+                line,
+                end_line,
+            }),
+            _ => notes.push(format!(
+                "problem {n}: place {} has no usable path and line, so it was dropped",
+                i + 1
+            )),
+        }
+    }
+    out
 }
 
 /// The array in a file that holds either an array or an object with the array under `key`.
@@ -445,9 +505,28 @@ pub fn parse_outputs_joined(
                 out.unusable.push(unusable(reason));
                 continue;
             }
-            for p in parsed {
+            for (mut p, item) in parsed.into_iter().zip(items.iter()) {
                 seen_numbers.insert(p.n);
                 if in_piece.contains(&p.path) {
+                    let listed = parse_problem_places(item, p.n, &mut out.notes);
+                    for place in listed {
+                        if in_piece.contains(&place.path) {
+                            if !p.places.contains(&place) {
+                                p.places.push(place);
+                            }
+                        } else {
+                            // A place outside the part is a lead, as a problem whose own path is
+                            // outside the part is.
+                            out.leads.push(Lead {
+                                n: 0,
+                                path: place.path,
+                                line: place.line,
+                                what: lead_text(&format!("{}. {}", p.title, p.what)),
+                                source_problem: Some(p.n),
+                                severity: Some(p.severity.clone()),
+                            });
+                        }
+                    }
                     out.problems.push(p);
                 } else {
                     out.leads.push(Lead {

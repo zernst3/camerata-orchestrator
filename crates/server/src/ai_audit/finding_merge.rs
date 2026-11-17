@@ -1712,6 +1712,8 @@ pub(crate) fn same_cause_signal(
 /// sub-group is labelled with and the hint a possible-duplicate link carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CauseSignal {
+    /// One problem the model reported at several places: its rows are one cause by construction.
+    SameProblem,
     /// The two rows name the same captured object.
     SharedObject,
     /// The same rule fired twice in one file, nearby or at one severity.
@@ -1728,6 +1730,7 @@ impl CauseSignal {
     /// The sub-group cause text.
     pub(crate) fn cause(self) -> &'static str {
         match self {
+            Self::SameProblem => "one problem reported at several places",
             Self::SharedObject => "the same captured object",
             Self::SameRule => "the same rule repeated in one file",
             Self::SameConstruct => "the same function or block",
@@ -1739,6 +1742,7 @@ impl CauseSignal {
     /// The test name a possible-duplicate link records.
     pub(crate) fn hint(self) -> &'static str {
         match self {
+            Self::SameProblem => "same_cause:same_problem",
             Self::SharedObject => "same_cause:shared_object",
             Self::SameRule => "same_cause:same_rule",
             Self::SameConstruct => "same_cause:same_construct",

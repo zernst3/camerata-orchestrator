@@ -64,3 +64,66 @@ async fn a_blank_group_review_model_is_refused_and_changes_nothing() {
         before.review.group_review_model
     );
 }
+
+#[tokio::test]
+async fn the_step_models_route_sets_the_project_finder_and_it_reads_back_from_the_store() {
+    let f = review_fixture(6);
+    let before = f.state.projects().get(&f.project_id).unwrap();
+    assert_eq!(
+        before.review.finder,
+        camerata_api_types::project::ProjectFinder::Engine,
+        "a project starts on the engine finder"
+    );
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("/api/projects/{}/step-models", f.project_id),
+        Some(json!({ "step": "finder", "model": "agent" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let reply: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(reply["ok"], json!(true), "{text}");
+    let after = f.state.projects().get(&f.project_id).unwrap();
+    assert_eq!(
+        after.review.finder,
+        camerata_api_types::project::ProjectFinder::Agent
+    );
+    assert_eq!(
+        after.review.group_review_model, before.review.group_review_model,
+        "the other review settings are untouched"
+    );
+    // The settings view the screen reads carries it.
+    let (_, text) = call(
+        &f.app,
+        "GET",
+        &format!("/api/projects/{}/review/settings", f.project_id),
+        None,
+    )
+    .await;
+    let view: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(view["stage_models"]["finder"], json!("agent"), "{text}");
+}
+
+#[tokio::test]
+async fn an_unknown_finder_word_is_refused_by_name_and_changes_nothing() {
+    let f = review_fixture(6);
+    let (_, text) = call(
+        &f.app,
+        "POST",
+        &format!("/api/projects/{}/step-models", f.project_id),
+        Some(json!({ "step": "finder", "model": "robot" })),
+    )
+    .await;
+    let reply: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(reply["ok"], json!(false), "{text}");
+    assert_eq!(
+        reply["message"],
+        json!("the finder must be agent or engine"),
+        "{text}"
+    );
+    assert_eq!(
+        f.state.projects().get(&f.project_id).unwrap().review.finder,
+        camerata_api_types::project::ProjectFinder::Engine
+    );
+}

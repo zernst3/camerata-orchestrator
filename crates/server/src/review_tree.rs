@@ -43,7 +43,7 @@ pub use types::{
     DuplicateLink, FlaggedBy, GroupRole, NodeCounts, NodeEscalation, NodeKind, NodeLevel, Outlier,
     OutlierBy, OutlierReason, ReviewTree, TextSource, TreeNode,
 };
-pub use unfold::unfold_also_locations;
+pub use unfold::{sibling_row, unfold_also_locations};
 
 use std::path::{Path, PathBuf};
 

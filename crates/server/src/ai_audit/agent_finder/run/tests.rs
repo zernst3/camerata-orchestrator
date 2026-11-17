@@ -224,6 +224,7 @@ impl PieceAgent for ByPiece {
 }
 
 mod checklist_outcomes;
+mod checkpoint;
 mod contract;
 mod conventions;
 mod coverage;
@@ -234,6 +235,7 @@ mod ledger;
 mod metering;
 mod no_convention;
 mod one_piece;
+mod one_row;
 mod resume;
 mod setup;
 mod severity;

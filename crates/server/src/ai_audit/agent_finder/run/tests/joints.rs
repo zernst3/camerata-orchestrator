@@ -428,3 +428,22 @@ async fn a_joints_file_broken_twice_gets_one_repair_turn_then_a_failed_part() {
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert!(failed[0].pass.contains("joints"), "{failed:?}");
 }
+
+#[tokio::test]
+async fn a_place_outside_the_part_is_a_lead_that_ends_as_a_row_needing_a_decision() {
+    // Part two lists a.rs:3 as another place of its problem at b.rs:2. a.rs is part one's file, so
+    // the place is a lead; the joints call answers nothing, so it becomes a held row.
+    let mut p = problem(1, "src/b.rs", 2, "high", "fn item_2() { run(2); }");
+    p["places"] = json!([{"path": "src/a.rs", "line": 3}]);
+    let (a, b) = parts(vec![], vec![p]);
+    let joints = ScriptedAgent::new(vec![out("problems-1.json", &json!([]))]);
+    let (_, rows, failed, _) = two_part_run(a, b, joints).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let held = rows
+        .iter()
+        .find(|f| f.path == "src/a.rs" && f.line == 3)
+        .unwrap_or_else(|| panic!("the place was kept: {rows:?}"));
+    assert_eq!(held.rule_id, "AI-OPEN-QUESTION");
+    assert!(held.needs_review);
+    assert_eq!(held.severity, "high");
+}

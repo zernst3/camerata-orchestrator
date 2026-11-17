@@ -374,6 +374,7 @@ impl<'a> ReviewComposer<'a> {
                 calibration: self.inputs.calibration_model.to_string(),
                 group_review,
                 fix: self.inputs.fix_model.to_string(),
+                finder: s.finder.as_str().to_string(),
             },
             escalation: EscalationSettingsView {
                 rate_per_kloc: s.escalation_rate_per_kloc,

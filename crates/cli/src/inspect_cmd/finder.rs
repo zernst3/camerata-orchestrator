@@ -140,31 +140,6 @@ pub fn comparison_note_path(ledger_file: &Path) -> PathBuf {
     ledger_file.with_file_name(format!("{stem}.run-difference.md"))
 }
 
-/// The finder setup the command line hands the run: the rooms folder (an engine-owned folder,
-/// never inside the client's repository), the saved Anthropic key and the kind of engagement,
-/// built once here and carried into the audit. The command line never builds the agent itself:
-/// the run builds it on the run's own shared meter. `Err` before anything is spent when the API
-/// backend has no key.
-pub fn finder_setup(
-    backend: camerata_server::llm::Backend,
-    api_key: Option<String>,
-    rooms_dir: PathBuf,
-    client_engagement: bool,
-) -> Result<camerata_server::ai_audit::agent_finder::run::FinderSetup, String> {
-    use camerata_server::ai_audit::agent_finder::run::{EngagementKind, FinderSetup};
-    let api_key = api_key
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty());
-    if backend == camerata_server::llm::Backend::Api && api_key.is_none() {
-        return Err("the API backend needs an Anthropic key".to_string());
-    }
-    Ok(FinderSetup {
-        rooms_dir,
-        api_key,
-        engagement: if client_engagement {
-            EngagementKind::Client
-        } else {
-            EngagementKind::Internal
-        },
-    })
-}
+/// The finder setup the command line hands the run is the server's: one constructor for both
+/// callers, so they cannot drift.
+pub use camerata_server::ai_audit::agent_finder::run::finder_setup;

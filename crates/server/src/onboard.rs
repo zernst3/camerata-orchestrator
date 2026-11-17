@@ -158,6 +158,14 @@ impl BookkeepingCaptures {
                 {
                     continue;
                 }
+                // Which problem of which part a row is of stays too: grouping reads it, so the
+                // rows of one problem reported at several places are one cause. Neither names
+                // an object (both are bookkeeping keys), so they cannot fuse two rows.
+                if *key == crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE
+                    || *key == crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE
+                {
+                    continue;
+                }
 
                 if let Some(value) = f.captures.remove(*key) {
                     taken.push(((*key).to_string(), value));
@@ -2416,6 +2424,13 @@ pub async fn audit_repos_with_llm_controlled(
         controls.fix_model_for(model, calibration_model),
     ));
     let meter = std::sync::Arc::new(crate::ai_audit::UsageMeter::with_controls(controls.clone()));
+    // The cost checkpoint reaches the job state the UI polls.
+    if let Some((jobs, id)) = job {
+        let (jobs, id) = (jobs.clone(), id.to_string());
+        meter.set_job_sink(crate::cost_checkpoint::CheckpointSink::new(move |cp| {
+            jobs.set_cost_checkpoint(&id, cp.clone());
+        }));
+    }
     // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
     // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
     // question, so a changed rule set or an AI-off prior scan does not invalidate them); a
@@ -2879,10 +2894,7 @@ pub async fn audit_repos_with_llm_controlled(
                                 meter.is_resume(),
                             );
                         let unavailable = if clone_blocked {
-                            format!(
-                                "{} before the judge ran",
-                                crate::cost_cap::cause_for(meter.cost_unknown())
-                            )
+                            format!("{} before the judge ran", meter.stop_cause())
                         } else {
                             ai_blocked_reason
                                 .clone()
@@ -3043,10 +3055,7 @@ pub async fn audit_repos_with_llm_controlled(
                              provider could not be reached)"
                         )
                     } else {
-                        format!(
-                            "{spec}: AI review not run ({})",
-                            crate::cost_cap::cause_for(meter.cost_unknown())
-                        )
+                        format!("{spec}: AI review not run ({})", meter.stop_cause())
                     });
                     for (rid, _) in &semantic {
                         pipeline_ledger.record_rule(
@@ -3061,7 +3070,7 @@ pub async fn audit_repos_with_llm_controlled(
                             } else {
                                 format!(
                                     "not run: {} before any pass checked it",
-                                    crate::cost_cap::cause_for(meter.cost_unknown())
+                                    meter.stop_cause()
                                 )
                             }),
                             0,
@@ -3080,7 +3089,7 @@ pub async fn audit_repos_with_llm_controlled(
                             format!(
                                 "NOT RUN: {} before this repository was reviewed. This \
                                  inspection is incomplete.",
-                                crate::cost_cap::cause_for(meter.cost_unknown())
+                                meter.stop_cause()
                             )
                         },
                         files_not_reviewed: files.len(),
@@ -4466,6 +4475,43 @@ mod tests {
                  only tier that can evaluate it: {semantic:?}"
             );
         }
+    }
+
+    /// Which problem of which part a row is of stays on the row through the merge stages, so
+    /// grouping can put the rows of one problem in one sub-group.
+    #[test]
+    fn the_finder_problem_captures_stay_on_the_rows_when_bookkeeping_is_held_aside() {
+        let mut f = Finding::default();
+        for (k, v) in [
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE,
+                "acme/app#1",
+            ),
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE,
+                "3",
+            ),
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE,
+                "Fix it.",
+            ),
+        ] {
+            f.captures.insert(k.to_string(), v.to_string());
+        }
+        let mut rows = vec![f];
+        BookkeepingCaptures::default().take(&mut rows);
+        assert!(rows[0]
+            .captures
+            .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE));
+        assert!(rows[0]
+            .captures
+            .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE));
+        assert!(
+            !rows[0]
+                .captures
+                .contains_key(crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE),
+            "the others are still held aside"
+        );
     }
 
     /// A capture that records bookkeeping (a severity-adjustment sentence, a history status, the

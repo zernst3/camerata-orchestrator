@@ -214,12 +214,15 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
     // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
     // Per-repo sizes for the estimate (several repos only): fetched once per mount.
+    let agent_finder = active_project
+        .as_ref()
+        .is_some_and(|p| p.review.finder == camerata_api_types::project::ProjectFinder::Agent);
     let repo_sizes = {
         let repos = report.repos.clone();
         use_resource(move || {
             let repos = repos.clone();
             async move {
-                if repos.len() > 1 {
+                if repos.len() > 1 || agent_finder {
                     fetch_repo_sizes(&repos).await
                 } else {
                     None
@@ -1639,9 +1642,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         // Several repos: one estimate per repo, summed (the scan chunks and
                         // calibrates each repo on its own). Single repo, or sizes not back yet:
                         // the one-stream estimate, unchanged.
-                        let sizes: Option<Vec<RepoSizeView>> = if multi_repo { (*repo_sizes.read()).clone().flatten() } else { None };
+                        let all_sizes: Option<Vec<RepoSizeView>> = (*repo_sizes.read()).clone().flatten();
+                        let sizes: Option<Vec<RepoSizeView>> = if multi_repo { all_sizes.clone() } else { None };
                         let mut repo_lines: Vec<String> = Vec::new();
-                        let (toks, dollars, passes) = match sizes {
+                        let (toks, mut dollars, passes) = match sizes {
                             Some(sizes) => {
                                 let selection = repo_selection.read().clone();
                                 // A repo is priced only when its rule choice is known: a guessed
@@ -1683,6 +1687,22 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 (est.tokens, est.dollars, est.passes)
                             }
                         };
+                        // The agent finder's estimate replaces the engine's figure when the project's
+                        // finder is the agent: the server's per-repo figures, from the one estimate
+                        // function the command line prints from. Not back yet: no figure is shown
+                        // as a made-up number (the engine figure stays, labelled by its own lines).
+                        let finder_figures: Option<Vec<(String, AgentFinderSizeView)>> = if agent_finder {
+                            all_sizes.as_ref().map(|v| v.iter().filter_map(|z| z.agent_finder.clone().map(|a| (z.repo.clone(), a))).collect())
+                        } else {
+                            None
+                        };
+                        if let Some(figs) = finder_figures.as_ref().filter(|f| !f.is_empty()) {
+                            dollars = figs.iter().map(|(_, a)| a.expected_usd).sum();
+                            repo_lines = figs
+                                .iter()
+                                .map(|(repo, a)| camerata_ui_core::scan::agent_finder_repo_line(repo, a.pieces, a.expected_usd, a.low_usd, a.high_usd))
+                                .collect();
+                        }
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.

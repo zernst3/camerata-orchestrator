@@ -628,6 +628,9 @@ pub(super) fn report_of(
             .notes
             .push(format!("{}: the file {} {}", piece.key, u.file, u.reason));
     }
+    for n in &view.output.notes {
+        report.notes.push(format!("{}: {n}", piece.key));
+    }
     for file in rewritten_problem_files(&runs) {
         report.notes.push(format!(
             "{}: a later step wrote {file} again; the problems only the earlier version held were kept",
@@ -967,9 +970,7 @@ pub(super) fn not_run_report(
 ) -> PieceReport {
     let cause = shared
         .meter
-        .map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| {
-            crate::cost_cap::cause_for(m.cost_unknown())
-        });
+        .map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| m.stop_cause());
     let reason = if outage {
         "NOT RUN: the run stopped because the model provider could not be reached before this part was reviewed. This inspection is incomplete.".to_string()
     } else {

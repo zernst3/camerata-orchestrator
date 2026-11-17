@@ -516,6 +516,74 @@ fn escapes(value: &str) -> bool {
     bad(&segment, first)
 }
 
+/// The text of a tool result.
+fn result_text(result: &Value) -> String {
+    match &result["content"] {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Whether a tool result is in Claude Code's own saved-output framing. A Read, Grep or Glob
+/// result never starts this way, so file content cannot pose as one.
+fn is_persisted_output(text: &str) -> bool {
+    text.starts_with("<persisted-output>")
+}
+
+/// The path Claude Code says it saved a large tool result to ("Full output saved to: <path>"),
+/// taken only from its own framing.
+fn saved_result_path(text: &str) -> Option<String> {
+    if !is_persisted_output(text) {
+        return None;
+    }
+    let rest = text.split("Full output saved to: ").nth(1)?;
+    let path = rest.lines().next()?.trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// Whether a Read names, exactly, a file Claude Code announced in this call's stream as the saved
+/// copy of one of its tool results, and that file is of the shape
+/// `<home>/.claude/projects/<this room's project folder>/<session>/tool-results/<file>`. The
+/// project folder is the room's absolute path with every character that is not a letter or digit
+/// replaced by `-`; the part before `.claude` is Claude Code's own state folder (`CLAUDE_CONFIG_DIR`
+/// or the home folder). The stream's own session id is not the folder's name, so the announcement
+/// stands in for the session check.
+fn is_own_saved_result(path: &str, saved: &[String], roots: &[PathBuf], claude_dir: &Path) -> bool {
+    if !saved.iter().any(|s| s == path) {
+        return false;
+    }
+    // `<claude dir>/projects/<project dir>/<session>/tool-results/<file>`, nothing else.
+    let Ok(rest) = Path::new(path).strip_prefix(claude_dir) else {
+        return false;
+    };
+    let tail: Vec<&str> = rest
+        .components()
+        .map(|c| match c {
+            Component::Normal(n) => n.to_str().unwrap_or(""),
+            _ => "",
+        })
+        .collect();
+    if tail.len() != 5 || tail[0] != "projects" || tail[3] != "tool-results" {
+        return false;
+    }
+    if tail.iter().any(|p| p.is_empty()) {
+        return false;
+    }
+    roots.iter().any(|root| {
+        let derived: String = root
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        derived == tail[1]
+    })
+}
+
 /// How many lines a tool result returned: the tool's own count when the record carries it, else
 /// the numbered lines of the text.
 fn lines_returned(record: &Value, result: &Value) -> usize {
@@ -557,6 +625,26 @@ pub(crate) fn parse_session(
     roots: &[PathBuf],
     long_lines: &BTreeMap<String, Vec<usize>>,
 ) -> ParsedSession {
+    parse_session_in(text, roots, long_lines, &claude_config_dir())
+}
+
+/// Where Claude Code keeps its state: `CLAUDE_CONFIG_DIR` when set, else `<home>/.claude`.
+fn claude_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".claude"))
+        .unwrap_or_default()
+}
+
+/// [`parse_session`] with the Claude Code state folder given.
+pub(crate) fn parse_session_in(
+    text: &str,
+    roots: &[PathBuf],
+    long_lines: &BTreeMap<String, Vec<usize>>,
+    claude_dir: &Path,
+) -> ParsedSession {
     struct Use {
         name: String,
         input: Value,
@@ -571,6 +659,8 @@ pub(crate) fn parse_session(
     // is no longer in the agent's context.
     let mut compacted_at = 0usize;
     let mut assistant_records = 0usize;
+    // Files Claude Code saved for a large result of this call's own tools.
+    let mut saved: Vec<String> = Vec::new();
     for line in text.lines() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -648,9 +738,13 @@ pub(crate) fn parse_session(
             Some("user") => {
                 for b in &blocks {
                     if b["type"] == "tool_result" {
+                        let body = result_text(b);
+                        saved.extend(saved_result_path(&body));
                         if let Some(id) = b["tool_use_id"].as_str() {
                             let failed = b["is_error"].as_bool() == Some(true);
-                            let lines = if failed {
+                            // A result that came back as a saved preview showed the model only
+                            // the start of the output: it covers no lines.
+                            let lines = if failed || is_persisted_output(&body) {
                                 0
                             } else {
                                 lines_returned(&record, b)
@@ -688,6 +782,11 @@ pub(crate) fn parse_session(
         }
         match u.name.as_str() {
             "Read" => {
+                // Claude Code's own saved copy of an earlier result of this call: not outside,
+                // and it covers no room file.
+                if is_own_saved_result(&text_of("file_path"), &saved, roots, claude_dir) {
+                    continue;
+                }
                 let Some(path) = place(text_of("file_path"), false) else {
                     continue;
                 };

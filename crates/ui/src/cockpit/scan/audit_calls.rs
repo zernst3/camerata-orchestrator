@@ -411,6 +411,19 @@ pub(in crate::cockpit) struct RepoSizeView {
     pub code_chars: usize,
     #[serde(default)]
     pub error: Option<String>,
+    /// The agent finder's figures for this repo (the server computes them with the one estimate
+    /// function the command line prints from). `None` for a repo that could not be read.
+    #[serde(default)]
+    pub agent_finder: Option<AgentFinderSizeView>,
+}
+
+/// The agent finder's pre-flight figures for one repo, as the preflight route sends them.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(in crate::cockpit) struct AgentFinderSizeView {
+    pub pieces: usize,
+    pub expected_usd: f64,
+    pub low_usd: f64,
+    pub high_usd: f64,
 }
 
 /// Ask the server how big each repo is as the scan will read it. The scan chunks and calibrates

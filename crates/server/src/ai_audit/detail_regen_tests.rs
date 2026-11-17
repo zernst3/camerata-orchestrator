@@ -328,6 +328,7 @@ fn meter_with(config: EfficiencyConfig) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 
@@ -783,6 +784,7 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        checkpoint: Default::default(),
     });
     let (findings, failed) = audit(&llm, &meter).await;
     assert_eq!(findings.len(), 1);
@@ -858,6 +860,7 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        checkpoint: Default::default(),
     });
     let (out, failed) = regenerate_full_details(
         &llm,
@@ -1596,6 +1599,7 @@ async fn the_third_round_is_still_bounded_by_the_spend_limit() {
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        checkpoint: Default::default(),
     });
     let (out, failed) = regenerate_full_details(
         &llm,
@@ -2395,6 +2399,7 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
                 mode: "parallel".to_string(),
                 resolved: true,
                 group_review: String::new(),
+                finder: String::new(),
             },
             ai_scan_key: crate::scan_cache::AiScanKey {
                 audit_model: "claude-a".to_string(),
@@ -3146,6 +3151,7 @@ mod batch_route {
             fix_model: None,
             clone_judge_model: None,
             consensus: false,
+            checkpoint: Default::default(),
         })
     }
 

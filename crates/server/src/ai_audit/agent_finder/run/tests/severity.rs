@@ -220,7 +220,7 @@ async fn a_problem_in_a_test_only_place_is_held_at_low_and_a_secret_keeps_its_ra
 
 #[tokio::test]
 async fn a_security_fault_under_a_departure_is_a_defect_not_a_deviation() {
-    // The layering rule has a convention with one listed departure; a separate problem under the
+    // The layering rule has a convention with one listed departure; the problem cited to the
     // same rule states a cross-tenant read, an objective fault.
     let mut set = camerata_rules::RuleSet::default();
     let mut layer = camerata_rules::bare_rule("ARCH-LAYER-1", "universal");
@@ -267,11 +267,18 @@ async fn a_security_fault_under_a_departure_is_a_defect_not_a_deviation() {
         "an objective fault stays a defect: {:?}",
         fault.kind
     );
-    let departure = rows
+    // The rule's answer cites the problem, so the departure is not an engine row: its place is
+    // a sibling row of the fault (a copy of it), never a deviation of its own.
+    let sibling = rows
         .iter()
         .find(|f| f.path == "src/b.rs" && f.line == 3)
         .unwrap();
-    assert!(matches!(departure.kind, Some(FindingKind::Deviation(_))));
+    assert!(
+        !sibling.detail.contains("The rest of the codebase follows"),
+        "{}",
+        sibling.detail
+    );
+    assert!(fault.also_locations.is_empty());
 }
 
 #[tokio::test]

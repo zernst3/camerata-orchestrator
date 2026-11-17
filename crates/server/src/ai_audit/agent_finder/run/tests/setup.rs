@@ -224,3 +224,138 @@ async fn the_production_factory_passes_the_engagement_on_so_a_client_run_is_refu
         .join("\n");
     assert!(text.contains("internal runs only"), "{text}");
 }
+
+// ── The setup for a run (the one function the command line and the server's scan path share) ──
+
+fn creds_with_key(key: Option<&str>) -> crate::credentials::MemoryCredentialStore {
+    let store = crate::credentials::MemoryCredentialStore::new();
+    if let Some(k) = key {
+        crate::credentials::CredentialStore::set(&store, crate::credentials::ANTHROPIC_API_KEY, k)
+            .unwrap();
+    }
+    store
+}
+
+fn agent_controls() -> RunControls {
+    RunControls {
+        finder: crate::ai_audit::agent_finder::FinderChoice::Agent,
+        ..RunControls::default()
+    }
+}
+
+#[test]
+fn a_client_run_on_the_api_gets_the_run_folders_rooms_the_saved_key_and_client() {
+    let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+    let creds = creds_with_key(Some("sk-test"));
+    let run_dir = PathBuf::from("/run/folder");
+    let setup = super::super::finder_setup_for_run(
+        &agent_controls(),
+        false,
+        Backend::Api,
+        &creds,
+        Some(&run_dir),
+        true,
+    )
+    .unwrap()
+    .expect("the agent finder gets a setup");
+    assert_eq!(setup.rooms_dir, run_dir.join("finder-rooms"));
+    assert_eq!(setup.api_key.as_deref(), Some("sk-test"));
+    assert_eq!(setup.engagement, EngagementKind::Client);
+}
+
+/// The first run from the app: the command line transport, internal mode, no key needed.
+#[test]
+fn an_internal_run_on_the_cli_gets_internal_the_rooms_and_traces_beside_them() {
+    let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+    let creds = creds_with_key(None);
+    let run_dir = PathBuf::from("/run/folder");
+    let setup = super::super::finder_setup_for_run(
+        &agent_controls(),
+        false,
+        Backend::Cli,
+        &creds,
+        Some(&run_dir),
+        false,
+    )
+    .unwrap()
+    .expect("the agent finder gets a setup");
+    assert_eq!(setup.engagement, EngagementKind::Internal);
+    assert_eq!(setup.rooms_dir, run_dir.join("finder-rooms"));
+    // The build the factory sees names the same rooms folder, and the transport puts its stream
+    // records in `<run folder>/finder-traces` (the parent of the rooms folder).
+    let build = resolve_agent_build(Some(&setup), None, Backend::Cli).unwrap();
+    assert_eq!(build.engagement, EngagementKind::Internal);
+    assert_eq!(
+        build.work_dir.parent().unwrap().join("finder-traces"),
+        run_dir.join("finder-traces")
+    );
+}
+
+#[test]
+fn the_engine_finder_a_blocked_review_and_a_missing_api_key_are_handled_before_any_spend() {
+    let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+    let creds = creds_with_key(None);
+    let dir = PathBuf::from("/run/folder");
+    let engine = super::super::finder_setup_for_run(
+        &RunControls::default(),
+        false,
+        Backend::Api,
+        &creds,
+        Some(&dir),
+        true,
+    );
+    assert_eq!(engine, Ok(None), "the engine finder builds no setup");
+    let blocked = super::super::finder_setup_for_run(
+        &agent_controls(),
+        true,
+        Backend::Cli,
+        &creds,
+        Some(&dir),
+        true,
+    );
+    assert_eq!(blocked, Ok(None), "a blocked AI review builds none");
+    let no_key = super::super::finder_setup_for_run(
+        &agent_controls(),
+        false,
+        Backend::Api,
+        &creds,
+        Some(&dir),
+        true,
+    );
+    assert!(no_key.is_err(), "the API backend needs a saved key");
+}
+
+/// The shared function is the only place that builds a `FinderSetup` outside tests.
+#[test]
+fn only_the_shared_function_builds_a_finder_setup() {
+    fn scan(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = path.to_string_lossy().to_string();
+            if path.is_dir() {
+                scan(&path, hits);
+            } else if name.ends_with(".rs")
+                && !name.contains("/tests/")
+                && !name.ends_with("_tests.rs")
+                && !name.ends_with("/tests.rs")
+            {
+                let text = std::fs::read_to_string(&path).unwrap();
+                if text.contains("FinderSetup {") && !text.contains("pub struct FinderSetup") {
+                    hits.push(name);
+                }
+            }
+        }
+    }
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut hits = Vec::new();
+    for c in std::fs::read_dir(&crates).unwrap().flatten() {
+        let src = c.path().join("src");
+        if src.is_dir() {
+            scan(&src, &mut hits);
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "built outside the shared function: {hits:?}"
+    );
+}

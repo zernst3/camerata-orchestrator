@@ -1325,3 +1325,37 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod finder_setting_tests {
+    use super::*;
+    use camerata_api_types::project::ProjectFinder;
+
+    #[test]
+    fn the_finder_setting_defaults_to_engine_and_survives_a_reload() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-finder-setting-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("projects.json");
+        let id = {
+            let store = ProjectStore::load_or_new(path.clone());
+            let p = store.create("A", vec![]).unwrap();
+            assert_eq!(p.review.finder, ProjectFinder::Engine);
+            let settings = ReviewSettings {
+                finder: ProjectFinder::Agent,
+                ..p.review
+            };
+            store.set_review_settings(&p.id, settings).unwrap().unwrap();
+            p.id
+        };
+        let reloaded = ProjectStore::load_or_new(path);
+        assert_eq!(
+            reloaded.get(&id).unwrap().review.finder,
+            ProjectFinder::Agent
+        );
+    }
+}
