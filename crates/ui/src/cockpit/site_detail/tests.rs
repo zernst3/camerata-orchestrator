@@ -1494,3 +1494,102 @@ async fn a_ruling_the_server_would_refuse_on_a_thrown_out_row_posts_nothing() {
     .unwrap();
     assert_eq!(writes.log.borrow().len(), 3);
 }
+
+// ── The rule's severity bounds beside the severity ────────────────────────────────────────
+
+fn with_bounds(
+    configure: impl FnOnce(&mut camerata_api_types::review_view::SeverityBoundsView),
+) -> SiteRow {
+    let mut view = camerata_api_types::review_view::SeverityBoundsView {
+        floor: None,
+        ceiling: None,
+        deviation_ceiling: None,
+        applied: None,
+        applied_from: None,
+    };
+    configure(&mut view);
+    SiteRow {
+        severity_bounds: Some(view),
+        ..plain()
+    }
+}
+
+#[test]
+fn each_applied_bound_is_worded_after_the_severity() {
+    use camerata_api_types::review_view::AppliedBound;
+    let cases = [
+        (
+            with_bounds(|v| {
+                v.floor = Some("high".into());
+                v.applied = Some(AppliedBound::Floor);
+                v.applied_from = Some("medium".into());
+            }),
+            "raised from medium by the rule&#39;s floor (at least high)",
+        ),
+        (
+            with_bounds(|v| {
+                v.ceiling = Some("medium".into());
+                v.applied = Some(AppliedBound::Ceiling);
+                v.applied_from = Some("high".into());
+            }),
+            "capped from high by the rule&#39;s ceiling (at most medium)",
+        ),
+        (
+            with_bounds(|v| {
+                v.deviation_ceiling = Some("medium".into());
+                v.applied = Some(AppliedBound::DeviationCeiling);
+                v.applied_from = Some("high".into());
+            }),
+            "capped from high: a consistency deviation is at most medium",
+        ),
+        (
+            with_bounds(|v| {
+                v.applied = Some(AppliedBound::NoLocation);
+                v.applied_from = Some("high".into());
+            }),
+            "set to info: the row has no file and line",
+        ),
+    ];
+    for (row, words) in cases {
+        let html = page(row, DetailPanel::default());
+        assert!(html.contains("site-detail-bounds"), "{html}");
+        assert!(html.contains(words), "{words}\n{html}");
+    }
+}
+
+#[test]
+fn bounds_that_changed_nothing_are_quiet_and_a_rule_without_bounds_adds_nothing() {
+    let html = page(
+        with_bounds(|v| v.floor = Some("high".into())),
+        DetailPanel::default(),
+    );
+    assert!(html.contains("rule: at least high"), "{html}");
+    assert!(!html.contains("raised from"), "{html}");
+    let html = page(plain(), DetailPanel::default());
+    assert!(!html.contains("site-detail-bounds"), "{html}");
+    assert!(!html.contains("rule: at"), "{html}");
+}
+
+#[test]
+fn the_bounds_line_sits_beside_the_group_reviewers_disagreement_and_does_not_replace_it() {
+    use camerata_api_types::review_view::AppliedBound;
+    let mut row = plain();
+    row.stage2.as_mut().unwrap().disagreements.push(
+        camerata_api_types::review::Stage2Disagreement {
+            field: camerata_api_types::review::DisagreementField::Severity,
+            stage1: "low".to_string(),
+            mine: "high".to_string(),
+            why: String::new(),
+        },
+    );
+    row.severity_bounds = Some(camerata_api_types::review_view::SeverityBoundsView {
+        floor: Some("high".into()),
+        ceiling: None,
+        deviation_ceiling: None,
+        applied: Some(AppliedBound::Floor),
+        applied_from: Some("medium".into()),
+    });
+    let html = page(row, DetailPanel::default());
+    assert!(html.contains("stage 2 disagrees"), "{html}");
+    assert!(html.contains("raised from medium"), "{html}");
+}

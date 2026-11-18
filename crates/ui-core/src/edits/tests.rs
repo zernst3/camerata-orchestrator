@@ -1912,3 +1912,98 @@ fn a_checked_same_place_entry_shows_the_models_reason_in_its_hint() {
         plain[0].hint
     );
 }
+
+// ── The rule's severity bounds on the row ─────────────────────────────────────────────────
+
+fn bounds_row(
+    configure: impl FnOnce(&mut camerata_api_types::review_view::SeverityBoundsView),
+) -> SiteRow {
+    let mut view = camerata_api_types::review_view::SeverityBoundsView {
+        floor: None,
+        ceiling: None,
+        deviation_ceiling: None,
+        applied: None,
+        applied_from: None,
+    };
+    configure(&mut view);
+    SiteRow {
+        severity_bounds: Some(view),
+        ..plain()
+    }
+}
+
+#[test]
+fn the_bounds_note_words_each_bound_that_moved_the_severity() {
+    use camerata_api_types::review_view::AppliedBound;
+    let floor = bounds_row(|v| {
+        v.floor = Some("high".into());
+        v.applied = Some(AppliedBound::Floor);
+        v.applied_from = Some("medium".into());
+    });
+    assert_eq!(
+        severity_bounds_note(&floor).as_deref(),
+        Some("raised from medium by the rule's floor (at least high)")
+    );
+    let ceiling = bounds_row(|v| {
+        v.ceiling = Some("medium".into());
+        v.applied = Some(AppliedBound::Ceiling);
+        v.applied_from = Some("high".into());
+    });
+    assert_eq!(
+        severity_bounds_note(&ceiling).as_deref(),
+        Some("capped from high by the rule's ceiling (at most medium)")
+    );
+    let deviation = bounds_row(|v| {
+        v.deviation_ceiling = Some("medium".into());
+        v.applied = Some(AppliedBound::DeviationCeiling);
+        v.applied_from = Some("high".into());
+    });
+    assert_eq!(
+        severity_bounds_note(&deviation).as_deref(),
+        Some("capped from high: a consistency deviation is at most medium")
+    );
+    let unlocated = bounds_row(|v| {
+        v.applied = Some(AppliedBound::NoLocation);
+        v.applied_from = Some("high".into());
+    });
+    assert_eq!(
+        severity_bounds_note(&unlocated).as_deref(),
+        Some("set to info: the row has no file and line")
+    );
+}
+
+#[test]
+fn bounds_that_changed_nothing_are_worded_quietly_and_no_bounds_say_nothing() {
+    let floor = bounds_row(|v| v.floor = Some("high".into()));
+    assert_eq!(
+        severity_bounds_note(&floor).as_deref(),
+        Some("rule: at least high")
+    );
+    let both = bounds_row(|v| {
+        v.floor = Some("medium".into());
+        v.ceiling = Some("critical".into());
+    });
+    assert_eq!(
+        severity_bounds_note(&both).as_deref(),
+        Some("rule: at least medium, at most critical")
+    );
+    // A row with no bounds says nothing new, and the stage 2 note is a different thing.
+    assert_eq!(severity_bounds_note(&plain()), None);
+}
+
+#[test]
+fn a_row_json_from_before_the_bounds_still_loads_and_says_nothing() {
+    let mut value = serde_json::to_value(plain()).unwrap();
+    assert!(
+        value.get("severity_bounds").is_none(),
+        "left off when empty"
+    );
+    value.as_object_mut().unwrap().remove("severity_bounds");
+    let row: SiteRow = serde_json::from_value(value).unwrap();
+    assert_eq!(row.severity_bounds, None);
+    assert_eq!(severity_bounds_note(&row), None);
+    // And a row that carries them survives the wire.
+    let with = bounds_row(|v| v.floor = Some("high".into()));
+    let back: SiteRow = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+    assert_eq!(back, with);
+}

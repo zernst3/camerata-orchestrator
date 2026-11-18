@@ -25,7 +25,7 @@ use camerata_api_types::edits::{
     AddFindingReq, ClientAckReq, EditField, FindingAdded, NewEditReq, KNOWN_CATEGORIES,
 };
 use camerata_api_types::review::{DisagreementField, EscalationState, ReviewLevel};
-use camerata_api_types::review_view::{DecisionView, EditView, SiteRow, TreeLevel};
+use camerata_api_types::review_view::{AppliedBound, DecisionView, EditView, SiteRow, TreeLevel};
 
 use crate::tree::state::{TreeIndex, TreeState};
 use crate::tree::{decision_label, kind_tag_of, marker_chips, outlier_phrase, short_date, Chip};
@@ -1333,6 +1333,47 @@ pub fn severity_note(row: &SiteRow) -> Option<String> {
             d.stage1, d.mine
         )
     })
+}
+
+/// What the rule itself says about the row's severity, in plain words, written after the severity
+/// on the row detail: which bound changed it and from what, or (a bound that changed nothing) the
+/// rule's bounds quietly. `None` for a row with neither. The UI only words what the server
+/// carried; it never works a severity out.
+pub fn severity_bounds_note(row: &SiteRow) -> Option<String> {
+    let b = row.severity_bounds.as_ref()?;
+    let from = b.applied_from.as_deref().unwrap_or("its first rating");
+    if let Some(applied) = b.applied {
+        let said = |bound: &Option<String>, label: &str| match bound {
+            Some(v) => format!(" ({label} {v})"),
+            None => String::new(),
+        };
+        return Some(match applied {
+            AppliedBound::Floor => format!(
+                "raised from {from} by the rule's floor{}",
+                said(&b.floor, "at least")
+            ),
+            AppliedBound::Ceiling => format!(
+                "capped from {from} by the rule's ceiling{}",
+                said(&b.ceiling, "at most")
+            ),
+            AppliedBound::DeviationCeiling => match &b.deviation_ceiling {
+                Some(v) => format!("capped from {from}: a consistency deviation is at most {v}"),
+                None => format!("capped from {from}: the ceiling for a consistency deviation"),
+            },
+            AppliedBound::NoLocation => "set to info: the row has no file and line".to_string(),
+        });
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = &b.floor {
+        parts.push(format!("at least {v}"));
+    }
+    if let Some(v) = &b.ceiling {
+        parts.push(format!("at most {v}"));
+    }
+    if let Some(v) = &b.deviation_ceiling {
+        parts.push(format!("a consistency deviation is at most {v}"));
+    }
+    (!parts.is_empty()).then(|| format!("rule: {}", parts.join(", ")))
 }
 
 /// The Stage 1 line: `high · real yes · effort low · "the key is a literal"`; `None` when stage 1

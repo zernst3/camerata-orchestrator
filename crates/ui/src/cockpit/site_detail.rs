@@ -26,11 +26,11 @@ use camerata_ui_core::edits::{
     commit, control_for, decision_line, duplicate_entries, edit_tip, field_label, field_state,
     flagged_by_line, head_chips, held_line, is_thrown_out, merge_candidate_total, merge_candidates,
     merge_shown_line, possible_false_positive_lines, reapply_decision_request,
-    reapply_done_message, reduce, review_level_text, severity_note, snippet_at_line,
-    split_choice_from_value, split_option_value, stage1_line, stage2_line, stale_edit_line,
-    stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control, DetailAction,
-    DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction, LineTone, Snippet,
-    SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
+    reapply_done_message, reduce, review_level_text, severity_bounds_note, severity_note,
+    snippet_at_line, split_choice_from_value, split_option_value, stage1_line, stage2_line,
+    stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control,
+    DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction,
+    LineTone, Snippet, SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
 };
 use camerata_ui_core::tree::{file_line, is_outlier, kind_tag_of, severity_badge, severity_label};
 use camerata_ui_core::triage::TriageState;
@@ -157,6 +157,7 @@ pub(crate) fn SiteDetailView(
     let duplicates = duplicate_entries(&row);
     let fp_lines = possible_false_positive_lines(&row);
     let sev_note = severity_note(&row);
+    let sev_bounds = severity_bounds_note(&row);
     let mode = panel.mode.clone();
     let picking = mode == DetailMode::PickField;
     let editing = |field: EditField| matches!(&mode, DetailMode::Edit(d) if d.field == field);
@@ -243,7 +244,7 @@ pub(crate) fn SiteDetailView(
             if has_form(EditField::Headline) {
                 EditFormFor { field: EditField::Headline, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
-            FieldRow { state: severity, note: sev_note, badge: Some(row.severity.clone()), editable: !thrown_out, on_event }
+            FieldRow { state: severity, note: sev_note, bounds: sev_bounds, badge: Some(row.severity.clone()), editable: !thrown_out, on_event }
             if has_form(EditField::Severity) {
                 EditFormFor { field: EditField::Severity, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
@@ -582,6 +583,9 @@ fn FieldRow(
     /// Words after the value (the severity's stage disagreement).
     #[props(default)]
     note: Option<String>,
+    /// What the rule's own bounds did to the severity, or say about it (plain words).
+    #[props(default)]
+    bounds: Option<String>,
     /// A severity badge to draw in front of the value.
     #[props(default)]
     badge: Option<String>,
@@ -619,6 +623,9 @@ fn FieldRow(
                 }
                 if let Some(note) = note {
                     span { class: "site-detail-note", " ({note})" }
+                }
+                if let Some(bounds) = bounds {
+                    span { class: "site-detail-note site-detail-bounds", " {bounds}" }
                 }
             }
             if let Some(edit) = applied {
