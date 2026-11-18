@@ -1471,7 +1471,7 @@ fn an_uncorrected_no_on_a_second_look_card_holds_the_row_and_a_later_decision_fr
         key: key.clone(),
         run_id: RUN.to_string(),
         right: false,
-        wrong: Some(EngineCheckError::NotARealIssue),
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
         correction: None,
         by: "zach".to_string(),
         at: "2026-11-04T10:00:00Z".to_string(),
@@ -1497,7 +1497,18 @@ fn an_uncorrected_no_on_a_second_look_card_holds_the_row_and_a_later_decision_fr
         "a No is a wrong ruling"
     );
 
-    // Deciding the row again, later than the No, is the correction.
+    // Ruling it out again, later than the No, is not a correction.
+    let mut re_ruled = decision("dec-000098", &key, DecisionState::FalsePositive, RUN);
+    re_ruled.decided_at = "2026-11-04T10:30:00Z".to_string();
+    let mut with_re_ruling = decisions.clone();
+    with_re_ruling.push(re_ruled);
+    assert_eq!(
+        crate::engine_check::uncorrected_keys(&stores.verdicts, RUN, &with_re_ruling, &[]),
+        vec![key.clone()],
+        "ruling it out again does not free it"
+    );
+
+    // Keeping the row as a problem, later than the No, is the correction.
     let mut again = decision("dec-000099", &key, DecisionState::Confirmed, RUN);
     again.decided_at = "2026-11-04T11:00:00Z".to_string();
     let mut all = decisions.clone();

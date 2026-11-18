@@ -585,3 +585,84 @@ fn a_later_ruling_never_takes_a_row_out_of_the_second_look_but_can_add_one() {
     assert!(grew, "new rulings do add rows");
     assert_eq!(before.len(), 12);
 }
+
+// ── a No on a second-look card: only un-ruling the row frees it ───────────────────────────
+
+fn ruled_out_no(key: &str, at: &str) -> EngineCheckVerdict {
+    EngineCheckVerdict {
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
+        ..verdict(key, false, at, None)
+    }
+}
+
+fn ruling(id: &str, key: &str, state: DecisionState, at: &str) -> Decision {
+    Decision {
+        state,
+        ..decision(id, key, at)
+    }
+}
+
+#[test]
+fn a_second_look_no_is_not_freed_by_another_rule_out_an_edit_or_a_group_rule_out() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T10:00:00Z";
+    let t2 = "2026-11-04T11:00:00Z";
+    let no = [ruled_out_no("k", t1)];
+    let held = |decisions: &[Decision], edits: &[Edit]| {
+        uncorrected_keys(&no, RUN, decisions, edits) == vec!["k".to_string()]
+    };
+    let first = ruling("dec-000001", "k", DecisionState::FalsePositive, t0);
+    assert!(held(&[first.clone()], &[]), "the ruling before the No");
+    // Ruled out again, later.
+    let again = ruling("dec-000002", "k", DecisionState::FalsePositive, t2);
+    assert!(held(&[first.clone(), again], &[]), "a later rule-out");
+    // A severity or wording edit, later.
+    assert!(
+        held(&[first.clone()], &[edit("edit-1", "k", t2)]),
+        "an edit"
+    );
+    // A group rule-out covering the row, later.
+    let mut node = ruling("dec-000003", "rule:x", DecisionState::FalsePositive, t2);
+    node.scope = Scope::Node("rule:x".to_string());
+    node.applies_to = vec!["k".to_string()];
+    let mut site = ruling("dec-000003.00000", "k", DecisionState::FalsePositive, t2);
+    site.inherited_from = Some("dec-000003".to_string());
+    assert!(held(&[first, node, site], &[]), "a group rule-out");
+}
+
+#[test]
+fn a_second_look_no_is_freed_by_un_ruling_the_row_or_by_a_later_yes() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T10:00:00Z";
+    let t2 = "2026-11-04T11:00:00Z";
+    let no = [ruled_out_no("k", t1)];
+    let ruled_out = ruling("dec-000001", "k", DecisionState::FalsePositive, t0);
+    // Kept as a problem, later.
+    let kept = ruling("dec-000002", "k", DecisionState::Confirmed, t2);
+    assert!(uncorrected_keys(&no, RUN, &[ruled_out.clone(), kept], &[]).is_empty());
+    // The ruling undone (no live ruling at all).
+    assert!(uncorrected_keys(&no, RUN, &[], &[]).is_empty());
+    // A later Yes replaces the No.
+    let yes = [ruled_out_no("k", t1), verdict("k", true, t2, None)];
+    assert!(uncorrected_keys(&yes, RUN, &[ruled_out], &[]).is_empty());
+}
+
+#[test]
+fn a_second_look_card_takes_only_its_own_no_and_no_other_card_takes_it() {
+    use camerata_api_types::review_view::SampleStratum::{Kept, RuledOutFlagged, ThrownOut};
+    let own = req(false, Some(EngineCheckError::RuledOutRealProblem));
+    let other = req(false, Some(EngineCheckError::NotARealIssue));
+    assert!(answer_fits_stratum(RuledOutFlagged, &own).is_ok());
+    assert!(answer_fits_stratum(RuledOutFlagged, &req(true, None)).is_ok());
+    assert_eq!(
+        answer_fits_stratum(RuledOutFlagged, &other),
+        Err(EngineCheckStoreError::WrongAnswerForCard)
+    );
+    for stratum in [Kept, ThrownOut] {
+        assert_eq!(
+            answer_fits_stratum(stratum, &own),
+            Err(EngineCheckStoreError::WrongAnswerForCard)
+        );
+        assert!(answer_fits_stratum(stratum, &other).is_ok());
+    }
+}

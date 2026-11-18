@@ -339,20 +339,19 @@ pub(crate) async fn post_engine_check_verdict(
     let Some(latest) = state.inspections.latest(&id) else {
         return no_inspection();
     };
-    // Only a row of the sample can be judged.
+    // Only a row of the sample can be judged, and with an answer its card takes.
     let lane_has_it = with_composer(&state, &id, Some(&latest.id), |c| {
-        if c.engine_check()
-            .cards
-            .iter()
-            .any(|card| card.site.site_key == key)
-        {
-            StatusCode::OK.into_response()
-        } else {
-            refusal(
+        let lane = c.engine_check();
+        let Some(card) = lane.cards.iter().find(|card| card.site.site_key == key) else {
+            return refusal(
                 StatusCode::NOT_FOUND,
                 "not_in_sample",
                 "This row is not in the Engine Check sample for this run.",
-            )
+            );
+        };
+        match crate::engine_check::answer_fits_stratum(card.stratum, &req) {
+            Ok(()) => StatusCode::OK.into_response(),
+            Err(e) => refusal(StatusCode::UNPROCESSABLE_ENTITY, e.code(), e.to_string()),
         }
     });
     if lane_has_it.status() != StatusCode::OK {

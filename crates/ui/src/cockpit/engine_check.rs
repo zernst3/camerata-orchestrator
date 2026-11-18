@@ -612,6 +612,7 @@ fn CorrectionForm(
                     | CorrectionKind::Escalate
                     | CorrectionKind::Deescalate
                     | CorrectionKind::Restore
+                    | CorrectionKind::KeepAsProblem
                     | CorrectionKind::ConfirmThrownOut => rsx! {},
                 }
             }
@@ -933,11 +934,11 @@ pub(crate) fn EngineHost() -> Element {
         if matches!(card_state(&card), CardState::ThrownOutConfirmed { .. }) {
             return;
         }
-        if card.stratum == SampleStratum::ThrownOut {
-            // A No on a thrown-out finding has one answer, and puts the row back.
-            pick.call(EngineCheckError::ThrownOutRealProblem);
-        } else {
-            ls.write().open_list();
+        // A thrown-out card (puts the row back) and a second-look card (keeps the row as a
+        // problem) have one answer; a kept card opens the list of what was wrong.
+        match camerata_ui_core::engine_check::no_answer(&card) {
+            Some(answer) => pick.call(answer),
+            None => ls.write().open_list(),
         }
     });
 

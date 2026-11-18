@@ -42,6 +42,7 @@ pub fn error_label(e: EngineCheckError) -> &'static str {
             "Group summary does not describe this finding"
         }
         EngineCheckError::ThrownOutRealProblem => "Thrown out, but a real problem",
+        EngineCheckError::RuledOutRealProblem => "Ruled out, but a real problem",
     }
 }
 
@@ -113,6 +114,15 @@ fn strictly_later(later: &str, earlier: &str) -> bool {
 /// Whether something corrected the No: the verdict names a correction, or a decision or an edit
 /// was made on the row after the verdict (the gate's own test, see `uncorrected_keys`).
 fn corrected_since(card: &EngineCheckCard, v: &EngineCheckVerdict) -> bool {
+    // A No on a row ruled out while flagged is answered only by un-ruling the row, the gate's own
+    // test: another rule-out, an edit or a named correction does not.
+    if v.wrong == Some(EngineCheckError::RuledOutRealProblem) {
+        return !card
+            .site
+            .decision
+            .as_ref()
+            .is_some_and(|d| d.state == DecisionState::FalsePositive);
+    }
     v.correction.is_some()
         || card
             .site
@@ -120,6 +130,17 @@ fn corrected_since(card: &EngineCheckCard, v: &EngineCheckVerdict) -> bool {
             .as_ref()
             .is_some_and(|d| strictly_later(&d.decided_at, &v.at))
         || card.site.edits.iter().any(|e| strictly_later(&e.at, &v.at))
+}
+
+/// The one answer a No has on a card that takes only one: a thrown-out card ("thrown out, but a
+/// real problem") and a second-look card ("ruled out, but a real problem"). `None` on a kept
+/// card, which offers the closed list of what was wrong.
+pub fn no_answer(card: &EngineCheckCard) -> Option<EngineCheckError> {
+    match card.stratum {
+        SampleStratum::ThrownOut => Some(EngineCheckError::ThrownOutRealProblem),
+        SampleStratum::RuledOutFlagged => Some(EngineCheckError::RuledOutRealProblem),
+        SampleStratum::Kept => None,
+    }
 }
 
 /// The state of a card, read from the verdict, from whether the gate holds the row and from
@@ -617,6 +638,8 @@ pub enum CorrectionKind {
     /// Confirm the throw-out was right (reason): the row stays out of the client package and the
     /// Engine Check's hold on it clears.
     ConfirmThrownOut,
+    /// Un-rule a row ruled out while flagged: keep it as a problem (reason).
+    KeepAsProblem,
 }
 
 /// The correction a choice opens.
@@ -631,6 +654,7 @@ pub fn kind_of(e: EngineCheckError) -> CorrectionKind {
         EngineCheckError::WordingOrFixWrong => CorrectionKind::Text,
         EngineCheckError::GroupSummaryDoesNotDescribe => CorrectionKind::Summary,
         EngineCheckError::ThrownOutRealProblem => CorrectionKind::Restore,
+        EngineCheckError::RuledOutRealProblem => CorrectionKind::KeepAsProblem,
     }
 }
 
@@ -671,6 +695,7 @@ impl Correction {
             | CorrectionKind::Escalate
             | CorrectionKind::Deescalate
             | CorrectionKind::Restore
+            | CorrectionKind::KeepAsProblem
             | CorrectionKind::ConfirmThrownOut => String::new(),
         };
         Self {
@@ -717,6 +742,7 @@ impl Correction {
             CorrectionKind::Text => "Edit its wording",
             CorrectionKind::Summary => "Edit the group summary",
             CorrectionKind::Restore => "Put it back into review",
+            CorrectionKind::KeepAsProblem => "Keep it as a problem",
             CorrectionKind::ConfirmThrownOut => "Confirm it was rightly thrown out",
         }
     }
@@ -811,6 +837,12 @@ pub fn correction_request(
         CorrectionKind::FalsePositive => {
             need_reason("call this row a false positive")?;
             Ok(decision(DecisionState::FalsePositive, None, reason))
+        }
+        // Ruling it out was wrong: a Confirmed ruling replaces the rule-out, so the row is a
+        // problem again. (A put-back is for rows the engine threw out; this row was kept.)
+        CorrectionKind::KeepAsProblem => {
+            need_reason("keep a row you ruled out as a problem")?;
+            Ok(decision(DecisionState::Confirmed, None, reason))
         }
         CorrectionKind::Restore => {
             need_reason("put back a finding the engine threw out")?;

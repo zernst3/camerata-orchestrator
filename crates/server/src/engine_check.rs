@@ -24,7 +24,7 @@ use camerata_api_types::decisions::{effective_by_key, Decision};
 use camerata_api_types::edits::Edit;
 use camerata_api_types::review::EscalationState;
 use camerata_api_types::review_view::{
-    CorrectionRef, EngineCheckVerdict, EngineCheckVerdictReq, SampleStratum,
+    CorrectionRef, EngineCheckError, EngineCheckVerdict, EngineCheckVerdictReq, SampleStratum,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -59,6 +59,8 @@ pub enum EngineCheckStoreError {
     WrongRequired,
     /// A Yes carries neither a reason it was wrong nor a correction.
     YesCarriesNothing,
+    /// The answer is not one this kind of card takes.
+    WrongAnswerForCard,
     /// The site key is blank.
     KeyRequired,
     /// The project's file was damaged when the store opened.
@@ -73,6 +75,7 @@ impl EngineCheckStoreError {
         match self {
             Self::WrongRequired => "wrong_required",
             Self::YesCarriesNothing => "yes_carries_nothing",
+            Self::WrongAnswerForCard => "wrong_answer_for_card",
             Self::KeyRequired => "key_required",
             Self::Corrupt => "store_corrupt",
             Self::Persist(_) => "persist_failed",
@@ -89,6 +92,11 @@ impl std::fmt::Display for EngineCheckStoreError {
             Self::YesCarriesNothing => write!(
                 f,
                 "A Yes records the verdict and nothing else: it names no error and no correction."
+            ),
+            Self::WrongAnswerForCard => write!(
+                f,
+                "A No on a row you ruled out says it is a real problem; that is the only No this \
+                 card takes, and no other card takes it."
             ),
             Self::KeyRequired => write!(f, "A verdict names the site it is about."),
             Self::Corrupt => write!(
@@ -400,6 +408,25 @@ impl EngineCheckStore {
     }
 }
 
+/// Whether `req` is an answer the card of `stratum` takes: a No on a second-look card (a row ruled
+/// out while flagged) is "ruled out, but a real problem" and nothing else, and no other card takes
+/// that No.
+pub fn answer_fits_stratum(
+    stratum: SampleStratum,
+    req: &EngineCheckVerdictReq,
+) -> Result<(), EngineCheckStoreError> {
+    let ruled_out_no = req.wrong == Some(EngineCheckError::RuledOutRealProblem);
+    let fits = match stratum {
+        SampleStratum::RuledOutFlagged => req.right || ruled_out_no,
+        SampleStratum::Kept | SampleStratum::ThrownOut => !ruled_out_no,
+    };
+    if fits {
+        Ok(())
+    } else {
+        Err(EngineCheckStoreError::WrongAnswerForCard)
+    }
+}
+
 /// What the Engine Check store holds about one run, as the release gate and the review read model
 /// need it. Built from the store by [`EngineCheckStore::evidence_for`]; a caller that holds no
 /// store (the headless `camerata inspect`, a test of something else) carries
@@ -533,6 +560,17 @@ pub fn uncorrected_keys(
         .into_iter()
         .filter(|v| !v.right)
         .filter(|v| {
+            // A No on a row ruled out while flagged says the ruling was wrong. Only un-ruling the
+            // row answers it: the row's standing decision is no longer a rule-out (a later ruling
+            // that keeps it, or the ruling undone). Another rule-out, an edit or a group rule-out
+            // does not, and nothing the No names counts.
+            if v.wrong
+                == Some(camerata_api_types::review_view::EngineCheckError::RuledOutRealProblem)
+            {
+                return decided.get(v.key.as_str()).is_some_and(|d| {
+                    d.state == camerata_api_types::decisions::DecisionState::FalsePositive
+                });
+            }
             let named = match &v.correction {
                 Some(CorrectionRef::Decision(id)) => decisions.iter().any(|d| d.id == *id),
                 Some(CorrectionRef::Edit(id)) => edits.iter().any(|e| e.id == *id),

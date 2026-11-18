@@ -693,6 +693,11 @@ pub enum EngineCheckError {
     /// [`Self::ALL`], the list the reviewer picks from on a kept row; the thrown-out card has
     /// this one answer, and it puts the row back (a restore decision) as its correction.
     ThrownOutRealProblem,
+    /// A No on a row the reviewer RULED OUT while the engine flagged it (the second look): ruling
+    /// it out was wrong, it is a real problem. Not in [`Self::ALL`]; the second-look card has this
+    /// one answer. Only un-ruling the row corrects it (a later ruling that keeps it, or the ruling
+    /// undone), never another ruling out, an edit or a group rule-out.
+    RuledOutRealProblem,
 }
 
 impl EngineCheckError {
