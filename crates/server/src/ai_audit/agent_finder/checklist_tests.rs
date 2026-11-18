@@ -826,7 +826,7 @@ fn render_bans_secret_values_and_attack_recipes_in_problems_it_adds() {
     let text = checklist().render();
     for needle in [
         "Never copy a credential",
-        "`<value omitted>`",
+        "write only the variable or key name",
         "step-by-step exploit instructions",
     ] {
         assert!(text.contains(needle), "{needle} missing from:\n{text}");

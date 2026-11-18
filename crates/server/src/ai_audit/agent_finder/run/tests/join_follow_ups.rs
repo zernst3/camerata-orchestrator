@@ -81,7 +81,11 @@ async fn the_repair_request_restates_the_format_and_every_refusal() {
         assert!(repair.contains(field), "{field}: {repair}");
     }
     assert!(repair.contains("may not be dropped"), "{repair}");
-    assert!(repair.contains("`<value omitted>`"), "{repair}");
+    assert!(
+        repair.contains("stopping before the `=` or `:`"),
+        "{repair}"
+    );
+    assert!(!repair.contains("value omitted"), "{repair}");
 }
 
 #[tokio::test]
