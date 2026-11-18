@@ -4,14 +4,16 @@
 //! drawn by [`crate::engine_check::draw_sample`], which depends on the run and the rows only, so
 //! the same run always shows the same cards in the same order.
 
-use camerata_api_types::decisions::DecisionState;
+use std::collections::{HashMap, HashSet};
+
+use camerata_api_types::decisions::{effective_by_key, DecisionState};
 use camerata_api_types::review_view::{
     CategoryAllocation, CorrectionRef, EngineCheckCard, EngineCheckLane, OutlierView,
     PlacementView, SampleStratum, StratumRate, SMALL_CATEGORY_DRAWN,
 };
 
 use super::ReviewComposer;
-use crate::engine_check::{draw_sample, Sample};
+use crate::engine_check::{draw_ruled_out_flagged, draw_sample, Sample};
 
 /// A rate as a percent of verdicts, with the half-width of its 95 percent Wilson score interval
 /// (design A14), both in percentage points to one decimal place; `None` before the first verdict.
@@ -45,6 +47,48 @@ impl<'a> ReviewComposer<'a> {
             self.report,
             self.inputs.settings.sample_size_per_run,
             self.inputs.run_id,
+        )
+    }
+
+    /// The second look: the rows the reviewer ruled out while the engine flagged them "possible
+    /// false positive", drawn from the decisions ([`draw_ruled_out_flagged`]), and how many rows
+    /// were ruled out in all. It is its own draw and never touches [`Self::sample`]: a row that
+    /// the first sample already holds is left out of it (one card per row, one question), and
+    /// the lane being off (a sample size of 0) turns it off too.
+    pub(super) fn second_look(&self, first: &Sample) -> (Vec<String>, usize) {
+        if self.inputs.settings.sample_size_per_run == 0 {
+            return (Vec::new(), 0);
+        }
+        let records = self.inputs.reviewed.records();
+        let effective = effective_by_key(records);
+        let position: HashMap<&str, usize> = records
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.id.as_str(), i))
+            .collect();
+        let in_first: HashSet<String> = first.cards().into_iter().map(|(_, k, _)| k).collect();
+        // Ruled out while flagged, in the order the rulings were written.
+        let mut ruled_out: Vec<(usize, &str)> = self
+            .report
+            .findings
+            .iter()
+            .filter(|f| !in_first.contains(&f.site_key))
+            .filter(|f| self.possible_false_positive(f).is_some())
+            .filter_map(|f| {
+                let d = effective.get(f.site_key.as_str())?;
+                (d.state == DecisionState::FalsePositive).then(|| {
+                    (
+                        position.get(d.id.as_str()).copied().unwrap_or(0),
+                        f.site_key.as_str(),
+                    )
+                })
+            })
+            .collect();
+        ruled_out.sort_unstable();
+        let keys: Vec<String> = ruled_out.into_iter().map(|(_, k)| k.to_string()).collect();
+        (
+            draw_ruled_out_flagged(self.inputs.run_id, &keys),
+            keys.len(),
         )
     }
 
@@ -104,8 +148,14 @@ impl<'a> ReviewComposer<'a> {
         let setting = self.inputs.settings.sample_size_per_run;
         let sample = self.sample();
 
+        let (second_look, ruled_out_flagged_total) = self.second_look(&sample);
         let mut cards = Vec::new();
-        for (_, key, stratum) in sample.cards() {
+        let drawn_cards = sample.cards().into_iter().chain(
+            second_look
+                .iter()
+                .map(|k| (String::new(), k.clone(), SampleStratum::RuledOutFlagged)),
+        );
+        for (_, key, stratum) in drawn_cards {
             let Some(f) = self.row(&key) else { continue };
             let node = f
                 .group_path
@@ -184,24 +234,29 @@ impl<'a> ReviewComposer<'a> {
             .collect();
 
         let kept_keys: Vec<&String> = sample.kept.iter().flat_map(|(_, k)| k).collect();
-        let strata = [
+        let mut strata_keys = vec![
             (SampleStratum::Kept, kept_keys),
             (SampleStratum::ThrownOut, sample.thrown_out.iter().collect()),
-        ]
-        .into_iter()
-        .map(|(stratum, keys)| {
-            let (verdicts, wrong) = self.verdict_counts(keys.iter().copied());
-            let (rate, margin) = rate_and_margin(wrong, verdicts);
-            StratumRate {
-                stratum,
-                drawn: keys.len(),
-                verdicts,
-                wrong,
-                rate_percent: rate,
-                margin_percent: margin,
-            }
-        })
-        .collect();
+        ];
+        // The second look has a rate of its own, once it has drawn a row.
+        if !second_look.is_empty() {
+            strata_keys.push((SampleStratum::RuledOutFlagged, second_look.iter().collect()));
+        }
+        let strata = strata_keys
+            .into_iter()
+            .map(|(stratum, keys)| {
+                let (verdicts, wrong) = self.verdict_counts(keys.iter().copied());
+                let (rate, margin) = rate_and_margin(wrong, verdicts);
+                StratumRate {
+                    stratum,
+                    drawn: keys.len(),
+                    verdicts,
+                    wrong,
+                    rate_percent: rate,
+                    margin_percent: margin,
+                }
+            })
+            .collect();
 
         EngineCheckLane {
             run_id: self.inputs.run_id.to_string(),
@@ -210,6 +265,7 @@ impl<'a> ReviewComposer<'a> {
             drawn: sample.drawn(),
             unread_total: sample.unread_total,
             thrown_out_total: sample.thrown_out_total,
+            ruled_out_flagged_total,
             allocation,
             strata,
             cards,

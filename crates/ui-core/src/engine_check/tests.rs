@@ -1191,3 +1191,60 @@ fn the_corrected_fixture_names_the_error_its_correction_fixed() {
         "a false-positive ruling corrects 'not a real issue', not 'wrong severity'"
     );
 }
+
+// ── The second look at rows ruled out while flagged ───────────────────────────────────────
+
+#[test]
+fn a_second_look_card_asks_whether_ruling_the_row_out_was_right() {
+    let mut card = card0();
+    card.stratum = SampleStratum::RuledOutFlagged;
+    assert_eq!(question(&card), "Was it right to rule this out?");
+    assert_eq!(stratum_label(card.stratum), Some("ruled out while flagged"));
+    // A No on it is held like a No on a kept row, until something corrects it.
+    card.verdict = Some(verdict(false, None));
+    card.site.held = Some(HoldReason::EngineCheckNoWithoutCorrection);
+    assert!(matches!(card_state(&card), CardState::Held { .. }));
+}
+
+#[test]
+fn the_second_look_has_its_own_rate_line_and_its_own_count_in_the_note() {
+    let mut l = lane(EngineMode::AllVerdicts);
+    let mut card = l.cards[0].clone();
+    card.stratum = SampleStratum::RuledOutFlagged;
+    l.cards.push(card);
+    l.ruled_out_flagged_total = 9;
+    l.strata.push(StratumRate {
+        stratum: SampleStratum::RuledOutFlagged,
+        drawn: 1,
+        verdicts: 0,
+        wrong: 0,
+        rate_percent: None,
+        margin_percent: None,
+    });
+    let line = rate_lines(&l)
+        .into_iter()
+        .find(|r| r.stratum == SampleStratum::RuledOutFlagged)
+        .expect("its own rate line");
+    assert_eq!(
+        line.label,
+        "Real problems among rows ruled out while flagged"
+    );
+    assert!(rate_lines(&l).len() >= 2, "never pooled with the others");
+    let note = allocation_note(&l).unwrap_or_default();
+    assert!(
+        note.contains(
+            "1 of the 9 rows you ruled out while the engine flagged them are in a second look"
+        ),
+        "{note}"
+    );
+    for text in [
+        line.label,
+        note.as_str(),
+        question(&l.cards[l.cards.len() - 1]),
+    ] {
+        assert!(
+            !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+            "{text}"
+        );
+    }
+}

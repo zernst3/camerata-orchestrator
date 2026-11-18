@@ -345,7 +345,7 @@ impl<'a> ReviewComposer<'a> {
             lanes: LaneCounts {
                 tree_undecided: counts.unresolved,
                 escalations: self.queue_groups().iter().filter(|g| g.escalated).count(),
-                engine_check: sample.drawn(),
+                engine_check: sample.drawn() + self.second_look(&sample).0.len(),
                 engine_check_off: self.inputs.settings.sample_size_per_run == 0,
                 flat_rows: counts.total,
             },

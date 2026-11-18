@@ -271,3 +271,18 @@ fn no_engine_check_ui_string_says_accuracy() {
         }
     }
 }
+
+/// A second-look card (a row ruled out while the engine flagged it) says so with a chip, asks its
+/// own question and offers the same Yes and No.
+#[test]
+fn a_second_look_card_carries_its_chip_and_its_own_question() {
+    let mut lane = dataset_base().engine;
+    lane.cards[0].stratum = SampleStratum::RuledOutFlagged;
+    lane.cards[0].verdict = None;
+    let mut state = LaneState::default();
+    state.go(0, lane.cards.len());
+    let html = crate::test_harness::render_fragment(form_page, FormCase { lane, state });
+    assert!(html.contains("ruled out while flagged"), "{html}");
+    assert!(html.contains("Was it right to rule this out?"), "{html}");
+    assert!(html.contains("engine-yes") && html.contains("engine-no"));
+}

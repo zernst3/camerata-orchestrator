@@ -1963,6 +1963,7 @@ fn build_engine(
         drawn: cards.len(),
         unread_total,
         thrown_out_total,
+        ruled_out_flagged_total: 0,
         allocation: Vec::new(),
         strata: Vec::new(),
         cards,

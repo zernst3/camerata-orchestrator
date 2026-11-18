@@ -277,3 +277,44 @@ fn the_internal_workbook_cell_names_the_reason_then_the_row_sentence() {
         format!("{}: {DOUBT_MARKER}", FpReason::GroupReviewerDoubt.label())
     );
 }
+
+/// The second look at rows ruled out while flagged is the Engine Check's: internal, in the
+/// review lane only. Neither package carries its stratum, its labels or its card question, even
+/// with a flagged row ruled out.
+#[test]
+fn neither_package_carries_the_second_look_at_ruled_out_flagged_rows() {
+    let sealed = sealed_with_a_test_row();
+    let key = key_at(&sealed, "tests/orders_test.rs");
+    let records = vec![decision(
+        "dec-000001",
+        &key,
+        DecisionState::FalsePositive,
+        "test helper, not production code",
+    )];
+    let reviewed = apply_overlay(&sealed, &records, &[], &[]);
+    for (internal, entries) in [
+        (false, released_entries(&reviewed, &client_options())),
+        (true, internal_entries(&reviewed)),
+    ] {
+        let mut text = String::new();
+        for (name, bytes) in &entries {
+            if name.ends_with(".xlsx") {
+                text.push_str(&xlsx_strings(bytes).expect("strings").join("\n"));
+            } else if !name.ends_with(".pdf") {
+                text.push_str(&String::from_utf8_lossy(bytes));
+            }
+        }
+        let lower = text.to_lowercase();
+        for needle in [
+            "ruled_out_flagged",
+            "ruled out while flagged",
+            "second look",
+            "was it right to rule this out",
+        ] {
+            assert!(
+                !lower.contains(needle),
+                "internal={internal}: a package file carries {needle:?}"
+            );
+        }
+    }
+}

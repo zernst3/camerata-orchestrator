@@ -337,6 +337,7 @@
     ],
     "drawn": "number",
     "off": "bool",
+    "ruled_out_flagged_total": "number",
     "run_id": "string",
     "setting": "number",
     "strata": [

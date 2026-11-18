@@ -1282,3 +1282,247 @@ fn a_site_row_names_the_other_cause_at_the_same_place_and_nothing_else_changes()
     let wire = serde_json::to_string(alone).unwrap();
     assert!(!wire.contains("same_place_as"), "{wire}");
 }
+
+// ── the second look at rows ruled out while flagged ───────────────────────────────────────
+
+/// `flagged` rows in test code (the engine flags them "possible false positive") and `plain` rows
+/// in production code, one rule, sealed.
+fn flagged_and_plain(flagged: usize, plain: usize) -> crate::onboard::SealedReport {
+    let mut rows: Vec<Finding> = (0..flagged)
+        .map(|i| {
+            let mut f = row(
+                "SEC-NO-RAW-SQL-CONCAT-1",
+                &format!("tests/t{i:02}.rs"),
+                10 + i,
+                "high",
+            );
+            f.in_test = true;
+            f
+        })
+        .collect();
+    rows.extend((0..plain).map(|i| {
+        row(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            &format!("src/p{i:02}.rs"),
+            10 + i,
+            "high",
+        )
+    }));
+    sealed(rows, |_| {})
+}
+
+fn ruling(n: usize, key: &str) -> Decision {
+    decision(
+        &format!("dec-{n:06}"),
+        key,
+        DecisionState::FalsePositive,
+        RUN,
+    )
+}
+
+/// The keys of the cards of `stratum`, in card order.
+fn cards_of(
+    lane: &camerata_api_types::review_view::EngineCheckLane,
+    stratum: camerata_api_types::review_view::SampleStratum,
+) -> Vec<String> {
+    lane.cards
+        .iter()
+        .filter(|c| c.stratum == stratum)
+        .map(|c| c.site.site_key.clone())
+        .collect()
+}
+
+fn flagged_keys(report: &crate::onboard::SealedReport) -> Vec<String> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.path.starts_with("tests/"))
+        .map(|f| f.site_key.clone())
+        .collect()
+}
+
+#[test]
+fn the_first_sample_is_the_same_whatever_has_been_decided_and_the_second_look_adds_its_own_cards() {
+    use camerata_api_types::review_view::SampleStratum::{Kept, RuledOutFlagged};
+    let report = flagged_and_plain(30, 10);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 8;
+
+    let undecided = apply_overlay(&report, &[], &[], &[]);
+    let before = compose(&undecided, &stores, |c| c.engine_check());
+    assert!(
+        cards_of(&before, RuledOutFlagged).is_empty(),
+        "nothing ruled out yet"
+    );
+    assert!(
+        before.strata.iter().all(|s| s.stratum != RuledOutFlagged),
+        "no stratum for a second look that drew nothing"
+    );
+
+    // Ten flagged rows (none in the first sample) and one plain row ruled out.
+    let in_first: Vec<String> = cards_of(&before, Kept);
+    let flagged: Vec<String> = flagged_keys(&report)
+        .into_iter()
+        .filter(|k| !in_first.contains(k))
+        .collect();
+    assert!(flagged.len() >= 16);
+    let plain = report
+        .findings
+        .iter()
+        .find(|f| f.path.starts_with("src/"))
+        .unwrap()
+        .site_key
+        .clone();
+    let mut decisions: Vec<Decision> = flagged
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    decisions.push(ruling(11, &plain));
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let after = compose(&reviewed, &stores, |c| c.engine_check());
+
+    // The first sample does not move: the same cards in the same order, the same count.
+    assert_eq!(cards_of(&after, Kept), cards_of(&before, Kept));
+    assert_eq!(after.drawn, before.drawn);
+
+    // The second look: 3 of the 10 ruled-out flagged rows, none of them the plain row.
+    let second = cards_of(&after, RuledOutFlagged);
+    assert_eq!(second.len(), 3, "{second:?}");
+    assert!(second.iter().all(|k| flagged.contains(k)), "{second:?}");
+    assert!(!second.contains(&plain));
+    assert_eq!(after.ruled_out_flagged_total, 10);
+    let rate = after
+        .strata
+        .iter()
+        .find(|s| s.stratum == RuledOutFlagged)
+        .expect("its own stratum");
+    assert_eq!((rate.drawn, rate.verdicts, rate.wrong), (3, 0, 0));
+    assert_eq!(
+        compose(&reviewed, &stores, |c| c.shell())
+            .lanes
+            .engine_check,
+        after.drawn + 3
+    );
+
+    // More rulings: the same cards stay, and the share grows (16 rows, 4 cards).
+    let more: Vec<Decision> = flagged
+        .iter()
+        .take(16)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &more, &[], &[]);
+    let later = compose(&reviewed, &stores, |c| c.engine_check());
+    let grown = cards_of(&later, RuledOutFlagged);
+    assert_eq!(grown.len(), 4, "{grown:?}");
+    assert!(
+        second.iter().all(|k| grown.contains(k)),
+        "{second:?} -> {grown:?}"
+    );
+    assert_eq!(cards_of(&later, Kept), cards_of(&before, Kept));
+}
+
+#[test]
+fn a_flagged_row_the_first_sample_already_holds_is_not_drawn_twice() {
+    use camerata_api_types::review_view::SampleStratum::{Kept, RuledOutFlagged};
+    let report = flagged_and_plain(6, 0);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 6;
+    let all = flagged_keys(&report);
+    let decisions: Vec<Decision> = all
+        .iter()
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    let first = cards_of(&lane, Kept);
+    assert_eq!(first.len(), 6, "the first sample holds every row");
+    assert!(
+        cards_of(&lane, RuledOutFlagged).is_empty(),
+        "a row already carded once is not carded again"
+    );
+}
+
+#[test]
+fn an_uncorrected_no_on_a_second_look_card_holds_the_row_and_a_later_decision_frees_it() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    use camerata_api_types::review_view::{EngineCheckError, EngineCheckVerdict};
+    let report = flagged_and_plain(12, 0);
+    let flagged = flagged_keys(&report);
+    let mut stores = Stores::default();
+    // A sample of 0 turns the lane off; one row keeps the first sample from holding the rest.
+    stores.settings.sample_size_per_run = 1;
+    let decisions: Vec<Decision> = flagged
+        .iter()
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    let second = cards_of(&lane, RuledOutFlagged);
+    assert!(!second.is_empty());
+    let key = second[0].clone();
+
+    // A No, given after the ruling (the verdict is later than the decision's 09:00).
+    let no = EngineCheckVerdict {
+        key: key.clone(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::NotARealIssue),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        carried_from: None,
+    };
+    stores.verdicts = vec![no.clone()];
+    let held = compose(&reviewed, &stores, |c| c.engine_check());
+    let card = held.cards.iter().find(|c| c.site.site_key == key).unwrap();
+    assert_eq!(card.stratum, RuledOutFlagged);
+    assert_eq!(
+        card.site.held,
+        Some(camerata_api_types::review_view::HoldReason::EngineCheckNoWithoutCorrection),
+        "the uncorrected No holds the row from export"
+    );
+    let rate = held
+        .strata
+        .iter()
+        .find(|s| s.stratum == RuledOutFlagged)
+        .unwrap();
+    assert_eq!(
+        (rate.verdicts, rate.wrong),
+        (1, 1),
+        "a No is a wrong ruling"
+    );
+
+    // Deciding the row again, later than the No, is the correction.
+    let mut again = decision("dec-000099", &key, DecisionState::Confirmed, RUN);
+    again.decided_at = "2026-11-04T11:00:00Z".to_string();
+    let mut all = decisions.clone();
+    all.push(again);
+    let freed = apply_overlay(&report, &all, &[], &[]);
+    let lane = compose(&freed, &stores, |c| c.engine_check());
+    let card = lane.cards.iter().find(|c| c.site.site_key == key);
+    assert!(
+        card.is_none_or(|c| c.site.held.is_none()),
+        "a later decision clears the hold"
+    );
+}
+
+#[test]
+fn a_sample_size_of_zero_turns_the_second_look_off_with_the_rest_of_the_lane() {
+    let report = flagged_and_plain(12, 0);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 0;
+    let decisions: Vec<Decision> = flagged_keys(&report)
+        .iter()
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    assert!(lane.off && lane.cards.is_empty());
+    assert_eq!(lane.ruled_out_flagged_total, 0);
+}

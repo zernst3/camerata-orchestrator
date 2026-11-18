@@ -521,3 +521,67 @@ fn the_verdicts_in_force_give_the_lane_an_earlier_runs_no_marked_as_carried() {
     // The run's own list (what the lane used to read) holds nothing for the second run.
     assert!(store.latest_for_run("p1", &second.id).is_empty());
 }
+
+// ── the second look at rows ruled out while flagged ───────────────────────────────────────
+
+fn ruled_out(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("flagged-{i:03}")).collect()
+}
+
+#[test]
+fn the_second_look_draws_a_fifth_of_the_ruled_out_flagged_rows_at_least_three_or_all() {
+    for (pool, want) in [
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (10, 3),
+        (15, 3),
+        (16, 4),
+        (50, 10),
+        (100, 20),
+        (101, 21),
+    ] {
+        let rows = ruled_out(pool);
+        let drawn = draw_ruled_out_flagged(RUN, &rows);
+        assert_eq!(drawn.len(), want, "pool of {pool}");
+        let distinct: BTreeSet<&String> = drawn.iter().collect();
+        assert_eq!(distinct.len(), drawn.len(), "no row twice");
+        assert!(
+            drawn.iter().all(|k| rows.contains(k)),
+            "only ruled-out rows"
+        );
+    }
+}
+
+#[test]
+fn the_second_look_is_the_same_every_time_and_depends_on_the_run() {
+    let rows = ruled_out(40);
+    assert_eq!(
+        draw_ruled_out_flagged(RUN, &rows),
+        draw_ruled_out_flagged(RUN, &rows)
+    );
+    assert_ne!(
+        draw_ruled_out_flagged(RUN, &rows),
+        draw_ruled_out_flagged("insp-2", &rows),
+        "another run draws another set"
+    );
+}
+
+#[test]
+fn a_later_ruling_never_takes_a_row_out_of_the_second_look_but_can_add_one() {
+    let rows = ruled_out(60);
+    let mut before: Vec<String> = Vec::new();
+    let mut grew = false;
+    for n in 1..=rows.len() {
+        let now = draw_ruled_out_flagged(RUN, &rows[..n]);
+        assert!(
+            before.iter().all(|k| now.contains(k)),
+            "pool {n}: a row already drawn was dropped: {before:?} -> {now:?}"
+        );
+        grew |= now.len() > before.len();
+        before = now;
+    }
+    assert!(grew, "new rulings do add rows");
+    assert_eq!(before.len(), 12);
+}

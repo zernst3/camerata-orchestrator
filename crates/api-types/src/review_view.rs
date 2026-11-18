@@ -725,6 +725,10 @@ pub enum SampleStratum {
     Kept,
     /// A row the engine threw out; sampled apart and its rate never pooled with the kept rows.
     ThrownOut,
+    /// A row the engine flagged "possible false positive" that the reviewer then ruled out: a
+    /// second look at the reviewer's own ruling, drawn from the decisions and kept apart from the
+    /// first sample (its rate is never pooled with it either).
+    RuledOutFlagged,
 }
 
 /// One Yes or No on one sampled row, as stored (spec section 7). Internal: it never appears in
@@ -846,6 +850,10 @@ pub struct EngineCheckLane {
     pub unread_total: usize,
     /// Thrown-out rows in the run.
     pub thrown_out_total: usize,
+    /// Rows the reviewer has ruled out while they carried the possible false positive flag: the
+    /// pool the second look draws from. Zero when none, and in older stored lanes.
+    #[serde(default)]
+    pub ruled_out_flagged_total: usize,
     pub allocation: Vec<CategoryAllocation>,
     /// The kept stratum then the thrown-out stratum; never pooled.
     pub strata: Vec<StratumRate>,

@@ -46,6 +46,12 @@ pub const THROWN_OUT_SHARE_PERCENT: usize = 10;
 /// The fewest thrown-out rows a sample draws, or all of them when fewer exist.
 pub const THROWN_OUT_MINIMUM: usize = 5;
 
+/// The share of the rows the reviewer ruled out while they carried the possible false positive
+/// flag that the second look draws.
+pub const RULED_OUT_SHARE_PERCENT: usize = 20;
+/// The fewest rows the second look draws, or all of them when fewer were ruled out.
+pub const RULED_OUT_MINIMUM: usize = 3;
+
 /// Why a verdict was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCheckStoreError {
@@ -662,6 +668,40 @@ pub fn draw_sample(report: &ScanReport, size: usize, run_id: &str) -> Sample {
         ));
     }
     sample
+}
+
+/// Draw the second look: the rows the reviewer ruled out while the engine flagged them "possible
+/// false positive". `ruled_out_in_order` is each such row once, in the order the reviewer ruled
+/// them out.
+///
+/// The second look takes [`RULED_OUT_SHARE_PERCENT`] of the rows, at least [`RULED_OUT_MINIMUM`],
+/// or all of them when fewer were ruled out. It is built one ruling at a time: after each ruling
+/// the draw is topped up to what the rows so far call for, with the row whose [`draw_order`] (a
+/// hash of the run and the row) comes first among those not yet drawn. So the draw is the same for
+/// the same run and rulings, a later ruling never takes a drawn row out (a card the reviewer
+/// already answered cannot vanish), and a later ruling can add one.
+///
+/// This draw is separate from [`draw_sample`], which it never reads or changes.
+pub fn draw_ruled_out_flagged(run_id: &str, ruled_out_in_order: &[String]) -> Vec<String> {
+    let mut drawn: Vec<String> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    // The rows seen and not yet drawn, first in draw order first.
+    let mut waiting: BTreeSet<(u64, &str)> = BTreeSet::new();
+    for key in ruled_out_in_order {
+        if !seen.insert(key.as_str()) {
+            continue;
+        }
+        waiting.insert((draw_order(run_id, key), key.as_str()));
+        let rows = seen.len();
+        let want = rows.min(RULED_OUT_MINIMUM.max((rows * RULED_OUT_SHARE_PERCENT).div_ceil(100)));
+        while drawn.len() < want {
+            let Some((_, next)) = waiting.pop_first() else {
+                break;
+            };
+            drawn.push(next.to_string());
+        }
+    }
+    drawn
 }
 
 /// Split `size` across categories by unread rows, with a floor of [`CATEGORY_FLOOR`] each (or all

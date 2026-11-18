@@ -400,6 +400,7 @@ pub fn stratum_label(stratum: SampleStratum) -> Option<&'static str> {
     match stratum {
         SampleStratum::Kept => None,
         SampleStratum::ThrownOut => Some("thrown out by the engine"),
+        SampleStratum::RuledOutFlagged => Some("ruled out while flagged"),
     }
 }
 
@@ -408,6 +409,7 @@ pub fn question(card: &EngineCheckCard) -> &'static str {
     match card.stratum {
         SampleStratum::Kept => "Did the engine get this right?",
         SampleStratum::ThrownOut => "Was the engine right to throw this out?",
+        SampleStratum::RuledOutFlagged => "Was it right to rule this out?",
     }
 }
 
@@ -471,6 +473,18 @@ pub fn allocation_note(lane: &EngineCheckLane) -> Option<String> {
             "{} of the {} rows the engine threw out are in the sample",
             thousands(thrown),
             thousands(lane.thrown_out_total)
+        ));
+    }
+    let second_look = lane
+        .cards
+        .iter()
+        .filter(|c| c.stratum == SampleStratum::RuledOutFlagged)
+        .count();
+    if second_look > 0 {
+        parts.push(format!(
+            "{} of the {} rows you ruled out while the engine flagged them are in a second look",
+            thousands(second_look),
+            thousands(lane.ruled_out_flagged_total)
         ));
     }
     (!parts.is_empty()).then(|| parts.join(". "))
@@ -563,6 +577,9 @@ pub fn rate_lines(lane: &EngineCheckLane) -> Vec<RateLine> {
             label: match s.stratum {
                 SampleStratum::Kept => "Error rate among reported findings",
                 SampleStratum::ThrownOut => "Real problems among thrown-out findings",
+                SampleStratum::RuledOutFlagged => {
+                    "Real problems among rows ruled out while flagged"
+                }
             },
             text: stratum_rate_text(s),
         })
