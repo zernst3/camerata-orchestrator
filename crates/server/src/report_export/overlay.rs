@@ -694,9 +694,11 @@ fn apply_summary_edits(
         }
         if let Some(node) = tree.nodes.iter_mut().find(|n| n.id == e.key) {
             let new = Some(e.new.trim().to_string());
+            // The client reasons are client text: cleaned like the site business edit.
+            let client = || Some(crate::client_text::plain(e.new.trim()).into_owned());
             match e.field {
-                EditField::WhyBusiness => node.why_business = new,
-                EditField::WhyTechnical => node.why_technical = new,
+                EditField::WhyBusiness => node.why_business = client(),
+                EditField::WhyTechnical => node.why_technical = client(),
                 _ => {
                     node.summary = new;
                     node.summary_source = TextSource::Reviewer;

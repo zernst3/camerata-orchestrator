@@ -335,3 +335,27 @@ fn an_edit_of_a_reason_without_a_reason_is_refused() {
         assert!(store.record_edit("p", draft("because"), ctx()).is_ok());
     }
 }
+
+#[test]
+fn a_node_edit_with_dashes_gives_a_fix_plan_cell_with_neither_dash() {
+    use camerata_api_types::edits::EditField;
+    for (field, header) in [
+        (EditField::WhyBusiness, "Why it matters to the business"),
+        (EditField::WhyTechnical, "Why it matters technically"),
+    ] {
+        let sealed = marked();
+        let edit = node_edit(
+            &sealed,
+            1,
+            field,
+            "Data can go wrong \u{2014} quietly \u{2013} for weeks.",
+        );
+        let reviewed = apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+        let cell = fix_plan_cell(&reviewed, header);
+        assert!(
+            !cell.contains('\u{2014}') && !cell.contains('\u{2013}'),
+            "{cell}"
+        );
+        assert!(cell.contains("quietly"), "{cell}");
+    }
+}
