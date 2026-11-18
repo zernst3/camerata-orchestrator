@@ -223,7 +223,7 @@ fn a_run_in_flight_locks_every_control_and_says_why() {
     let html = fragment("settings/run-in-flight");
     assert!(html.contains(RUN_IN_FLIGHT_NOTE), "{html}");
     let selects = html.matches("<select").count();
-    assert_eq!(selects, 5, "one per stage and the finder");
+    assert_eq!(selects, 8, "one per stage (seven models) and the finder");
     for chunk in html.split("<select").skip(1) {
         let tag = &chunk[..chunk.find('>').unwrap()];
         assert!(tag.contains("disabled"), "a select is still live: {tag}");
