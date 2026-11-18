@@ -470,6 +470,7 @@ fn repair_message(unusable: &[reply::Unusable]) -> String {
     let mut text = String::from(
         "Some of your output files could not be used. Write each one again in full.\n",
     );
+    text.push_str(&super::super::brief_text::repair_reminder());
     for u in unusable {
         text.push_str(&format!("- {} {}\n", u.file, u.reason));
     }

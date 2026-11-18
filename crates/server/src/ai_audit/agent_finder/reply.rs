@@ -105,7 +105,8 @@ pub struct PieceOutput {
     pub leads_answers: Option<String>,
 }
 
-/// The most problems one file may hold.
+/// The most problems the brief asks for in one file. It keeps each write small; a file that
+/// holds more and is otherwise valid is read in full.
 pub const MAX_PROBLEMS_PER_FILE: usize = 40;
 
 const SEVERITIES: [&str; 4] = ["critical", "high", "medium", "low"];
@@ -139,7 +140,7 @@ fn problems_file_number(name: &str) -> Option<u64> {
 /// Whether `name` is a stray problems file name (`problems_2.json`, `problems.json`) whose `text`
 /// parses as a problems list. The agent has no delete tool, so a stray file it already wrote could
 /// never be repaired; one that holds a usable list is read as a problems file.
-fn stray_problems_list(name: &str, text: &str, cap: usize) -> bool {
+fn stray_problems_list(name: &str, text: &str) -> bool {
     if !(name.starts_with("problems") && name.ends_with(".json")) {
         return false;
     }
@@ -149,7 +150,7 @@ fn stray_problems_list(name: &str, text: &str, cap: usize) -> bool {
     let Ok(items) = array_of(&value, "problems") else {
         return false;
     };
-    items.len() <= cap && items.iter().all(|item| parse_problem(item).is_ok())
+    items.iter().all(|item| parse_problem(item).is_ok())
 }
 
 fn field<'a>(v: &'a serde_json::Value, name: &str) -> Result<&'a serde_json::Value, String> {
@@ -181,6 +182,43 @@ fn one_of(v: &serde_json::Value, name: &str, allowed: &[&str]) -> Result<String,
         Ok(s)
     } else {
         Err(format!("has {name} `{s}`; use {}", allowed.join(", ")))
+    }
+}
+
+/// Every field a problem needs, for the list of what is missing.
+const REQUIRED_FIELDS: [&str; 12] = [
+    "n", "path", "line", "severity", "title", "code", "what", "why", "fix", "sure", "effort",
+    "label",
+];
+
+/// The reason an entry failed; when fields are missing, all of them, not only the first.
+fn all_gaps(item: &serde_json::Value, first: String) -> String {
+    if !item.is_object() || !first.starts_with("is missing the field") {
+        return first;
+    }
+    let missing: Vec<String> = REQUIRED_FIELDS
+        .iter()
+        .filter(|f| field(item, f).is_err())
+        .map(|f| format!("`{f}`"))
+        .collect();
+    if missing.len() > 1 {
+        format!("is missing the fields {}", missing.join(", "))
+    } else {
+        first
+    }
+}
+
+/// The first few failing entries of a file, and how many more there were.
+fn summarize_failures(failures: &[String]) -> String {
+    let shown = failures
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    match failures.len().saturating_sub(3) {
+        0 => shown,
+        more => format!("{shown}; and {more} more entries have problems too"),
     }
 }
 
@@ -522,13 +560,13 @@ pub fn parse_outputs(outputs: &BTreeMap<String, String>, piece_files: &[String])
     parse_outputs_joined(outputs, piece_files, &HashSet::new())
 }
 
-/// [`parse_outputs`] where the files named in `joined` hold the engine's own joined text (a base
-/// plus a later rewrite): those are not held to [`MAX_PROBLEMS_PER_FILE`], which limits what the
-/// agent writes in one go, not what the engine puts together from several steps.
+/// [`parse_outputs`] where the files named in `joined` hold the engine's own joined text. No file
+/// is refused for its count any more ([`MAX_PROBLEMS_PER_FILE`] is guidance in the brief), so
+/// `joined` changes nothing here; the callers still say which files they joined.
 pub fn parse_outputs_joined(
     outputs: &BTreeMap<String, String>,
     piece_files: &[String],
-    joined: &HashSet<String>,
+    _joined: &HashSet<String>,
 ) -> PieceOutput {
     let mut out = PieceOutput::default();
     let in_piece: HashSet<String> = piece_files.iter().map(|p| plain_path(p)).collect();
@@ -546,12 +584,7 @@ pub fn parse_outputs_joined(
             file: key.clone(),
             reason,
         };
-        let cap = if joined.contains(key) {
-            usize::MAX
-        } else {
-            MAX_PROBLEMS_PER_FILE
-        };
-        if problems_file_number(name).is_some() || stray_problems_list(name, text, cap) {
+        if problems_file_number(name).is_some() || stray_problems_list(name, text) {
             out.problems_files += 1;
             let value: serde_json::Value = match serde_json::from_str(text) {
                 Ok(v) => v,
@@ -568,24 +601,15 @@ pub fn parse_outputs_joined(
                     continue;
                 }
             };
-            if items.len() > cap {
-                out.unusable.push(unusable(format!(
-                    "holds {} problems; at most {MAX_PROBLEMS_PER_FILE} to a file",
-                    items.len()
-                )));
-                continue;
-            }
             let mut parsed = Vec::new();
-            let mut failure = None;
+            let mut failures: Vec<String> = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 match parse_problem(item) {
                     Ok(p) => parsed.push(p),
-                    Err(e) => {
-                        failure = Some(format!("entry {} {e}", i + 1));
-                        break;
-                    }
+                    Err(e) => failures.push(format!("entry {} {}", i + 1, all_gaps(item, e))),
                 }
             }
+            let mut failure = (!failures.is_empty()).then(|| summarize_failures(&failures));
             if failure.is_none() {
                 let mut local: HashSet<u32> = HashSet::new();
                 for p in &parsed {

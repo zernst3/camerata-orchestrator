@@ -441,6 +441,7 @@ fn repair_message(view: &View) -> String {
     let mut text = String::from(
         "Some of your output files could not be used. Write each one again in full.\n",
     );
+    text.push_str(&super::super::brief_text::repair_reminder());
     for u in &view.known_unusable {
         let clashes: Vec<&Clash> = view.clashes.iter().filter(|c| c.file == u.file).collect();
         if clashes.is_empty() {
