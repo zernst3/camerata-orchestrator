@@ -96,7 +96,7 @@ const BUSINESS_FIELD: &str = "`why` (why it matters technically: what breaks and
     product, its data, its users or the people who work on it, and when it starts to matter. \
     Pick the one consequence that fits, such as data that quietly goes wrong, the cost of \
     changing it later, someone new working on the code, an outside review of the code, the \
-    running bill as usage grows, AI coding tools copying the pattern, or exposure of data or \
+    running bill as usage grows, AI coding tools copying the pattern or exposure of data or \
     access. Say what can happen, never what will happen, and give no figures, times or costs \
     the code does not show.)";
 
@@ -133,4 +133,10 @@ fn both_briefs_ask_for_unsure_why_inside_the_sure_description() {
         JOINTS_BRIEF.contains("`sure`, `unsure_why`, `effort`"),
         "{JOINTS_BRIEF}"
     );
+}
+
+#[test]
+fn the_finder_prompt_has_no_serial_comma_before_its_last_example() {
+    assert!(!PIECE_BRIEF.contains("copying the pattern, or exposure"));
+    assert!(PIECE_BRIEF.contains("copying the pattern or exposure"));
 }

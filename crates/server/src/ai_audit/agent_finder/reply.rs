@@ -51,7 +51,7 @@ pub const FINDER_PIECE_CAPTURE: &str = "finder-piece";
 pub const FINDER_SURE_CAPTURE: &str = "finder-sure";
 pub const FINDER_EFFORT_CAPTURE: &str = "finder-effort";
 pub const FINDER_FIX_CAPTURE: &str = "finder-fix";
-/// The business text of a problem, cleaned for the client.
+/// What the agent could not settle when it marked a problem `unsure`, cleaned. Operator only.
 pub const FINDER_UNSURE_WHY_CAPTURE: &str = "finder-unsure-why";
 /// The business text of a problem, cleaned for the client.
 pub const FINDER_BUSINESS_CAPTURE: &str = "finder-business";
