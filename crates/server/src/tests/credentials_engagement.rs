@@ -666,8 +666,14 @@ async fn a_client_engagement_refuses_a_non_anthropic_model_on_request_model_step
 async fn a_scan_with_no_active_project_is_refused_as_a_client_engagement() {
     let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
     assert!(state.projects.active().is_none());
-    let why = client_lock_refusal_for_scan(None, None, None, false, None)
-        .expect("no project means a client engagement");
+    let why = client_lock_refusal_for_scan(
+        None,
+        None,
+        None,
+        false,
+        &crate::cost_cap::RunControls::default(),
+    )
+    .expect("no project means a client engagement");
     assert!(why.contains("no active project"), "{why}");
 
     let req = || AuditReq {
@@ -764,7 +770,7 @@ async fn a_client_engagement_audit_is_refused_before_any_repository_is_read() {
             Some("claude-sonnet-5"),
             Some("claude-sonnet-5"),
             false,
-            None,
+            &crate::cost_cap::RunControls::default(),
         ),
         None
     );
@@ -1144,3 +1150,149 @@ fn resolve_backend_for_project_gathers_the_two_inputs_correctly() {
 }
 
 // ── Attachment tests ──────────────────────────────────────────────────────
+
+/// The client lock checks the models the run will actually call: a client engagement on the API
+/// with the agent finder, the duplicate check or the clone judge on a non-Anthropic model is
+/// refused before anything is read, naming the role and the model. A run with all of them on
+/// `claude-` ids is let through.
+#[tokio::test]
+async fn the_client_lock_checks_the_finder_duplicate_check_and_clone_judge_models() {
+    use camerata_api_types::project::{ProjectFinder, ReviewSettings};
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let p = state
+        .projects
+        .create("Client", vec!["acme/never-read".to_string()])
+        .unwrap();
+    state
+        .projects
+        .set_backend(&p.id, crate::project::ProjectBackend::Api)
+        .unwrap();
+    let req = || AuditReq {
+        repos: vec!["acme/never-read".to_string()],
+        model: Some("claude-sonnet-5-5".to_string()),
+        calibration_model: Some("claude-sonnet-5-5".to_string()),
+        ..serde_json::from_value(serde_json::json!({ "repos": [] })).unwrap()
+    };
+    let set = |review: ReviewSettings| {
+        state
+            .projects
+            .set_review_settings(&p.id, review)
+            .unwrap()
+            .unwrap();
+    };
+    let base = state.projects.get(&p.id).unwrap().review;
+    let cases = [
+        (
+            "the finder",
+            ReviewSettings {
+                finder: ProjectFinder::Agent,
+                finder_model: "other-vendor/x".to_string(),
+                ..base.clone()
+            },
+        ),
+        (
+            "the duplicate check",
+            ReviewSettings {
+                dup_check_model: "other-vendor/x".to_string(),
+                ..base.clone()
+            },
+        ),
+        (
+            "the clone judge",
+            ReviewSettings {
+                clone_judge_model: "other-vendor/x".to_string(),
+                ..base.clone()
+            },
+        ),
+    ];
+    for (role, review) in cases {
+        set(review);
+        let job_id = start_audit_job(&state, req(), AuditJobOptions::default()).await;
+        let job = state.jobs.get(&job_id).expect("the job exists");
+        assert_eq!(job.status, "failed", "{role}: {:?}", job.message);
+        let message = job.message.unwrap_or_default();
+        assert!(
+            message.contains(role) && message.contains("`other-vendor/x`"),
+            "{role}: {message}"
+        );
+        assert!(message.contains("Nothing was read"), "{role}: {message}");
+    }
+    // Every model on a claude- id: the lock lets the run through.
+    set(ReviewSettings {
+        finder: ProjectFinder::Agent,
+        finder_model: "claude-opus-5-5".to_string(),
+        dup_check_model: "claude-sonnet-5-5".to_string(),
+        clone_judge_model: "claude-haiku-5-5".to_string(),
+        ..base
+    });
+    let project = state.projects.get(&p.id).unwrap();
+    let controls = req().run_controls_for(&state);
+    assert_eq!(
+        client_lock_refusal_for_scan(
+            Some(&project),
+            Some("claude-sonnet-5-5"),
+            Some("claude-sonnet-5-5"),
+            false,
+            &controls,
+        ),
+        None
+    );
+}
+
+/// A job started for a NAMED project that is not the active one (the delta rescan does this) runs
+/// on that project's own models, and the client lock checks that project's models: the active
+/// project here is clean, the named one has its duplicate check on another vendor's model.
+#[tokio::test]
+async fn a_job_for_a_named_project_is_lock_checked_on_that_projects_models() {
+    use camerata_api_types::project::ReviewSettings;
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let named = state
+        .projects
+        .create("Named", vec!["acme/never-read".to_string()])
+        .unwrap();
+    let active = state
+        .projects
+        .create("Active", vec!["acme/never-read".to_string()])
+        .unwrap();
+    for id in [&named.id, &active.id] {
+        state
+            .projects
+            .set_backend(id, crate::project::ProjectBackend::Api)
+            .unwrap();
+    }
+    state
+        .projects
+        .set_review_settings(
+            &named.id,
+            ReviewSettings {
+                dup_check_model: "other-vendor/x".to_string(),
+                ..state.projects.get(&named.id).unwrap().review
+            },
+        )
+        .unwrap()
+        .unwrap();
+    state.projects.set_active(&active.id);
+    assert_eq!(state.projects.active().unwrap().id, active.id);
+    let req = AuditReq {
+        repos: vec!["acme/never-read".to_string()],
+        model: Some("claude-sonnet-5-5".to_string()),
+        calibration_model: Some("claude-sonnet-5-5".to_string()),
+        ..serde_json::from_value(serde_json::json!({ "repos": [] })).unwrap()
+    };
+    let job_id = start_audit_job(
+        &state,
+        req,
+        AuditJobOptions {
+            project_id: Some(named.id.clone()),
+            ..AuditJobOptions::default()
+        },
+    )
+    .await;
+    let job = state.jobs.get(&job_id).expect("the job exists");
+    assert_eq!(job.status, "failed", "{:?}", job.message);
+    let message = job.message.unwrap_or_default();
+    assert!(
+        message.contains("the duplicate check") && message.contains("`other-vendor/x`"),
+        "{message}"
+    );
+}

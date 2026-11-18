@@ -720,6 +720,22 @@ pub fn step_model(state: &AppState, step: crate::project::StepKind) -> String {
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
 }
 
+/// [`step_model_or`] over `project`'s per-step default instead of the active project's (a job's
+/// own project is not always the active one).
+pub fn project_step_model_or(
+    project: Option<&crate::project::Project>,
+    step: crate::project::StepKind,
+    requested: Option<&str>,
+) -> String {
+    match requested.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => m.to_string(),
+        None => project.map_or_else(
+            || crate::llm::DEFAULT_MODEL.to_string(),
+            |p| p.model_for_step(step).to_string(),
+        ),
+    }
+}
+
 /// UI-picked step resolution: the caller's explicit `requested` model wins when non-empty;
 /// otherwise fall back to the active project's per-step default (see [`step_model`]). Used
 /// by the audit / calibration / research-chat steps, where the UI still owns the
@@ -783,8 +799,9 @@ pub(crate) struct SetStepModelReq {
     /// `finder_model`, `clone_judge` and `finder` (all kept in the project's review settings, not
     /// its step models).
     pub(crate) step: String,
-    /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix` only, where it
-    /// clears the setting back to the default (see [`fix_step_model`]).
+    /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix`, `duplicate_check`,
+    /// `finder_model` and `clone_judge`, where it clears the setting back to the default (see
+    /// [`fix_step_model`]); every other step refuses a blank model.
     pub(crate) model: String,
 }
 
@@ -1189,6 +1206,12 @@ pub(crate) async fn rescan_alternatives_handler(
 
     // The client-engagement lock, before any repository is read (the same check the main
     // audit runs, over the same step models this rescan uses below).
+    let lock_controls = crate::cost_cap::RunControls {
+        fix_model: fix_step_model(&state),
+        clone_judge_model: Some(clone_judge_model_of(&project)),
+        review: project.review.clone(),
+        ..crate::cost_cap::RunControls::from_env()
+    };
     if let Some(why) = client_lock_refusal_for_scan(
         Some(&project),
         Some(&step_model_or(
@@ -1202,7 +1225,7 @@ pub(crate) async fn rescan_alternatives_handler(
             None,
         )),
         false,
-        fix_step_model(&state).as_deref(),
+        &lock_controls,
     ) {
         return Json(serde_json::json!({ "ok": false, "message": why }));
     }
