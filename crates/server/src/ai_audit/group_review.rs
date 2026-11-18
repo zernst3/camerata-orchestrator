@@ -347,6 +347,9 @@ pub struct ReplySubgroup {
     /// Why it matters technically; empty when the reply left it out.
     pub why_technical: String,
     pub members: Vec<usize>,
+    /// The reply was a lone sub-group with no `members`; [`Stage2Reply::fill_omitted_members`]
+    /// gives it every index of the part.
+    pub members_omitted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +472,37 @@ const REAL_LABELS: [&str; 3] = ["yes", "no", "unclear"];
 /// is refused, never read as the stale first one. A reply with no readable object is refused, and the
 /// refusal says where the JSON broke.
 fn reply_object(raw: &str) -> Result<serde_json::Value, String> {
+    match read_object(raw) {
+        Ok(v) => Ok(v),
+        // Only a reply that did not read gets the one narrow repair; a reply that still fails
+        // is refused with the original message.
+        Err(first) => match repair_stray_reason_colon(raw) {
+            Some(fixed) => read_object(&fixed).map_err(|_| first),
+            None => Err(first),
+        },
+    }
+}
+
+/// The model sometimes writes a colon (and maybe an empty string) after a known reason value,
+/// as in `"reason": "needs_more_code": "", "rank": 2`. Rewrites exactly that, for the known
+/// escalation and outlier reason names, into `"reason": "needs_more_code", "rank": 2`.
+/// `None` when nothing matched.
+fn repair_stray_reason_colon(raw: &str) -> Option<String> {
+    let names: Vec<&str> = EscalationReason::ALL
+        .iter()
+        .map(|r| r.as_str())
+        .chain(OutlierReason::ALL.iter().map(|r| r.as_str()))
+        .collect();
+    let pattern = format!(
+        r#"("reason"\s*:\s*"(?:{})")\s*:\s*(?:""\s*)?,?"#,
+        names.join("|")
+    );
+    let re = regex::Regex::new(&pattern).ok()?;
+    let fixed = re.replace_all(raw, "$1,");
+    (fixed != raw).then(|| fixed.into_owned())
+}
+
+fn read_object(raw: &str) -> Result<serde_json::Value, String> {
     let Some(span) = extract_json_object(raw) else {
         return Err("the reply is not a JSON object".to_string());
     };
@@ -512,6 +546,13 @@ fn reply_object(raw: &str) -> Result<serde_json::Value, String> {
 }
 
 impl Stage2Reply {
+    /// A lone sub-group that left `members` out holds every index this call asked about.
+    pub fn fill_omitted_members(&mut self, asked: &[usize]) {
+        for sg in self.subgroups.iter_mut().filter(|sg| sg.members_omitted) {
+            sg.members = asked.to_vec();
+        }
+    }
+
     /// Read a reply. `Err` carries the reason it is turned down: not JSON, a field the schema
     /// does not have, a reason outside the closed lists, a value of the wrong kind. Whether an
     /// index names a member of the group is not judged here (see [`apply_rule`]).
@@ -531,23 +572,37 @@ impl Stage2Reply {
         let summary = prose_of(top, "summary", "the reply")?;
 
         let mut subgroups = Vec::new();
-        for (i, v) in array_of(top, "subgroups")?.iter().enumerate() {
+        let sub_values = array_of(top, "subgroups")?;
+        let sub_count = sub_values.len();
+        for (i, v) in sub_values.iter().enumerate() {
             let at = format!("subgroups[{i}]");
+            let lone = sub_count == 1;
             let o = object_with(
                 v,
-                &["label", "cause", "summary", "members"],
-                &["why_business", "why_technical"],
+                &["label", "cause", "summary"],
+                &["why_business", "why_technical", "members"],
                 &at,
             )?;
-            let members = array_of(o, "members")
-                .map_err(|e| format!("{at}: {e}"))?
-                .iter()
-                .map(|m| {
-                    m.as_u64()
-                        .and_then(|n| usize::try_from(n).ok())
-                        .ok_or_else(|| format!("{at}.members holds a value that is not an index"))
-                })
-                .collect::<Result<Vec<usize>, String>>()?;
+            // Only a lone sub-group may leave `members` out; with two or more it is required.
+            let members_omitted = lone && !o.contains_key("members");
+            if !lone && !o.contains_key("members") {
+                return Err(format!("{at} is missing the field `members`"));
+            }
+            let members = if members_omitted {
+                Vec::new()
+            } else {
+                array_of(o, "members")
+                    .map_err(|e| format!("{at}: {e}"))?
+                    .iter()
+                    .map(|m| {
+                        m.as_u64()
+                            .and_then(|n| usize::try_from(n).ok())
+                            .ok_or_else(|| {
+                                format!("{at}.members holds a value that is not an index")
+                            })
+                    })
+                    .collect::<Result<Vec<usize>, String>>()?
+            };
             subgroups.push(ReplySubgroup {
                 label: prose_of(o, "label", &at)?,
                 cause: prose_of(o, "cause", &at)?,
@@ -555,6 +610,7 @@ impl Stage2Reply {
                 why_business: optional_prose_of(o, "why_business"),
                 why_technical: optional_prose_of(o, "why_technical"),
                 members,
+                members_omitted,
             });
         }
 
@@ -1911,6 +1967,12 @@ pub async fn review_groups(
         max_in_flight: cfg.max_in_flight.max(1),
     };
     let ran = run_stage(Stage::GroupReview, &mut items, mode, &stage_ctx).await;
+    // A lone sub-group that left `members` out holds every index of its part.
+    for (id, reply) in items.replies.iter_mut() {
+        if let Some((_, idxs)) = chunk_of.get(id) {
+            reply.fill_omitted_members(idxs);
+        }
+    }
 
     // What came back, per rule group.
     let mut failed_reasons: BTreeMap<usize, Vec<String>> = BTreeMap::new();

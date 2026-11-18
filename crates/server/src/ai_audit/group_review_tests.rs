@@ -2993,7 +2993,7 @@ fn malformed_then_corrected() -> (String, String) {
     .to_string();
     let bad = good.replace(
         "\"reason\":\"needs_more_code\"",
-        "\"reason\":\"needs_more_code\":\"\"",
+        "\"reason\":\"made_up_reason\":\"\"",
     );
     assert_ne!(bad, good);
     let reply = format!(
@@ -3148,4 +3148,107 @@ async fn the_two_client_reasons_are_stored_on_the_sub_group_beside_its_summary()
     assert_eq!(sub.why_business, None);
     assert_eq!(sub.why_technical, None);
     assert_eq!(outcome.rules_failed, 0, "no part failed");
+}
+
+fn reply_with_escalation_entry(entry: &str) -> String {
+    format!(
+        "{{\"summary\": \"s\", \"subgroups\": [], \"outliers\": [], \"disagreements\": [], \"escalations\": [{entry}]}}"
+    )
+}
+
+/// The model sometimes writes a colon (and maybe an empty string) after a reason value.
+#[test]
+fn a_stray_colon_after_a_known_reason_is_repaired() {
+    for entry in [
+        r#"{"index": 0, "reason": "needs_more_code": "", "rank": 2, "why": "w"}"#,
+        r#"{"index":0,"reason":"needs_more_code":"rank":2,"why":"placeholder"}"#,
+    ] {
+        let parsed = Stage2Reply::parse(&reply_with_escalation_entry(entry))
+            .unwrap_or_else(|e| panic!("{entry}: {e}"));
+        assert_eq!(parsed.escalations.len(), 1);
+        assert_eq!(parsed.escalations[0].reason.as_str(), "needs_more_code");
+        assert_eq!(parsed.escalations[0].rank, 2);
+    }
+}
+
+#[test]
+fn a_stray_colon_after_an_outlier_reason_is_repaired() {
+    let reason = OutlierReason::ALL[0].as_str();
+    let reply = format!(
+        "{{\"summary\": \"s\", \"subgroups\": [], \"escalations\": [], \"disagreements\": [], \"outliers\": [{{\"index\": 1, \"reason\": \"{reason}\": \"\", \"why\": \"w\"}}]}}"
+    );
+    let parsed = Stage2Reply::parse(&reply).expect("repaired");
+    assert_eq!(parsed.outliers.len(), 1);
+    assert_eq!(parsed.outliers[0].reason.as_str(), reason);
+}
+
+#[test]
+fn a_stray_colon_after_an_unknown_reason_is_still_refused() {
+    let entry = r#"{"index": 0, "reason": "made_up_reason": "", "rank": 2, "why": "w"}"#;
+    let why = Stage2Reply::parse(&reply_with_escalation_entry(entry)).unwrap_err();
+    assert!(why.contains("not a JSON object"), "{why}");
+    assert!(why.contains("column"), "{why}");
+}
+
+#[test]
+fn a_valid_reply_is_never_passed_through_the_repair() {
+    let why = r#"the model wrote "reason": "needs_more_code": "" here"#;
+    let reply = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "needs_more_code", "rank": 1, "why": why}],
+    })
+    .to_string();
+    let parsed = Stage2Reply::parse(&reply).expect("valid");
+    assert_eq!(parsed.escalations[0].why, why);
+}
+
+fn subgroup_json(with_members: bool) -> serde_json::Value {
+    let mut sg = serde_json::json!({
+        "label": "l", "cause": "c", "summary": "x",
+        "why_business": "b", "why_technical": "t"
+    });
+    if with_members {
+        sg["members"] = serde_json::json!([0]);
+    }
+    sg
+}
+
+fn reply_with_subgroups(sgs: Vec<serde_json::Value>) -> String {
+    serde_json::json!({
+        "summary": "s", "subgroups": sgs,
+        "outliers": [], "escalations": [], "disagreements": []
+    })
+    .to_string()
+}
+
+#[test]
+fn one_sub_group_with_no_members_holds_every_index_of_the_part() {
+    let mut parsed = Stage2Reply::parse(&reply_with_subgroups(vec![subgroup_json(false)]))
+        .expect("a lone sub-group may leave members out");
+    assert!(parsed.subgroups[0].members_omitted);
+    // A chunked group: only this chunk's indexes.
+    parsed.fill_omitted_members(&[150, 151, 152]);
+    assert_eq!(parsed.subgroups[0].members, vec![150, 151, 152]);
+    // A reply that wrote members is never touched.
+    let mut written = Stage2Reply::parse(&reply_with_subgroups(vec![subgroup_json(true)])).unwrap();
+    assert!(!written.subgroups[0].members_omitted);
+    written.fill_omitted_members(&[5, 6]);
+    assert_eq!(written.subgroups[0].members, vec![0]);
+}
+
+#[test]
+fn two_sub_groups_with_one_missing_members_is_still_refused() {
+    let why = Stage2Reply::parse(&reply_with_subgroups(vec![
+        subgroup_json(true),
+        subgroup_json(false),
+    ]))
+    .unwrap_err();
+    assert!(why.contains("missing the field `members`"), "{why}");
+}
+
+#[test]
+fn an_empty_or_wrong_members_is_still_refused() {
+    let mut empty = subgroup_json(false);
+    empty["members"] = serde_json::json!("all");
+    assert!(Stage2Reply::parse(&reply_with_subgroups(vec![empty])).is_err());
 }
