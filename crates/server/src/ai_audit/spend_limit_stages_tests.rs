@@ -112,7 +112,8 @@ fn the_table_names_every_stage_the_meter_counts() {
             "fix",
             "deep",
             "clone-judge",
-            "finder"
+            "finder",
+            "duplicate-check"
         ]
     );
 }
@@ -291,6 +292,45 @@ async fn run_stage_once(stage: Stage, llm: &Counting, meter: &UsageMeter) {
         }
         // Driven by the agent finder's runner; nothing to run for it here.
         Stage::Finder => {}
+        Stage::DuplicateCheck => {
+            let mut report = crate::release_gate::test_scan_report();
+            report.findings = vec![
+                Finding {
+                    repo: REPO.to_string(),
+                    path: "src/a.rs".to_string(),
+                    line: 10,
+                    rule_id: "SEC-A-1".to_string(),
+                    severity: "high".to_string(),
+                    detail: "one".to_string(),
+                    ..Finding::default()
+                },
+                Finding {
+                    repo: REPO.to_string(),
+                    path: "src/a.rs".to_string(),
+                    line: 12,
+                    rule_id: "SEC-B-1".to_string(),
+                    severity: "high".to_string(),
+                    detail: "two".to_string(),
+                    ..Finding::default()
+                },
+            ];
+            report.assign_site_keys();
+            let candidates = crate::possible_duplicate::DupIndex::candidates(
+                report.tree.as_ref(),
+                &report.findings,
+            );
+            assert_eq!(candidates.len(), 1, "the fixture has one candidate pair");
+            let _ = crate::possible_duplicate::check::run_check(
+                &report,
+                llm,
+                meter,
+                "claude-sonnet-5-5",
+                &candidates,
+                false,
+                None,
+            )
+            .await;
+        }
         Stage::CloneJudge => {
             use crate::onboard::clone_advisory::{
                 judge_clone_candidates, JudgeRequest, VerdictCache,

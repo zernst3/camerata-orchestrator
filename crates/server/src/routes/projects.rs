@@ -811,6 +811,10 @@ pub(crate) async fn set_step_model(
     if req.step.trim().eq_ignore_ascii_case("group_review") {
         return set_group_review_model(&state, &id, req.model.trim());
     }
+    // The possible-duplicate check's model lives with the review settings too.
+    if req.step.trim().eq_ignore_ascii_case("duplicate_check") {
+        return set_dup_check_model(&state, &id, req.model.trim());
+    }
     // The finder is a word (`agent` or `engine`), not a model; it lives with the review settings
     // and rides the same route as the group reviewer's model.
     if req.step.trim().eq_ignore_ascii_case("finder") {
@@ -841,6 +845,27 @@ fn set_group_review_model(state: &AppState, id: &str, model: &str) -> Json<serde
     };
     let settings = camerata_api_types::project::ReviewSettings {
         group_review_model: model.to_string(),
+        ..project.review
+    };
+    match state.projects.set_review_settings(id, settings) {
+        Some(Ok(p)) => Json(serde_json::json!({ "ok": true, "project": p })),
+        Some(Err(message)) => Json(serde_json::json!({ "ok": false, "message": message })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Set the project's possible-duplicate check model (`step: "duplicate_check"` on the step-models
+/// route). The other review settings are kept as they are. A blank model is refused: the built-in
+/// default applies only when the setting was never written.
+fn set_dup_check_model(state: &AppState, id: &str, model: &str) -> Json<serde_json::Value> {
+    if model.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
+    }
+    let Some(project) = state.projects.get(id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    let settings = camerata_api_types::project::ReviewSettings {
+        dup_check_model: model.to_string(),
         ..project.review
     };
     match state.projects.set_review_settings(id, settings) {

@@ -118,12 +118,14 @@ pub fn models_a_scan_may_use(
     fix_model: Option<&str>,
     clone_judge_model: Option<&str>,
     group_review_model: Option<&str>,
+    dup_check_model: Option<&str>,
 ) -> Vec<(String, String)> {
     let controls = crate::cost_cap::RunControls {
         fix_model: fix_model.map(str::to_string),
         clone_judge_model: clone_judge_model.map(str::to_string),
         review: camerata_api_types::project::ReviewSettings {
             group_review_model: group_review_model.unwrap_or_default().to_string(),
+            dup_check_model: dup_check_model.unwrap_or_default().to_string(),
             ..Default::default()
         },
         ..crate::cost_cap::RunControls::from_env()

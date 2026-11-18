@@ -1722,6 +1722,7 @@ fn same_place(key: &str, line: usize) -> camerata_api_types::review_view::SamePl
         rule_id: "SEC-OTHER-1".into(),
         line,
         group_id: "sub:SEC-OTHER-1/1".into(),
+        reason: Default::default(),
     }
 }
 
@@ -1840,4 +1841,29 @@ fn two_same_place_causes_with_the_same_title_stay_two_entries_with_their_own_key
         "a span key is never the label"
     );
     assert_eq!(entries[0].key, all[1].site_key);
+}
+
+#[test]
+fn a_checked_same_place_entry_shows_the_models_reason_in_its_hint() {
+    let mut row = rows()[0].clone();
+    row.possible_duplicate_of = None;
+    row.same_place_as = vec![same_place("other-key", row.line + 2)];
+    row.same_place_as[0].reason = "Both write up the missing owner check.".to_string();
+    let entries = duplicate_entries(&row);
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0]
+            .hint
+            .contains("Both write up the missing owner check."),
+        "{}",
+        entries[0].hint
+    );
+    // With no reason the hint is what it always was.
+    row.same_place_as[0].reason.clear();
+    let plain = duplicate_entries(&row);
+    assert!(
+        !plain[0].hint.contains("The check says"),
+        "{}",
+        plain[0].hint
+    );
 }

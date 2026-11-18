@@ -6,7 +6,7 @@ use camerata_api_types::review::{
 };
 use camerata_api_types::review_view::{Marker, MovedFromView, TreeView};
 
-use super::test_support::{compose, row, sealed, Stores, RUN};
+use super::test_support::{answer_every_pair, compose, row, sealed, Stores, RUN};
 use super::{decode_cursor, encode_cursor, severity_rank};
 use crate::onboard::Finding;
 use crate::report_export::apply_overlay;
@@ -1199,11 +1199,40 @@ fn a_site_row_carries_the_possible_false_positive_flag_and_nothing_else_changes(
 }
 
 #[test]
+fn a_pair_the_model_did_not_call_the_same_flaw_is_not_linked_in_the_review_view() {
+    use crate::possible_duplicate::check::Verdict;
+    for answer in [Some(Verdict::Different), Some(Verdict::Unclear), None] {
+        let sql = row("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        let authz = row("SEC-AUTHZ-4", "src/orders.rs", 12, "high");
+        let sealed = sealed(vec![sql, authz], |r| {
+            if let Some(v) = answer {
+                answer_every_pair(r, v, "a reason");
+            }
+        });
+        let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+        let rows = compose(&reviewed, &Stores::default(), |c| {
+            c.sites_page("rule:SEC-NO-RAW-SQL-CONCAT-1", None, 500)
+                .unwrap()
+        })
+        .rows;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].same_place_as.is_empty(), "{answer:?}");
+        assert!(!rows[0].markers.contains(&Marker::PossibleDuplicate));
+    }
+}
+
+#[test]
 fn a_site_row_names_the_other_cause_at_the_same_place_and_nothing_else_changes() {
     let sql = row("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
     let authz = row("SEC-AUTHZ-4", "src/orders.rs", 12, "high");
     let far = row("SEC-NO-RAW-SQL-CONCAT-1", "src/other.rs", 40, "high");
-    let sealed = sealed(vec![sql, authz, far], |_| {});
+    let sealed = sealed(vec![sql, authz, far], |r| {
+        answer_every_pair(
+            r,
+            crate::possible_duplicate::check::Verdict::Same,
+            "Both name the missing owner check.",
+        )
+    });
     let sql_key = key_of(&sealed, "src/orders.rs");
     let reviewed = apply_overlay(&sealed, &[], &[], &[]);
     let sites = |node: &str| {
@@ -1228,6 +1257,10 @@ fn a_site_row_names_the_other_cause_at_the_same_place_and_nothing_else_changes()
     assert_eq!(at_orders.same_place_as[0].line, 12);
     assert_eq!(at_orders.same_place_as[0].group_id, other.group_path[2]);
     assert!(!at_orders.same_place_as[0].title.is_empty());
+    assert_eq!(
+        at_orders.same_place_as[0].reason, "Both name the missing owner check.",
+        "the model's reason rides on the link"
+    );
     assert_eq!(other.same_place_as[0].key, at_orders.site_key);
     for r in [at_orders, other] {
         assert!(r.markers.contains(&Marker::PossibleDuplicate), "{r:?}");

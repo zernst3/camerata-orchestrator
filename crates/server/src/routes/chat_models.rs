@@ -459,6 +459,7 @@ pub(crate) fn client_lock_refusal_for_scan(
         fix_model,
         Some(project.tier_map.fast_primary()),
         Some(project.review.group_review_model.as_str()),
+        Some(project.review.dup_check_model.as_str()),
     );
     crate::client_lock::refusal(project.client_engagement, project.backend, &models)
         .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))

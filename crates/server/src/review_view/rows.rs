@@ -216,6 +216,7 @@ impl<'a> ReviewComposer<'a> {
                 rule_id: link.rule_id.clone(),
                 line: link.line,
                 group_id: link.group_id.clone(),
+                reason: link.reason.clone(),
             })
             .collect()
     }

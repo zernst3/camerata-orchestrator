@@ -1189,6 +1189,7 @@ pub fn build(p: &Params) -> ReviewDataSet {
             rule_id: r.rule_id.clone(),
             line: r.line,
             group_id: r.group_path.get(2).cloned().unwrap_or_default(),
+            reason: Default::default(),
         };
         let (to_j, to_i) = (view_of(&rows[j]), view_of(&rows[i]));
         rows[i].same_place_as = vec![to_j];

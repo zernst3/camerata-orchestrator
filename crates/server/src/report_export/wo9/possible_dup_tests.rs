@@ -11,16 +11,56 @@ use crate::release_gate::{read_zip_entries, release, release_internal, xlsx_stri
 use crate::report_export::{apply_overlay, ReportOptions};
 use crate::xlsx_export::vocabulary as v;
 
-/// A SQL row and a layering row two lines apart in one file (two causes at one place), and a SQL
-/// row alone in another file.
-fn sealed_with_a_pair() -> crate::onboard::SealedReport {
+/// Seal `report` with the possible-duplicate check's answer `verdict` stored for every candidate
+/// pair of its rows (the stored answers the exports and the review view read). Sealing twice is
+/// safe: the site keys do not depend on what is stored.
+fn sealed_answered(
+    report: crate::onboard::ScanReport,
+    verdict: crate::possible_duplicate::check::Verdict,
+) -> crate::onboard::SealedReport {
+    use crate::possible_duplicate::check::{DuplicateChecks, PairCheck};
+    let first = report.clone().seal();
+    let pairs =
+        crate::possible_duplicate::DupIndex::candidates(first.tree.as_ref(), &first.findings)
+            .into_iter()
+            .map(|c| PairCheck {
+                key_a: c.key_a,
+                key_b: c.key_b,
+                fix_a: c.fix_a,
+                fix_b: c.fix_b,
+                verdict,
+                reason: REASON.to_string(),
+                model: "scripted".to_string(),
+            })
+            .collect();
+    let mut report = report;
+    report.ledger.record_duplicate_checks(DuplicateChecks {
+        pairs,
+        not_run: None,
+    });
+    report.seal()
+}
+
+/// The model's reason in these tests: a sentence no export has any other source for.
+const REASON: &str = "Both write up the same unchecked query on the orders path.";
+
+fn a_pair_report() -> crate::onboard::ScanReport {
     let mut report = crate::release_gate::test_scan_report();
     report.findings = vec![
         sql_row("src/orders.rs", 10),
         layering_row("src/orders.rs", 12),
         sql_row("src/alone.rs", 40),
     ];
-    report.seal()
+    report
+}
+
+/// A SQL row and a layering row two lines apart in one file (two causes at one place), and a SQL
+/// row alone in another file. The model answered `same` for the pair.
+fn sealed_with_a_pair() -> crate::onboard::SealedReport {
+    sealed_answered(
+        a_pair_report(),
+        crate::possible_duplicate::check::Verdict::Same,
+    )
 }
 
 fn internal_options() -> ReportOptions {
@@ -250,7 +290,7 @@ fn two_places_of_one_residual_group_name_the_fix_and_the_place_in_the_workbook_c
     // residual group holds both, each place is its own cause, and they share a Fix id.
     let mut report = crate::release_gate::test_scan_report();
     report.findings = vec![sql_row("src/r.rs", 10), sql_row("src/r.rs", 12)];
-    let sealed = report.seal();
+    let sealed = sealed_answered(report, crate::possible_duplicate::check::Verdict::Same);
     let fix = fix_id_of_rule(&sealed, "SEC-NO-RAW-SQL-CONCAT-1", "src/r.rs");
     let reviewed = apply_overlay(&sealed, &[], &[], &[]);
     let entries = internal_entries(&reviewed);
@@ -285,4 +325,66 @@ fn two_places_of_one_residual_group_name_the_fix_and_the_place_in_the_workbook_c
         all.iter().any(|c| c.contains(&format!("{fix} line "))),
         "{all:?}"
     );
+}
+
+#[test]
+fn a_pair_the_model_did_not_call_the_same_flaw_is_not_hinted_anywhere() {
+    use crate::possible_duplicate::check::Verdict;
+    // `different` and `unclear` leave the pair alone, and so does no stored answer at all.
+    let none = a_pair_report().seal();
+    for sealed in [
+        sealed_answered(a_pair_report(), Verdict::Different),
+        sealed_answered(a_pair_report(), Verdict::Unclear),
+        none,
+    ] {
+        let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+        let entries = internal_entries(&reviewed);
+        assert!(
+            findings_rows(&entries)
+                .iter()
+                .all(|r| r.get("possible_duplicate_of").is_none()),
+            "no findings.json key"
+        );
+        let xlsx = workbook(&entries);
+        assert_eq!(
+            start_here_line(&xlsx).as_deref(),
+            Some("0 fixes may duplicate another, 0 decided"),
+            "a count of none on Start here"
+        );
+        let grid = sheet_table(&xlsx, v::ALL_PROBLEMS);
+        let col = grid[0]
+            .iter()
+            .position(|h| h == v::POSSIBLE_DUPLICATE_OF)
+            .expect("the internal column");
+        assert!(grid[1..].iter().all(|r| r[col].is_empty()), "no cell");
+    }
+}
+
+#[test]
+fn a_client_package_carries_no_verdict_no_reason_no_key_and_no_verdict_file() {
+    let sealed = sealed_with_a_pair();
+    let stored = sealed.ledger.duplicate_checks().clone();
+    assert!(!stored.pairs.is_empty());
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let package = package_of(&reviewed, &client_options());
+    let mut text = package.data_json.clone();
+    let entries = read_zip_entries(&release(package).expect("clears").bytes).expect("zip");
+    for (name, bytes) in &entries {
+        assert!(
+            !name.contains("duplicate_checks"),
+            "the verdict file is not in a client package: {name}"
+        );
+        if name.ends_with(".xlsx") {
+            text.push_str(&xlsx_strings(bytes).expect("strings").join("\n"));
+        } else if !name.ends_with(".pdf") {
+            text.push_str(&String::from_utf8_lossy(bytes));
+        }
+    }
+    assert!(!text.contains(REASON), "the model's reason");
+    assert!(!text.contains("duplicate_checks"), "the stored record");
+    for p in &stored.pairs {
+        assert!(!text.contains(&p.key_a) || p.key_a.is_empty(), "a pair key");
+        assert!(!text.contains(&p.key_b) || p.key_b.is_empty(), "a pair key");
+    }
+    assert!(!text.contains("\"same\""), "a verdict word as a value");
 }

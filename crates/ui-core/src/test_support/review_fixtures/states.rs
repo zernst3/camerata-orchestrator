@@ -645,6 +645,7 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                     rule_id: r.rule_id.clone(),
                     line: r.line,
                     group_id: r.group_path.get(2).cloned().unwrap_or_default(),
+                    reason: Default::default(),
                 }
             };
             // The partner sits at the same place: the same file, two lines on.

@@ -158,6 +158,14 @@ impl RunControls {
         ))
     }
 
+    /// The model this run's possible-duplicate check calls: the project setting or the
+    /// `--dup-check-model` flag, else Sonnet 5.5. Never the environment.
+    pub fn dup_check_model_for(&self) -> String {
+        crate::possible_duplicate::check::resolve_dup_check_model(Some(
+            self.review.dup_check_model.as_str(),
+        ))
+    }
+
     /// The model this run's agent finder calls: the explicit pick, else the built-in default.
     pub fn finder_model_for(&self) -> String {
         self.finder_model
@@ -228,6 +236,7 @@ pub fn models_the_run_will_use(
             ("fix generation", fix),
         ]
     };
+    roles.push(("the duplicate check", controls.dup_check_model_for()));
     if deep {
         roles.push(("the deep tier", scan));
     }
@@ -664,7 +673,9 @@ mod tests {
             .iter()
             .map(|(roles, model)| (model.as_str(), roles.as_str()))
             .collect();
-        assert_eq!(all.len(), 3, "three models fill the roles: {all:?}");
+        // The duplicate check's own default, Sonnet 5.5, is a fourth.
+        assert_eq!(all.len(), 4, "four models fill the roles: {all:?}");
+        assert_eq!(by_model["claude-sonnet-5-5"], "the duplicate check");
         assert!(by_model["claude-sonnet-5"].contains("the scan"));
         assert!(by_model["claude-sonnet-5"].contains("fix generation"));
         assert_eq!(by_model["claude-opus-5-5"], "calibration");
@@ -690,6 +701,21 @@ mod tests {
             text.contains("the deep tier") && text.contains("the clone judge"),
             "{text}"
         );
+    }
+
+    /// The duplicate check's model: the project setting or `--dup-check-model`, else Sonnet 5.5,
+    /// and never the environment (a variable of the likeliest names changes nothing).
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_duplicate_check_model_defaults_to_sonnet_5_5_and_is_never_read_from_the_environment() {
+        let _a = camerata_test_env::EnvGuard::set("CAMERATA_DUP_CHECK_MODEL", "env-model");
+        let _b = camerata_test_env::EnvGuard::set("CAMERATA_DUPLICATE_CHECK_MODEL", "env-model");
+        let mut controls = RunControls::default();
+        assert_eq!(controls.dup_check_model_for(), "claude-sonnet-5-5");
+        controls.review.dup_check_model = "  ".to_string();
+        assert_eq!(controls.dup_check_model_for(), "claude-sonnet-5-5");
+        controls.review.dup_check_model = " claude-opus-5-5 ".to_string();
+        assert_eq!(controls.dup_check_model_for(), "claude-opus-5-5");
     }
 
     /// The clone judge is listed (and so priced and lock-checked) on the model the run will call:

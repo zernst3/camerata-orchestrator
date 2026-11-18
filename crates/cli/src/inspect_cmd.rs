@@ -104,6 +104,11 @@ pub struct InspectArgs {
     /// Never the environment.
     #[serde(default)]
     pub group_review_model: Option<String>,
+    /// `--dup-check-model`: the possible-duplicate check's model. `None`/blank = the built-in
+    /// default, Sonnet 5.5 (`camerata_server::possible_duplicate::check::resolve_dup_check_model`).
+    /// Never the environment.
+    #[serde(default)]
+    pub dup_check_model: Option<String>,
     /// `--escalation-rate`: escalations per 1,000 counted lines. `None` = 1.0.
     #[serde(default)]
     pub escalation_rate: Option<f32>,
@@ -281,6 +286,7 @@ impl InspectArgs {
                 escalation_floor: self.escalation_floor.unwrap_or(defaults.escalation_floor),
                 over_budget_reasons: defaults.over_budget_reasons,
                 group_review_model: self.group_review_model.clone().unwrap_or_default(),
+                dup_check_model: self.dup_check_model.clone().unwrap_or_default(),
                 sample_size_per_run: defaults.sample_size_per_run,
                 finder: defaults.finder,
             },
@@ -568,6 +574,7 @@ pub fn require_client_lock(args: &InspectArgs) -> Result<(), String> {
         args.fix_model.as_deref(),
         args.clone_judge_model.as_deref(),
         args.group_review_model.as_deref(),
+        args.dup_check_model.as_deref(),
     );
     match camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models) {
         None => Ok(()),
@@ -1437,8 +1444,7 @@ pub async fn run_inspect_pipeline_with(
             .collect();
         camerata_server::checkpoint::with_run_checkpoints(
             store.as_ref().map(|s| s.checkpoint_dir()),
-            camerata_server::prompt_frame::with_seed(
-                token_seed,
+            camerata_server::prompt_frame::with_seed(token_seed, async {
                 camerata_server::ai_audit::group_review::review_scan_report(
                     &mut report,
                     model_seam,
@@ -1447,8 +1453,19 @@ pub async fn run_inspect_pipeline_with(
                     llm_backend == camerata_server::llm::Backend::Cli,
                     None,
                     corpus.as_ref(),
-                ),
-            ),
+                )
+                .await;
+                // The possible-duplicate check reads the Fix ids the group reviewer just
+                // made; a failure of it is a note, never a failed part.
+                camerata_server::possible_duplicate::check::check_possible_duplicates(
+                    &mut report,
+                    model_seam,
+                    &controls,
+                    llm_backend == camerata_server::llm::Backend::Cli,
+                    None,
+                )
+                .await;
+            }),
         )
         .await;
     }
@@ -2226,6 +2243,7 @@ mod tests {
             fix_model: None,
             clone_judge_model: None,
             group_review_model: None,
+            dup_check_model: None,
             escalation_rate: None,
             escalation_floor: None,
             full: false,
@@ -3221,6 +3239,14 @@ mod tests {
         assert!((defaults.review.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
         assert_eq!(defaults.review.escalation_floor, 20);
         assert_eq!(defaults.group_review_model_for(), "claude-fable-5-2");
+        assert_eq!(defaults.dup_check_model_for(), "claude-sonnet-5-5");
+        args.dup_check_model = Some("claude-opus-5-5".to_string());
+        assert_eq!(
+            args.run_controls().unwrap().dup_check_model_for(),
+            "claude-opus-5-5",
+            "the flag wins"
+        );
+        args.dup_check_model = None;
         // The flags win.
         args.group_review_model = Some("claude-opus-5-5".to_string());
         args.escalation_rate = Some(0.5);

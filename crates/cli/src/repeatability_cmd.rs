@@ -304,6 +304,7 @@ pub async fn run_repeatability_with(
         None,
         None,
         None,
+        None,
     );
     if let Some(why) =
         camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models)

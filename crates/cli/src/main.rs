@@ -180,6 +180,11 @@ enum Command {
         /// settings, never by the environment.
         #[arg(long = "group-review-model")]
         group_review_model: Option<String>,
+        /// Model for the possible-duplicate check, which asks, for each pair of problems at one
+        /// place, whether they are the same flaw written twice. Unset: the built-in default,
+        /// Sonnet 5.5. Set only here or in a project's settings, never by the environment.
+        #[arg(long = "dup-check-model")]
+        dup_check_model: Option<String>,
         /// How many escalations the group reviewer may put in the architect's queue per 1,000
         /// counted lines of code. Default 1.0. A few more may go past it (the severe reasons at
         /// critical severity, and unverified evidence); the rest stay below the line, visible.
@@ -555,6 +560,7 @@ async fn main() -> anyhow::Result<()> {
             fix_model,
             clone_judge_model,
             group_review_model,
+            dup_check_model,
             escalation_rate,
             escalation_floor,
             full,
@@ -590,6 +596,7 @@ async fn main() -> anyhow::Result<()> {
                 fix_model,
                 clone_judge_model,
                 group_review_model,
+                dup_check_model,
                 escalation_rate,
                 escalation_floor,
                 full,
@@ -1305,6 +1312,7 @@ mod cli_parse_tests {
                 fix_model,
                 clone_judge_model,
                 group_review_model,
+                dup_check_model,
                 escalation_rate,
                 escalation_floor,
                 full,
@@ -1332,6 +1340,10 @@ mod cli_parse_tests {
                 assert!(
                     group_review_model.is_none(),
                     "the default group reviewer unless asked for"
+                );
+                assert!(
+                    dup_check_model.is_none(),
+                    "the default duplicate check model unless asked for"
                 );
                 assert!(escalation_rate.is_none() && escalation_floor.is_none());
                 assert_eq!(client.as_deref(), Some("Example Client Ltd"));

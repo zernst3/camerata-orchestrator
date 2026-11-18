@@ -41,6 +41,34 @@ pub(crate) fn sealed(rows: Vec<Finding>, mutate: impl FnOnce(&mut ScanReport)) -
     report.seal()
 }
 
+/// Store the possible-duplicate check's `verdict` and `reason` for every candidate pair of the
+/// report's rows, as the scan's check stage does. For `sealed`'s `mutate` closure, which runs with
+/// the rows keyed and the tree built.
+pub(crate) fn answer_every_pair(
+    report: &mut ScanReport,
+    verdict: crate::possible_duplicate::check::Verdict,
+    reason: &str,
+) {
+    use crate::possible_duplicate::check::{DuplicateChecks, PairCheck};
+    let pairs =
+        crate::possible_duplicate::DupIndex::candidates(report.tree.as_ref(), &report.findings)
+            .into_iter()
+            .map(|c| PairCheck {
+                key_a: c.key_a,
+                key_b: c.key_b,
+                fix_a: c.fix_a,
+                fix_b: c.fix_b,
+                verdict,
+                reason: reason.to_string(),
+                model: "scripted".to_string(),
+            })
+            .collect();
+    report.ledger.record_duplicate_checks(DuplicateChecks {
+        pairs,
+        not_run: None,
+    });
+}
+
 /// Everything a composer borrows, owned.
 #[derive(Default)]
 pub(crate) struct Stores {

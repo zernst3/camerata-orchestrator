@@ -1441,10 +1441,17 @@ pub fn duplicate_entries(row: &SiteRow) -> Vec<DuplicateEntry> {
         out.push(DuplicateEntry {
             key: other.key.clone(),
             label: other.title.clone(),
-            hint: format!(
-                "{} at line {}, another cause at the same place",
-                other.rule_id, other.line
-            ),
+            hint: {
+                let place = format!(
+                    "{} at line {}, another cause at the same place",
+                    other.rule_id, other.line
+                );
+                if other.reason.trim().is_empty() {
+                    place
+                } else {
+                    format!("{place}. The check says: {}", other.reason.trim())
+                }
+            },
             goto: Some((
                 other.key.clone(),
                 other.rule_id.clone(),
