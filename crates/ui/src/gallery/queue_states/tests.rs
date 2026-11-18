@@ -16,7 +16,7 @@ fn count(html: &str, needle: &str) -> usize {
 
 #[test]
 fn every_queue_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 13, "every queue state is built");
+    assert_eq!(states().len(), 14, "every queue state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -406,6 +406,27 @@ fn the_possible_false_positive_page_lists_flagged_rows_first_with_their_chip_and
     // A look only: the line is still drawn once and every escalated row is still there.
     assert_eq!(count(&html, "class=\"queue-line\""), 1);
     assert_eq!(l.row_count(), v.escalated.len().min(ROWS_PER_PAGE));
+}
+
+#[test]
+fn the_specific_page_shows_each_rows_own_sentence_after_the_standard_one() {
+    use camerata_api_types::review::FpReason;
+    let html = page("queue/possible-false-positive-specific");
+    for own in [
+        "It queries a lookup table, not orders.",
+        "The caller may be checked in a layer not shown.",
+    ] {
+        assert!(html.contains(own), "{own}\n{html}");
+    }
+    // The standard sentence comes first, then the row's own.
+    let standard = FpReason::GroupReviewerDoubt
+        .sentence()
+        .replace('\'', "&#39;");
+    let at = html.find(&standard).expect("the standard sentence");
+    let own_at = html
+        .find("It queries a lookup table, not orders.")
+        .expect("the row's own sentence");
+    assert!(at < own_at);
 }
 
 #[test]

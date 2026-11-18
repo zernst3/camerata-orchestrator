@@ -214,13 +214,17 @@ impl<'a> ReviewComposer<'a> {
                     TextSource::Model => SummarySource::Model,
                     TextSource::Reviewer => SummarySource::Reviewer,
                 },
+                why_business: n.why_business.clone(),
+                why_technical: n.why_technical.clone(),
                 flags: n.flags.iter().cloned().chain(prose_flags_of(n)).collect(),
                 thrown_out: is_thrown_out_id(&n.id),
                 counts: counts
                     .get(n.id.as_str())
                     .map_or_else(NodeCountsView::default, |t| t.0),
                 decision: self.node_decision(&n.id),
-                summary_edit: self.summary_edit_of(n),
+                summary_edit: self.node_edit_of(n, EditField::Summary),
+                why_business_edit: self.node_edit_of(n, EditField::WhyBusiness),
+                why_technical_edit: self.node_edit_of(n, EditField::WhyTechnical),
             })
             .collect();
         TreeView {
@@ -231,12 +235,18 @@ impl<'a> ReviewComposer<'a> {
     }
 
     /// The reviewer's latest summary edit of `node` (spec U4), applied or stale, beside the node.
-    fn summary_edit_of(&self, node: &TreeNode) -> Option<EditView> {
+    fn node_edit_of(&self, node: &TreeNode, field: EditField) -> Option<EditView> {
         let edit = self
             .edits_by_key
             .get(node.id.as_str())?
             .iter()
-            .rfind(|e| e.field == EditField::Summary)?;
+            .rfind(|e| e.field == field)?;
+        let shown = match field {
+            EditField::WhyBusiness => node.why_business.clone(),
+            EditField::WhyTechnical => node.why_technical.clone(),
+            _ => node.summary.clone(),
+        }
+        .unwrap_or_default();
         let stale = self.stale_edits.get(edit.id.as_str());
         Some(EditView {
             id: edit.id.clone(),
@@ -247,10 +257,7 @@ impl<'a> ReviewComposer<'a> {
             by: edit.by.clone(),
             at: edit.at.clone(),
             stale: stale.is_some(),
-            current_value: stale.map_or_else(
-                || node.summary.clone().unwrap_or_default(),
-                |s| s.current_value.clone(),
-            ),
+            current_value: stale.map_or_else(|| shown, |s| s.current_value.clone()),
             reapplied_from: edit.reapplied_from.clone(),
         })
     }

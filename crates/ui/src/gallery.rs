@@ -113,6 +113,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "merge-picker-empty-pool",
             "place",
             "possible-false-positive",
+            "possible-false-positive-specific",
             "possible-duplicate",
         ],
     ),

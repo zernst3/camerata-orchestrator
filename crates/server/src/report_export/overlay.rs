@@ -664,13 +664,23 @@ fn apply_summary_edits(
         }
         return (applied, stale);
     };
-    let model: HashMap<String, String> = tree
+    // The MODEL's text of each node and field, which an edit's fingerprint is judged against.
+    let model: HashMap<(String, EditField), String> = tree
         .nodes
         .iter()
-        .map(|n| (n.id.clone(), n.summary.clone().unwrap_or_default()))
+        .flat_map(|n| {
+            [
+                (EditField::Summary, n.summary.clone()),
+                (EditField::WhyBusiness, n.why_business.clone()),
+                (EditField::WhyTechnical, n.why_technical.clone()),
+            ]
+            .into_iter()
+            .map(|(field, text)| ((n.id.clone(), field), text.unwrap_or_default()))
+            .collect::<Vec<_>>()
+        })
         .collect();
     for e in edits {
-        let current = model.get(&e.key);
+        let current = model.get(&(e.key.clone(), e.field));
         let matches =
             current.is_some_and(|text| summary_fingerprint(text) == e.fingerprint_at_edit);
         if !matches {
@@ -683,8 +693,15 @@ fn apply_summary_edits(
             continue;
         }
         if let Some(node) = tree.nodes.iter_mut().find(|n| n.id == e.key) {
-            node.summary = Some(e.new.trim().to_string());
-            node.summary_source = TextSource::Reviewer;
+            let new = Some(e.new.trim().to_string());
+            match e.field {
+                EditField::WhyBusiness => node.why_business = new,
+                EditField::WhyTechnical => node.why_technical = new,
+                _ => {
+                    node.summary = new;
+                    node.summary_source = TextSource::Reviewer;
+                }
+            }
             applied.push(AppliedEdit {
                 id: e.id.clone(),
                 key: e.key.clone(),
@@ -717,8 +734,13 @@ pub fn current_value(f: &Finding, field: EditField) -> String {
         EditField::Kind => serde_json::to_string(&f.kind).unwrap_or_default(),
         EditField::Category => f.category.clone().unwrap_or_default(),
         EditField::Subgroup => f.group_path.get(2).cloned().unwrap_or_default(),
-        // A summary belongs to a tree node, not to a row.
-        EditField::Summary => String::new(),
+        // A node's texts belong to a tree node, not to a row.
+        EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical => String::new(),
+        EditField::Business => f
+            .captures
+            .get(crate::ai_audit::agent_finder::reply::FINDER_BUSINESS_CAPTURE)
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -776,8 +798,18 @@ fn apply_field(f: &mut Finding, field: EditField, new: &str) {
         EditField::Category => {
             f.category = (!new.is_empty()).then(|| new.to_string());
         }
+        EditField::Business => {
+            let text = crate::client_text::plain(new).into_owned();
+            f.captures.insert(
+                crate::ai_audit::agent_finder::reply::FINDER_BUSINESS_CAPTURE.to_string(),
+                text,
+            );
+        }
         // Applied to the tree, not the row.
-        EditField::Subgroup | EditField::Summary => {}
+        EditField::Subgroup
+        | EditField::Summary
+        | EditField::WhyBusiness
+        | EditField::WhyTechnical => {}
     }
 }
 

@@ -427,8 +427,10 @@ fn the_summary_editor_shows_the_summary_a_reason_field_and_commit() {
     );
     assert!(html.contains("An edit needs a reason"), "the refusal shows");
     assert!(html.contains("Commit"));
-    assert!(
-        !html.contains(">Edit</button>"),
+    // The summary's Edit button gives way to the editor; the two client reasons keep theirs.
+    assert_eq!(
+        html.matches(">Edit</button>").count(),
+        2,
         "the Edit button gives way to the editor"
     );
     assert!(!html.contains('\u{2014}'));

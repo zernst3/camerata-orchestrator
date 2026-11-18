@@ -434,6 +434,45 @@ pub fn summary_edit_request(
     })
 }
 
+/// The text of a node that `field` edits, as the node shows it now.
+pub fn why_text(node: &TreeNodeView, field: EditField) -> &str {
+    match field {
+        EditField::WhyBusiness => node.why_business.as_deref(),
+        EditField::WhyTechnical => node.why_technical.as_deref(),
+        _ => node.summary.as_deref(),
+    }
+    .unwrap_or_default()
+}
+
+/// The edit that replaces one of a node's two client reasons (`why_business`, `why_technical`):
+/// keyed by the node id, with a required reason, like the summary's.
+pub fn why_edit_request(
+    node: &TreeNodeView,
+    field: EditField,
+    new_text: &str,
+    reason: &str,
+    run_id: &str,
+) -> Result<NewEditReq, SummaryEditError> {
+    let new_text = new_text.trim();
+    if new_text.is_empty() {
+        return Err(SummaryEditError::Empty);
+    }
+    if new_text == why_text(node, field).trim() {
+        return Err(SummaryEditError::Unchanged);
+    }
+    if reason.trim().is_empty() {
+        return Err(SummaryEditError::ReasonRequired);
+    }
+    Ok(NewEditReq {
+        key: node.id.clone(),
+        field,
+        new: new_text.to_string(),
+        reason: reason.trim().to_string(),
+        by: String::new(),
+        run_id: run_id.to_string(),
+    })
+}
+
 /// A stale summary edit's line under the node's summary: the reviewer's text is shown and not
 /// applied (design 5.2).
 pub fn stale_summary_note(node: &TreeNodeView) -> Option<String> {

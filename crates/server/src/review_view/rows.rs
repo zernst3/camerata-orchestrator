@@ -330,6 +330,7 @@ impl<'a> ReviewComposer<'a> {
             category: f.category.clone(),
             headline: current_value(f, EditField::Headline),
             detail: current_value(f, EditField::Detail),
+            why_business: current_value(f, EditField::Business),
             fix: current_value(f, EditField::Fix),
             fix_type: current_value(f, EditField::FixType),
             snippet: f.snippet.clone(),

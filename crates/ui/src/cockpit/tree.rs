@@ -35,7 +35,7 @@ use camerata_ui_core::edits::context_for;
 use camerata_ui_core::tree::batch::{
     batch_allowed, batch_blocked_reason, batch_heading, batch_plan, decision_request,
     decision_state_for, plan_sentence, stale_summary_note, summary_edit_request, summary_text,
-    BatchPlan, TreeUndo,
+    why_text, BatchPlan, TreeUndo,
 };
 use camerata_ui_core::tree::export::Door;
 use camerata_ui_core::tree::keys::{keys_hint, tree_command, tree_keys_armed, TreeCommand};
@@ -107,6 +107,15 @@ pub(crate) enum TreePrompt {
         reason: String,
         error: Option<String>,
     },
+    /// Editing one of a node's two client reasons (why it matters to the business, or
+    /// technically).
+    Why {
+        node: String,
+        field: camerata_api_types::edits::EditField,
+        text: String,
+        reason: String,
+        error: Option<String>,
+    },
     /// The reason for one site's Ignore or False positive.
     Site {
         node: String,
@@ -125,6 +134,7 @@ impl TreePrompt {
             | Self::Batch { node, .. }
             | Self::PlanFailed { node, .. }
             | Self::Summary { node, .. }
+            | Self::Why { node, .. }
             | Self::Site { node, .. } => node,
         }
     }
@@ -172,6 +182,7 @@ pub(crate) fn TreeScreen(
     #[props(default)] on_retry: Callback<()>,
     #[props(default)] on_batch: Callback<TriageState>,
     #[props(default)] on_edit_summary: Callback<()>,
+    #[props(default)] on_edit_why: Callback<camerata_api_types::edits::EditField>,
     #[props(default)] on_prompt_reason: Callback<String>,
     #[props(default)] on_prompt_text: Callback<String>,
     #[props(default)] on_prompt_commit: Callback<()>,
@@ -315,6 +326,7 @@ pub(crate) fn TreeScreen(
                         prompt: prompt.clone(),
                         on_batch,
                         on_edit_summary,
+                        on_edit_why,
                         on_prompt_reason,
                         on_prompt_text,
                         on_prompt_commit,
@@ -748,6 +760,7 @@ fn NodeSide(
     prompt: Option<TreePrompt>,
     on_batch: Callback<TriageState>,
     on_edit_summary: Callback<()>,
+    on_edit_why: Callback<camerata_api_types::edits::EditField>,
     on_prompt_reason: Callback<String>,
     on_prompt_text: Callback<String>,
     on_prompt_commit: Callback<()>,
@@ -808,6 +821,29 @@ fn NodeSide(
             }
             if let Some(note) = stale_note {
                 p { class: "node-stale-note", "{note}" }
+            }
+            for field in [
+                camerata_api_types::edits::EditField::WhyBusiness,
+                camerata_api_types::edits::EditField::WhyTechnical,
+            ] {
+                div { key: "{field.wire_name()}", class: "node-why",
+                    div { class: "node-summary-head",
+                        span { "{camerata_ui_core::edits::field_label(field)}" }
+                        if !matches!(&prompt_here, Some(TreePrompt::Why { field: f, .. }) if *f == field) {
+                            button {
+                                class: "btn-edit-sm",
+                                title: "Edit this text. The client workbook reads it. It needs a reason.",
+                                onclick: move |_| on_edit_why.call(field),
+                                "Edit"
+                            }
+                        }
+                    }
+                    if why_text(&node, field).trim().is_empty() {
+                        p { class: "node-summary-none", "None written for this node." }
+                    } else {
+                        p { class: "node-summary", "{why_text(&node, field)}" }
+                    }
+                }
             }
             if !node.flags.is_empty() {
                 div { class: "node-flags",
@@ -967,6 +1003,36 @@ fn TreePromptView(
                     },
                 }
                 label { class: "rule-modal-label", "Why the model's summary was wrong (required)" }
+                ReasonField { reason, placeholder: "why (recorded with the edit)", on_reason, on_commit, on_cancel }
+                if let Some(error) = error {
+                    p { class: "batch-error", role: "alert", "{error}" }
+                }
+                PromptButtons { commit_disabled: false, on_commit, on_cancel }
+            }
+        },
+        TreePrompt::Why {
+            field,
+            text,
+            reason,
+            error,
+            ..
+        } => rsx! {
+            div { class: "queue-reason-prompt",
+                label { class: "rule-modal-label", "Edit: {camerata_ui_core::edits::field_label(field)}" }
+                textarea {
+                    class: "addressee-input summary-input",
+                    rows: "5",
+                    autofocus: true,
+                    value: "{text}",
+                    oninput: move |e| on_text.call(e.value()),
+                    onkeydown: move |e: KeyboardEvent| {
+                        e.stop_propagation();
+                        if e.key() == Key::Escape {
+                            on_cancel.call(());
+                        }
+                    },
+                }
+                label { class: "rule-modal-label", "Why the text was wrong (required)" }
                 ReasonField { reason, placeholder: "why (recorded with the edit)", on_reason, on_commit, on_cancel }
                 if let Some(error) = error {
                     p { class: "batch-error", role: "alert", "{error}" }
@@ -1543,6 +1609,50 @@ pub(crate) fn TreeHost(
                         }
                     });
                 }
+                Some(TreePrompt::Why {
+                    node,
+                    field,
+                    text,
+                    reason,
+                    ..
+                }) => {
+                    let idx = index.peek().clone();
+                    let Some(view) = idx.node(&node).cloned() else {
+                        return;
+                    };
+                    let api = api.clone();
+                    let run = run_id();
+                    spawn(async move {
+                        let sent = match camerata_ui_core::tree::batch::why_edit_request(
+                            &view, field, &text, &reason, &run,
+                        ) {
+                            Ok(req) => api
+                                .writes
+                                .post_edit(req)
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| e.message),
+                            Err(e) => Err(e.message().to_string()),
+                        };
+                        match sent {
+                            Ok(()) => {
+                                prompt.set(None);
+                                toast.call((
+                                    crate::toast::ToastKind::Info,
+                                    "Saved. The client workbook reads your text.".to_string(),
+                                ));
+                                after_write.call(());
+                            }
+                            Err(message) => prompt.set(Some(TreePrompt::Why {
+                                node,
+                                field,
+                                text,
+                                reason,
+                                error: Some(message),
+                            })),
+                        }
+                    });
+                }
                 Some(TreePrompt::Site {
                     node,
                     key,
@@ -1776,10 +1886,25 @@ pub(crate) fn TreeHost(
                     open_summary(&idx, &id, prompt);
                 }
             },
+            on_edit_why: move |field: camerata_api_types::edits::EditField| {
+                if let Some(TreeRef::Node(id)) = state.peek().cursor.clone() {
+                    let idx = index.peek().clone();
+                    if let Some(view) = idx.node(&id) {
+                        prompt.set(Some(TreePrompt::Why {
+                            node: id.clone(),
+                            field,
+                            text: camerata_ui_core::tree::batch::why_text(view, field).to_string(),
+                            reason: String::new(),
+                            error: None,
+                        }));
+                    }
+                }
+            },
             on_prompt_reason: move |text: String| {
                 if let Some(
                     TreePrompt::Batch { reason, .. }
                     | TreePrompt::Summary { reason, .. }
+                    | TreePrompt::Why { reason, .. }
                     | TreePrompt::Site { reason, .. },
                 ) = prompt.write().as_mut()
                 {
@@ -1787,7 +1912,10 @@ pub(crate) fn TreeHost(
                 }
             },
             on_prompt_text: move |text: String| {
-                if let Some(TreePrompt::Summary { text: t, .. }) = prompt.write().as_mut() {
+                if let Some(
+                    TreePrompt::Summary { text: t, .. } | TreePrompt::Why { text: t, .. },
+                ) = prompt.write().as_mut()
+                {
                     *t = text;
                 }
             },

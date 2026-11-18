@@ -222,8 +222,8 @@ fn a_plain_site_draws_every_line_of_spec_section_8_with_an_edit_for_each_field()
             "no {label} line:\n{html}"
         );
     }
-    // One edit control per editable field of the site: nine, the node summary being WO10's.
-    assert_eq!(html.matches("site-detail-edit").count(), 9, "{html}");
+    // One edit control per editable field of the site: ten, the node's texts being WO10's.
+    assert_eq!(html.matches("site-detail-edit").count(), 10, "{html}");
     for field in camerata_ui_core::edits::SITE_FIELDS {
         let title = format!("Edit {}", field_label(field).to_lowercase());
         assert!(html.contains(&title), "no `{title}`");
@@ -478,7 +478,7 @@ fn an_open_edit_swaps_the_value_for_its_control_a_required_reason_and_commit() {
         assert!(html.contains("Cancel"));
         let control = match field {
             EditField::Headline => "<input",
-            EditField::Detail | EditField::Fix => "<textarea",
+            EditField::Detail | EditField::Fix | EditField::Business => "<textarea",
             EditField::RuleId => "<datalist",
             _ => "<select",
         };
@@ -915,7 +915,7 @@ async fn an_edit_button_opens_that_fields_form_and_enter_commits_while_esc_cance
     seen.take(&vdom.rebuild_to_vec());
     settle(&mut vdom, &mut seen).await;
     EVENTS.with(|l| l.borrow_mut().clear());
-    // Click every button: the doors, the nine edit buttons, the decisions, merge and add.
+    // Click every button: the doors, the ten edit buttons, the decisions, merge and add.
     let clicks = seen.0.iter().filter(|(n, _)| n == "click").count();
     for n in 0..clicks {
         click(&vdom, seen.nth("click", n));

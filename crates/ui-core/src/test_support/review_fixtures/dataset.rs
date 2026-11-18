@@ -620,6 +620,7 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         category: Some(cat_label),
         headline: format!("{} at line {line}", rule.label),
         detail: DETAILS[rng.below(DETAILS.len())].to_string(),
+        why_business: String::new(),
         fix: FIXES[rng.below(FIXES.len())].to_string(),
         fix_type: if rng.below(3) == 0 {
             "Tailored fix"
@@ -671,6 +672,7 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         category: Some("Thrown out by the engine".to_string()),
         headline: "Placeholder text where a finding should be".to_string(),
         detail: "The engine kept no usable text for this row.".to_string(),
+        why_business: String::new(),
         fix: String::new(),
         fix_type: "Standard fix".to_string(),
         snippet: format!("// thrown {n}"),
@@ -1659,6 +1661,10 @@ fn assemble(
                 counts,
                 decision: node_decision(id),
                 summary_edit: None,
+                why_business_edit: None,
+                why_technical_edit: None,
+                why_business: None,
+                why_technical: None,
             });
         };
     for c in (0..p.categories).chain(std::iter::once(usize::MAX)) {

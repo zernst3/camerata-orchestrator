@@ -563,7 +563,10 @@ pub fn validate_value(field: EditField, new: &str) -> Result<(), EditStoreError>
         | EditField::Detail
         | EditField::Fix
         | EditField::RuleId
-        | EditField::Summary => {
+        | EditField::Summary
+        | EditField::WhyBusiness
+        | EditField::WhyTechnical
+        | EditField::Business => {
             if new.is_empty() {
                 return bad("the new value cannot be empty");
             }

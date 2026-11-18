@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 73] = [
+pub const FIXTURE_IDS: [&str; 74] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -44,6 +44,7 @@ pub const FIXTURE_IDS: [&str; 73] = [
     "queue/merge-picker-empty-pool",
     "queue/place",
     "queue/possible-false-positive",
+    "queue/possible-false-positive-specific",
     "queue/possible-duplicate",
     "engine/lane-off",
     "engine/loading",
@@ -601,6 +602,47 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                     _ => continue,
                 };
                 r.site.possible_false_positive = PossibleFalsePositive::from_reasons(reasons);
+                r.site.markers = super::dataset::markers_for(&r.site);
+            }
+            let focused = queue
+                .escalated
+                .iter()
+                .find(|r| r.site.possible_false_positive.is_some())
+                .map(|r| r.candidate.key.clone());
+            let mut fx = queue_state(&ds, queue);
+            if let Body::Queue(q) = &mut fx.body {
+                q.selected_site = focused;
+            }
+            fx
+        }
+        "queue/possible-false-positive-specific" => {
+            // The flag with the row's own sentences: the finder's reason for being unsure and the
+            // group reviewer's own why, each after the reason's standard sentence. The first
+            // flagged row is focused so the detail lists them.
+            let ds = base();
+            let mut queue = ds.queue(false, 0, 100);
+            for (i, r) in queue.escalated.iter_mut().enumerate() {
+                let flag = match i % 9 {
+                    4 => PossibleFalsePositive::from_reasons(vec![
+                        FpReason::GroupReviewerDoubt,
+                        FpReason::FinderUnsure,
+                    ])
+                    .map(|f| {
+                        f.with_specifics([
+                            (
+                                FpReason::GroupReviewerDoubt,
+                                "It queries a lookup table, not orders.".to_string(),
+                            ),
+                            (
+                                FpReason::FinderUnsure,
+                                "The caller may be checked in a layer not shown.".to_string(),
+                            ),
+                        ])
+                    }),
+                    7 => PossibleFalsePositive::from_reasons(vec![FpReason::FinderUnsure]),
+                    _ => continue,
+                };
+                r.site.possible_false_positive = flag;
                 r.site.markers = super::dataset::markers_for(&r.site);
             }
             let focused = queue

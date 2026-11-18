@@ -203,3 +203,135 @@ fn a_withheld_business_text_leaves_an_empty_client_cell_and_a_reviewer_flag() {
         "{flags:?}"
     );
 }
+
+// ── The reviewer can edit every reason before export ─────────────────────────────────────────
+
+const EDIT_BUSINESS: &str = "EDITED-BUSINESS-MARKER the client may lose orders.";
+const EDIT_TECHNICAL: &str = "EDITED-TECHNICAL-MARKER the write skips the check.";
+const EDIT_ROW: &str = "EDITED-ROW-BUSINESS-MARKER a new hire may copy it.";
+
+fn node_edit(
+    sealed: &crate::onboard::SealedReport,
+    n: usize,
+    field: camerata_api_types::edits::EditField,
+    new: &str,
+) -> camerata_api_types::edits::Edit {
+    use camerata_api_types::edits::EditField;
+    let node = sealed.tree.as_ref().unwrap().node(SQL_SUB).unwrap();
+    let model = match field {
+        EditField::WhyBusiness => node.why_business.clone(),
+        _ => node.why_technical.clone(),
+    }
+    .unwrap_or_default();
+    camerata_api_types::edits::Edit {
+        id: format!("edit-{n:06}"),
+        key: SQL_SUB.to_string(),
+        field,
+        old: model.clone(),
+        new: new.to_string(),
+        reason: "SECRET-REASON the wording was wrong".to_string(),
+        by: "SECRET-REVIEWER".to_string(),
+        at: "2026-11-17T00:00:00Z".to_string(),
+        run_id: "insp-1".to_string(),
+        fingerprint_at_edit: crate::report_export::summary_fingerprint(&model),
+        stale: false,
+        discarded_at: None,
+        reapplied_from: None,
+    }
+}
+
+fn fix_plan_cell(reviewed: &crate::report_export::ReviewedReport, header: &str) -> String {
+    let entries = released_entries(reviewed, &client_options());
+    let grid = xlsx_sheet_grid(&workbook(&entries), "Fix plan").expect("plan");
+    let row = grid
+        .iter()
+        .skip(1)
+        .find(|r| cell(&grid, r, "What is wrong").contains("request value"))
+        .expect("the SQL fix row");
+    cell(&grid, row, header).to_string()
+}
+
+#[test]
+fn an_edit_of_the_business_reason_reaches_the_fix_plan_and_the_pdf_data() {
+    use camerata_api_types::edits::EditField;
+    let sealed = marked();
+    let edit = node_edit(&sealed, 1, EditField::WhyBusiness, EDIT_BUSINESS);
+    let reviewed = apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+    assert_eq!(
+        fix_plan_cell(&reviewed, "Why it matters to the business"),
+        EDIT_BUSINESS
+    );
+    let data = package_of(&reviewed, &client_options()).data_json;
+    assert!(data.contains("EDITED-BUSINESS-MARKER"));
+    assert!(
+        !data.contains(BUSINESS_MARKER),
+        "the edit replaces the model text"
+    );
+    // The reviewer's reason and name reach no client file.
+    let text = client_text(&reviewed);
+    assert!(!text.contains("SECRET-REASON") && !text.contains("SECRET-REVIEWER"));
+}
+
+#[test]
+fn an_edit_of_the_technical_reason_reaches_the_workbook_only() {
+    use camerata_api_types::edits::EditField;
+    let sealed = marked();
+    let edit = node_edit(&sealed, 1, EditField::WhyTechnical, EDIT_TECHNICAL);
+    let reviewed = apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+    assert_eq!(
+        fix_plan_cell(&reviewed, "Why it matters technically"),
+        EDIT_TECHNICAL
+    );
+    let data = package_of(&reviewed, &client_options()).data_json;
+    assert!(!data.contains("EDITED-TECHNICAL-MARKER"));
+}
+
+#[test]
+fn an_edit_of_a_rows_business_text_reaches_the_all_problems_cell() {
+    use camerata_api_types::edits::EditField;
+    let sealed = marked();
+    let row = row_at(&sealed, "src/a.rs");
+    let mut edit = edit_of(1, &row, EditField::Business, EDIT_ROW);
+    edit.old = ROW_BUSINESS_MARKER.to_string();
+    let reviewed = apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+    let entries = released_entries(&reviewed, &client_options());
+    let grid = xlsx_sheet_grid(&workbook(&entries), "All problems").expect("sheet");
+    let r = grid
+        .iter()
+        .skip(1)
+        .find(|r| cell(&grid, r, "File") == "src/a.rs")
+        .expect("row");
+    assert_eq!(cell(&grid, r, "Why it matters to the business"), EDIT_ROW);
+}
+
+#[test]
+fn an_edit_of_a_reason_without_a_reason_is_refused() {
+    use crate::edits::{EditCtx, EditDraft, EditStore, EditStoreError};
+    use camerata_api_types::edits::EditField;
+    for field in [
+        EditField::WhyBusiness,
+        EditField::WhyTechnical,
+        EditField::Business,
+    ] {
+        let draft = |reason: &str| EditDraft {
+            key: "k".to_string(),
+            field,
+            old: "old".to_string(),
+            new: "new".to_string(),
+            reason: reason.to_string(),
+            by: String::new(),
+            run_id: String::new(),
+            fingerprint: "fp".to_string(),
+        };
+        let ctx = || EditCtx {
+            run_id: "insp-1",
+            now: "2026-11-17T00:00:00Z",
+        };
+        let store = EditStore::new();
+        assert!(matches!(
+            store.record_edit("p", draft("  "), ctx()),
+            Err(EditStoreError::ReasonRequired(_))
+        ));
+        assert!(store.record_edit("p", draft("because"), ctx()).is_ok());
+    }
+}

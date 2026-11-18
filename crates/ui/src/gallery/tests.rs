@@ -30,6 +30,7 @@ const SPEC_STATES: &[&str] = &[
     "queue/merge-picker-empty-pool",
     "queue/place",
     "queue/possible-false-positive",
+    "queue/possible-false-positive-specific",
     "queue/possible-duplicate",
     "engine/lane-off",
     "engine/loading",
