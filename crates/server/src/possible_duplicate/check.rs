@@ -292,6 +292,7 @@ type PlannedCall<'a> = (String, Vec<CandidatePair>, Vec<(&'a Finding, &'a Findin
 
 /// Split the candidate pairs into calls: one file at a time, at most [`MAX_PAIRS_PER_CALL`] each.
 fn plan_calls<'a>(
+    model: &str,
     candidates: &[CandidatePair],
     rows: &HashMap<&str, &'a Finding>,
 ) -> Vec<PlannedCall<'a>> {
@@ -310,9 +311,13 @@ fn plan_calls<'a>(
         for chunk in group.chunks(MAX_PAIRS_PER_CALL) {
             let id = crate::checkpoint::batch_key(
                 "dup",
-                chunk
-                    .iter()
-                    .flat_map(|(c, _, _)| [c.key_a.as_str(), c.key_b.as_str()]),
+                // The model is part of the id: a resume on another model asks again, so the stored
+                // answers never name a model that did not give them.
+                std::iter::once(model).chain(
+                    chunk
+                        .iter()
+                        .flat_map(|(c, _, _)| [c.key_a.as_str(), c.key_b.as_str()]),
+                ),
             );
             out.push((
                 id,
@@ -479,7 +484,7 @@ async fn send_calls(
         pairs_of: BTreeMap::new(),
         answers: BTreeMap::new(),
     };
-    for (id, pairs, shown) in plan_calls(candidates, &rows) {
+    for (id, pairs, shown) in plan_calls(model, candidates, &rows) {
         let path = shown
             .first()
             .map(|(a, _)| a.path.clone())

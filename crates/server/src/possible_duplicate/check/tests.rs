@@ -429,3 +429,53 @@ async fn a_cost_checkpoint_stop_stops_the_check_and_not_the_run() {
     let _ = reasons;
     assert_limit_stop_leaves_the_run_whole(&r, failed, &reasons_with_record);
 }
+
+#[tokio::test]
+async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoints = crate::checkpoint::checkpoint_dir_of(&dir.path().join("run-1"));
+    std::fs::create_dir_all(&checkpoints).unwrap();
+
+    let mut first = report();
+    let llm = Script::new(c_same_d_different);
+    crate::checkpoint::with_run_checkpoints(
+        Some(checkpoints.clone()),
+        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, None),
+    )
+    .await;
+    assert_eq!(llm.calls(), 2);
+    assert!(first
+        .ledger
+        .duplicate_checks()
+        .pairs
+        .iter()
+        .all(|p| p.model == "claude-sonnet-5-5"));
+
+    // The same model: nothing is asked again.
+    let mut same = report();
+    let none = Script::new(|_| panic!("the same model must not be asked again"));
+    crate::checkpoint::with_run_checkpoints(
+        Some(checkpoints.clone()),
+        check_possible_duplicates(&mut same, &none, &RunControls::default(), false, None),
+    )
+    .await;
+    assert_eq!(none.calls(), 0);
+
+    // Another model: asked again, and the stored answers name it.
+    let mut controls = RunControls::default();
+    controls.review.dup_check_model = "claude-opus-5-5".to_string();
+    let mut changed = report();
+    let again = Script::new(c_same_d_different);
+    crate::checkpoint::with_run_checkpoints(
+        Some(checkpoints),
+        check_possible_duplicates(&mut changed, &again, &controls, false, None),
+    )
+    .await;
+    assert_eq!(again.calls(), 2, "a model change asks again");
+    let stored = changed.ledger.duplicate_checks();
+    assert_eq!(stored.pairs.len(), 2);
+    assert!(
+        stored.pairs.iter().all(|p| p.model == "claude-opus-5-5"),
+        "{stored:?}"
+    );
+}
