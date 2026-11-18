@@ -131,8 +131,13 @@ pub fn ReviewSettingsView(props: ReviewSettingsViewProps) -> Element {
                                     }
                                 }
                             }
-                            if !stage.hint().is_empty() {
-                                span { class: "audit-model-hint", "{stage.hint()}" }
+                            {
+                                let hint = stage.hint();
+                                rsx! {
+                                    if !hint.is_empty() {
+                                        span { class: "audit-model-hint", "{hint}" }
+                                    }
+                                }
                             }
                         }
                     }

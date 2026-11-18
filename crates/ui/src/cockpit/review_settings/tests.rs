@@ -93,6 +93,59 @@ fn defaults_show_the_saved_formula_and_a_disabled_apply() {
     assert!(html.contains("(not set)"));
 }
 
+/// Every settable model has its own row in Stage models, with the current value selected and a
+/// "(not set)" option when it has a built-in default.
+#[test]
+fn every_settable_model_has_a_row_with_its_current_value_selected() {
+    let mut props = page_props("settings/defaults").expect("a settings state");
+    let Loaded::Ready(view) = &mut props.body.view else {
+        panic!("the defaults state is ready");
+    };
+    view.stage_models.finder_model = "claude-opus-5-5".to_string();
+    view.stage_models.duplicate_check = "claude-haiku-4-5-20251001".to_string();
+    let html = crate::test_harness::render_fragment(
+        crate::gallery::settings_states::SettingsStatePage,
+        props,
+    );
+    for (step, label) in [
+        ("audit", "Scan model"),
+        ("calibration", "Calibration (stage 1)"),
+        ("group_review", "Group review (stage 2)"),
+        ("fix", "Fix model"),
+        ("finder_model", "Finder model"),
+        ("duplicate_check", "Duplicate check"),
+        ("clone_judge", "Clone judge"),
+    ] {
+        assert!(
+            html.contains(&format!("id=\"rs-model-{step}\"")),
+            "a row for {step}\n{html}"
+        );
+        assert!(html.contains(label), "{label}\n{html}");
+    }
+    let select_of = |step: &str| {
+        let at = html.find(&format!("id=\"rs-model-{step}\"")).unwrap();
+        let end = html[at..].find("</select>").unwrap() + at;
+        html[at..end].to_string()
+    };
+    assert!(
+        select_of("finder_model").contains("value=\"claude-opus-5-5\" selected"),
+        "{html}"
+    );
+    assert!(
+        select_of("duplicate_check").contains("value=\"claude-haiku-4-5-20251001\" selected"),
+        "{html}"
+    );
+    // Unset models offer "(not set)" and say what the default is.
+    for step in ["finder_model", "duplicate_check", "clone_judge"] {
+        assert!(select_of(step).contains("(not set)"), "{step}");
+    }
+    assert!(
+        html.contains("not set: Claude Fable 5.2; used when the finder is agent"),
+        "{html}"
+    );
+    assert!(html.contains("not set: Claude Sonnet 5.5"), "{html}");
+}
+
 #[test]
 fn a_changed_rate_shows_the_new_budget_and_what_applying_would_do() {
     let html = fragment("settings/rate-changed");
