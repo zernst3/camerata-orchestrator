@@ -720,6 +720,22 @@ pub fn step_model(state: &AppState, step: crate::project::StepKind) -> String {
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
 }
 
+/// [`step_model_or`] over `project`'s per-step default instead of the active project's (a job's
+/// own project is not always the active one).
+pub fn project_step_model_or(
+    project: Option<&crate::project::Project>,
+    step: crate::project::StepKind,
+    requested: Option<&str>,
+) -> String {
+    match requested.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => m.to_string(),
+        None => project.map_or_else(
+            || crate::llm::DEFAULT_MODEL.to_string(),
+            |p| p.model_for_step(step).to_string(),
+        ),
+    }
+}
+
 /// UI-picked step resolution: the caller's explicit `requested` model wins when non-empty;
 /// otherwise fall back to the active project's per-step default (see [`step_model`]). Used
 /// by the audit / calibration / research-chat steps, where the UI still owns the
@@ -751,15 +767,27 @@ pub fn fix_step_model(state: &AppState) -> Option<String> {
         .filter(|m| !m.is_empty())
 }
 
-/// The clone judge's model for the active project: its fast (Haiku) band primary, or `None` when
-/// there is no active project (the built-in default then applies). The judge is classification
+/// The clone judge's model for the active project: its own setting when set, else its fast
+/// (Haiku) band primary, or `None` when there is no active project (the built-in default then
+/// applies). The judge is classification
 /// over bounded input, the fast band's job; the project's tier map is where that band is set.
 pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
     state
         .projects
         .active()
-        .map(|p| p.tier_map.fast_primary().trim().to_string())
+        .map(|p| clone_judge_model_of(&p))
         .filter(|m| !m.is_empty())
+}
+
+/// The clone judge's model for `project`: the review setting when set, else the fast band's
+/// primary.
+pub(crate) fn clone_judge_model_of(project: &crate::project::Project) -> String {
+    let own = project.review.clone_judge_model.trim();
+    if own.is_empty() {
+        project.tier_map.fast_primary().trim().to_string()
+    } else {
+        own.to_string()
+    }
 }
 
 /// Body for `POST /api/projects/:id/step-models`: which NON-FLEET AI step and the model id
@@ -767,11 +795,13 @@ pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
 #[derive(serde::Deserialize)]
 pub(crate) struct SetStepModelReq {
     /// The step key: `audit` | `calibration` | `fix` | `research_chat` | `story_authoring` |
-    /// `decomposition` | `escalation` | `clarification` | `group_review` (kept in the project's
-    /// review settings, not its step models).
+    /// `decomposition` | `escalation` | `clarification` | `group_review`, `duplicate_check`,
+    /// `finder_model`, `clone_judge` and `finder` (all kept in the project's review settings, not
+    /// its step models).
     pub(crate) step: String,
-    /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix` only, where it
-    /// clears the setting back to the default (see [`fix_step_model`]).
+    /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix`, `duplicate_check`,
+    /// `finder_model` and `clone_judge`, where it clears the setting back to the default (see
+    /// [`fix_step_model`]); every other step refuses a blank model.
     pub(crate) model: String,
 }
 
@@ -811,9 +841,10 @@ pub(crate) async fn set_step_model(
     if req.step.trim().eq_ignore_ascii_case("group_review") {
         return set_group_review_model(&state, &id, req.model.trim());
     }
-    // The possible-duplicate check's model lives with the review settings too.
-    if req.step.trim().eq_ignore_ascii_case("duplicate_check") {
-        return set_dup_check_model(&state, &id, req.model.trim());
+    // The possible-duplicate check's, the agent finder's and the clone judge's models live with
+    // the review settings too; a blank model clears them back to the built-in default.
+    if let Some(step) = ReviewModelStep::parse(&req.step) {
+        return set_review_model(&state, &id, step, req.model.trim());
     }
     // The finder is a word (`agent` or `engine`), not a model; it lives with the review settings
     // and rides the same route as the group reviewer's model.
@@ -854,20 +885,45 @@ fn set_group_review_model(state: &AppState, id: &str, model: &str) -> Json<serde
     }
 }
 
-/// Set the project's possible-duplicate check model (`step: "duplicate_check"` on the step-models
-/// route). The other review settings are kept as they are. A blank model is refused: the built-in
-/// default applies only when the setting was never written.
-fn set_dup_check_model(state: &AppState, id: &str, model: &str) -> Json<serde_json::Value> {
-    if model.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
+/// Which review-setting model a step key on the step-models route sets.
+#[derive(Clone, Copy)]
+enum ReviewModelStep {
+    DuplicateCheck,
+    FinderModel,
+    CloneJudge,
+}
+
+impl ReviewModelStep {
+    fn parse(step: &str) -> Option<Self> {
+        match step.trim().to_ascii_lowercase().as_str() {
+            "duplicate_check" => Some(Self::DuplicateCheck),
+            "finder_model" => Some(Self::FinderModel),
+            "clone_judge" => Some(Self::CloneJudge),
+            _ => None,
+        }
     }
+}
+
+/// Set (or clear) one of the project's review-setting models: the possible-duplicate check
+/// (`duplicate_check`), the agent finder (`finder_model`) or the clone judge (`clone_judge`) on
+/// the step-models route. The other review settings are kept as they are. A blank model clears
+/// the setting, so the built-in default applies again.
+fn set_review_model(
+    state: &AppState,
+    id: &str,
+    step: ReviewModelStep,
+    model: &str,
+) -> Json<serde_json::Value> {
     let Some(project) = state.projects.get(id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
-    let settings = camerata_api_types::project::ReviewSettings {
-        dup_check_model: model.to_string(),
-        ..project.review
-    };
+    let mut settings = project.review;
+    let model = model.to_string();
+    match step {
+        ReviewModelStep::DuplicateCheck => settings.dup_check_model = model,
+        ReviewModelStep::FinderModel => settings.finder_model = model,
+        ReviewModelStep::CloneJudge => settings.clone_judge_model = model,
+    }
     match state.projects.set_review_settings(id, settings) {
         Some(Ok(p)) => Json(serde_json::json!({ "ok": true, "project": p })),
         Some(Err(message)) => Json(serde_json::json!({ "ok": false, "message": message })),
@@ -1150,6 +1206,12 @@ pub(crate) async fn rescan_alternatives_handler(
 
     // The client-engagement lock, before any repository is read (the same check the main
     // audit runs, over the same step models this rescan uses below).
+    let lock_controls = crate::cost_cap::RunControls {
+        fix_model: fix_step_model(&state),
+        clone_judge_model: Some(clone_judge_model_of(&project)),
+        review: project.review.clone(),
+        ..crate::cost_cap::RunControls::from_env()
+    };
     if let Some(why) = client_lock_refusal_for_scan(
         Some(&project),
         Some(&step_model_or(
@@ -1163,7 +1225,7 @@ pub(crate) async fn rescan_alternatives_handler(
             None,
         )),
         false,
-        fix_step_model(&state).as_deref(),
+        &lock_controls,
     ) {
         return Json(serde_json::json!({ "ok": false, "message": why }));
     }

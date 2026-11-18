@@ -127,3 +127,86 @@ async fn an_unknown_finder_word_is_refused_by_name_and_changes_nothing() {
         camerata_api_types::project::ProjectFinder::Engine
     );
 }
+
+/// The finder model and the clone judge model have their own steps (the finder KIND keeps
+/// `finder`): each sets, shows in the settings view, and clears with a blank model.
+#[tokio::test]
+async fn the_finder_model_and_clone_judge_model_steps_set_and_clear() {
+    let f = review_fixture(6);
+    let url = format!("/api/projects/{}/step-models", f.project_id);
+    for (step, view_key) in [
+        ("finder_model", "finder_model"),
+        ("clone_judge", "clone_judge"),
+        ("duplicate_check", "duplicate_check"),
+    ] {
+        let (_, text) = call(
+            &f.app,
+            "POST",
+            &url,
+            Some(json!({ "step": step, "model": " claude-opus-5-5 " })),
+        )
+        .await;
+        let reply: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(reply["ok"], json!(true), "{step}: {text}");
+        let review = f.state.projects().get(&f.project_id).unwrap().review;
+        let stored = match step {
+            "finder_model" => review.finder_model.clone(),
+            "clone_judge" => review.clone_judge_model.clone(),
+            _ => review.dup_check_model.clone(),
+        };
+        assert_eq!(stored, "claude-opus-5-5", "{step}");
+        let (_, text) = call(
+            &f.app,
+            "GET",
+            &format!("/api/projects/{}/review/settings", f.project_id),
+            None,
+        )
+        .await;
+        let view: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            view["stage_models"][view_key],
+            json!("claude-opus-5-5"),
+            "{step}: {text}"
+        );
+        // A blank model clears the setting back to the built-in default.
+        let (_, text) = call(
+            &f.app,
+            "POST",
+            &url,
+            Some(json!({ "step": step, "model": "" })),
+        )
+        .await;
+        let reply: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(reply["ok"], json!(true), "{step} cleared: {text}");
+        let review = f.state.projects().get(&f.project_id).unwrap().review;
+        let stored = match step {
+            "finder_model" => review.finder_model,
+            "clone_judge" => review.clone_judge_model,
+            _ => review.dup_check_model,
+        };
+        assert!(stored.is_empty(), "{step} cleared");
+    }
+    // The finder KIND step still works, and an unknown step is still refused.
+    let (_, text) = call(
+        &f.app,
+        "POST",
+        &url,
+        Some(json!({ "step": "finder", "model": "agent" })),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["ok"],
+        json!(true),
+        "{text}"
+    );
+    let (_, text) = call(
+        &f.app,
+        "POST",
+        &url,
+        Some(json!({ "step": "no_such_step", "model": "claude-opus-5-5" })),
+    )
+    .await;
+    let reply: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(reply["ok"], json!(false), "{text}");
+    assert_eq!(reply["message"], json!("unknown step"), "{text}");
+}

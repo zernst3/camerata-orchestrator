@@ -991,6 +991,15 @@ pub struct StageModelsView {
     /// The group review, stage 2.
     pub group_review: String,
     pub fix: String,
+    /// The agent finder's model. Empty: not set, the run uses its built-in default.
+    #[serde(default)]
+    pub finder_model: String,
+    /// The possible-duplicate check's model. Empty: not set.
+    #[serde(default)]
+    pub duplicate_check: String,
+    /// The clone judge's model. Empty: not set.
+    #[serde(default)]
+    pub clone_judge: String,
     /// The project's finder, `agent` or `engine` (not a model: it sits here beside the stage
     /// models because it is the same lane's setting, sent through the same route).
     #[serde(default)]

@@ -2286,7 +2286,7 @@ async fn onboard_audit(
             req.calibration_model.as_deref(),
         )),
         req.deep,
-        fix_step_model(&state).as_deref(),
+        &run_controls,
     ) {
         return Json(client_lock_blocked_report(&repos, why));
     }
@@ -2661,7 +2661,15 @@ pub(crate) async fn start_audit_job(
     options: AuditJobOptions,
 ) -> String {
     let state = state.clone();
-    let mut run_controls = req.run_controls_for(&state);
+    // The job's own project (the named one, else the active one): every model the run calls is
+    // read from it, so a job for a project that is not the active one runs (and is lock-checked)
+    // on its own project's models.
+    let active_project = options
+        .project_id
+        .as_deref()
+        .and_then(|id| state.projects.get(id))
+        .or_else(|| state.projects.active());
+    let mut run_controls = req.run_controls_for_project(active_project.as_ref());
     // What the run was asked, saved with the run so it can be resumed with the same request.
     let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
     let resume_run = options.resume_run.clone();
@@ -2694,13 +2702,13 @@ pub(crate) async fn start_audit_job(
     // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
     // no active project). Each is resolved to a concrete id (never `None`) so there is no
     // downstream env/const fallback once a project exists.
-    let model = Some(step_model_or(
-        &state,
+    let model = Some(project_step_model_or(
+        active_project.as_ref(),
         crate::project::StepKind::Audit,
         req.model.as_deref(),
     ));
-    let calibration_model = Some(step_model_or(
-        &state,
+    let calibration_model = Some(project_step_model_or(
+        active_project.as_ref(),
         crate::project::StepKind::Calibration,
         req.calibration_model.as_deref(),
     ));
@@ -2711,19 +2719,9 @@ pub(crate) async fn start_audit_job(
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
 
-    // Capture the project up front (the named one, else the active one): the job is stamped
-    // with it (ROUTES-5, so a project's deep-report export finds ITS OWN latest deep report)
-    // AND it seeds the incremental-scan manifest lookup below.
-    let active_project = options
-        .project_id
-        .as_deref()
-        .and_then(|id| state.projects.get(id))
-        .or_else(|| state.projects.active());
+    // The job is stamped with its project (ROUTES-5, so a project's deep-report export finds ITS
+    // OWN latest deep report) AND it seeds the incremental-scan manifest lookup below.
     let project_id = active_project.as_ref().map(|p| p.id.clone());
-    // The finder is the job's own project's setting (the named project, else the active one).
-    if let Some(p) = &active_project {
-        run_controls.finder = p.review.finder.into();
-    }
     // The client-engagement lock, before any repository is located or read: the job fails at
     // once with the reason, and nothing is spawned.
     if let Some(why) = client_lock_refusal_for_scan(
@@ -2731,7 +2729,7 @@ pub(crate) async fn start_audit_job(
         model.as_deref(),
         calibration_model.as_deref(),
         deep,
-        fix_step_model(&state).as_deref(),
+        &run_controls,
     ) {
         let job_id = state.jobs.create("audit", project_id);
         state.jobs.fail(&job_id, why);

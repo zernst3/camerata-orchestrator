@@ -653,7 +653,10 @@
     },
     "stage_models": {
       "calibration": "string",
+      "clone_judge": "string",
+      "duplicate_check": "string",
       "finder": "string",
+      "finder_model": "string",
       "fix": "string",
       "group_review": "string",
       "scan": "string"

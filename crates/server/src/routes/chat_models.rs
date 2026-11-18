@@ -440,7 +440,7 @@ pub(crate) fn client_lock_refusal_for_scan(
     model: Option<&str>,
     calibration_model: Option<&str>,
     deep: bool,
-    fix_model: Option<&str>,
+    controls: &crate::cost_cap::RunControls,
 ) -> Option<String> {
     let Some(project) = project else {
         return Some(
@@ -451,16 +451,9 @@ pub(crate) fn client_lock_refusal_for_scan(
                 .to_string(),
         );
     };
-    // The clone judge runs on the project's fast band.
-    let models = crate::client_lock::models_a_scan_may_use(
-        model,
-        calibration_model,
-        deep,
-        fix_model,
-        Some(project.tier_map.fast_primary()),
-        Some(project.review.group_review_model.as_str()),
-        Some(project.review.dup_check_model.as_str()),
-    );
+    // The models the run will call, from the run's own controls.
+    let models =
+        crate::client_lock::models_a_scan_may_use(model, calibration_model, deep, controls);
     crate::client_lock::refusal(project.client_engagement, project.backend, &models)
         .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
 }

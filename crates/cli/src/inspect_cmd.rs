@@ -287,6 +287,8 @@ impl InspectArgs {
                 over_budget_reasons: defaults.over_budget_reasons,
                 group_review_model: self.group_review_model.clone().unwrap_or_default(),
                 dup_check_model: self.dup_check_model.clone().unwrap_or_default(),
+                finder_model: String::new(),
+                clone_judge_model: String::new(),
                 sample_size_per_run: defaults.sample_size_per_run,
                 finder: defaults.finder,
             },
@@ -567,14 +569,12 @@ pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String
 /// environment overrides included). Pure apart from those environment reads; runs before any
 /// file is read.
 pub fn require_client_lock(args: &InspectArgs) -> Result<(), String> {
+    let controls = args.run_controls()?;
     let models = camerata_server::client_lock::models_a_scan_may_use(
         args.model.as_deref(),
         args.calibration_model.as_deref(),
         false,
-        args.fix_model.as_deref(),
-        args.clone_judge_model.as_deref(),
-        args.group_review_model.as_deref(),
-        args.dup_check_model.as_deref(),
+        &controls,
     );
     match camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models) {
         None => Ok(()),
@@ -2339,6 +2339,18 @@ mod tests {
             refusal.contains("the clone judge") && refusal.contains("other-vendor/judge"),
             "{refusal}"
         );
+        // The agent finder's model is checked too: a client engagement (no --internal) with the
+        // agent finder on another vendor's model is refused before anything is read.
+        args.clone_judge_model = None;
+        args.finder.finder = camerata_server::ai_audit::agent_finder::FinderChoice::Agent;
+        args.finder.model = Some("other-vendor/x".to_string());
+        let refusal = validate_args(&args, true).unwrap_err();
+        assert!(
+            refusal.contains("the finder") && refusal.contains("other-vendor/x"),
+            "{refusal}"
+        );
+        args.finder.model = Some("claude-opus-5-5".to_string());
+        assert!(require_client_lock(&args).is_ok());
     }
 
     #[test]

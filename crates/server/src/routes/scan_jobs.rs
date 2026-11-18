@@ -1604,12 +1604,31 @@ impl AuditReq {
     /// operator picked one) is what the run's fix stage is told. The one place the project's
     /// fix setting becomes run controls; both audit entry points come through it.
     pub(crate) fn run_controls_for(&self, state: &AppState) -> crate::cost_cap::RunControls {
-        let mut controls = self.run_controls(fix_step_model(state), clone_judge_step_model(state));
-        // The review tree's settings (group review model, escalation rate and floor) are the
-        // active project's.
-        if let Some(project) = state.projects.active() {
+        self.run_controls_for_project(state.projects.active().as_ref())
+    }
+
+    /// [`Self::run_controls`] for `project` (the job's own project, which is not always the
+    /// active one): its fix model, its clone judge (its setting, else its fast band) and its
+    /// review settings (group review, duplicate check, finder and finder model).
+    pub(crate) fn run_controls_for_project(
+        &self,
+        project: Option<&crate::project::Project>,
+    ) -> crate::cost_cap::RunControls {
+        let fix_model = project
+            .map(|p| {
+                p.model_for_step(crate::project::StepKind::Fix)
+                    .trim()
+                    .to_string()
+            })
+            .filter(|m| !m.is_empty());
+        let judge = project
+            .map(super::projects::clone_judge_model_of)
+            .filter(|m| !m.is_empty());
+        let mut controls = self.run_controls(fix_model, judge);
+        if let Some(project) = project {
             controls.review = project.review.clone();
             controls.finder = project.review.finder.into();
+            controls.fill_models_from_project(&project.review);
         }
         controls
     }

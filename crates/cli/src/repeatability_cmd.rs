@@ -301,10 +301,7 @@ pub async fn run_repeatability_with(
         args.model.as_deref(),
         args.calibration_model.as_deref(),
         false,
-        None,
-        None,
-        None,
-        None,
+        &camerata_server::cost_cap::RunControls::from_env(),
     );
     if let Some(why) =
         camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models)
