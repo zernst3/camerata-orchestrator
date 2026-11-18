@@ -902,7 +902,7 @@ do). The screen shows both, side by side, and never lets one overwrite the other
 **The lane tabs.** Five tabs sit at the top: **Tree** (with "N undecided"), **Escalations** (with a
 count), **Engine Check** (with a count; it reads "Engine Check off" when the sample size is 0) and
 **Flat view** and **Settings**. Hovering a tab says "Press 3 to switch to Engine Check" and so on.
-The keys `1` to `5` switch lanes, but not while the operator is typing in a field and not with Ctrl,
+The keys `1` to `5` switch lanes from the tab row or an armed lane region, but not while the operator is typing in a field (so not inside the Settings fields) and not with Ctrl,
 Alt or Cmd held.
 
 **The progress strip.** Under the tabs one line says where the review stands, for example
@@ -917,8 +917,8 @@ of whatever the cursor is on (a node or a place).
 
 - **Nodes.** The tree has three levels: an **area** (a category such as security), a **rule**, and
   a **rule group** (the places of one rule that share one cause, also called a sub-group). A node
-  header has an arrow (Open or Close), a green check when every place under it is decided, its label,
-  a "N flags" tag when the group reviewer flagged it, and a counts line such as
+  header has an arrow (Open or Close), a green check when every place under it is decided, its label
+  and a "N flags" tag when the group reviewer flagged it, then a counts line such as
   `312 sites · 4 esc · 2 outl · 12 new · 298 decided`. The words are: `esc` escalated, `outl`
   outliers, `new` new since a decision, `stale` stale, `held` held, `decided` decided. The review
   screens call a place a "site".
@@ -961,7 +961,7 @@ of whatever the cursor is on (a node or a place).
 all** and **Tech debt all** decide every place in the group that the batch covers, in one act. They
 are disabled when the group has no sites or holds rows the engine threw out (the tooltip says why;
 put such a row back from the Engine Check instead). Pressing one first reads the sites ("Reading the
-sites to plan the batch: N of M."), then shows the plan ("This writes N site(s)...") and asks for a
+sites to plan the batch: N of M."), then shows the plan ("This writes N site records.", then the clauses that apply) and asks for a
 **reason**. A group decision always needs a reason, Confirm included ("A group decision needs a
 reason."). Commit with **Commit →** or Enter, cancel with **Cancel** or Esc. What a batch leaves out:
 
@@ -1011,9 +1011,9 @@ server refuses a blank reason either way.
    its rule says otherwise) or `set to info: the row has no file and line`. Steps that both applied
    are joined in order with ", then ". When no bound moved the severity but the rule has bounds, the
    line quietly states them: `rule: at least high, at most critical`. On a row the agent finder
-   reported, the model's own rating stands and a rule's minimum is guidance only; the one raise kept
-   is for unauthenticated access (at least High, and Critical when the wording shows sensitive data, a
-   write or a full compromise).
+   reported, the model's own rating stands against a rule's minimum, which is guidance only; the one
+   raise kept is for unauthenticated access (at least High, and Critical when the wording shows sensitive data, a
+   write or a full compromise). The wording caps and a rule's ceiling still apply to agent rows.
 6. **Where** (repo, file and line) and the stored code snippet.
 7. **Stage 1** (`high · real yes · effort low · "reason"`) and **Stage 2** (`escalated, unauthenticated
    reach, rank 12 · why "..." · outlier: different object "..."`) lines.
@@ -1082,7 +1082,7 @@ workbook reads the edited text.
 
 **Possible false positive.** A flag on a row the engine itself has reasons to doubt. It is a review
 aid for the operator and nothing else: it never hides, drops, merges or lowers a row, never changes
-a severity, a kind, an escalation or a count, never holds an export, and a client package carries
+a severity, a kind, an escalation or a count, never holds an export; a client package carries
 none of it. The reasons, in the screen's words (hover the chip or read the detail): **Group reviewer
 doubts it**; **Calibration unsure**; **Test code only** (a secret committed in a test is never
 flagged for this); **Convention rule at medium or higher** (a style rule, not a security rule, rated
@@ -1243,7 +1243,7 @@ Everything after the finder is the same for both: the possible-duplicate check, 
 
 ### How to choose it
 
-- **In the app:** open **Review** (§3a), then the **Settings** tab (key `5`), and pick **Finder**:
+- **In the app:** open **Review** (§3a), then the **Settings** tab (key `5`) and pick **Finder**:
   **Agent (one model reviews each part)** or **Engine (rule by rule)**. The row's note reads "agent:
   one model reviews each part; engine: rule by rule". The choice is saved on the project the moment it
   is picked, and it can be changed only while no run is in flight. The **Review** button appears once a
@@ -1328,8 +1328,10 @@ as the engine finder does.
 
 With the agent finder on, the pre-scan estimate shows, for each repository, a line such as
 `acme/api: finder stage about $4.20 (range $2.52 to $7.56), 3 piece(s)`. It is built from the number
-of pieces and the lines in them, and it is a **starting guess** with a range, not a quote. The figure
-is for the finder stage; the group review and the fix stage are extra. The finder stage is not
+of pieces and the lines in them, and it is a **starting guess** with a range, not a quote. The dollar
+figure is the finder stage's; the token and pass counts in the headline stay the engine finder's
+figures; the group review and the fix stage are extra. The estimate uses fixed per-line and per-piece
+figures, so it does not change with the Finder model picked. The finder stage is not
 batched: every piece is a live conversation, so `--batch` does not apply to it (the command line
 says so).
 
@@ -1391,7 +1393,7 @@ automatically.
 | **Duplicate check** | The model that checks each candidate pair of problems for the Possible duplicate hint (is it the same flaw written twice?). | Claude Sonnet 5.5 | yes: "not set: Claude Sonnet 5.5" |
 | **Clone judge** | The duplicate-code checker, which judges code the clone rules flagged. It runs only when a clone rule is selected. | The project's fast model band (Claude Haiku 5.5 unless changed) | yes: "not set: the project's fast tier model" |
 
-(The **Finder** row above them is the agent or engine choice, not a model.)
+(The **Finder** row sits below the stage rows and the models note. It is the agent or engine choice, not a model.)
 
 **Precedence (where a model comes from).** In this order: (1) a command line flag
 (`--model`, `--calibration-model`, `--group-review-model`, `--fix-model`, `--finder-model`,
@@ -1406,21 +1408,33 @@ project's Settings) runs **only Anthropic models on the Anthropic API**. A model
 Anthropic API model when it starts with `claude-` and has no `/` or `:`. Before any file is read or
 any model is called, the engine lists **every model the run will call** (the scan, calibration,
 group review, fix, duplicate check, the finder when it is the agent finder, the deep tier when it is
-on, and the clone judge always) and refuses the run if the backend is the CLI or any one of them is
+on and the clone judge always) and refuses the run if the backend is the CLI or any one of them is
 not an Anthropic model. The refusal names each one ("group review is set to `...`") and ends
 "Nothing was read and no model was called." The lock decides by the id's shape, not by a lookup, so an
 OpenRouter id cannot slip through when a model list is empty.
 
 **How to run a project with Opus 5.5 as the finder and the group reviewer.**
 
-1. Project **Settings** (nav): **Backend** is **API**, the Anthropic API key is saved, and **Client
+1. Project **Settings** (nav): **Backend** is **API**, the Anthropic API key is saved and **Client
    engagement** can stay on (Opus 5.5 is an Anthropic model).
 2. **Review** (after any scan result) > **Settings** tab.
 3. **Finder**: choose **Agent (one model reviews each part)**.
 4. **Finder model**: choose **Claude Opus 5.5**.
 5. **Group review (stage 2)**: choose **Claude Opus 5.5**.
-6. Leave **Calibration** alone (it is not used by the agent finder) and leave the rest on their
-   defaults. Tick **Full scan** on the scan screen. Run the scan (§3c).
+6. Leave **Calibration** alone: the agent finder does not call it, but on a client engagement it is
+   still checked by the client lock and the price check, so it must still be a Claude model. It also
+   becomes the fix model when the `fix_on_haiku` measure is off. Leave the rest on their defaults.
+7. Tick **Full scan** on the scan screen. The app saves its baseline after every scan, so a later
+   default scan reviews only changed files or skips the AI review as fully cached.
+8. Optional: set a **Spend limit (USD)** if you want the Cost panel and the pause. With none, the run
+   goes to completion with no panel.
+9. Run the scan (§3c).
+
+**The same run for an internal session (the operator's own development).** Project **Settings**:
+**Backend** CLI and **Client engagement** off. Pieces run one at a time on the CLI, so it is slower.
+Claude Code must be new enough for the models named (`claude-fable-5-2` needs 2.1.290 or newer; see §22).
+Then Review > Settings: **Finder** Agent, **Finder model** and **Group review (stage 2)** Claude Opus
+5.5, then tick **Full scan** and run.
 
 On the command line the same run is `camerata inspect --repo <PATH> --client "<CLIENT>" --finder agent
 --finder-model claude-opus-5-5 --group-review-model claude-opus-5-5 --full --export <OUT.zip>`. With
@@ -1477,15 +1491,18 @@ no cost the dollar figure shows "n/a" rather than understating; the API backend 
 cache written and read.
 
 **4. The spend limit.** The scan stops between passes once its actual AI spend reaches the limit,
-lists every pass it did not run, and marks the result incomplete (§11a). Passes already started
+lists every pass it did not run and marks the result incomplete (§11a). Passes already started
 finish, so a run can end about one pass over. Every model the run uses needs a known price, or the
 run refuses to start and names the model. With **no limit the run goes to completion whatever it
 costs**.
 
-**5. The live cost panel.** While a run with a spend limit goes, and after it, a **Cost** panel shows
+**5. The live cost panel.** The **Cost** panel needs a spend limit: with no limit there is no panel. With
+the **agent finder** and a limit, it appears once the first piece finishes and updates after each piece.
+With the **engine finder** it appears only if the run pauses before a later stage because the
+projection would pass the limit. When shown, it reads
 `Spent $130.00 of $260.00 approved` with a bar, `Projected $200.00 for the finder stage` (or "with the
 group review", or "with the <stage> stage") and `3 pieces done, 4 left`. The **approved amount is the spend
-limit**; a run with no limit has no panel. The projection is the spend so far plus the pieces left at
+limit**; The projection is the spend so far plus the pieces left at
 the average cost of the pieces finished (or the pre-flight figure before any finished) plus the
 stages after the finder. **When the projection goes over the approved amount, the run pauses before
 it overspends** (it is the spend-limit stop, with a different reason, so the pieces left are parts a
@@ -1694,9 +1711,9 @@ per-repo **Resolve…** button to browse to its folder. A repo is "broken" when 
 missing, or not a git checkout whose origin matches `owner/repo`.
 
 **The readiness banner (a paused project).** A project whose repos do not all resolve to a local
-clone is **paused**: an amber banner reads "Paused: link this project's repo before you can run it."
-(no repo resolves) or "Paused: N repos still need a local clone before this project can run."
-(some do not), with a **Link repo** button. Every action that needs a repo (start a run, scan,
+clone is **paused**: an amber banner reads "Paused", then a dash on screen, then "link this project's repo before you can
+run it." (no repo resolves) or "Paused", a dash, "N repos still need a local clone before this project
+can run." (some do not), with a **Link repo** button. Every action that needs a repo (start a run, scan,
 apply, publish a design) is disabled until the project is ready, and a disabled action says "This
 action is paused until the project's repo is linked. Use "Link repo" above to resolve it." The
 button, or opening the project, opens the **Link this project's repo** dialog. For each unresolved
@@ -3187,7 +3204,7 @@ scopes.
   is the only mode safe for client repositories." Turning safe mode off asks first ("This sends
   prompts to providers that may retain or train on them. Never use with client code.") with **Cancel**
   and **Turn off (testing mode)**. Testing mode resets to safe mode the next time the app starts, and
-  while it is on a red banner reads "TESTING MODE: data safety OFF. Prompts may be retained or trained
+  while it is on a red banner reads "TESTING MODE", a dash on screen, then "data safety OFF. Prompts may be retained or trained
   on. Do not use with client repositories." A **Provider** picker appears under the chat's model select
   for an OpenRouter model and lists that model's providers with their data policy; unsafe ones are
   disabled in safe mode; "Provider data unavailable: using Auto." when the list cannot be read.
@@ -3494,7 +3511,7 @@ Rules that hold everywhere:
 | Tree, node | `E` | Edit the node's summary (reason required) |
 | Tree, outlier row | `Space` | Tick or untick the outlier for the next batch |
 | Tree, place | `C` `T` / `I` `F` | Apply at once with Undo / ask for a reason |
-| Tree, place | `O` / `B` | Code viewer / stacked view |
+| Tree, place | `O` / `B` | Code viewer / stacked view (`B` also opens the stack on a node) |
 | Tree, place | `E` then a letter | Edit a field: `H` headline, `D` detail, `X` fix, `T` fix type, `S` severity, `R` rule, `K` kind, `G` category, `U` sub-group, `B` why it matters to the business (this place). `Esc` cancels ("Edit which field? ... Esc cancels") |
 | Tree, place | `M` | Merge into another site |
 | Tree, place | `A` | Add a finding the engine missed |
@@ -3654,7 +3671,7 @@ glossary (`docs/CLIENT_PACKAGE.md`) defines the package columns.
 | Turn the Engine Check off or on | Review > Settings > **Sample size per run** (0 is off) (§3a). |
 | Answer an Engine Check card | **Yes (Y)** or **No (N)**, then pick what was wrong (§3a). |
 | Release a held row | Open it (the export panel's **open**) and decide it (§3a). |
-| Export the package | Set the **Client name**, resolve held rows, **Export product (ZIP: PDF + Excel + JSON)** (§11a). |
+| Export the package | Set the **Client name**, resolve held rows, fill **Project title** and **Prepared by** (the name on the package; the app has no signing step), then **Export product (ZIP: PDF + Excel + JSON)** (§11a). |
 | Export a package from a terminal | `camerata inspect --export` (§11a). |
 | Check a package | `camerata release-gate <zip>` (§11a). |
 | Resolve a repo path | Rules view, repo paths (§5). |
@@ -3688,7 +3705,7 @@ Each entry is a message or symptom the app can show, with its meaning and the ne
 | "--finder-force-pieces is for internal runs only" or "...needs --finder agent" | Misused internal flag. | Add `--internal` and `--finder agent`, or drop it. |
 | "Select at least one rule (tick its checkbox) to audit against." | No rule is ticked. | Tick a rule. |
 | "Source for <repo> was deleted. Re-fetch source from the Workspace tab to rescan." | The client's source was deleted from this machine (§5a). | Re-fetch it, then rescan. |
-| "Paused: link this project's repo before you can run it." or "N repos still need a local clone..." | A repo has no local folder. | Use **Link repo** or clone it (§5). |
+| "Paused" (a dash on screen) "link this project's repo before you can run it." or "...N repos still need a local clone before this project can run." | A repo has no local folder. | Use **Link repo** or clone it (§5). |
 | "Can't reach the engine" | The local server is not answering on its port. | Restart the app. |
 | An amber pulsing "rate-limiting" badge on the usage meter | The provider is throttling; the request retries. | Wait; it clears when a request succeeds. |
 
@@ -3711,12 +3728,13 @@ Each entry is a message or symptom the app can show, with its meaning and the ne
 | Message or symptom | What it means | What to do |
 |---|---|---|
 | "No inspection to review. Run a scan or open a saved inspection." | There is nothing to review yet. | Run a scan. |
+| "This project has no completed inspection to review. Run an audit first." | The server refused the review read: the project has no completed inspection. | Run an audit first. |
 | "Loading the review" that does not end, or a red banner with **Retry** | The read failed or is slow. | Press **Retry**. |
 | "This inspection was not reviewed by the group reviewer..." | An old inspection with no stage 2. | Re-run the scan to get the summaries. |
 | "Decisions not loaded: the decision store could not be reached... You are seeing your decisions as of the last time it could be..." | The server cannot be reached; changes are saved here and stored when it is reachable. **An export waits until they are.** | Wait for the server; the export button works again afterwards. |
 | "Decisions not loaded: ... so what you have decided on these findings is unknown. It is not shown as Unresolved." | Nothing earlier to show. | Retry once the server is reachable. |
 | "Export blocked: N rows need a decision before the package can be built." | The release gate refuses held rows or group decisions with missing records. | Press **open** on each line and decide the row (§3a). |
-| "A reason is required to move N site(s) to "X"." / "A group decision needs a reason." / "A reason is required to ..." | Ignore, False positive, every batch decision and every correction need a reason. | Type one and commit. |
+| "A reason is required to move 1 site to “X”." (the Escalations lane says "this place" or "1 site") / "A group decision needs a reason." / "A reason is required to ..." | Ignore, False positive, every batch decision and every correction need a reason. | Type one and commit. |
 | "Nothing to write: every site here is held, an outlier you did not tick, or already recorded." | The batch has nothing it may write. | Tick outliers or decide held rows by name. |
 | "These rows were thrown out by the engine. Put one back from the Engine Check; a batch decision does not apply." | A batch on a thrown-out node. | Use the Engine Check. |
 | "An edit needs a reason. Say what was wrong." / "That is the value it already has." / "Severity must be critical, high, medium or low." / "The fix type must be Tailored fix or Standard fix." | An edit was refused. | Fix the field. |
@@ -3743,13 +3761,13 @@ Each entry is a message or symptom the app can show, with its meaning and the ne
 | "The client name is longer than N characters" / "contains a line break..." / "too long for the workbook footer" | The name does not fit the footer. | Shorten it. |
 | "This package records an inspection that did not run to completion, so it is not for a client" | The release gate refused an incomplete package. | Finish the run, then export again. |
 | "Product export failed." / "Export failed." / "Could not export the project JSON." | The export did not complete. | Read the cause in the message; fix and retry. |
-| "Import failed." (project) / "Import failed: check the JSON shape." (ruleset) / "Overwrite project?" | A bad file, or a project of the same name exists. | Check the file; confirm **Overwrite** only if intended. |
+| "Import failed." (project) / "Import failed" (a dash on screen) "check the JSON shape." (ruleset) / "Overwrite project?" | A bad file, or a project of the same name exists. | Check the file; confirm **Overwrite** only if intended. |
 | "Could not save <setting>." toasts | A settings save failed (the server is unreachable or refused it). | Retry; check the server. |
 | "Each tier requires at least one model id." | A fleet band was saved empty. | Give each band a model. |
 | "Choose an alternative first for: <rules>" | A rule needs an option before arming. | Pick the option (§3). |
-| "Apply failed: set a workspace folder + connect GitHub (Contents write)." | Apply needs a workspace folder and a token. | Set both (§0, §3). |
-| "Open PR failed: needs PR write on the connected token." | The token cannot open PRs. | Use a token with PR write. |
-| "TESTING MODE: data safety OFF. Prompts may be retained or trained on. Do not use with client repositories." | Provider safety testing mode is on. | Turn it off before any client work. |
+| "Apply failed" (a dash on screen) "set a workspace folder + connect GitHub (Contents write)." | Apply needs a workspace folder and a token. | Set both (§0, §3). |
+| "Open PR failed" (a dash on screen) "needs PR write on the connected token." | The token cannot open PRs. | Use a token with PR write. |
+| "TESTING MODE" (a dash on screen) "data safety OFF. Prompts may be retained or trained on. Do not use with client repositories." | Provider safety testing mode is on. | Turn it off before any client work. |
 | "Corpus freshness: ..." banner | A rule pack is overdue for its sweep (§9). | See §9. |
 | "Camerata X is available (you are running Y)." | An app update exists. | **View release**. |
 
@@ -3757,7 +3775,7 @@ Each entry is a message or symptom the app can show, with its meaning and the ne
 
 ## The whole loop, in one line
 
-**Create/open a project → configure credentials in Settings (OpenRouter key + GitHub token,
+**Create/open a project → configure credentials in Settings (Anthropic API key + GitHub token; an OpenRouter key only for own development,
 keychain-backed) + set model configuration (profile, fleet bands, Designer band, helper steps, L3
 review) → onboard each repo (browse to its local folder → scan the local code, choosing AI review
 and/or deterministic scans → pick per-repo rules (opt-in rules are never pre-checked) → Add rules
