@@ -373,7 +373,7 @@ pub(crate) async fn post_engine_check_verdict(
         return no_inspection();
     };
     // Only a row of the sample can be judged, and with an answer its card takes.
-    let lane_has_it = with_composer(&state, &id, Some(&latest.id), |c| {
+    let lane_has_it = with_composer_using(&state, &id, Some(&latest.id), None, |c| {
         let lane = c.engine_check();
         let Some(card) = lane.cards.iter().find(|card| card.site.site_key == key) else {
             return refusal(
@@ -386,8 +386,7 @@ pub(crate) async fn post_engine_check_verdict(
             Ok(()) => StatusCode::OK.into_response(),
             Err(e) => refusal(StatusCode::UNPROCESSABLE_ENTITY, e.code(), e.to_string()),
         }
-    })
-    .await;
+    });
     if lane_has_it.status() != StatusCode::OK {
         return lane_has_it;
     }
@@ -417,10 +416,9 @@ pub(crate) async fn get_export_gate(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    with_composer(&state, &id, q.run_id.as_deref(), |c| {
+    with_composer_using(&state, &id, q.run_id.as_deref(), None, |c| {
         Json(c.export_gate()).into_response()
     })
-    .await
 }
 
 /// `GET /api/projects/:id/review/settings`.
@@ -429,10 +427,9 @@ pub(crate) async fn get_settings(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    with_composer(&state, &id, q.run_id.as_deref(), |c| {
+    with_composer_using(&state, &id, q.run_id.as_deref(), None, |c| {
         Json(c.settings()).into_response()
     })
-    .await
 }
 
 fn invalid_setting(message: impl Into<String>) -> Response {

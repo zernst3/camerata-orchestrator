@@ -1504,8 +1504,7 @@ fn with_bounds(
         floor: None,
         ceiling: None,
         deviation_ceiling: None,
-        applied: None,
-        applied_from: None,
+        applied: Vec::new(),
     };
     configure(&mut view);
     SiteRow {
@@ -1516,36 +1515,44 @@ fn with_bounds(
 
 #[test]
 fn each_applied_bound_is_worded_after_the_severity() {
-    use camerata_api_types::review_view::AppliedBound;
+    use camerata_api_types::review_view::{AppliedBound, AppliedStep};
     let cases = [
         (
             with_bounds(|v| {
                 v.floor = Some("high".into());
-                v.applied = Some(AppliedBound::Floor);
-                v.applied_from = Some("medium".into());
+                v.applied = vec![AppliedStep {
+                    bound: AppliedBound::Floor,
+                    from: "medium".into(),
+                }];
             }),
             "raised from medium by the rule&#39;s floor (at least high)",
         ),
         (
             with_bounds(|v| {
                 v.ceiling = Some("medium".into());
-                v.applied = Some(AppliedBound::Ceiling);
-                v.applied_from = Some("high".into());
+                v.applied = vec![AppliedStep {
+                    bound: AppliedBound::Ceiling,
+                    from: "high".into(),
+                }];
             }),
             "capped from high by the rule&#39;s ceiling (at most medium)",
         ),
         (
             with_bounds(|v| {
                 v.deviation_ceiling = Some("medium".into());
-                v.applied = Some(AppliedBound::DeviationCeiling);
-                v.applied_from = Some("high".into());
+                v.applied = vec![AppliedStep {
+                    bound: AppliedBound::DeviationCeiling,
+                    from: "high".into(),
+                }];
             }),
             "capped from high: a consistency deviation is at most medium",
         ),
         (
             with_bounds(|v| {
-                v.applied = Some(AppliedBound::NoLocation);
-                v.applied_from = Some("high".into());
+                v.applied = vec![AppliedStep {
+                    bound: AppliedBound::NoLocation,
+                    from: "high".into(),
+                }];
             }),
             "set to info: the row has no file and line",
         ),
@@ -1586,8 +1593,10 @@ fn the_bounds_line_sits_beside_the_group_reviewers_disagreement_and_does_not_rep
         floor: Some("high".into()),
         ceiling: None,
         deviation_ceiling: None,
-        applied: Some(AppliedBound::Floor),
-        applied_from: Some("medium".into()),
+        applied: vec![camerata_api_types::review_view::AppliedStep {
+            bound: AppliedBound::Floor,
+            from: "medium".into(),
+        }],
     });
     let html = page(row, DetailPanel::default());
     assert!(html.contains("stage 2 disagrees"), "{html}");

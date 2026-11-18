@@ -5,9 +5,10 @@
 //! ([`camerata_rules::severity_bounds::classify_adjustment`]).
 
 use camerata_api_types::edits::EditField;
-use camerata_api_types::review_view::{AppliedBound, SeverityBoundsView};
+use camerata_api_types::review_view::{AppliedBound, AppliedStep, SeverityBoundsView};
 use camerata_rules::severity_bounds::{
-    classify_adjustment, normalize_severity, BoundStep, BoundedFinding, DEVIATION_DEFAULT_CEILING,
+    adjustment_move, classify_adjustment, normalize_severity, BoundStep, BoundedFinding,
+    DEVIATION_DEFAULT_CEILING,
 };
 
 use super::ReviewComposer;
@@ -32,33 +33,55 @@ impl ReviewComposer<'_> {
             floor,
             ceiling: authored(rule.and_then(|r| r.max_severity.as_ref())),
             deviation_ceiling: authored(rule.and_then(|r| r.deviation_ceiling.as_ref())),
-            applied: None,
-            applied_from: None,
+            applied: Vec::new(),
         };
         // A severity the reviewer set is theirs: no bound moved what is shown.
         if !reviewer_edited_field(f, EditField::Severity) {
-            // The last bound that moved it has the last word on what is shown.
-            let last = crate::severity_bounds::recorded_adjustments(f)
-                .iter()
-                .filter_map(|n| classify_adjustment(n).map(|(step, from)| (step, from.to_string())))
-                .next_back();
-            if let Some((step, from)) = last {
-                view.applied = Some(match step {
-                    BoundStep::Floor => AppliedBound::Floor,
-                    BoundStep::Ceiling => AppliedBound::Ceiling,
-                    BoundStep::DeviationCeiling => AppliedBound::DeviationCeiling,
-                    BoundStep::NoLocation => AppliedBound::NoLocation,
-                });
-                view.applied_from = Some(from);
-                if step == BoundStep::DeviationCeiling && view.deviation_ceiling.is_none() {
-                    view.deviation_ceiling = Some(DEVIATION_DEFAULT_CEILING.to_string());
+            // The bounds explain the shown severity only while they are the LAST things that
+            // moved it: walk back from the end over moves by any writer, keep the run of bound
+            // moves that chain to the shown severity, and stop at the first move that does not.
+            let mut expect = normalize_severity(&f.severity);
+            let mut steps: Vec<(BoundStep, String)> = Vec::new();
+            for note in crate::severity_bounds::recorded_adjustments(f).iter().rev() {
+                if note.starts_with(crate::follow_reviewers::RETURNED_NOTE_PREFIX) {
+                    break;
+                }
+                let Some((from, to)) = adjustment_move(note) else {
+                    continue;
+                };
+                match classify_adjustment(note) {
+                    Some((step, _)) if normalize_severity(to) == expect => {
+                        expect = normalize_severity(from);
+                        steps.push((step, from.to_string()));
+                    }
+                    _ => break,
                 }
             }
+            steps.reverse();
+            if steps
+                .iter()
+                .any(|(step, _)| *step == BoundStep::DeviationCeiling)
+                && view.deviation_ceiling.is_none()
+            {
+                view.deviation_ceiling = Some(DEVIATION_DEFAULT_CEILING.to_string());
+            }
+            view.applied = steps
+                .into_iter()
+                .map(|(step, from)| AppliedStep {
+                    bound: match step {
+                        BoundStep::Floor => AppliedBound::Floor,
+                        BoundStep::Ceiling => AppliedBound::Ceiling,
+                        BoundStep::DeviationCeiling => AppliedBound::DeviationCeiling,
+                        BoundStep::NoLocation => AppliedBound::NoLocation,
+                    },
+                    from,
+                })
+                .collect();
         }
         let empty = view.floor.is_none()
             && view.ceiling.is_none()
             && view.deviation_ceiling.is_none()
-            && view.applied.is_none();
+            && view.applied.is_empty();
         (!empty).then_some(view)
     }
 }

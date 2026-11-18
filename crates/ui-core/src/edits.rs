@@ -1341,27 +1341,40 @@ pub fn severity_note(row: &SiteRow) -> Option<String> {
 /// carried; it never works a severity out.
 pub fn severity_bounds_note(row: &SiteRow) -> Option<String> {
     let b = row.severity_bounds.as_ref()?;
-    let from = b.applied_from.as_deref().unwrap_or("its first rating");
-    if let Some(applied) = b.applied {
+    if !b.applied.is_empty() {
         let said = |bound: &Option<String>, label: &str| match bound {
             Some(v) => format!(" ({label} {v})"),
             None => String::new(),
         };
-        return Some(match applied {
-            AppliedBound::Floor => format!(
-                "raised from {from} by the rule's floor{}",
-                said(&b.floor, "at least")
-            ),
-            AppliedBound::Ceiling => format!(
-                "capped from {from} by the rule's ceiling{}",
-                said(&b.ceiling, "at most")
-            ),
-            AppliedBound::DeviationCeiling => match &b.deviation_ceiling {
-                Some(v) => format!("capped from {from}: a consistency deviation is at most {v}"),
-                None => format!("capped from {from}: the ceiling for a consistency deviation"),
-            },
-            AppliedBound::NoLocation => "set to info: the row has no file and line".to_string(),
-        });
+        let steps: Vec<String> = b
+            .applied
+            .iter()
+            .map(|step| {
+                let from = &step.from;
+                match step.bound {
+                    AppliedBound::Floor => format!(
+                        "raised from {from} by the rule's floor{}",
+                        said(&b.floor, "at least")
+                    ),
+                    AppliedBound::Ceiling => format!(
+                        "capped from {from} by the rule's ceiling{}",
+                        said(&b.ceiling, "at most")
+                    ),
+                    AppliedBound::DeviationCeiling => match &b.deviation_ceiling {
+                        Some(v) => {
+                            format!("capped from {from}: a consistency deviation is at most {v}")
+                        }
+                        None => {
+                            format!("capped from {from}: the ceiling for a consistency deviation")
+                        }
+                    },
+                    AppliedBound::NoLocation => {
+                        "set to info: the row has no file and line".to_string()
+                    }
+                }
+            })
+            .collect();
+        return Some(steps.join(", then "));
     }
     let mut parts: Vec<String> = Vec::new();
     if let Some(v) = &b.floor {

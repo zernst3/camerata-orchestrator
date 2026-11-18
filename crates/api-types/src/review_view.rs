@@ -363,6 +363,15 @@ pub enum AppliedBound {
     NoLocation,
 }
 
+/// One bound's move of a row's severity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedStep {
+    pub bound: AppliedBound,
+    /// The severity the bound moved the row from.
+    pub from: String,
+}
+
 /// The rule's own say in a row's severity, for the operator's row detail. Operator only: no
 /// client export carries it. Absent on a row whose rule sets no bound and whose severity no bound
 /// moved.
@@ -378,12 +387,11 @@ pub struct SeverityBoundsView {
     /// The deviation ceiling (the rule's own, or the default when it is the one that applied).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deviation_ceiling: Option<String>,
-    /// The bound that changed the shown severity, when one did, and the severity it changed it
-    /// from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied: Option<AppliedBound>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_from: Option<String>,
+    /// The bounds that moved the shown severity to what it is, oldest first, each with the
+    /// severity it moved the row from. Empty when none did (or something later changed the
+    /// severity, so the bounds no longer explain it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<AppliedStep>,
 }
 
 /// One site row (spec section 5, "Columns of a site row", and section 8, the site detail). The

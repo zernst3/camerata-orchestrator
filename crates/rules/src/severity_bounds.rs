@@ -328,6 +328,18 @@ pub fn classify_adjustment(note: &str) -> Option<(BoundStep, &str)> {
     Some((step, from))
 }
 
+/// The `(from, to)` severities of any recorded note of the form `severity raised|lowered from X
+/// to Y[: why]`, whoever wrote it (a bound, a merge, a phrase floor, a reviewer pass). `None` for
+/// a note that is not a move (a held-back floor, a returned severity).
+pub fn adjustment_move(note: &str) -> Option<(&str, &str)> {
+    let rest = note
+        .strip_prefix("severity raised from ")
+        .or_else(|| note.strip_prefix("severity lowered from "))?;
+    let (from, rest) = rest.split_once(" to ")?;
+    let to = rest.split_once(": ").map_or(rest, |(to, _)| to);
+    Some((from, to.trim()))
+}
+
 /// Why C4-R1 lowered an unlocated row, as its note says it.
 pub const UNLOCATED_WHY: &str = "no file or line was identified for this finding";
 

@@ -1922,8 +1922,7 @@ fn bounds_row(
         floor: None,
         ceiling: None,
         deviation_ceiling: None,
-        applied: None,
-        applied_from: None,
+        applied: Vec::new(),
     };
     configure(&mut view);
     SiteRow {
@@ -1934,11 +1933,13 @@ fn bounds_row(
 
 #[test]
 fn the_bounds_note_words_each_bound_that_moved_the_severity() {
-    use camerata_api_types::review_view::AppliedBound;
+    use camerata_api_types::review_view::{AppliedBound, AppliedStep};
     let floor = bounds_row(|v| {
         v.floor = Some("high".into());
-        v.applied = Some(AppliedBound::Floor);
-        v.applied_from = Some("medium".into());
+        v.applied = vec![AppliedStep {
+            bound: AppliedBound::Floor,
+            from: "medium".into(),
+        }];
     });
     assert_eq!(
         severity_bounds_note(&floor).as_deref(),
@@ -1946,8 +1947,10 @@ fn the_bounds_note_words_each_bound_that_moved_the_severity() {
     );
     let ceiling = bounds_row(|v| {
         v.ceiling = Some("medium".into());
-        v.applied = Some(AppliedBound::Ceiling);
-        v.applied_from = Some("high".into());
+        v.applied = vec![AppliedStep {
+            bound: AppliedBound::Ceiling,
+            from: "high".into(),
+        }];
     });
     assert_eq!(
         severity_bounds_note(&ceiling).as_deref(),
@@ -1955,16 +1958,20 @@ fn the_bounds_note_words_each_bound_that_moved_the_severity() {
     );
     let deviation = bounds_row(|v| {
         v.deviation_ceiling = Some("medium".into());
-        v.applied = Some(AppliedBound::DeviationCeiling);
-        v.applied_from = Some("high".into());
+        v.applied = vec![AppliedStep {
+            bound: AppliedBound::DeviationCeiling,
+            from: "high".into(),
+        }];
     });
     assert_eq!(
         severity_bounds_note(&deviation).as_deref(),
         Some("capped from high: a consistency deviation is at most medium")
     );
     let unlocated = bounds_row(|v| {
-        v.applied = Some(AppliedBound::NoLocation);
-        v.applied_from = Some("high".into());
+        v.applied = vec![AppliedStep {
+            bound: AppliedBound::NoLocation,
+            from: "high".into(),
+        }];
     });
     assert_eq!(
         severity_bounds_note(&unlocated).as_deref(),
@@ -2006,4 +2013,51 @@ fn a_row_json_from_before_the_bounds_still_loads_and_says_nothing() {
     let with = bounds_row(|v| v.floor = Some("high".into()));
     let back: SiteRow = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
     assert_eq!(back, with);
+}
+
+#[test]
+fn two_bounds_on_one_row_are_worded_in_order_and_joined() {
+    use camerata_api_types::review_view::{AppliedBound, AppliedStep};
+    let both = bounds_row(|v| {
+        v.floor = Some("high".into());
+        v.deviation_ceiling = Some("medium".into());
+        v.applied = vec![
+            AppliedStep {
+                bound: AppliedBound::Floor,
+                from: "low".into(),
+            },
+            AppliedStep {
+                bound: AppliedBound::DeviationCeiling,
+                from: "high".into(),
+            },
+        ];
+    });
+    assert_eq!(
+        severity_bounds_note(&both).as_deref(),
+        Some(
+            "raised from low by the rule's floor (at least high), then capped from high: \
+             a consistency deviation is at most medium"
+        )
+    );
+    let ceilings = bounds_row(|v| {
+        v.ceiling = Some("high".into());
+        v.deviation_ceiling = Some("medium".into());
+        v.applied = vec![
+            AppliedStep {
+                bound: AppliedBound::Ceiling,
+                from: "critical".into(),
+            },
+            AppliedStep {
+                bound: AppliedBound::DeviationCeiling,
+                from: "high".into(),
+            },
+        ];
+    });
+    assert_eq!(
+        severity_bounds_note(&ceilings).as_deref(),
+        Some(
+            "capped from critical by the rule's ceiling (at most high), then capped from high: \
+             a consistency deviation is at most medium"
+        )
+    );
 }
