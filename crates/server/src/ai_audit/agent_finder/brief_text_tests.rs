@@ -247,3 +247,27 @@ fn a_real_template_value_in_an_example_file_is_still_capped() {
         assert_ne!(row.severity, "critical", "{snippet}");
     }
 }
+
+pub(super) const SEVERAL_LINES: &str =
+    "When several lines hold credentials, `code` is the first name only and the other lines go in `places`.";
+pub(super) const NO_NAME: &str = "When a credential has no variable or key name (a PEM block or a key inline in code), `code` is the part of the line before the value.";
+
+#[test]
+fn every_brief_and_the_reminder_carry_the_several_lines_and_no_name_rules() {
+    for (name, text) in [
+        ("piece", PIECE_BRIEF.to_string()),
+        ("joints", JOINTS_BRIEF.to_string()),
+        ("reminder", repair_reminder()),
+    ] {
+        assert!(text.contains(SEVERAL_LINES), "{name}: several lines");
+        assert!(text.contains(NO_NAME), "{name}: no name");
+    }
+}
+
+#[test]
+fn a_snippet_of_two_names_is_not_found_but_the_first_name_alone_is() {
+    let file = "NODE_ENV=production\nSTRIPE_SECRET_KEY=sk_live_abcdefghijklmnop1234\nDB_PASSWORD=hunter2hunter2\n";
+    let near = crate::onboard::evidence_check::snippet_near_line;
+    assert!(!near(file, "STRIPE_SECRET_KEY\nDB_PASSWORD", 2));
+    assert!(near(file, "STRIPE_SECRET_KEY", 2));
+}

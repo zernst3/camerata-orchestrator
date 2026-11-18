@@ -13,7 +13,7 @@ macro_rules! problem_fields {
 /// What a problem may not carry: secret values and attack recipes.
 macro_rules! safety_rules {
     () => {
-        "Never copy a credential, key, token, password or connection string value into any field, even masked, partial or public. In `code`, for a line that holds a credential, write only the variable or key name, with nothing after it, stopping before the `=` or `:` (for example `STRIPE_SECRET_KEY`). Name the variable and the file, never the value. Still report it as a problem. Describe what is wrong, why it matters and the fix; do not write step-by-step exploit instructions, working attack payloads or ready-to-run attack code."
+        "Never copy a credential, key, token, password or connection string value into any field, even masked, partial or public. In `code`, for a line that holds a credential, write only the variable or key name, with nothing after it, stopping before the `=` or `:` (for example `STRIPE_SECRET_KEY`). When several lines hold credentials, `code` is the first name only and the other lines go in `places`. When a credential has no variable or key name (a PEM block or a key inline in code), `code` is the part of the line before the value. Name the variable and the file, never the value. Still report it as a problem. Describe what is wrong, why it matters and the fix; do not write step-by-step exploit instructions, working attack payloads or ready-to-run attack code."
     };
 }
 
@@ -30,7 +30,7 @@ pub fn repair_reminder() -> String {
     format!(
         "Every problem needs all of these fields: {PROBLEM_FIELDS} (`unsure_why` only \
          when `sure` is `unsure`). A field may not be dropped, and `description` is not a field. For a line that \
-         holds a credential, `code` is only the variable or key name, stopping before the `=` or `:`. A file holds at most 40 problems; \
+         holds a credential, `code` is only the variable or key name, stopping before the `=` or `:`, and with several such lines it is the first name only. A file holds at most 40 problems; \
          write more in the next file.\n{SAFETY_RULES}\n"
     )
 }

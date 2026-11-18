@@ -832,3 +832,13 @@ fn render_bans_secret_values_and_attack_recipes_in_problems_it_adds() {
         assert!(text.contains(needle), "{needle} missing from:\n{text}");
     }
 }
+
+#[test]
+fn render_carries_the_several_lines_and_no_name_rules() {
+    let text = checklist().render();
+    assert!(
+        text.contains(super::brief_text_tests::SEVERAL_LINES),
+        "{text}"
+    );
+    assert!(text.contains(super::brief_text_tests::NO_NAME), "{text}");
+}
