@@ -612,13 +612,16 @@ fn a_second_look_no_is_not_freed_by_another_rule_out_an_edit_or_a_group_rule_out
         uncorrected_keys(&no, RUN, decisions, edits) == vec!["k".to_string()]
     };
     let first = ruling("dec-000001", "k", DecisionState::FalsePositive, t0);
-    assert!(held(&[first.clone()], &[]), "the ruling before the No");
+    assert!(
+        held(std::slice::from_ref(&first), &[]),
+        "the ruling before the No"
+    );
     // Ruled out again, later.
     let again = ruling("dec-000002", "k", DecisionState::FalsePositive, t2);
     assert!(held(&[first.clone(), again], &[]), "a later rule-out");
     // A severity or wording edit, later.
     assert!(
-        held(&[first.clone()], &[edit("edit-1", "k", t2)]),
+        held(std::slice::from_ref(&first), &[edit("edit-1", "k", t2)]),
         "an edit"
     );
     // A group rule-out covering the row, later.
@@ -669,10 +672,7 @@ fn a_second_look_card_takes_only_its_own_no_and_no_other_card_takes_it() {
 
 #[test]
 fn the_drawn_second_look_rows_are_kept_append_only_per_run_and_survive_a_restart() {
-    let dir = std::path::PathBuf::from(
-        "/private/tmp/claude-501/-Users-zacharyernst-Documents-Repos-Agora-Repos/4b2d1ad6-5aa2-465b-8ed0-cb1118a268ad/scratchpad/flag-guards",
-    )
-    .join(format!("second-look-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("camerata-second-look-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let store = EngineCheckStore::at(dir.clone());
     let keys = |ks: &[&str]| ks.iter().map(|k| (*k).to_string()).collect::<Vec<_>>();
