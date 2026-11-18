@@ -2664,6 +2664,9 @@ mod fn_batch_c_adjust_tests;
 mod held_severity_text_tests;
 
 #[cfg(test)]
+mod severity_bounds_pin_tests;
+
+#[cfg(test)]
 mod fn_batch_c_dep_tests;
 
 #[cfg(test)]

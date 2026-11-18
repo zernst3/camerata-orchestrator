@@ -52,8 +52,11 @@ use crate::review_tree::{KeyLink, LinkHow, PlaceNode, ReviewTree};
 mod lane;
 mod queue;
 mod rows;
+mod severity_bounds;
 mod tree;
 
+#[cfg(test)]
+mod severity_bounds_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -86,6 +89,8 @@ pub struct ReviewInputs<'a> {
     /// The rows the second look at rows ruled out while flagged has drawn on this run, kept in
     /// the Engine Check store. A drawn row stays drawn.
     pub second_look_drawn: &'a [String],
+    /// The rule corpus, for the rule's severity bounds on a row. `None` shows no bounds.
+    pub corpus: Option<&'a camerata_rules::RuleSet>,
 }
 
 /// The composer: indexes built once from [`ReviewInputs`], then one method per view.

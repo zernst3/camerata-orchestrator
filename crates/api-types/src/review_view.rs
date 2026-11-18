@@ -349,6 +349,43 @@ pub struct MergedIntoView {
     pub label: String,
 }
 
+/// Which of the rule's authored bounds moved a row's shown severity away from stage 1's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppliedBound {
+    /// The rule's floor (`min_severity`) raised the row.
+    Floor,
+    /// The rule's ceiling (`max_severity`) lowered the row.
+    Ceiling,
+    /// The deviation ceiling lowered the row.
+    DeviationCeiling,
+    /// The row has no file and line, so the null-location net set it to `info`.
+    NoLocation,
+}
+
+/// The rule's own say in a row's severity, for the operator's row detail. Operator only: no
+/// client export carries it. Absent on a row whose rule sets no bound and whose severity no bound
+/// moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeverityBoundsView {
+    /// The rule's `min_severity`: at least this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<String>,
+    /// The rule's `max_severity`: at most this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<String>,
+    /// The deviation ceiling (the rule's own, or the default when it is the one that applied).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deviation_ceiling: Option<String>,
+    /// The bound that changed the shown severity, when one did, and the severity it changed it
+    /// from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<AppliedBound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_from: Option<String>,
+}
+
 /// One site row (spec section 5, "Columns of a site row", and section 8, the site detail). The
 /// same row serves the tree, the queue, the Engine Check card and the detail pane.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -427,6 +464,10 @@ pub struct SiteRow {
     /// for a row with none. Operator only: no client export carries it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub same_place_as: Vec<SamePlaceView>,
+    /// The rule's floor and ceilings, and which one changed the shown severity. `None` for a row
+    /// with neither. Operator only: no client export carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity_bounds: Option<SeverityBoundsView>,
 }
 
 // ── Section 4: the shell ──────────────────────────────────────────────────────────────────

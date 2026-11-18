@@ -79,6 +79,8 @@ pub(crate) struct Stores {
     pub links: Vec<KeyLink>,
     /// The rows the second look has drawn so far (what the store would hold).
     pub second_look: Vec<String>,
+    /// The rule corpus the rows' bounds are read from.
+    pub corpus: Option<camerata_rules::RuleSet>,
 }
 
 /// Compose over `reviewed` with `stores` and hand the composer to `f`.
@@ -109,6 +111,7 @@ pub(crate) fn compose<R>(
         moved: &stores.moved,
         links: &stores.links,
         second_look_drawn: &stores.second_look,
+        corpus: stores.corpus.as_ref(),
     };
     f(&ReviewComposer::new(&inputs))
 }

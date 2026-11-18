@@ -654,6 +654,7 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         review_flags: Vec::new(),
         possible_false_positive: None,
         same_place_as: Vec::new(),
+        severity_bounds: None,
     }
 }
 
@@ -708,6 +709,7 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         review_flags: Vec::new(),
         possible_false_positive: None,
         same_place_as: Vec::new(),
+        severity_bounds: None,
     }
 }
 

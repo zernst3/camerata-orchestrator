@@ -169,10 +169,28 @@ fn moved_sites(
 
 /// Load what the views are composed from and run `compose` on it. Refuses with the route's
 /// answer when the project, a store or the inspection is not there, or `run_id` is not the latest.
-fn with_composer(
+async fn with_composer(
     state: &AppState,
     id: &str,
     run_id: Option<&str>,
+    compose: impl FnOnce(&ReviewComposer<'_>) -> Response,
+) -> Response {
+    // The rule's bounds ride on each row; a corpus that is not there shows none.
+    let dir = camerata_rules::corpus_path();
+    let corpus = if dir.exists() {
+        Some(camerata_rules::load_corpus_lenient(&dir).await.0)
+    } else {
+        None
+    };
+    with_composer_using(state, id, run_id, corpus.as_ref(), compose)
+}
+
+/// [`with_composer`] with the corpus already in hand.
+fn with_composer_using(
+    state: &AppState,
+    id: &str,
+    run_id: Option<&str>,
+    corpus: Option<&camerata_rules::RuleSet>,
     compose: impl FnOnce(&ReviewComposer<'_>) -> Response,
 ) -> Response {
     let project = match guard(state, id) {
@@ -214,6 +232,7 @@ fn with_composer(
         moved: &moved,
         links: &links,
         second_look_drawn: &second_look,
+        corpus,
     };
     let composer = ReviewComposer::new(&inputs);
     let response = compose(&composer);
@@ -239,7 +258,7 @@ pub(crate) async fn get_shell(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    with_composer(&state, &id, q.run_id.as_deref(), |c| {
+    with_composer_using(&state, &id, q.run_id.as_deref(), None, |c| {
         Json(c.shell()).into_response()
     })
 }
@@ -250,7 +269,7 @@ pub(crate) async fn get_tree(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    with_composer(&state, &id, q.run_id.as_deref(), |c| {
+    with_composer_using(&state, &id, q.run_id.as_deref(), None, |c| {
         Json(c.tree()).into_response()
     })
 }
@@ -296,6 +315,7 @@ pub(crate) async fn get_sites(
             ),
         }
     })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -325,6 +345,7 @@ pub(crate) async fn get_queue(
         ))
         .into_response()
     })
+    .await
 }
 
 /// `GET /api/projects/:id/review/engine-check`.
@@ -336,6 +357,7 @@ pub(crate) async fn get_engine_check(
     with_composer(&state, &id, q.run_id.as_deref(), |c| {
         Json(c.engine_check()).into_response()
     })
+    .await
 }
 
 /// `POST /api/projects/:id/review/engine-check/:key`: one Yes or No on one sampled row.
@@ -364,7 +386,8 @@ pub(crate) async fn post_engine_check_verdict(
             Ok(()) => StatusCode::OK.into_response(),
             Err(e) => refusal(StatusCode::UNPROCESSABLE_ENTITY, e.code(), e.to_string()),
         }
-    });
+    })
+    .await;
     if lane_has_it.status() != StatusCode::OK {
         return lane_has_it;
     }
@@ -397,6 +420,7 @@ pub(crate) async fn get_export_gate(
     with_composer(&state, &id, q.run_id.as_deref(), |c| {
         Json(c.export_gate()).into_response()
     })
+    .await
 }
 
 /// `GET /api/projects/:id/review/settings`.
@@ -408,6 +432,7 @@ pub(crate) async fn get_settings(
     with_composer(&state, &id, q.run_id.as_deref(), |c| {
         Json(c.settings()).into_response()
     })
+    .await
 }
 
 fn invalid_setting(message: impl Into<String>) -> Response {
@@ -454,7 +479,8 @@ fn budget_outcome_for(
     applied: bool,
 ) -> Response {
     if state.inspections.latest(id).is_some() {
-        return with_composer(state, id, None, |c| {
+        // The line has nothing to say about a rule's severity, so it reads no corpus.
+        return with_composer_using(state, id, None, None, |c| {
             Json(c.budget_outcome(req, applied)).into_response()
         });
     }

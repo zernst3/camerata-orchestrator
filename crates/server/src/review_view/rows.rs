@@ -387,6 +387,7 @@ impl<'a> ReviewComposer<'a> {
             review_flags: crate::review_flags::flags_of(f),
             possible_false_positive: self.possible_false_positive(f),
             same_place_as: self.same_place_as(f),
+            severity_bounds: self.severity_bounds(f),
         }
     }
 }

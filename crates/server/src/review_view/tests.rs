@@ -559,6 +559,7 @@ fn after_a_rate_change_the_queue_and_the_client_export_agree_on_the_line() {
         moved: &moved,
         links: &[],
         second_look_drawn: &[],
+        corpus: None,
     };
     let queue = super::ReviewComposer::new(&inputs).queue(false, 0, 100);
     let on_screen: BTreeSet<String> = queue
