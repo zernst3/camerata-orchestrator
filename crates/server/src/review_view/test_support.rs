@@ -77,6 +77,8 @@ pub(crate) struct Stores {
     pub verdicts: Vec<EngineCheckVerdict>,
     pub moved: HashMap<String, MovedFromView>,
     pub links: Vec<KeyLink>,
+    /// The rows the second look has drawn so far (what the store would hold).
+    pub second_look: Vec<String>,
 }
 
 /// Compose over `reviewed` with `stores` and hand the composer to `f`.
@@ -106,6 +108,7 @@ pub(crate) fn compose<R>(
         verdicts: &stores.verdicts,
         moved: &stores.moved,
         links: &stores.links,
+        second_look_drawn: &stores.second_look,
     };
     f(&ReviewComposer::new(&inputs))
 }

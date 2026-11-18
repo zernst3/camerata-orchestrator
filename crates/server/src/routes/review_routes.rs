@@ -200,6 +200,7 @@ fn with_composer(
     // answered (marked `carried_from`), so the lane shows the card as the No it still is.
     let verdicts = state.engine_check.verdicts_in_force(id, &latest.id);
     let (links, moved) = moved_sites(state, id, &latest);
+    let second_look = state.engine_check.second_look(id, &latest.id);
     let inputs = ReviewInputs {
         run_id: &latest.id,
         engine_version: env!("CARGO_PKG_VERSION"),
@@ -212,8 +213,18 @@ fn with_composer(
         verdicts: &verdicts,
         moved: &moved,
         links: &links,
+        second_look_drawn: &second_look,
     };
-    compose(&ReviewComposer::new(&inputs))
+    let composer = ReviewComposer::new(&inputs);
+    let response = compose(&composer);
+    // Rows the second look drew now are recorded, so they stay drawn.
+    let added = composer.second_look_added();
+    if !added.is_empty() {
+        if let Err(e) = state.engine_check.add_second_look(id, &latest.id, &added) {
+            tracing::warn!(error = %e, "could not record the second look's draw");
+        }
+    }
+    response
 }
 
 #[derive(Deserialize)]

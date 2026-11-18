@@ -118,6 +118,17 @@ struct ProjectVerdicts {
     version: u32,
     #[serde(default)]
     verdicts: Vec<EngineCheckVerdict>,
+    /// The rows the second look at rows ruled out while flagged has drawn, by run, oldest first.
+    /// Append only: a drawn row stays drawn. `serde(default)` so an older file still loads.
+    #[serde(default)]
+    second_look: Vec<SecondLookDraw>,
+}
+
+/// One row the second look drew on one run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SecondLookDraw {
+    run_id: String,
+    key: String,
 }
 
 #[derive(Deserialize)]
@@ -244,6 +255,52 @@ impl EngineCheckStore {
     /// The verdicts given on `run_id`, the LATEST one per site key.
     pub fn latest_for_run(&self, project_id: &str, run_id: &str) -> Vec<EngineCheckVerdict> {
         latest_per_key(&self.list(project_id), run_id)
+    }
+
+    /// The rows the second look has drawn on `run_id`, in the order they were drawn.
+    pub fn second_look(&self, project_id: &str, run_id: &str) -> Vec<String> {
+        self.lock()
+            .get(project_id)
+            .map(|p| {
+                p.second_look
+                    .iter()
+                    .filter(|d| d.run_id == run_id)
+                    .map(|d| d.key.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Record rows the second look drew on `run_id`. Appends the ones not already recorded and
+    /// never removes one.
+    pub fn add_second_look(
+        &self,
+        project_id: &str,
+        run_id: &str,
+        keys: &[String],
+    ) -> Result<(), EngineCheckStoreError> {
+        if self.is_corrupt(project_id) {
+            return Err(EngineCheckStoreError::Corrupt);
+        }
+        let mut guard = self.lock();
+        let mut working = guard.get(project_id).cloned().unwrap_or_default();
+        let before = working.second_look.len();
+        for key in keys {
+            let draw = SecondLookDraw {
+                run_id: run_id.to_string(),
+                key: key.clone(),
+            };
+            if !working.second_look.contains(&draw) {
+                working.second_look.push(draw);
+            }
+        }
+        if working.second_look.len() == before {
+            return Ok(());
+        }
+        self.persist_locked(project_id, &working)
+            .map_err(|e| EngineCheckStoreError::Persist(e.to_string()))?;
+        guard.insert(project_id.to_string(), working);
+        Ok(())
     }
 
     /// Record one verdict. Appends; a later verdict on the same site supersedes the earlier one.
@@ -708,6 +765,11 @@ pub fn draw_sample(report: &ScanReport, size: usize, run_id: &str) -> Sample {
     sample
 }
 
+/// How many rows the second look holds once `rows` rows have been ruled out while flagged.
+pub fn ruled_out_want(rows: usize) -> usize {
+    rows.min(RULED_OUT_MINIMUM.max((rows * RULED_OUT_SHARE_PERCENT).div_ceil(100)))
+}
+
 /// Draw the second look: the rows the reviewer ruled out while the engine flagged them "possible
 /// false positive". `ruled_out_in_order` is each such row once, in the order the reviewer ruled
 /// them out.
@@ -730,8 +792,7 @@ pub fn draw_ruled_out_flagged(run_id: &str, ruled_out_in_order: &[String]) -> Ve
             continue;
         }
         waiting.insert((draw_order(run_id, key), key.as_str()));
-        let rows = seen.len();
-        let want = rows.min(RULED_OUT_MINIMUM.max((rows * RULED_OUT_SHARE_PERCENT).div_ceil(100)));
+        let want = ruled_out_want(seen.len());
         while drawn.len() < want {
             let Some((_, next)) = waiting.pop_first() else {
                 break;

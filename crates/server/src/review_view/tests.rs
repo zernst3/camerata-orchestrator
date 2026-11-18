@@ -558,6 +558,7 @@ fn after_a_rate_change_the_queue_and_the_client_export_agree_on_the_line() {
         verdicts: &[],
         moved: &moved,
         links: &[],
+        second_look_drawn: &[],
     };
     let queue = super::ReviewComposer::new(&inputs).queue(false, 0, 100);
     let on_screen: BTreeSet<String> = queue
@@ -1292,7 +1293,7 @@ fn flagged_and_plain(flagged: usize, plain: usize) -> crate::onboard::SealedRepo
         .map(|i| {
             let mut f = row(
                 "SEC-NO-RAW-SQL-CONCAT-1",
-                &format!("tests/t{i:02}.rs"),
+                &format!("src/t{i:02}.rs"),
                 10 + i,
                 "high",
             );
@@ -1336,7 +1337,7 @@ fn flagged_keys(report: &crate::onboard::SealedReport) -> Vec<String> {
     report
         .findings
         .iter()
-        .filter(|f| f.path.starts_with("tests/"))
+        .filter(|f| f.path.starts_with("src/t"))
         .map(|f| f.site_key.clone())
         .collect()
 }
@@ -1522,8 +1523,182 @@ fn an_uncorrected_no_on_a_second_look_card_holds_the_row_and_a_later_decision_fr
     );
 }
 
+/// Compose the lane the way the route does: the drawn keys the store holds go in, and the keys
+/// the composer drew new go into the store.
+fn lane_persisting(
+    reviewed: &crate::report_export::ReviewedReport,
+    stores: &mut Stores,
+) -> camerata_api_types::review_view::EngineCheckLane {
+    let (lane, added) = compose(reviewed, stores, |c| {
+        (c.engine_check(), c.second_look_added())
+    });
+    stores.second_look.extend(added);
+    lane
+}
+
+/// A report of 30 flagged and 10 plain rows, the first sample of 8 drawn, and ten flagged rows
+/// outside that sample ruled out: the rulings, the report and the stores with the second look
+/// drawn once (3 cards).
+fn drawn_once() -> (
+    crate::onboard::SealedReport,
+    Vec<Decision>,
+    Stores,
+    Vec<String>,
+) {
+    use camerata_api_types::review_view::SampleStratum::{Kept, RuledOutFlagged};
+    let report = flagged_and_plain(30, 10);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 8;
+    let undecided = apply_overlay(&report, &[], &[], &[]);
+    let in_first = cards_of(&compose(&undecided, &stores, |c| c.engine_check()), Kept);
+    let decisions: Vec<Decision> = flagged_keys(&report)
+        .into_iter()
+        .filter(|k| !in_first.contains(k))
+        .take(10)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, &k))
+        .collect();
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let drawn = cards_of(&lane_persisting(&reviewed, &mut stores), RuledOutFlagged);
+    assert_eq!(drawn.len(), 3);
+    (report, decisions, stores, drawn)
+}
+
+fn assert_all_still_carded(
+    lane: &camerata_api_types::review_view::EngineCheckLane,
+    drawn: &[String],
+    what: &str,
+) {
+    for key in drawn {
+        assert!(
+            lane.cards.iter().any(|c| c.site.site_key == *key),
+            "{what}: the card of {key} is gone"
+        );
+    }
+}
+
 #[test]
-fn a_sample_size_of_zero_turns_the_second_look_off_with_the_rest_of_the_lane() {
+fn a_drawn_card_stays_when_another_ruling_is_undone_or_a_row_is_ruled_out_again() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, decisions, mut stores, drawn) = drawn_once();
+
+    // Another ruling undone (the last ruling is not a drawn row): the pool changes.
+    let undone: Vec<Decision> = decisions
+        .iter()
+        .filter(|d| !drawn.contains(&d.key))
+        .skip(1)
+        .cloned()
+        .collect();
+    let reviewed = apply_overlay(&report, &undone, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_all_still_carded(&lane, &drawn, "another ruling undone");
+
+    // A drawn row ruled out again (its record moves to the end of the order).
+    let mut again = decisions.clone();
+    again.push(ruling(99, &drawn[0]));
+    let reviewed = apply_overlay(&report, &again, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_all_still_carded(&lane, &drawn, "a row ruled out again");
+    assert!(drawn
+        .iter()
+        .all(|k| cards_of(&lane, RuledOutFlagged).contains(k)));
+}
+
+#[test]
+fn a_drawn_card_stays_when_the_flag_goes_or_the_sample_size_changes() {
+    let (report, decisions, mut stores, drawn) = drawn_once();
+
+    // The flag goes from a drawn row (its test scope is lifted).
+    let mut rows = report.findings.clone();
+    for f in rows.iter_mut().filter(|f| f.site_key == drawn[0]) {
+        f.in_test = false;
+    }
+    let unflagged = sealed(rows, |_| {});
+    let reviewed = apply_overlay(&unflagged, &decisions, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_all_still_carded(&lane, &drawn, "the flag removed");
+
+    // A smaller and a larger sample.
+    for size in [2, 20] {
+        stores.settings.sample_size_per_run = size;
+        let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+        let lane = lane_persisting(&reviewed, &mut stores);
+        assert_all_still_carded(&lane, &drawn, &format!("sample size {size}"));
+    }
+}
+
+#[test]
+fn a_row_with_a_standing_second_look_no_always_has_its_card() {
+    use camerata_api_types::review_view::EngineCheckError;
+    use camerata_api_types::review_view::EngineCheckVerdict;
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, decisions, mut stores, drawn) = drawn_once();
+    // A ruled-out flagged row the draw did not take, with a No stored on it, and nothing
+    // persisted (an older store).
+    let other = decisions
+        .iter()
+        .map(|d| d.key.clone())
+        .find(|k| !drawn.contains(k))
+        .unwrap();
+    stores.second_look.clear();
+    stores.verdicts = vec![EngineCheckVerdict {
+        key: other.clone(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        carried_from: None,
+    }];
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    assert!(cards_of(&lane, RuledOutFlagged).contains(&other));
+}
+
+#[test]
+fn the_second_look_rate_keeps_a_no_after_the_row_is_corrected() {
+    use camerata_api_types::review_view::EngineCheckError;
+    use camerata_api_types::review_view::EngineCheckVerdict;
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, mut decisions, mut stores, drawn) = drawn_once();
+    stores.verdicts = vec![EngineCheckVerdict {
+        key: drawn[0].clone(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        carried_from: None,
+    }];
+    let rate_of = |lane: &camerata_api_types::review_view::EngineCheckLane| {
+        let s = lane
+            .strata
+            .iter()
+            .find(|s| s.stratum == RuledOutFlagged)
+            .expect("its own stratum");
+        (s.drawn, s.verdicts, s.wrong)
+    };
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    assert_eq!(rate_of(&lane_persisting(&reviewed, &mut stores)), (3, 1, 1));
+
+    // The row is kept as a problem (corrected), so it is no longer ruled out: the rate stays.
+    let mut kept = decision("dec-000050", &drawn[0], DecisionState::Confirmed, RUN);
+    kept.decided_at = "2026-11-04T11:00:00Z".to_string();
+    decisions.push(kept);
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_eq!(
+        rate_of(&lane),
+        (3, 1, 1),
+        "the corrected row's No still counts"
+    );
+}
+
+#[test]
+fn a_sample_size_of_zero_keeps_the_second_look_on() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
     let report = flagged_and_plain(12, 0);
     let mut stores = Stores::default();
     stores.settings.sample_size_per_run = 0;
@@ -1533,7 +1708,18 @@ fn a_sample_size_of_zero_turns_the_second_look_off_with_the_rest_of_the_lane() {
         .map(|(i, k)| ruling(i + 1, k))
         .collect();
     let reviewed = apply_overlay(&report, &decisions, &[], &[]);
-    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_eq!(cards_of(&lane, RuledOutFlagged).len(), 3);
+    assert!(!lane.off, "the lane has cards, so it is not off");
+    assert_eq!(lane.drawn, 0, "the first sample draws nothing");
+    let shell = compose(&reviewed, &stores, |c| c.shell());
+    assert!(!shell.lanes.engine_check_off);
+    assert_eq!(shell.lanes.engine_check, 3);
+
+    // With nothing ruled out the lane is off, as before.
+    let none = apply_overlay(&report, &[], &[], &[]);
+    let mut fresh = Stores::default();
+    fresh.settings.sample_size_per_run = 0;
+    let lane = compose(&none, &fresh, |c| c.engine_check());
     assert!(lane.off && lane.cards.is_empty());
-    assert_eq!(lane.ruled_out_flagged_total, 0);
 }

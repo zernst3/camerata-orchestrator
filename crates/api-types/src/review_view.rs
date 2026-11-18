@@ -848,7 +848,7 @@ pub struct EngineCheckLane {
     pub run_id: String,
     /// The `sample_size_per_run` setting.
     pub setting: usize,
-    /// The setting is 0: the lane is off and has no cards.
+    /// The setting is 0 and no second-look card is drawn: the lane is off and has no cards.
     pub off: bool,
     pub drawn: usize,
     /// Unread kept rows in the run.

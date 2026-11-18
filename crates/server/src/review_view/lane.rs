@@ -8,12 +8,12 @@ use std::collections::{HashMap, HashSet};
 
 use camerata_api_types::decisions::{effective_by_key, DecisionState};
 use camerata_api_types::review_view::{
-    CategoryAllocation, CorrectionRef, EngineCheckCard, EngineCheckLane, OutlierView,
-    PlacementView, SampleStratum, StratumRate, SMALL_CATEGORY_DRAWN,
+    CategoryAllocation, CorrectionRef, EngineCheckCard, EngineCheckError, EngineCheckLane,
+    OutlierView, PlacementView, SampleStratum, StratumRate, SMALL_CATEGORY_DRAWN,
 };
 
 use super::ReviewComposer;
-use crate::engine_check::{draw_ruled_out_flagged, draw_sample, Sample};
+use crate::engine_check::{draw_ruled_out_flagged, draw_sample, ruled_out_want, Sample};
 
 /// A rate as a percent of verdicts, with the half-width of its 95 percent Wilson score interval
 /// (design A14), both in percentage points to one decimal place; `None` before the first verdict.
@@ -40,6 +40,14 @@ pub(super) fn rate_and_margin_for_tests(
     rate_and_margin(wrong, verdicts)
 }
 
+/// The second look: the cards it shows, the rows drawn new this time, and how many rows were ruled
+/// out while flagged.
+pub(super) struct SecondLook {
+    pub(super) cards: Vec<String>,
+    pub(super) added: Vec<String>,
+    pub(super) total: usize,
+}
+
 impl<'a> ReviewComposer<'a> {
     /// The run's sample under the project's current `sample_size_per_run`.
     pub(super) fn sample(&self) -> Sample {
@@ -50,46 +58,95 @@ impl<'a> ReviewComposer<'a> {
         )
     }
 
-    /// The second look: the rows the reviewer ruled out while the engine flagged them "possible
-    /// false positive", drawn from the decisions ([`draw_ruled_out_flagged`]), and how many rows
-    /// were ruled out in all. It is its own draw and never touches [`Self::sample`]: a row that
-    /// the first sample already holds is left out of it (one card per row, one question), and
-    /// the lane being off (a sample size of 0) turns it off too.
-    pub(super) fn second_look(&self, first: &Sample) -> (Vec<String>, usize) {
-        if self.inputs.settings.sample_size_per_run == 0 {
-            return (Vec::new(), 0);
-        }
-        let records = self.inputs.reviewed.records();
-        let effective = effective_by_key(records);
-        let position: HashMap<&str, usize> = records
-            .iter()
-            .enumerate()
-            .map(|(i, d)| (d.id.as_str(), i))
-            .collect();
-        let in_first: HashSet<String> = first.cards().into_iter().map(|(_, k, _)| k).collect();
-        // Ruled out while flagged, in the order the rulings were written.
-        let mut ruled_out: Vec<(usize, &str)> = self
-            .report
-            .findings
-            .iter()
-            .filter(|f| !in_first.contains(&f.site_key))
-            .filter(|f| self.possible_false_positive(f).is_some())
-            .filter_map(|f| {
-                let d = effective.get(f.site_key.as_str())?;
-                (d.state == DecisionState::FalsePositive).then(|| {
-                    (
-                        position.get(d.id.as_str()).copied().unwrap_or(0),
-                        f.site_key.as_str(),
-                    )
+    /// The rows the second look drew now that the store has not yet recorded. The route records
+    /// them, so a drawn row stays drawn.
+    pub fn second_look_added(&self) -> Vec<String> {
+        self.second_look().added.clone()
+    }
+
+    /// The second look at rows the reviewer ruled out while the engine flagged them "possible
+    /// false positive", worked out once per composer.
+    ///
+    /// - The rows already drawn on this run (`second_look_drawn`, kept in the Engine Check store)
+    ///   stay drawn whatever the decisions, the flag or the sample size do afterwards, and so does
+    ///   any row with a standing second-look No: nothing is ever taken out, so a card the
+    ///   reviewer answered cannot vanish.
+    /// - New rows are drawn by [`draw_ruled_out_flagged`] over the rows ruled out while flagged,
+    ///   in the order they were ruled out, and recorded. With a pool of 15 or fewer the cards are
+    ///   the first three rulings (an online draw cannot know the pool to come); this is accepted.
+    /// - It never touches [`Self::sample`]. A row the first sample already holds is left out of
+    ///   the new draws and carries one card only, the first sample's (one card per row, one
+    ///   question); this is accepted.
+    /// - It does not depend on the sample size: it guards the reviewer's own rulings, not engine
+    ///   sampling, so a sample size of 0 leaves it on.
+    pub(super) fn second_look(&self) -> &SecondLook {
+        self.second_look.get_or_init(|| {
+            let first = self.sample();
+            let in_first: HashSet<String> = first.cards().into_iter().map(|(_, k, _)| k).collect();
+            let records = self.inputs.reviewed.records();
+            let effective = effective_by_key(records);
+            let position: HashMap<&str, usize> = records
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (d.id.as_str(), i))
+                .collect();
+            // Ruled out while flagged, in the order the rulings were written.
+            let mut ruled_out: Vec<(usize, &str)> = self
+                .report
+                .findings
+                .iter()
+                .filter(|f| !in_first.contains(&f.site_key))
+                .filter(|f| self.possible_false_positive(f).is_some())
+                .filter_map(|f| {
+                    let d = effective.get(f.site_key.as_str())?;
+                    (d.state == DecisionState::FalsePositive).then(|| {
+                        (
+                            position.get(d.id.as_str()).copied().unwrap_or(0),
+                            f.site_key.as_str(),
+                        )
+                    })
                 })
-            })
-            .collect();
-        ruled_out.sort_unstable();
-        let keys: Vec<String> = ruled_out.into_iter().map(|(_, k)| k.to_string()).collect();
-        (
-            draw_ruled_out_flagged(self.inputs.run_id, &keys),
-            keys.len(),
-        )
+                .collect();
+            ruled_out.sort_unstable();
+            let pool: Vec<String> = ruled_out.into_iter().map(|(_, k)| k.to_string()).collect();
+
+            let mut cards: Vec<String> = self.inputs.second_look_drawn.to_vec();
+            // A standing No always has its card, even when the store holds no draw for it.
+            let mut standing: Vec<String> = self
+                .verdicts
+                .iter()
+                .filter(|(_, v)| {
+                    !v.right
+                        && v.carried_from.is_none()
+                        && v.wrong == Some(EngineCheckError::RuledOutRealProblem)
+                })
+                .map(|(k, _)| (*k).to_string())
+                .collect();
+            standing.sort();
+            cards.extend(standing);
+            let mut added = Vec::new();
+            // Rows already drawn count toward the share even when their ruling has since gone,
+            // so undoing or correcting a ruling never draws a replacement.
+            let want = ruled_out_want(pool.len());
+            for key in draw_ruled_out_flagged(self.inputs.run_id, &pool) {
+                if cards.len() >= want {
+                    break;
+                }
+                if !cards.contains(&key) {
+                    added.push(key.clone());
+                    cards.push(key);
+                }
+            }
+            let mut seen = HashSet::new();
+            cards.retain(|k| {
+                !in_first.contains(k) && self.row(k).is_some() && seen.insert(k.clone())
+            });
+            SecondLook {
+                cards,
+                added,
+                total: pool.len(),
+            }
+        })
     }
 
     fn verdict_counts<'k>(&self, keys: impl Iterator<Item = &'k String>) -> (usize, usize) {
@@ -148,7 +205,8 @@ impl<'a> ReviewComposer<'a> {
         let setting = self.inputs.settings.sample_size_per_run;
         let sample = self.sample();
 
-        let (second_look, ruled_out_flagged_total) = self.second_look(&sample);
+        let second = self.second_look();
+        let (second_look, ruled_out_flagged_total) = (&second.cards, second.total);
         let mut cards = Vec::new();
         let drawn_cards = sample.cards().into_iter().chain(
             second_look
@@ -261,7 +319,8 @@ impl<'a> ReviewComposer<'a> {
         EngineCheckLane {
             run_id: self.inputs.run_id.to_string(),
             setting,
-            off: setting == 0,
+            // Off only when there is nothing to show: a second look keeps the lane on.
+            off: setting == 0 && second_look.is_empty(),
             drawn: sample.drawn(),
             unread_total: sample.unread_total,
             thrown_out_total: sample.thrown_out_total,

@@ -83,6 +83,9 @@ pub struct ReviewInputs<'a> {
     pub moved: &'a HashMap<String, MovedFromView>,
     /// The same moves as key links, for the stale-decision standing.
     pub links: &'a [KeyLink],
+    /// The rows the second look at rows ruled out while flagged has drawn on this run, kept in
+    /// the Engine Check store. A drawn row stays drawn.
+    pub second_look_drawn: &'a [String],
 }
 
 /// The composer: indexes built once from [`ReviewInputs`], then one method per view.
@@ -121,6 +124,8 @@ pub struct ReviewComposer<'a> {
     fp: crate::possible_false_positive::FpIndex,
     /// The other causes with a row at the same place as each kept row, worked out once.
     dup: crate::possible_duplicate::DupIndex,
+    /// The second look at rows ruled out while flagged, worked out once on first use.
+    second_look: std::cell::OnceCell<lane::SecondLook>,
 }
 
 impl<'a> ReviewComposer<'a> {
@@ -253,6 +258,7 @@ impl<'a> ReviewComposer<'a> {
                 &report.findings,
                 report.ledger.duplicate_checks(),
             ),
+            second_look: std::cell::OnceCell::new(),
         }
     }
 
@@ -337,6 +343,7 @@ impl<'a> ReviewComposer<'a> {
         counts.held = self.gate.rows_needing_a_decision();
 
         let sample = self.sample();
+        let second_look = self.second_look();
         ReviewShellView {
             run_id: self.inputs.run_id.to_string(),
             engine_version: self.inputs.engine_version.to_string(),
@@ -345,8 +352,9 @@ impl<'a> ReviewComposer<'a> {
             lanes: LaneCounts {
                 tree_undecided: counts.unresolved,
                 escalations: self.queue_groups().iter().filter(|g| g.escalated).count(),
-                engine_check: sample.drawn() + self.second_look(&sample).0.len(),
-                engine_check_off: self.inputs.settings.sample_size_per_run == 0,
+                engine_check: sample.drawn() + second_look.cards.len(),
+                engine_check_off: self.inputs.settings.sample_size_per_run == 0
+                    && second_look.cards.is_empty(),
                 flat_rows: counts.total,
             },
             export_gate: self.gate.clone(),

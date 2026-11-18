@@ -666,3 +666,27 @@ fn a_second_look_card_takes_only_its_own_no_and_no_other_card_takes_it() {
         assert!(answer_fits_stratum(stratum, &other).is_ok());
     }
 }
+
+#[test]
+fn the_drawn_second_look_rows_are_kept_append_only_per_run_and_survive_a_restart() {
+    let dir = std::path::PathBuf::from(
+        "/private/tmp/claude-501/-Users-zacharyernst-Documents-Repos-Agora-Repos/4b2d1ad6-5aa2-465b-8ed0-cb1118a268ad/scratchpad/flag-guards",
+    )
+    .join(format!("second-look-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = EngineCheckStore::at(dir.clone());
+    let keys = |ks: &[&str]| ks.iter().map(|k| (*k).to_string()).collect::<Vec<_>>();
+    store.add_second_look("p", RUN, &keys(&["a", "b"])).unwrap();
+    store.add_second_look("p", RUN, &keys(&["b", "c"])).unwrap();
+    store.add_second_look("p", "insp-2", &keys(&["z"])).unwrap();
+    assert_eq!(store.second_look("p", RUN), keys(&["a", "b", "c"]));
+    assert_eq!(store.second_look("p", "insp-2"), keys(&["z"]));
+    assert!(store.second_look("other", RUN).is_empty());
+    // Verdicts and draws share the file and neither loses the other.
+    store
+        .record("p", "a", &req(true, None), RUN, "2026-11-04T09:00:00Z")
+        .unwrap();
+    let reopened = EngineCheckStore::at(dir);
+    assert_eq!(reopened.second_look("p", RUN), keys(&["a", "b", "c"]));
+    assert_eq!(reopened.list("p").len(), 1);
+}
