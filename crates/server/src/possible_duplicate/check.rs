@@ -372,9 +372,15 @@ pub async fn check_possible_duplicates(
         report.actual_usage = Some(meter.snapshot());
     }
     report.ledger.record_runner_notes(meter.notes());
-    if let Some(cap) = meter.cost_cap_record() {
+    if let Some(mut cap) = meter.cost_cap_record() {
         // Only the spend joins the record: a part the limit left out of THIS operator-only stage
-        // is a note below, never a failed part of the run.
+        // is a note below, never a stopped run. `absorb` would also copy these four, and the
+        // shared runner records a not-run stage when the limit refuses a call, which would add a
+        // failed pass and hold the export.
+        cap.not_run_passes.clear();
+        cap.not_run_stages.clear();
+        cap.repos_not_finished.clear();
+        cap.checkpoint = None;
         match report.ledger.cost_cap().cloned() {
             Some(mut earlier) => {
                 earlier.absorb(cap);

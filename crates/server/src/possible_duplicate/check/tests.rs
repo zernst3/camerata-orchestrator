@@ -356,3 +356,76 @@ async fn a_call_asks_about_at_most_twenty_pairs() {
     }
     assert!(llm.calls() >= 2);
 }
+
+/// A spend-limit stop inside the check is a note, never a stopped run: the shared runner records a
+/// not-run stage when the limit refuses a call, and none of that may reach the report's record.
+fn assert_limit_stop_leaves_the_run_whole(
+    r: &ScanReport,
+    failed_before: usize,
+    reasons: &[String],
+) {
+    assert!(!any_hint(r), "no hints");
+    assert!(
+        !r.ledger
+            .cost_cap()
+            .is_some_and(crate::cost_cap::CostCapRecord::stopped_the_run),
+        "the check's limit stop must not stop the run: {:?}",
+        r.ledger.cost_cap()
+    );
+    assert_eq!(r.failed_passes.len(), failed_before, "no failed pass");
+    assert_eq!(
+        &r.incomplete_reasons(),
+        reasons,
+        "the run is as complete as before"
+    );
+    assert_eq!(
+        r.ledger.runner_notes().len(),
+        1,
+        "exactly one note: {:?}",
+        r.ledger.runner_notes()
+    );
+    assert!(r.ledger.runner_notes()[0].contains("duplicate check"));
+}
+
+#[tokio::test]
+async fn a_limit_reached_by_the_first_call_stops_the_check_and_not_the_run() {
+    let mut r = report();
+    let (failed, reasons) = (r.failed_passes.len(), r.incomplete_reasons());
+    let controls = RunControls {
+        max_cost_usd: Some(0.005),
+        ..RunControls::default()
+    };
+    // One call at a time, so the first call's spend is on the meter before the second is admitted.
+    let llm = Script::new(c_same_d_different);
+    check_possible_duplicates(&mut r, &llm, &controls, true, None).await;
+    assert_limit_stop_leaves_the_run_whole(&r, failed, &reasons);
+}
+
+#[tokio::test]
+async fn a_cost_checkpoint_stop_stops_the_check_and_not_the_run() {
+    let mut r = report();
+    let (failed, reasons) = (r.failed_passes.len(), r.incomplete_reasons());
+    r.ledger.record_cost_cap(crate::cost_cap::CostCapRecord {
+        cap_usd: 100.0,
+        spent_usd: 5.0,
+        checkpoint: Some(crate::cost_checkpoint::CostCheckpoint {
+            approved_usd: 100.0,
+            spent_usd: 5.0,
+            projected_usd: 120.0,
+            pieces_done: 1,
+            pieces_left: 3,
+            stopped: true,
+            new_estimate_usd: Some(120.0),
+            difference_usd: Some(20.0),
+            stopped_before: "agent finder".into(),
+            reserve_usd: 0.0,
+        }),
+        ..Default::default()
+    });
+    let reasons_with_record = r.incomplete_reasons();
+    let llm = Script::new(c_same_d_different);
+    check_possible_duplicates(&mut r, &llm, &RunControls::default(), false, None).await;
+    assert_eq!(llm.calls(), 0, "a paused run sends nothing");
+    let _ = reasons;
+    assert_limit_stop_leaves_the_run_whole(&r, failed, &reasons_with_record);
+}
