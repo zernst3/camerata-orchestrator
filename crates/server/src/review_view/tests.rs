@@ -1689,9 +1689,10 @@ fn the_second_look_rate_keeps_a_no_after_the_row_is_corrected() {
     decisions.push(kept);
     let reviewed = apply_overlay(&report, &decisions, &[], &[]);
     let lane = lane_persisting(&reviewed, &mut stores);
+    // The draw gained one replacement for the row that left the pool; nothing was removed.
     assert_eq!(
         rate_of(&lane),
-        (3, 1, 1),
+        (4, 1, 1),
         "the corrected row's No still counts"
     );
 }
@@ -1722,4 +1723,115 @@ fn a_sample_size_of_zero_keeps_the_second_look_on() {
     fresh.settings.sample_size_per_run = 0;
     let lane = compose(&none, &fresh, |c| c.engine_check());
     assert!(lane.off && lane.cards.is_empty());
+}
+
+// ── the second look's share counts only rows still ruled out ───────────────────────────────
+
+/// A 30 flagged and 10 plain row report with a first sample of 8, and the flagged keys outside
+/// that sample, in key order.
+fn flagged_outside_the_first_sample() -> (crate::onboard::SealedReport, Stores, Vec<String>) {
+    use camerata_api_types::review_view::SampleStratum::Kept;
+    let report = flagged_and_plain(30, 10);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 8;
+    let undecided = apply_overlay(&report, &[], &[], &[]);
+    let in_first = cards_of(&compose(&undecided, &stores, |c| c.engine_check()), Kept);
+    let outside: Vec<String> = flagged_keys(&report)
+        .into_iter()
+        .filter(|k| !in_first.contains(k))
+        .collect();
+    assert!(outside.len() >= 20);
+    (report, stores, outside)
+}
+
+fn no_on(key: &str, carried: Option<&str>) -> camerata_api_types::review_view::EngineCheckVerdict {
+    camerata_api_types::review_view::EngineCheckVerdict {
+        key: key.to_string(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(camerata_api_types::review_view::EngineCheckError::RuledOutRealProblem),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        carried_from: carried.map(str::to_string),
+    }
+}
+
+#[test]
+fn rows_drawn_and_since_un_ruled_do_not_use_up_the_second_looks_share() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, mut stores, outside) = flagged_outside_the_first_sample();
+    let first_three: Vec<Decision> = outside
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &first_three, &[], &[]);
+    let drawn = cards_of(&lane_persisting(&reviewed, &mut stores), RuledOutFlagged);
+    assert_eq!(drawn.len(), 3);
+
+    // All three answered No and kept as problems, then fifteen more ruled out.
+    stores.verdicts = drawn.iter().map(|k| no_on(k, None)).collect();
+    let mut decisions: Vec<Decision> = drawn
+        .iter()
+        .enumerate()
+        .map(|(i, k)| decision(&format!("dec-0001{i:02}"), k, DecisionState::Confirmed, RUN))
+        .collect();
+    decisions.extend(
+        outside
+            .iter()
+            .filter(|k| !drawn.contains(k))
+            .take(15)
+            .enumerate()
+            .map(|(i, k)| ruling(i + 10, k)),
+    );
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    let cards = cards_of(&lane, RuledOutFlagged);
+    assert_all_still_carded(&lane, &drawn, "the kept rows");
+    assert_eq!(cards.len(), 6, "three kept, three new: {cards:?}");
+}
+
+#[test]
+fn a_drawn_row_with_a_no_is_counted_once_toward_the_share() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, mut stores, outside) = flagged_outside_the_first_sample();
+    let first_three: Vec<Decision> = outside
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &first_three, &[], &[]);
+    let drawn = cards_of(&lane_persisting(&reviewed, &mut stores), RuledOutFlagged);
+    // Still ruled out, each with a No (drawn and standing), and the pool grows to 16: a share of 4.
+    stores.verdicts = drawn.iter().map(|k| no_on(k, None)).collect();
+    let all: Vec<Decision> = outside
+        .iter()
+        .take(16)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &all, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_eq!(cards_of(&lane, RuledOutFlagged).len(), 4);
+}
+
+#[test]
+fn a_no_carried_from_an_earlier_run_still_has_its_card() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, mut stores, outside) = flagged_outside_the_first_sample();
+    let decisions: Vec<Decision> = outside
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    // A resume with a new run id: nothing drawn here yet, and the No arrives marked carried.
+    let carried = outside[9].clone();
+    stores.verdicts = vec![no_on(&carried, Some("insp-0"))];
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    assert!(cards_of(&lane, RuledOutFlagged).contains(&carried));
 }

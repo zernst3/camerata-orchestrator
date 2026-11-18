@@ -13,7 +13,9 @@ use camerata_api_types::review_view::{
 };
 
 use super::ReviewComposer;
-use crate::engine_check::{draw_ruled_out_flagged, draw_sample, ruled_out_want, Sample};
+use crate::engine_check::{
+    draw_order, draw_ruled_out_flagged, draw_sample, ruled_out_want, Sample,
+};
 
 /// A rate as a percent of verdicts, with the half-width of its 95 percent Wilson score interval
 /// (design A14), both in percentage points to one decimal place; `None` before the first verdict.
@@ -110,37 +112,51 @@ impl<'a> ReviewComposer<'a> {
             ruled_out.sort_unstable();
             let pool: Vec<String> = ruled_out.into_iter().map(|(_, k)| k.to_string()).collect();
 
-            let mut cards: Vec<String> = self.inputs.second_look_drawn.to_vec();
-            // A standing No always has its card, even when the store holds no draw for it.
+            // One de-duped set: the rows already drawn, then any row with a standing No (carried
+            // from an earlier run or not), which always has its card even when the store holds no
+            // draw for it. A card is never taken away.
             let mut standing: Vec<String> = self
                 .verdicts
                 .iter()
-                .filter(|(_, v)| {
-                    !v.right
-                        && v.carried_from.is_none()
-                        && v.wrong == Some(EngineCheckError::RuledOutRealProblem)
-                })
+                .filter(|(_, v)| !v.right && v.wrong == Some(EngineCheckError::RuledOutRealProblem))
                 .map(|(k, _)| (*k).to_string())
                 .collect();
             standing.sort();
-            cards.extend(standing);
-            let mut added = Vec::new();
-            // Rows already drawn count toward the share even when their ruling has since gone,
-            // so undoing or correcting a ruling never draws a replacement.
+            let mut seen = HashSet::new();
+            let mut cards: Vec<String> = self
+                .inputs
+                .second_look_drawn
+                .iter()
+                .cloned()
+                .chain(standing)
+                .filter(|k| {
+                    !in_first.contains(k) && self.row(k).is_some() && seen.insert(k.clone())
+                })
+                .collect();
+            // Only rows still ruled out count toward the share, so rows since kept as problems
+            // never use it up; replacements are added, nothing is removed.
+            let in_pool: HashSet<&str> = pool.iter().map(String::as_str).collect();
+            let mut live = cards
+                .iter()
+                .filter(|k| in_pool.contains(k.as_str()))
+                .count();
             let want = ruled_out_want(pool.len());
-            for key in draw_ruled_out_flagged(self.inputs.run_id, &pool) {
-                if cards.len() >= want {
+            let mut added = Vec::new();
+            // The online draw first, then the rest of the pool in draw order.
+            let mut candidates = draw_ruled_out_flagged(self.inputs.run_id, &pool);
+            let mut rest: Vec<&String> = pool.iter().filter(|k| !candidates.contains(k)).collect();
+            rest.sort_by_key(|k| (draw_order(self.inputs.run_id, k), (*k).clone()));
+            candidates.extend(rest.into_iter().cloned());
+            for key in candidates {
+                if live >= want {
                     break;
                 }
-                if !cards.contains(&key) {
+                if seen.insert(key.clone()) {
                     added.push(key.clone());
                     cards.push(key);
+                    live += 1;
                 }
             }
-            let mut seen = HashSet::new();
-            cards.retain(|k| {
-                !in_first.contains(k) && self.row(k).is_some() && seen.insert(k.clone())
-            });
             SecondLook {
                 cards,
                 added,
