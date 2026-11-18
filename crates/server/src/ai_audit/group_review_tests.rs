@@ -3247,8 +3247,76 @@ fn two_sub_groups_with_one_missing_members_is_still_refused() {
 }
 
 #[test]
-fn an_empty_or_wrong_members_is_still_refused() {
+fn a_members_value_of_the_wrong_kind_is_still_refused() {
+    let mut wrong = subgroup_json(false);
+    wrong["members"] = serde_json::json!("all");
+    assert!(Stage2Reply::parse(&reply_with_subgroups(vec![wrong])).is_err());
+}
+
+/// An empty `members` is a written value, not an omitted one: it parses, is never filled, and
+/// its sites go unplaced exactly as before.
+#[test]
+fn a_lone_sub_group_with_empty_members_is_not_filled() {
     let mut empty = subgroup_json(false);
-    empty["members"] = serde_json::json!("all");
-    assert!(Stage2Reply::parse(&reply_with_subgroups(vec![empty])).is_err());
+    empty["members"] = serde_json::json!([]);
+    let mut parsed = Stage2Reply::parse(&reply_with_subgroups(vec![empty])).expect("parses");
+    assert!(!parsed.subgroups[0].members_omitted);
+    parsed.fill_omitted_members(&[1, 2, 3]);
+    assert!(parsed.subgroups[0].members.is_empty());
+}
+
+#[tokio::test]
+async fn a_chunk_whose_lone_sub_group_has_no_members_places_all_of_that_chunks_sites() {
+    let mut report = report_of(&[(SQL, 330)]);
+    let llm = Reviewer::new(|call| {
+        if call.summary_call {
+            Ok(summary_reply("The whole rule."))
+        } else if call.indices.contains(&0) {
+            Ok(serde_json::json!({
+                "summary": "Lone chunk.",
+                "subgroups": [{"label": "Lone", "cause": "one cause", "summary": "All of it."}],
+                "outliers": [], "escalations": [], "disagreements": []
+            })
+            .to_string())
+        } else {
+            Ok(one_group(call, "Other chunk."))
+        }
+    });
+    let outcome = run(&mut report, &llm).await;
+    let calls = llm.calls();
+    let lone_call = calls
+        .iter()
+        .find(|c| !c.summary_call && c.indices.contains(&0))
+        .expect("the chunk with site 0");
+    assert!(
+        outcome.unplaced.is_empty(),
+        "{} sites unplaced",
+        outcome.unplaced.len()
+    );
+    assert_eq!(outcome.stray_indexes, 0);
+    let rule = rule_node(&report, SQL);
+    let subs = subgroups_of(&report, &rule);
+    assert_eq!(subs.len(), 3, "the other chunks are unchanged");
+    let lone: Vec<_> = subs
+        .iter()
+        .filter(|n| n.members.len() == lone_call.indices.len())
+        .collect();
+    assert!(!lone.is_empty());
+    // The sub-group the lone chunk made holds exactly that chunk's sites.
+    let lone_paths: BTreeSet<String> = lone_call
+        .indices
+        .iter()
+        .map(|&i| format!("src/{}/f{i:04}.rs", SQL.to_ascii_lowercase()))
+        .collect();
+    let holds_lone_chunk = subs.iter().any(|n| {
+        n.members.len() == lone_paths.len()
+            && n.members
+                .iter()
+                .all(|k| lone_paths.iter().any(|p| k.contains(p.as_str())))
+    });
+    assert!(
+        holds_lone_chunk,
+        "one sub-group holds exactly the lone chunk's sites"
+    );
+    assert_every_row_in_one_subgroup(&report);
 }

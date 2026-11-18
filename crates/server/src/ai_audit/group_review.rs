@@ -495,7 +495,11 @@ fn repair_stray_reason_colon(raw: &str) -> Option<String> {
         .collect();
     let pattern = format!(
         r#"("reason"\s*:\s*"(?:{})")\s*:\s*(?:""\s*)?,?"#,
-        names.join("|")
+        names
+            .iter()
+            .map(|n| regex::escape(n))
+            .collect::<Vec<_>>()
+            .join("|")
     );
     let re = regex::Regex::new(&pattern).ok()?;
     let fixed = re.replace_all(raw, "$1,");
