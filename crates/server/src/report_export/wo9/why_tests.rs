@@ -170,3 +170,36 @@ fn the_pdfs_data_carries_only_the_business_text() {
         assert!(!data.contains(marker), "the PDF's data carries {marker}");
     }
 }
+
+#[test]
+fn a_withheld_business_text_leaves_an_empty_client_cell_and_a_reviewer_flag() {
+    let mut report = mixed_sealed().into_inner();
+    let node = report
+        .tree
+        .as_mut()
+        .expect("a tree")
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == SQL_SUB)
+        .expect("the SQL sub-group");
+    node.why_business =
+        Some("LEAK-MARKER the scanner flagged these as regex-scan hits.".to_string());
+    let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+    // The client sees nothing of it.
+    let text = client_text(&reviewed);
+    assert!(!text.contains("LEAK-MARKER"));
+    // The reviewer sees the flag beside the node.
+    let internal = crate::report_export::tree_view::tree_view(&reviewed, true);
+    let flags = &internal
+        .iter()
+        .find(|n| n.id == SQL_SUB)
+        .and_then(|n| n.internal.as_ref())
+        .expect("the internal triage")
+        .flags;
+    assert!(
+        flags
+            .iter()
+            .any(|f| f.starts_with("why_business:methodology_leak:")),
+        "{flags:?}"
+    );
+}

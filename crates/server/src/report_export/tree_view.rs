@@ -182,11 +182,21 @@ fn checked_text(n: &TreeNode) -> (Vec<String>, String, String, String) {
     let label = client_text("label", &n.label);
     let cause = client_text("cause", n.cause.as_deref().unwrap_or_default());
     let summary = client_text("summary", n.summary.as_deref().unwrap_or_default());
+    let why_business = client_text(
+        "why_business",
+        n.why_business.as_deref().unwrap_or_default(),
+    );
+    let why_technical = client_text(
+        "why_technical",
+        n.why_technical.as_deref().unwrap_or_default(),
+    );
     let flags: Vec<String> = label
         .flags
         .iter()
         .chain(&cause.flags)
         .chain(&summary.flags)
+        .chain(&why_business.flags)
+        .chain(&why_technical.flags)
         .cloned()
         .collect();
     let label_text = if label.flags.is_empty() {
