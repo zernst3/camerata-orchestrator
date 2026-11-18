@@ -295,6 +295,8 @@ pub fn build_tree(
             outliers: merged_outliers(old, &key_set, members.iter().map(|&i| &findings[i])),
             summary,
             summary_source,
+            why_business: old.and_then(|o| o.why_business.clone()),
+            why_technical: old.and_then(|o| o.why_technical.clone()),
             escalations: Vec::new(),
             flags: old.map(|o| o.flags.clone()).unwrap_or_default(),
         });
@@ -328,6 +330,8 @@ pub fn build_tree(
                 outliers: Vec::new(),
                 summary: old.and_then(|o| o.summary.clone()),
                 summary_source: old.map_or(TextSource::Model, |o| o.summary_source),
+                why_business: None,
+                why_technical: None,
                 escalations: old.map(|o| o.escalations.clone()).unwrap_or_default(),
                 flags: old.map(|o| o.flags.clone()).unwrap_or_default(),
             }
@@ -351,6 +355,8 @@ pub fn build_tree(
             outliers: Vec::new(),
             summary: old.and_then(|o| o.summary.clone()),
             summary_source: old.map_or(TextSource::Model, |o| o.summary_source),
+            why_business: None,
+            why_technical: None,
             escalations: Vec::new(),
             flags: Vec::new(),
         }
@@ -564,6 +570,8 @@ fn thrown_out_nodes(
             outliers: Vec::new(),
             summary: old.and_then(|o| o.summary.clone()),
             summary_source: old.map_or(TextSource::Model, |o| o.summary_source),
+            why_business: None,
+            why_technical: None,
             escalations: Vec::new(),
             flags: Vec::new(),
         });
@@ -583,6 +591,8 @@ fn thrown_out_nodes(
             outliers: Vec::new(),
             summary: old.and_then(|o| o.summary.clone()),
             summary_source: old.map_or(TextSource::Model, |o| o.summary_source),
+            why_business: None,
+            why_technical: None,
             escalations: Vec::new(),
             flags: Vec::new(),
         });

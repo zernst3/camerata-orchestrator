@@ -53,7 +53,6 @@ pub(super) fn grouped_table(nodes: &[TreeNodeView], internal: bool) -> Table {
         Col::plain(v::H_WITHIN, 10.0),
         Col::plain(v::H_UNDER, 44.0),
         Col::plain(v::H_CAUSE, 40.0),
-        Col::plain(v::H_SUMMARY, 70.0),
         Col::plain(v::H_PLACES, 8.0),
         Col::plain(v::H_RULED_OUT_COUNT, 10.0),
         Col::plain(v::H_REVIEWED_IN_PERSON, 12.0),
@@ -64,6 +63,8 @@ pub(super) fn grouped_table(nodes: &[TreeNodeView], internal: bool) -> Table {
         Col::technical(v::H_FIX_ID, 20.0),
     ];
     if internal {
+        // The reviewer's summary is a column of the reviewer's workbook only.
+        cols.insert(5, Col::plain(v::H_SUMMARY, 70.0));
         for h in [
             "Summary source",
             v::H_ESCALATED,

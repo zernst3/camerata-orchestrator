@@ -164,6 +164,8 @@ fn every_stage2_reply_field_is_rendered_in_the_internal_workbook() {
         node.cause = Some("a query parameter".to_string());
         node.summary = Some("Raw SQL built from input.".to_string());
         node.summary_source = TextSource::Model;
+        node.why_business = Some("Data can quietly go wrong.".to_string());
+        node.why_technical = Some("A write skips the check.".to_string());
         node.outliers = vec![Outlier {
             key,
             reason: OutlierReason::DifferentConstruct,
@@ -198,6 +200,8 @@ fn every_stage2_reply_field_is_rendered_in_the_internal_workbook() {
         ("subgroups[].label", &["Params"]),
         ("subgroups[].cause", &["a query parameter"]),
         ("subgroups[].summary", &["Raw SQL built from input."]),
+        ("subgroups[].why_business", &["Data can quietly go wrong."]),
+        ("subgroups[].why_technical", &["A write skips the check."]),
         ("subgroups[].members[]", &["sub:SEC-NO-RAW-SQL-CONCAT-1/0"]),
         ("outliers[].index", &["Outliers"]),
         ("outliers[].reason", &["different_construct"]),

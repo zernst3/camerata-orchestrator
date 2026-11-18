@@ -28,6 +28,10 @@ pub struct Problem {
     /// `low`, `medium` or `high`.
     pub effort: String,
     pub label: String,
+    /// Why it matters to the client's business. Empty when the agent wrote none.
+    pub business: String,
+    /// What the agent could not settle, when it marked the problem `unsure`. Empty when none.
+    pub unsure_why: String,
     /// The other places where the same thing is wrong (the main place is `path`/`line`).
     pub places: Vec<ProblemPlace>,
 }
@@ -47,6 +51,12 @@ pub const FINDER_PIECE_CAPTURE: &str = "finder-piece";
 pub const FINDER_SURE_CAPTURE: &str = "finder-sure";
 pub const FINDER_EFFORT_CAPTURE: &str = "finder-effort";
 pub const FINDER_FIX_CAPTURE: &str = "finder-fix";
+/// What the agent could not settle when it marked a problem `unsure`, cleaned. Operator only.
+pub const FINDER_UNSURE_WHY_CAPTURE: &str = "finder-unsure-why";
+/// The business text of a problem, cleaned for the client.
+pub const FINDER_BUSINESS_CAPTURE: &str = "finder-business";
+/// The technical reason of a problem (`why`), cleaned for the client, apart from `detail`.
+pub const FINDER_WHY_CAPTURE: &str = "finder-why";
 pub const FINDER_PROBLEM_CAPTURE: &str = "finder-problem";
 pub const FINDER_END_LINE_CAPTURE: &str = "finder-end-line";
 /// Every checklist rule id the problem was cited to, comma separated, strictest first.
@@ -211,6 +221,16 @@ fn parse_problem(v: &serde_json::Value) -> Result<Problem, String> {
         sure,
         effort: one_of(v, "effort", &EFFORTS)?,
         label: text_field(v, "label", false)?,
+        business: v
+            .get("business")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default(),
+        unsure_why: v
+            .get("unsure_why")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default(),
         places: Vec::new(),
     })
 }
@@ -793,6 +813,18 @@ pub fn to_findings(
         }
         if let Some(end) = p.end_line {
             c.insert(FINDER_END_LINE_CAPTURE.to_string(), end.to_string());
+        }
+        let unsure_why = lead_text(&p.unsure_why);
+        if !unsure_why.is_empty() {
+            c.insert(FINDER_UNSURE_WHY_CAPTURE.to_string(), unsure_why);
+        }
+        let why = lead_text(&p.why);
+        if !why.is_empty() {
+            c.insert(FINDER_WHY_CAPTURE.to_string(), why);
+        }
+        let business = lead_text(&p.business);
+        if !business.is_empty() {
+            c.insert(FINDER_BUSINESS_CAPTURE.to_string(), business);
         }
         c.insert(FINDER_PIECE_CAPTURE.to_string(), piece_key.to_string());
         c.insert(

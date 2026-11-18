@@ -252,7 +252,8 @@ pub const H_ORDER: &str = "Order";
 pub const H_FIX_ORDER: &str = "Fix order";
 pub const H_FIX: &str = "Fix";
 pub const H_WHAT_IS_WRONG: &str = "What is wrong";
-pub const H_WHY_IT_MATTERS: &str = "Why it matters";
+pub const H_WHY_BUSINESS: &str = "Why it matters to the business";
+pub const H_WHY_TECHNICAL: &str = "Why it matters technically";
 pub const H_WHAT_TO_DO: &str = "What to do";
 pub const H_WHAT_TO_DO_HERE: &str = "What to do here";
 pub const H_EXAMPLE: &str = "Example from your code";
@@ -366,7 +367,10 @@ pub fn possible_false_positive_cell(
     flag.map(|p| {
         p.reasons
             .iter()
-            .map(|r| r.label())
+            .map(|r| match p.specifics.get(r) {
+                Some(own) => format!("{}: {own}", r.label()),
+                None => r.label().to_string(),
+            })
             .collect::<Vec<_>>()
             .join("; ")
     })
@@ -910,9 +914,14 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Fix plan",
     ),
     e(
-        "Why it matters",
-        "What the problem puts at risk.",
-        "Fix plan",
+        "Why it matters to the business",
+        "What can go wrong for the product, its data, its users or the people who work on it, and when it starts to matter.",
+        "Fix plan; All problems; Needs a decision",
+    ),
+    e(
+        "Why it matters technically",
+        "What breaks and under what conditions.",
+        "Fix plan; All problems; Needs a decision",
     ),
     e(
         "What to do",

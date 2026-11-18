@@ -52,7 +52,8 @@ impl FpIndex {
     /// The flag of `f`, or `None` when the engine has no reason to doubt it.
     pub fn of(&self, f: &Finding) -> Option<PossibleFalsePositive> {
         let deterministic_peer = self.deterministic_places.contains(&f.place());
-        PossibleFalsePositive::from_reasons(reasons_of(f, deterministic_peer))
+        let flag = PossibleFalsePositive::from_reasons(reasons_of(f, deterministic_peer))?;
+        Some(flag.with_specifics(specifics_of(f)))
     }
 }
 
@@ -128,6 +129,40 @@ pub fn reasons_of(f: &Finding, deterministic_peer: bool) -> Vec<FpReason> {
         .collect()
 }
 
+/// The row's own sentence for the reasons that have one: the finder's `unsure_why` for
+/// [`FpReason::FinderUnsure`], and the group reviewer's own `why` (the outlier's, else the first
+/// downward disagreement's) for [`FpReason::GroupReviewerDoubt`]. Blank sentences are left out by
+/// [`PossibleFalsePositive::with_specifics`].
+fn specifics_of(f: &Finding) -> Vec<(FpReason, String)> {
+    use camerata_api_types::review::OutlierReason;
+    let plain = |text: &str| crate::client_text::plain(text.trim()).into_owned();
+    let mut out = Vec::new();
+    if let Some(own) = f
+        .captures
+        .get(crate::ai_audit::agent_finder::reply::FINDER_UNSURE_WHY_CAPTURE)
+    {
+        out.push((FpReason::FinderUnsure, plain(own)));
+    }
+    let outlier_why = matches!(
+        f.review.outlier_reason,
+        Some(OutlierReason::DifferentObject | OutlierReason::CouldBeIntentional)
+    )
+    .then(|| plain(&f.review.outlier_why))
+    .filter(|t| !t.is_empty());
+    let doubt = outlier_why.or_else(|| {
+        f.review
+            .stage2_disagreement
+            .iter()
+            .filter(|d| is_downward(f, d))
+            .map(|d| plain(&d.why))
+            .find(|t| !t.is_empty())
+    });
+    if let Some(text) = doubt {
+        out.push((FpReason::GroupReviewerDoubt, text));
+    }
+    out
+}
+
 /// Higher is more severe (`critical` 4 down to anything else 0).
 fn rank(severity: &str) -> u8 {
     crate::ai_audit::severity_rank(&severity.trim().to_ascii_lowercase())
@@ -137,12 +172,23 @@ fn rank(severity: &str) -> u8 {
 /// pattern, or disagreed with it downward: a lower severity than stage 1 or the row shows, or
 /// "not real" (or "unclear" against stage 1's "yes").
 fn group_reviewer_doubts(f: &Finding) -> bool {
-    use camerata_api_types::review::{DisagreementField, OutlierReason};
+    use camerata_api_types::review::OutlierReason;
     let outlier = matches!(
         f.review.outlier_reason,
         Some(OutlierReason::DifferentObject | OutlierReason::CouldBeIntentional)
     );
-    let downward = f.review.stage2_disagreement.iter().any(|d| match d.field {
+    let downward = f
+        .review
+        .stage2_disagreement
+        .iter()
+        .any(|d| is_downward(f, d));
+    outlier || downward
+}
+
+/// Whether one group reviewer disagreement rates the row lower than stage 1 or the row show.
+fn is_downward(f: &Finding, d: &camerata_api_types::review::Stage2Disagreement) -> bool {
+    use camerata_api_types::review::DisagreementField;
+    match d.field {
         DisagreementField::Severity => {
             let mine = rank(&d.mine);
             mine < rank(&d.stage1) || mine < rank(&f.severity)
@@ -151,8 +197,7 @@ fn group_reviewer_doubts(f: &Finding) -> bool {
             let mine = d.mine.trim().to_ascii_lowercase();
             mine == "no" || (mine == "unclear" && d.stage1.trim().eq_ignore_ascii_case("yes"))
         }
-    });
-    outlier || downward
+    }
 }
 
 /// Whether calibration's confidence in `f` is anything but high. A row calibration never saw (the

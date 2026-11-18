@@ -678,6 +678,10 @@ impl FpReason {
 #[serde(deny_unknown_fields)]
 pub struct PossibleFalsePositive {
     pub reasons: Vec<FpReason>,
+    /// The row's own sentence for a reason, where one exists (the finder's `unsure_why`, the
+    /// group reviewer's own `why`). Operator only, like the flag. Empty for a row with none.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub specifics: std::collections::BTreeMap<FpReason, String>,
 }
 
 impl PossibleFalsePositive {
@@ -688,14 +692,40 @@ impl PossibleFalsePositive {
     pub fn from_reasons(mut reasons: Vec<FpReason>) -> Option<Self> {
         reasons.sort();
         reasons.dedup();
-        (!reasons.is_empty()).then_some(Self { reasons })
+        (!reasons.is_empty()).then_some(Self {
+            reasons,
+            specifics: std::collections::BTreeMap::new(),
+        })
+    }
+
+    /// The flag with the row's own sentences; a blank one is left out.
+    #[must_use]
+    pub fn with_specifics(
+        mut self,
+        specifics: impl IntoIterator<Item = (FpReason, String)>,
+    ) -> Self {
+        for (reason, text) in specifics {
+            let text = text.trim();
+            if !text.is_empty() && self.reasons.contains(&reason) {
+                self.specifics.insert(reason, text.to_string());
+            }
+        }
+        self
+    }
+
+    /// A reason's standard sentence, then the row's own sentence when it has one.
+    pub fn sentence_of(&self, reason: FpReason) -> String {
+        match self.specifics.get(&reason) {
+            Some(own) => format!("{} {own}", reason.sentence()),
+            None => reason.sentence().to_string(),
+        }
     }
 
     /// Every reason as its sentence, one after another.
     pub fn sentences(&self) -> String {
         self.reasons
             .iter()
-            .map(|r| r.sentence())
+            .map(|r| self.sentence_of(*r))
             .collect::<Vec<_>>()
             .join(" ")
     }

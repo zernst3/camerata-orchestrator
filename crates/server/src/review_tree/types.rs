@@ -135,6 +135,13 @@ pub struct TreeNode {
     pub summary: Option<String>,
     #[serde(default)]
     pub summary_source: TextSource,
+    /// Why the sub-group matters to the client's business, written for the client (never the
+    /// reviewer's `summary`). Sub-group only; `None` when the group reviewer wrote none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_business: Option<String>,
+    /// Why the sub-group matters technically, written for the client. Sub-group only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_technical: Option<String>,
     /// The sites the group reviewer wants escalated, from this node's stage 2 call. Rule nodes
     /// only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

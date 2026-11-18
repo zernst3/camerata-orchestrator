@@ -66,7 +66,7 @@ fn detail_plain_has_the_whole_pane_and_none_of_the_marks() {
     ] {
         assert!(html.contains(want), "no `{want}`");
     }
-    assert_eq!(html.matches("site-detail-edit").count(), 9);
+    assert_eq!(html.matches("site-detail-edit").count(), 10);
     for absent in [
         "mark-stale",
         "mark-moved",

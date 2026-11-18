@@ -3052,3 +3052,100 @@ async fn a_group_review_pause_reaches_the_job_state_the_ui_polls() {
     assert!(cp.stopped, "{cp:?}");
     assert_eq!(cp.stopped_before, STAGE_GROUP_REVIEW);
 }
+
+// ── The two reasons a sub-group matters, for the client ────────────────────────────────────
+
+/// A reply with one sub-group over every index of the call, with the extra fields given.
+fn reply_with_why(call: &Call, extra: serde_json::Value) -> String {
+    let mut sub = serde_json::json!({
+        "label": "Same cause", "cause": "one shared cause",
+        "summary": "REVIEWER-ONLY marker, src/a.rs:3 is an outlier.",
+        "members": call.indices.clone()
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        sub[k] = v.clone();
+    }
+    serde_json::json!({
+        "summary": "Rule level.", "subgroups": [sub],
+        "outliers": [], "escalations": [], "disagreements": []
+    })
+    .to_string()
+}
+
+#[test]
+fn the_prompt_asks_for_the_two_client_reasons_apart_from_the_reviewers_summary() {
+    let prompt = group_review_system_prompt();
+    for needle in [
+        "\"why_business\": \"...\"",
+        "\"why_technical\": \"...\"",
+        "`why_business` and `why_technical` are written for the client, not for the architect",
+        "no `path:line`, no outlier marks, no counts and no mention of the architect",
+        "Pick the one consequence that fits",
+        "Say what can happen, never what will happen",
+        "give no figures, times or costs the code does not show",
+        "`why_technical` says what breaks and under what conditions",
+    ] {
+        assert!(
+            prompt.contains(needle),
+            "the prompt lacks {needle}\n{prompt}"
+        );
+    }
+    assert!(!prompt.contains('\u{2014}') && !prompt.contains('\u{2013}'));
+}
+
+#[test]
+fn a_reply_with_the_two_client_reasons_keeps_them_and_one_without_keeps_none() {
+    let with = serde_json::json!({
+        "summary": "s",
+        "subgroups": [{"label": "l", "cause": "c", "summary": "x", "members": [0],
+            "why_business": "Data can quietly go wrong \u{2014} unseen.",
+            "why_technical": "A write skips the check when the caller is a service."}],
+        "outliers": [], "escalations": [], "disagreements": []
+    });
+    let parsed = Stage2Reply::parse(&with.to_string()).expect("reads");
+    assert!(!parsed.subgroups[0].why_business.contains('\u{2014}'));
+    assert!(parsed.subgroups[0]
+        .why_business
+        .starts_with("Data can quietly"));
+    assert!(parsed.subgroups[0]
+        .why_technical
+        .starts_with("A write skips"));
+    let without = serde_json::json!({
+        "summary": "s",
+        "subgroups": [{"label": "l", "cause": "c", "summary": "x", "members": [0]}],
+        "outliers": [], "escalations": [], "disagreements": []
+    });
+    let parsed =
+        Stage2Reply::parse(&without.to_string()).expect("a missing field is not a failure");
+    assert_eq!(parsed.subgroups[0].why_business, "");
+    assert_eq!(parsed.subgroups[0].why_technical, "");
+}
+
+#[tokio::test]
+async fn the_two_client_reasons_are_stored_on_the_sub_group_beside_its_summary() {
+    let mut report = report_of(&[(SQL, 3)]);
+    let llm = Reviewer::new(|call| {
+        Ok(reply_with_why(
+            call,
+            serde_json::json!({
+                "why_business": "BUSINESS marker.",
+                "why_technical": "TECHNICAL marker."
+            }),
+        ))
+    });
+    run(&mut report, &llm).await;
+    let rule = rule_node(&report, SQL);
+    let sub = subgroups_of(&report, &rule).remove(0);
+    assert_eq!(sub.why_business.as_deref(), Some("BUSINESS marker."));
+    assert_eq!(sub.why_technical.as_deref(), Some("TECHNICAL marker."));
+    assert!(sub.summary.as_deref().unwrap().contains("REVIEWER-ONLY"));
+
+    let mut bare = report_of(&[(SQL, 3)]);
+    let llm = Reviewer::new(|call| Ok(reply_with_why(call, serde_json::json!({}))));
+    let outcome = run(&mut bare, &llm).await;
+    let rule = rule_node(&bare, SQL);
+    let sub = subgroups_of(&bare, &rule).remove(0);
+    assert_eq!(sub.why_business, None);
+    assert_eq!(sub.why_technical, None);
+    assert_eq!(outcome.rules_failed, 0, "no part failed");
+}

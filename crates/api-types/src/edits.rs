@@ -58,11 +58,19 @@ pub enum EditField {
     /// not a site key; its `fingerprint_at_edit` is the hash of the model summary it replaced, so
     /// a rerun that changes the model summary shows the edit as stale like any other.
     Summary,
+    /// Why the Fix matters to the client's business (a tree NODE's text, like the summary): the
+    /// Fix plan cell and the PDF read it.
+    WhyBusiness,
+    /// Why the Fix matters technically (a tree NODE's text): the Fix plan cell reads it; the PDF
+    /// never does.
+    WhyTechnical,
+    /// The row's own business reason (the All problems cell). A site field.
+    Business,
 }
 
 impl EditField {
     /// Every field a reviewer can edit, in the order a form lists them.
-    pub const ALL: [EditField; 10] = [
+    pub const ALL: [EditField; 13] = [
         Self::Headline,
         Self::Detail,
         Self::Fix,
@@ -73,6 +81,9 @@ impl EditField {
         Self::Category,
         Self::Subgroup,
         Self::Summary,
+        Self::WhyBusiness,
+        Self::WhyTechnical,
+        Self::Business,
     ];
 
     /// The name serde writes for this field.
@@ -88,12 +99,16 @@ impl EditField {
             Self::Category => "category",
             Self::Subgroup => "subgroup",
             Self::Summary => "summary",
+            Self::WhyBusiness => "why_business",
+            Self::WhyTechnical => "why_technical",
+            Self::Business => "business",
         }
     }
 
-    /// Whether the edit's `key` is a tree node id (a summary) and not a site key.
+    /// Whether the edit's `key` is a tree node id (a summary or a Fix's why text) and not a site
+    /// key.
     pub fn is_node_scope(self) -> bool {
-        matches!(self, Self::Summary)
+        matches!(self, Self::Summary | Self::WhyBusiness | Self::WhyTechnical)
     }
 }
 
@@ -370,8 +385,19 @@ mod tests {
         assert_eq!(
             names,
             [
-                "headline", "detail", "fix", "fix_type", "severity", "rule_id", "kind", "category",
-                "subgroup", "summary"
+                "headline",
+                "detail",
+                "fix",
+                "fix_type",
+                "severity",
+                "rule_id",
+                "kind",
+                "category",
+                "subgroup",
+                "summary",
+                "why_business",
+                "why_technical",
+                "business"
             ]
         );
         for f in EditField::ALL {

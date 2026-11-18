@@ -310,7 +310,8 @@
             "scope": "string",
             "state": "string"
           },
-          "thrown_out_reason": "string"
+          "thrown_out_reason": "string",
+          "why_business": "string"
         },
         "stage1": {
           "confidence": "string",
@@ -487,7 +488,8 @@
             "why": "string"
           },
           "stale_decision": "null",
-          "thrown_out_reason": "null"
+          "thrown_out_reason": "null",
+          "why_business": "string"
         }
       }
     ],
@@ -604,7 +606,8 @@
             "why": "string"
           },
           "stale_decision": "null",
-          "thrown_out_reason": "null"
+          "thrown_out_reason": "null",
+          "why_business": "string"
         }
       }
     ],
@@ -872,7 +875,8 @@
           "scope": "string",
           "state": "string"
         },
-        "thrown_out_reason": "null"
+        "thrown_out_reason": "null",
+        "why_business": "string"
       }
     ],
     "run_id": "string",
@@ -924,7 +928,11 @@
           "stale": "bool"
         },
         "summary_source": "string",
-        "thrown_out": "bool"
+        "thrown_out": "bool",
+        "why_business": "null",
+        "why_business_edit": "null",
+        "why_technical": "null",
+        "why_technical_edit": "null"
       }
     ],
     "run_id": "string"

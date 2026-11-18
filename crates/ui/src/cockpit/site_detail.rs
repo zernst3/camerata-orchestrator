@@ -165,6 +165,7 @@ pub(crate) fn SiteDetailView(
     let detail = field_state(&row, EditField::Detail, &ctx);
     let fix = field_state(&row, EditField::Fix, &ctx);
     let fix_type = field_state(&row, EditField::FixType, &ctx);
+    let business = field_state(&row, EditField::Business, &ctx);
     let meta: Vec<FieldState> = [
         EditField::RuleId,
         EditField::Kind,
@@ -257,6 +258,10 @@ pub(crate) fn SiteDetailView(
             FieldRow { state: fix_type, editable: !thrown_out, on_event }
             if has_form(EditField::FixType) {
                 EditFormFor { field: EditField::FixType, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
+            }
+            FieldRow { state: business, multiline: true, editable: !thrown_out, on_event }
+            if has_form(EditField::Business) {
+                EditFormFor { field: EditField::Business, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
             div { class: "site-detail-meta",
                 for state in meta {

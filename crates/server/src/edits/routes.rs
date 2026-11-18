@@ -199,6 +199,16 @@ fn draft_for(
 /// The edit of a tree node's summary (spec U4): the old value is the summary the node shows now,
 /// and the fingerprint is the hash of the MODEL's summary in the sealed report, so a rerun that
 /// writes a different one shows the edit as stale. `None` when the tree has no such node.
+/// The text of a tree node that `field` edits: its summary, or one of its two client reasons.
+fn node_text(node: &crate::review_tree::TreeNode, field: EditField) -> String {
+    match field {
+        EditField::WhyBusiness => node.why_business.clone(),
+        EditField::WhyTechnical => node.why_technical.clone(),
+        _ => node.summary.clone(),
+    }
+    .unwrap_or_default()
+}
+
 fn node_draft_for(
     sealed: &SealedReport,
     reviewed: &ReviewedReport,
@@ -210,14 +220,12 @@ fn node_draft_for(
     Some(EditDraft {
         key: key.to_string(),
         field: req.field,
-        old: shown.summary.clone().unwrap_or_default(),
+        old: node_text(shown, req.field),
         new: req.new.trim().to_string(),
         reason: req.reason.clone(),
         by: req.by.clone(),
         run_id: req.run_id.clone(),
-        fingerprint: crate::report_export::summary_fingerprint(
-            model.summary.as_deref().unwrap_or_default(),
-        ),
+        fingerprint: crate::report_export::summary_fingerprint(&node_text(model, req.field)),
     })
 }
 

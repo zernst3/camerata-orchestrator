@@ -83,7 +83,9 @@ pub struct PatternJson {
     pub rules: Vec<String>,
     pub label: String,
     pub cause: String,
-    pub summary: String,
+    /// Why the Fix matters to the client's business. The PDF's data carries no other reason: not
+    /// the reviewer's summary and not the technical reason.
+    pub why_business: String,
     pub severity: String,
     /// Every site of the sub-group that is not a false positive.
     pub site_count: usize,

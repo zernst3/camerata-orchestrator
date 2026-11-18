@@ -114,7 +114,12 @@ pub(crate) struct SubgroupFacts {
     pub fix_id: String,
     pub label: String,
     pub cause: String,
+    /// What the architect reads at the sub-group. Reviewer-only: no client file prints it.
     pub summary: String,
+    /// Why the sub-group matters to the client's business, written for the client.
+    pub why_business: String,
+    /// Why the sub-group matters technically, written for the client.
+    pub why_technical: String,
     pub rule_id: String,
     pub rule_title: String,
     /// The standard the rule cites, as the workbook prints it.
@@ -251,6 +256,14 @@ fn subgroup_facts_with(
         let label = client_text("label", &node.label);
         let cause = client_text("cause", node.cause.as_deref().unwrap_or_default());
         let summary = client_text("summary", node.summary.as_deref().unwrap_or_default());
+        let why_business = client_text(
+            "why_business",
+            node.why_business.as_deref().unwrap_or_default(),
+        );
+        let why_technical = client_text(
+            "why_technical",
+            node.why_technical.as_deref().unwrap_or_default(),
+        );
         let label = if label.flags.is_empty() {
             label.text
         } else {
@@ -307,6 +320,8 @@ fn subgroup_facts_with(
                 label,
                 cause: cause.text,
                 summary: summary.text,
+                why_business: why_business.text,
+                why_technical: why_technical.text,
                 rule_id: crate::dep_audit::DEP_AUDIT_RULE_ID.to_string(),
                 rule_title: "Known vulnerable dependency".to_string(),
                 citation: String::new(),
@@ -403,6 +418,8 @@ fn subgroup_facts_with(
             label,
             cause: cause.text,
             summary: summary.text,
+            why_business: why_business.text,
+            why_technical: why_technical.text,
             rule_id: primary.rule_id.clone(),
             rule_title: own_name(&primary.rule_id, corpus).0,
             citation: primary.citation_label.clone(),
@@ -529,7 +546,12 @@ pub(crate) struct FixFacts {
     /// The primary member's label, cause and summary.
     pub label: String,
     pub cause: String,
+    /// The primary's summary. Reviewer-only: no client file prints it.
     pub summary: String,
+    /// The primary's business reason, written for the client.
+    pub why_business: String,
+    /// The primary's technical reason, written for the client.
+    pub why_technical: String,
     /// The primary rule.
     pub rule_id: String,
     pub rule_title: String,
@@ -843,6 +865,8 @@ fn fold_fix(
         label: primary.label.clone(),
         cause: primary.cause.clone(),
         summary: primary.summary.clone(),
+        why_business: primary.why_business.clone(),
+        why_technical: primary.why_technical.clone(),
         rule_id: primary.rule_id.clone(),
         rule_title: primary.rule_title.clone(),
         rules,
@@ -1028,6 +1052,8 @@ pub(crate) struct PdfFixFacts {
     pub places: usize,
     pub effort: String,
     pub severity: String,
+    /// Why the Fix matters to the client's business. The only reason the PDF prints.
+    pub why_business: String,
 }
 
 /// The escalated places as the PDF prints them, one entry for each place whatever the number of
@@ -1165,6 +1191,7 @@ pub(crate) fn pdf_sections(
                     places: g.open_site_total,
                     effort: g.effort.clone(),
                     severity: g.severity.clone(),
+                    why_business: g.why_business.clone(),
                 },
             )
         })
@@ -1200,7 +1227,7 @@ pub(crate) fn pdf_sections(
             rule_title: g.rule_title,
             label: g.label,
             cause: g.cause,
-            summary: g.summary,
+            why_business: g.why_business,
             severity: g.severity,
             site_count: g.live_sites,
             open_sites: g.open_site_total,

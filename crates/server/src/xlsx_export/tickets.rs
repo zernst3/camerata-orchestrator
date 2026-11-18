@@ -77,8 +77,12 @@ fn ticket_row(g: &FixFacts) -> [String; 8] {
     };
     let title = format!("{}: {title_tail}", g.rule_title);
     let mut description = Vec::new();
-    if !g.summary.is_empty() {
-        description.push(g.summary.clone());
+    // The reviewer's summary is not here: a ticket carries the two reasons written for the client.
+    if !g.why_business.is_empty() {
+        description.push(format!("{}: {}", v::H_WHY_BUSINESS, g.why_business));
+    }
+    if !g.why_technical.is_empty() {
+        description.push(format!("{}: {}", v::H_WHY_TECHNICAL, g.why_technical));
     }
     if !g.cause.is_empty() {
         description.push(format!("Why these places belong together: {}", g.cause));

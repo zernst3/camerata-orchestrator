@@ -78,6 +78,14 @@ pub const STAGE2_FIELD_HOMES: &[(&str, &str)] = &[
         "TreeNode.summary of the sub-group, the text the architect reads at it (A15)",
     ),
     (
+        "subgroups[].why_business",
+        "TreeNode.why_business of the sub-group, the Fix plan's business reason and the PDF's",
+    ),
+    (
+        "subgroups[].why_technical",
+        "TreeNode.why_technical of the sub-group, the Fix plan's technical reason",
+    ),
+    (
         "subgroups[].members[]",
         "TreeNode.members of the sub-group, and Finding.group_path of each member",
     ),
@@ -170,7 +178,7 @@ pub fn group_review_system_prompt() -> String {
          site.\n\n\
          Answer with one JSON object and nothing else:\n\
          {\"summary\": \"...\",\n \
-         \"subgroups\": [{\"label\": \"...\", \"cause\": \"...\", \"summary\": \"...\", \"members\": [index, ...]}],\n \
+         \"subgroups\": [{\"label\": \"...\", \"cause\": \"...\", \"summary\": \"...\", \"why_business\": \"...\", \"why_technical\": \"...\", \"members\": [index, ...]}],\n \
          \"outliers\": [{\"index\": i, \"reason\": \"<outlier reason>\", \"why\": \"...\"}],\n \
          \"escalations\": [{\"index\": i, \"reason\": \"<escalation reason>\", \"rank\": n, \"why\": \"...\"}],\n \
          \"disagreements\": [{\"index\": i, \"field\": \"severity\" or \"real\", \"stage1\": \"...\", \"mine\": \"...\", \"why\": \"...\"}]}\n\n\
@@ -188,7 +196,13 @@ pub fn group_review_system_prompt() -> String {
          reads at this sub-group: what its sites share, the fix once, and the sites that differ \
          from the rest of it, each named by its `path:line` exactly as listed and marked as an \
          outlier. The same rule holds: name every site that does not share the stated cause, and \
-         do not state how many sites there are.\n\
+         do not state how many sites there are. `why_business` and `why_technical` are written \
+         for the client, not for the architect: no `path:line`, no outlier marks, no counts and no \
+         mention of the architect. `why_business` says why this matters to the client's \
+         business: what can go wrong for the product, its data, its users or the people who work \
+         on it, and when it starts to matter. Pick the one consequence that fits. Say what can \
+         happen, never what will happen, and give no figures, times or costs the code does not \
+         show. `why_technical` says what breaks and under what conditions.\n\
          - outliers: the sites that do not belong with the rest of their sub-group, each with a \
          reason from the outlier list and a one-line why. An outlier mark alone never puts a \
          site in the architect's queue.\n\
@@ -326,7 +340,12 @@ pub struct Stage2Reply {
 pub struct ReplySubgroup {
     pub label: String,
     pub cause: String,
+    /// What the architect reads. Reviewer-only: no client file carries it.
     pub summary: String,
+    /// Why it matters to the client's business; empty when the reply left it out.
+    pub why_business: String,
+    /// Why it matters technically; empty when the reply left it out.
+    pub why_technical: String,
     pub members: Vec<usize>,
 }
 
@@ -412,6 +431,19 @@ fn prose_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
         // multiplication sign, and a problem in a whole file is "whole file", not `path:0`.
         crate::report_export::client_prose(&camerata_secrets::redact_str(&text))
     })
+}
+
+/// An optional client text: missing, null, blank or not a string reads as empty, never as a
+/// failed reply.
+fn optional_prose_of(obj: &Obj, key: &str) -> String {
+    obj.get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(|text| {
+            crate::report_export::client_prose(&camerata_secrets::redact_str(text))
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 fn index_of(obj: &Obj, key: &str, at: &str) -> Result<usize, String> {
@@ -501,7 +533,12 @@ impl Stage2Reply {
         let mut subgroups = Vec::new();
         for (i, v) in array_of(top, "subgroups")?.iter().enumerate() {
             let at = format!("subgroups[{i}]");
-            let o = exact_object(v, &["label", "cause", "summary", "members"], &at)?;
+            let o = object_with(
+                v,
+                &["label", "cause", "summary", "members"],
+                &["why_business", "why_technical"],
+                &at,
+            )?;
             let members = array_of(o, "members")
                 .map_err(|e| format!("{at}: {e}"))?
                 .iter()
@@ -515,6 +552,8 @@ impl Stage2Reply {
                 label: prose_of(o, "label", &at)?,
                 cause: prose_of(o, "cause", &at)?,
                 summary: prose_of(o, "summary", &at)?,
+                why_business: optional_prose_of(o, "why_business"),
+                why_technical: optional_prose_of(o, "why_technical"),
                 members,
             });
         }
@@ -1230,6 +1269,8 @@ fn apply_rule(
         label: String,
         cause: String,
         summary: String,
+        why_business: String,
+        why_technical: String,
         idxs: Vec<usize>,
     }
     let mut new_subs: Vec<NewSub> = Vec::new();
@@ -1254,6 +1295,8 @@ fn apply_rule(
                     label: sg.label.clone(),
                     cause: sg.cause.clone(),
                     summary: sg.summary.clone(),
+                    why_business: sg.why_business.clone(),
+                    why_technical: sg.why_technical.clone(),
                     idxs,
                 });
             }
@@ -1312,6 +1355,8 @@ fn apply_rule(
         sub_members.insert(id.clone(), sg.idxs.clone());
         let mut node = sub_node(&id, rule_id, &sg.label, &sg.cause);
         node.summary = Some(sg.summary.clone());
+        node.why_business = Some(sg.why_business.clone()).filter(|t| !t.is_empty());
+        node.why_technical = Some(sg.why_technical.clone()).filter(|t| !t.is_empty());
         if let Some((text, source)) = kept_edits.get(&id) {
             node.summary = Some(text.clone());
             node.summary_source = *source;
@@ -1559,6 +1604,8 @@ fn sub_node(id: &str, rule_id: &str, label: &str, cause: &str) -> TreeNode {
         outliers: Vec::new(),
         summary: None,
         summary_source: TextSource::Model,
+        why_business: None,
+        why_technical: None,
         escalations: Vec::new(),
         flags: Vec::new(),
     }

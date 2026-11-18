@@ -35,8 +35,8 @@ use crate::triage::UNDO_WINDOW_MS;
 // ── The editable fields ───────────────────────────────────────────────────────────────────
 
 /// The fields a site's own detail edits, in the order spec section 3 lists them. The node
-/// summary is the ninth field of [`EditField::ALL`]; it is edited at the node (WO10).
-pub const SITE_FIELDS: [EditField; 9] = [
+/// summary and the two client reasons of a Fix are edited at the node (WO10).
+pub const SITE_FIELDS: [EditField; 10] = [
     EditField::Headline,
     EditField::Detail,
     EditField::Fix,
@@ -46,6 +46,7 @@ pub const SITE_FIELDS: [EditField; 9] = [
     EditField::Kind,
     EditField::Category,
     EditField::Subgroup,
+    EditField::Business,
 ];
 
 /// The severities a reviewer can set (spec section 3). The server also takes `info`, which only
@@ -68,6 +69,9 @@ pub fn field_label(field: EditField) -> &'static str {
         EditField::Category => "Category",
         EditField::Subgroup => "Sub-group",
         EditField::Summary => "Summary",
+        EditField::WhyBusiness => "Why it matters to the business",
+        EditField::WhyTechnical => "Why it matters technically",
+        EditField::Business => "Why it matters to the business (this place)",
     }
 }
 
@@ -86,7 +90,8 @@ pub fn chord_letter(field: EditField) -> Option<char> {
         EditField::Kind => Some('K'),
         EditField::Category => Some('G'),
         EditField::Subgroup => Some('U'),
-        EditField::Summary => None,
+        EditField::Business => Some('B'),
+        EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical => None,
     }
 }
 
@@ -254,7 +259,7 @@ pub fn context_for(
 pub fn control_for(field: EditField, row: &SiteRow, ctx: &DetailContext) -> Control {
     match field {
         EditField::Headline => Control::Line,
-        EditField::Detail | EditField::Fix => Control::Multi,
+        EditField::Detail | EditField::Fix | EditField::Business => Control::Multi,
         EditField::FixType => {
             Control::Select(FIX_TYPES.iter().map(|f| ControlOption::same(f)).collect())
         }
@@ -296,7 +301,9 @@ pub fn control_for(field: EditField, row: &SiteRow, ctx: &DetailContext) -> Cont
             Control::Select(options)
         }
         EditField::Subgroup => Control::Split,
-        EditField::Summary => Control::NodeSummary,
+        EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical => {
+            Control::NodeSummary
+        }
     }
 }
 
@@ -339,7 +346,8 @@ pub fn current_value(row: &SiteRow, field: EditField, ctx: &DetailContext) -> St
             })
             .or_else(|| row.group_path.get(2).cloned())
             .unwrap_or_default(),
-        EditField::Summary => String::new(),
+        EditField::Business => row.why_business.clone(),
+        EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical => String::new(),
     }
 }
 
@@ -435,7 +443,10 @@ pub fn value_problem(field: EditField, new: &str) -> Option<String> {
         | EditField::Detail
         | EditField::Fix
         | EditField::RuleId
-        | EditField::Summary => new.is_empty().then(|| format!("{name} cannot be empty.")),
+        | EditField::Summary
+        | EditField::WhyBusiness
+        | EditField::WhyTechnical
+        | EditField::Business => new.is_empty().then(|| format!("{name} cannot be empty.")),
         EditField::Subgroup => new
             .is_empty()
             .then(|| "A sub-group needs a name.".to_string()),
@@ -1398,11 +1409,14 @@ pub fn flagged_by_line(row: &SiteRow) -> Option<String> {
 /// The possible-duplicate line: `SEC-KEY-2 at web/env.ts:3`, with the engine's hint.
 /// The detail's Possible false positive lines: each reason the engine has to doubt the row, as
 /// its short name and its sentence, in the order the row lists them. Empty for a row with none.
-pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, &'static str)> {
+pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, String)> {
     row.possible_false_positive
         .iter()
-        .flat_map(|p| &p.reasons)
-        .map(|r| (r.label(), r.sentence()))
+        .flat_map(|p| {
+            p.reasons
+                .iter()
+                .map(move |r| (r.label(), p.sentence_of(*r)))
+        })
         .collect()
 }
 
@@ -1605,7 +1619,10 @@ pub fn reduce(
             if *field == EditField::Subgroup {
                 return reduce(mode, &DetailAction::BeginSplit, row, ctx);
             }
-            if *field == EditField::Summary {
+            if matches!(
+                field,
+                EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical
+            ) {
                 return mode;
             }
             DetailMode::Edit(EditDraft {

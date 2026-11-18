@@ -365,6 +365,9 @@ pub struct SiteRow {
     pub category: Option<String>,
     pub headline: String,
     pub detail: String,
+    /// The row's own business reason, as the All problems sheet reads it. Empty when it has none.
+    #[serde(default)]
+    pub why_business: String,
     /// The fix text for this site.
     pub fix: String,
     /// `Tailored fix` or `Standard fix`.
@@ -565,6 +568,13 @@ pub struct TreeNodeView {
     /// What the reviewer reads at this node.
     pub summary: Option<String>,
     pub summary_source: SummarySource,
+    /// Why the node matters to the client's business, written for the client (a sub-group's
+    /// text; the Fix plan and the PDF read it). The reviewer's edit replaces it.
+    #[serde(default)]
+    pub why_business: Option<String>,
+    /// Why the node matters technically, written for the client. The reviewer's edit replaces it.
+    #[serde(default)]
+    pub why_technical: Option<String>,
     /// Review flags on the summary (a count the data contradicts, a differing member not named).
     pub flags: Vec<String>,
     /// A node of rows the engine threw out (spec design A12).
@@ -573,6 +583,12 @@ pub struct TreeNodeView {
     pub decision: Option<NodeDecisionSummary>,
     /// The reviewer's edit of the summary (spec U4); the engine's summary is replaced by it.
     pub summary_edit: Option<EditView>,
+    /// The reviewer's edit of the business reason, applied or stale.
+    #[serde(default)]
+    pub why_business_edit: Option<EditView>,
+    /// The reviewer's edit of the technical reason, applied or stale.
+    #[serde(default)]
+    pub why_technical_edit: Option<EditView>,
 }
 
 /// `GET /api/projects/:id/review/tree`: nodes, counts and markers only; never sites (spec U1).
