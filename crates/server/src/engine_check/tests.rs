@@ -726,3 +726,43 @@ fn a_second_look_no_is_not_freed_by_a_merge_into_a_row_that_is_itself_ruled_out(
     .is_empty());
     assert!(uncorrected_keys(&no, RUN, &[ruled_out, merge], &[]).is_empty());
 }
+
+#[test]
+fn a_second_look_no_stays_held_on_a_merge_cycle_or_a_chain_too_long_to_follow() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T10:00:00Z";
+    let t2 = "2026-11-04T11:00:00Z";
+    let merged = |id: &str, key: &str, into: &str| {
+        ruling(id, key, DecisionState::MergedInto(into.to_string()), t2)
+    };
+    let no = [ruled_out_no("a", t1)];
+    let ruled_out = ruling("dec-000001", "a", DecisionState::FalsePositive, t0);
+    // A merged into B, B merged into A: no row at the end of the chain says it is kept.
+    let cycle = [
+        merged("dec-000002", "a", "b"),
+        merged("dec-000003", "b", "a"),
+    ];
+    assert_eq!(
+        uncorrected_keys(
+            &no,
+            RUN,
+            &[ruled_out.clone(), cycle[0].clone(), cycle[1].clone()],
+            &[]
+        ),
+        vec!["a".to_string()]
+    );
+    // A chain of twelve merges, longer than the walk follows.
+    let mut chain = vec![ruled_out];
+    for i in 0..12 {
+        let (from, to) = if i == 0 {
+            ("a".to_string(), "r1".to_string())
+        } else {
+            (format!("r{i}"), format!("r{}", i + 1))
+        };
+        chain.push(merged(&format!("dec-1{i:05}"), &from, &to));
+    }
+    assert_eq!(
+        uncorrected_keys(&no, RUN, &chain, &[]),
+        vec!["a".to_string()]
+    );
+}

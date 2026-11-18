@@ -596,7 +596,8 @@ pub fn carry_forward(
 fn still_ruled_out(decided: &HashMap<&str, &Decision>, key: &str) -> bool {
     use camerata_api_types::decisions::DecisionState;
     let mut at = key;
-    // A merge chain is short; the bound only stops a cycle.
+    // A merge chain is short; the bound only stops a cycle. When it runs out (a cycle, or a
+    // chain too long to follow) the answer is "still ruled out": the hold fails safe.
     for _ in 0..8 {
         match decided.get(at).map(|d| &d.state) {
             Some(DecisionState::FalsePositive) => return true,
@@ -604,7 +605,7 @@ fn still_ruled_out(decided: &HashMap<&str, &Decision>, key: &str) -> bool {
             _ => return false,
         }
     }
-    false
+    true
 }
 
 /// The site keys an Engine Check No holds from the client export: the latest verdict on the site
