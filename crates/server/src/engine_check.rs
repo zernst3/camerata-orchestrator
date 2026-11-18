@@ -591,6 +591,22 @@ pub fn carry_forward(
 
 // ── the hold rule ─────────────────────────────────────────────────────────────────────────
 
+/// Whether the row's standing decision rules it out, directly or by being merged into a row that
+/// is itself ruled out (a merge into a ruled-out row leaves it out of the package all the same).
+fn still_ruled_out(decided: &HashMap<&str, &Decision>, key: &str) -> bool {
+    use camerata_api_types::decisions::DecisionState;
+    let mut at = key;
+    // A merge chain is short; the bound only stops a cycle.
+    for _ in 0..8 {
+        match decided.get(at).map(|d| &d.state) {
+            Some(DecisionState::FalsePositive) => return true,
+            Some(DecisionState::MergedInto(target)) => at = target.as_str(),
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// The site keys an Engine Check No holds from the client export: the latest verdict on the site
 /// is a No, and nothing corrects it. A No is corrected when it names a correction that exists, or
 /// when the reviewer has decided the site or edited it LATER than the verdict. `decisions` and
@@ -624,9 +640,7 @@ pub fn uncorrected_keys(
             if v.wrong
                 == Some(camerata_api_types::review_view::EngineCheckError::RuledOutRealProblem)
             {
-                return decided.get(v.key.as_str()).is_some_and(|d| {
-                    d.state == camerata_api_types::decisions::DecisionState::FalsePositive
-                });
+                return still_ruled_out(&decided, &v.key);
             }
             let named = match &v.correction {
                 Some(CorrectionRef::Decision(id)) => decisions.iter().any(|d| d.id == *id),
@@ -695,7 +709,7 @@ pub fn category_of(f: &Finding) -> String {
 
 /// A row's place in the draw order: a hash of the run and the row, so the order is fixed for a run
 /// and unrelated to anything the reviewer does.
-fn draw_order(run_id: &str, key: &str) -> u64 {
+pub(crate) fn draw_order(run_id: &str, key: &str) -> u64 {
     let digest = Sha256::digest(format!("{run_id}\u{0}{key}").as_bytes());
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);

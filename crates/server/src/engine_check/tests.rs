@@ -690,3 +690,39 @@ fn the_drawn_second_look_rows_are_kept_append_only_per_run_and_survive_a_restart
     assert_eq!(reopened.second_look("p", RUN), keys(&["a", "b", "c"]));
     assert_eq!(reopened.list("p").len(), 1);
 }
+
+#[test]
+fn a_second_look_no_is_not_freed_by_a_merge_into_a_row_that_is_itself_ruled_out() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T10:00:00Z";
+    let t2 = "2026-11-04T11:00:00Z";
+    let no = [ruled_out_no("k", t1)];
+    let ruled_out = ruling("dec-000001", "k", DecisionState::FalsePositive, t0);
+    let target_ruled_out = ruling("dec-000002", "t", DecisionState::FalsePositive, t0);
+    let merge = ruling(
+        "dec-000003",
+        "k",
+        DecisionState::MergedInto("t".to_string()),
+        t2,
+    );
+    // The target is ruled out too: the row is still, in effect, ruled out.
+    assert_eq!(
+        uncorrected_keys(
+            &no,
+            RUN,
+            &[ruled_out.clone(), target_ruled_out, merge.clone()],
+            &[]
+        ),
+        vec!["k".to_string()]
+    );
+    // Into a target that is a problem, or one with no ruling, the row is no longer ruled out.
+    let target_kept = ruling("dec-000002", "t", DecisionState::Confirmed, t0);
+    assert!(uncorrected_keys(
+        &no,
+        RUN,
+        &[ruled_out.clone(), target_kept, merge.clone()],
+        &[]
+    )
+    .is_empty());
+    assert!(uncorrected_keys(&no, RUN, &[ruled_out, merge], &[]).is_empty());
+}
