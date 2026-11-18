@@ -117,15 +117,7 @@ fn a_malformed_file_is_reported_as_unusable_with_the_reason() {
 }
 
 #[test]
-fn more_than_forty_problems_in_one_file_or_a_repeated_number_make_the_file_unusable() {
-    let many: Vec<serde_json::Value> = (1..=41).map(|n| entry(n, "src/a.rs")).collect();
-    let out = parse_outputs(
-        &outputs(&[("problems-1.json", serde_json::json!(many).to_string())]),
-        &piece_files(),
-    );
-    assert!(out.problems.is_empty());
-    assert!(out.unusable[0].reason.contains("40"), "{:?}", out.unusable);
-
+fn a_repeated_number_makes_the_file_unusable() {
     let out = parse_outputs(
         &outputs(&[
             (
@@ -1049,4 +1041,54 @@ fn unsure_why_is_read_tolerantly_and_rides_on_the_row_cleaned() {
         "{text}"
     );
     assert!(!findings[1].captures.contains_key("finder-unsure-why"));
+}
+
+#[test]
+fn a_valid_file_of_forty_one_problems_is_read_in_full() {
+    let many: Vec<serde_json::Value> = (1..=41).map(|n| entry(n, "src/a.rs")).collect();
+    let out = parse_outputs(
+        &outputs(&[("problems-1.json", serde_json::json!(many).to_string())]),
+        &piece_files(),
+    );
+    assert!(out.unusable.is_empty(), "{:?}", out.unusable);
+    assert_eq!(out.problems.len(), 41);
+}
+
+#[test]
+fn an_invalid_file_of_forty_one_is_still_refused_with_its_reason() {
+    let mut many: Vec<serde_json::Value> = (1..=41).map(|n| entry(n, "src/a.rs")).collect();
+    many[40] = serde_json::json!({"n": 41, "path": "src/a.rs", "line": 3, "description": "x"});
+    let out = parse_outputs(
+        &outputs(&[("problems-1.json", serde_json::json!(many).to_string())]),
+        &piece_files(),
+    );
+    assert!(out.problems.is_empty());
+    assert!(
+        out.unusable[0].reason.contains("entry 41"),
+        "{:?}",
+        out.unusable
+    );
+}
+
+#[test]
+fn a_refused_file_names_every_missing_field_and_every_bad_entry() {
+    let bare =
+        |n: u32| serde_json::json!({"n": n, "path": "src/a.rs", "line": 3, "description": "x"});
+    let out = parse_outputs(
+        &outputs(&[(
+            "problems-1.json",
+            serde_json::json!([bare(1), bare(2)]).to_string(),
+        )]),
+        &piece_files(),
+    );
+    let reason = &out.unusable[0].reason;
+    for field in [
+        "severity", "title", "code", "what", "why", "fix", "sure", "effort", "label",
+    ] {
+        assert!(reason.contains(&format!("`{field}`")), "{field}: {reason}");
+    }
+    assert!(
+        reason.contains("entry 1") && reason.contains("entry 2"),
+        "{reason}"
+    );
 }

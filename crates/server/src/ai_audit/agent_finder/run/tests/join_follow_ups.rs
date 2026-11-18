@@ -54,16 +54,34 @@ async fn the_joined_problems_text_is_not_held_to_the_forty_per_file_cap() {
 }
 
 #[tokio::test]
-async fn the_agents_own_file_of_forty_one_problems_is_still_refused() {
+async fn the_agents_own_valid_file_of_forty_one_problems_is_read() {
     let many: Vec<Value> = (1..=41).map(|n| item(n, n as usize)).collect();
-    let agent = ScriptedAgent::new(first_step(many));
-    let (_, _, _, failed, _, _) = go(&agent).await;
-    assert!(
-        failed
-            .iter()
-            .any(|f| f.reason.contains("problems-1.json") && f.reason.contains("at most 40")),
-        "{failed:?}"
-    );
+    let agent = ScriptedAgent::new(first_step(many))
+        .with_follow_up(vec![sec_answer()], AgentStop::Finished);
+    let (rows, _, _, failed, _, _) = go(&agent).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(rows.len(), 41);
+}
+
+#[tokio::test]
+async fn the_repair_request_restates_the_format_and_every_refusal() {
+    let bare = json!([{"n": 1, "path": "src/a.rs", "line": 2, "description": "x"}]);
+    let mut script = first_step(vec![]);
+    script.push(out("problems-1.json", &bare));
+    script.push(out("problems-2.json", &bare));
+    let agent = ScriptedAgent::new(script);
+    let _ = go(&agent).await;
+    let sent = agent.messages();
+    let repair = sent
+        .iter()
+        .find(|m| m.contains("problems-1.json"))
+        .unwrap_or_else(|| panic!("a repair turn names the file: {sent:?}"));
+    assert!(repair.contains("problems-2.json"), "{repair}");
+    for field in crate::ai_audit::agent_finder::brief_text::PROBLEM_FIELDS.split(", ") {
+        assert!(repair.contains(field), "{field}: {repair}");
+    }
+    assert!(repair.contains("may not be dropped"), "{repair}");
+    assert!(repair.contains("`<value omitted>`"), "{repair}");
 }
 
 #[tokio::test]
