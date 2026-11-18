@@ -12,6 +12,39 @@
 > or change a store's persistence path, update the relevant section here in the
 > same commit. A stale technical reference is worse than no reference.
 
+> **Quick map of the inspection engine (added 2026-11-18).** How one inspection runs, in order:
+> section 6d. The agent finder (the second finder, pieces and joints, the review room, the rules
+> checklist, coverage): 6e. Every stage model, its default, the precedence, the client lock and
+> how to run with Opus 5.5 as finder and group reviewer: 6f. The group reviewer: 6g. What the review
+> screen shows and where each thing comes from (Stage 1 line, severity bounds, Possible false
+> positive, Possible duplicate, held rows, Engine Check and its second look, one cause per problem,
+> the business and technical why): 6h. Every `camerata inspect` flag and default, the exit codes,
+> the other commands and the state folder: 6i. The pre-flight estimate, the spend limit, the cost
+> panel, run to completion and the two backends: 6j. The release gate's 18 checks and the files in
+> the export package: 6c. Saved runs and the resume rules: 14. The current defaults: the finder is
+> **Engine**; the scan model is Sonnet 5.5; calibration is Opus 5.5; the group reviewer and the
+> agent finder are Fable 5.2; the duplicate check is Sonnet 5.5; the fix stage is Haiku 5.5; the
+> clone judge is Haiku 5.5.
+>
+> | Word | Meaning in this file |
+> |---|---|
+> | finder | the part of an inspection that reads the code and reports problems: the engine finder (rule by rule) or the agent finder (one model per part) |
+> | piece | the files one finder agent reviews; the unit of the agent finder's work |
+> | joints | the one extra agent call that reviews only what shows across pieces |
+> | room | the small closed file tree one agent works in; nothing outside it exists for the agent |
+> | checklist | the rules a piece owes an answer to: problems, clean, not a problem here or not applicable |
+> | coverage | which files were read in full, read in part, sent again or not reviewed, from the tool trace only |
+> | stage 1 and stage 2 | the per site reviewer (calibration, or the agent's own rating) and the group reviewer |
+> | cause or Fix | a set of sub-groups that share one fix; the client counts causes |
+> | place | one row at one file and line; every place of a problem is its own row |
+> | escalation | a site the group reviewer wants the architect to look at, ranked against a budget |
+> | held | a row that must be ruled on before it can go to a client |
+> | ruled out | a row the reviewer decided is not a problem (a False positive decision) |
+> | Engine Check | the architect's own sample of rows, "did the engine get this right?"; internal only |
+> | second look | a second Engine Check sample of the rows the reviewer ruled out while the engine flagged them |
+> | client engagement | a run for a client: API backend and Anthropic models only, client code never executed unless opted in |
+> | run to completion | no client export with a failed or unfinished part |
+
 ---
 
 ## 1. System overview and crate map
@@ -2671,18 +2704,11 @@ writes the same product-export ZIP the UI's export button produces:
 cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
 ```
 
-Flags: `--backend cli|api` (the same compliance-safety setting a project's
-`backend` field carries; `api` is the default), `--batch` (force the Anthropic
-Message Batches path, roughly 50% cheaper, latency not returned until the whole
-batch completes, requires `--backend api`; on the API backend this is already the
-default unless `batch_default` is off), `--realtime` (force real-time parallel calls;
-exclusive with `--batch`), `--model` and `--calibration-model`
-overrides, `--full` to ignore the on-disk incremental-scan cache, `--verbose`
-to print the ledger's per-rule detail alongside the default concise summary,
-`--max-cost-usd <USD>` (the spend limit) and `--efficiency <name>=on|off`
-(repeatable). Those last two, the pre-flight estimate and the cost arithmetic are
-described in "Token efficiency: switches, cost arithmetic, estimate and spend
-limit" below.
+Every flag, with its default, is in section 6i (updated 2026-11-18; the list that stood here
+stopped at 2026-10 and missed the client, finder, group review, resume and several model flags).
+The stage by stage order of a run is section 6d. The pre-flight estimate, the spend limit and the
+cost arithmetic are described in "Token efficiency: switches, cost arithmetic, estimate and spend
+limit" below and in section 6j.
 
 #### Token efficiency: switches, cost arithmetic, estimate and spend limit
 
@@ -3619,7 +3645,7 @@ thing:
   `json/all-findings.json`'s tally by `(severity, kind)`;
   `pdf_count_reconciliation_problems` (in-memory release) does the same for the PDF's rendered
   rows and its cover severity summary. A difference names the cell and both counts. The gate
-  now runs nine checks (the ninth, `finding content`, is described in section 6c).
+  now runs several checks (`finding content` and the rest are described in section 6c).
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
 - **`findings.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`
@@ -3833,9 +3859,12 @@ A ledger used to live only in memory: `render_ledger_summary` printed a digest a
 the ledger was dropped with the process, so the one artifact recording whether
 everything that was supposed to run actually ran could not be re-examined, diffed
 against a previous scan, or checked by anything but a person watching it scroll
-past. `camerata inspect` now writes `<repo>/.camerata-scan-ledger.json` at the
+past. `camerata inspect` now writes the ledger at the
 exact point the summary is computed - fully reconciled, before sealing - so the
-gate evaluates precisely the facts that run's summary describes. The write is
+gate evaluates precisely the facts that run's summary describes. (Until 2026-10-18 the
+ledger was `<repo>/.camerata-scan-ledger.json` inside the scanned repository, and the engine then
+collected its own cache as source on the next scan. It is now `<state dir>/<key>.ledger.json`,
+see section 6i, and `inspect` prints its path as `integrity ledger:`.) The write is
 best-effort and never fails the inspection.
 
 ### `camerata integrity-gate`
@@ -4002,14 +4031,32 @@ The deterministic floor and checkers still read RAW code (they must find the sec
 **The gate** (`server/src/release_gate.rs`). `build_product_package` is the one assembly of a
 product export and `release` is the ONLY function that returns zip bytes (HTTP `export_product`,
 `camerata inspect --export` and the sample generator all use it; source-grep tests pin
-`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs nine checks over the
-archive it built: **secrets** (every string of every file: `data.json`, `findings.json`, each
-dataset in both formats, every workbook cell and shared string, the README, the manifest, member
-names; zero-width characters stripped; never a field list), **dataset set**, **dataset parity**
-(CSV against JSON, `findings.json` against `all-findings`), **row parity** (PDF rows against
-`findings.json` rows), **severity and kind counts**, **finding content** (D1: no model-invented
-row is a placeholder or says to discard itself), **confidentiality marking**, **manifest**
-hashes, **provenance** (README against manifest). The
+`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs **18 checks** (`CheckId::ALL` in `crates/server/src/release_gate/report.rs`,
+updated 2026-11-18; the first version had nine) over the archive it built and over the package's own
+rows. The label is what the operator reads in `[brackets]` and in the "Release checks" line:
+
+| # | Check (label) | What it holds |
+|---|---|---|
+| 1 | secrets | no secret value in any client visible byte: every string of every file (`data.json`, `findings.json`, each dataset in both formats, every workbook cell and shared string, the README, the manifest, member names), zero-width characters stripped, never a field list |
+| 2 | dataset set | exactly the promised files and datasets are in the package (list below), the PDF starts with `%PDF-`, the workbook parses |
+| 3 | dataset parity | every dataset's CSV agrees with its JSON, and `findings.json` agrees with `all-findings` |
+| 4 | row parity | the PDF's rows and `findings.json`'s rows are the same set (needs the in memory rows, so `release-gate <zip>` cannot run it) |
+| 5 | severity and kind counts | the PDF's rows and cover summary, the workbook's rows and Index summaries and the CSV agree with `json/all-findings.json` by severity and kind, and every printed number holds to an independent recount of the files in the package (single counts) |
+| 6 | finding content | no model invented row is junk: a placeholder title or rule id, no evidence, an explanation that says to discard it (D1); also the claim about missing preview tools agrees with the ledger |
+| 7 | reviewer decision on unverified evidence | every row whose quoted evidence was not found carries a reviewer decision (M5) |
+| 8 | decision records behind merged rows | every merged row has a merge decision with a reason, and every group decision has one per site record for each site it covers |
+| 9 | reviewer decision on restored findings | a finding the engine threw out and the reviewer put back is decided before it ships (A12 item 2) |
+| 10 | reviewer decision on split-out problems | a problem split out of one the reviewer ruled out has a decision of its own |
+| 11 | reviewer correction on flagged findings | a site the Engine Check said No to carries a correction, a decision or a later edit. An Engine Check file that cannot be read refuses too. (The README's label does not say Engine Check: it never appears in a client output.) |
+| 12 | confidentiality marking | every workbook sheet's footer carries the confidentiality line naming the client, and it is the PDF's line |
+| 13 | manifest | every manifest hash equals the archive member's hash and every member is listed. A client package whose manifest records an incomplete run is refused. |
+| 14 | provenance | an internal package's README provenance lines equal the manifest's. A client package's README carries none of them. |
+| 15 | unsynced reviewer changes | the review screen holds no change the decision store has not accepted (an undo whose revoke has not landed would export the decision the reviewer took back) |
+| 16 | one fix per row | every row has a Fix, the tickets and the Fix plan list the same Fixes once each, the PDF's escalation list has one entry for each escalated place and its top three are three distinct Fixes (item #1); also one row per place |
+| 17 | client text style | no em dash, en dash or multiplication sign in any file a client receives (PDF text, every workbook string, every CSV and JSON file, the README). Skipped for an internal package. |
+| 18 | internal notes kept out | no package, client or internal, carries the operator's rewrite advisory or one of its names |
+
+The
 comparison logic is production code the export tests call. A refusal is a `GateFailure`: its
 `Display` is the fail-loud block (every field redacted by `Problem::new`), the HTTP route returns
 422 `{ok:false, gate:"release", message, problems}`, and `camerata inspect` exits 3 and writes
@@ -4017,6 +4064,35 @@ nothing. The PDF-only route checks `data.json` before Typst runs.
 
 `camerata release-gate <zip>` runs the same checks over a zip on disk (exit 0 clean, 3 blocked, 2
 could not run); build with `--features pdf-text` to check the PDF's rendered text too.
+
+**What is in the product package** (`build_product_zip` in `crates/server/src/lib.rs`, the expected
+set in `release_gate/consistency.rs` `dataset_set_problems`; the gate refuses a missing promised
+file and an unexpected one). `<stem>` is `camerata-inspection-{repo}-{sha}`.
+
+| File | What it is |
+|---|---|
+| `<stem>.pdf` | the report to read first: cover, executive summary, scorecard by area, severity by effort matrix, the problems with citations and fixes, what is healthy, the dependency snapshot and how the inspection was done. Ruled out problems are left out and counted once in the methodology section. |
+| `<stem>-findings.xlsx` | the working list for the engineers: Start here, Glossary, Fix plan, All problems, Needs a decision, Your conventions, Departures, Dependencies, Rules checked, Ruled out and Not checked, and for reviewers All source rows, Reviewer decisions and How problems were grouped (the names are `xlsx_export/vocabulary.rs`; a several repo project adds the Patterns across services sheet) |
+| `findings.json` | every row that was not ruled out, of every kind, wrapped with the report's summary counts. For scripts and CI. |
+| `decisions.json` | every decision record the report was reviewed with |
+| `README.txt` | what each file is (`product_export_readme`) |
+| `manifest.json` | the list of files with a checksum for each, written last over the final bytes (it never lists itself), and the provenance |
+| `csv/<dataset>.csv` and `json/<dataset>.json` | one pair for each of eight datasets (`DATASETS`): `all-findings`, `deviations`, `conventions`, `not-assessed`, `dependencies`, `false-positives`, `coverage`, `rules-applied`. `all-findings` holds the same rows as `findings.json`, flat. |
+| `csv/tickets.csv` | one ticket for each fix that still has places to change, with columns for a Jira, Linear or GitHub Issues import (title, description, priority, labels, estimate, group id, places, place list). A place ruled out or accepted as a risk is on no ticket. No JSON sibling. |
+| `csv/triage-log.csv` | optional and off by default; admitted when present |
+
+An internal package (`--internal`, `ReportOptions.internal`) is the operator's own review copy. It
+carries what the client package must not: the review flags (Possible false positive, a column in the
+workbook's technical band and a key in `findings.json`), the held rows marked held, and, for a run
+that did not complete, the INTERNAL INCOMPLETE marking (`INTERNAL_INCOMPLETE_README_LINE`). It is
+released only by `release_internal`, and the client text style check does not apply to it.
+
+**Operator only files** (never in any zip, client or internal; `release_gate/operator_only.rs` and
+the "internal notes kept out" check hold the rewrite advisory to this): the pipeline integrity ledger
+(`<key>.ledger.json`), the failure report (`.failures.json`, `.failures.md`), the rewrite advisory
+(`.rewrite_advisory.json`, `.md`, `.history.jsonl`), the agent finder's run record and comparison
+note, the duplicate check's answers (`duplicate_checks.json`), the cost checkpoint, the run folder
+and everything in it. Where they are: section 6i.
 
 **Merged sites and the CSV (D5).** A merged finding's absorbed sites (`also_locations`) are
 redacted where the merge builds them and again by `sanitize_finding_text` before any dataset,
@@ -4049,6 +4125,1300 @@ caught by the gate, not redacted). Calls that pass `repo_read_dir` give the mode
 access to the raw checkout; the inspection passes do not use it, the governed-dev flows do. The
 joined-lines PDF text scan can glue a prose word onto a wrapped key (it still reports the real
 key). Row parity does not re-run `req_d2`'s count reconciliation at runtime.
+
+---
+
+## 6d. The inspection run, stage by stage
+
+> Added 2026-11-18. This section lists what one inspection does, in order, with the file that does
+> it. Two entry points run the same steps: `camerata inspect`
+> (`crates/cli/src/inspect_cmd.rs`, function `run_inspect_pipeline_with`) and the app's scan job
+> (`crates/server/src/lib.rs` `onboard_audit_start`, with its settings from
+> `crates/server/src/routes/scan_jobs.rs` `run_controls_for_project`). The command line is
+> followed below because it is one function that can be read top to bottom. Where the app differs,
+> the text says so. Sections 6e to 6j go deeper on single parts.
+
+### The order of one run
+
+| # | Step | Where | Model call | What it writes |
+|---|---|---|---|---|
+| 0 | Check the arguments and the client lock. Refused here: a missing `--client`, a bad `--efficiency` entry, a bad spend limit, the finder settings that cannot go together, a `cli` backend or a non-Anthropic model on a client engagement. Nothing has been read or spent. | `validate_args`, `require_client_lock` | none | nothing |
+| 1 | Name the repos (`--repo-name` or the folder name), find the state paths, sweep two bookkeeping files an older binary left in a repo | `resolve_sources`, `state_paths`, `clean_legacy_repo_file` | none | `<state>/<key>.repos.json` for a several-repo run |
+| 2 | Detect the stack and propose rules, then take the curated default selection (the rules a first untouched onboarding pre-checks) | `onboard::scan_repos`, `curated_rule_selection` | none | nothing |
+| 3 | Load the corpus once and split the selection. Rules the corpus marks `inspectable = false` leave the scan set here. | `split_scannable_rules` | none | nothing |
+| 4 | Resolve the backend (`resolve_backend`) and the mode (`resolve_scan_mode`: Message Batch on the API backend unless forced or `batch_default` is off, real time on the CLI backend with a printed notice) | `inspect_cmd.rs` | none | nothing |
+| 5 | Only for `--resume`: open the saved run (`open_for_resume`, the checks of section 14). It keeps the group reviewer model the run started on and re-checks the client lock on every model the run will call. A new run is created at step 7b. | `run_store.rs` | none | nothing yet |
+| 6 | With a spend limit, check that every model the run will call has a list price. On the `cli` backend, check each model against the installed Claude Code version. | `RunControls::refuse_if_cap_unenforceable`, `cli_version_refusal` | none | nothing |
+| 7 | Print the pre-flight estimate before the first call (section 6j). With the agent finder, also work out the plan the cost checkpoint projects from. | `preflight::build` | one free token count on the API backend | nothing |
+| 7b | A new run is saved from here on (`RunStore::create`): the plan of parts, every part pending, is written before any work starts, and every model reply is stored as it returns. The cost checkpoint starts recording into the run folder. | `run_store.rs` | none | `<state>/runs/<run-id>/run.json`, `lock.json`, `calls/`, `batches/`, `prior_manifest.json` |
+| 8 | Per repo: read the files, then the deterministic floor, the architectural checkers, the clone candidates and their judge, the finder, the merge stages, the corpus severity bounds, the fix stage and the evidence check (next table). | `onboard::audit_repos_with_llm_controlled` | the finder, the clone judge and the fix stage | stage checkpoints under the run folder |
+| 9 | The mechanical preview tools: `ruff`, `eslint` and `semgrep` read the code as data. `cargo clippy` builds the crate, so on a client engagement it runs only with `--run-client-tooling` (`ScanTool::executes_repo_code`, `crates/server/src/scan_tools.rs`). The ledger and the report say which ran. | `merge_scan_preview` | none | nothing |
+| 10 | The runtime and framework end-of-life audit, the dependency audit (OSV), the KEV and EPSS enrichment | `runtime_audit`, `dep_audit`, `vuln_intel` | none | ledger stage `dependency-audit-merge` |
+| 11 | The evidence of violation gate, then the corpus severity bounds over the final rows | `apply_evidence_gate`, `apply_scan_severity_bounds` | none | ledger stage notes |
+| 12 | The group reviewer (stage 2, section 6g). Skipped where the compliance gate blocked the AI review. | `group_review::review_scan_report` | one call per rule group | `checkpoints/`, stage telemetry |
+| 13 | The possible-duplicate check (section 6h). A failure is a run note, never a failed part. | `possible_duplicate::check` | one call per 20 candidate pairs | `duplicate_checks.json` in the run folder |
+| 14 | Settle the tool causes after the group reviewer has re-sorted the rows | `settle_tool_causes` | none | nothing |
+| 15 | Save the incremental baseline, only when nothing failed and the finder was the engine finder. Record the working tree as it now stands in the run. | `save_manifest`, `record_tree_end` | none | `<state>/<key>.cache.json`, `tree_at_end` in `run.json` |
+| 16 | Render the ledger summary. Write the ledger, the failure report and the rewrite advisory next to it. With the agent finder, also write the finder run record and any `--compare-with` note. | `render_ledger_summary`, `failure_report::write`, `rewrite_advisory::write`, `finder::write_finder_run` | none | `<key>.ledger.json`, `<key>.failures.json` and `.md`, `<key>.rewrite_advisory.*`, `<key>.finder-run.json`, `<key>.run-difference.md` |
+| 17 | Seal the report. After this no row can be added. | `ScanReport::seal` | none | nothing |
+| 18 | Build the package and run the release gate (section 6c). A client export of a run that did not complete is refused before anything is built. | `release_product_export` | none | the zip, only on a clean gate |
+| 19 | Tell the run store whether it finished and whether the export was written | `finish_run` | none | `run.json` status |
+
+Step 16 comes before step 18 on purpose: a run the release gate refuses still leaves its ledger,
+its failure report and its advisory.
+
+### Step 8 in detail (per repository)
+
+The order below is the order of `crates/server/src/onboard.rs` `audit_repos_with_llm_controlled`.
+A deterministic-only scan (`run_ai_review` false, or the compliance gate blocking the AI review)
+skips every model call in this table and keeps the free steps.
+
+| Step | What it does | Model |
+|---|---|---|
+| Files | The gitignore-aware walk of section 6, minus vendored, generated and binary files and files over the size caps. Files left out are listed in the report's coverage notes, never dropped silently. | none |
+| Floor | The deterministic floor rules (the secrets floor and the gate's own rules) | none |
+| Architectural checkers | The deterministic checkers (migration replay and the rest) that an armed rule needs | none |
+| Clone candidates | The duplicate-code candidates, then the clone judge answers them in batches of 16 (`clone_advisory::BATCH_SIZE`). Runs only when a clone rule is selected. | the clone judge model |
+| Finder | Either the engine finder (the next table) or the agent finder (section 6e). It replaces `audit_repo` as a whole. | scan and calibration models, or the finder model |
+| Merge | Same-rule same-place dedup, collapse of identical rows, the review tree's grouping | none |
+| Severity bounds | `apply_scan_severity_bounds` (section 6h) | none |
+| Fix stage | One concrete fix per row (`generate_fix_specifics_in`). Runs as batches when the run is a batch run. The rule's own authored fix replaces a fix the checks turn down, and the row is labelled a Standard fix (section 14). | the fix model |
+| Evidence check | Open each row's file and look for the quoted code near its line. A row where it is not found is marked `evidence_unverified` and held, never dropped. | none |
+
+### The engine finder (`ai_audit::audit_repo`, `audit_run.rs`)
+
+| Step | What it does | Model |
+|---|---|---|
+| Alternatives | For each rule with several options, one call decides which option the repo follows, that no convention exists or that the rule does not apply. Rules marked `violates` in the chosen option become defect rows. Skipped for a rule the operator forced. | the scan model |
+| Scan passes | Each file chunk is checked against the rule batches its routing group allows. A Message Batch on the API backend, parallel calls otherwise. | the scan model |
+| Resolution round | One more pass over files that earlier passes asked to see | the scan model |
+| Dedup and merge | Keep the highest severity for the same rule at the same place | none |
+| Detail regeneration | With `terse_output` on, the full explanation of each surviving row is written once here | the scan model |
+| Calibration (stage 1) | One verdict per site: severity, `real` yes, no or unclear, effort, a one line reason | the calibration model |
+| Kinds and information rows | Deviation kinds, then the convention observed, no convention and not assessed rows | none |
+
+### What the agent finder skips
+
+With `--finder agent` (or the project's Finder set to Agent) the alternatives, scan passes,
+resolution round, detail regeneration and calibration steps do not run. The finder returns the same
+values `audit_repo` returns, so every step after it is unchanged. The model roles of such a run are
+the finder, group review, fix generation, the duplicate check and, when a clone rule is selected,
+the clone judge (`cost_cap::models_the_run_will_use`).
+
+### The ten model-call stages
+
+`crates/server/src/stage_telemetry.rs` `Stage::ALL` lists them in pipeline order. The label is what
+the telemetry table prints.
+
+| Stage | Label | Model setting |
+|---|---|---|
+| Scan passes | `scan` | scan model |
+| Alternatives | `alternatives` | scan model |
+| Detail regeneration | `detail` | scan model |
+| Calibration | `calibration` | calibration model |
+| Group reviewer | `group-review` | group review model |
+| Fix generation | `fix` | fix model |
+| Deep tier (off unless asked for) | `deep` | scan model |
+| Clone judge | `clone-judge` | clone judge model |
+| Agent finder | `finder` | finder model |
+| Possible-duplicate check | `duplicate-check` | duplicate check model |
+
+### How a failure is treated
+
+The rule is run to completion: a deliverable never holds a failed or unfinished part.
+
+* Every model call is retried inside the transport (`crates/llm/src/retry.rs`). What is left after
+  the retries is a failure with a class (`camerata_llm::failure::FailureClass`): `transport`,
+  `auth_or_billing`, `content`, `spend_limit`, `outage_stop`, `io` or `rate_limited`.
+* `transport` and `rate_limited` parts get one more try at the end of their stage. A `content`
+  failure (the model answered and the answer was unusable) is never sent again unchanged. Each
+  stage changes the request in its own rounds instead.
+* An outage stops the run (`run_health.rs`): three transport failures in a row that together span
+  at least 120 seconds, or one `auth_or_billing` failure. Every part not yet sent is recorded as
+  not run with class `outage_stop`. A rate limit neither counts toward the streak nor resets it.
+* The spend limit stops the run between calls (section 6j). Parts it holds back are recorded as
+  not run with class `spend_limit`.
+* A failed or not-run part makes the report incomplete (`ScanReport::incomplete_reasons`). A client
+  export of an incomplete run is refused before anything is built, with the message "This
+  inspection did not run to completion, so it cannot be exported for a client", and exit code 4
+  (spend limit), 5 (outage) or 6 (anything else). An `--internal` run writes the export and marks it
+  INTERNAL INCOMPLETE (the README line, `manifest.json` `inspection.run_incomplete` and a marking in
+  `findings.json`). The release gate refuses such a package for a client even when the files are
+  edited by hand (`incomplete_run_problems`).
+* A resume (`camerata inspect --resume`) sends again only what is not stored as good (section 14).
+
+---
+
+## 6e. The agent finder
+
+> Added 2026-11-18. Code: `crates/server/src/ai_audit/agent_finder.rs` and the files beside it in
+> `crates/server/src/ai_audit/agent_finder/`. Design (intent only): the internal agent finder
+> design note. Where the two differ, the code is right.
+
+### What it is, and the two finders
+
+There are two finders. A finder is the part of an inspection that reads the code and reports
+problems. Everything after the finder (merge, severity bounds, fix stage, evidence check, group
+review, flags, export) is the same for both.
+
+| | Engine finder | Agent finder |
+|---|---|---|
+| Idea | The engine cuts the code into chunks, asks the model about each chunk against the rules in batches, then a calibration stage rates each site | One model agent reads each part of the code in a review room and writes its problems. The rules are its checklist. |
+| Switch (app) | Settings, Finder row, "Engine (rule by rule)" | Settings, Finder row, "Agent (one model reviews each part)" |
+| Switch (CLI) | `--finder engine` | `--finder agent` |
+| Default today | **Engine.** `ProjectFinder::default()` is `Engine` (`crates/api-types/src/project.rs`) and `--finder` defaults to `engine`. | Opt in |
+| Model setting | scan model and calibration model | finder model (built-in default Fable 5.2) |
+| Stages used | alternatives, scan passes, resolution, detail, calibration | the agent stages of this section (pieces, joints, conventions) |
+| Rating of a row | calibration (stage 1) | the agent's own `sure`, `effort` and `label`, through the same `apply_verdicts` code a calibration verdict goes through (`run/rating.rs`). The stored note says "Rated by the review agent that found it; no second reviewer rated this problem." |
+| Needs a full inspection | no | yes: the CLI refuses it with an earlier baseline unless `--full` is given |
+| Batch discount | yes, on the API backend | no: each piece is a live conversation, so `--batch` does not apply to the finder stage |
+
+A run keeps its finder for life. The finder is recorded in the saved run (`ModelsRecord.finder`,
+`crates/server/src/run_store.rs`) and a resume holds the run to it, whatever the project setting is
+now (`hold_finder`). An older run with no record resumes as the engine finder.
+
+### Where it plugs in
+
+`onboard.rs` (`audit_repos_with_llm_controlled`) calls
+`agent_finder::run::find_repo_for_run` instead of `ai_audit::audit_repo` when
+`controls.finder == FinderChoice::Agent`. It returns the same five values `audit_repo` returns plus
+`FinderExtras` (coverage, partial rules, notes). So a run has one finder or the other, never a mix
+inside one repo.
+
+The setup the run needs is built once before the audit by `finder_setup_for_run`
+(`agent_finder/run.rs`): the rooms folder (`finder-rooms/` inside the run's own folder, never inside
+a client repository); the Anthropic key from the saved credentials (a missing key stops the run
+before any call and never switches to the CLI); and the engagement kind.
+
+### Pieces
+
+A piece is the set of files one agent reviews (`agent_finder/pieces.rs`). The cut is by folder, in
+path order, the same on every run.
+
+* The unit is the repository (`units_for`: one unit per repo; service detection plugs in here
+  later). A piece never crosses a unit.
+* The target size is 240,000 bytes of model-facing text, about 6,000 lines (`TARGET_BYTES`). A unit
+  at or under 1.25 times the target is one piece.
+* A bigger unit is opened folder by folder. A folder that fits is one block; a folder over the
+  target is opened; a file over the target is a block of its own. Neighbouring blocks are packed up
+  to the target. A last piece of one or two files joins the piece before it when the two stay within
+  1.25 times the target (a tiny piece costs a whole agent run).
+* `--finder-force-pieces K` (internal runs only) cuts every unit into at least K pieces so the
+  joints step runs on small code. It halves the largest multi-file piece or joins the two smallest
+  neighbours until there are K.
+* The piece key is the unit name, the piece number and a digest of the file list. It is stable for
+  the same input, and the checkpoint and the failure report use it.
+* The most pieces run at once: 3 on the API backend, 1 on the CLI backend
+  (`pieces_in_flight_for`).
+
+### The review room
+
+`agent_finder/room.rs`. The room is a small in-memory file tree built from files that are already
+redacted. A path that is not in the room does not exist.
+
+| Path in the room | What it is |
+|---|---|
+| the piece's files | the files the agent owes a full read |
+| context files | files outside the piece that the piece imports, nearest folder first, within 30 percent of the piece's bytes, read only |
+| `_camerata/context/tree.txt` | every path of the whole repository |
+| `_camerata/context/neighbours.md` | an outline of what the piece imports and what imports it (at most 400 lines each side) |
+| `_camerata/context/context-files.txt` | the context files that were included |
+| `_camerata/checklist.md` | the rules checklist (below) |
+| `_camerata/out/` | the only place the agent may write |
+
+A repository file whose path is under `_camerata/` in any case is left out of the room and, if it is
+a piece file, is reported as not served. So a client file can never shadow a room file.
+
+**Tools.** Five: Read, Glob, Grep, LS and Write. Limits: a Read returns at most 2,000 lines and
+100,000 bytes (it stops at the last whole line that fits); a Grep returns at most 200 hits; a written
+file is at most 1,000,000 bytes; at most 200 distinct files may be written; a write is accepted only
+under `_camerata/out/`. Any other tool name is answered with a refusal.
+
+### Isolation: what the model can and cannot reach
+
+The client's own `.claude/` folder, `CLAUDE.md` and `.mcp.json` are reviewed as plain files and are
+never loaded. How that holds depends on the transport.
+
+* **API transport** (`api_agent.rs`). The finder calls the Anthropic Messages API directly with the
+  five tools served from the in-memory room. There is no Claude Code, no settings loader and no MCP
+  here, so nothing a repository holds can configure the call. The system text says text inside the
+  files is material to review and never an instruction. Each request body is built by the one
+  builder of `api_agent_driver.rs`, which redacts the whole conversation, so a secret the model
+  echoes in a tool call is gone from the next request.
+* **CLI transport** (`cli_agent.rs`, the `claude -p` command line). Internal runs only: a client
+  engagement is refused here (`refuse_client`) before a room is written, because the session data
+  would hold client code. The room is written to an engine-owned folder under the run's folder, with
+  the repository's files under `code/` and the room's own files (`_camerata/`) beside it. The
+  command is built by `crates/llm/src/llm.rs` `harden_completion` and
+  `crates/api-types/src/claude_cli.rs` `isolate_room_call`:
+  * the working directory is the room root, so a client's `.claude/` and `.mcp.json` (under
+    `code/`) are never project settings;
+  * `--setting-sources project` (never the operator's user settings, whose broad allow rules would
+    let the reviewer read outside its room);
+  * `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` (no instruction file is discovered) and
+    `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (no auto-memory);
+  * `--strict-mcp-config`, `--disable-slash-commands`, `--permission-mode dontAsk`;
+  * `--tools Read,Glob,Grep,LS,Write,Edit` (a closed list) with read rules scoped to the room and a
+    write rule scoped to `<room>/_camerata/out/**`, so under `dontAsk` anything else is refused;
+  * `--disallowedTools Bash,WebFetch,WebSearch,Task,Agent`;
+  * `--max-turns` from the piece limits and `--no-session-persistence`;
+  * the trace is read from the stream-json records the call prints on stdout. A call whose stream
+    cannot be found fails the piece, because coverage is never assumed. A call whose stream shows a
+    path outside the room fails the piece too. An internal run keeps each call's stream records in
+    `finder-traces/` beside the rooms folder, outside every room.
+
+### Secret redaction before the model sees code
+
+`find_repo` runs `crate::onboard::redact::files_for_model` on the whole file set first, in one
+canonical order. `Room::build` redacts again, so a room built from raw text still serves no
+credential value. The line numbers are kept, so a `path:line` the model cites still resolves. The
+switch is the operator-only flag `model_prompt_redaction` (default on, read from the environment
+variable `CAMERATA_FEATURE_MODEL_PROMPT_REDACTION` only, see section 6c). On the CLI transport the
+model-input chokepoint (`crates/llm/src/model_input.rs`) redacts the prompt as well.
+
+### How the finder writes a credential line
+
+The brief (`agent_finder/brief_text.rs`, `SAFETY_RULES`) tells the agent never to copy a credential,
+key, token, password or connection string value into any field, even masked or partial. In `code`,
+for a line that holds a credential, it writes only the variable or key name, stopping before the `=`
+or `:` (for example `STRIPE_SECRET_KEY`). When several lines hold credentials, `code` is the first
+name only and the other lines go in `places`. When a credential has no name (a PEM block or a key
+inline in code), `code` is the part of the line before the value. It still reports the problem. It
+also writes no step-by-step exploit instructions, working payloads or ready-to-run attack code. Why
+a bare name: a placeholder such as `<value omitted>` made the engine read a real committed secret as
+an unfilled template and cap it low, and several bare names joined into one snippet never match the
+file in the evidence check. Every text field of a problem is also redacted again when the output is
+read.
+
+### The brief, the output files and the turns
+
+The first paragraph of the piece brief (`PIECE_BRIEF`) is a plain review request: read this code and
+report every security and architecture problem, with a severity, why it matters and how to fix it. The
+lines after it are what the harness needs. The agent:
+
+1. Reads its part and writes its problems to `_camerata/out/problems-1.json` (then
+   `problems-2.json` and so on, at most 40 to a file). Each problem has `n`, `path`, `line`,
+   `end_line`, `severity` (critical, high, medium or low), `title`, `code`, `what`, `why` (technical),
+   `business` (why it matters to the client's business: what can happen, never what will happen, no
+   figures), `fix`, `sure` (`yes` or `unsure`), `unsure_why` (one sentence, when unsure), `effort`
+   (low, medium or high) and `label` (two to four words). The same fault at several places is written
+   once with the other places in `places`.
+2. When it has written down everything it found, and not before, opens `_camerata/checklist.md` and
+   follows it (next section). That order is deliberate: the model's own judgment comes first.
+3. Writes any problem it saw in a file outside its part to `_camerata/out/leads.json` (`path`,
+   `line`, `what`).
+4. Writes `_camerata/out/card.md`, at most 300 words: the part's entry points, what it trusts its
+   callers to have done, what it exposes and the questions it could not settle.
+5. Writes `_camerata/out/unread.json`: every file of its part it did not read in full, or an empty
+   list. This list is a claim only. It never changes a coverage state (see Coverage).
+
+`agent_finder/reply.rs` reads each file against a schema in code and turns problems into findings.
+Output that cannot be used is never dropped in silence.
+
+**The follow-up turns** (`run/piece.rs` `converse`). After the first run, if it ended normally, the
+runner reads the output and may send up to three follow-ups on the same conversation, each at most
+once, in this order of priority:
+
+| Follow-up | When | What it says |
+|---|---|---|
+| Repair | an output file with a known name (`problems*.json`, `checklist.json`, `leads.json`, `unread.json`) could not be used, or no problems file was written | the format again in full (every required field, no dropped field, the credential rule, the 40 per file limit), the file that failed with its reason and, for a number clash, which earlier problem to keep. If no problems file was written: write `problems-1.json`, and an empty list if nothing was found. |
+| Send again | piece files the agent did not read in full | the whole text of those files follows. Review them and add any problems to new problems files with the next unused numbers |
+| Rules | rules with no answer, or an answer the checks could not accept | write `checklist.json` again for those rules (answers given before stand) |
+
+A follow-up that cannot be sent (a released conversation, a missing key) is recorded as a failed
+step. A step that did not end normally reviewed nothing: neither its reads nor the files it was sent
+count toward coverage. A stray file the agent wrote (a name that is not a known output) is an
+operator note, and a file named like a problems file but with a stray name is read when it parses as
+a problems list.
+
+### Limits of one piece
+
+`PieceLimits::for_piece` (`agent_finder.rs`):
+
+* turns: 2 for each file plus 30, at least 60 and at most 400 (`turns_for`);
+* 32,000 output tokens a turn (a reply cut off at the output limit is continued once, then the piece
+  fails);
+* the longest one call may run on the clock (CLI transport): 60 seconds a turn, at least 15 minutes
+  and at most 4 hours;
+* a spend ceiling for the piece: four times its estimate, with a fixed minimum. The estimate for a
+  piece is a base amount plus an amount for each 1,000 lines (`run/piece.rs` `estimate_usd`). The
+  ceiling is one per piece however many follow-ups it takes.
+
+The API transport waits and retries by the engine's schedules: 2, 8 and 30 seconds for a rate limit
+or a server error, 5, 20, 60 and 120 seconds for an overload (HTTP 529 or 503). A `retry-after`
+is honoured up to 300 seconds. A request that has been sent and may be billed is always counted: a
+later failure comes back as a failed run with the usage of every paid turn, never as a silent error.
+
+### The rules checklist
+
+`agent_finder/checklist.rs`. `Checklist::build` takes the rules the AI tier checks for the repo and
+keeps the ones with at least one of the piece's files in scope (the rule's `applies_to` routing, when
+the `applies_to_routing` efficiency measure is on). Each rule shows its id, title, the directive of
+the project's chosen option (else the default), the corpus severity range as a suggestion and its
+options. A directive's severity orders are turned into guidance, because the engine no longer holds
+an agent's row to a rule's minimum ("Report at high severity when" becomes "Usually high when").
+
+The checklist asks the agent to do three things, then write `_camerata/out/checklist.json`:
+
+1. **Cite.** For each problem it already reported that breaks a rule on the list, record the
+   problem's number and the rule id. A problem that breaks no rule stays as it is.
+2. **Answer every rule**, one answer each, with one of four answers.
+   * `problems` with the numbers of its problems;
+   * `clean` with up to three places it checked, each a file and line it read;
+   * `not_a_problem_here`: the letter of the rule is not met at one place and the agent judges it
+     harmless. One place and one sentence of reason. It reports nothing to the client and tells the
+     reviewer what the agent saw. Not for something the code needs and lacks, and not when the
+     reason would name a real cost and call it small (that is a problem at low severity);
+   * `not_applicable`, only when this part has no code of the kind the rule governs, with one
+     sentence saying what is absent.
+   For a rule with options it also gives the counts, and up to ten places for each option.
+3. **Add.** A problem only if it would report it to this client on its own judgment, rated by
+   itself. A rule that asks for something the code needs and does not have is a problem. When in
+   doubt it writes the problem with `sure: unsure`.
+
+**The checks in code** (`Checklist::check_with_shown`). Nothing the model says about its own work is
+believed.
+
+* A `clean` answer holds only if a named place is a file of the piece at a line a Read returned (or a
+  file a completed step showed in full). Otherwise the rule is `NotCompleted`.
+* A `not_a_problem_here` answer gets the same place check, else `NotCompleted`.
+* A `problems` answer needs problem numbers that exist. If none resolves (the problem moved to the
+  leads because its path is outside the piece) the rule is `NotCompleted`, never "not applicable".
+* When a rule has several answers the worst one stands: problems, then not completed, then clean,
+  then not a problem here, then not applicable.
+* A citation needs a rule on the list and a problem that exists.
+* A rule with no answer even after the rules follow-up is `missing`.
+
+A `NotCompleted` or missing rule is recorded as partial for that unit (`note_partial_rule`), so it is
+never recorded as verified clean, and the piece fails with the reason "rules not answered" or "rules
+not completed". The fail is a failed part (class `content`), so the run is incomplete and a resume
+asks again.
+
+### Coverage
+
+`agent_finder/coverage.rs`. Coverage is read from the tool trace only.
+
+| State | Meaning |
+|---|---|
+| read in full | the lines returned across all Reads cover the whole file |
+| read in part | some lines were read: the merged ranges |
+| sent again | the transport proved the whole text went to the model in a turn that completed (`AgentRun::shown_in_full`, filled only by the transport) |
+| not reviewed | neither |
+
+A step that did not end normally contributes nothing. A piece file the room could not serve (its
+path is under `_camerata/`, or it is not in the repository set the room was built from) is owed and
+is "not reviewed" with that reason. The agent's own `unread.json` is compared with what the trace
+shows and the result (`claim_matched`) is recorded, but it never changes a state. A piece file that
+is still read in part or not reviewed after the send again step makes the piece fail with "files not
+reviewed" (class `content`), and the rules that cover those files are marked partial. The per piece
+record (files owed, read in full, read in part, sent again, not reviewed, context files read, whether
+the agent's list matched) goes to the ledger (`ScanLedger::record_finder_coverage`).
+
+### The joints between pieces
+
+For a repository with two or more pieces, after every piece has finished, one more agent call
+(`run/joints.rs`, brief `JOINTS_BRIEF`) reviews only what shows across parts. It is given every
+piece's card, every lead and the list of problems already reported (number, rule, place, title), and
+it can read any file of the repository. It follows the open questions on the cards, a check one part
+assumes and no part performs, data that crosses parts, layering faults and duplicated logic. It
+writes its problems as before and `leads-answers.json`.
+
+Every lead is answered one of two ways: "covered by problem n", or a new problem. A lead no answer
+settles becomes a problem needing a decision (rule `AI-OPEN-QUESTION`, severity from the lead, else
+medium) at the lead's place, so a lead is never dropped. A joints call whose number for a problem
+clashes with a reported one is renumbered above the highest in use. The joints call waits while any
+part has failed: the run is incomplete already, the leads still become problems needing a decision;
+the resume pays for the call once. A repository that is one piece makes no joints call.
+
+### Conventions from the answers
+
+The alternatives stage does not run under the agent finder, so its job is done from the checklist
+answers (`run/conventions.rs`). For each rule with options, the option counts of a repository's
+pieces are added. An option with at least two thirds of the counted places is the convention. A
+decision rule with no such option has no convention. The result is the same `RuleRecommendation`
+record the alternatives stage writes, so the existing steps (`apply_alternative_decision`,
+`assign_deviation_kinds`, `conventions_observed_findings`, `no_convention_findings`) run unchanged.
+The listed places of an option that is not the convention become departures, one problem each,
+checked against the file. A place that cannot be checked (no such line, a blank line) becomes a
+problem needing a decision. A problem cited to a rule with no convention is never thrown out: it
+moves to the next rule it was cited to that has a convention, else to its own `AI-` label.
+
+### Rows from problems
+
+Each problem becomes a finding (`reply::to_findings`) carrying captures the operator can read (the
+piece, `sure`, effort, the fix text, `unsure_why`, the business and technical reasons, the rules it
+was cited to). All of them are bookkeeping keys: none names an object, so the same value on two
+problems never reads as one cause. Then:
+
+* **Every further place of a problem is its own row.** The problem's `places` become sibling rows
+  (`places_as_rows`), each at its own path, line and snippet, in the same sub-group so the places
+  share one fix. A place that cannot be checked is a problem needing a decision.
+* Lines are anchored. Rows the parser threw out are set aside. Same-rule same-place rows are
+  deduplicated at the highest severity. Rows at one place are collapsed and merged.
+* **Severity.** The agent's own rating stands. The corpus floors are guidance for an agent row
+  (`rule_minimum_is_guidance`): a rule's minimum does not raise it. The one raise kept is the
+  unauthenticated access floor (R-8). The ceilings still apply.
+* An `unsure` problem is held for review and carries the possible false positive reason "Finder
+  unsure" (section 6h).
+* **The rule of a row comes only from a citation.** The first cited rule (strictest first) is the
+  row's rule and the others go in `also_matches`. A problem cited to no rule on the checklist keeps
+  the model's own label as an `AI-` rule id. A free-text label is never matched to a rule, however
+  close it is to one.
+
+### Cost and the estimate
+
+The finder stage is priced by a formula of three terms: a figure for each 1,000 lines, a figure for
+each piece and a figure for each joints call, with a low and a high multiple for the range
+(`AGENT_FINDER_*` in `crates/ui-core/src/scan.rs`). The constants are starting guesses. The cockpit
+shows a line for each repo ("finder stage about ... (range ... to ...), N piece(s)"). The
+group review, the fix stage and the duplicate check are not in the figure. See section 6j for how
+the estimate, the limit and the cost checkpoint behave.
+
+### Checkpoints and resume
+
+Each finished piece is stored as a checkpoint line (key = the piece key, stage name `finder_<repo>`;
+the joints call is `joints:<digest of its input>`) holding the recorded conversation. A resume
+replays a stored piece through exactly the code a fresh piece goes through, so the output is the
+same. It records the stored turns as resumed spend. A piece that failed stores nothing, so a resume
+starts it again. Its paid turns are recorded as wasted. A piece the model refused is stored under
+`<key>#refused`; a resume runs it in two halves by path order, and a single file the model refused on
+an earlier attempt and again alone is not tried again and stays a failed part.
+
+### The finder in the ledger and the failure report
+
+Failed finder parts are named `agent finder, part N of M (<what>)` where `<what>` is one of: output
+not usable, files not reviewed, rules not answered, rules not completed, files not served. The
+joints failure is `agent finder, joints between parts`. A part that was held back by the spend limit
+is recorded as not run with the group `agent finder`. Stage samples in the ledger: `agent-finder`,
+`ai-location-merge`, `agent-finder-no-convention-filter`, `violates-option-emission` and the three
+information row emissions.
+
+### Operator files of an agent finder run
+
+Operator side only. None of these is in any export.
+
+| File | Where | What |
+|---|---|---|
+| `<key>.finder-run.json` | next to the ledger in the state folder | the problems of the run, for `--compare-with` |
+| `<key>.run-difference.md` | same | the comparison with an earlier run, when `--compare-with` was given |
+| `finder-rooms/` | the run folder | the CLI transport's rooms |
+| `finder-traces/` | the run folder, internal CLI runs only | the stream records of each call |
+| `cost_checkpoint.json` | the run folder | the latest cost checkpoint |
+
+`--compare-with <state folder>` reads every `*.finder-run.json` in that folder, or when there is none
+the findings of every `*.cache.json` (the other finder's scan cache), and matches the two runs'
+problems. A folder that does not exist or holds nothing is an error: a comparison with nothing is
+never silent (`crates/cli/src/inspect_cmd/finder.rs`, `agent_finder/run_diff.rs`).
+
+### Refusals before any spend
+
+`refuse_unsupported_finder_settings` (`run.rs`), called by `validate_args` and again once the
+baseline is known:
+
+* `--finder-force-pieces` without `--internal`: "is for internal runs only";
+* `--finder-force-pieces` without `--finder agent`: "needs --finder agent";
+* `--finder agent` with `--consensus`: "cannot be combined with --consensus";
+* `--finder agent` with an earlier inspection baseline: "needs a full inspection", pass `--full`.
+
+These refusals are made by `camerata inspect`. In the app the project's Finder setting decides, and
+no refusal of the same kind is made. By the code, an app scan whose request is incremental (the
+default) hands the agent finder only the files changed since the last scan (`part.changed` in
+`onboard.rs`), and carries forward the earlier findings for the unchanged files. For the agent finder
+to review every file, tick "Full scan (ignore incremental cache)". This path was read, not run.
+
+---
+
+## 6f. Stage models and the client lock
+
+> Added 2026-11-18. Every model the engine calls in an inspection can be set on the project or on
+> the command line. A model never comes from the environment or from a `.env` file.
+
+### The rows in Settings
+
+The review screen has five lanes: Tree, Escalations, Engine Check, Flat view and Settings
+(`crates/ui/src/cockpit/review_shell.rs`). The Settings lane (`crates/ui/src/cockpit/review_settings.rs`,
+words in `crates/ui-core/src/review_settings.rs`) has a "Stage models" block with seven model rows,
+then a separate "Finder" row, then the "Escalation formula" and "Engine Check" blocks. The words
+under the rows are the UI's own: "Models come from this project or a CLI flag, never the
+environment. The model per stage is recorded in the ledger and disclosed in the methodology
+section." All controls are locked while a run is in flight ("A run is in flight, so these settings
+are locked until it finishes.").
+
+| Row (label) | Route key | What it does | Built-in default | "(not set)" offered |
+|---|---|---|---|---|
+| Scan model | `audit` | The engine finder's scan passes, the alternatives stage and the detail step. Unused by the agent finder. | Sonnet 5.5 (`DEFAULT_MODEL`, `claude-sonnet-5-5`) | no |
+| Calibration (stage 1) | `calibration` | Per site, batched: severity, real or not, effort, a one line reason. Unused by the agent finder. | Opus 5.5 (`STAGE1_DEFAULT_MODEL`, `claude-opus-5-5`). A new project is seeded with it. An older project keeps the pick it stored. | no |
+| Group review (stage 2) | `group_review` | One call per rule group, in real time: the architect's first reader (section 6g). | Fable 5.2 (`STAGE2_DEFAULT_MODEL`, `claude-fable-5-2`). The row shows it selected when nothing is stored. A blank model is refused. | no |
+| Fix model | `fix` | One concrete fix for each row | With `fix_on_haiku` on (the default): Haiku 5.5 (`claude-haiku-5-5`) at effort `low`. With it off: the calibration model, else the scan model. | yes |
+| Finder model | `finder_model` | The agent finder's model. Used only when the finder is Agent. | Fable 5.2 (`FINDER_DEFAULT_MODEL`). Hint: "not set: Claude Fable 5.2; used when the finder is agent". | yes |
+| Duplicate check | `duplicate_check` | The possible-duplicate check (section 6h) | Sonnet 5.5 (`DUP_CHECK_DEFAULT_MODEL`). Hint: "not set: Claude Sonnet 5.5". | yes |
+| Clone judge | `clone_judge` | The duplicate-code checker, which judges clone candidates. Runs only when a clone rule is selected. | The project's fast tier model, whose built-in default is Haiku 5.5. Hint: "not set: the project's fast tier model". | yes |
+| Finder (separate row) | `finder` | Not a model. `agent` or `engine`. The choices read "Agent (one model reviews each part)" and "Engine (rule by rule)". Hint: "agent: one model reviews each part; engine: rule by rule". | **Engine** (`ProjectFinder::default()`) | no |
+
+"(not set)" means the setting is empty and the run uses the default named in the table. It is
+offered only where a run-time default exists that an explicit pick would override. Choosing it sends
+a blank model to the route, which clears the setting for `fix`, `finder_model`, `duplicate_check`
+and `clone_judge` (`crates/server/src/routes/projects.rs` `set_step_model`). The route refuses a
+blank model for every other step, and refuses a `finder` word that is not `agent` or `engine`.
+
+The settings are stored on the project: `StepModels` (`audit`, `calibration`, `fix` and the
+helper steps) and `ReviewSettings` (`group_review_model`, `dup_check_model`, `finder_model`,
+`clone_judge_model`, `finder`, the escalation numbers and `sample_size_per_run`) in
+`crates/api-types/src/project.rs`. Every field of `ReviewSettings` has a serde default, so a project
+file written before a setting existed loads with the default.
+
+### Where each model comes from: the precedence
+
+The order is the command line flag, then the project setting, then the built-in default. The
+environment is never a source.
+
+* **`camerata inspect`** has no project. It reads only its flags (`--model`, `--calibration-model`,
+  `--fix-model`, `--clone-judge-model`, `--group-review-model`, `--dup-check-model`,
+  `--finder-model`). Unset, the built-in default applies.
+* **The app** reads the open project. `RunControls` is built by
+  `AuditReq::run_controls_for_project` (`routes/scan_jobs.rs`): the project's fix model, its
+  clone judge (its own setting, else the fast band's primary) and its `ReviewSettings`. The scan
+  screen's own pick of scan and calibration model wins over the project's for that run
+  (`step_model_or`). `RunControls::fill_models_from_project` fills only a model the run was not
+  already given: a flag wins over the project, and a blank project field leaves the built-in
+  default.
+* The resolvers are one function each, shared by both entry points:
+  `resolve_audit_model`, `resolve_calibration_model` (`ai_audit/usage_meter.rs`),
+  `resolve_fix_model` (`ai_audit/fix_stage.rs`), `resolve_group_review_model`
+  (`ai_audit/group_review.rs`), `resolve_dup_check_model` (`possible_duplicate/check.rs`),
+  `finder_model_for` (`agent_finder.rs`) and `resolve_clone_judge_model`
+  (`onboard/clone_advisory.rs`). A request that names no model is refused by the transport with an
+  error that names the caller as the bug, so the model the pre-flight prices, the ledger records
+  and the spend limit checks is the model that runs.
+* On a resume, the group review model is kept at what the run started on (`hold_group_review_model`).
+  An explicit different one is refused: "this run's group review is on X, and this resume asks for
+  Y. The stored group review replies came from X, so resume it with the same model, or start a new
+  run". The scan, calibration and fix models and the mode must equal the saved ones
+  (`ModelsRecord::matches_for_resume`).
+
+### The client lock
+
+A client engagement runs only on the Anthropic API with Anthropic models (`crates/server/src/client_lock.rs`).
+It is on by default: `Project::client_engagement` for every new, imported or legacy project until
+the operator turns it off, and every `camerata inspect` unless `--internal` is given.
+
+* The `cli` backend (the Claude Code subscription, consumer terms) is refused.
+* Any model that is not a first party Anthropic API model is refused. The test is the shape of the
+  id (`is_anthropic_api_model`): it must start with `claude-` and contain no `/` and no `:`. An
+  OpenRouter id such as `vendor/model` or `vendor/model:free` never passes. It is an allowlist on the
+  shape, not a lookup in the model registry, because the registry knows the OpenRouter catalog only
+  once it has been fetched.
+* **Every model the run calls is checked before any file is read.** The list comes from
+  `models_a_scan_may_use` over the run's own controls: the scan, calibration, group review, fix,
+  duplicate check, the finder when it is the agent finder and the deep tier when it is on. The
+  clone judge is always included, because which rules are selected is not known until files have
+  been read. On the command line this is `validate_args` then `require_client_lock`. In the app it
+  is `client_lock_refusal_for_scan` (`routes/chat_models.rs`). A resume checks again after the kept
+  group review model is applied (`refusal_for_run_models`).
+* The lock checks when a run starts. Saving a non-Anthropic model into the project does not fail at
+  save time. The run is refused with the model named, for example "This is a client engagement, so
+  every model must be an Anthropic API model (an id starting with `claude-`)", followed by the
+  app's fix: "In this project's Settings, set the backend to API and the audit and calibration models
+  to Claude models, or turn off Client engagement if this is your own development and not client
+  work." The command line adds "Run it with `--backend api` and Anthropic models (`--model
+  claude-...`), or pass `--internal` if this is your own development and not client work."
+* A scan with no active project is refused as a client engagement with no opt-in.
+* A client's own tooling is separate: a step that executes the client's code (today only the
+  `cargo clippy` preview) runs on a client engagement only with the operator's opt-in
+  (`client_tooling_opt_in` in the app, `--run-client-tooling` on the command line). The decision is
+  recorded in the ledger and stated in the report.
+
+### How to run a project with Opus 5.5 as the finder and the group reviewer
+
+In the app, on the project's review screen, open the Settings lane and set three rows:
+
+1. Finder: "Agent (one model reviews each part)".
+2. Finder model: Opus 5.5.
+3. Group review (stage 2): Opus 5.5.
+
+Leave Fix model, Duplicate check and Clone judge at "(not set)" unless a different model is wanted
+for them. The backend must be API for a client engagement (the project's backend setting). Scan model
+and Calibration are not used while the finder is Agent. Changes are refused while a run is in flight.
+
+On the command line:
+
+```
+camerata inspect --repo <PATH> --repo-name <OWNER/REPO> --export <OUT.zip> --client "<NAME>" \
+  --finder agent --finder-model claude-opus-5-5 --group-review-model claude-opus-5-5
+```
+
+Add `--full` when an earlier inspection of the same code exists. Add `--max-cost-usd <USD>` to put a
+limit on the run. The command refuses before any spend if a model has no list price while a limit is
+set. For the maintainer's own development on the subscription, add `--internal --backend cli`. A
+resumed run keeps the models it started on.
+
+### Model facts the engine relies on
+
+Prices and request shapes are in the registry table in section 4 (`crates/llm/src/model_registry.rs`).
+Two matter for these settings. Opus 5.5 defaults to `medium` effort, so every call asks for `high`
+explicitly (`EffortPolicy::SetHigh`). Fable 5.2 on the `cli` backend needs Claude Code 2.1.290 or
+newer (`CLAUDE_CODE_MIN_VERSIONS`); the run checks every model it will call against the installed
+version before any call and refuses with the reason.
+
+---
+
+## 6g. The group reviewer (stage 2)
+
+> Added 2026-11-18. Code: `crates/server/src/ai_audit/group_review.rs` (`review_scan_report`,
+> `review_groups`), `crates/server/src/review_tree.rs` (`rank_candidates`) and
+> `crates/server/src/follow_reviewers.rs`.
+
+### What it is
+
+Stage 1 (calibration, or the agent's own rating) rates each site on its own. Stage 2 is the
+architect's first reader of each rule group. The architect reviews patterns, not every site: he reads
+a summary at each group and goes down to single sites only where it matters. The group reviewer
+reads a whole rule group at once, so it can see what a per-site reviewer could not: which sites share
+a cause, which do not belong with the rest and which differ.
+
+### What it decides
+
+One structured call for each rule node. Its reply has exactly these parts
+(`STAGE2_FIELD_HOMES` pins where each lands; the reply schema has no field without a home):
+
+| Part | What it is | Where it lands |
+|---|---|---|
+| `summary` | what the architect reads at the rule: what the sites have in common, what is wrong, what to do. It names every site that does not share the stated cause by its `path:line`. It states no counts. | the rule node's summary |
+| `subgroups` | the sites sorted by shared **cause**. Each has `label`, `cause` (one sentence), `summary` (what the architect reads at it), `why_business` and `why_technical` (for the client) and `members`. A sub-group is the unit the architect reviews, and one sub-group is one **Fix**. | the sub-group node, and each member's `group_path` |
+| `outliers` | sites that do not belong with the rest of their sub-group, each with a reason from the outlier list and a one line `why` | the sub-group's outliers, the row's `outlier_reason` |
+| `escalations` | sites the architect must look at himself, each with one reason from the escalation list, a `rank` (1 first in the group) and a one line `why`. "Escalate sparingly": a limited number of minutes. | the review tree's candidates, then the line below |
+| `disagreements` | where it disagrees with the per-site reviewer: `field` is `severity` or `real`, with `stage1`, `mine` and `why` | the row's stage 2 disagreement, shown beside stage 1's answer |
+
+**It never removes a site.** Every member index is in exactly one sub-group. An index the reply
+leaves out lands in the rule's `unplaced` sub-group and is named in the ledger. An index the reply
+invents is counted and ignored. A chunk the model could not be read for keeps the placement the
+grouping pass gave it. **It never overwrites stage 1:** a disagreement is stored beside stage 1's
+answer, whose value is read from the row, not from the reply. **It never writes a count:** the
+numbers beside a summary come from the tree. A number the prose states is checked against it. A
+site that differs from the stated cause but is not named in the summary is flagged.
+
+### The closed lists
+
+The escalation reasons, most urgent first (`EscalationReason::ALL`, `crates/api-types/src/review.rs`):
+`unauthenticated_reach`, `secret_exposure`, `data_loss`, `cross_tenant`, `authorization_bypass`,
+`injection`, `conflicting_verdicts`, `likely_false_alarm_at_high_severity`, `outlier_in_group`,
+`rule_misfit`, `evidence_unverified`, `needs_more_code`. A disagreement the model records (a
+different `real`, or two or more severity levels apart) escalates the site by
+`conflicting_verdicts` automatically. `evidence_unverified` is added by the engine, not the model.
+
+The outlier reasons (`OutlierReason::ALL`): `severity_raise_held`, `different_object`,
+`different_construct`, `only_site_in_file`, `stage2_outlier`, `precondition_added`,
+`unverified_name`, `fix_ungrounded`, `contradiction`, `evidence_unverified`, `in_test_code`,
+`could_be_intentional`, `methodology_leak`. An outlier mark alone never puts a site in the queue.
+
+### The escalation line and the budget
+
+`rank_candidates` collects every escalation of every node into one ranked list and marks the line:
+
+1. One row has one reason: the highest ranked reason it was given.
+2. The engine adds `evidence_unverified` for every row whose quoted evidence was not found (the
+   release gate refuses that row without a decision anyway) and `conflicting_verdicts` for a row
+   whose shown critical or high severity is a floor applied after review, above what stage 1 rated,
+   when stage 1 called it real (R-5).
+3. Rows at one site (same repo, path and line) share one slot whatever their rules (R-1).
+4. Sites sort by severity (critical first), then by reason rank (R-2), then interleave across nodes
+   inside one severity and reason, so one noisy rule cannot take the whole budget (D6).
+5. The first `budget` slots are escalated. Past it, only the reasons that may exceed the budget are,
+   each recording why. The rest stay below the line, visible, in order.
+
+**The budget** is `max(floor, ceil(counted_lines / 1000 x rate))` with the rate taken to three
+decimals and whole number arithmetic (`EscalationBudget::compute`). Defaults: **1.0** escalation per
+1,000 counted lines and a floor of **20** (`DEFAULT_ESCALATION_RATE_PER_KLOC`,
+`DEFAULT_ESCALATION_FLOOR`). The command line flags are `--escalation-rate` and `--escalation-floor`.
+In the app the Settings lane has "Rate per 1,000 lines" and "Floor", whose limits are
+`ESCALATION_RATE_MAX` 10 and `ESCALATION_FLOOR_MAX` 1,000. Apply re-marks the line from the stored
+candidates and makes no model call.
+
+**Reasons that may exceed the budget** (`over_budget_reasons`, the "May exceed the budget"
+checkboxes): the default set is `unauthenticated_reach`, `secret_exposure`, `data_loss`,
+`cross_tenant`, `authorization_bypass`, `injection` and `evidence_unverified`. A candidate goes over
+only if its reason is in the set and its severity is critical, or high for the reasons of
+`is_severe_at_high` (all of them except unauthenticated reach). `evidence_unverified` always goes
+over, at any severity, whatever the stored set says.
+
+### How it runs
+
+Through the shared stage runner (`ai_audit/stage_batch.rs` `run_stage`) in `Parallel` mode, because
+the architect is waiting on it: adaptive concurrency (8 requests in flight on the API backend, 2 on
+the CLI backend), a pause on a 429 or an overloaded answer, one re-ask of a reply that was turned
+down. A rule group over 150 members (`MAX_CHUNK_MEMBERS`) is read in chunks cut along its sub-group
+hints, plus one short rule-level summary call. Every request passes `ensure_request_fits`: a chunk
+that is too big is split further, and one that cannot be made to fit is a failed part, never sent.
+It runs on the final row set (the preview, dependency and evidence gate rows included) on a meter
+that continues the scan's, so the spend limit counts the whole run. It does not run where the
+compliance gate blocked the AI review. The model is recorded on the report's provenance. After it,
+`follow_reviewers` makes severities and kinds follow what the reviewers said (R-7): a row either
+stage doubted (stage 1 `real: no`, the group reviewer not real, `rule_misfit` or
+`likely_false_alarm_at_high_severity`) is exactly the row a severity floor must not inflate, so the
+floor does not raise it and the row is held for the human reviewer. Nothing is dropped.
+
+On the CLI backend both prompts end with a line saying that no tools exist, because one reply on a
+real run was a transcript of tool calls instead of the JSON object.
+
+### What a reply may get wrong and still be read
+
+The reply tolerances (`reply_object`, `Stage2Reply::parse`):
+
+* The span from the first brace to the last is read first (a code fence or prose around one object).
+  When that is not one object, the top level `{...}` blocks are tried and only the last one counts: a
+  malformed object then a corrected one means the corrected one, and a valid object followed by a
+  malformed correction is refused, never read as the stale first one.
+* **(added 2026-11-18) A stray colon after a reason.** A reason value followed by a colon and
+  perhaps an empty string, as in `"reason": "needs_more_code": "", "rank": 2`, is repaired to
+  `"reason": "needs_more_code", "rank": 2`. This is tried only when the reply did not parse, only
+  for the known escalation and outlier reason names (escaped with `regex::escape`), and a reply that
+  still fails is refused with the original message.
+* **(added 2026-11-18) A lone sub-group with no `members`.** When the reply has exactly one
+  sub-group and it leaves `members` out, the sub-group holds every index of its part (the chunk's
+  indexes on a chunked group). With two or more sub-groups `members` is still required.
+* A reply that leaves `rank` out of an escalation is read, not refused: the rank only orders one
+  group's escalations. The tree sorts an unranked escalation after the ranked ones and keeps the
+  engine's order among them, and the ledger says so.
+* `why_business` and `why_technical` are optional: missing, null, blank or not a string reads as
+  empty, never as a failed reply. A withheld why raises a reviewer flag on the node.
+* Every client facing text field is redacted on the way in (the release gate's own detector) and
+  rewritten for the client (no em dash, en dash or multiplication sign).
+
+Still refused (a failed part after the one re-ask): not JSON, a field the schema does not have, a
+reason outside the closed lists, a `field` that is neither `severity` nor `real`, a `mine` outside
+that field's values, a value of the wrong kind.
+
+### Failure and resume
+
+A group reviewer part that fails (its failed parts join the report's) makes the run incomplete. A
+resume keeps the model the run started on and replays every stored reply. The plan's `GroupReview`
+part is one part for the whole run, after every repo's rows are in.
+
+---
+
+## 6h. What the review screen reads from the engine
+
+> Added 2026-11-18. The review screen (`crates/ui/src/cockpit/review*.rs`, words in
+> `crates/ui-core/src/`) never works a number out itself. The server composes every row
+> (`crates/server/src/review_view.rs`) and the UI words what the server carried. This section lists,
+> for each thing the reviewer sees on a row, where it comes from.
+
+### The Stage 1 line, the Stage 2 line and the disagreement note
+
+* **Stage 1 line** (`ui-core/src/edits.rs` `stage1_line`): `high · real yes · effort low · "the key is
+  a literal"`, joined with a middle dot: stage 1's severity, `real yes`, `no` or `unclear`, the
+  effort and the one line reason in quotes. It is absent when stage 1 did not read the site. Stage
+  1's severity is the row's own severity, or the value a reviewer's severity edit replaced. Under the
+  agent finder there is no calibration stage: the line shows the agent's own rating (`sure` becomes
+  `real`, `unsure` becomes `unclear`), written by the same code a calibration verdict is.
+* **Stage 2 line** (`stage2_line`): `escalated, unauthenticated reach, rank 12 · why "..." · outlier:
+  different object "..."`. The state is "escalated" or "below the line". It is absent when the group
+  reviewer said nothing about the site.
+* **The group reviewer's disagreement note** (`severity_note`): written after the severity when stage
+  2 disagrees with stage 1 on severity: `stage 1 said high; stage 2 disagrees: medium, "why"`. Stage
+  1's value is never overwritten. The disagreement sits beside it.
+
+### The severity line: the rule's floor and ceiling, and which bound moved it
+
+`crates/ui-core/src/edits.rs` `severity_bounds_note` words the `SeverityBoundsView` the server
+carried (`crates/api-types/src/review_view.rs`). Operator only. The bounds are the corpus rule's own
+(`crates/rules/src/severity_bounds.rs`, the one implementation the scan, the exporters and the
+repo-installed CI gate share). They apply in this order: the floor (`min_severity`, for an accusing,
+located row only), then the null location net (no path and line 0 becomes `info`), then the ceiling
+(`max_severity`), then the deviation ceiling (a consistency deviation is at most the rule's
+`deviation_ceiling`, default `medium`). The floor runs first so a ceiling always has the last word.
+`info` ranks with `low`, so no ceiling raises it back.
+
+* When a bound moved the severity, the line says so, each step in order and joined with ", then ":
+  "raised from low by the rule's floor (at least medium)", "capped from critical by the rule's
+  ceiling (at most high)", "capped from high: a consistency deviation is at most medium", "set to
+  info: the row has no file and line".
+* When no bound moved it, the line is the rule's bounds quietly: `rule: at least medium, at most
+  high`, or "a consistency deviation is at most medium". It is absent when the rule sets none.
+* The `applied` steps are read back from the adjustment notes the chain recorded
+  (`SEVERITY_ADJUSTMENTS_CAPTURE`, `crates/server/src/review_view/severity_bounds.rs`). Only the
+  bounds that are still the last things that moved the shown severity are listed: the walk goes back
+  from the shown severity and stops at the first move that does not chain to it. A severity the
+  reviewer set is the reviewer's own and shows no bound move.
+* For an agent finder row, and for a style linter row that is not a security check, the rule's
+  minimum is guidance only (`rule_minimum_is_guidance`), so the floor is not shown and does not raise
+  the row. The model's rating stands. The one raise kept is the unauthenticated access floor (R-8).
+* A row either reviewer doubted is held at its severity, not raised (section 6g, `follow_reviewers`).
+  The note the client may read says only "Severity held at <level> pending a decision." The operator's
+  detail names the reviewer and the floor held back (`SEVERITY_HOLD_DETAIL_CAPTURE`).
+
+### The Possible false positive flag
+
+`crates/server/src/possible_false_positive.rs`, reasons in `crates/api-types/src/review.rs`
+(`FpReason`). The engine's own reasons to doubt a row, worked out once from data the run already
+holds, with no model call, so the operator can open those rows first and rule them out quickly.
+
+**It never hides, drops, merges or lowers anything.** It changes no severity, kind, escalation or
+decision. A flagged row stays a problem until the operator rules it out. The flag reaches the
+operator only: the review UI, the internal workbook's technical band and an internal `findings.json`.
+A client package carries neither the flag nor its reasons (pinned by
+`crates/server/src/report_export/wo9/possible_fp_tests.rs`). The UI shows it in three places. On the row
+it is a chip with a dashed violet outline (hover text is the reasons as sentences). In the queue it is
+the "Possible false positives first (N)" button (a look only, like "Show below the line"). In the
+detail it is the "Possible false positive" lines, each reason followed by the row's own sentence when
+it has one.
+
+| Reason (label) | It fires when |
+|---|---|
+| `group_reviewer_doubt` ("Group reviewer doubts it") | the group reviewer marked the row an outlier for being a different object or a pattern that could be intentional, or disagreed downward (lower severity, or "not real", or "unclear" against stage 1's "yes") |
+| `calibration_doubt` ("Calibration unsure") | calibration left the row waiting for a reviewer (outside test scope) or its confidence is not high. For an agent row: its confidence, which an agent row does not carry. |
+| `test_code_only` ("Test code only") | the row is in test or fixture code and is not about a secret (a secret committed in a test is never flagged for this) |
+| `convention_rule_at_medium_or_higher` ("Convention rule at medium or higher") | a style or convention rule, not a security rule, rated the row medium or higher |
+| `evidence_not_found` ("Evidence not found") | the quoted code was not found near the cited line |
+| `severity_from_rule_minimum` ("Severity from the rule minimum") | the shown severity comes only from the rule's minimum: a rule minimum raised it, stage 1 rated it lower and the group reviewer, when it rated it, rated it lower too. For an agent row: only a recorded raise (R-8) lifted it. Never when the reviewer set the severity. |
+| `model_only` ("Model only") | only the model reported the row, no deterministic row is at the same place and its confidence is not high. Never for an agent row. |
+| `finder_unsure` ("Finder unsure") | an agent finder row the model marked `unsure`. The model's own `unsure_why` sentence follows the reason. |
+
+The flag also carries the row's own sentence for two reasons: the finder's `unsure_why` for
+`finder_unsure`, and the group reviewer's own `why` for `group_reviewer_doubt`. Reviewer added rows
+are never flagged. Agent finder rows are model rows even though they carry no confidence, so they
+are not counted as deterministic (`is_agent_row`).
+
+The flag can be wrong in both directions: a flagged row can be a real problem and an unflagged row
+can be a false alarm. That is why it never acts on its own, and why the Engine Check samples the rows
+the reviewer rules out while flagged (below). The code states no rate for it. **Ruling out a flagged
+row needs a reason**, the same as ruling out any row: see the next section.
+
+### The Possible duplicate hint and the duplicate model check
+
+`crates/server/src/possible_duplicate.rs` and `possible_duplicate/check.rs`. Recall comes before
+cutting duplicates, so a problem found twice under two causes can reach review. Two different causes
+(different Fix ids) that each have a problem row in one file, at lines within 3 of each other
+(`NEAR_LINES`), are a **candidate pair**. A residual sub-group ("No shared cause found") counts each
+place as its own cause, so two residual rows near each other pair even though they share a Fix.
+Place alone cannot tell the same flaw written twice from two different flaws that sit near each
+other, so a model judges each candidate.
+
+* **Where it runs:** once per run, right after the group reviewer (which makes the Fix ids the pairs
+  are built from) and before the export. Model: the Duplicate check row (default Sonnet 5.5) or
+  `--dup-check-model`.
+* **What it asks:** at most 20 pairs a call (`MAX_PAIRS_PER_CALL`), the two write-ups with their
+  explanation (at most 700 characters) and quoted code (at most 400). The answer for each pair is
+  `same` (the same flaw written twice, fixing one fixes the other), `different` or `unclear`, with
+  one short reason (at most 240 characters). In real time, one re-ask of a rejected reply.
+* **What is kept:** the stored answers (`DuplicateChecks`) on the scan ledger and in the run folder
+  as `duplicate_checks.json`. `DupIndex::new` keeps only the pairs answered `same`. The review view
+  and the internal exports read the stored answers and make no model call. With no answers (the
+  check did not run, or failed) there is no hint.
+* **What it never does:** hide, drop, merge, lower or reorder anything a client sees. It changes no
+  count, severity, kind, escalation or decision and never holds an export. A client package carries none of
+  it. A failed, skipped or stopped check never fails the run: it leaves no hints and one operator
+  note (a run note on the ledger), and a resume tries again, replaying what an earlier try already
+  read at no cost. A run with no candidate pair makes no call. A row the engine threw out, or one
+  merged into another, is never a candidate.
+
+### Ruling out a flagged row needs a reason
+
+The store refuses a decision with no reason where it makes a claim beyond the finding
+(`crates/server/src/decisions.rs`): Ignore (accepted risk), False positive, Merge into another row
+and putting back a row the engine threw out each need one. Confirm and Tech debt need none. A
+decision on a **group** (a tree node) always needs a reason, Confirm included, because a batch is
+where a wrong call hides the most rows (D9). The forms ask for it and the palette command for
+ruling a row out always opens the reason prompt, so a row carrying the flag is never ruled out with
+no reason typed, single or batch (pinned by tests in `decisions/tests.rs`, `ui-core/src/palette.rs`
+and `ui/src/cockpit/tree/tests.rs`). In the batch form ("False positive all N"), one reason prompt
+covers all the checked cards, a blank reason is refused and the prompt stays open. A group decision
+never covers the rows held for a ruling of their own (next sections). The reviewer may be held to
+the reason: it is stored on the record.
+
+### Held rows
+
+A row is held when something about it must be ruled on before it can go to a client. The one
+definition is `decisions::held_keys`, unioned with the rows the release gate refuses
+(`release_gate::holds::hold_set`), so a screen and the gate cannot disagree. A batch decision never
+covers a held row. The reasons (`HoldReason`, `crates/api-types/src/review_view.rs`) in the order
+the gate checks them, with the words the export-blocked panel prints:
+
+| Reason | Panel words | What holds it |
+|---|---|---|
+| `junk_content` | junk text | the row's text is junk (a placeholder, a refusal, an untranslated fragment) |
+| `evidence_unverified` | evidence unverified | the quoted code was not found near the cited line |
+| `restored_without_decision` | put back after the engine threw it out, no decision | the reviewer restored a thrown-out row; a restore is not a ruling |
+| `split_out_without_decision` | split out of a ruled-out problem, no decision | the problem was split out of one the reviewer ruled out and has no decision of its own |
+| `merged_without_decision` | merged with no decision record | the row exports as merged and no merge decision with a reason stands behind it |
+| `engine_check_no_without_correction` | Engine Check said No, no correction yet | an Engine Check No stands with no correction (below) |
+
+### The Engine Check sample
+
+`crates/server/src/engine_check.rs`, lane in `crates/server/src/review_view/lane.rs`, words in
+`crates/ui-core/src/engine_check.rs`. The Engine Check is the architect's own quality control of the
+engine: a fixed sample of rows per run, one card each, one question, "did the engine get this
+right?", Yes or No. It is internal and never appears in any client output.
+
+* **Size.** The "Sample size per run" setting, 0 to 1,000, default 50 (`DEFAULT_SAMPLE_SIZE_PER_RUN`).
+  0 turns the first sample off. "Enter saves, Esc reverts."
+* **The kept stratum.** Rows the group reviewer did not put in the queue (an escalated row is read by
+  the reviewer by construction), allocated across categories in proportion to their unread rows,
+  with at least 3 for every category that has that many (`SAMPLE_CATEGORY_FLOOR`; a floor holds even
+  when it puts the total over the size).
+* **The thrown-out stratum.** The rows the engine threw out are sampled apart: `max(5, 10 percent of
+  the size)` of them, or all when fewer exist. Its rate is never pooled with the kept rows.
+* **The draw is deterministic.** Rows are taken in the order of a SHA-256 hash of the run id and the
+  site key, so a rerun of the screen and the gallery agree, and a decision never changes the sample.
+* **A Yes** records the verdict and nothing else. **A No** on a kept row names what was wrong from a
+  closed list of eight: Not a real issue, Wrong severity, Duplicate of another row, Should have been
+  escalated, Should not have been escalated, Wrong grouping, Wording or fix wrong, Group summary does
+  not describe this finding (digits 1 to 8 pick one). A No on a thrown-out row has one answer,
+  "Thrown out, but a real problem", and puts the row back. A No with no reason named is refused
+  ("A No says what was wrong, from the closed list.").
+* **A No holds the row from the client export** until it is corrected: the verdict names a correction
+  that exists, or the reviewer decides or edits the site strictly later than the verdict
+  (`uncorrected_keys`). A record made in the same second, or one whose time cannot be read, does not
+  count, so a doubt never lets a wrong finding through. A No carried from an earlier run still
+  stands. The release gate check is "reviewer correction on flagged findings", and an Engine Check
+  file that cannot be read also refuses, because with the verdicts unknown no No can be ruled out.
+* **Honest labels.** An Engine Check rate is the error rate "among reported findings", and the other
+  rates say "Real problems among thrown-out findings" and "Real problems among rows ruled out while
+  flagged". The check cannot see problems the engine missed entirely, so no string claims it can.
+
+### The second look at rows ruled out while flagged
+
+A second, separate sample guards the reviewer's own rulings. It is not part of the first sample and
+never reads or changes it (`draw_ruled_out_flagged`, `review_view/lane.rs` `second_look`).
+
+* **The pool** is every row that carries the Possible false positive flag and whose standing decision
+  is False positive, in the order the rulings were made.
+* **The share** is 20 percent of the pool (at least 3), or all of them when fewer
+  (`RULED_OUT_SHARE_PERCENT`, `RULED_OUT_MINIMUM`). It is built one ruling at a time: after each
+  ruling the draw is topped up to what the rows so far call for, with the row whose draw order comes
+  first among those not yet drawn. A later ruling never takes a drawn row out (a card the reviewer
+  already answered cannot vanish) and may add one. With a pool of 15 or fewer the cards are the first
+  three rulings.
+* **Drawn rows stay drawn** (`second_look` in the Engine Check store), whatever the decisions, the
+  flag or the sample size do afterward, and so does any row with a standing No. Only rows still ruled
+  out count toward the share, so a row since kept as a problem never uses it up.
+* **It stays on when the sample size is 0**: it guards the reviewer's own rulings, not engine
+  sampling. A row the first sample already holds carries only that card.
+* **The card** asks the same question. A Yes is "the ruling was right". A No is "Ruled out, but a
+  real problem" and is the only No this card takes (and no other card takes it).
+* **Only un-ruling the row answers that No.** The hold stays while the row's standing decision, or the
+  row it was merged into, is still a False positive. Another rule-out, an edit, a group rule-out or a
+  named correction does not free it. The merge chain is followed up to 8 steps; a chain that cycles or
+  is too long to follow reads as "still ruled out" (the hold fails safe; fixes of 2026-11-17 and 2026-11-18).
+
+### One cause per problem, every place its own row
+
+* A **Fix** is the cause: a set of sub-groups the group reviewer made. The client counts causes
+  (distinct Fix ids), and the release gate's "one fix per row" check holds the files to it.
+* **Every place stays its own row** (design amendment A11). A problem written at several places has
+  one row for each place, in the same sub-group, so the places share one fix. The engine never writes
+  `also_locations` from a producer.
+* **A tool shares one cause per tool rule** (`crates/server/src/tool_row_groups.rs`): all rows of one
+  repo, tool and tool rule (`eslint`, `ruff`, `clippy`, `semgrep`) take one sub-group. When the rule
+  family matches an agent row in the same repository, the tool rows join that agent row's cause
+  instead (the agent row's rating is untouched and the tool is named in `also_seen_by`). A style
+  linter's own labels are rated low, its security checks keep the tool's severity. The camerata
+  architecture rows are per-site detectors and stay as placed. The causes are decided after the group
+  reviewer (`settle_tool_causes`), which re-sorts a rule's rows. They fold only into a single agent
+  cause.
+* Settling again keeps a row's own sub-group when no agent row is in it.
+
+### The business and technical "why"
+
+Two audiences read two reasons, and the reviewer can edit both before export.
+
+| Text | Written by | Read by |
+|---|---|---|
+| a sub-group's `why_business` | the group reviewer, for the client: what can go wrong for the product, its data, its users or the people who work on it, and when it starts to matter. One consequence that fits, "what can happen, never what will happen", no figures, times or costs the code does not show. | the Fix plan, the PDF (business only) |
+| a sub-group's `why_technical` | the group reviewer: what breaks and under what conditions | the Fix plan. The PDF never reads it. |
+| the sub-group `summary` | the group reviewer, for the architect | the review screen only. No client file carries it. |
+| a row's own business text (`finder-business` for an agent row) and technical reason (`finder-why`) | the finder, per problem | the All problems sheet (business), the detail |
+
+A client text is edited by the reviewer with an edit on the node (`why_business`, `why_technical`,
+with a reason, recorded in the overlay) or on the row (the row's business text), through
+`EditField` in `crates/api-types/src/edits.rs`. A node's text edit is cleaned for the client like the
+row edit. Every client text passes the style rules (no em dash, en dash or multiplication sign) and
+the secret detector before it reaches a file. A why the model left out raises a reviewer flag on the
+node.
+
+---
+
+## 6i. `camerata inspect` and the other commands: every flag, every default
+
+> Added 2026-11-18. Source: `crates/cli/src/main.rs` (the clap definitions and their help text) and
+> `crates/cli/src/inspect_cmd.rs`. Where the help text and the code differ, the code is stated here
+> and the difference is named.
+
+### `camerata inspect`
+
+Headless brownfield inspection: the full cockpit scan pipeline over the repos, then the same product
+export ZIP the UI's export button makes. No BFF, no UI. A client engagement is the default.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--repo <PATH>` | required unless `--resume` | The repo's local working tree. Repeat it to inspect several repos as ONE project (one scan, one report, one cache, one ledger). |
+| `--repo-name <OWNER/REPO>` | a lone repo is named for its folder | The repo's name, one per `--repo` in the same order. It tags every finding and keys the cache. Required when more than one `--repo` is given (a folder name is not a repository name, and two repos can share one). Each name must be a valid `OWNER/REPO` and unique. |
+| `--export <PATH>` | required unless `--resume` | Where to write the ZIP. Its parent directory must already exist. With `--resume`, defaults to where the saved run was to write it. |
+| `--client <NAME>` | required unless `--resume` | Who the inspection is for. Printed in the export's confidentiality line on every PDF page and workbook sheet ("Confidential, prepared for <client> on <date>"). Checked before anything is read or spent. |
+| `--backend api\|cli` | `api` | `api` is the Anthropic Messages API with the key saved in the app (the Keychain), or `ANTHROPIC_API_KEY` as the fallback. `cli` is the operator's own Claude Code subscription, for internal runs only: it needs `--internal`. An `api` run with no key fails and names the fix. It never falls back to the CLI. |
+| `--batch` | off | Force the Message Batches path (about half price on scan tokens, results only when the whole batch completes). Requires `--backend api` and a key. Exclusive with `--realtime`. |
+| `--realtime` | off | Force real time (parallel) calls at the full price. |
+| `--model <ID>` | Sonnet 5.5 | The scan model (audit pass). The help says "the project-less model floor", which is `DEFAULT_MODEL`. |
+| `--calibration-model <ID>` | Opus 5.5 | Stage 1. The help says "the project-less model floor"; the code default is `STAGE1_DEFAULT_MODEL`. |
+| `--fix-model <ID>` | unset | The fix stage. Unset: Haiku 5.5 while `fix_on_haiku` is on, else the calibration model, else the scan model. |
+| `--clone-judge-model <ID>` | Haiku 5.5 | The duplicate-code checker. |
+| `--group-review-model <ID>` | Fable 5.2 | The group reviewer (stage 2). |
+| `--dup-check-model <ID>` | Sonnet 5.5 | The possible-duplicate check. |
+| `--escalation-rate <PER-KLOC>` | 1.0 | Escalations the group reviewer may put in the architect's queue per 1,000 counted lines. Must be zero or a positive finite number. |
+| `--escalation-floor <N>` | 20 | The fewest escalations a run may carry. |
+| `--full` | off | Ignore the on-disk incremental cache and re-scan every file. |
+| `--verbose` | off | Also print the ledger's per rule detail (rule id, ran, files evaluated, findings). |
+| `--max-cost-usd <USD>` | no limit | The spend limit (section 6j). Must be positive and finite. |
+| `--efficiency <NAME=on\|off>` | all on | Switch a token efficiency measure for this run. Repeatable. Wins over `CAMERATA_EFFICIENCY`. Measures (`crates/server/src/efficiency.rs`): `warm_schedule`, `label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`, `fix_prefilter`, `fix_on_haiku`, `terse_output`, `batch_default`, `applies_to_routing`, `candidates_prefilter`. An unknown name is refused before anything runs. |
+| `--internal` | off (so a client engagement) | Not a client engagement: the maintainer's own development. Without it, `--backend cli` and OpenRouter models are refused before any file is read; the repository's own code is never executed; an incomplete run exports nothing. With it, an incomplete run is exported and marked INTERNAL INCOMPLETE. |
+| `--run-client-tooling` | off | Opt in to steps that execute the client's own code on a client engagement (today the `cargo clippy` preview, which builds the crate and so runs its build scripts and procedural macros). Recorded in the ledger and stated in the report. |
+| `--consensus` | off | Run the AI audit three times and keep only the findings at least two runs report (`CONSENSUS_PASSES` 3, `CONSENSUS_QUORUM` 2). About three times the AI cost. Not with `--finder agent`. |
+| `--finder engine\|agent` | `engine` | Which finder reviews the code (section 6e). |
+| `--finder-model <ID>` | Fable 5.2 | The agent finder's model. |
+| `--finder-force-pieces <K>` | unset | Internal runs only: cut every unit into at least K pieces. Needs `--internal` and `--finder agent`. |
+| `--compare-with <STATE-FOLDER>` | unset | After the run, compare its problems with those an earlier agent finder run left in that state folder and write the difference beside the ledger. Never in the export. |
+| `--resume <RUN-ID\|latest>` | unset | Run only what remains of a saved run (section 14). `latest` is the newest run with work left that was started from the command line (with `--repo`, the newest of those repos). `--export` and `--max-cost-usd` may be given again. Everything else is the saved run's. |
+| `--bff-url <URL>` (global) | `CAMERATA_BFF_URL`, else `http://127.0.0.1:8787` | Used only by the HTTP adapter subcommands. Ignored by `inspect`. |
+
+**No model comes from the environment.** The environment variables the CLI does read are not model
+sources: `CAMERATA_STATE_DIR` (where the state folder is), `CAMERATA_DATA_DIR` (where the app's
+stores are), `CAMERATA_EFFICIENCY` (the efficiency switches, a comma list of `name=on|off`),
+`CAMERATA_FEATURE_MODEL_PROMPT_REDACTION` (the operator only redaction switch, section 6c),
+`ANTHROPIC_API_KEY` (the key fallback), `CAMERATA_CLAUDE_PROGRAM` (which `claude` binary the CLI
+backend runs) and `CAMERATA_CLI_TIMEOUT_SECS` (the hard cap on one `claude` call, default 300).
+
+**Refusals before anything is read or spent** (`validate_args`): `--client` blank; `--repo` not a
+directory or given twice; `--repo-name` count or format wrong; `--export` parent missing;
+`--batch` with `--realtime`; `--batch` without `--backend api` or without a key; a bad
+`--efficiency` entry or spend limit; the finder combinations of section 6e; the client lock
+(section 6f).
+
+**Exit codes of `inspect`** (`inspect_cmd.rs`): 0 complete (or `--resume` of a run that is already
+complete, which says so and does nothing); 1 failure or a refused resume; 3 the release gate refused
+the export (nothing is written); 4 the spend limit stopped the run; 5 an outage stopped the run;
+6 incomplete for another reason (a part failed after its retries and second try).
+
+**What it prints.** `camerata inspect: wrote <path> (<bytes> bytes), backend: <api|cli>, findings:
+<n>`; `release gate: passed (<n> checks)`; `integrity ledger: <path>`; the token and cost report; the
+efficiency measures that were on; the spend limit block; each `run note:`; the ledger summary in four
+sections (PIPELINE STAGES with a `!!` on any stage that does not reconcile, DETECTION FAMILIES, NOT
+RUN, FAILED PASSES, then BATCH RUNNER NOTES when there are any; `--verbose` adds PER-RULE DETAIL);
+`failure report: <path>`; `operator note (never exported): <path>`; `run: <id> (camerata inspect
+--resume <id> runs only what remains)`; and the per stage telemetry table.
+
+### The other subcommands
+
+| Command | What it does | Exit codes |
+|---|---|---|
+| `camerata repeatability --repo <PATH> --max-cost-usd <USD>` | Measure run to run drift: the full AI pass twice with every answer cache bypassed, then the difference by tier, rule and severity and the findings one run reported and the other did not. Prints the pre-flight first and **refuses without `--max-cost-usd`** (each run gets half; refused when one run's estimate is above its half). Writes nothing. Flags: `--backend`, `--model`, `--calibration-model`, `--efficiency` (`result_cache` is always off), `--format text\|json`, `--internal`. | 0 both runs complete, 4 either incomplete |
+| `camerata integrity-gate --ledger <PATH> [--profile graded\|smoke]` | Evaluate a ledger `inspect` wrote: did everything that should run, run. `graded` (default) requires every engine that must run for any repo to have run and treats a scoped-out semantic tier as a blocker. `smoke` checks structure only and cannot catch a dark tier. | 0 pass, 1 degraded, 2 the gate could not run (never a pass) |
+| `camerata release-gate <ZIP>` | The export release gate over a ZIP on disk: the same checks `inspect --export` runs, never printing a secret value. Build with `--features pdf-text` to check the PDF's text too. | 0 clean, 3 blocked, 2 could not run |
+| `camerata count <REPO> [--json]` | Count a repo exactly as the inspection reads it: files and non blank lines per language, plus what the noise filter excluded. No model, no network. This is the number a quote is priced on. | |
+| `camerata cost-regression --baseline <LEDGER> --current <LEDGER> [--threshold-pct N]` | Compare two inspections of the same code: cost per 1,000 counted lines. Default threshold `DEFAULT_COST_REGRESSION_PCT`. | 0 within, 1 regressed, 2 cannot compare |
+| `camerata seed-review <FIXTURE> --data-dir <DIR> [--variant base\|moved\|clean] [--force]` | Write a demo review project into a data directory through the server's own stores. No model, no network. Refuses a non empty data directory unless `--force`. Never deletes. | 0 seeded, 1 refused |
+| `camerata corpus check\|confirm <DOMAIN> <YYYY-MM-DD>\|lock\|check-sources` | The rule corpus bookkeeping: staleness watermark, the lock of rule versions and content hashes (refuses a rule changed without a `version` bump), the cited source check. | |
+| `camerata stories`, `run`, `uows`, `assign`, `start-run`, `events`, `recent-events`, `feedback` | Thin HTTP adapters over the running BFF's `/api/*` routes. | |
+| `camerata acceptance`, `gate-probe`, `eval` | In process checks of the gate and the deterministic floor. No model, no network. | |
+| `camerata live-demo`, `build-demo`, `po-demo`, `worktracker-demo`, `maintenance-demo`, `deploy-demo`, `worktracker-live`, `projects-live` | The demo and live harness commands. | |
+
+The `integrity-gate` flag help in `main.rs` still says the ledger is `<repo>/.camerata-scan-ledger.json`.
+That is the pre 2026-10-18 location. The ledger is in the state folder (below); `inspect` prints its
+path as `integrity ledger:`.
+
+### Project settings and scan options in the app that shape an inspection
+
+In the app the same pipeline is driven by the open project's settings and by the scan request the
+scan screen sends (`AuditReq`, `crates/server/src/routes/scan.rs`). Where a setting has a command line
+twin it is named.
+
+| Setting | Where | Default | Command line twin |
+|---|---|---|---|
+| Backend `api` or `cli` | project (`POST /api/projects/:id/backend`) | a brand new project starts on `api` (`ProjectBackend::for_new_project`). A legacy project file with no backend reads as `cli`. | `--backend` |
+| Client engagement | project (`POST /api/projects/:id/client-engagement`) | on for every new, imported or legacy project until the operator turns it off | `--internal` turns it off |
+| Run client tooling opt in | project, same route (`client_tooling_opt_in`) | off | `--run-client-tooling` |
+| The stage models and the Finder | project, Settings lane (section 6f) | section 6f | the model flags and `--finder` |
+| Escalation rate, floor, "May exceed the budget" reasons | project, Settings lane (`ReviewSettings`) | 1.0, 20, the seven reasons of section 6g | `--escalation-rate`, `--escalation-floor` (the reasons have no flag) |
+| Engine Check sample size | project, Settings lane | 50 (0 turns the first sample off) | none |
+| Spend limit | scan screen, "Spend limit (USD)" (`max_cost_usd`) | blank: none | `--max-cost-usd` |
+| Scan model and calibration model | scan screen picks, over the project's | the project's, else the built-in defaults | `--model`, `--calibration-model` |
+| Mode `auto`, `parallel`, `sequential` or `batch` | scan request (`mode`) | auto: batch on the API backend, real time on the CLI backend | `--batch`, `--realtime` |
+| Thorough calibration (`thorough`) | scan request | off. The calibration pass runs several times and takes a conservative consensus. Costs more. | none |
+| Incremental (`incremental`) | scan request | on. Only files that changed since the last scan of the project are re-audited and cached findings are carried forward. The UI's "Full scan (ignore incremental cache)" checkbox sends `false`. The first scan of a project is always full. | `--full` |
+| Deep tier (`deep`) | scan request | off. Three extra whole repo lenses (SOC 2 gap analysis, a deep security audit, a threat model). Advisory, the most expensive tier. Not exposed on the command line. | none |
+| Run AI review, Run deterministic scans (`run_ai_review`, `run_deterministic`) | scan request, the scan type selector | both on. With the AI review off the run makes no model call. Both off is forced back to both on (never a no op scan). | none |
+| Allow partial (`allow_partial`) | scan request | off. Without it a project with a repo that has no local clone is refused and names the missing repos. With it the report lists them as not inspected and the release gate refuses to package it. | none |
+
+### The state folder layout
+
+The per user state folder (`crates/server/src/scan_cache/state_dir.rs`): `~/Library/Caches/camerata/`
+on macOS, `$XDG_CACHE_HOME/camerata` or `~/.cache/camerata` elsewhere, the temp folder if there is no
+`HOME`. `CAMERATA_STATE_DIR` replaces the platform cache directory (`camerata/` is still appended).
+Nothing here is written into the scanned repository. The key `<key>` is `<name>-<fnv32 of the
+canonical path>` for one repo and `project-<count>-<hash of the sorted paths>` for several.
+
+| Path | What it is |
+|---|---|
+| `<key>.cache.json` | the incremental scan baseline (`ScanManifest`), written only by a complete scan with the engine finder |
+| `<key>.ledger.json` | the pipeline integrity ledger: counts, no code. Read by `integrity-gate` and `cost-regression`. |
+| `<key>.failures.json` and `<key>.failures.md` | the operator's failure report: every failed part with every attempt's status, provider error, request id and waits. A part a later attempt completed stays as history with a `resolved_at`. Also lists the Standard fixes and the detail fallbacks. Removed when nothing failed now or before. |
+| `<key>.rewrite_advisory.json`, `.md`, `.history.jsonl` | the operator's rewrite advisory (fix or rewrite is the architect's call alone). Never in any zip. The history keeps up to 500 runs' raw numbers. |
+| `<key>.finder-run.json`, `<key>.run-difference.md` | agent finder runs only (section 6e) |
+| `project-<n>-<hash>.repos.json` | which folders a several repo project's cache and ledger cover, so source deletion can find them |
+| `runs/<run-id>/run.json` | the saved run's record (section 14) |
+| `runs/<run-id>/lock.json` | the lock, with process id and a heartbeat |
+| `runs/<run-id>/calls/`, `batches/` | every stored model answer, and every submitted Message Batch |
+| `runs/<run-id>/prior_manifest.json` | the incremental baseline the run started from |
+| `runs/<run-id>/checkpoints/` | stage checkpoints: `finder_<repo>`, `alternatives_<repo>`, `fix_<repo>`, `duplicate-check` and the others |
+| `runs/<run-id>/cost_checkpoint.json` | the latest cost checkpoint |
+| `runs/<run-id>/duplicate_checks.json` | the duplicate check's answers |
+| `runs/<run-id>/finder-rooms/`, `finder-traces/` | agent finder, CLI transport |
+
+Run folders are mode 0700 because they hold model answers derived from client code, and deleting a
+checkout deletes every file here that covers it. The newest 5 runs per project are kept
+(`DEFAULT_KEEP_RUNS`). The app's own stores are under `<data dir>/camerata/` (section 7): the
+decisions, edits and Engine Check verdicts are `decisions/<project>.json`, `edits/<project>.json` and
+`engine-check/<project>.json`.
+
+---
+
+## 6j. Running a scan: the estimate, the spend limit, the cost panel and the backends
+
+> Added 2026-11-18.
+
+### The pre-flight estimate
+
+Printed before the first model call (the command line prints it, the cockpit shows it on the scan
+screen). Code: `crates/cli/src/inspect_cmd/preflight.rs` (`build`), the arithmetic in
+`crates/ui-core/src/scan.rs` (`estimate_run_cost_by_repo`) and the facts in
+`crates/server/src/preflight.rs`. It is "an estimate, not a quote". It prints:
+
+* the estimated cost, the token count and the number of model calls;
+* an "at most" figure when the ceiling is above the expected figure: the worst case if the scan
+  reports sites at the highest rate seen and the detail step needs every repeat round on every
+  finding. The usual run pays for its first round only;
+* the basis: characters of code, files, the number of rules the model checks, the scan, calibration
+  and group review models, the mode and the backend;
+* one line for each repo of a several repo run, and a repo that could not be read is named and left
+  out of the figure (the run is refused, naming it, rather than priced smaller);
+* on the API backend, the exact input size of one scan pass as counted by the API (free, not billed);
+  on the CLI backend, "not available";
+* the consensus and incremental notes, and the spend limit line.
+
+**It can overestimate.** It prices a full scan, so a run with an earlier cache costs less ("a
+previous scan's cache exists; unchanged files reuse its findings, so this run can cost less"). With
+`terse_output` the detail step is an upper bound, and "rule routing by declared scope is not
+modeled, so a scan that skips rules costs less". The engine finder's figure prices the scan,
+calibration, group review, fix and (when a clone rule is selected) clone judge models. It does not
+price the duplicate check. A model with no list price leaves its stage out of the figure, and the
+figure says so (the group review model is named when that happens).
+
+**The agent finder's estimate** is the formula of section 6e (per 1,000 lines, per piece, per joints
+call, with a low and a high multiple). It is the finder stage alone: the group review, the fix stage
+and the duplicate check are extra. The cockpit shows it as a line under the estimate for each repo.
+Known gap: `camerata inspect --finder agent` still prints the engine finder's estimate text
+(`preflight::build`). The agent finder's own text, `preflight::build_agent_finder`, exists and is
+tested but nothing in the pipeline calls it. The pieces are priced for the cost checkpoint's plan
+(`controls.checkpoint.plan`) in either case.
+
+### The spend limit
+
+`--max-cost-usd` on the command line, and the "Spend limit (USD)" field on the scan screen (blank means none). Code:
+`crates/server/src/cost_cap.rs`. It is a guard against a runaway bill, not a saving, so it fails
+loudly: a run that stops early is incomplete, and says so everywhere.
+
+* Without it there is no limit. The pre-flight still prints the expected cost.
+* **Checked before every model call or batch of every stage** starts: each scan pass, the alternatives
+  call, each detail regeneration batch, each calibration batch, each group review call, each fix
+  batch, each deep tier call, each clone judge batch, each agent finder piece and the joints call.
+  A call that has started always finishes. So a run can end about one pass over the limit (a pass
+  can include one retry).
+* A pass is admitted only while `spent + in flight x reserve < limit`, where the reserve is the
+  larger of the most any one call has cost so far and the most any request built so far could cost
+  (its whole prompt at the full input rate plus its `max_tokens` at the output rate). The first pass of
+  a run is always admitted, so a limit smaller than one pass still lets that one pass finish.
+* A stage is blocked once spend reaches the limit and once the limit has stopped anything, so nothing
+  starts after the limit has bitten. What it holds back is recorded as not run with class
+  `spend_limit` and listed under FAILED PASSES.
+* A Message Batch cannot be cancelled cheaply, so the limit is checked before submission against a
+  projection (the estimate). A batch that was submitted runs to completion.
+* Every model the run will call must have a list price in the registry, or the run is refused
+  before anything runs, naming each unpriced model: "The spend limit cannot be enforced: ... has no
+  price in the model registry". If a call's cost becomes unknowable mid run, the run stops and says
+  the limit "COULD NOT BE ENFORCED".
+* **On a resume the limit counts the whole run:** fresh spend plus the stored replies' cost. The
+  resume prints "spend limit: $X. The limit counts the whole run, stored replies included: $Y is
+  already spent, so $Z remain for what is left to do", or that no further call will be sent when the
+  stored replies already pass the limit. Set the limit to the stored spend plus what you will allow
+  for the rest.
+
+### The live cost panel and Approve and continue
+
+The agent finder runs as many pieces, so a run can drift over its estimate while it is going. The
+cost checkpoint (`crates/server/src/cost_checkpoint.rs`, type in
+`crates/api-types/src/cost_checkpoint.rs`) projects the total as the run goes and pauses it **before**
+it goes over the approved amount. There is no second stopping mechanism. The approved amount is the
+spend limit, and a projection over it stops the run through the same spend limit stop, with its own
+cause ("the run was paused because its projected cost went over the approved amount"). A run with no
+spend limit has no checkpoint.
+
+* **The projection** = spent so far (a resume counts its stored spend) + the pieces left times the
+  average cost of the pieces finished in this run (the pre-flight figure per piece while none has
+  finished) + the joints calls still to come + the pre-flight figure for the stages after the finder,
+  scaled by the problems found so far against the problems the estimate assumed, less what those
+  stages have spent. It is compared with the limit at whole cents, so a limit typed from an estimate
+  shown to the cent never pauses with "(+$0.00)".
+* After each finished piece the command line prints "Spent $X of $Y approved; projected $Z for the
+  finder stage". Each checkpoint is written to `cost_checkpoint.json` in the run folder and published
+  to the scan job's state, which the scan screen polls.
+* **The cost panel** (`crates/ui/src/cockpit/scan/cost_panel.rs`): a "Cost" heading with "Spent $X of
+  $Y approved", a bar, "Projected $Z for the finder stage" (or "with the group review" or "with the
+  <name> stage"), and "N pieces done, M left". It shows while a run goes and after it ends, and says
+  nothing without a checkpoint.
+* **A pause** shows: "Paused before going over the approved amount. Approved $A, spent $S, N pieces
+  left. New estimate $E (+$D). Approve to continue: resume with a spend limit of at least $L." The
+  advised limit is the new estimate plus a reserve (what the hard limit holds back for pieces in
+  flight), rounded up to the cent, so a resume at exactly that figure is not refused its last pieces.
+* **Approve and continue.** Two buttons: "Approve and continue" (disabled until the job has ended and
+  the run is saved: "The run can be approved once its job has ended and it is saved.") and "Stop here".
+  "Approve and continue" asks to confirm and sends nothing: "Resume this run with a spend limit of $L?
+  Work already paid for is not paid for again." with "Confirm and resume" and "Back". Only the
+  confirming click resumes the run, at the advised limit. "Stop here" leaves it paused: "The run stays
+  paused. It can be resumed later." with a "Back" that returns to the two buttons. The resume
+  confirmation's spend limit field sends no override when it is blank or the same to the cent, and
+  refuses a number that is not positive ("the spend limit must be a positive number of dollars").
+  On the command line the same is `--resume <ID> --max-cost-usd <the advised figure>`.
+
+### Run to completion
+
+No client deliverable has a failed portion. The rules, all of them in code:
+
+* A part that fails is retried inside the transport, then once more at the end of its stage when the
+  failure was transport trouble (section 6d). A reply the model gave and that was unusable is never
+  sent again unchanged.
+* A failed or not run part, a fatal AI error or a repo not inspected makes the run incomplete. A client
+  export of it is refused before anything is built. The message names every reason and nothing is
+  written. The export of an `--internal` run is marked INTERNAL INCOMPLETE and is **not for a client**.
+  The release gate refuses to let such a package out as a client package.
+* The failure report (operator only) lists every failed part with every attempt.
+* `--resume` retries only what failed (section 14). It refuses, in plain words, if a repo's commit or
+  files, the models, the rules or this version of Camerata differ from the saved run. A run already
+  complete says so and does nothing.
+* A scope limit that is disclosed on purpose (a tool not run by policy, a file over the size cap) is a
+  coverage note, not a failed part.
+
+### The two backends
+
+| | API backend (`--backend api`, the default) | CLI backend (`--backend cli`) |
+|---|---|---|
+| What it is | The Anthropic Messages API, billed per token, with the key saved in the app or `ANTHROPIC_API_KEY` | The operator's own Claude Code subscription, one `claude -p` process for each call |
+| Client engagement | allowed (the only backend a client engagement may use) | refused. Internal runs only, with `--internal`. |
+| Message Batches | yes: on by default (half price on every scan token), failed items resubmitted once | no: the scan runs in real time, with the notice "The CLI backend cannot use Message Batches, so this scan runs in real time (parallel). Use the API backend for the batch discount." |
+| Exact token count | one free API count of a scan pass for the pre-flight | not available |
+| Prompt cache | shared across calls | each call is a separate process with its own fresh cache, so there is no cross call caching discount |
+| Agent finder pieces in flight | 3 | 1 |
+| Group review requests in flight | 8 | 2 |
+| Claude Code version | not applicable | every model the run will call is checked against the installed version before any call (Fable 5.2 needs 2.1.290 or newer) |
+| Session data | none kept | the call keeps no session file (`--no-session-persistence` for the finder); the finder's rooms and traces are in the run folder |
 
 ---
 
@@ -5544,31 +6914,45 @@ non-orchestrator (it can never re-delegate).
 
 #### Per-project per-step model config (`StepModels`)
 
-Every non-fleet AI step (audit, calibration, research chat, story authoring,
+Every non-fleet AI step (audit, calibration, fix, research chat, story authoring,
 decomposition, escalation, clarification) has a dedicated model slot in
 `StepModels`, stored on the `Project` (`#[serde(default)]`, back-compat). Default
-at project creation: `DEFAULT_MODEL` (`claude-sonnet-5-5`) for every slot.
+at project creation: `DEFAULT_MODEL` (`claude-sonnet-5-5`) for every slot, with two
+exceptions: calibration is seeded with `STAGE1_DEFAULT_MODEL` (`claude-opus-5-5`), and the
+fix slot is EMPTY ("not set"), because the fix stage's default depends on the `fix_on_haiku`
+efficiency measure and a seeded id would read as an explicit choice that overrides it.
 
-`StepKind` enum variants: `Audit`, `Calibration`, `ResearchChat`, `StoryAuthoring`,
+`StepKind` enum variants: `Audit`, `Calibration`, `Fix`, `ResearchChat`, `StoryAuthoring`,
 `Decomposition`, `Escalation`, `Clarification`.
+
+The stage models of an inspection that are NOT step models live in the project's
+`ReviewSettings` (`group_review_model`, `dup_check_model`, `finder_model`, `clone_judge_model`,
+`finder`), set through the same `step-models` route with the keys `group_review`,
+`duplicate_check`, `finder_model`, `clone_judge` and `finder`. Section 6f lists every row, its
+default and the client lock.
 
 #### Where a model comes from
 
 A model is never read from the environment or a `.env` file. The sources, in order:
 
-1. The open project's model configuration in the cockpit (`StepModels`, the tier map, the L3
-   review model). A project file written before a setting existed loads with the built-in
-   defaults (`#[serde(default)]`).
+1. The open project's model configuration in the cockpit (`StepModels`, `ReviewSettings`, the tier
+   map, the L3 review model). A project file written before a setting existed loads with the
+   built-in defaults (`#[serde(default)]`).
 2. On the command line, only the explicit flags: `--model`, `--calibration-model`, `--fix-model`,
-   `--clone-judge-model`.
-3. The built-in default: `DEFAULT_MODEL` (`claude-sonnet-5-5`, Sonnet 5.5), with Haiku 5.5
-   (`claude-haiku-5-5`) for the fix stage and the clone judge and Opus 5.5 (`claude-opus-5-5`) for
-   the tier map's strongest band (`fleet::tier::default_strongest_model`). Older ids stay
+   `--clone-judge-model`, `--group-review-model`, `--dup-check-model` and `--finder-model`. A flag
+   wins over the project's setting for that run (`RunControls::fill_models_from_project` fills only
+   what the run was not given).
+3. The built-in default: `DEFAULT_MODEL` (`claude-sonnet-5-5`, Sonnet 5.5) for the scan and the
+   duplicate check; Opus 5.5 (`claude-opus-5-5`) for calibration (stage 1); Fable 5.2
+   (`claude-fable-5-2`) for the group reviewer (stage 2) and the agent finder; Haiku 5.5
+   (`claude-haiku-5-5`) for the fix stage (while `fix_on_haiku` is on) and the clone judge; and Opus
+   5.5 for the tier map's strongest band (`fleet::tier::default_strongest_model`). Older ids stay
    selectable and priced.
 
-`ai_audit::resolve_audit_model`, `resolve_calibration_model`, `stage_model` and
-`clone_advisory::resolve_clone_judge_model` apply that order and are shared by the cockpit and the
-command line. The transport (`Llm::complete` and `complete_streaming`) has no default of its own: a
+`ai_audit::resolve_audit_model`, `resolve_calibration_model`, `resolve_fix_model`, `stage_model`,
+`group_review::resolve_group_review_model`, `possible_duplicate::check::resolve_dup_check_model`,
+`agent_finder::finder_model_for` and `clone_advisory::resolve_clone_judge_model` apply that order and
+are shared by the cockpit and the command line. The transport (`Llm::complete` and `complete_streaming`) has no default of its own: a
 request that names no model is refused with an error that names the caller as the bug, so the model
 the pre-flight prices, the ledger records and the spend limit checks is the model that runs.
 The delegate tool's tier
@@ -6291,8 +7675,14 @@ start and at the end of the last attempt; the models and mode; the rules fingerp
 `AiScanKey`; the engine version (crate version plus the prompt schema version); the seed the
 prompt delimiter tokens are drawn from; the arguments the run started with; and the plan of parts
 with their status (`pending`, `running`, `done`, `failed`). The plan is written, every part pending,
-before any work starts: per repo the tools, scan, calibration, alternatives, detail and fix stages,
-then merge and export. `calls/<digest>.json` holds every model answer for one request, by
+before any work starts: per repo the tools, scan, calibration, alternatives (only when the corpus
+resolves rule alternatives), detail and fix parts, then, once for the whole run, the group review,
+the merge and the export (`PartKind`, `plan_for` in `run_store.rs`). The agent finder's pieces are
+failures of the scan part (their pass names start `agent finder`). The run record also holds the
+group review model and the finder the run started with (`ModelsRecord.group_review` and `.finder`).
+Besides those files the run folder holds `checkpoints/` (stage checkpoints), `cost_checkpoint.json`,
+`duplicate_checks.json` and, for the agent finder, `finder-rooms/` and `finder-traces/` (section
+6i lists them all). `calls/<digest>.json` holds every model answer for one request, by
 occurrence. `batches/<digest>-<n>.json` holds a submitted Message Batch (its id the moment the
 submit returned, its results once fetched). `lock.json` is the lock (below) and holds the process id and a heartbeat time.
 `prior_manifest.json` is the incremental baseline the run started from.
@@ -6331,6 +7721,40 @@ and the server's `POST /api/inspections/:id/resume` (the cockpit's **Run what re
 `GET /api/inspections/:id/plan` shows the plan and estimate) both use it. The command line and the
 cockpit's scan job are two pipelines that call the same steps; the resume logic, the journal, the
 checks and the estimate are shared, not copied.
+
+**Resume rules** (`run_store::check_resume`, the one function behind both the command line and the
+cockpit; each refusal is a plain sentence naming what differs). In the order the code checks them:
+
+1. The run is already complete: "run <id> is already complete: every part is done and the export was
+   written, so there is nothing to resume". Not an error: exit 0, nothing done.
+2. **Another version of Camerata.** The engine version is the crate version plus the prompt schema
+   version (`engine_version`, written `<crate version>+prompt<N>`; at this writing `0.0.0+prompt5`). A different one is refused: "run <id> was
+   made by another version of Camerata (A instead of B); its saved replies answer a different
+   question, so start a new run". A prompt change makes a stored reply an answer to an older
+   question.
+3. A repository of the saved run is not part of this one.
+4. **A repository's commit differs:** "repository R is at commit C now; run <id> was made at commit D.
+   Check out that commit to resume it, or start a new run".
+5. **The files changed.** The tree's digest (status and diff) must equal the one at the start of the
+   run or the one at the end of its last attempt (the inspection's own build step can leave files
+   behind): "repository R has changes that were not there when run <id> was made (an edited or new
+   file); put the tree back as it was, or start a new run".
+6. **The models or mode differ.** The scan, calibration and fix models, the backend and the mode must
+   equal the saved ones (resolved ids, so a changed built-in default is noticed). The group review
+   model is not compared: a resume keeps the one the run started on and refuses only an explicit
+   different one (section 6f). The finder is kept the same way (`hold_finder`).
+7. **The rules changed** (the directives fingerprint): "the rules changed since run <id> was made, so
+   its stored replies answer different questions; start a new run".
+8. The way the scan asks the model changed (prompt layout, measures or models).
+9. The run is being worked on right now (a live lock): "wait for it to finish".
+
+A resume is also refused for a run started in the other place: a cockpit run is resumed in the
+cockpit (**Run what remains**), a command line run with `--resume`. `--resume latest` picks the newest
+run with work left that the asking place started (with `--repo`, of that project). When the resume
+starts it prints what remains, how many model calls are stored and will not be sent again, how many
+will be sent again, the upper estimate for the remaining work and what the stored calls cost (a spend
+limit counts it). A group review or an agent finder stored reply is replayed through the same code a
+fresh one goes through.
 
 **Saved inspections in the cockpit.** `GET /api/inspections` lists the open project's saved runs
 (`run_store::list_inspections_in`): id, start time, repos, status (`complete`, `incomplete`,
