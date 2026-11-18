@@ -1019,7 +1019,7 @@ server refuses a blank reason either way.
    reach, rank 12 · why "..." · outlier: different object "..."`) lines.
 8. **Also flagged by**, **Possible duplicate of** (see below), **Also matches at this place**
    (the other rules that fire at the same place; each has a checkbox "Include this rule in the place
-   decision", its own severity, kind and hold, and a **Decide alone** button that opens that rule's
+   decision", its own severity, kind and hold; a **Decide alone** button opens that rule's
    own row, whose decision wins over the place's), **Carried by** (with **Go to carrier**) and, for a
    row the engine doubts, **Possible false positive** with its reasons.
 9. **Wording flags**: the plain-text checks that flagged the row's wording (a "methodology leak",
@@ -1424,8 +1424,9 @@ OpenRouter id cannot slip through when a model list is empty.
 6. Leave **Calibration** alone: the agent finder does not call it, but on a client engagement it is
    still checked by the client lock and the price check, so it must still be a Claude model. It also
    becomes the fix model when the `fix_on_haiku` measure is off. Leave the rest on their defaults.
-7. Tick **Full scan** on the scan screen. The app saves its baseline after every scan, so a later
-   default scan reviews only changed files or skips the AI review as fully cached.
+7. Tick **Full scan** on the scan screen. After a scan with a complete AI review, the app keeps a
+   baseline, so a later default scan reviews only changed files or skips the AI review as fully
+   cached.
 8. Optional: set a **Spend limit (USD)** if you want the Cost panel and the pause. With none, the run
    goes to completion with no panel.
 9. Run the scan (§3c).
@@ -1502,7 +1503,7 @@ With the **engine finder** it appears only if the run pauses before a later stag
 projection would pass the limit. When shown, it reads
 `Spent $130.00 of $260.00 approved` with a bar, `Projected $200.00 for the finder stage` (or "with the
 group review", or "with the <stage> stage") and `3 pieces done, 4 left`. The **approved amount is the spend
-limit**; The projection is the spend so far plus the pieces left at
+limit**. The projection is the spend so far plus the pieces left at
 the average cost of the pieces finished (or the pre-flight figure before any finished) plus the
 stages after the finder. **When the projection goes over the approved amount, the run pauses before
 it overspends** (it is the spend-limit stop, with a different reason, so the pieces left are parts a
