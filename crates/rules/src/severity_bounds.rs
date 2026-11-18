@@ -295,6 +295,45 @@ pub fn is_min_severity_note(note: &str) -> bool {
     note.starts_with("severity raised from ") && note.trim_end().ends_with(MIN_SEVERITY_REASON)
 }
 
+/// Which bound a recorded severity adjustment came from (see [`classify_adjustment`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundStep {
+    /// The rule's `min_severity` raised the row.
+    Floor,
+    /// C4-R1: the row has no file and line, so it went to `info`.
+    NoLocation,
+    /// The rule's `max_severity` lowered the row.
+    Ceiling,
+    /// The deviation ceiling (authored or the default) lowered the row.
+    DeviationCeiling,
+}
+
+/// Read back which bound wrote `note` (one recorded severity adjustment) and the severity that
+/// bound moved the row FROM. `None` for any note this chain did not write as a move (a held-back
+/// floor, a returned severity, the AI tier's own notes). The notes are built in
+/// [`bounded_severity_explained`] from the constants read here, so the two cannot drift.
+pub fn classify_adjustment(note: &str) -> Option<(BoundStep, &str)> {
+    let rest = note
+        .strip_prefix("severity raised from ")
+        .or_else(|| note.strip_prefix("severity lowered from "))?;
+    let (from, rest) = rest.split_once(" to ")?;
+    let (_, why) = rest.split_once(": ")?;
+    let step = match why {
+        MIN_SEVERITY_REASON => BoundStep::Floor,
+        UNLOCATED_WHY => BoundStep::NoLocation,
+        MAX_CAP_WHY => BoundStep::Ceiling,
+        DEVIATION_CAP_WHY => BoundStep::DeviationCeiling,
+        _ => return None,
+    };
+    Some((step, from))
+}
+
+/// Why C4-R1 lowered an unlocated row, as its note says it.
+pub const UNLOCATED_WHY: &str = "no file or line was identified for this finding";
+
+/// Why the rule's `max_severity` lowered a row, as its note says it.
+pub const MAX_CAP_WHY: &str = "the rule caps the severity of what it finds";
+
 /// `f`'s severity after every bound: normalize, the floor, C4-R1, then both ceilings (see the
 /// module docs for the order). `rule` is the corpus rule the caller resolved for `f`; `None`
 /// still applies C4-R1 and the deviation ceiling's default, which need no authored rule.
@@ -335,12 +374,12 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
     let located = step(
         &raised,
         downgrade_unlocated(raised.clone(), f),
-        "no file or line was identified for this finding".to_string(),
+        UNLOCATED_WHY.to_string(),
     );
     let capped = step(
         &located,
         clamp_to_max_severity(located.clone(), rule),
-        "the rule caps the severity of what it finds".to_string(),
+        MAX_CAP_WHY.to_string(),
     );
     let last = step(
         &capped,
@@ -765,6 +804,46 @@ mod tests {
         };
         let (_, notes) = bounded_severity_explained(&unlocated, None);
         assert!(notes.iter().all(|n| !is_min_severity_note(n)), "{notes:?}");
+    }
+
+    #[test]
+    fn each_recorded_adjustment_reads_back_its_bound_and_its_from_severity() {
+        let both = rule_set(|r| {
+            r.min_severity = Some("high".to_string());
+            r.max_severity = Some("medium".to_string());
+        });
+        let rule = both.get_by_id("BOUND-1");
+        // The floor raises low to high, then the ceiling lowers it to medium.
+        let (_, notes) = bounded_severity_explained(&row("low", BoundKind::Defect), rule);
+        let steps: Vec<_> = notes
+            .iter()
+            .filter_map(|n| classify_adjustment(n))
+            .collect();
+        assert_eq!(
+            steps,
+            vec![(BoundStep::Floor, "low"), (BoundStep::Ceiling, "high")],
+            "{notes:?}"
+        );
+        let (_, notes) = bounded_severity_explained(&row("critical", BoundKind::Deviation), None);
+        assert_eq!(
+            classify_adjustment(&notes[0]),
+            Some((BoundStep::DeviationCeiling, "critical"))
+        );
+        let unlocated = Row {
+            path: String::new(),
+            line: 0,
+            ..row("high", BoundKind::Defect)
+        };
+        let (_, notes) = bounded_severity_explained(&unlocated, None);
+        assert_eq!(
+            classify_adjustment(&notes[0]),
+            Some((BoundStep::NoLocation, "high"))
+        );
+        assert_eq!(
+            classify_adjustment("severity held at low pending a decision"),
+            None
+        );
+        assert_eq!(classify_adjustment("something the AI tier wrote"), None);
     }
 
     #[test]
