@@ -4072,7 +4072,7 @@ file and an unexpected one). `<stem>` is `camerata-inspection-{repo}-{sha}`.
 | File | What it is |
 |---|---|
 | `<stem>.pdf` | the report to read first: cover, executive summary, scorecard by area, severity by effort matrix, the problems with citations and fixes, what is healthy, the dependency snapshot and how the inspection was done. Ruled out problems are left out and counted once in the methodology section. |
-| `<stem>-findings.xlsx` | the working list for the engineers: Start here, Glossary, Fix plan, All problems, Needs a decision, Your conventions, Departures, Dependencies, Rules checked, Ruled out and Not checked, and for reviewers All source rows, Reviewer decisions and How problems were grouped (the names are `xlsx_export/vocabulary.rs`; a several repo project adds the Patterns across services sheet) |
+| `<stem>-findings.xlsx` | the working list for the engineers: Start here, Glossary, Fix plan, All problems, Needs a decision, Your conventions, Departures, Dependencies, Rules checked, Ruled out and Not checked; for reviewers All source rows, Reviewer decisions and How problems were grouped (the names are `xlsx_export/vocabulary.rs`; a several repo project adds the Patterns across services sheet) |
 | `findings.json` | every row that was not ruled out, of every kind, wrapped with the report's summary counts. For scripts and CI. |
 | `decisions.json` | every decision record the report was reviewed with |
 | `README.txt` | what each file is (`product_export_readme`) |
@@ -4158,13 +4158,14 @@ key). Row parity does not re-run `req_d2`'s count reconciliation at runtime.
 | 12 | The group reviewer (stage 2, section 6g). Skipped where the compliance gate blocked the AI review. | `group_review::review_scan_report` | one call per rule group | `checkpoints/`, stage telemetry |
 | 13 | The possible-duplicate check (section 6h). A failure is a run note, never a failed part. | `possible_duplicate::check` | one call per 20 candidate pairs | `duplicate_checks.json` in the run folder |
 | 14 | Settle the tool causes after the group reviewer has re-sorted the rows | `settle_tool_causes` | none | nothing |
-| 15 | Save the incremental baseline, only when nothing failed and the finder was the engine finder. Record the working tree as it now stands in the run. | `save_manifest`, `record_tree_end` | none | `<state>/<key>.cache.json`, `tree_at_end` in `run.json` |
-| 16 | Render the ledger summary. Write the ledger, the failure report and the rewrite advisory next to it. With the agent finder, also write the finder run record and any `--compare-with` note. | `render_ledger_summary`, `failure_report::write`, `rewrite_advisory::write`, `finder::write_finder_run` | none | `<key>.ledger.json`, `<key>.failures.json` and `.md`, `<key>.rewrite_advisory.*`, `<key>.finder-run.json`, `<key>.run-difference.md` |
+| 15 | Save the incremental baseline. In `camerata inspect` only when nothing failed and the finder was the engine finder (`inspect_cmd.rs`). The app stores it after every scan with no such condition (`scan_cache.put` in `crates/server/src/lib.rs`), so after any app scan, an agent finder scan included, the next scan with the default incremental setting hands the agent finder only the changed files, or skips the AI review as "fully cached" when nothing changed (`onboard.rs`). Tick "Full scan (ignore incremental cache)" to review everything. Record the working tree as it now stands in the run. | `save_manifest`, `record_tree_end` | none | `<state>/<key>.cache.json`, `tree_at_end` in `run.json` |
+| 16 | Render the ledger summary. Write the ledger and the failure report, before the seal. | `render_ledger_summary`, `failure_report::write` | none | `<key>.ledger.json`, `<key>.failures.json` and `.md` |
 | 17 | Seal the report. After this no row can be added. | `ScanReport::seal` | none | nothing |
+| 17b | After the seal and before the release gate: write the rewrite advisory. With the agent finder, also write the finder run record and any `--compare-with` note. | `rewrite_advisory::write`, `finder::write_finder_run` | none | `<key>.rewrite_advisory.*`, `<key>.finder-run.json`, `<key>.run-difference.md` |
 | 18 | Build the package and run the release gate (section 6c). A client export of a run that did not complete is refused before anything is built. | `release_product_export` | none | the zip, only on a clean gate |
 | 19 | Tell the run store whether it finished and whether the export was written | `finish_run` | none | `run.json` status |
 
-Step 16 comes before step 18 on purpose: a run the release gate refuses still leaves its ledger,
+Steps 16 and 17b come before step 18 on purpose: a run the release gate refuses still leaves its ledger,
 its failure report and its advisory.
 
 ### Step 8 in detail (per repository)
@@ -4624,7 +4625,10 @@ These refusals are made by `camerata inspect`. In the app the project's Finder s
 no refusal of the same kind is made. By the code, an app scan whose request is incremental (the
 default) hands the agent finder only the files changed since the last scan (`part.changed` in
 `onboard.rs`), and carries forward the earlier findings for the unchanged files. For the agent finder
-to review every file, tick "Full scan (ignore incremental cache)". This path was read, not run.
+to review every file, tick "Full scan (ignore incremental cache)". This path was read, not run. The app stores the baseline after every scan with no finder or
+completeness condition (`scan_cache.put`, `lib.rs`), so after any app scan the next one with the
+default incremental setting hands the agent finder only the changed files, or skips the AI review as
+"fully cached" when nothing changed.
 
 ---
 
@@ -4709,9 +4713,10 @@ the operator turns it off, and every `camerata inspect` unless `--internal` is g
   shape, not a lookup in the model registry, because the registry knows the OpenRouter catalog only
   once it has been fetched.
 * **Every model the run calls is checked before any file is read.** The list comes from
-  `models_a_scan_may_use` over the run's own controls: the scan, calibration, group review, fix,
-  duplicate check, the finder when it is the agent finder and the deep tier when it is on. The
-  clone judge is always included, because which rules are selected is not known until files have
+  `models_a_scan_may_use` over the run's own controls: with the engine finder the scan and
+  calibration models, with the agent finder the finder model in their place (the scan and
+  calibration models are not checked then), then group review, fix, duplicate check and the deep tier
+  when it is on. The clone judge is always included, because which rules are selected is not known until files have
   been read. On the command line this is `validate_args` then `require_client_lock`. In the app it
   is `client_lock_refusal_for_scan` (`routes/chat_models.rs`). A resume checks again after the kept
   group review model is applied (`refusal_for_run_models`).
@@ -4723,8 +4728,8 @@ the operator turns it off, and every `camerata inspect` unless `--internal` is g
   work." The command line adds "Run it with `--backend api` and Anthropic models (`--model
   claude-...`), or pass `--internal` if this is your own development and not client work."
 * A scan with no active project is refused as a client engagement with no opt-in.
-* A client's own tooling is separate: a step that executes the client's code (today only the
-  `cargo clippy` preview) runs on a client engagement only with the operator's opt-in
+* A client's own tooling is separate: a step that executes the client's code (in an inspection, only the
+  `cargo clippy` preview; the governed dev loop's layer 2 checks are the other such step in the code) runs on a client engagement only with the operator's opt-in
   (`client_tooling_opt_in` in the app, `--run-client-tooling` on the command line). The decision is
   recorded in the ledger and stated in the report.
 
@@ -4965,8 +4970,8 @@ it has one.
 
 | Reason (label) | It fires when |
 |---|---|
-| `group_reviewer_doubt` ("Group reviewer doubts it") | the group reviewer marked the row an outlier for being a different object or a pattern that could be intentional, or disagreed downward (lower severity, or "not real", or "unclear" against stage 1's "yes") |
-| `calibration_doubt` ("Calibration unsure") | calibration left the row waiting for a reviewer (outside test scope) or its confidence is not high. For an agent row: its confidence, which an agent row does not carry. |
+| `group_reviewer_doubt` ("Group reviewer doubts it") | the group reviewer marked the row an outlier for being a different object or a pattern that could be intentional, or disagreed downward (a lower severity, "not real" or "unclear" against stage 1's "yes") |
+| `calibration_doubt` ("Calibration unsure") | calibration left the row waiting for a reviewer (outside test scope) or its confidence is not high. An agent row has no calibration: for it the reason fires only when its own confidence is below high, and an agent row carries none, so in practice it does not fire (an unsure agent row gets `finder_unsure` instead). |
 | `test_code_only` ("Test code only") | the row is in test or fixture code and is not about a secret (a secret committed in a test is never flagged for this) |
 | `convention_rule_at_medium_or_higher` ("Convention rule at medium or higher") | a style or convention rule, not a security rule, rated the row medium or higher |
 | `evidence_not_found` ("Evidence not found") | the quoted code was not found near the cited line |
@@ -5185,7 +5190,15 @@ sources: `CAMERATA_STATE_DIR` (where the state folder is), `CAMERATA_DATA_DIR` (
 stores are), `CAMERATA_EFFICIENCY` (the efficiency switches, a comma list of `name=on|off`),
 `CAMERATA_FEATURE_MODEL_PROMPT_REDACTION` (the operator only redaction switch, section 6c),
 `ANTHROPIC_API_KEY` (the key fallback), `CAMERATA_CLAUDE_PROGRAM` (which `claude` binary the CLI
-backend runs) and `CAMERATA_CLI_TIMEOUT_SECS` (the hard cap on one `claude` call, default 300).
+backend runs) and `CAMERATA_CLI_TIMEOUT_SECS` (the hard cap on one `claude` call, default 300). The list is longer:
+
+* `CAMERATA_LLM_VENDOR` (`anthropic` by default; `openai` or `google`/`gemini` pick another provider's transport), `crates/llm/src/llm.rs`;
+* `CAMERATA_LLM_IDLE_SECS` (how long a streaming reply may be silent before it fails, default 120), `llm.rs`;
+* `CAMERATA_LLM_MAX_SECS` (a total time backstop for the deep tier's non streaming calls only, default 600), `ai_audit/scan_passes.rs`;
+* `CAMERATA_SCAN_EXCLUDE_DIRS` (a comma list of extra directory names the file walk skips), `onboard/files.rs`;
+* `CAMERATA_DISABLE_DEP_AUDIT` (turns the dependency audit off; a test seam, never for production), `dep_audit.rs`;
+* `CAMERATA_NO_KEYCHAIN` (do not read the OS keychain; a test seam that adds no credential source), `crates/llm/src/credentials.rs`;
+* `CAMERATA_EXPORT_TRIAGE_LOG` (`1` or `true` adds the optional `csv/triage-log.csv` to an export), `CAMERATA_REPORT_BRAND` and `CAMERATA_REPORT_PREPARED_BY` (standing defaults for the export's brand and prepared by lines when the export dialog posts none), `report_export.rs`.
 
 **Refusals before anything is read or spent** (`validate_args`): `--client` blank; `--repo` not a
 directory or given twice; `--repo-name` count or format wrong; `--export` parent missing;
@@ -5258,7 +5271,7 @@ canonical path>` for one repo and `project-<count>-<hash of the sorted paths>` f
 
 | Path | What it is |
 |---|---|
-| `<key>.cache.json` | the incremental scan baseline (`ScanManifest`), written only by a complete scan with the engine finder |
+| `<key>.cache.json` | the incremental scan baseline (`ScanManifest`), written by `camerata inspect` only after a complete scan with the engine finder. The app writes it after every scan, agent finder included (see 6d step 15) |
 | `<key>.ledger.json` | the pipeline integrity ledger: counts, no code. Read by `integrity-gate` and `cost-regression`. |
 | `<key>.failures.json` and `<key>.failures.md` | the operator's failure report: every failed part with every attempt's status, provider error, request id and waits. A part a later attempt completed stays as history with a `resolved_at`. Also lists the Standard fixes and the detail fallbacks. Removed when nothing failed now or before. |
 | `<key>.rewrite_advisory.json`, `.md`, `.history.jsonl` | the operator's rewrite advisory (fix or rewrite is the architect's call alone). Never in any zip. The history keeps up to 500 runs' raw numbers. |
@@ -5315,6 +5328,8 @@ figure says so (the group review model is named when that happens).
 **The agent finder's estimate** is the formula of section 6e (per 1,000 lines, per piece, per joints
 call, with a low and a high multiple). It is the finder stage alone: the group review, the fix stage
 and the duplicate check are extra. The cockpit shows it as a line under the estimate for each repo.
+Help text differences (the code is stated throughout this file): the `--calibration-model` help says "project-less model floor" (`main.rs`) while the default is Opus 5.5; the `integrity-gate --ledger` help names the old repo path of the ledger (section 6i); the outage rule of three failures in a row that must span 120 seconds is in a code comment (`run_health.rs`), not in the CLI help.
+
 Known gap: `camerata inspect --finder agent` still prints the engine finder's estimate text
 (`preflight::build`). The agent finder's own text, `preflight::build_agent_finder`, exists and is
 tested but nothing in the pipeline calls it. The pieces are priced for the cost checkpoint's plan
