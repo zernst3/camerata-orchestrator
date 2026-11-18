@@ -287,6 +287,8 @@ impl InspectArgs {
                 over_budget_reasons: defaults.over_budget_reasons,
                 group_review_model: self.group_review_model.clone().unwrap_or_default(),
                 dup_check_model: self.dup_check_model.clone().unwrap_or_default(),
+                finder_model: String::new(),
+                clone_judge_model: String::new(),
                 sample_size_per_run: defaults.sample_size_per_run,
                 finder: defaults.finder,
             },

@@ -392,6 +392,9 @@ impl<'a> ReviewComposer<'a> {
                 calibration: self.inputs.calibration_model.to_string(),
                 group_review,
                 fix: self.inputs.fix_model.to_string(),
+                finder_model: s.finder_model.clone(),
+                duplicate_check: s.dup_check_model.clone(),
+                clone_judge: s.clone_judge_model.clone(),
                 finder: s.finder.as_str().to_string(),
             },
             escalation: EscalationSettingsView {
