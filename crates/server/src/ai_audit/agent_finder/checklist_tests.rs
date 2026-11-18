@@ -820,3 +820,15 @@ fn render_shows_the_optional_reason_on_not_applicable_in_the_example() {
         "{text}"
     );
 }
+
+#[test]
+fn render_bans_secret_values_and_attack_recipes_in_problems_it_adds() {
+    let text = checklist().render();
+    for needle in [
+        "Never copy a credential",
+        "`<value omitted>`",
+        "step-by-step exploit instructions",
+    ] {
+        assert!(text.contains(needle), "{needle} missing from:\n{text}");
+    }
+}

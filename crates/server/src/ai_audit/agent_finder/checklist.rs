@@ -271,7 +271,7 @@ impl Checklist {
 
     /// The text of `_camerata/checklist.md`: the three instructions, then the rules.
     pub fn render(&self) -> String {
-        let mut out = String::from(
+        let mut out = String::from(concat!(
             "# Checklist\n\n\
              You have written down everything you found. Now go through the rules below. Do these \
              three things, then write `_camerata/out/checklist.json`.\n\n\
@@ -305,7 +305,9 @@ impl Checklist {
              (step 1) and write no second problem. If the reason is different, it is a new \
              problem, even at the same place. When you are in doubt whether something is a \
              problem, write it with `sure: unsure`. A problem you add goes into a new problems \
-             file with that rule's id as its `label`.\n\n\
+             file with that rule's id as its `label`.\n\n",
+            super::brief_text::safety_rules!(),
+            "\n\n\
              `checklist.json` looks like this:\n\n\
              {\"citations\": [{\"n\": 1, \"rule\": \"RULE-ID\"}], \"answers\": [{\"rule\": \"RULE-ID\", \
              \"answer\": \"clean\", \"places\": [{\"path\": \"src/a.rs\", \"line\": 10}], \"options\": \
@@ -314,8 +316,8 @@ impl Checklist {
              \"src/b.rs\", \"line\": 7}, \"reason\": \"One sentence.\"}, \
              {\"rule\": \"THIRD-ID\", \"answer\": \"not_applicable\", \"reason\": \"One sentence \
              saying what is absent.\"}]}\n\n\
-             # Rules\n",
-        );
+             # Rules\n"
+        ));
         for rule in &self.rules {
             out.push_str(&format!("\n## {}: {}\n", rule.id, rule.title));
             out.push_str(&format!(

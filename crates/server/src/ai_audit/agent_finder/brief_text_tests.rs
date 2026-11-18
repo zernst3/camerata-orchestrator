@@ -1,4 +1,4 @@
-use super::brief_text::{JOINTS_BRIEF, PIECE_BRIEF};
+use super::brief_text::{repair_reminder, JOINTS_BRIEF, PIECE_BRIEF, PROBLEM_FIELDS};
 
 #[test]
 fn the_piece_brief_starts_with_the_baseline_paragraph_word_for_word() {
@@ -139,4 +139,40 @@ fn both_briefs_ask_for_unsure_why_inside_the_sure_description() {
 fn the_finder_prompt_has_no_serial_comma_before_its_last_example() {
     assert!(!PIECE_BRIEF.contains("copying the pattern, or exposure"));
     assert!(PIECE_BRIEF.contains("copying the pattern or exposure"));
+}
+
+#[test]
+fn every_brief_that_writes_problems_bans_secret_values_and_attack_recipes() {
+    for (name, brief) in [("piece", PIECE_BRIEF), ("joints", JOINTS_BRIEF)] {
+        for needle in [
+            "Never copy a credential",
+            "even masked, partial or public",
+            "`<value omitted>`",
+            "Name the variable and the file, never the value",
+            "step-by-step exploit instructions",
+            "ready-to-run attack code",
+        ] {
+            assert!(brief.contains(needle), "the {name} brief lacks {needle}");
+        }
+    }
+}
+
+#[test]
+fn the_shared_field_list_is_in_the_piece_and_joints_briefs() {
+    assert!(!PROBLEM_FIELDS.is_empty());
+    for field in PROBLEM_FIELDS.split(", ") {
+        for (name, brief) in [("piece", PIECE_BRIEF), ("joints", JOINTS_BRIEF)] {
+            assert!(brief.contains(field), "the {name} brief lacks {field}");
+        }
+    }
+}
+
+#[test]
+fn the_repair_reminder_lists_every_field_and_forbids_dropping_one() {
+    let text = repair_reminder();
+    for field in PROBLEM_FIELDS.split(", ") {
+        assert!(text.contains(field), "the reminder lacks {field}: {text}");
+    }
+    assert!(text.contains("may not be dropped"), "{text}");
+    assert!(text.contains("`<value omitted>`"), "{text}");
 }
