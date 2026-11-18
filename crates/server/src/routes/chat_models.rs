@@ -457,7 +457,7 @@ pub(crate) fn client_lock_refusal_for_scan(
         calibration_model,
         deep,
         fix_model,
-        Some(project.tier_map.fast_primary()),
+        Some(super::projects::clone_judge_model_of(project).as_str()),
         Some(project.review.group_review_model.as_str()),
         Some(project.review.dup_check_model.as_str()),
     );

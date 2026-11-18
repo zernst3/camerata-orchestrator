@@ -61,7 +61,7 @@ impl From<camerata_api_types::project::ProjectFinder> for FinderChoice {
 }
 
 /// The finder's default model when `--finder-model` and the project settings name none.
-pub const DEFAULT_FINDER_MODEL: &str = "claude-fable-5-2";
+pub const DEFAULT_FINDER_MODEL: &str = camerata_api_types::project::FINDER_DEFAULT_MODEL;
 
 /// One piece of a unit: the files one agent reviews. A piece never crosses a unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

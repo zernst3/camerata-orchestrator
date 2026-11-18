@@ -150,6 +150,30 @@ impl RunControls {
         }
     }
 
+    /// Fill every model the project sets that this run was not already given: the group reviewer,
+    /// the duplicate check, the agent finder and the clone judge. A model the run already carries
+    /// (a command line flag) wins over the project's; a blank project field leaves the run on the
+    /// built-in default. Never the environment.
+    pub fn fill_models_from_project(
+        &mut self,
+        project: &camerata_api_types::project::ReviewSettings,
+    ) {
+        let blank = |m: &str| m.trim().is_empty();
+        if blank(&self.review.group_review_model) {
+            self.review.group_review_model = project.group_review_model.clone();
+        }
+        if blank(&self.review.dup_check_model) {
+            self.review.dup_check_model = project.dup_check_model.clone();
+        }
+        if self.finder_model.as_deref().is_none_or(blank) && !blank(&project.finder_model) {
+            self.finder_model = Some(project.finder_model.trim().to_string());
+        }
+        if self.clone_judge_model.as_deref().is_none_or(blank) && !blank(&project.clone_judge_model)
+        {
+            self.clone_judge_model = Some(project.clone_judge_model.trim().to_string());
+        }
+    }
+
     /// The model this run's group reviewer (stage 2) calls: the explicit pick, else the built-in
     /// stage 2 default ([`crate::ai_audit::group_review::resolve_group_review_model`]).
     pub fn group_review_model_for(&self) -> String {
@@ -716,6 +740,77 @@ mod tests {
         assert_eq!(controls.dup_check_model_for(), "claude-sonnet-5-5");
         controls.review.dup_check_model = " claude-opus-5-5 ".to_string();
         assert_eq!(controls.dup_check_model_for(), "claude-opus-5-5");
+    }
+
+    /// A project's finder, duplicate check and clone judge models reach the run's controls; a
+    /// blank project field leaves the built-in default; a model the run already carries (the
+    /// command line flag) wins over the project's. The group reviewer follows the same rule.
+    #[test]
+    fn the_projects_models_fill_the_controls_and_a_flag_wins_over_them() {
+        use camerata_api_types::project::ReviewSettings;
+        let project = ReviewSettings {
+            finder_model: "claude-opus-5-5".to_string(),
+            dup_check_model: "claude-haiku-5-5".to_string(),
+            clone_judge_model: "claude-haiku-4-5-20251001".to_string(),
+            group_review_model: "claude-opus-5-5".to_string(),
+            ..ReviewSettings::default()
+        };
+        // Nothing given on the command line: the project's models are the run's.
+        let mut controls = RunControls::default();
+        controls.fill_models_from_project(&project);
+        assert_eq!(controls.finder_model_for(), "claude-opus-5-5");
+        assert_eq!(controls.dup_check_model_for(), "claude-haiku-5-5");
+        assert_eq!(
+            controls.clone_judge_model_for(),
+            "claude-haiku-4-5-20251001"
+        );
+        assert_eq!(controls.group_review_model_for(), "claude-opus-5-5");
+        // A blank project: the built-in defaults.
+        let mut blank = RunControls::default();
+        blank.fill_models_from_project(&ReviewSettings::default());
+        assert_eq!(blank.finder_model_for(), "claude-fable-5-2");
+        assert_eq!(blank.dup_check_model_for(), "claude-sonnet-5-5");
+        assert_eq!(blank.clone_judge_model_for(), "claude-haiku-5-5");
+        // A flag wins over the project, for every role.
+        let mut flagged = RunControls {
+            finder_model: Some("flag-finder".to_string()),
+            clone_judge_model: Some("flag-judge".to_string()),
+            review: ReviewSettings {
+                dup_check_model: "flag-dup".to_string(),
+                group_review_model: "flag-group".to_string(),
+                ..ReviewSettings::default()
+            },
+            ..RunControls::default()
+        };
+        flagged.fill_models_from_project(&project);
+        assert_eq!(flagged.finder_model_for(), "flag-finder");
+        assert_eq!(flagged.dup_check_model_for(), "flag-dup");
+        assert_eq!(flagged.clone_judge_model_for(), "flag-judge");
+        assert_eq!(flagged.group_review_model_for(), "flag-group");
+        // The pre-flight list names the chosen models.
+        let listed = models_the_run_will_use(
+            Some("claude-sonnet-5-5"),
+            None,
+            false,
+            &[camerata_checks::clone_rules::RULE_SINGLE_SOURCE],
+            &{
+                let mut c = RunControls {
+                    finder: crate::ai_audit::agent_finder::FinderChoice::Agent,
+                    ..RunControls::default()
+                };
+                c.fill_models_from_project(&project);
+                c
+            },
+        );
+        let model_of = |role: &str| {
+            listed
+                .iter()
+                .find(|(roles, _)| roles.contains(role))
+                .map(|(_, m)| m.clone())
+                .unwrap()
+        };
+        assert_eq!(model_of("the finder"), "claude-opus-5-5");
+        assert_eq!(model_of("the clone judge"), "claude-haiku-4-5-20251001");
     }
 
     /// The clone judge is listed (and so priced and lock-checked) on the model the run will call:
