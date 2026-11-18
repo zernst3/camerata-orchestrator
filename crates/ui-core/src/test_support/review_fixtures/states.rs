@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 74] = [
+pub const FIXTURE_IDS: [&str; 75] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -56,6 +56,7 @@ pub const FIXTURE_IDS: [&str; 74] = [
     "engine/small-category",
     "engine/thrown-out-held",
     "engine/thrown-out-confirmed",
+    "engine/second-look-held",
     "engine/floor-binds",
     "detail/empty",
     "detail/plain",
@@ -880,6 +881,48 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
             let ds = build(&params(|p| p.engine_mode = EngineMode::ThrownOutConfirmed));
             let at = thrown_out_card_with_verdict(&ds);
             engine_body(&ds, at, false)
+        }
+        "engine/second-look-held" => {
+            // A row the reviewer ruled out while the engine flagged it, drawn into the second
+            // look, with a No ("ruled out, but a real problem") that nothing has answered.
+            use camerata_api_types::review_view::{
+                EngineCheckError, EngineCheckVerdict, HoldReason, SampleStratum, StratumRate,
+            };
+            let mut ds = build(&params(|p| p.engine_mode = EngineMode::Pending));
+            let card = &mut ds.engine.cards[0];
+            card.stratum = SampleStratum::RuledOutFlagged;
+            card.site.decision = Some(camerata_api_types::review_view::DecisionView {
+                id: "dec-second-look".to_string(),
+                state: camerata_api_types::decisions::DecisionState::FalsePositive,
+                reason: "Test code, not production.".to_string(),
+                scope: camerata_api_types::decisions::Scope::Site,
+                inherited_from: None,
+                decided_by: "architect".to_string(),
+                decided_at: "2026-11-04T09:00:00Z".to_string(),
+                needed_me: None,
+                confirmed_by_client: None,
+            });
+            card.site.held = Some(HoldReason::EngineCheckNoWithoutCorrection);
+            card.verdict = Some(EngineCheckVerdict {
+                key: card.site.site_key.clone(),
+                run_id: ds.engine.run_id.clone(),
+                right: false,
+                wrong: Some(EngineCheckError::RuledOutRealProblem),
+                correction: None,
+                by: "architect".to_string(),
+                at: "2026-11-04T10:00:00Z".to_string(),
+                carried_from: None,
+            });
+            ds.engine.ruled_out_flagged_total = 9;
+            ds.engine.strata.push(StratumRate {
+                stratum: SampleStratum::RuledOutFlagged,
+                drawn: 1,
+                verdicts: 1,
+                wrong: 1,
+                rate_percent: Some(100.0),
+                margin_percent: Some(79.3),
+            });
+            engine_body(&ds, Some(0), false)
         }
         "engine/floor-binds" => {
             // A sample size of 6 against four categories with a floor of 3 each: the floor wins

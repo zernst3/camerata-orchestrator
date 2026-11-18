@@ -131,6 +131,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "small-category",
             "thrown-out-held",
             "thrown-out-confirmed",
+            "second-look-held",
             "floor-binds",
         ],
     ),

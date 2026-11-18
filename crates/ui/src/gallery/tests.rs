@@ -42,6 +42,7 @@ const SPEC_STATES: &[&str] = &[
     "engine/small-category",
     "engine/thrown-out-held",
     "engine/thrown-out-confirmed",
+    "engine/second-look-held",
     "engine/floor-binds",
     "detail/empty",
     "detail/plain",
