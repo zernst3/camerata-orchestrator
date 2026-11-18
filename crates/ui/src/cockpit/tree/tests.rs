@@ -121,6 +121,61 @@ async fn a_batch_without_a_reason_writes_nothing_and_says_so() {
     assert!(writes.log.borrow().is_empty());
 }
 
+/// Ruling out a batch that covers a row the engine flagged "possible false positive" needs a
+/// reason, like every other batch: nothing is posted without one, and a reason goes through with
+/// the flagged row covered.
+#[tokio::test]
+async fn ruling_out_a_batch_with_a_flagged_row_needs_a_reason() {
+    let ds = dataset_base();
+    let (node, flagged) = ds
+        .tree
+        .nodes
+        .iter()
+        .filter(|n| !n.thrown_out && n.counts.sites > 0)
+        .find_map(|n| {
+            let key = ds.node_rows.get(&n.id)?.iter().find_map(|&i| {
+                let r = &ds.rows[i];
+                (r.possible_false_positive.is_some() && r.held.is_none())
+                    .then(|| r.site_key.clone())
+            })?;
+            Some((n.id.clone(), key))
+        })
+        .expect("a node with a flagged row that is not held");
+    let reads = FixtureReviewSource::base();
+    let writes = RecordingWrites::default();
+    // The flagged row ticked, so it is covered and not left out as an unticked outlier.
+    let ticked: BTreeSet<String> = std::iter::once(flagged.clone()).collect();
+    let plan = plan_batch(
+        &reads,
+        &node,
+        &DecisionState::FalsePositive,
+        &ticked,
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    assert!(
+        plan.keys.contains(&flagged),
+        "the flagged row is in the plan"
+    );
+    for blank in ["", "   "] {
+        let err = commit_batch(&writes, &plan, blank, "insp-1")
+            .await
+            .unwrap_err();
+        assert_eq!(err, "A group decision needs a reason.");
+    }
+    assert!(writes.log.borrow().is_empty(), "nothing was posted");
+    commit_batch(&writes, &plan, "it is test code", "insp-1")
+        .await
+        .unwrap();
+    let log = writes.log.borrow();
+    let Written::Decision(req) = &log[0] else {
+        panic!("not a decision: {:?}", log[0]);
+    };
+    assert_eq!(req.state, DecisionState::FalsePositive);
+    assert!(!req.except.contains(&flagged));
+}
+
 #[tokio::test]
 async fn a_refused_batch_comes_back_in_the_servers_words_and_the_plan_stays() {
     let node = node_with_outlier_and_held();

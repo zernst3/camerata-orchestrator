@@ -2057,3 +2057,131 @@ fn a_new_rule_at_a_decided_place_is_new_since_the_decision() {
         (record.id.as_str(), place.as_str())
     );
 }
+
+// ── ruling out a row the engine flagged needs a reason ────────────────────────────────────
+
+/// Three rows of one rule in three files, the first two flagged "possible false positive" (test
+/// code), the third not. The flag is checked here, so the tests cannot drift from the rule.
+fn two_flagged_one_plain() -> Vec<Finding> {
+    let mut rows = vec![
+        row("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 10, "let a = 1;"),
+        row("SEC-NO-RAW-SQL-CONCAT-1", "src/b.rs", 20, "let b = 2;"),
+        row("SEC-NO-RAW-SQL-CONCAT-1", "src/c.rs", 30, "let c = 3;"),
+    ];
+    rows[0].in_test = true;
+    rows[1].in_test = true;
+    let index = crate::possible_false_positive::FpIndex::new(&rows);
+    assert!(index.of(&rows[0]).is_some() && index.of(&rows[1]).is_some());
+    assert!(index.of(&rows[2]).is_none());
+    rows
+}
+
+#[tokio::test]
+async fn ruling_out_a_flagged_row_without_a_reason_is_refused_and_with_one_is_kept() {
+    let (state, app, pid) = app_with_project();
+    let entry = state
+        .inspections
+        .append(entry_of(
+            &pid,
+            two_flagged_one_plain(),
+            "2026-11-02T10:00:00Z",
+        ))
+        .unwrap();
+    let flagged = key_at(&entry.report.findings, "src/a.rs");
+    let plain = key_at(&entry.report.findings, "src/c.rs");
+    let uri = format!("/api/projects/{pid}/decisions");
+
+    for blank in ["", "   "] {
+        let (status, body) = call(
+            &app,
+            "POST",
+            &uri,
+            Some(to_json(&PostDecisionsReq::Decide(site_req(
+                &flagged,
+                DecisionState::FalsePositive,
+                blank,
+            )))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["code"], "reason_required");
+    }
+    assert!(state.decisions.active(&pid).is_empty(), "nothing was kept");
+
+    // The same refusal for a row the engine did not flag: Ruled out always needs a reason.
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(site_req(
+            &plain,
+            DecisionState::FalsePositive,
+            "",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(site_req(
+            &flagged,
+            DecisionState::FalsePositive,
+            "it is a fixture",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.decisions.active(&pid).len(), 1);
+}
+
+#[tokio::test]
+async fn ruling_out_a_batch_that_holds_a_flagged_row_without_a_reason_is_refused() {
+    let (state, app, pid) = app_with_project();
+    let entry = state
+        .inspections
+        .append(entry_of(
+            &pid,
+            two_flagged_one_plain(),
+            "2026-11-02T10:00:00Z",
+        ))
+        .unwrap();
+    let tree = entry.report.tree.clone().unwrap();
+    let node = rule_node(&tree, "SEC-NO-RAW-SQL-CONCAT-1");
+    let uri = format!("/api/projects/{pid}/decisions");
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(node_req(
+            &node,
+            DecisionState::FalsePositive,
+            "  ",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "reason_required");
+    assert!(state.decisions.active(&pid).is_empty(), "nothing was kept");
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(node_req(
+            &node,
+            DecisionState::FalsePositive,
+            "all fixtures",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state.decisions.active(&pid).len(),
+        4,
+        "node plus three sites"
+    );
+}
