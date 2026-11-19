@@ -2924,7 +2924,17 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
 /// development. Auto-saves on change and reconciles from the server's echoed values, like
 /// [`BackendEditor`]; a failed save reverts both controls.
 #[component]
-pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
+pub(super) fn ClientEngagementEditor(
+    project: ProjectView,
+    /// Told the server's confirmed `(client_engagement, client_tooling_opt_in)` after each save,
+    /// so a screen that shows a line derived from them (the Inspection settings' conflict line)
+    /// follows the control.
+    #[props(default)]
+    on_changed: Option<EventHandler<(bool, bool)>>,
+    /// Locked while a run is in flight.
+    #[props(default)]
+    disabled: bool,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let pid = project.id.clone();
     let mut engagement = use_signal(|| project.client_engagement);
@@ -2942,6 +2952,9 @@ pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
                 Some((confirmed_engagement, confirmed_opt_in)) => {
                     engagement.set(confirmed_engagement);
                     opt_in.set(confirmed_opt_in);
+                    if let Some(on_changed) = on_changed {
+                        on_changed.call((confirmed_engagement, confirmed_opt_in));
+                    }
                 }
                 None => {
                     engagement.set(previous.0);
@@ -2968,7 +2981,7 @@ pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
                     r#type: "checkbox",
                     class: "l3-review-checkbox",
                     checked: engagement(),
-                    disabled: saving(),
+                    disabled: saving() || disabled,
                     onchange: move |e: Event<FormData>| save_engagement(e.checked(), opt_in()),
                 }
                 span { class: "l3-review-toggle-hint",
@@ -2986,7 +2999,7 @@ pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
                         r#type: "checkbox",
                         class: "l3-review-checkbox",
                         checked: opt_in(),
-                        disabled: saving(),
+                        disabled: saving() || disabled,
                         onchange: move |e: Event<FormData>| save_opt_in(engagement(), e.checked()),
                     }
                     span { class: "l3-review-toggle-hint",
@@ -3003,7 +3016,15 @@ pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
 }
 
 #[component]
-pub(super) fn BackendEditor(project: ProjectView) -> Element {
+pub(super) fn BackendEditor(
+    project: ProjectView,
+    /// Told the server's confirmed backend after each save (see [`ClientEngagementEditor`]).
+    #[props(default)]
+    on_changed: Option<EventHandler<ProjectBackend>>,
+    /// Locked while a run is in flight.
+    #[props(default)]
+    disabled: bool,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let pid = project.id.clone();
     let mut backend = use_signal(|| project.backend);
@@ -3024,7 +3045,7 @@ pub(super) fn BackendEditor(project: ProjectView) -> Element {
                 } else {
                     "backend-seg"
                 },
-                disabled: saving() || is_active,
+                disabled: saving() || is_active || disabled,
                 onclick: move |_| {
                     if is_active {
                         return;
@@ -3039,6 +3060,9 @@ pub(super) fn BackendEditor(project: ProjectView) -> Element {
                         match set_project_backend(&pid, candidate).await {
                             Some(confirmed) => {
                                 backend.set(confirmed);
+                                if let Some(on_changed) = on_changed {
+                                    on_changed.call(confirmed);
+                                }
                                 crate::toast::push_toast(
                                     toasts,
                                     crate::toast::ToastKind::Info,

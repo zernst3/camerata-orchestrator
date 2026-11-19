@@ -42,13 +42,6 @@ fn defaults_show_the_saved_formula_and_a_disabled_apply() {
     let html = fragment("settings/defaults");
     let v = view();
     for text in [
-        "Stage models",
-        "Scan model",
-        "Calibration (stage 1)",
-        "Group review (stage 2)",
-        "Fix model",
-        "per site, batched",
-        "one call per rule group, real time",
         "Escalation formula",
         "Rate per 1,000 lines",
         "Floor",
@@ -84,66 +77,10 @@ fn defaults_show_the_saved_formula_and_a_disabled_apply() {
     assert!(!html.contains("review-settings-bad"), "no hint when valid");
     assert!(!html.contains("review-settings-banner"));
     assert!(!html.contains("review-settings-locked"));
-    // The group review model is the fixture's, selected.
-    assert!(
-        html.contains("value=\"claude-fable-5-2\" selected"),
-        "{html}"
-    );
-    // The fix model offers "(not set)".
-    assert!(html.contains("(not set)"));
-}
-
-/// Every settable model has its own row in Stage models, with the current value selected and a
-/// "(not set)" option when it has a built-in default.
-#[test]
-fn every_settable_model_has_a_row_with_its_current_value_selected() {
-    let mut props = page_props("settings/defaults").expect("a settings state");
-    let Loaded::Ready(view) = &mut props.body.view else {
-        panic!("the defaults state is ready");
-    };
-    view.stage_models.finder_model = "claude-opus-5-5".to_string();
-    view.stage_models.duplicate_check = "claude-haiku-4-5-20251001".to_string();
-    let html = crate::test_harness::render_fragment(
-        crate::gallery::settings_states::SettingsStatePage,
-        props,
-    );
-    for (step, label) in [
-        ("audit", "Scan model"),
-        ("calibration", "Calibration (stage 1)"),
-        ("group_review", "Group review (stage 2)"),
-        ("fix", "Fix model"),
-        ("finder_model", "Finder model"),
-        ("duplicate_check", "Duplicate check"),
-        ("clone_judge", "Clone judge"),
-    ] {
-        assert!(
-            html.contains(&format!("id=\"rs-model-{step}\"")),
-            "a row for {step}\n{html}"
-        );
-        assert!(html.contains(label), "{label}\n{html}");
+    // The stage models are the Inspection settings component's now: this lane carries none.
+    for gone in ["Stage models", "Scan model", "Group review", "Fix model", "<select"] {
+        assert!(!html.contains(gone), "{gone} left the lane\n{html}");
     }
-    let select_of = |step: &str| {
-        let at = html.find(&format!("id=\"rs-model-{step}\"")).unwrap();
-        let end = html[at..].find("</select>").unwrap() + at;
-        html[at..end].to_string()
-    };
-    assert!(
-        select_of("finder_model").contains("value=\"claude-opus-5-5\" selected"),
-        "{html}"
-    );
-    assert!(
-        select_of("duplicate_check").contains("value=\"claude-haiku-4-5-20251001\" selected"),
-        "{html}"
-    );
-    // Unset models offer "(not set)" and say what the default is.
-    for step in ["finder_model", "duplicate_check", "clone_judge"] {
-        assert!(select_of(step).contains("(not set)"), "{step}");
-    }
-    assert!(
-        html.contains("not set: Claude Opus 5.5; used when the finder is agent"),
-        "{html}"
-    );
-    assert!(html.contains("not set: Claude Sonnet 5.5"), "{html}");
 }
 
 #[test]
@@ -222,12 +159,7 @@ fn an_error_shows_the_servers_reason_in_a_banner_and_keeps_the_typed_values() {
 fn a_run_in_flight_locks_every_control_and_says_why() {
     let html = fragment("settings/run-in-flight");
     assert!(html.contains(RUN_IN_FLIGHT_NOTE), "{html}");
-    let selects = html.matches("<select").count();
-    assert_eq!(selects, 8, "one per stage (seven models) and the finder");
-    for chunk in html.split("<select").skip(1) {
-        let tag = &chunk[..chunk.find('>').unwrap()];
-        assert!(tag.contains("disabled"), "a select is still live: {tag}");
-    }
+    assert_eq!(html.matches("<select").count(), 0, "the model rows are not in this lane");
     for chunk in html.split("<input").skip(1) {
         let tag = &chunk[..chunk.find('>').unwrap()];
         assert!(tag.contains("disabled"), "an input is still live: {tag}");
@@ -252,9 +184,9 @@ fn settings_lane_never_mentions_environment_models() {
         }
     }
     assert_eq!(
-        seen_the_sentence,
-        STATES.len(),
-        "every state carries the sentence that models come from the project or a CLI flag"
+        seen_the_sentence, 0,
+        "the sentence about where models come from moved with the model rows to the Inspection \
+         settings component, which carries it in every state"
     );
     // The whole page too (heading and card), not only the lane.
     for id in STATES {
@@ -422,39 +354,6 @@ async fn the_sample_size_saves_with_one_write_and_a_reload() {
         .await
         .is_err());
     assert_eq!(source.calls().len(), n);
-}
-
-#[tokio::test]
-async fn a_stage_model_goes_through_the_step_models_route_under_its_step_key() {
-    let source = FixtureReviewSource::base();
-    let n = source.calls().len();
-    let reloaded = change_stage_model(
-        &source,
-        &source,
-        Stage::GroupReview,
-        "claude-opus-5-5",
-        false,
-    )
-    .await
-    .unwrap();
-    assert_eq!(reloaded.stage_models.group_review, "claude-opus-5-5");
-    assert_eq!(
-        source.calls().split_off(n),
-        ["set_stage_model:group_review", "settings"]
-    );
-    let cleared = change_stage_model(&source, &source, Stage::Fix, "", false)
-        .await
-        .unwrap();
-    assert_eq!(cleared.stage_models.fix, "", "the fix model can be unset");
-    assert!(change_stage_model(&source, &source, Stage::Scan, "x", true)
-        .await
-        .is_err());
-    assert!(
-        change_stage_model(&source, &source, Stage::GroupReview, " ", false)
-            .await
-            .is_err(),
-        "a blank stage 2 model is refused"
-    );
 }
 
 #[tokio::test]

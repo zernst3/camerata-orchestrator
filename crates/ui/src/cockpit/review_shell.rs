@@ -309,13 +309,16 @@ fn SettingsLane() -> Element {
     // The app-scope in-flight job id (the scan panel's); a job running locks the lane.
     let run_in_flight =
         try_use_context::<Signal<Option<String>>>().is_some_and(|job| job.read().is_some());
-    let models = use_resource(crate::chat::fetch_models);
-    let models = models.read().clone().flatten();
     rsx! {
+        // The Inspection settings read the PROJECT, so they show before the first inspection has
+        // a result; the lane below them is the part that waits for one.
+        super::inspection_settings::InspectionSettingsHost {
+            project_id: String::new(),
+            run_in_flight,
+        }
         ReviewSettingsHost {
             api,
             run_in_flight,
-            models,
             on_applied: move |outcome: EscalationBudgetOutcome| {
                 if let Some(mut applied) = applied {
                     applied.0.set(Some(outcome.clone()));
