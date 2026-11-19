@@ -1115,6 +1115,9 @@ pub(crate) async fn rescan_alternatives_handler(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
+    if let Some(why) = state.source_ops.deleting_refusal(&project.id) {
+        return Json(serde_json::json!({ "ok": false, "message": why }));
+    }
     // Re-reads the project's source and calls the model, all inside this request: while it
     // does, deleting that source is refused rather than raced.
     let _scan_claim = state.source_ops.begin_scan(&project.id);

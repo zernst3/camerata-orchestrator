@@ -645,6 +645,29 @@ impl ScanCacheStore {
         removed
     }
 
+    /// Drop a project's manifest and write the file; when the write fails nothing is dropped and
+    /// the error is returned.
+    pub fn clear_checked(&self, project_id: &str) -> std::io::Result<()> {
+        let mut s = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("scan cache mutex poisoned"))?;
+        let kept = CacheState {
+            by_project: s
+                .by_project
+                .iter()
+                .filter(|(id, _)| id.as_str() != project_id)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&kept).map_err(std::io::Error::other)?;
+            std::fs::write(path.as_path(), json)?;
+        }
+        *s = kept;
+        Ok(())
+    }
+
     /// The size in bytes of everything the cache holds for `project_id`, every repo together
     /// (0 when it holds nothing). What deleting the whole project's cache would remove.
     pub fn project_bytes(&self, project_id: &str) -> u64 {

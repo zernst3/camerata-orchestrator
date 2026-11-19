@@ -2325,6 +2325,14 @@ async fn onboard_audit(
             return Json(r);
         }
     };
+    // A project being deleted with all its data starts nothing.
+    if let Some(why) = state
+        .projects
+        .active()
+        .and_then(|p| state.source_ops.deleting_refusal(&p.id))
+    {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // The client-engagement lock, before any repository is located or read.
     if let Some(why) = client_lock_refusal_for_scan(
         state.projects.active().as_ref(),
@@ -2794,6 +2802,15 @@ pub(crate) async fn start_audit_job(
     // The job is stamped with its project (ROUTES-5, so a project's deep-report export finds ITS
     // OWN latest deep report) AND it seeds the incremental-scan manifest lookup below.
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // A project being deleted with all its data starts nothing: the job fails at once.
+    if let Some(why) = project_id
+        .as_deref()
+        .and_then(|id| state.source_ops.deleting_refusal(id))
+    {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
     // The client-engagement lock, before any repository is located or read: the job fails at
     // once with the reason, and nothing is spawned.
     if let Some(why) = client_lock_refusal_for_scan(

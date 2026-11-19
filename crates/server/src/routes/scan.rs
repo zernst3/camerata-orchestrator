@@ -151,6 +151,14 @@ pub(crate) async fn onboard_scan(
         return Json(r);
     }
 
+    // A project being deleted with all its data starts nothing.
+    if let Some(why) = state
+        .projects
+        .active()
+        .and_then(|p| state.source_ops.deleting_refusal(&p.id))
+    {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // Local-first: scan reads the repos' local working trees, not GitHub. No token needed.
     // While it reads them, deleting that source is refused rather than raced (see `onboard_audit`).
     let _scan_claim = state

@@ -109,6 +109,9 @@ pub struct ProjectDeletionRecord {
     pub camerata_build: String,
     pub items: Vec<ProjectDeletionItem>,
     pub kept: Vec<KeptItem>,
+    /// Uncommitted work and unpushed commits that went with the checkouts (counts only).
+    #[serde(default)]
+    pub lost_work: Vec<String>,
     pub total_files: u64,
     pub total_bytes: u64,
     /// The project record itself was removed (false when some item could not be removed).
@@ -154,6 +157,12 @@ impl ProjectDeletionRecord {
                 outcome
             ));
         }
+        if !self.lost_work.is_empty() {
+            out.push_str("\nWork that existed only in a checkout\n");
+            for l in &self.lost_work {
+                out.push_str(&format!("  {l}\n"));
+            }
+        }
         if !self.kept.is_empty() {
             out.push_str("\nKept\n");
             for k in &self.kept {
@@ -168,14 +177,61 @@ impl ProjectDeletionRecord {
     }
 }
 
-/// What one extra step does when executed.
+/// Which development console store a row set belongs to.
+#[derive(Clone, Copy)]
+enum Dev {
+    Uow,
+    Story,
+    Clarification,
+    Resume,
+    Routine,
+    Checkpoint,
+    Escalation,
+}
+
+impl Dev {
+    /// The file the store keeps in the data dir.
+    fn file(self) -> &'static str {
+        match self {
+            Dev::Uow => "uow.json",
+            Dev::Story => "stories.json",
+            Dev::Clarification => "clarifications.json",
+            Dev::Resume => "clarify-resume.json",
+            Dev::Routine => "routines.json",
+            Dev::Checkpoint => "checkpoints.json",
+            Dev::Escalation => "escalations.json",
+        }
+    }
+}
+
+/// What one extra step does when executed. Steps run in the order of [`Action::phase`].
 enum Action {
     Path(PathBuf),
     ScanCache,
     Draft,
+    /// This project's development console rows (units of work, stories, questions, routines,
+    /// checkpoints, escalations), by the ids found when the plan was built.
+    Dev(Dev, Vec<String>),
     /// Forget the stores' in-memory copies and the scan transcripts, jobs and last scans.
     Memory,
+    /// A decision, edit or engine-check file (after the memory copies are forgotten).
+    StoreFile(PathBuf),
+    /// An inspection file: kept until every other item is clear, because the Claude Code
+    /// session ids it records are how a retry finds the session files.
+    Inspection(PathBuf),
     ProjectRecord,
+}
+
+impl Action {
+    fn phase(&self) -> u8 {
+        match self {
+            Action::Path(_) => 0,
+            Action::ScanCache | Action::Draft | Action::Dev(..) => 1,
+            Action::Memory => 2,
+            Action::StoreFile(_) => 3,
+            Action::Inspection(_) | Action::ProjectRecord => 4,
+        }
+    }
 }
 
 struct Step {
@@ -216,7 +272,30 @@ struct Built {
     /// Repos whose checkout the guard refused: reported as failed items.
     blocked: Vec<ProjectDeletionItem>,
     kept: Vec<KeptItem>,
+    /// Work that exists only in a checkout and goes with it.
+    losses: Vec<Loss>,
     not_reached: Vec<String>,
+}
+
+/// Uncommitted changes and unpushed commits in one checkout.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Loss {
+    pub repo: String,
+    pub uncommitted: u64,
+    pub unpushed: u64,
+}
+
+impl Loss {
+    fn sentence(&self) -> String {
+        let n = self.uncommitted;
+        let m = self.unpushed;
+        format!(
+            "{}: {n} uncommitted {} and {m} unpushed {} will be lost.",
+            self.repo,
+            if n == 1 { "change" } else { "changes" },
+            if m == 1 { "commit" } else { "commits" },
+        )
+    }
 }
 
 impl Built {
@@ -300,6 +379,8 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     let mut claims = Vec::new();
     let mut blocked = Vec::new();
     let mut kept = Vec::new();
+    let mut losses: Vec<Loss> = Vec::new();
+    let mut blocked_repos: HashSet<String> = HashSet::new();
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
     for repo in &project.repos {
@@ -327,6 +408,15 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         };
         match guard(state, &project.id, repo, intent).await {
             Ok(target) => {
+                let uncommitted = target.dirty_files + target.stashes;
+                let unpushed: u64 = target.unpushed.iter().map(|u| u.ahead).sum();
+                if uncommitted + unpushed > 0 {
+                    losses.push(Loss {
+                        repo: repo.clone(),
+                        uncommitted,
+                        unpushed,
+                    });
+                }
                 let mut p = plan(state, &target).await;
                 // The project-wide steps below own these kinds.
                 p.steps.retain(|s| {
@@ -350,6 +440,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
                 return Err(r);
             }
             Err(r) => {
+                blocked_repos.insert(repo.to_ascii_lowercase());
                 blocked.push(ProjectDeletionItem {
                     category: "checkout".to_string(),
                     path: repo.clone(),
@@ -363,9 +454,12 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     }
 
     // Folders of this project's repos, and of every other project's.
+    // (A repo whose folder the guard refused is not trusted to be this project's: its folder
+    // counts for nothing below.)
     let own_dirs: Vec<PathBuf> = project
         .repos
         .iter()
+        .filter(|r| !blocked_repos.contains(&r.to_ascii_lowercase()))
         .filter_map(|r| resolve_dir(state, r))
         .collect();
     let other_dirs: Vec<PathBuf> = others
@@ -384,10 +478,20 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
 
     if let Some(cli) = &cli_dir {
         // Per-checkout bookkeeping that is not already in a repo plan.
-        for repo in project.repos.iter().filter(|r| !shared_repo(r)) {
+        let canon = |p: &Path| crate::onboard::finding_context::canonicalize_existing_prefix(p);
+        let other_canon: Vec<PathBuf> = other_dirs.iter().map(|d| canon(d)).collect();
+        for repo in project
+            .repos
+            .iter()
+            .filter(|r| !shared_repo(r) && !blocked_repos.contains(&r.to_ascii_lowercase()))
+        {
             let Some(dir) = resolve_dir(state, repo) else {
                 continue;
             };
+            // A folder another project's repo also resolves to is not this project's to clean.
+            if other_canon.contains(&canon(&dir)) {
+                continue;
+            }
             let key = repo_state_key(&dir);
             for (cat, name) in [
                 ("CLI scan cache", format!("{key}.cache.json")),
@@ -481,8 +585,12 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     }
 
     // Scan cache, draft entry.
+    let data = data_dir(state)?;
     let cache_bytes = state.scan_cache.project_bytes(&project.id);
-    if cache_bytes > 0 {
+    let in_file = |name: &str| {
+        ids_in_file(&data.join(name)).map_or(true, |ids| ids.contains(&project.id))
+    };
+    if cache_bytes > 0 || in_file("scan-cache.json") {
         add(
             &mut extras,
             step(
@@ -495,7 +603,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         );
     }
     let draft_bytes = state.draft.stored_bytes(&project.id);
-    if draft_bytes > 0 {
+    if draft_bytes > 0 || in_file("onboarding-draft.json") {
         add(
             &mut extras,
             step(
@@ -508,20 +616,53 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         );
     }
 
-    // The per-project stores (and their stray temp and corrupt files).
-    let stores: [(&str, Option<PathBuf>); 4] = [
-        ("inspection store", state.inspections.file_for(&project.id)),
-        ("decision store", state.decisions.file_for(&project.id)),
-        ("edit store", state.edits.file_for(&project.id)),
+    // The development console rows of this project (units of work, stories, questions,
+    // routines, checkpoints, escalations).
+    for (dev, ids, what) in dev_rows(state, &project, &others, &mut kept).await {
+        if ids.is_empty() {
+            continue;
+        }
+        add(
+            &mut extras,
+            step(
+                "development console record",
+                format!("{}#{} ({} {what})", dev.file(), project.id, ids.len()),
+                0,
+                0,
+                Action::Dev(dev, ids),
+            ),
+        );
+    }
+
+    // The per-project stores (and their stray temp and corrupt files). Decisions, edits and
+    // the Engine Check go with the memory step; the inspection files wait for everything else.
+    let stores: [(&str, Option<PathBuf>, bool); 4] = [
+        (
+            "inspection store",
+            state.inspections.file_for(&project.id),
+            true,
+        ),
+        ("decision store", state.decisions.file_for(&project.id), false),
+        ("edit store", state.edits.file_for(&project.id), false),
         (
             "engine check store",
             state.engine_check.file_for(&project.id),
+            false,
         ),
     ];
-    for (cat, main) in stores {
+    for (cat, main, last) in stores {
         for f in store_files(main) {
             if std::fs::symlink_metadata(&f).is_ok() {
-                add(&mut extras, path_step(cat, f));
+                let st = path_step(cat, f.clone());
+                let st = Step {
+                    action: if last {
+                        Action::Inspection(f)
+                    } else {
+                        Action::StoreFile(f)
+                    },
+                    ..st
+                };
+                add(&mut extras, st);
             }
         }
     }
@@ -553,8 +694,205 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         extras,
         blocked,
         kept,
+        losses,
         not_reached,
     })
+}
+
+/// The ids a file-backed store keeps, read from its file: a list of objects with an `id`, a
+/// `units`, `by_project` or `projects` section, or a plain map keyed by id. A missing file holds
+/// none; an unreadable one is an error (so it is treated as "may still hold the project").
+fn ids_in_file(path: &Path) -> Result<HashSet<String>, String> {
+    use serde_json::Value;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let from_array = |a: &Vec<Value>| -> HashSet<String> {
+        a.iter()
+            .filter_map(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    };
+    Ok(match &value {
+        Value::Array(a) => from_array(a),
+        Value::Object(o) => {
+            if let Some(Value::Object(m)) = o.get("units").or_else(|| o.get("by_project")) {
+                m.keys().cloned().collect()
+            } else if let Some(Value::Array(a)) = o.get("projects") {
+                from_array(a)
+            } else {
+                o.keys().cloned().collect()
+            }
+        }
+        _ => HashSet::new(),
+    })
+}
+
+/// The development console rows of `project`, by store: attributed by the project id the row
+/// records or by its repositories, and only when every repository is this project's alone. A row
+/// tied to a repository another project also uses, or to none, is left and listed as kept.
+async fn dev_rows(
+    state: &AppState,
+    project: &Project,
+    others: &[Project],
+    kept: &mut Vec<KeptItem>,
+) -> Vec<(Dev, Vec<String>, &'static str)> {
+    enum Who {
+        Mine,
+        Shared,
+        Unassigned,
+        Foreign,
+    }
+    let lower = |r: &String| r.to_ascii_lowercase();
+    let own: HashSet<String> = project.repos.iter().map(lower).collect();
+    let other: HashSet<String> = others.iter().flat_map(|p| p.repos.iter()).map(lower).collect();
+    let classify = |repos: &[String]| -> Who {
+        let repos: Vec<String> = repos.iter().map(lower).collect();
+        if repos.is_empty() {
+            Who::Unassigned
+        } else if repos.iter().all(|r| own.contains(r) && !other.contains(r)) {
+            Who::Mine
+        } else if repos.iter().any(|r| own.contains(r)) {
+            Who::Shared
+        } else {
+            Who::Foreign
+        }
+    };
+
+    let mut shared = 0usize;
+    let mut unassigned = 0usize;
+    let mut uow_ids: Vec<String> = Vec::new();
+    for u in state.uow.list() {
+        let mut repos: Vec<String> = u.repo().map(str::to_string).into_iter().collect();
+        repos.extend(u.intake.repos.iter().map(|s| s.repo.clone()));
+        match u.project_id.as_deref() {
+            Some(id) if id == project.id => uow_ids.push(u.story_id.clone()),
+            Some(_) => {}
+            None => match classify(&repos) {
+                Who::Mine => uow_ids.push(u.story_id.clone()),
+                Who::Shared => shared += 1,
+                Who::Unassigned => unassigned += 1,
+                Who::Foreign => {}
+            },
+        }
+    }
+    let mut story_ids: Vec<String> = Vec::new();
+    for story in state.stories.list().await.unwrap_or_default() {
+        let repos: Vec<String> = story.targets.iter().map(|t| t.repo.clone()).collect();
+        if uow_ids.contains(&story.id) {
+            story_ids.push(story.id.clone());
+            continue;
+        }
+        match classify(&repos) {
+            Who::Mine => story_ids.push(story.id.clone()),
+            Who::Shared => shared += 1,
+            Who::Unassigned => unassigned += 1,
+            Who::Foreign => {}
+        }
+    }
+    let mut story_scope = uow_ids.clone();
+    story_scope.extend(story_ids.iter().cloned());
+    story_scope.sort();
+    story_scope.dedup();
+
+    let routine_ids: Vec<String> = state
+        .routines
+        .list_for_project(&project.id)
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let checkpoint_ids: Vec<String> = state
+        .checkpoints
+        .list()
+        .into_iter()
+        .filter(|c| {
+            c.project_id.as_deref() == Some(project.id.as_str())
+                || story_scope.contains(&c.story_id)
+        })
+        .map(|c| c.id)
+        .collect();
+    let escalation_ids: Vec<String> = state
+        .escalations
+        .list()
+        .into_iter()
+        .filter(|e| match e.subject_kind {
+            camerata_app_core::escalation::SubjectKind::Uow => story_scope.contains(&e.routine_id),
+            camerata_app_core::escalation::SubjectKind::Routine => routine_ids.contains(&e.routine_id),
+        })
+        .map(|e| e.id)
+        .collect();
+
+    if shared > 0 {
+        kept.push(KeptItem {
+            what: format!("{shared} development console record(s)"),
+            why: "they are tied to a repository another project also uses, so they cannot be \
+                  attributed to this project alone"
+                .to_string(),
+        });
+    }
+    if unassigned > 0 {
+        kept.push(KeptItem {
+            what: format!("{unassigned} development console record(s)"),
+            why: "they name no project and no repository, so Camerata cannot attribute them to \
+                  this project"
+                .to_string(),
+        });
+    }
+    vec![
+        (Dev::Uow, uow_ids, "units of work"),
+        (Dev::Story, story_ids, "stories"),
+        (
+            Dev::Clarification,
+            state.clarifications.ids_for_stories(&story_scope),
+            "questions",
+        ),
+        (
+            Dev::Resume,
+            state.clarify_resume.ids_for_stories(&story_scope),
+            "resume points",
+        ),
+        (Dev::Routine, routine_ids, "routines"),
+        (Dev::Checkpoint, checkpoint_ids, "checkpoints"),
+        (Dev::Escalation, escalation_ids, "escalations"),
+    ]
+}
+
+fn failed(file: &Path, e: &std::io::Error) -> PurgeOutcome {
+    PurgeOutcome::Failed {
+        error: format!("{} could not be written: {e}", file.display()),
+    }
+}
+
+/// Forget the in-memory copies of the decision, edit and Engine Check stores, the scan
+/// transcripts, finished jobs and last scans of the project. (Inspections wait for the end.)
+fn forget_console_memory(state: &AppState, project: &Project) {
+    state.decisions.forget_project(&project.id);
+    state.edits.forget_project(&project.id);
+    state.engine_check.forget_project(&project.id);
+    state.transcripts.clear(crate::SCAN_AUDIT_KEY);
+    state.jobs.remove_finished_for_project(&project.id);
+    state.forget_project_scans(&project.id, &project.repos);
+}
+
+/// Remove one set of development console rows (the write is checked: on a failure nothing is
+/// removed and the item is failed, so a retry finds the rows again).
+fn remove_dev(state: &AppState, dev: Dev, ids: &[String], data: &Path) -> PurgeOutcome {
+    let result: std::io::Result<()> = match dev {
+        Dev::Uow => state.uow.remove_many(ids).map(|_| ()),
+        Dev::Story => state.stories.remove_many(ids).map(|_| ()),
+        Dev::Routine => state.routines.remove_ids(ids).map(|_| ()),
+        Dev::Checkpoint => state.checkpoints.remove_ids(ids).map(|_| ()),
+        Dev::Escalation => state.escalations.remove_ids(ids).map(|_| ()),
+        Dev::Clarification => state.clarifications.remove_ids(ids).map(|_| ()),
+        Dev::Resume => state.clarify_resume.remove_ids(ids).map(|_| ()),
+    };
+    match result {
+        Ok(()) => PurgeOutcome::Removed,
+        Err(e) => failed(&data.join(dev.file()), &e),
+    }
 }
 
 fn is_set_file(path: &str) -> bool {
@@ -626,14 +964,23 @@ pub async fn delete_all(
         ));
     }
     let requested_at = now_rfc3339();
+    // From here until this function ends no scan or job may start on the project; set BEFORE the
+    // in-flight checks so nothing slips in between the check and the removal.
+    let Some(_deleting) = state.source_ops.begin_deleting(&project.id) else {
+        return Err(Refusal::conflict(
+            "scan_in_progress",
+            "This project is already being deleted. Wait for that to finish.",
+        ));
+    };
     let built = build(state, project_id, false).await?;
     let Built {
         project,
         targets,
         _claims,
-        extras,
+        mut extras,
         blocked,
         kept,
+        losses,
         not_reached,
     } = built;
 
@@ -644,53 +991,106 @@ pub async fn delete_all(
         }
     }
     items.extend(blocked);
-    let mut project_step: Option<ProjectDeletionItem> = None;
-    let mut memory_step: Option<ProjectDeletionItem> = None;
+    let data = state.storage_roots.data_dir.clone().unwrap_or_default();
+    extras.sort_by_key(|s| s.action.phase());
+    let mut memory_forgotten = false;
+    let mut inspections_forgotten = false;
+    let mut project_item: Option<ProjectDeletionItem> = None;
     for Step { mut item, action } in extras {
+        // The last phase (inspections, then the project record) runs only when everything
+        // before it is clear, and a scan that slipped in refuses it too.
+        if action.phase() == 4 {
+            let clear = items.iter().all(|i| i.outcome.is_clear());
+            let running = state.jobs.has_running_for_project(&project.id)
+                || state.source_ops.scan_running(&project.id);
+            if !clear || running {
+                item.outcome = PurgeOutcome::Failed {
+                    error: if running {
+                        "a scan started during the deletion; the project is kept so you can retry"
+                            .to_string()
+                    } else {
+                        "kept because another location could not be removed; delete again to \
+                         retry"
+                            .to_string()
+                    },
+                };
+                items.push(item);
+                continue;
+            }
+        }
         match action {
-            Action::ProjectRecord => {
-                project_step = Some(item);
-                continue;
-            }
-            Action::Memory => {
-                memory_step = Some(item);
-                continue;
-            }
-            Action::Path(path) => {
+            Action::Path(path) | Action::StoreFile(path) => {
+                if matches!(item.category.as_str(), "decision store" | "edit store" | "engine check store")
+                    && !memory_forgotten
+                {
+                    forget_console_memory(state, &project);
+                    memory_forgotten = true;
+                }
                 item.outcome = run_blocking(move || remove_path(&path)).await;
             }
             Action::ScanCache => {
-                state.scan_cache.clear(&project.id);
-                item.outcome = PurgeOutcome::Removed;
+                item.outcome = match state.scan_cache.clear_checked(&project.id) {
+                    Ok(()) => PurgeOutcome::Removed,
+                    Err(e) => failed(&data.join("scan-cache.json"), &e),
+                };
             }
             Action::Draft => {
-                state.draft.clear(&project.id);
+                item.outcome = match state.draft.clear_checked(&project.id) {
+                    Ok(()) => PurgeOutcome::Removed,
+                    Err(e) => failed(&data.join("onboarding-draft.json"), &e),
+                };
+            }
+            Action::Dev(dev, ids) => {
+                item.outcome = remove_dev(state, dev, &ids, &data);
+            }
+            Action::Memory => {
+                if !memory_forgotten {
+                    forget_console_memory(state, &project);
+                    memory_forgotten = true;
+                }
                 item.outcome = PurgeOutcome::Removed;
+            }
+            Action::Inspection(path) => {
+                if !inspections_forgotten {
+                    state.inspections.forget_project(&project.id);
+                    inspections_forgotten = true;
+                }
+                item.outcome = run_blocking(move || remove_path(&path)).await;
+            }
+            Action::ProjectRecord => {
+                project_item = Some(item);
+                continue;
             }
         }
         items.push(item);
     }
-    if let Some(mut item) = memory_step {
+    if !inspections_forgotten && items.iter().all(|i| i.outcome.is_clear()) {
         state.inspections.forget_project(&project.id);
-        state.decisions.forget_project(&project.id);
-        state.edits.forget_project(&project.id);
-        state.engine_check.forget_project(&project.id);
-        state.transcripts.clear(crate::SCAN_AUDIT_KEY);
-        state.jobs.remove_finished_for_project(&project.id);
-        state.forget_project_scans(&project.id, &project.repos);
-        item.outcome = PurgeOutcome::Removed;
-        items.push(item);
     }
-    // The project record goes only when everything else is clear, so a partial run can be retried.
-    let all_clear = items.iter().all(|i| i.outcome.is_clear());
+    // The project record itself goes last, only when everything else is clear.
     let mut project_removed = false;
-    if let Some(mut item) = project_step {
-        if all_clear {
-            state.projects.delete(&project.id);
-            item.outcome = PurgeOutcome::Removed;
-            project_removed = true;
-            items.push(item);
-        }
+    if let Some(mut item) = project_item {
+        let clear = items.iter().all(|i| i.outcome.is_clear());
+        let running = state.jobs.has_running_for_project(&project.id)
+            || state.source_ops.scan_running(&project.id);
+        item.outcome = if !clear || running {
+            PurgeOutcome::Failed {
+                error: "kept so the deletion can be retried".to_string(),
+            }
+        } else {
+            match state.projects.delete_checked(&project.id) {
+                Ok(true) => {
+                    project_removed = true;
+                    PurgeOutcome::Removed
+                }
+                Ok(false) => {
+                    project_removed = true;
+                    PurgeOutcome::AlreadyAbsent
+                }
+                Err(e) => failed(&data.join("projects.json"), &e),
+            }
+        };
+        items.push(item);
     }
 
     let removed = items.iter().filter(|i| i.outcome == PurgeOutcome::Removed);
@@ -712,6 +1112,7 @@ pub async fn delete_all(
         camerata_build: build_id(),
         items,
         kept,
+        lost_work: losses.iter().map(Loss::sentence).collect(),
         total_files,
         total_bytes,
         project_removed,
