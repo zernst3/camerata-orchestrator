@@ -54,6 +54,10 @@ pub(in crate::cockpit) fn audit_request_json(
 /// Phase 2 — audit the repos against the selected rules (each carrying its repo binding).
 /// When `deep` is true, the server also runs the three deep-tier lenses (SOC-2 gap,
 /// deep security, threat model) and attaches the results to `report.deep`.
+///
+/// Only tests call this now: the screen runs every scan as a saved job ([`audit_job_start`]), the
+/// one path whose run can be resumed.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::cockpit) async fn audit_against(
     repos: &[String],
@@ -603,6 +607,18 @@ pub(in crate::cockpit) struct JobStatusEnvelope {
     #[allow(dead_code)]
     #[serde(default)]
     pub cancel_requested: bool,
+}
+
+/// The execution mode a scan job is started with for the picked scan mode. "Background job" is
+/// the server's default (`auto`); every other pick is kept, because it decides how the model is
+/// called. EVERY pick runs as a saved job (see `ScanResults`): the plain request path saved no
+/// run, so its incomplete result could not be resumed.
+pub(in crate::cockpit) fn job_exec_mode(picked: &str) -> String {
+    if picked == "job" {
+        "auto".to_string()
+    } else {
+        picked.to_string()
+    }
 }
 
 /// Mode 3: START an async audit job, returning its id (the request returns immediately).

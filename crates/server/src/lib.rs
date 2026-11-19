@@ -3311,10 +3311,17 @@ pub(crate) async fn start_audit_job(
                 crate::run_store::note_report(store, &mut report);
             }
 
-            // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
-            // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
-            // handler. If you add ledger capture here in the future, follow the same
-            // background-spawn pattern used there.)
+            // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
+            // The cockpit runs every scan as this job, so the capture the synchronous
+            // `onboard_audit` handler makes runs here too. Same background-spawn pattern,
+            // best-effort: a failed write is logged and swallowed.
+            {
+                let ledger = state.enforcement_ledger.clone();
+                let all_findings = report.findings.clone();
+                tokio::spawn(async move {
+                    crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
+                });
+            }
 
             // ── Write last_scan + recent_scan (async job path) ──────────────────────────
             // Store the completed report before finishing the job so any concurrent chat

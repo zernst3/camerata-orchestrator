@@ -970,16 +970,24 @@ fn resend_or_fail<Id: Clone + Ord>(
 
 /// Why a part was not sent: the outage stop or the spend limit.
 fn refusal_class(ctx: &StageCtx<'_>) -> (FailureClass, &'static str) {
-    if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
-        (
+    use super::usage_meter::RefusalCause;
+    match ctx.meter.map(UsageMeter::refusal_cause) {
+        Some(RefusalCause::Outage) => (
             FailureClass::OutageStop,
             "the run stopped because the model provider could not be reached before this item was sent",
-        )
-    } else {
-        (
+        ),
+        Some(RefusalCause::CostUnknown) => (
+            FailureClass::SpendLimit,
+            "a call's cost was unknown, so the limit set for this run could not be enforced and this item was not sent",
+        ),
+        Some(RefusalCause::CheckpointStop) => (
+            FailureClass::SpendLimit,
+            "the run was paused at a cost checkpoint, so this item was not sent",
+        ),
+        _ => (
             FailureClass::SpendLimit,
             "the spend limit stopped the run before this item was sent",
-        )
+        ),
     }
 }
 
@@ -1180,7 +1188,7 @@ async fn run_parallel<S>(
                     // limit has nothing to refuse, and refusing it would drop paid work.
                     let permit = match meter {
                         Some(m) if !realtime.replays(&req) => {
-                            match m.admit_for_stage(repo, label).await {
+                            match m.admit_for_stage_request(repo, label, &req).await {
                                 Ok(permit) => Some(permit),
                                 Err(_) => return (work, Called::Refused),
                             }

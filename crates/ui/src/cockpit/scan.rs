@@ -190,3 +190,8 @@ mod order_preset_reload_tests;
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod order_preset_followup_tests;
+
+/// "Run what remains" after a scan run from the screen: every scan is a saved job, the saved id
+/// enables the button and a click fetches the plan.
+#[cfg(test)]
+mod resume_button_tests;

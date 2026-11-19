@@ -1319,13 +1319,13 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                     return;
                                 }
                             };
-                            // Deterministic-only is fast, but its PROGRESS is only pollable on
-                            // the async job path (the sync path holds one request and returns
-                            // the final report). So route a deterministic-ONLY scan through the
-                            // job path regardless of the picked mode — that's where the
-                            // per-tool progress streams into the "Deterministic scan" component.
-                            let deterministic_only = det && !ai;
-                            let use_job = mode == "job" || deterministic_only;
+                            // Every scan runs as a saved server-side job, whatever the picked mode:
+                            // the job is the only path that saves the run (its journal and
+                            // checkpoints), so it is the only one "Run what remains" can resume,
+                            // and its progress is pollable. The picked mode still decides HOW the
+                            // model is called (see `exec_mode`); "Background job" is the server's
+                            // default.
+                            let exec_mode = job_exec_mode(&mode);
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
@@ -1350,7 +1350,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             // like this new run already failed before it even began.
                             job_failed_message.set(None);
                             auditing.set(true);
-                            if use_job {
+                            {
                                 // Async job: submit, record the id (app-scope, so a later
                                 // mount can resume), then poll. The server runs it decoupled
                                 // from any single request.
@@ -1365,7 +1365,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "auto", incremental, deep, ai, det, max_cost).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, &exec_mode, incremental, deep, ai, det, max_cost).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -1388,24 +1388,6 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                         loading_count,
                                     )
                                     .await;
-                                });
-                            } else {
-                                // Synchronous: hold the request until the (shorter) run finishes.
-                                spawn(async move {
-                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, incremental, deep, ai, det, max_cost).await;
-                                    if result.is_none() {
-                                        // The sync request itself failed (network error, server
-                                        // unreachable) — the server-side crash path already
-                                        // returns a normal 200 JSON with `ai_error` set, so
-                                        // `None` here means the response never arrived at all.
-                                        job_failed_message.set(Some(
-                                            "The scan request failed (no response from the \
-                                             server). Please retry."
-                                                .to_string(),
-                                        ));
-                                    }
-                                    audit.set(result);
-                                    auditing.set(false);
                                 });
                             }
                         },

@@ -56,10 +56,27 @@ mod checkpoint;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapReached;
 
+/// What really refused a part ([`UsageMeter::refusal_cause`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalCause {
+    /// The provider could not be reached for a streak of calls.
+    Outage,
+    /// A call's cost could not be determined, so the limit cannot be enforced.
+    CostUnknown,
+    /// The cost checkpoint paused the run (its projection went over what was approved).
+    CheckpointStop,
+    /// The spend limit was reached.
+    LimitReached,
+}
+
 /// Proof that a pass was admitted under the spend cap; releases its slot when dropped (after
 /// the pass, its truncation retry included, has finished).
 pub struct PassPermit<'a> {
     meter: &'a UsageMeter,
+    /// What this pass reserves while in flight, in micro-dollars, when it was admitted for one
+    /// request ([`UsageMeter::admit_for_request`]); `None` when it reserves the run's per-call
+    /// reserve ([`UsageMeter::reserve_micro_usd`]).
+    scoped_reserve_micro: Option<u64>,
 }
 
 impl Drop for PassPermit<'_> {
@@ -67,6 +84,10 @@ impl Drop for PassPermit<'_> {
         {
             let mut budget = self.meter.budget();
             budget.in_flight = budget.in_flight.saturating_sub(1);
+            if let Some(micro) = self.scoped_reserve_micro {
+                budget.scoped_in_flight = budget.scoped_in_flight.saturating_sub(1);
+                budget.scoped_reserved_micro = budget.scoped_reserved_micro.saturating_sub(micro);
+            }
         }
         self.meter.admission.notify_waiters();
     }
@@ -162,6 +183,21 @@ impl UsageMeter {
         }
     }
 
+    /// What actually refused (or would refuse) a part right now, in the order the meter applies
+    /// them: the outage stop, a cost that could not be determined, the checkpoint stop, else the
+    /// spend limit having been reached.
+    pub fn refusal_cause(&self) -> RefusalCause {
+        if self.health.is_stopped() {
+            RefusalCause::Outage
+        } else if self.cost_unknown() {
+            RefusalCause::CostUnknown
+        } else if self.checkpoint_stopped() {
+            RefusalCause::CheckpointStop
+        } else {
+            RefusalCause::LimitReached
+        }
+    }
+
     /// Actual spend so far, in dollars, as the telemetry and the printed total count it.
     pub fn spent_usd(&self) -> f64 {
         self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0
@@ -200,8 +236,21 @@ impl UsageMeter {
         if budget.cost_unknown {
             return true;
         }
-        let reserve = self.reserve_micro_usd() as f64 / 1_000_000.0;
-        self.limit_spend_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
+        let held = self.held_reserve_micro(&budget) as f64 / 1_000_000.0;
+        self.limit_spend_usd() + held >= cap
+    }
+
+    /// What the passes in flight hold in reserve, in micro-dollars: a request-scoped pass its own
+    /// request's ceiling, every other pass the run's per-call reserve. With nothing in flight, one
+    /// per-call reserve (a pass about to retry counts as in flight).
+    pub(super) fn held_reserve_micro(&self, budget: &crate::cost_cap::BudgetState) -> u64 {
+        if budget.in_flight == 0 {
+            return self.reserve_micro_usd();
+        }
+        let plain = budget.in_flight.saturating_sub(budget.scoped_in_flight);
+        plain
+            .saturating_mul(self.reserve_micro_usd())
+            .saturating_add(budget.scoped_reserved_micro)
     }
 
     /// What one pass is assumed to cost while it is in flight, in micro-dollars: the larger of
@@ -247,7 +296,7 @@ impl UsageMeter {
     /// overshoot bound in [`crate::cost_cap`]); with no cap, always admitted. The check and the
     /// in-flight count move together under one lock, so two passes cannot both claim the last
     /// slot.
-    fn try_admit(&self) -> Admission<'_> {
+    fn try_admit(&self, scope: Option<u64>) -> Admission<'_> {
         // The outage stop refuses every new part, cap or no cap.
         if self.health.is_stopped() {
             return Admission::CapReached;
@@ -262,12 +311,20 @@ impl UsageMeter {
             if budget.cost_unknown {
                 return Admission::CapReached;
             }
-            let reserve_micro = self.reserve_micro_usd();
-            let reserve = reserve_micro as f64 / 1_000_000.0;
+            // What the passes already in flight hold back. A pass admitted for one request holds
+            // that request's own ceiling; any other holds the run's per-call reserve, which is
+            // the worst call or request the whole run has seen (an earlier stage's one big call
+            // must not shrink the room later, cheap requests have).
+            let held_micro = budget
+                .in_flight
+                .saturating_sub(budget.scoped_in_flight)
+                .saturating_mul(self.reserve_micro_usd())
+                .saturating_add(budget.scoped_reserved_micro);
+            let held = held_micro as f64 / 1_000_000.0;
             // The reserve includes what a request in flight MAY cost ([`Self::note_request`]), so
             // a pass whose request alone reaches the limit closes admission at once, whether or
             // not any call has reported a cost yet.
-            if self.limit_spend_usd() + budget.in_flight as f64 * reserve >= cap {
+            if self.limit_spend_usd() + held >= cap {
                 return Admission::CapReached;
             }
             // Until one call has reported a cost the run has not seen what a call really costs
@@ -279,20 +336,50 @@ impl UsageMeter {
             }
         }
         budget.in_flight += 1;
-        Admission::Admitted(PassPermit { meter: self })
+        // With no cap nothing is reserved, so nothing is tracked.
+        let scoped_reserve_micro = scope.filter(|_| self.controls.max_cost_usd.is_some());
+        if let Some(micro) = scoped_reserve_micro {
+            budget.scoped_in_flight += 1;
+            budget.scoped_reserved_micro = budget.scoped_reserved_micro.saturating_add(micro);
+        }
+        Admission::Admitted(PassPermit {
+            meter: self,
+            scoped_reserve_micro,
+        })
     }
 
     /// Ask to start one scan pass. Waits (without spending anything) while the only thing
     /// standing in the way is that no cost is known yet; refuses with [`CapReached`] when the
     /// cap forbids the pass. An admitted pass holds its permit until it is dropped.
     pub async fn admit(&self) -> Result<PassPermit<'_>, CapReached> {
+        self.admit_scoped(None).await
+    }
+
+    /// [`Self::admit`] for one request already built: the pass reserves what THIS request may
+    /// cost ([`request_ceiling_usd`]) while it is in flight and gives it back when its permit is
+    /// dropped, instead of the run's worst call. A cheap request after an earlier stage's one
+    /// expensive call is therefore not priced at that call. A request with no list price reserves
+    /// the run's per-call reserve like [`Self::admit`]. The request is noted too
+    /// ([`Self::note_request`]).
+    pub async fn admit_for_request(&self, req: &LlmRequest) -> Result<PassPermit<'_>, CapReached> {
+        self.admit_scoped(self.request_reserve_micro(req)).await
+    }
+
+    /// The reserve one request holds, in micro-dollars; `None` with no cap or no list price.
+    fn request_reserve_micro(&self, req: &LlmRequest) -> Option<u64> {
+        self.controls.max_cost_usd?;
+        let micro = crate::llm::usd_to_micro_ceil(request_ceiling_usd(req)?);
+        (micro > 0).then_some(micro)
+    }
+
+    async fn admit_scoped(&self, scope: Option<u64>) -> Result<PassPermit<'_>, CapReached> {
         loop {
             // Register for wake-ups BEFORE checking, so a release between the check and the
             // wait is not missed.
             let woken = self.admission.notified();
             tokio::pin!(woken);
             woken.as_mut().enable();
-            match self.try_admit() {
+            match self.try_admit(scope) {
                 Admission::Admitted(permit) => return Ok(permit),
                 Admission::CapReached => return Err(CapReached),
                 Admission::Wait => woken.await,
@@ -315,6 +402,21 @@ impl UsageMeter {
         stage: &str,
     ) -> Result<PassPermit<'_>, CapReached> {
         let permit = self.admit().await;
+        if permit.is_err() {
+            self.record_stage_not_run(repo, stage, true);
+        }
+        permit
+    }
+
+    /// [`Self::admit_for_stage`] for a call whose request is built: it reserves that request's
+    /// own ceiling ([`Self::admit_for_request`]).
+    pub async fn admit_for_stage_request(
+        &self,
+        repo: &str,
+        stage: &str,
+        req: &LlmRequest,
+    ) -> Result<PassPermit<'_>, CapReached> {
+        let permit = self.admit_for_request(req).await;
         if permit.is_err() {
             self.record_stage_not_run(repo, stage, true);
         }
