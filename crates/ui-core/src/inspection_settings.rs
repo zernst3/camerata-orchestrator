@@ -271,7 +271,7 @@ pub enum SaveFailure {
 /// The plain reason for a server refusal. Known refusals have their own words; any other refusal
 /// gets one generic sentence, never the server's string.
 fn refusal_reason(server: &str) -> &'static str {
-    match server.trim().trim_end_matches('.') {
+    match server.trim().trim_end_matches('.').to_lowercase().as_str() {
         "model must not be empty" => "a model must be chosen",
         "unknown step" => "this is not a setting the server knows",
         "no such project" => "the project was not found",
