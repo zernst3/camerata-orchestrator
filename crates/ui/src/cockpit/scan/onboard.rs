@@ -452,7 +452,7 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
                         },
                         "Browse for a local repo folder\u{2026}"
                     }
-                    p { class: "scan-section-sub", "Scans only the currently checked-out branch of each repo. Switch branches first if you want a different branch scanned." }
+                    p { class: "scan-section-sub", "Only the currently checked-out branch of each repo is read. Switch branches first if you want a different branch." }
                     ScanReposButton {
                         repos: scan_scope.clone(),
                         scanning: scanning(),

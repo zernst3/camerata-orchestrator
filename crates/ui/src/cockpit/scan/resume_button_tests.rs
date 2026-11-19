@@ -340,6 +340,17 @@ async fn posts_to(server: &MockServer, route: &str) -> usize {
 #[serial_test::serial(process_env)]
 async fn the_audit_button_in_default_mode_starts_a_saved_job_and_run_what_remains_is_live() {
     let server = MockServer::start().await;
+    // Run mode (the old Scan mode) is the Engine finder's control, so this project is on the
+    // Engine finder. The first mock mounted wins, so it comes before the shared stubs.
+    Mock::given(method("GET"))
+        .and(path("/api/projects/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "p-1", "name": "Hearth", "repos": ["me/api"],
+            "review": { "finder": "engine" },
+            "backend": "api", "client_engagement": true, "client_name": "",
+        })))
+        .mount(&server)
+        .await;
     stub_for_a_scan_run(&server).await;
     Mock::given(method("GET"))
         .and(path("/api/onboard/audit/job/job-9"))
@@ -357,11 +368,13 @@ async fn the_audit_button_in_default_mode_starts_a_saved_job_and_run_what_remain
     let mut wired = Wired::default();
     wired.take(&vdom.rebuild_to_vec());
     pump_wired(&mut vdom, &mut wired, 800).await;
-    // The screen is on Scan mode Default (one small repo: the recommended mode is `auto`).
+    // The screen is on Run mode Default (one small repo: the recommended mode is `auto`).
     let html = dioxus_ssr::render(&vdom);
     assert!(
-        html.contains("<select class=\"audit-model-select\" value=\"auto\">"),
-        "Scan mode is Default: {html}"
+        html.contains(
+            "<select id=\"inspection-run-mode\" class=\"audit-model-select\" value=\"auto\">"
+        ),
+        "Run mode is Default: {html}"
     );
 
     wired.click_tour(&vdom, "run-inspection");
@@ -428,8 +441,18 @@ async fn a_client_lock_refusal_is_shown_as_the_servers_own_refusal_not_a_backend
 
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
-async fn the_scan_mode_options_say_what_is_true_of_the_engine() {
+async fn the_run_mode_options_say_what_is_true_of_the_engine() {
     let server = MockServer::start().await;
+    // Run mode is the Engine finder's control; the first mock mounted wins.
+    Mock::given(method("GET"))
+        .and(path("/api/projects/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "p-1", "name": "Hearth", "repos": ["me/api"],
+            "review": { "finder": "engine" },
+            "backend": "api", "client_engagement": true, "client_name": "",
+        })))
+        .mount(&server)
+        .await;
     stub_for_a_scan_run(&server).await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let mut vdom = VirtualDom::new(results_with_a_selected_rule);
@@ -437,21 +460,27 @@ async fn the_scan_mode_options_say_what_is_true_of_the_engine() {
     pump(&mut vdom, 800).await;
     let html = dioxus_ssr::render(&vdom);
     assert!(
-        html.contains("Default (batch on the API backend, else parallel; saved, resumable)"),
+        html.contains("Default (batch on the API backend, else parallel)"),
         "{html}"
     );
     assert!(
-        html.contains("Large scan (same as Default; picked for big codebases)"),
+        html.contains("Large inspection (same as Default)"),
         "{html}"
     );
+    assert!(!html.contains("Large scan"), "{html}");
     assert!(
         !html.contains("Background job (walk away, default mode)"),
         "{html}"
     );
+    // One short line says every run is saved; the long text is behind the "?" button.
     assert!(
-        html.contains("Every scan runs server-side as a saved job"),
+        html.contains("Every inspection is saved, so Run what remains can finish it."),
         "{html}"
     );
+    assert!(html.contains("aria-label=\"About Run mode\""), "{html}");
+    assert!(camerata_ui_core::help::inspection::run_mode_topic()
+        .body
+        .contains("the inspection is saved on the server as a job"),);
 }
 
 // ── the poll loop that every paid scan now depends on (edge-state row R11) ──────────

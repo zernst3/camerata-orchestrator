@@ -229,7 +229,7 @@ async fn a_no_rows_migration_refusal_does_not_show_the_decisions_banner() {
     // The screen really rendered (its summary and first step), so the absence below means
     // something.
     assert!(
-        html.contains("Step 1 — proposed starter ruleset") && html.contains("scan-summary"),
+        html.contains("1. Choose rules") && html.contains("scan-summary"),
         "the results screen is not mounted: {html}"
     );
     assert!(!html.contains("Decisions not loaded"), "{html}");

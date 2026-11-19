@@ -22,19 +22,19 @@ use super::{AuditModelsResp, RepoSizeView};
 /// follow a change of finder or backend without a remount. `None` until a setting changes: the
 /// screen then reads the project it fetched itself.
 #[derive(Clone, Copy)]
-pub(in crate::cockpit) struct LiveProject(pub Signal<Option<ProjectView>>);
+pub(crate) struct LiveProject(pub Signal<Option<ProjectView>>);
 
 /// The html ids the tests and the walkthrough find the controls by.
-pub(in crate::cockpit) const RUN_BLOCK_ID: &str = "inspection-run";
-pub(in crate::cockpit) const CHECKS_ID: &str = "inspection-checks";
-pub(in crate::cockpit) const RUN_MODE_ID: &str = "inspection-run-mode";
-pub(in crate::cockpit) const FULL_ID: &str = "inspection-full";
-pub(in crate::cockpit) const SPEND_LIMIT_ID: &str = "inspection-spend-limit";
-pub(in crate::cockpit) const ESTIMATE_ID: &str = "inspection-estimate";
+pub(crate) const RUN_BLOCK_ID: &str = "inspection-run";
+pub(crate) const CHECKS_ID: &str = "inspection-checks";
+pub(crate) const RUN_MODE_ID: &str = "inspection-run-mode";
+pub(crate) const FULL_ID: &str = "inspection-full";
+pub(crate) const SPEND_LIMIT_ID: &str = "inspection-spend-limit";
+pub(crate) const ESTIMATE_ID: &str = "inspection-estimate";
 
 /// The controls of one run, drawn from props.
 #[derive(Props, Clone, PartialEq)]
-pub(in crate::cockpit) struct RunControlsProps {
+pub(crate) struct RunControlsProps {
     pub finder: ProjectFinder,
     pub checks: ChecksToRun,
     pub on_checks: EventHandler<ChecksToRun>,
@@ -56,7 +56,7 @@ pub(in crate::cockpit) struct RunControlsProps {
 }
 
 #[component]
-pub(in crate::cockpit) fn InspectionRunControls(props: RunControlsProps) -> Element {
+pub(crate) fn InspectionRunControls(props: RunControlsProps) -> Element {
     let full = full_inspection(props.finder, props.full_ticked);
     let engine = props.finder == ProjectFinder::Engine;
     let checks_value = props.checks.value();
@@ -175,7 +175,7 @@ pub(in crate::cockpit) fn InspectionRunControls(props: RunControlsProps) -> Elem
 
 /// What the estimate block shows. The screen decides which; this file only draws it.
 #[derive(Clone, PartialEq)]
-pub(in crate::cockpit) enum EstimateBlock {
+pub(crate) enum EstimateBlock {
     /// The Engine finder's figure.
     Engine {
         dollars: String,
@@ -201,7 +201,7 @@ pub(in crate::cockpit) enum EstimateBlock {
 
 /// The estimate, before a run. After a run the screen shows the actual cost instead.
 #[component]
-pub(in crate::cockpit) fn InspectionEstimate(block: EstimateBlock) -> Element {
+pub(crate) fn InspectionEstimate(block: EstimateBlock) -> Element {
     rsx! {
         div { id: ESTIMATE_ID, class: "audit-cost",
             match block {
@@ -262,7 +262,7 @@ pub(in crate::cockpit) fn InspectionEstimate(block: EstimateBlock) -> Element {
 
 /// An estimate ready to show, and the short form "est. was ..." uses once the real cost is in.
 #[derive(Clone, PartialEq)]
-pub(in crate::cockpit) struct EstimateShown {
+pub(crate) struct EstimateShown {
     pub block: EstimateBlock,
     pub short: String,
 }

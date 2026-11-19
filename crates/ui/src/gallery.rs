@@ -26,6 +26,7 @@ mod detail_states;
 mod engine_states;
 mod export_states;
 pub(crate) mod inspection_settings_states;
+mod inspection_states;
 mod queue_states;
 mod shell_states;
 mod tree_states;
@@ -201,6 +202,17 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "registry-missing",
         ],
     ),
+    (
+        "inspection",
+        "WO-C",
+        &[
+            "start-agent",
+            "start-engine",
+            "estimate-unavailable",
+            "deterministic-only",
+            "help-open",
+        ],
+    ),
     ("app", "build-guard", &["build-mismatch"]),
 ];
 
@@ -219,6 +231,7 @@ fn built_renderers() -> Vec<BuiltRenderer> {
     all.extend(export_states::states());
     all.extend(settings_states::states());
     all.extend(inspection_settings_states::states());
+    all.extend(inspection_states::states());
     all.extend(app_states::states());
     all
 }

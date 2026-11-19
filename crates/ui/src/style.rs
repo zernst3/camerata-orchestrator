@@ -2889,6 +2889,12 @@ html, body {
 .audit-model-select:hover:not(:disabled) { border-color: var(--accent); }
 .audit-model-select:disabled { opacity: .55; cursor: default; }
 .audit-model-hint { font-size: 11.5px; color: var(--ink-soft); }
+/* The Inspection screen's "This run" block: a control and its "?" button side by side. */
+.audit-run { margin: 6px 0 4px; }
+.audit-run-h { margin: 8px 0 2px; font-size: 13px; color: var(--ink); }
+.audit-run-control { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.audit-cost-range { margin: 2px 0 0; font-size: 12px; color: var(--ink-soft); }
+.audit-cost-unavailable { font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
 /* The shared help dialog: a small "?" button beside a heading or control, and the fixed overlay it
    opens. The text is selectable and the body scrolls when it is long. */
 .help-button {

@@ -752,7 +752,7 @@ async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() 
     let html = screen.html();
     // Before any run: the settings are on the start screen, from the project alone.
     assert!(
-        html.contains("Onboard repos into governance"),
+        html.contains("Choose rules, inspect, then review and export."),
         "the start screen\n{html}"
     );
     assert!(html.contains("Finder and models"), "{html}");

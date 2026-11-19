@@ -90,6 +90,11 @@ const SPEC_STATES: &[&str] = &[
     "inspection-settings/run-in-flight",
     "inspection-settings/save-error",
     "inspection-settings/registry-missing",
+    "inspection/start-agent",
+    "inspection/start-engine",
+    "inspection/estimate-unavailable",
+    "inspection/deterministic-only",
+    "inspection/help-open",
     "app/build-mismatch",
 ];
 

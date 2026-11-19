@@ -176,7 +176,12 @@ pub fn estimate_topic(finder: ProjectFinder, backend: ProjectBackend) -> HelpTop
 
 /// Every topic this file owns (the Engine and Agent forms of the two that differ).
 pub fn topics() -> Vec<HelpTopic> {
-    let mut all = vec![checks_topic(), run_mode_topic(), full_inspection_topic(), spend_limit_topic()];
+    let mut all = vec![
+        checks_topic(),
+        run_mode_topic(),
+        full_inspection_topic(),
+        spend_limit_topic(),
+    ];
     for finder in [ProjectFinder::Agent, ProjectFinder::Engine] {
         all.push(inspect_topic(finder));
         for backend in [ProjectBackend::Cli, ProjectBackend::Api] {
@@ -197,7 +202,10 @@ mod tests {
         }
         assert_eq!(checks_topic().button_label(), "About Checks to run");
         assert_eq!(run_mode_topic().button_label(), "About Run mode");
-        assert_eq!(full_inspection_topic().button_label(), "About Full inspection");
+        assert_eq!(
+            full_inspection_topic().button_label(),
+            "About Full inspection"
+        );
         assert_eq!(spend_limit_topic().button_label(), "About Spend limit");
         assert_eq!(
             inspect_topic(ProjectFinder::Agent).button_label(),
@@ -218,13 +226,22 @@ mod tests {
     #[test]
     fn the_agent_topics_describe_the_agent_finder_and_never_the_engines_passes_or_batches() {
         let run = inspect_topic(ProjectFinder::Agent).body;
-        assert!(run.contains("in pieces") && run.contains("joints calls"), "{run}");
+        assert!(
+            run.contains("in pieces") && run.contains("joints calls"),
+            "{run}"
+        );
         assert!(run.contains("not batched"), "{run}");
         let est = estimate_topic(ProjectFinder::Agent, ProjectBackend::Cli).body;
-        assert!(est.contains("finder stage only") && est.contains("extra"), "{est}");
+        assert!(
+            est.contains("finder stage only") && est.contains("extra"),
+            "{est}"
+        );
         assert!(!est.contains("tokens") && !est.contains("passes"), "{est}");
         // The estimate does not price the picked model, and the text says so.
-        assert!(est.contains("does not change with the Finder model"), "{est}");
+        assert!(
+            est.contains("does not change with the Finder model"),
+            "{est}"
+        );
     }
 
     #[test]

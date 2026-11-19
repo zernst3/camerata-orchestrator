@@ -89,7 +89,9 @@ impl Screen {
     fn pick(&self, html_id: &str, value: &str) {
         let id = self.id_of(html_id);
         assert!(
-            self.listeners.iter().any(|(n, i)| n == "change" && *i == id),
+            self.listeners
+                .iter()
+                .any(|(n, i)| n == "change" && *i == id),
             "{html_id} has no change listener"
         );
         let data: Rc<dyn std::any::Any> = Rc::new(dioxus::html::PlatformEventData::new(Box::new(
@@ -98,6 +100,21 @@ impl Screen {
         self.vdom
             .runtime()
             .handle_event("change", dioxus::dioxus_core::Event::new(data, true), id);
+    }
+
+    /// The operator types `text` into the text field with html id `html_id`.
+    fn type_into(&self, html_id: &str, text: &str) {
+        let id = self.id_of(html_id);
+        assert!(
+            self.listeners.iter().any(|(n, i)| n == "input" && *i == id),
+            "{html_id} has no input listener"
+        );
+        let data: Rc<dyn std::any::Any> = Rc::new(dioxus::html::PlatformEventData::new(Box::new(
+            dioxus::html::SerializedFormData::new(text.to_string(), Vec::new()),
+        )));
+        self.vdom
+            .runtime()
+            .handle_event("input", dioxus::dioxus_core::Event::new(data, true), id);
     }
 
     fn click_id(&self, id: ElementId) {
@@ -407,9 +424,17 @@ async fn an_agent_project_shows_no_model_rows_a_locked_full_inspection_no_run_mo
 
     // The per-run model picks are gone: no select in the block but Checks to run, and none of
     // the words that named them.
-    assert_eq!(run.matches("<select").count(), 1, "only Checks to run: {run}");
+    assert_eq!(
+        run.matches("<select").count(),
+        1,
+        "only Checks to run: {run}"
+    );
     assert!(run.contains("id=\"inspection-checks\""), "{run}");
-    for gone in ["Audit model", "Calibration model", "Default = the scan model"] {
+    for gone in [
+        "Audit model",
+        "Calibration model",
+        "Default = the scan model",
+    ] {
         assert!(!text.contains(gone), "{gone}: {text}");
     }
     // What to scan is Checks to run now.
@@ -417,20 +442,38 @@ async fn an_agent_project_shows_no_model_rows_a_locked_full_inspection_no_run_mo
     assert!(!text.contains("What to scan"), "{text}");
     assert!(!text.contains("AI architectural review"), "{text}");
     // No Run mode, no Scan mode, for the Agent finder.
-    assert!(!text.contains("Run mode") && !text.contains("Scan mode"), "{text}");
+    assert!(
+        !text.contains("Run mode") && !text.contains("Scan mode"),
+        "{text}"
+    );
     assert!(!run.contains("id=\"inspection-run-mode\""), "{run}");
     // Full inspection: ticked and locked, with the one line that says why.
-    assert!(text.contains("Full inspection") && !text.contains("Full scan"), "{text}");
+    assert!(
+        text.contains("Full inspection") && !text.contains("Full scan"),
+        "{text}"
+    );
     let full = tag_of(&run, "inspection-full");
-    assert!(full.contains("checked") && full.contains("disabled"), "{full}");
-    assert!(text.contains("The Agent finder always inspects every file."), "{text}");
+    assert!(
+        full.contains("checked") && full.contains("disabled"),
+        "{full}"
+    );
+    assert!(
+        text.contains("The Agent finder always inspects every file."),
+        "{text}"
+    );
     assert!(!text.contains("INCREMENTAL"), "{text}");
     // The estimate is the Agent finder's: the finder stage, pieces and joints calls, and the
     // line that says the rest is extra. Never the Engine's figure, tokens, passes or rule count.
     let estimate = visible_text(&block(&html, "inspection-estimate"));
-    assert!(estimate.contains("Estimated cost of the finder stage"), "{estimate}");
+    assert!(
+        estimate.contains("Estimated cost of the finder stage"),
+        "{estimate}"
+    );
     assert!(estimate.contains("about $4.20"), "{estimate}");
-    assert!(estimate.contains("most likely between $2.52 and $7.56"), "{estimate}");
+    assert!(
+        estimate.contains("most likely between $2.52 and $7.56"),
+        "{estimate}"
+    );
     assert!(estimate.contains("3 pieces, 1 joints call"), "{estimate}");
     assert!(estimate.contains("Other stages are extra."), "{estimate}");
     for engine in ["pass(es)", "rule(s)", "tokens"] {
@@ -472,8 +515,15 @@ async fn an_engine_project_shows_run_mode_a_free_full_inspection_and_its_own_est
     let html = screen.html();
     let run = block(&html, RUN);
     let text = visible_text(&run);
-    assert_eq!(run.matches("<select").count(), 2, "Checks to run and Run mode: {run}");
-    assert!(text.contains("Run mode") && !text.contains("Scan mode"), "{text}");
+    assert_eq!(
+        run.matches("<select").count(),
+        2,
+        "Checks to run and Run mode: {run}"
+    );
+    assert!(
+        text.contains("Run mode") && !text.contains("Scan mode"),
+        "{text}"
+    );
     assert!(run.contains("id=\"inspection-run-mode\""), "{run}");
     for gone in ["Audit model", "Default = the scan model"] {
         assert!(!text.contains(gone), "{gone}: {text}");
@@ -482,11 +532,20 @@ async fn an_engine_project_shows_run_mode_a_free_full_inspection_and_its_own_est
     assert!(text.contains("Large inspection"), "{text}");
     assert!(!text.contains("Large scan"), "{text}");
     let full = tag_of(&run, "inspection-full");
-    assert!(!full.contains("disabled") && !full.contains("checked"), "{full}");
-    assert!(!text.contains("The Agent finder always inspects every file."), "{text}");
+    assert!(
+        !full.contains("disabled") && !full.contains("checked"),
+        "{full}"
+    );
+    assert!(
+        !text.contains("The Agent finder always inspects every file."),
+        "{text}"
+    );
     let estimate = visible_text(&block(&html, "inspection-estimate"));
     assert!(estimate.contains("Estimated cost"), "{estimate}");
-    assert!(estimate.contains("pass(es)") && estimate.contains("rule(s)"), "{estimate}");
+    assert!(
+        estimate.contains("pass(es)") && estimate.contains("rule(s)"),
+        "{estimate}"
+    );
     assert!(!estimate.contains("finder stage"), "{estimate}");
 }
 
@@ -502,7 +561,10 @@ async fn deterministic_checks_only_costs_nothing_for_both_finders() {
         screen.pump(200).await;
         let html = screen.html();
         let estimate = visible_text(&block(&html, "inspection-estimate"));
-        assert!(estimate.contains("$0, no model calls"), "{finder}: {estimate}");
+        assert!(
+            estimate.contains("$0, no model calls"),
+            "{finder}: {estimate}"
+        );
         assert!(!estimate.contains("pass(es)"), "{finder}: {estimate}");
         assert!(!estimate.contains("finder stage"), "{finder}: {estimate}");
     }
@@ -519,7 +581,10 @@ async fn the_inspect_button_starts_a_saved_job_with_no_model_and_its_label_chang
     let mut screen = Screen::mount(rules_proposed);
     screen.pump(900).await;
     let before = visible_text(&button_of(&screen.html(), "run-inspection"));
-    assert!(before.contains("Inspect code against selected rules"), "{before}");
+    assert!(
+        before.contains("Inspect code against selected rules"),
+        "{before}"
+    );
     assert!(!before.contains("Audit"), "{before}");
 
     screen.click_tour("run-inspection");
@@ -533,15 +598,25 @@ async fn the_inspect_button_starts_a_saved_job_with_no_model_and_its_label_chang
     );
     let body = &started[0];
     assert!(body.get("model").is_none(), "no model is sent: {body}");
-    assert!(body.get("calibration_model").is_none(), "no calibration model is sent: {body}");
-    assert_eq!(body["incremental"], json!(false), "the Agent finder inspects every file: {body}");
+    assert!(
+        body.get("calibration_model").is_none(),
+        "no calibration model is sent: {body}"
+    );
+    assert_eq!(
+        body["incremental"],
+        json!(false),
+        "the Agent finder inspects every file: {body}"
+    );
     assert_eq!(body["run_ai_review"], json!(true));
     assert_eq!(body["run_deterministic"], json!(true));
     // While it runs the button reads Inspecting and the old label is gone.
     let running = visible_text(&button_of(&screen.html(), "run-inspection"));
     assert!(running.contains("Inspecting"), "{running}");
     assert!(!running.contains("Auditing"), "{running}");
-    assert!(!running.contains("Inspect code against selected rules"), "{running}");
+    assert!(
+        !running.contains("Inspect code against selected rules"),
+        "{running}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -560,11 +635,65 @@ async fn an_engine_run_sends_the_pickers_it_still_has_and_never_a_model() {
     let started = requests_to(&server, "/api/onboard/audit/start").await;
     assert_eq!(started.len(), 1);
     let body = &started[0];
-    assert!(body.get("model").is_none() && body.get("calibration_model").is_none(), "{body}");
+    assert!(
+        body.get("model").is_none() && body.get("calibration_model").is_none(),
+        "{body}"
+    );
     assert_eq!(body["mode"], json!("parallel"));
-    assert_eq!(body["incremental"], json!(true), "an Engine run is incremental unless ticked");
+    assert_eq!(
+        body["incremental"],
+        json!(true),
+        "an Engine run is incremental unless ticked"
+    );
     assert_eq!(body["run_ai_review"], json!(true));
     assert_eq!(body["run_deterministic"], json!(false));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn full_inspection_and_the_spend_limit_reach_the_request_for_the_engine_finder() {
+    let (server, _) = stub_server("engine", Sizes::Back).await;
+    mount_job(&server, "running").await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut screen = Screen::mount(rules_proposed);
+    screen.pump(900).await;
+    screen.pick("inspection-full", "true");
+    screen.type_into("inspection-spend-limit", "5");
+    screen.pump(200).await;
+    screen.click_tour("run-inspection");
+    screen.pump(1500).await;
+    let started = requests_to(&server, "/api/onboard/audit/start").await;
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        started[0]["incremental"],
+        json!(false),
+        "Full inspection is ticked"
+    );
+    assert_eq!(started[0]["max_cost_usd"], json!(5.0), "{}", started[0]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn an_agent_run_after_an_engine_pick_still_sends_every_file_and_the_default_mode() {
+    // The operator ticks nothing and picks nothing: the Agent finder's request is the same
+    // whatever an earlier Engine pick left in the boxes. Switching finder keeps the boxes, so
+    // pick the Engine's values, switch to Agent and run.
+    let (server, _) = stub_server("engine", Sizes::Back).await;
+    mount_job(&server, "running").await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut screen = Screen::mount(rules_proposed);
+    screen.pump(900).await;
+    screen.pick("inspection-run-mode", "batch");
+    screen.pick("inspection-full", "false");
+    screen.pump(200).await;
+    screen.pick("is-model-finder", "agent");
+    screen.pump(900).await;
+    screen.click_tour("run-inspection");
+    screen.pump(1500).await;
+    let started = requests_to(&server, "/api/onboard/audit/start").await;
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0]["mode"], json!("auto"), "{}", started[0]);
+    assert_eq!(started[0]["incremental"], json!(false), "{}", started[0]);
 }
 
 // ── The finder changes on screen ────────────────────────────────────────────────────────────
@@ -583,13 +712,25 @@ async fn changing_the_finder_redraws_the_run_block_and_the_estimate_without_a_re
     // The operator switches the finder in the Inspection settings on this same screen.
     screen.pick("is-model-finder", "engine");
     screen.pump(900).await;
-    assert_eq!(shared.0.lock().unwrap()["review"]["finder"], json!("engine"));
+    assert_eq!(
+        shared.0.lock().unwrap()["review"]["finder"],
+        json!("engine")
+    );
     let html = screen.html();
-    assert!(html.contains("id=\"inspection-run-mode\""), "Run mode appears: {html}");
+    assert!(
+        html.contains("id=\"inspection-run-mode\""),
+        "Run mode appears: {html}"
+    );
     let full = tag_of(&block(&html, RUN), "inspection-full");
-    assert!(!full.contains("disabled"), "Full inspection is free again: {full}");
+    assert!(
+        !full.contains("disabled"),
+        "Full inspection is free again: {full}"
+    );
     let estimate = visible_text(&block(&html, "inspection-estimate"));
-    assert!(estimate.contains("pass(es)"), "the Engine figure: {estimate}");
+    assert!(
+        estimate.contains("pass(es)"),
+        "the Engine figure: {estimate}"
+    );
     assert!(!estimate.contains("finder stage"), "{estimate}");
 
     // And back: the Agent finder's block returns.
@@ -631,10 +772,26 @@ async fn the_inspection_settings_stay_on_the_screen_once_rules_are_proposed_with
 /// The "?" buttons of the run block and, for each, a sentence only its dialog holds.
 const AGENT_HELP: [(&str, &str, &str); 5] = [
     ("inspect", "About This run", "each a live conversation"),
-    ("checks-to-run", "About Checks to run", "Deterministic checks only runs"),
-    ("full-inspection", "About Full inspection", "ticked and locked for it"),
-    ("spend-limit", "About Spend limit", "Work already started finishes"),
-    ("estimate", "About The cost estimate", "at fixed rates taken from earlier runs"),
+    (
+        "checks-to-run",
+        "About Checks to run",
+        "Deterministic checks only runs",
+    ),
+    (
+        "full-inspection",
+        "About Full inspection",
+        "ticked and locked for it",
+    ),
+    (
+        "spend-limit",
+        "About Spend limit",
+        "Work already started finishes",
+    ),
+    (
+        "estimate",
+        "About The cost estimate",
+        "at fixed rates taken from earlier runs",
+    ),
 ];
 
 #[tokio::test(flavor = "current_thread")]
@@ -668,17 +825,26 @@ async fn the_long_explanations_are_behind_question_mark_buttons_that_open_and_cl
         screen.pump(100).await;
         let open = screen.html();
         assert!(open.contains("role=\"dialog\""), "{label} opens a dialog");
-        assert!(open.contains(sentence), "{label} dialog holds its text: {sentence}");
+        assert!(
+            open.contains(sentence),
+            "{label} dialog holds its text: {sentence}"
+        );
         screen.escape(&dialog);
         screen.pump(100).await;
         let closed = screen.html();
-        assert!(!closed.contains("role=\"dialog\""), "{label}: Esc closes it");
+        assert!(
+            !closed.contains("role=\"dialog\""),
+            "{label}: Esc closes it"
+        );
         assert!(
             closed.contains(&format!("id=\"{button}\"")),
             "{label}: the button is there for focus to return to"
         );
     }
-    assert!(!page.contains("aria-label=\"About Run mode\""), "no Run mode for the Agent finder");
+    assert!(
+        !page.contains("aria-label=\"About Run mode\""),
+        "no Run mode for the Agent finder"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -690,7 +856,11 @@ async fn run_mode_has_its_own_help_button_for_the_engine_finder() {
     screen.pump(900).await;
     let page = screen.html();
     assert!(page.contains("aria-label=\"About Run mode\""), "{page}");
-    for long in ["Message Batches API", "flat 50% discount", "Sequential runs"] {
+    for long in [
+        "Message Batches API",
+        "flat 50% discount",
+        "Sequential runs",
+    ] {
         assert!(!page.contains(long), "{long} is still inline");
     }
     screen.click("help-btn-run-mode");
@@ -735,7 +905,10 @@ async fn the_start_screen_is_titled_inspection_and_its_button_says_propose_rules
     let text = visible_text(&screen.html());
     assert!(text.contains("Inspection"), "{text}");
     assert!(!text.contains("Onboard repos"), "{text}");
-    assert!(text.contains("Propose rules") && !text.contains("Scan repos"), "{text}");
+    assert!(
+        text.contains("Propose rules") && !text.contains("Scan repos"),
+        "{text}"
+    );
     assert!(!whole_word_audit(&text), "{text}");
 }
 

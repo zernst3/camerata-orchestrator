@@ -117,10 +117,7 @@ pub fn incremental_flag(finder: ProjectFinder, ticked: bool) -> bool {
 /// The Run mode options (Engine finder only): the value the request carries and what a person
 /// reads. Every mode runs as a saved job; the mode decides how the model is called.
 pub const RUN_MODES: [(&str, &str); 5] = [
-    (
-        "auto",
-        "Default (batch on the API backend, else parallel)",
-    ),
+    ("auto", "Default (batch on the API backend, else parallel)"),
     ("parallel", "Parallel (real time)"),
     ("sequential", "Sequential (real time, slower, gentlest)"),
     ("job", "Large inspection (same as Default)"),
@@ -128,7 +125,8 @@ pub const RUN_MODES: [(&str, &str); 5] = [
 ];
 
 /// The Engine finder's one line under "Run mode".
-pub const RUN_MODE_INLINE_LINE: &str = "Every inspection is saved, so Run what remains can finish it.";
+pub const RUN_MODE_INLINE_LINE: &str =
+    "Every inspection is saved, so Run what remains can finish it.";
 
 /// The sentence when the Agent finder has no estimate. Always followed by the reason.
 pub const AGENT_ESTIMATE_UNAVAILABLE: &str = "Estimate not available for the Agent finder";
@@ -308,10 +306,9 @@ mod tests {
 
     #[test]
     fn the_agent_estimate_says_the_finder_stage_and_that_the_others_are_extra() {
-        let AgentEstimateView::Figure(text) = agent_estimate_view(
-            &[figure("acme/api", 3, 1, 4.2)],
-            &[],
-        ) else {
+        let AgentEstimateView::Figure(text) =
+            agent_estimate_view(&[figure("acme/api", 3, 1, 4.2)], &[])
+        else {
             panic!("a figure was given");
         };
         assert_eq!(text.label, "Estimated cost of the finder stage");
@@ -320,7 +317,10 @@ mod tests {
         assert_eq!(text.calls, "3 pieces, 1 joints call");
         assert_eq!(text.extra, "Other stages are extra.");
         assert!(text.repo_lines.is_empty(), "one repository needs no list");
-        let all = format!("{} {} {} {}", text.value, text.range, text.calls, text.extra);
+        let all = format!(
+            "{} {} {} {}",
+            text.value, text.range, text.calls, text.extra
+        );
         for engine_word in ["token", "pass", "rule"] {
             assert!(!all.contains(engine_word), "{engine_word}: {all}");
         }
@@ -354,7 +354,10 @@ mod tests {
         ) else {
             panic!("no figure");
         };
-        assert!(why.contains("acme/api") && why.contains("no local folder set"), "{why}");
+        assert!(
+            why.contains("acme/api") && why.contains("no local folder set"),
+            "{why}"
+        );
         assert_eq!(
             agent_estimate_unavailable(""),
             "Estimate not available for the Agent finder."

@@ -1228,7 +1228,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         }
                     }
                     span { class: "repo-select-hint",
-                        "Showing rules for this repo. Each repo has its own selection; the audit scans every repo against its own rules."
+                        "Showing rules for this repo. Each repo has its own selection; the inspection checks every repo against its own rules."
                     }
                 }
             }

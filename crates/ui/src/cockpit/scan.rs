@@ -116,7 +116,7 @@ pub use banners_panels::*;
 pub use cost_panel::*;
 pub use exports::*;
 pub use findings_table::*;
-pub(in crate::cockpit) use inspection_run::*;
+pub(crate) use inspection_run::*;
 pub use onboard::*;
 pub use queue_table::*;
 pub use repo_health::*;

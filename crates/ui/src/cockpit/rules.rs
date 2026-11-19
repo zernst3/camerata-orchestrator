@@ -1731,7 +1731,7 @@ pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, Strin
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "Choose the alternative to adopt" }
                         if r.default_option.is_none() {
-                            p { class: "rule-modal-mustchoose", "No default set. Pick an alternative here if you'd like, or leave it: the audit will recommend one for you." }
+                            p { class: "rule-modal-mustchoose", "No default set. Pick an alternative here if you'd like, or leave it: the inspection will recommend one for you." }
                         }
                         div { class: "rule-modal-opts",
                             for o in r.options.iter() {
@@ -4475,7 +4475,7 @@ pub(super) fn ProposedRulesTable(
     let has_unresolved = !unresolved_selected.is_empty();
     let unresolved_hint = if has_unresolved {
         format!(
-            "No alternative chosen yet for: {}. The audit will recommend one automatically.",
+            "No alternative chosen yet for: {}. The inspection will recommend one automatically.",
             unresolved_selected.join(", ")
         )
     } else {
@@ -4607,7 +4607,7 @@ pub(super) fn ProposedRulesTable(
                 span {
                     "These selected rules have no alternative chosen yet (highlighted yellow above): "
                     strong { "{unresolved_selected.join(\", \")}" }
-                    ". The audit will recommend one for you automatically; click a rule to choose one yourself if you'd rather decide now."
+                    ". The inspection will recommend one for you automatically; click a rule to choose one yourself if you'd rather decide now."
                 }
             }
         }
@@ -4662,7 +4662,7 @@ pub(super) fn ProposedRulesTable(
                         out
                     };
                     if chosen_rules.is_empty() {
-                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Select at least one rule (tick its checkbox) to audit against.");
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Select at least one rule (tick its checkbox) to inspect against.");
                         return;
                     }
                     on_audit.call(chosen_rules);
@@ -4970,7 +4970,7 @@ pub(super) fn RuleDetailModal() -> Element {
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "Choose the alternative to adopt" }
                         if r.default_option.is_none() {
-                            p { class: "rule-modal-mustchoose", "No default set. Pick an alternative here if you'd like, or leave it: the audit will recommend one for you." }
+                            p { class: "rule-modal-mustchoose", "No default set. Pick an alternative here if you'd like, or leave it: the inspection will recommend one for you." }
                         }
                         div { class: "rule-modal-opts",
                             for o in r.options.iter() {

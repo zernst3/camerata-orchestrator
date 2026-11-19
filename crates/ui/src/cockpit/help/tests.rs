@@ -110,9 +110,11 @@ impl Screen {
                 false,
             ),
         )));
-        self.vdom
-            .runtime()
-            .handle_event("keydown", dioxus::dioxus_core::Event::new(data, true), id);
+        self.vdom.runtime().handle_event(
+            "keydown",
+            dioxus::dioxus_core::Event::new(data, true),
+            id,
+        );
         self.settle();
     }
 }
@@ -129,7 +131,10 @@ fn long_button() -> Element {
 fn the_button_is_a_named_question_mark_and_the_dialog_is_not_drawn_until_it_is_pressed() {
     let screen = Screen::mount(one_button);
     let html = screen.html();
-    assert!(html.contains("aria-label=\"About Checks to run\""), "{html}");
+    assert!(
+        html.contains("aria-label=\"About Checks to run\""),
+        "{html}"
+    );
     assert!(html.contains("aria-haspopup=\"dialog\""), "{html}");
     assert!(html.contains(">?</button>"), "{html}");
     assert!(!html.contains("role=\"dialog\""), "{html}");
@@ -147,7 +152,10 @@ fn pressing_the_button_opens_a_modal_dialog_with_the_topics_text_and_a_close_but
     assert!(html.contains("role=\"dialog\""), "{html}");
     assert!(html.contains("aria-modal=\"true\""), "{html}");
     assert!(
-        html.contains(&format!("aria-labelledby=\"{}\"", title_id("checks-to-run"))),
+        html.contains(&format!(
+            "aria-labelledby=\"{}\"",
+            title_id("checks-to-run")
+        )),
         "{html}"
     );
     assert!(
@@ -174,16 +182,26 @@ fn escape_closes_the_dialog_and_the_return_script_names_the_button_that_opened_i
     let html = screen.html();
     assert!(!html.contains("role=\"dialog\""), "{html}");
     // The button is still there, and it is the element the return script focuses.
-    assert!(html.contains(&format!("id=\"{}\"", button_id("checks-to-run"))), "{html}");
+    assert!(
+        html.contains(&format!("id=\"{}\"", button_id("checks-to-run"))),
+        "{html}"
+    );
     let back = focus_button_js("checks-to-run");
-    assert!(back.contains(&format!("getElementById('{}')", button_id("checks-to-run"))), "{back}");
+    assert!(
+        back.contains(&format!("getElementById('{}')", button_id("checks-to-run"))),
+        "{back}"
+    );
 }
 
 #[test]
 fn another_key_does_not_close_it() {
     let mut screen = Screen::mount(one_button);
     screen.click_html_id(&button_id("checks-to-run"));
-    screen.key(&dialog_id("checks-to-run"), Key::Character("a".into()), Code::KeyA);
+    screen.key(
+        &dialog_id("checks-to-run"),
+        Key::Character("a".into()),
+        Code::KeyA,
+    );
     assert!(screen.html().contains("role=\"dialog\""));
 }
 
@@ -215,13 +233,19 @@ fn a_long_topic_scrolls_inside_the_dialog_and_the_text_is_selectable() {
     let mut screen = Screen::mount(long_button);
     screen.click_html_id(&button_id("long-one"));
     let html = screen.html();
-    assert!(html.contains("Paragraph 39 of a body"), "the whole text is in the dialog");
+    assert!(
+        html.contains("Paragraph 39 of a body"),
+        "the whole text is in the dialog"
+    );
     assert!(html.contains("class=\"help-body\""), "{html}");
     let css = crate::style::GLOBAL_CSS;
     let body = css.split(".help-body {").nth(1).expect("a help-body rule");
     let body = &body[..body.find('}').unwrap()];
     assert!(body.contains("overflow-y: auto"), "{body}");
-    let dialog = css.split(".help-dialog {").nth(1).expect("a help-dialog rule");
+    let dialog = css
+        .split(".help-dialog {")
+        .nth(1)
+        .expect("a help-dialog rule");
     let dialog = &dialog[..dialog.find('}').unwrap()];
     assert!(dialog.contains("max-height"), "{dialog}");
     assert!(dialog.contains("user-select: text"), "{dialog}");
