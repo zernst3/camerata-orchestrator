@@ -67,6 +67,7 @@ struct FakeStore {
     reachable: bool,
     migrated: RefCell<bool>,
     migrate_refuses: bool,
+    migrate_fails_unreachable: bool,
     refuse: HashMap<String, (u16, String)>,
     refuse_revoke: HashMap<String, (u16, String)>,
     decisions: RefCell<Vec<Decision>>,
@@ -81,6 +82,7 @@ impl FakeStore {
             reachable: true,
             migrated: RefCell::new(true),
             migrate_refuses: false,
+            migrate_fails_unreachable: false,
             refuse: HashMap::new(),
             refuse_revoke: HashMap::new(),
             decisions: RefCell::new(decisions),
@@ -104,11 +106,11 @@ impl DecisionTransport for FakeStore {
         if !self.reachable {
             return Err(OpError::Unreachable("down".into()));
         }
+        if self.migrate_fails_unreachable {
+            return Err(OpError::Unreachable("migrate failed".into()));
+        }
         if self.migrate_refuses {
-            return Err(OpError::Refused {
-                status: 409,
-                message: "no scan rows yet".into(),
-            });
+            return Err(OpError::NoRows("no scan rows yet".into()));
         }
         *self.migrations.borrow_mut() += 1;
         *self.migrated.borrow_mut() = true;
@@ -270,7 +272,19 @@ fn an_offline_undo_is_queued_and_revokes_on_the_next_online_load() {
 }
 
 #[test]
-fn a_load_with_no_rows_leaves_the_draft_untouched_and_stores_nothing() {
+fn a_no_rows_refusal_with_an_empty_queue_loads_live_with_no_banner() {
+    let mut store = FakeStore::new(Vec::new());
+    *store.migrated.borrow_mut() = false;
+    store.migrate_refuses = true;
+    let loaded = block_on(load_decisions(&store, &DraftQueue::default()));
+    assert_eq!(loaded.bridge.availability(), Availability::Live);
+    assert!(loaded.banner.is_none());
+    assert!(loaded.shown.is_empty());
+    assert_eq!(loaded.state_of("any\0key"), StateView::Unresolved);
+}
+
+#[test]
+fn a_no_rows_refusal_keeps_the_drafts_queue_pending_and_migrates_once_rows_exist() {
     // The server refuses to migrate until the project has scan rows.
     let mut store = FakeStore::new(Vec::new());
     *store.migrated.borrow_mut() = false;
@@ -283,10 +297,11 @@ fn a_load_with_no_rows_leaves_the_draft_untouched_and_stores_nothing() {
     let loaded = block_on(load_decisions(&store, &queue));
     assert_eq!(*store.migrations.borrow(), 0);
     assert!(store.decisions.borrow().is_empty() && store.posted.borrow().is_empty());
-    assert_ne!(loaded.bridge.availability(), Availability::Live);
-    assert!(loaded.banner.is_some());
-    // The draft goes back out exactly as it came in.
-    assert_eq!(loaded.bridge.draft_queue(&HashMap::new()).pending, legacy);
+    assert_eq!(loaded.bridge.availability(), Availability::Live);
+    assert!(loaded.banner.is_none());
+    // The queue's entries show as pending and stay in the draft, not lost, not migrated.
+    assert_eq!(loaded.shown, legacy);
+    assert_eq!(loaded.bridge.draft_queue(&loaded.shown).pending, legacy);
 
     // Once rows exist the same load migrates, and the draft's old entries are consumed.
     store.migrate_refuses = false;
@@ -297,6 +312,22 @@ fn a_load_with_no_rows_leaves_the_draft_untouched_and_stores_nothing() {
         !loaded.shown.contains_key("old\0key"),
         "the server holds them now"
     );
+}
+
+#[test]
+fn an_unreachable_migrate_still_gives_the_banner() {
+    let mut store = FakeStore::new(Vec::new());
+    *store.migrated.borrow_mut() = false;
+    store.migrate_fails_unreachable = true;
+    let legacy = map(&[("old\0key", disp(TriageState::Ignored, "fixture"))]);
+    let queue = DraftQueue {
+        pending: legacy.clone(),
+        ..DraftQueue::default()
+    };
+    let loaded = block_on(load_decisions(&store, &queue));
+    assert_eq!(loaded.banner, Some(UNKNOWN_BANNER));
+    assert_ne!(loaded.bridge.availability(), Availability::Live);
+    assert_eq!(loaded.bridge.draft_queue(&HashMap::new()).pending, legacy);
 }
 
 // ── the sync loop ─────────────────────────────────────────────────────────────────────────
