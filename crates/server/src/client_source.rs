@@ -130,3 +130,6 @@ impl IntoResponse for Refusal {
         (self.status, Json(self.body())).into_response()
     }
 }
+
+#[cfg(test)]
+mod delete_project_tests;
