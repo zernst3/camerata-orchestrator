@@ -303,7 +303,7 @@ fn a_refused_write_reads_as_one_operator_sentence() {
     );
     assert_eq!(
         save_error_line(Stage::Finder, "The finder must be agent or engine."),
-        "Not saved. Finder: the finder must be agent or engine. The previous value was kept."
+        "Not saved. Finder: the finder must be Agent or Engine. The previous value was kept."
     );
     assert_eq!(
         save_error_line(Stage::Fix, ""),
