@@ -616,21 +616,29 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
     stack.type_into(".engine-correction .queue-reason-input", "", reason);
     stack.click(".engine-correction .queue-prompt-commit", "");
 
-    // The card says corrected, and the Held count fell by the one row.
+    // The card says corrected.
     // "No, corrected": the held states say "until corrected" too, so the bare word would match a card that is still held.
     stack.wait_text(".engine-state-text", "No, corrected");
     stack.wait_for("no correction form", "T.count('.engine-correction') === 0");
     assert!(stack
         .page_text()
         .contains("The corrected version is what ships."));
-    assert!(
-        !stack.gate_held().iter().any(|h| h["key"] == key.as_str()),
-        "the gate no longer holds the row"
-    );
-    let gate_text = stack.js_string("T.text('.export-blocked-head')");
-    assert!(
-        gate_text.contains("4 rows"),
-        "the export panel lists one row fewer: {gate_text}"
+    // The correction answered the Engine Check's No: that hold is gone. It also raised the row to
+    // critical, and a critical row needs a reviewer's own decision (release gate check 12, commit
+    // 7ca2bdea): an edit is not a decision, so the gate now holds the row for THAT reason alone.
+    let still: Vec<Value> = stack
+        .gate_held()
+        .into_iter()
+        .filter(|h| h["key"] == key.as_str())
+        .collect();
+    assert_eq!(still.len(), 1, "one hold on the row remains: {still:?}");
+    assert_eq!(still[0]["reason"], "critical_without_decision", "{still:?}");
+    assert_eq!(still[0]["path"], site["path"], "{still:?}");
+    assert_eq!(still[0]["line"], site["line"], "{still:?}");
+    assert_eq!(
+        stack.gate_held().len(),
+        7,
+        "the row moved from one hold to the other: the gate holds as many rows as before"
     );
 
     // The correction is a real severity edit on that row, with the reason, and the verdict names it.
@@ -653,7 +661,26 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
     assert_eq!(verdict["wrong"], "wrong_severity", "{verdict}");
     assert_eq!(verdict["correction"]["edit"], edit["id"], "{verdict}");
 
-    stack.assert_shell_counts(&Strip { held: 6, ..BASE });
+    // Decide the row in person in Review (one click on Confirmed): that clears the last hold, the
+    // gate holds one row fewer and the export panel counts it out.
+    stack.click(".triage-tab", "Tree");
+    open_site(&stack, "cat:injection", "SEC-NO-RAW-SQL-CONCAT-1", &place);
+    stack.click(".site-detail-actions .pane-dispose", "Confirmed");
+    stack.wait_for(
+        "the gate to release the row",
+        "T.text('.export-blocked-head').includes('6 held rows')",
+    );
+    assert!(
+        !stack.gate_held().iter().any(|h| h["key"] == key.as_str()),
+        "a decision in person clears the critical hold"
+    );
+    let gate_text = stack.js_string("T.text('.export-blocked-head')");
+    assert!(gate_text.contains("6 held rows"), "{gate_text}");
+
+    let mut after = BASE;
+    after.held = 6;
+    after.shift(None, "confirmed");
+    stack.assert_shell_counts(&after);
     stack.assert_no_model_calls();
 }
 
@@ -1316,17 +1343,29 @@ fn adding_a_finding_with_a_stale_snippet_is_held_and_the_gate_refuses_the_export
     assert_eq!(held[0]["reason"], "evidence_unverified", "{held:?}");
     assert_eq!(held[0]["path"], "src/orders/repo.rs", "{held:?}");
     assert_eq!(held[0]["line"], 5, "{held:?}");
-    let panel = stack.text(".export-blocked");
-    assert!(
-        panel.contains("Export blocked: 1 row needs a decision"),
+    // The panel is now one line and a door (deliberate design, export_panel.rs and the held-rows
+    // work): the row itself, its place and its reason are shown in Review, not in the panel.
+    let panel = stack.text(".export-blocked-head");
+    assert_eq!(
+        panel, "Export blocked: 1 held row needs a decision (it is in Review).",
         "{panel}"
     );
-    assert!(panel.contains("src/orders/repo.rs:5"), "{panel}");
-    assert!(panel.contains("evidence unverified"), "{panel}");
     assert_eq!(
         stack.js("T.count('.export-clear .btn-run')"),
         0,
         "the Export button is gone"
+    );
+    // Follow the door with a real click: Review shows that row, at that place, held for the reason.
+    stack.click(".export-blocked .export-open-review", "Open Review");
+    stack.wait_for(
+        "the held row in Review",
+        "T.has('.site-detail .site-detail-where', 'src/orders/repo.rs:5')",
+    );
+    let detail = stack.text(".site-detail");
+    assert!(detail.contains("src/orders/repo.rs:5"), "{detail}");
+    assert!(
+        detail.contains("Held from export: evidence unverified. Decide it to release."),
+        "{detail}"
     );
     let added = stack.store("edits");
     let rows = added["added"].as_array().expect("added");
