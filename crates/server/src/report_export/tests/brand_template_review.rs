@@ -1330,7 +1330,8 @@ fn shipped_template_methodology_line_is_gated_on_review_state() {
         template.contains("d.methodology.reconciliation"),
         "the template must print the reconciling line it is given"
     );
-    let counts = counts_of_problems(3, 1, 0);
+    let mut counts = counts_of_problems(3, 1, 0);
+    counts.review.reviewed_in_person = 1;
     let raw = counts_prose::methodology_line(&counts, ReviewState::Raw);
     assert!(raw.contains("has not yet had a human review"), "{raw}");
     assert!(

@@ -140,7 +140,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Info | A severity for an observation that is not a defect, such as a convention noted. It counts in the Low column of the scorecard. | The Severity column; the scorecard on Start here |
 | Effort | A rough size of the change for one place: low, medium or high. | Fix plan; All problems |
 | Estimated hours | The range of hours the effort stands for, for one place. | All problems |
-| Confidence | How sure the review is that the problem is real: High, Low or Disputed. Low has three causes: the review marked the problem unsure, no published standard backs it, or it reads as a convention to consider. Only the first means the review was unsure, and only those problems are always read in person. Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision. | All problems; Needs a decision |
+| Confidence | How sure the review is that the problem is real: High, Low or Disputed. Low has three causes. One is that the review marked the problem unsure. Another is that no published standard backs it. The third is that it reads as a convention to consider. Only the first means the review was unsure, and only those problems are always read in person. Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision. | All problems; Needs a decision |
 | Needs a decision | A reviewer must rule on the problem before you act on it. | The Needs a decision sheet; the column of that name on All problems |
 | Ruled out | Looked at and not a problem. The reason is on the Ruled out sheet. | The Ruled out sheet |
 | Convention | A habit your code already follows consistently. | Your conventions; Departures |
