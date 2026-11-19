@@ -1131,12 +1131,13 @@ html, body {
 /* Critical (security) row highlight: applied to the whole <tr> via chorale 0.2.3's
    row_class hook (replaces the old per-cell stripe). A red left border + faint red tint
    marks the security-floor rows unmistakably; selection background still composes over it. */
-.finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+.finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b, inset 0 -1px 0 0 var(--chorale-separator-color, rgba(0, 0, 0, 0.25)) !important; }
 /* A row the release gate holds (work order E): a wider, darker edge and its own tint, so it reads
    apart from the critical highlight even on a critical row. chorale gives the checkbox cell an
    inline box-shadow (its row separator), which beats any stylesheet rule, so the edge is
-   !important and carries the separator itself. */
-.finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d, inset 0 -1px 0 0 rgba(0, 0, 0, 0.25) !important; }
+   !important and carries the separator itself, in the colour chorale sets on the row (so a
+   selected row keeps its divider colour). The critical edge needs the same. */
+.finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d, inset 0 -1px 0 0 var(--chorale-separator-color, rgba(0, 0, 0, 0.25)) !important; }
 /* A row the release gate holds (work order E): the status cell is red AND says so in words. */
 .held-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; background: #d4332b; white-space: nowrap; }
 .finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }

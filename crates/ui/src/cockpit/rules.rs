@@ -8158,6 +8158,20 @@ mod render_tests {
             ),
             "the API hint renders; html=\n{html}"
         );
+        // The no-key consequence moved behind the "?": the topic must still say an API run does
+        // not start until a key is saved.
+        let topic = camerata_ui_core::help::inspection::backend_topic();
+        assert!(
+            topic
+                .body
+                .contains("the AI steps on this project do not run until one is saved"),
+            "the no-key consequence is explained in the help topic: {}",
+            topic.body
+        );
+        assert!(
+            html.contains("aria-label=\"About Backend\""),
+            "the topic is one press away; html=\n{html}"
+        );
         assert!(
             !html.contains("CLI selected"),
             "the CLI-selected hint must not render when API is active; html=\n{html}"

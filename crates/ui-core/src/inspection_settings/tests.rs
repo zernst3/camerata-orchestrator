@@ -242,21 +242,21 @@ fn a_select_always_offers_the_model_it_currently_holds() {
         backend: String::new(),
     });
     assert_eq!(
-        ids(&model_groups(&registry, "claude-fable-5-1")),
+        ids(&model_groups(&registry, "claude-fable-5-1", false)),
         ["claude-opus-5-5", "claude-fable-5-1"]
     );
     assert_eq!(
-        ids(&model_groups(&registry, "my-own-model")),
+        ids(&model_groups(&registry, "my-own-model", false)),
         ["claude-opus-5-5", "claude-fable-5-1", "my-own-model"],
         "a model the registry does not list is still shown"
     );
     assert_eq!(
-        ids(&model_groups(&registry, "")),
+        ids(&model_groups(&registry, "", false)),
         ["claude-opus-5-5", "claude-fable-5-1"],
         "an unset row adds nothing"
     );
     assert_eq!(
-        ids(&model_groups(&None, "claude-opus-5-5")),
+        ids(&model_groups(&None, "claude-opus-5-5", false)),
         ["claude-opus-5-5"],
         "no registry: the current model alone, never an empty select"
     );
@@ -303,7 +303,7 @@ fn a_refused_write_reads_as_one_operator_sentence() {
     );
     assert_eq!(
         save_error_line(Stage::Finder, "The finder must be agent or engine."),
-        "Not saved. Finder: the finder must be agent or engine. The previous value was kept."
+        "Not saved. Finder: the finder must be Agent or Engine. The previous value was kept."
     );
     assert_eq!(
         save_error_line(Stage::Fix, ""),
@@ -312,12 +312,54 @@ fn a_refused_write_reads_as_one_operator_sentence() {
 }
 
 #[test]
-fn with_no_registry_a_blank_model_never_says_loading() {
-    let groups = model_groups(&None, "");
-    let labels: Vec<&str> = groups
-        .iter()
-        .flat_map(|(_, o)| o.iter().map(|m| m.label.as_str()))
-        .collect();
-    assert!(!labels.is_empty(), "never an empty select");
-    assert!(labels.iter().all(|l| !l.contains("Loading")), "{labels:?}");
+fn the_placeholder_says_loading_only_while_loading_and_missing_once_it_is() {
+    let labels = |loading: bool| -> Vec<String> {
+        model_groups(&None, "", loading)
+            .iter()
+            .flat_map(|(_, o)| o.iter().map(|m| m.label.clone()))
+            .collect()
+    };
+    assert_eq!(labels(true), ["Loading models\u{2026}"]);
+    assert_eq!(labels(false), ["No model list available"]);
+}
+
+#[test]
+fn a_refusal_never_shows_the_servers_string() {
+    for raw in [
+        "unknown step",
+        "no such project",
+        "something odd (http://x/y)",
+    ] {
+        let line = save_error_line(Stage::Fix, raw);
+        assert!(line.starts_with("Not saved. Fix model: "), "{line}");
+        assert!(line.ends_with("The previous value was kept."), "{line}");
+        assert!(!line.contains(raw), "{line}");
+    }
+    assert_eq!(
+        save_error_line(Stage::Fix, "something odd (http://x/y)"),
+        "Not saved. Fix model: the server refused the change. The previous value was kept."
+    );
+    assert!(save_error_line(Stage::Fix, "no such project").contains("the project was not found"));
+}
+
+#[test]
+fn an_unconfirmed_or_unreadable_write_does_not_claim_the_value_was_kept() {
+    let un = save_failure_line(Stage::Fix, &SaveFailure::Unconfirmed);
+    assert!(un.contains("may or may not have been saved"), "{un}");
+    assert!(un.contains("Reload"), "{un}");
+    assert!(
+        !un.contains("Not saved") && !un.contains("previous value was kept"),
+        "{un}"
+    );
+    let saved = save_failure_line(Stage::Fix, &SaveFailure::SavedUnreadable);
+    assert!(saved.contains("saved, but"), "{saved}");
+    assert!(saved.contains("Reload"), "{saved}");
+    assert!(
+        !saved.contains("Not saved") && !saved.contains("kept"),
+        "{saved}"
+    );
+    assert_eq!(
+        save_failure_line(Stage::Fix, &SaveFailure::Refused("unknown step".into())),
+        save_error_line(Stage::Fix, "unknown step")
+    );
 }
