@@ -89,10 +89,12 @@ pub(crate) async fn delete_project(
     Path(id): Path<String>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    if state.projects.get(&id).is_some()
-        && crate::client_source::delete_project::project_holds_data(&state, &id).await
-    {
-        return crate::client_source::delete_project::holds_data_refusal().into_response();
+    if state.projects.get(&id).is_some() {
+        if let Some(refusal) =
+            crate::client_source::delete_project::project_holds_data(&state, &id).await
+        {
+            return refusal.into_response();
+        }
     }
     Json(serde_json::json!({ "ok": state.projects.delete(&id) })).into_response()
 }

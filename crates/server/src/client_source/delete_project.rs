@@ -446,7 +446,14 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
                     path: repo.clone(),
                     files: 0,
                     bytes: 0,
-                    outcome: PurgeOutcome::Failed { error: r.message },
+                    outcome: PurgeOutcome::Failed {
+                        error: format!(
+                            "{} The way out: unlink {repo} in the project's repositories (or \
+                             point it at the right folder), or remove the folder by hand, then \
+                             delete again.",
+                            r.message
+                        ),
+                    },
                 });
                 claim(state, &project.id, repo, &mut claims)?;
             }
@@ -845,28 +852,69 @@ async fn dev_rows(
     if unassigned > 0 {
         kept.push(KeptItem {
             what: format!("{unassigned} development console record(s)"),
-            why: "they name no project and no repository, so Camerata cannot attribute them to \
-                  this project"
+            why: "they name no project and no repository, so Camerata cannot tell whether they \
+                  are this project's: they may include this project's, so check them by hand"
                 .to_string(),
         });
     }
+    kept.push(KeptItem {
+        what: "the SQLite logs (artifacts.db, enforcement_catches.db, governance_events.db, \
+               orchestrator_decisions.db, feedback.db)"
+            .to_string(),
+        why: "they hold ids, rule ids and descriptions, not client code, and are not kept per \
+              project, so they are not deleted"
+            .to_string(),
+    });
+    kept.push(KeptItem {
+        what: "source-records.json".to_string(),
+        why: "it holds the paths, counts and dates of earlier source deletions, kept as proof; \
+              no code"
+            .to_string(),
+    });
+    // Dependents first, then the stories and units of work they were found through, then the
+    // routines their escalations were found through: a write that fails leaves the rows the
+    // retry needs to find the rest.
     vec![
-        (Dev::Uow, uow_ids, "units of work"),
-        (Dev::Story, story_ids, "stories"),
-        (
-            Dev::Clarification,
-            state.clarifications.ids_for_stories(&story_scope),
-            "questions",
-        ),
+        (Dev::Escalation, escalation_ids, "escalations"),
+        (Dev::Checkpoint, checkpoint_ids, "checkpoints"),
         (
             Dev::Resume,
             state.clarify_resume.ids_for_stories(&story_scope),
             "resume points",
         ),
+        (
+            Dev::Clarification,
+            state.clarifications.ids_for_stories(&story_scope),
+            "questions",
+        ),
+        (Dev::Story, story_ids, "stories"),
+        (Dev::Uow, uow_ids, "units of work"),
         (Dev::Routine, routine_ids, "routines"),
-        (Dev::Checkpoint, checkpoint_ids, "checkpoints"),
-        (Dev::Escalation, escalation_ids, "escalations"),
     ]
+}
+
+/// Why the last phase (the inspections, then the project record) must not run yet, or `None`:
+/// another location is not clear, or a scan or job started on the project during the deletion
+/// (the marker refuses new starts; this catches one that began before it was set).
+fn final_block(
+    state: &AppState,
+    project: &Project,
+    items: &[ProjectDeletionItem],
+) -> Option<String> {
+    if state.jobs.has_running_for_project(&project.id)
+        || state.source_ops.scan_running(&project.id)
+    {
+        return Some(
+            "a scan started during the deletion; the project is kept so you can retry".to_string(),
+        );
+    }
+    if items.iter().any(|i| !i.outcome.is_clear()) {
+        return Some(
+            "kept because another location could not be removed; delete again to retry"
+                .to_string(),
+        );
+    }
+    None
 }
 
 fn failed(file: &Path, e: &std::io::Error) -> PurgeOutcome {
@@ -950,23 +998,45 @@ fn build_id() -> String {
 /// saved runs, inspections, review stores, session files or development console rows (the
 /// project record and the in-memory copies do not count). A run in flight counts as data.
 /// The plain "Remove from list" is refused while this is true.
-pub async fn project_holds_data(state: &AppState, project_id: &str) -> bool {
+pub async fn project_holds_data(state: &AppState, project_id: &str) -> Option<Refusal> {
+    const BASE: &str = "This project still has data on this machine. Use Delete source code from \
+                        this machine or Delete project and all its data first.";
     let Ok(built) = build(state, project_id, true).await else {
-        return true;
+        return Some(Refusal::conflict("project_holds_data", BASE));
     };
-    built
+    let holds = built
         .items()
         .iter()
-        .any(|i| !matches!(i.category.as_str(), "in-memory copy" | "project record"))
+        .any(|i| !matches!(i.category.as_str(), "in-memory copy" | "project record"));
+    if !holds {
+        return None;
+    }
+    // A checkout Camerata will not delete is a dead end for the delete too: say how to get out.
+    let mut message = BASE.to_string();
+    for b in &built.blocked {
+        if let PurgeOutcome::Failed { error } = &b.outcome {
+            message.push_str(&format!(" One folder cannot be deleted by Camerata: {error}"));
+        }
+    }
+    Some(Refusal::conflict("project_holds_data", message))
 }
 
-/// The refusal the plain project delete answers with while the project still holds data.
-pub fn holds_data_refusal() -> Refusal {
-    Refusal::conflict(
-        "project_holds_data",
-        "This project still has data on this machine. Use Delete source code from this machine \
-         or Delete project and all its data first.",
-    )
+/// The refusal for starting governed work on `story_id` while the project that owns its
+/// repository (or that created the unit) is being deleted, or `None`.
+pub(crate) fn story_deleting_refusal(state: &AppState, story_id: &str) -> Option<String> {
+    let unit = state.uow.get_or_default(story_id);
+    let repo = unit.repo().map(str::to_string);
+    state
+        .projects
+        .list()
+        .into_iter()
+        .filter(|p| {
+            unit.project_id.as_deref() == Some(p.id.as_str())
+                || repo
+                    .as_deref()
+                    .is_some_and(|r| p.repos.iter().any(|x| x.eq_ignore_ascii_case(r)))
+        })
+        .find_map(|p| state.source_ops.deleting_refusal(&p.id))
 }
 
 /// What a project deletion ended in.
@@ -1027,25 +1097,14 @@ pub async fn delete_all(
     extras.sort_by_key(|s| s.action.phase());
     let mut memory_forgotten = false;
     let mut inspections_forgotten = false;
+    let mut dev_failed = false;
     let mut project_item: Option<ProjectDeletionItem> = None;
     for Step { mut item, action } in extras {
         // The last phase (inspections, then the project record) runs only when everything
         // before it is clear, and a scan that slipped in refuses it too.
         if action.phase() == 4 {
-            let clear = items.iter().all(|i| i.outcome.is_clear());
-            let running = state.jobs.has_running_for_project(&project.id)
-                || state.source_ops.scan_running(&project.id);
-            if !clear || running {
-                item.outcome = PurgeOutcome::Failed {
-                    error: if running {
-                        "a scan started during the deletion; the project is kept so you can retry"
-                            .to_string()
-                    } else {
-                        "kept because another location could not be removed; delete again to \
-                         retry"
-                            .to_string()
-                    },
-                };
+            if let Some(why) = final_block(state, &project, &items) {
+                item.outcome = PurgeOutcome::Failed { error: why };
                 items.push(item);
                 continue;
             }
@@ -1075,7 +1134,17 @@ pub async fn delete_all(
                 };
             }
             Action::Dev(dev, ids) => {
-                item.outcome = remove_dev(state, dev, &ids, &data);
+                // Stop at the first failure: later sets are found through earlier ones' rows.
+                item.outcome = if dev_failed {
+                    PurgeOutcome::Failed {
+                        error: "not attempted because an earlier removal failed; delete again to \
+                                retry"
+                            .to_string(),
+                    }
+                } else {
+                    remove_dev(state, dev, &ids, &data)
+                };
+                dev_failed |= !item.outcome.is_clear();
             }
             Action::Memory => {
                 if !memory_forgotten {
@@ -1104,13 +1173,8 @@ pub async fn delete_all(
     // The project record itself goes last, only when everything else is clear.
     let mut project_removed = false;
     if let Some(mut item) = project_item {
-        let clear = items.iter().all(|i| i.outcome.is_clear());
-        let running = state.jobs.has_running_for_project(&project.id)
-            || state.source_ops.scan_running(&project.id);
-        item.outcome = if !clear || running {
-            PurgeOutcome::Failed {
-                error: "kept so the deletion can be retried".to_string(),
-            }
+        item.outcome = if let Some(why) = final_block(state, &project, &items) {
+            PurgeOutcome::Failed { error: why }
         } else {
             match state.projects.delete_checked(&project.id) {
                 Ok(true) => {

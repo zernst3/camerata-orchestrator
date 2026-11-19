@@ -2123,7 +2123,11 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
     // comes due. Spawned here (not in `router`) so tests that build the router don't
     // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
-    crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
+    crate::auto_fire::spawn_routine_scheduler(
+        state.routines.clone(),
+        state.escalations.clone(),
+        state.source_ops.clone(),
+    );
 
     // Stall sweep (LIFECYCLE-6): periodically auto-cancel AUTONOMOUS runs that have stalled
     // (no activity past the active project's routine threshold). Watched runs stay alert-only.

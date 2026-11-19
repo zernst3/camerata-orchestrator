@@ -130,6 +130,16 @@ pub(crate) async fn start_run(
         return (StatusCode::CONFLICT, body).into_response();
     }
 
+    // A project being deleted with all its data starts no governed work.
+    if let Some(why) = crate::client_source::delete_project::story_deleting_refusal(&state, &story_id)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": why, "reason": why, "story_id": story_id })),
+        )
+            .into_response();
+    }
+
     // Repository pre-flight (live runs only; the scripted run writes no code): a unit that
     // should work in a repository but cannot (no branch selected, no local clone, ...) is
     // refused here with the reason, never silently handed to the greenfield scaffolder.
