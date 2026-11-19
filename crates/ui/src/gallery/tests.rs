@@ -90,6 +90,11 @@ const SPEC_STATES: &[&str] = &[
     "inspection-settings/run-in-flight",
     "inspection-settings/save-error",
     "inspection-settings/registry-missing",
+    "inspection/start-agent",
+    "inspection/start-engine",
+    "inspection/estimate-unavailable",
+    "inspection/deterministic-only",
+    "inspection/help-open",
     "app/build-mismatch",
 ];
 
@@ -327,12 +332,17 @@ fn no_gallery_page_renders_a_native_control_the_stylesheet_does_not_theme() {
 #[test]
 fn fixtures_cover_every_state() {
     use camerata_ui_core::test_support::review_fixtures::{fixture, FIXTURE_IDS};
-    // The `app/*` and `inspection-settings/*` states are not review screens and have no review
-    // fixture: they render from pure props of their own. Every other state is a review state and has one.
+    // The `app/*`, `inspection-settings/*` and `inspection/*` states are not review screens and
+    // have no review fixture: they render from pure props of their own. Every other state is a
+    // review state and has one.
     let registered: Vec<String> = registry()
         .iter()
         .map(GalleryState::id)
-        .filter(|id| !id.starts_with("app/") && !id.starts_with("inspection-settings/"))
+        .filter(|id| {
+            !id.starts_with("app/")
+                && !id.starts_with("inspection-settings/")
+                && !id.starts_with("inspection/")
+        })
         .collect();
     for id in &registered {
         assert!(

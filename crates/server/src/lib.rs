@@ -2417,7 +2417,7 @@ async fn onboard_audit(
     let _scan_claim = project_id
         .as_deref()
         .map(|id| state.source_ops.begin_scan(id));
-    let prior = if req.incremental {
+    let prior = if uses_prior_manifest(req.incremental, run_controls.review.finder) {
         project_id
             .as_deref()
             .and_then(|id| state.scan_cache.get(id))
@@ -2878,8 +2878,10 @@ pub(crate) async fn start_audit_job(
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
+    // The Agent finder inspects every file (the command line refuses an incremental Agent run), so
+    // an Agent run that asks for an incremental one runs in full instead: no prior manifest.
     let prior = options.prior_override.or_else(|| {
-        if req.incremental {
+        if uses_prior_manifest(req.incremental, run_controls.review.finder) {
             project_id
                 .as_deref()
                 .and_then(|id| state.scan_cache.get(id))
@@ -5065,7 +5067,31 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
+/// Whether a run reuses the project's prior manifest (an incremental run). The Agent finder
+/// inspects every file and the command line refuses an incremental Agent run, so an Agent run
+/// that asks for one runs in full: the request is never the only thing that decides it.
+pub(crate) fn uses_prior_manifest(
+    incremental: bool,
+    finder: camerata_api_types::project::ProjectFinder,
+) -> bool {
+    incremental && finder != camerata_api_types::project::ProjectFinder::Agent
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod uses_prior_manifest_tests {
+    use super::uses_prior_manifest;
+    use camerata_api_types::project::ProjectFinder::{Agent, Engine};
+
+    #[test]
+    fn an_agent_run_that_asks_for_an_incremental_one_runs_in_full() {
+        assert!(!uses_prior_manifest(true, Agent));
+        assert!(!uses_prior_manifest(false, Agent));
+        assert!(uses_prior_manifest(true, Engine));
+        assert!(!uses_prior_manifest(false, Engine));
+    }
+}
 
 #[cfg(test)]
 mod enforcement_capture_tests {

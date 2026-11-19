@@ -104,6 +104,7 @@ mod banners_panels;
 mod cost_panel;
 mod exports;
 mod findings_table;
+mod inspection_run;
 mod onboard;
 mod queue_table;
 mod repo_health;
@@ -115,6 +116,7 @@ pub use banners_panels::*;
 pub use cost_panel::*;
 pub use exports::*;
 pub use findings_table::*;
+pub(crate) use inspection_run::*;
 pub use onboard::*;
 pub use queue_table::*;
 pub use repo_health::*;
@@ -200,3 +202,8 @@ mod order_preset_followup_tests;
 /// enables the button and a click fetches the plan.
 #[cfg(test)]
 mod resume_button_tests;
+
+/// The Inspection screen tells the truth (work order C): per finder, the "This run" block, the
+/// estimate, the Inspect button and the help behind "?".
+#[cfg(test)]
+mod inspection_screen_tests;

@@ -86,6 +86,7 @@ pub(crate) fn ReviewShell(
                             for tab in lane_tabs(&shell.lanes, active) {
                                 button {
                                     key: "{tab.lane.slug()}",
+                                    id: "review-lane-{tab.lane.slug()}",
                                     class: if tab.active { "triage-tab active" } else { "triage-tab" },
                                     role: "tab",
                                     "aria-selected": "{tab.active}",
@@ -313,9 +314,15 @@ fn SettingsLane() -> Element {
     rsx! {
         // The Inspection settings read the PROJECT, so they show before the first inspection has
         // a result; the lane below them is the part that waits for one.
-        super::inspection_settings::InspectionSettingsHost {
-            project_id: String::new(),
-            run_in_flight,
+        // On the Inspection screen the same panel is already at the top, and a second copy would
+        // repeat every control id on the page; the lane says where it is instead.
+        if try_use_context::<super::scan::InspectionPanelOnScreen>().is_some() {
+            p { class: "audit-model-hint", "The Inspection settings are at the top of this screen." }
+        } else {
+            super::inspection_settings::InspectionSettingsHost {
+                project_id: String::new(),
+                run_in_flight,
+            }
         }
         ReviewSettingsHost {
             api,
@@ -394,6 +401,53 @@ mod tests {
             inspection < lane,
             "the component sits above the lane: {html}"
         );
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct UnderTheScreen {
+        api: ReviewApi,
+    }
+
+    /// The lane as it sits on the Inspection screen: below the panel that screen already shows.
+    fn under_the_inspection_screen(case: UnderTheScreen) -> Element {
+        use_context_provider(|| crate::cockpit::scan::InspectionPanelOnScreen);
+        harness(Case {
+            lane: Lane::Settings,
+            api: case.api,
+        })
+    }
+
+    /// The Inspection screen shows the Inspection settings at its top, so Review > Settings does
+    /// not draw a second copy: every control id on the page stays unique, and the lane says where
+    /// the settings are.
+    #[test]
+    fn review_settings_on_the_inspection_screen_points_to_the_top_panel_and_repeats_no_id() {
+        let fixture = Rc::new(FixtureReviewSource::base());
+        let html = crate::test_harness::render_fragment(
+            under_the_inspection_screen,
+            UnderTheScreen {
+                api: ReviewApi {
+                    reads: fixture.clone(),
+                    writes: fixture,
+                },
+            },
+        );
+        for repeated in [
+            "is-model-finder",
+            "inspection-client-name",
+            "Finder and models",
+        ] {
+            assert!(
+                !html.contains(repeated),
+                "{repeated} is drawn twice: {html}"
+            );
+        }
+        assert!(
+            html.contains("The Inspection settings are at the top of this screen."),
+            "{html}"
+        );
+        // The part that is the lane's own is still there.
+        assert!(html.contains("class=\"review-settings\""), "{html}");
     }
 
     #[test]

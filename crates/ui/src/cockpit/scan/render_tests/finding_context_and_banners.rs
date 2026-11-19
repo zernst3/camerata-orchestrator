@@ -107,7 +107,7 @@ fn scan_repos_button_is_off_for_a_deleted_source_and_says_why() {
     };
     let blocked = render(Some(deleted_block()));
     assert!(
-        button_tag_labelled(&blocked, "Scan repos").contains("disabled"),
+        button_tag_labelled(&blocked, "Propose rules").contains("disabled"),
         "{blocked}"
     );
     assert!(blocked.contains(
@@ -115,7 +115,7 @@ fn scan_repos_button_is_off_for_a_deleted_source_and_says_why() {
         ));
     let open = render(None);
     assert!(
-        !button_tag_labelled(&open, "Scan repos").contains("disabled"),
+        !button_tag_labelled(&open, "Propose rules").contains("disabled"),
         "{open}"
     );
     assert!(!open.contains("was deleted"));
@@ -171,18 +171,15 @@ fn onboard_view_renders_findings_with_deleted_source_and_disabled_rescan_control
     vdom.rebuild_in_place();
     let html = dioxus_ssr::render(&vdom);
     // The review surface is still there: a deleted source does not hide it (the report,
-    // its rules table and the audit panel render), it only switches the source-needing
+    // its rules table and the inspection panel render), it only switches the source-needing
     // controls off.
-    assert!(
-        html.contains("Step 2 — audit the code against your selected rules"),
-        "{html}"
-    );
+    assert!(html.contains("2. Inspect"), "{html}");
     assert!(html.contains("findings-toolbar"));
     // Every control that needs the source says why and is off.
     assert!(html.contains("Source for acme/app was deleted on 24 Oct 2026."));
     assert!(
-        button_tag_labelled(&html, "Audit code against selected rules").contains("disabled"),
-        "audit"
+        button_tag_labelled(&html, "Inspect code against selected rules").contains("disabled"),
+        "inspect"
     );
     assert!(
         button_tag_labelled(&html, "Add rules to repo(s) (branch + push)").contains("disabled"),

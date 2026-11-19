@@ -7,6 +7,7 @@
 //! the minimum work order E needs (the topic type and E's own file); B's merge replaces it.
 
 pub mod export;
+pub mod inspection;
 
 /// One help topic: what the "?" button beside a heading or control opens.
 #[derive(Debug, Clone, PartialEq, Eq)]

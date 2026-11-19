@@ -3,6 +3,9 @@
 use super::*;
 use camerata_api_types::cost_checkpoint::CostCheckpoint;
 
+/// The html id of the Review tab's button (an expression, so a test can find it by it).
+const REVIEW_OPEN_ID: &str = "review-open";
+
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
 /// chorale tables with fresh rows.
@@ -12,57 +15,37 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // architect picks rules and runs the audit.
     let mut audit = use_signal(|| Option::<ScanReportView>::None);
     let mut auditing = use_signal(|| false);
-    // The model the user picks for the audit — they own the thoroughness/speed trade-off.
-    // Company-agnostic list comes from the server (`/api/models`); seed from its default.
+    // The model registry: prices for the Engine finder's estimate. The inspection's models are
+    // the PROJECT's (Inspection settings); this screen picks none of them.
     let models_res = use_resource(fetch_audit_models);
     let models = models_res.read().clone().flatten();
-    // Fetch the active project so the Audit + Calibration selectors read their initial
-    // value from `project.step_models` — the same source Settings writes to. This makes
-    // both screens bidirectionally synced: a change here persists to step_models (via the
-    // shared endpoint), so it shows in Settings next time; a change in Settings shows here
-    // next time the onboarding scan mounts (because we seed from step_models, not from the
-    // models-registry default).
+    // The open project. The Inspection settings on this screen tell it when something changes
+    // (a finder or a backend pick), so the run block and the estimate follow without a remount.
     let active_project_res = use_resource(fetch_active_project);
-    let active_project = active_project_res.read().clone().flatten();
-    // Derive the project id once (empty string = no active project; the persist calls are
-    // no-ops in that case since the endpoint requires a real id). Memoised as a String so
-    // the onchange closures can clone it cheaply.
+    let live_project = try_use_context::<LiveProject>();
+    let active_project: Option<ProjectView> = live_project
+        .and_then(|l| l.0.read().clone())
+        .or_else(|| active_project_res.read().clone().flatten());
+    // The finder in effect. A screen with no project runs as a new project does, on the Agent
+    // finder (the server resolves a run with no project the same way).
+    let finder_now = use_memo(move || {
+        live_project
+            .and_then(|l| l.0.read().as_ref().map(|p| p.review.finder))
+            .or_else(|| {
+                active_project_res
+                    .read()
+                    .clone()
+                    .flatten()
+                    .map(|p| p.review.finder)
+            })
+            .unwrap_or_default()
+    });
+    let finder = finder_now();
+    // Derive the project id once (empty string = no active project).
     let project_id = active_project
         .as_ref()
         .map(|p| p.id.clone())
         .unwrap_or_default();
-    // Seed priority: project.step_models.audit (Settings-authoritative) → models.default
-    // (registry fallback for first-time / no-project state). The guard is `is_empty()` so
-    // a user actively choosing a different model in THIS session is never overwritten by a
-    // later async re-render of the active-project resource.
-    let mut audit_model = use_signal(String::new);
-    if audit_model().is_empty() {
-        let from_step = active_project
-            .as_ref()
-            .map(|p| p.step_models.audit.clone())
-            .filter(|s| !s.is_empty());
-        let from_default = models
-            .as_ref()
-            .map(|m| m.default.clone())
-            .filter(|s| !s.is_empty());
-        if let Some(m) = from_step.or(from_default) {
-            audit_model.set(m);
-        }
-    }
-    // Calibration model — its OWN picker (severity recalibration + confidence tagging).
-    // Seed priority: project.step_models.calibration (Settings-authoritative) → current
-    // audit_model (so "the model you picked" is used end-to-end unless deliberately split).
-    let mut calibration_model = use_signal(String::new);
-    if calibration_model().is_empty() {
-        let from_step = active_project
-            .as_ref()
-            .map(|p| p.step_models.calibration.clone())
-            .filter(|s| !s.is_empty());
-        let from_audit = Some(audit_model()).filter(|s| !s.is_empty());
-        if let Some(m) = from_step.or(from_audit) {
-            calibration_model.set(m);
-        }
-    }
     // Scan mode (user-facing): "auto" (default: the server picks batch on the API backend),
     // "parallel" / "sequential" (forced real time), "batch" (forced batch), or "job" (async:
     // submit, walk away, poll). Job sends "auto", so it batches on the API backend too.
@@ -83,13 +66,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // threat model) after the standard audit and attaches the results as `report.deep`.
     // Output is ADVISORY — never a SOC-2 report or a penetration test.
     let mut audit_deep = use_signal(|| false);
-    // Scan-type selector (Part C): which scans to run. Both default ON (today's behaviour).
-    // "AI architectural review" = the LLM scan of architectural/structured/prose rules (and
-    // the deep tier). "Deterministic scans" = the always-on security floor + the mechanical
-    // preview linters — fast, no LLM, no tokens. Deselecting AI sends `run_ai_review=false`
-    // (the server makes zero model calls); deselecting deterministic skips the floor + preview.
-    let mut run_ai_review = use_signal(|| true);
-    let mut run_deterministic = use_signal(|| true);
+    // Checks to run: which kinds of check the run makes (see `ChecksToRun`). One select, the same
+    // two request flags the two checkboxes it replaced sent.
+    let mut checks = use_signal(|| camerata_ui_core::scan::inspection_run::ChecksToRun::All);
     // pw/cockpit-ui Feature 5: feature-flag map. Controls per-feature affordances —
     // SOC-2 section visibility, deep-export scope. Fetched once on mount; degrades
     // gracefully (all flags default to false) when the server is old.
@@ -275,16 +254,16 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| repo_selection);
     // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
     // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
-    // Per-repo sizes for the estimate (several repos only): fetched once per mount.
-    let agent_finder = active_project
-        .as_ref()
-        .is_some_and(|p| p.review.finder == camerata_api_types::project::ProjectFinder::Agent);
+    // Per-repo sizes for the estimate: several repos always, and one repo too under the Agent
+    // finder (its figures come with the sizes). Reads the live finder, so a change of finder
+    // fetches again.
     let repo_sizes = {
         let repos = report.repos.clone();
         use_resource(move || {
             let repos = repos.clone();
+            let agent = finder_now() == camerata_api_types::project::ProjectFinder::Agent;
             async move {
-                if repos.len() > 1 || agent_finder {
+                if repos.len() > 1 || agent {
                     fetch_repo_sizes(&repos).await
                 } else {
                     None
@@ -1233,7 +1212,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 class: "scan-section-h",
                 // The walkthrough points here for the stack rules.
                 "data-tour": camerata_ui_core::walkthrough::target::RULES,
-                "Step 1 — proposed starter ruleset"
+                "1. Choose rules"
             }
             p { class: "scan-section-sub", "Camerata mapped the stack and proposes these rules. Pick the ones to enforce and choose alternatives; you own the final set (arming generates the governance PR)." }
             p { class: "scan-section-sub", "Click a rule row to read its full context and choose its alternative." }
@@ -1252,7 +1231,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         }
                     }
                     span { class: "repo-select-hint",
-                        "Showing rules for this repo. Each repo has its own selection; the audit scans every repo against its own rules."
+                        "Showing rules for this repo. Each repo has its own selection; the inspection checks every repo against its own rules."
                     }
                 }
             }
@@ -1303,18 +1282,14 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         scan_block: scan_blocked.clone(),
                         on_audit: move |rules: Vec<SelectedAuditRule>| {
                             let repos = repos_audit.clone();
-                            let model = audit_model();
-                            let calib = calibration_model();
                             let mode = audit_mode();
-                            let deep = audit_deep();
-                            // Scan-type selector: both default true; if a user somehow unticks
-                            // both, send both true (the server also coerces — never a no-op).
-                            let mut ai = run_ai_review();
-                            let mut det = run_deterministic();
-                            if !ai && !det { ai = true; det = true; }
-                            // Full scan forces a clean pass; otherwise the scan is incremental
-                            // (only files changed since the last scan cost AI tokens).
-                            let incremental = !audit_full_scan();
+                            // The checks the operator picked, as the two request flags.
+                            let (ai, det) = checks().flags();
+                            let deep = audit_deep() && ai;
+                            // The Agent finder always inspects every file; the Engine finder
+                            // is incremental unless Full inspection is ticked (only files
+                            // changed since the last inspection cost AI tokens).
+                            let incremental = camerata_ui_core::scan::inspection_run::incremental_flag(finder, audit_full_scan());
                             // A spend limit that is not a positive number stops the scan from
                             // starting (and says why) rather than silently running unlimited.
                             let max_cost = match camerata_ui_core::scan::parse_spend_limit(&audit_spend_limit()) {
@@ -1330,7 +1305,13 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             // and its progress is pollable. The picked mode still decides HOW the
                             // model is called (see `exec_mode`); "Background job" is the server's
                             // default.
-                            let exec_mode = job_exec_mode(&mode);
+                            // Run mode is the Engine finder's: an Agent run sends the default, whatever
+                            // an earlier Engine pick left in the box.
+                            let exec_mode = if finder == camerata_api_types::project::ProjectFinder::Agent {
+                                "auto".to_string()
+                            } else {
+                                job_exec_mode(&mode)
+                            };
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
@@ -1370,7 +1351,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, &exec_mode, incremental, deep, ai, det, max_cost).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &exec_mode, incremental, deep, ai, det, max_cost).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -1400,197 +1381,31 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 }
             }
 
-            // ── Phase 2: the audit runs from the table's "Audit selected" button ──
+            // ── 2. Inspect: the run block, the estimate, the progress and the cost ──────────
+            // The Inspect button is the rules table's (above); it acts on the ticked rules and on
+            // the choices here. The explanations live behind the "?" buttons.
             div { class: "audit-cta",
-                p { class: "scan-section-h", "Step 2 — audit the code against your selected rules (optional)" }
-                p { class: "scan-section-sub", "The audit is OPTIONAL — you can Apply the rules above and finish onboarding without it. Run it when you want to see existing violations to triage. Tick the rules, then press “Audit code against selected rules”. The deterministic security rules (secrets / raw-SQL / secret-URLs) always run as the enforced floor; the AI checks the code against ONLY your selected rules AND flags anything else worth a look (advisory)." }
-                // Model picker — the user owns the speed/thoroughness trade-off. List is
-                // company-agnostic, served by /api/models/registry. Options are grouped
-                // by provider (Claude first, then OpenRouter); each label has badges
-                // (FREE / no-tools / NNNk ctx). Degrades to Claude-only when no OpenRouter
-                // key is configured.
-                if let Some(m) = models.as_ref() {
-                    div { class: "audit-model-row",
-                        label { class: "audit-model-label", "Audit model" }
-                        select {
-                            class: "audit-model-select",
-                            disabled: auditing(),
-                            value: "{audit_model}",
-                            onchange: {
-                                let pid = project_id.clone();
-                                move |e: Event<FormData>| {
-                                    let model = e.value();
-                                    audit_model.set(model.clone());
-                                    // Persist to project.step_models so Settings stays in sync.
-                                    let pid = pid.clone();
-                                    spawn(async move {
-                                        if !pid.is_empty() {
-                                            set_project_step_model(&pid, "audit", &model).await;
-                                        }
-                                    });
-                                }
-                            },
-                            for (group_label , opts) in m.grouped().into_iter() {
-                                optgroup { label: "{group_label}",
-                                    for opt in opts.into_iter() {
-                                        option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
-                                    }
-                                }
-                            }
-                        }
-                        span { class: "audit-model-hint", "Faster models finish sooner; stronger models catch more." }
-                    }
-                    // Calibration model — its OWN tier. The scan finds; calibration
-                    // recalibrates severity + tags confidence. Defaults to the scan model
-                    // (end-to-end); split it to run a cheap scan with a stronger verify.
-                    div { class: "audit-model-row",
-                        label { class: "audit-model-label", "Calibration model" }
-                        select {
-                            class: "audit-model-select",
-                            disabled: auditing(),
-                            value: "{calibration_model}",
-                            onchange: {
-                                let pid = project_id.clone();
-                                move |e: Event<FormData>| {
-                                    let model = e.value();
-                                    calibration_model.set(model.clone());
-                                    // Persist to project.step_models so Settings stays in sync.
-                                    let pid = pid.clone();
-                                    spawn(async move {
-                                        if !pid.is_empty() {
-                                            set_project_step_model(&pid, "calibration", &model).await;
-                                        }
-                                    });
-                                }
-                            },
-                            for (group_label , opts) in m.grouped().into_iter() {
-                                optgroup { label: "{group_label}",
-                                    for opt in opts.into_iter() {
-                                        option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
-                                    }
-                                }
-                            }
-                        }
-                        span { class: "audit-model-hint", "Recalibrates severity + flags low-confidence findings. Default = the scan model; pick a stronger one for cheap-scan-plus-smart-verify." }
-                    }
+                p { class: "scan-section-h", "2. Inspect" }
+                p { class: "scan-section-sub", "Tick the rules above, then press \u{201c}Inspect code against selected rules\u{201d}." }
+                InspectionRunControls {
+                    finder,
+                    checks: checks(),
+                    on_checks: move |c| checks.set(c),
+                    run_mode: audit_mode(),
+                    recommended_mode: recommended_mode.clone(),
+                    on_run_mode: move |m: String| audit_mode.set(m),
+                    full_ticked: audit_full_scan(),
+                    on_full: move |v| audit_full_scan.set(v),
+                    spend_limit: audit_spend_limit(),
+                    on_spend_limit: move |v: String| audit_spend_limit.set(v),
+                    deep_available: feature_flags.soc2 && checks().uses_a_model(),
+                    deep: audit_deep(),
+                    on_deep: move |v| audit_deep.set(v),
+                    busy: auditing(),
                 }
-                // Scan-type selector (Part C) — pick WHICH scans run. Both default ON
-                // (today's behaviour). Deterministic-only is fast and uses no LLM / no tokens.
-                div { class: "audit-model-row",
-                    label { class: "audit-model-label", "What to scan" }
-                    div { class: "scan-type-selector",
-                        label { class: "audit-thorough-toggle",
-                            input {
-                                r#type: "checkbox",
-                                checked: run_ai_review(),
-                                disabled: auditing(),
-                                onchange: move |e| run_ai_review.set(e.checked()),
-                            }
-                            span { "AI architectural review" }
-                        }
-                        label { class: "audit-thorough-toggle",
-                            input {
-                                r#type: "checkbox",
-                                checked: run_deterministic(),
-                                disabled: auditing(),
-                                onchange: move |e| run_deterministic.set(e.checked()),
-                            }
-                            span { "Deterministic scans (floor + linters)" }
-                        }
-                    }
-                    span { class: "audit-model-hint",
-                        if run_deterministic() && !run_ai_review() {
-                            "Deterministic-only: the always-on security floor + the mechanical preview linters run LOCALLY — fast, no LLM, NO TOKENS. The AI review is skipped entirely (zero model calls). Best for a quick check or QA of the deterministic pass."
-                        } else if run_ai_review() && !run_deterministic() {
-                            "AI-only: the LLM checks the code against your selected architectural/structured/prose rules. The deterministic floor + preview linters are skipped."
-                        } else {
-                            "Both run (default): the deterministic floor + linters (free, no tokens) AND the AI architectural review. Untick AI for a fast, token-free deterministic-only scan. At least one must be ticked — unticking both runs both."
-                        }
-                    }
-                }
-                // Execution mode — speed/scale knob, separate from the model (quality) and
-                // the rule selection (coverage). Parallel is the recommended default.
-                div { class: "audit-model-row",
-                    label { class: "audit-model-label", "Scan mode" }
-                    select {
-                        class: "audit-model-select",
-                        disabled: auditing(),
-                        value: "{audit_mode}",
-                        onchange: move |e| audit_mode.set(e.value()),
-                        option { value: "auto", "Default (batch on the API backend, else parallel; saved, resumable)" }
-                        option { value: "parallel", "Parallel (real time)" }
-                        option { value: "sequential", "Sequential (real time, slower, gentlest)" }
-                        option { value: "job", "Large scan (same as Default; picked for big codebases)" }
-                        option { value: "batch", "Batch (50% off, async, API key required)" }
-                    }
-                    if audit_mode() == recommended_mode {
-                        span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
-                    }
-                    span { class: "audit-model-hint", "Default runs the scan as a Message Batch on the API backend (half price, results when the whole batch is done) and in real time on the CLI backend. Parallel and Sequential force real time. Parallel runs rule-batches concurrently. Every scan runs server-side as a saved job, so you can leave and watch findings stream in, and Run what remains can resume it. Large scan is the same as Default; it is only what is picked for huge or multi-repo codebases. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
-                }
-                // Incremental scan — on by default; re-scans only pay AI for changed files.
-                // The checkbox forces a full re-scan over every file.
-                div { class: "audit-model-row",
-                    label { class: "audit-model-label", "Full scan" }
-                    label { class: "audit-thorough-toggle",
-                        input {
-                            r#type: "checkbox",
-                            checked: audit_full_scan(),
-                            disabled: auditing(),
-                            onchange: move |e| audit_full_scan.set(e.checked()),
-                        }
-                        span { "Re-scan every file (ignore the incremental cache)" }
-                    }
-                    span { class: "audit-model-hint",
-                        "By default a re-scan is INCREMENTAL: only files whose content changed since the last scan of this project are sent to the AI, and findings for unchanged files are reused from cache — so re-running after a small edit costs a fraction of the tokens. The first scan of a project is always full (no cache yet). Tick this to ignore the cache and re-audit the whole codebase from scratch (e.g. after changing your rule selection, or to refresh every finding)."
-                    }
-                }
-                // Spend limit: optional hard stop on the scan's AI spend, checked between passes.
-                div {
-                    class: "audit-model-row",
-                    "data-tour": camerata_ui_core::walkthrough::target::SPEND_LIMIT,
-                    label { class: "audit-model-label", "Spend limit (USD)" }
-                    input {
-                        r#type: "text",
-                        placeholder: "no limit",
-                        value: "{audit_spend_limit}",
-                        disabled: auditing(),
-                        oninput: move |e| audit_spend_limit.set(e.value()),
-                    }
-                    span { class: "audit-model-hint",
-                        "Optional. The scan stops between passes once its actual AI spend reaches this amount, lists every pass it did not run, and marks the result incomplete. Passes already started finish, so it can end about one pass over the limit. Leave blank for no limit."
-                    }
-                }
-                // Deep compliance & security tier (#55): opt-in, ADVISORY, expensive.
-                // Gated on the `soc2` feature flag — hidden entirely when soc2 is disabled
-                // (this is the SOC-2-headlined surface; set via .camerata/features.toml or
-                // CAMERATA_FEATURE_SOC2=false). The server also skips the lens when off.
-                if feature_flags.soc2 && run_ai_review() {
-                    div { class: "audit-model-row",
-                        label { class: "audit-model-label", "Deep compliance & security (opt-in)" }
-                        label { class: "audit-thorough-toggle",
-                            input {
-                                r#type: "checkbox",
-                                checked: audit_deep(),
-                                disabled: auditing(),
-                                onchange: move |e| audit_deep.set(e.checked()),
-                            }
-                            span { "Run SOC-2 gap analysis, deep security audit, and threat model" }
-                        }
-                        span { class: "audit-model-hint deep-tier-warning",
-                            "ADVISORY ONLY — not a SOC-2 report and not a penetration test. \
-                             Camerata sees static code only; controls that depend on org-level evidence \
-                             (HR policies, vendor contracts, access reviews) cannot be assessed from code. \
-                             Three extra whole-repo passes run after the standard audit. \
-                             This is the MOST EXPENSIVE tier (~3 extra whole-repo passes). \
-                             Enable only when you explicitly want compliance gap analysis for this codebase."
-                        }
-                    }
-                }
-                // If the architect SKIPS the audit, the post-scan section below (which hosts the
-                // CI-wiring story) never renders because `code_chars == 0`. But wiring mechanical
-                // rules into CI only needs the SELECTED rules, not a code scan — so offer the
-                // CI-story affordance here too, so it's reachable straight after rule selection.
+                // Wiring mechanical rules into CI only needs the SELECTED rules, not an inspection,
+                // and the post-inspection section below (which hosts the CI-wiring story) never
+                // renders while `code_chars == 0`. So offer it here too.
                 if report.code_chars == 0 {
                     div { class: "onboard-final-step",
                         span { class: "onboard-step-eyebrow", "Optional: wire CI rules into CI" }
@@ -1598,242 +1413,81 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             repos: report.repos.clone(),
                             rules: ci_rule_items_from_proposed(&report.proposed_rules),
                         }
-                        p { class: "section-hint", "You can file the CI-wiring stories (GitHub issues) from your selected rules without running the audit. Optional, and not required to finish onboarding." }
+                        p { class: "section-hint", "You can file the CI-wiring stories (GitHub issues) from your selected rules without running the inspection. Optional, and not required to finish onboarding." }
                     }
                 }
-                // Inspection setup: who the inspection is for. Saved with the project, it fills
-                // the confidentiality line on every page and sheet of every export, and the
-                // export refuses to run while it is blank (2026-10-24 decision).
-                if let Some(p) = active_project.as_ref() {
-                    ClientNameSetup {
-                        project_id: p.id.clone(),
-                        initial: p.client_name.clone(),
-                    }
-                }
-                // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
-                // model + mode + ticked rules), and — once the audit has run — the ACTUAL
-                // billed usage beside it, so the estimate is verifiable, not a black box.
+                // Cost: the ESTIMATE for this run, and once the inspection has run the ACTUAL billed
+                // usage beside it, so the estimate is verifiable. The estimate is the finder's own:
+                // the Engine finder's figure, or the Agent finder's (never the Engine's).
                 if report.code_chars > 0 {
                     {
-                        let price = |id: &str, fallback: (f64, f64)| {
-                            models.as_ref()
-                                .and_then(|m| m.models.iter().find(|o| o.id == id).map(|o| (o.price_in, o.price_out)))
-                                .unwrap_or(fallback)
-                        };
-                        // When AI scan is off, every model price is zeroed — no LLM calls
-                        // means no token spend. The deep tier also requires AI, so it too is
-                        // zeroed. This ensures the estimate correctly shows $0 (or "<$0.01")
-                        // when the user has selected deterministic-only mode.
-                        let ai_on = run_ai_review();
-                        let (a_in, a_out) = if ai_on { price(&audit_model(), (3.0, 15.0)) } else { (0.0, 0.0) };
-                        let (c_in, c_out) = if ai_on { price(&calibration_model(), (a_in, a_out)) } else { (0.0, 0.0) };
-                        // The fix stage runs on its default model (the server's `fix_on_haiku`
-                        // switch is on by default); priced when the model list prices it.
-                        let fix_model_id = camerata_api_types::project::FIX_STAGE_HAIKU_MODEL;
-                        let fix_price = if ai_on {
-                            models.as_ref().and_then(|m| m.models.iter().find(|o| o.id == fix_model_id).map(|o| (o.price_in, o.price_out)))
-                        } else {
-                            None
-                        };
-                        // The group reviewer (stage 2) runs on the project's group review model,
-                        // else its built-in default; priced when the model list prices it.
-                        let group_review_id = active_project
-                            .as_ref()
-                            .map(|p| p.review.group_review_model.trim().to_string())
-                            .filter(|m| !m.is_empty())
-                            .unwrap_or_else(|| camerata_api_types::project::STAGE2_DEFAULT_MODEL.to_string());
-                        let group_review_price = if ai_on {
-                            models.as_ref().and_then(|m| m.models.iter().find(|o| o.id == group_review_id).map(|o| (o.price_in, o.price_out)))
-                        } else {
-                            None
-                        };
-                        let scan_id = audit_model();
-                        let calibration_id = calibration_model();
-                        let sel = selected_count();
-                        // Mirror the request flags the audit will actually send: incremental
-                        // scope (only changed files cost tokens unless Full scan is ticked; the
-                        // estimate prices a full scan and the note below says so) and the deep
-                        // SOC-2/security tier (three extra whole-repo passes).
-                        let incremental = !audit_full_scan();
-                        // Deep tier only runs with AI; force it off in the estimate when AI is off.
-                        let deep = audit_deep() && ai_on;
-                        // The project's AI backend (docs/design/2026-09-22_per-project-backend.md)
-                        // changes how the estimator prices the shared repo digest's prompt cache
-                        // (CLI can't reuse a prior call's cache; API/batch can) — defaults to Cli,
-                        // the safe/zero-setup default, when no active project has loaded yet.
+                        let uses_model = checks().uses_a_model();
+                        // The Finder model the project uses, named on the Agent estimate.
+                        let finder_model_name = camerata_api_types::project::model_display_name(
+                            active_project
+                                .as_ref()
+                                .map(|p| p.review.finder_model.trim())
+                                .filter(|m| !m.is_empty())
+                                .unwrap_or(camerata_api_types::project::FINDER_DEFAULT_MODEL),
+                        );
                         let backend = active_project.as_ref().map(|p| p.backend).unwrap_or_default();
-                        // Best-effort count of multi-option rules in the proposed corpus (the
-                        // live per-rule selection set isn't available here) — sizes the one-off
-                        // alternative-recommendation pass the audit will run.
-                        let multi_option_selected =
-                            report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
-                        let est_mode = camerata_ui_core::scan::estimate_mode(&audit_mode(), backend).to_string();
-                        // THE run estimate (`camerata_ui_core::scan::cockpit_run_estimate`): the
-                        // same arithmetic the command line's pre-flight prints, over the inputs
-                        // the cockpit has (each repo as one routing group: the cockpit has no
-                        // file list to route, so its figure sits a little under the pre-flight's).
-                        fn priced(id: &str, price_in: f64, price_out: f64) -> camerata_ui_core::scan::PricedModel<'_> {
-                            camerata_ui_core::scan::PricedModel { id, price_in, price_out }
-                        }
-                        let flags = camerata_ui_core::scan::RunFlags {
-                            deep,
-                            backend,
-                            terse_output: true,
-                        };
-                        let run_estimate = |inputs: &[camerata_ui_core::scan::RunRepoInput]| {
-                            camerata_ui_core::scan::cockpit_run_estimate(
-                                inputs,
-                                &est_mode,
-                                priced(&scan_id, a_in, a_out),
-                                priced(&calibration_id, c_in, c_out),
-                                group_review_price.map(|(i, o)| priced(&group_review_id, i, o)),
-                                fix_price.map(|(i, o)| priced(fix_model_id, i, o)),
-                                flags,
+                        let estimate: EstimateShown = if !uses_model {
+                            EstimateShown::deterministic()
+                        } else if finder == camerata_api_types::project::ProjectFinder::Agent {
+                            agent_estimate_block(&repo_sizes.read().clone(), backend, &finder_model_name)
+                        } else {
+                            engine_estimate_block(
+                                &report,
+                                models.as_ref(),
+                                active_project.as_ref(),
+                                &repo_sizes.read().clone(),
+                                &repo_selection.read().clone(),
+                                selected_count(),
+                                &audit_mode(),
+                                backend,
+                                camerata_ui_core::scan::inspection_run::incremental_flag(finder, audit_full_scan()),
+                                audit_deep(),
                             )
                         };
-                        // Several repos: one estimate per repo, summed (the scan chunks and
-                        // calibrates each repo on its own). Single repo, or sizes not back yet:
-                        // the one-stream estimate, unchanged.
-                        let all_sizes: Option<Vec<RepoSizeView>> = (*repo_sizes.read()).clone().flatten();
-                        let sizes: Option<Vec<RepoSizeView>> = if multi_repo { all_sizes.clone() } else { None };
-                        let mut repo_lines: Vec<String> = Vec::new();
-                        let (toks, mut dollars, passes) = match sizes {
-                            Some(sizes) => {
-                                let selection = repo_selection.read().clone();
-                                // A repo is priced only when its rule choice is known: a guessed
-                                // rule count would put a made-up figure in front of a spend decision.
-                                let inputs: Vec<camerata_ui_core::scan::RunRepoInput> = sizes
-                                    .iter()
-                                    .filter(|z| z.error.is_none())
-                                    .filter_map(|z| {
-                                        let ids = selection.get(&z.repo)?;
-                                        Some(camerata_ui_core::scan::RunRepoInput {
-                                            repo: z.repo.clone(),
-                                            code_chars: z.code_chars,
-                                            files: z.files,
-                                            selected: ids.len(),
-                                            multi_option_selected: report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && ids.contains(&r.id)).count(),
-                                            routing_groups: 1,
-                                        })
-                                    })
-                                    .collect();
-                                let est = run_estimate(&inputs);
-                                for z in sizes.iter() {
-                                    match (&z.error, est.rows.iter().find(|r| r.repo == z.repo)) {
-                                        (Some(why), _) => repo_lines.push(camerata_ui_core::scan::unreadable_repo_line(&z.repo, why)),
-                                        (None, Some(row)) => repo_lines.push(camerata_ui_core::scan::repo_estimate_line(&z.repo, z.files, z.code_chars, row)),
-                                        (None, None) => repo_lines.push(camerata_ui_core::scan::unknown_rules_repo_line(&z.repo)),
-                                    }
-                                }
-                                (est.tokens, est.dollars, est.passes)
-                            }
-                            None => {
-                                let est = run_estimate(&[camerata_ui_core::scan::RunRepoInput {
-                                    repo: report.repos.first().cloned().unwrap_or_default(),
-                                    code_chars: report.code_chars,
-                                    files: report.files_scanned,
-                                    selected: sel,
-                                    multi_option_selected,
-                                    routing_groups: 1,
-                                }]);
-                                (est.tokens, est.dollars, est.passes)
-                            }
-                        };
-                        // The agent finder's estimate replaces the engine's figure when the project's
-                        // finder is the agent: the server's per-repo figures, from the one estimate
-                        // function the command line prints from. Not back yet: no figure is shown
-                        // as a made-up number (the engine figure stays, labelled by its own lines).
-                        let finder_figures: Option<Vec<(String, AgentFinderSizeView)>> = if agent_finder {
-                            all_sizes.as_ref().map(|v| v.iter().filter_map(|z| z.agent_finder.clone().map(|a| (z.repo.clone(), a))).collect())
-                        } else {
-                            None
-                        };
-                        if let Some(figs) = finder_figures.as_ref().filter(|f| !f.is_empty()) {
-                            dollars = figs.iter().map(|(_, a)| a.expected_usd).sum();
-                            repo_lines = figs
-                                .iter()
-                                .map(|(repo, a)| camerata_ui_core::scan::agent_finder_repo_line(repo, a.pieces, a.expected_usd, a.low_usd, a.high_usd))
-                                .collect();
-                        }
-                        let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
-                        let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
-                        // ACTUAL, once the audit finished and the backend reported usage.
+                        // ACTUAL, once the inspection finished and the backend reported usage.
                         let actual = audited.as_ref().and_then(|a| a.actual_usage.clone()).filter(|u| u.calls > 0);
                         rsx! {
-                            div {
-                                class: "audit-cost",
-                                if let Some(u) = actual {
-                                    {
-                                        let act_toks = u.input_tokens + u.output_tokens;
-                                        let act_dollar = if !u.cost_complete { "n/a".to_string() }
-                                            else if u.cost_usd < 0.01 { "<$0.01".to_string() }
-                                            else { format!("${:.2}", u.cost_usd) };
-                                        // Show cache savings line when the API backend ran with
-                                        // prompt caching active (cache_read > 0 means the cache
-                                        // was hit at least once; creation > 0 means the cache
-                                        // was written at least once).
-                                        let cache_active = u.cache_read_input_tokens > 0
-                                            || u.cache_creation_input_tokens > 0;
-                                        rsx! {
+                            if let Some(u) = actual {
+                                {
+                                    let act_toks = u.input_tokens + u.output_tokens;
+                                    let act_dollar = if !u.cost_complete { "n/a".to_string() }
+                                        else if u.cost_usd < 0.01 { "<$0.01".to_string() }
+                                        else { format!("${:.2}", u.cost_usd) };
+                                    // Show cache savings line when the API backend ran with
+                                    // prompt caching active (cache_read > 0 means the cache
+                                    // was hit at least once; creation > 0 means the cache
+                                    // was written at least once).
+                                    let cache_active = u.cache_read_input_tokens > 0
+                                        || u.cache_creation_input_tokens > 0;
+                                    let est_was = estimate.short.clone();
+                                    rsx! {
+                                        div { class: "audit-cost",
                                             div { class: "audit-cost-main",
                                                 span { class: "audit-cost-label", "Actual cost" }
                                                 span { class: "audit-cost-val", "{act_dollar}" }
-                                                span { class: "audit-cost-meta", "{human_tokens(act_toks)} tokens · {u.calls} calls · est. was {dollar_str}" }
+                                                span { class: "audit-cost-meta", "{human_tokens(act_toks)} tokens \u{b7} {u.calls} calls \u{b7} est. was {est_was}" }
                                             }
                                             p { class: "audit-cost-note",
                                                 if u.cost_complete {
                                                     "Real billed usage for this run ({human_tokens(u.input_tokens)} in / {human_tokens(u.output_tokens)} out). "
                                                 } else {
-                                                    "Real token usage shown; a $ figure needs every call to report cost (some didn't, so it's omitted to avoid understating). "
+                                                    "Real token usage shown. A dollar figure needs every call to report cost, and some did not, so it is left out rather than understated. "
                                                 }
                                                 if cache_active {
                                                     "Prompt cache: {human_tokens(u.cache_creation_input_tokens)} tok written (1.25x), {human_tokens(u.cache_read_input_tokens)} tok read (0.1x). "
                                                 }
-                                                "The deterministic security floor ran free. Next time you audit PR diffs — pennies."
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    div { class: "audit-cost-main",
-                                        span { class: "audit-cost-label", "Estimated cost" }
-                                        span { class: "audit-cost-val", "{dollar_str}" }
-                                        span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
-                                    }
-                                    if !repo_lines.is_empty() {
-                                        ul { class: "audit-cost-repos",
-                                            for line in repo_lines.iter() {
-                                                li { key: "{line}", "{line}" }
-                                            }
-                                        }
-                                    }
-                                    p { class: "audit-cost-note",
-                                        // Approximate in both directions now, not uniformly "biased high": output
-                                        // tokens (found issues) dominate findings-heavy scans regardless of backend,
-                                        // but the input side differs by backend. On CLI, every call is a fresh
-                                        // `claude` subprocess that can't reuse another call's prompt cache, so each
-                                        // pass pays the cache-write surcharge with no read discount to offset it —
-                                        // this estimate already prices that in, it isn't a caching UPSIDE to expect.
-                                        // On API/batch, prompt-caching across batches keeps the input side down, so
-                                        // the real bill can land below this figure.
-                                        if backend == ProjectBackend::Cli {
-                                            "Approximate — output tokens (found issues) dominate findings-heavy scans. This is priced for the CLI backend: each call is a separate subprocess with its own fresh prompt cache, so there's no cross-call caching discount to expect here (switching to the API backend, with a key configured, usually costs less for the same scan). "
-                                        } else {
-                                            "Approximate — output tokens (found issues) dominate findings-heavy scans; prompt-caching across batches keeps the input side down, so the real bill can land below this figure. "
-                                        }
-                                        if incremental {
-                                            "Scope: INCREMENTAL — only files changed since the last scan are billed, so the real cost is usually well below this whole-repo figure (priced over ~{code_toks} tokens, {report.files_scanned} files). Tick Full scan to re-audit everything. "
-                                        } else {
-                                            "Scope: FULL — every file is re-audited (~{code_toks} tokens, {report.files_scanned} files). "
-                                        }
-                                        "The deterministic security floor (secrets / raw-SQL / secret-URLs) runs free. "
-                                        "After this, you audit PR diffs — pennies. Cheaper model or Sequential mode lowers this."
-                                        if deep {
-                                            span { class: "audit-cost-deep-note",
-                                                " Deep tier is ON and INCLUDED above: ~3 extra whole-repo passes (SOC-2 gap, deep security, threat model) at the audit model. This is the MOST EXPENSIVE option — it dominates the figure. Untick Deep to drop it."
+                                                "The deterministic security floor ran free."
                                             }
                                         }
                                     }
                                 }
+                            } else {
+                                InspectionEstimate { block: estimate.block.clone() }
                             }
                         }
                     }
@@ -1877,7 +1531,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 // the global loading guard — just show the text label inline.
                 if auditing() {
                     div { class: "audit-thinking",
-                        span { class: "audit-thinking-label", "Camerata is auditing your code\u{2026}" }
+                        span { class: "audit-thinking-label", "Camerata is inspecting your code\u{2026}" }
                         button {
                             class: "btn-stop",
                             onclick: move |_| {
@@ -2034,6 +1688,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 // The review lanes: the tree, and the Queue as the Flat view.
                 if !project_id.is_empty() {
                     button {
+                        id: REVIEW_OPEN_ID,
                         class: if review_open() { "kind-tab active" } else { "kind-tab" },
                         title: "The tree of groups: decide a whole group at once, with the exceptions listed.",
                         onclick: move |_| {

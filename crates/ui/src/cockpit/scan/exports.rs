@@ -223,54 +223,6 @@ pub(super) fn ClientNameField(project_id: String, initial: String) -> Element {
     }
 }
 
-/// The "?" button beside the panel's heading and the dialog it opens.
-///
-/// PLACEHOLDER: work order B builds the shared help dialog (focus handling, the Close button, Esc
-/// and a scrolling body, mounted once at the app root). Until its merge replaces this, the panel
-/// opens its topic in a plain dialog of its own, so the long text is already out of the page.
-#[component]
-pub(super) fn ExportHelp() -> Element {
-    let topic = camerata_ui_core::help::export::export_topic();
-    let mut open = use_signal(|| false);
-    let label = topic.button_label();
-    rsx! {
-        button {
-            class: "help-button",
-            r#type: "button",
-            "aria-label": "{label}",
-            "aria-haspopup": "dialog",
-            onclick: move |_| open.set(true),
-            "?"
-        }
-        if open() {
-            div {
-                class: "help-dialog help-dialog-placeholder",
-                role: "dialog",
-                "aria-modal": "true",
-                "aria-labelledby": "help-title-export",
-                tabindex: "-1",
-                onkeydown: move |e| {
-                    if e.key() == Key::Escape {
-                        open.set(false);
-                    }
-                },
-                h3 { id: "help-title-export", "{topic.title}" }
-                div { class: "help-body",
-                    for (i, para) in topic.body.split("\n\n").enumerate() {
-                        p { key: "{i}", "{para}" }
-                    }
-                }
-                button {
-                    class: "btn-edit-sm help-close",
-                    r#type: "button",
-                    onclick: move |_| open.set(false),
-                    "Close"
-                }
-            }
-        }
-    }
-}
-
 /// Fetch the operator's triage log from `GET /api/projects/:id/triage-log.csv`: the CSV text on
 /// success, else the server's message for a toast.
 pub(in crate::cockpit) async fn fetch_triage_log(project_id: &str) -> Result<String, String> {
@@ -361,7 +313,9 @@ pub(in crate::cockpit) fn AuditReportExportPanel(
         div { class: "audit-export-panel",
             div { class: "export-heading",
                 p { class: "section-label", "{heading}" }
-                ExportHelp {}
+                crate::cockpit::help::HelpButton {
+                    topic: camerata_ui_core::help::export::export_topic(),
+                }
             }
             div { class: "audit-export-fields",
                 div { class: "audit-model-row",

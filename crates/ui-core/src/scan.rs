@@ -3,6 +3,8 @@
 
 use camerata_api_types::project::ProjectBackend;
 
+pub mod inspection_run;
+
 /// Human-readable token count by magnitude (900 -> "900", 2_000 -> "2k", 2_000_000 -> "2.0M").
 pub fn human_tokens(t: u64) -> String {
     if t >= 1_000_000 {
