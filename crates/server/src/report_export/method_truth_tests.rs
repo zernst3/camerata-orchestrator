@@ -252,6 +252,56 @@ fn the_reconciling_line_does_not_say_the_whole_export_was_reviewed() {
 }
 
 #[test]
+fn the_reconciling_line_branches_on_the_reviewed_count() {
+    let report = mixed_report();
+    // A decision on a ruled-out row only: reviewed state, no place read in person.
+    let mut r = report.clone();
+    r.findings
+        .push(finding("SEC-NO-HARDCODED-SECRETS-1", "src/d.rs", 4, "low"));
+    let fp = r.findings.last().unwrap().clone();
+    let none = HashMap::from([(
+        finding_key(&fp),
+        DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "x".to_string(),
+            ..DispositionWire::default()
+        },
+    )]);
+    let json = build_report_json(
+        &ReviewedReport::unreviewed(&r.seal(), &none),
+        None,
+        &empty_opts(),
+    );
+    let line = &json.methodology.reconciliation;
+    assert!(line.contains("No place was reviewed in person"), "{line}");
+    assert!(!line.contains("A person has ruled"), "{line}");
+    let some = build_report_json(
+        &ReviewedReport::unreviewed(&report.clone().seal(), &decided(&report, 1)),
+        None,
+        &empty_opts(),
+    );
+    assert!(some
+        .methodology
+        .reconciliation
+        .contains("A person has ruled on part"));
+}
+
+#[test]
+fn the_confidence_glossary_entry_names_every_cause_of_low() {
+    let e = crate::xlsx_export::vocabulary::GLOSSARY_ENTRIES
+        .iter()
+        .find(|e| e.term == "Confidence")
+        .unwrap();
+    for cause in [
+        "marked the problem unsure",
+        "no published standard backs it",
+        "convention to consider",
+    ] {
+        assert!(e.meaning.contains(cause), "{}", e.meaning);
+    }
+}
+
+#[test]
 fn the_severity_paragraph_follows_the_finder_that_ran() {
     let engine = build_report_json(
         &ReviewedReport::unreviewed(&mixed_report().seal(), &HashMap::new()),

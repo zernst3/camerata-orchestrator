@@ -739,7 +739,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Confidence",
-        "How sure the review is that the problem is real: High, Low or Disputed. Low means the review was unsure; Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision.",
+        "How sure the review is that the problem is real: High, Low or Disputed. Low has three causes: the review marked the problem unsure, no published standard backs it, or it reads as a convention to consider. Only the first means the review was unsure, and only those problems are always read in person. Disputed means the review judged it probably not a real problem. A Low problem waits on Needs a decision.",
         "All problems; Needs a decision",
     ),
     e(
