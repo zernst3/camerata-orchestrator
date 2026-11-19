@@ -1975,9 +1975,18 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
         ..crate::cost_cap::RunControls::default()
     };
     let rules = vec![(SQL.to_string(), "Never concatenate SQL.".to_string())];
-    let outcome = review_scan_report(&mut report, &llm, &controls, &rules, false, None, None, None)
-        .await
-        .expect("it ran");
+    let outcome = review_scan_report(
+        &mut report,
+        &llm,
+        &controls,
+        &rules,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("it ran");
     assert_eq!(outcome.rules_reviewed, 1);
     assert_eq!(
         report.provenance.group_review_model.as_deref(),
@@ -2854,7 +2863,17 @@ async fn tool_rows_the_reviewer_split_into_three_sub_groups_end_as_one_cause_wit
         "No unsafe deserialization.".to_string(),
     )];
     let controls = crate::cost_cap::RunControls::default();
-    review_scan_report(&mut report, &llm, &controls, &rules, false, None, None, None).await;
+    review_scan_report(
+        &mut report,
+        &llm,
+        &controls,
+        &rules,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
     let split: BTreeSet<&str> = report
         .findings
         .iter()

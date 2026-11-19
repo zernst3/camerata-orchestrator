@@ -2424,8 +2424,7 @@ mod activity_rows {
     #[tokio::test(start_paused = true)]
     async fn a_stage_shows_a_running_row_before_its_first_call_returns_and_a_done_row_after() {
         let store = TranscriptStore::new();
-        let seen_during: Arc<Mutex<Vec<Vec<crate::transcript::AgentTranscript>>>> =
-            Arc::default();
+        let seen_during: Arc<Mutex<Vec<Vec<crate::transcript::AgentTranscript>>>> = Arc::default();
         let (watch, sink) = (store.clone(), seen_during.clone());
         let rt = Realtime::new(move |id, _| {
             sink.lock().unwrap().push(watch.get(KEY));
@@ -2448,7 +2447,10 @@ mod activity_rows {
         for view in &during {
             assert_eq!(view.len(), 1, "{view:#?}");
             assert_eq!(view[0].role, "Group review (acme/widgets)");
-            assert_eq!(view[0].status, "running", "the row is there while calls run");
+            assert_eq!(
+                view[0].status, "running",
+                "the row is there while calls run"
+            );
             assert!(
                 view[0].prompt.contains("ITEM=a;"),
                 "the generated prompt is shown: {}",

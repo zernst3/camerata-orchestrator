@@ -283,7 +283,14 @@ async fn a_resume_replays_the_stored_answers_with_no_new_call() {
     let again = Script::new(|_| panic!("a resume must not ask the model again"));
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints),
-        check_possible_duplicates(&mut resumed, &again, &RunControls::default(), false, None, None),
+        check_possible_duplicates(
+            &mut resumed,
+            &again,
+            &RunControls::default(),
+            false,
+            None,
+            None,
+        ),
     )
     .await;
     assert_eq!(again.calls(), 0);

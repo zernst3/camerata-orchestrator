@@ -2419,6 +2419,7 @@ pub async fn review_groups_metered(
 /// Last, the severities and kinds follow what the reviewers said
 /// ([`crate::follow_reviewers::follow_reviewers`], owner ruling R-7): `corpus` is the run's rule
 /// set, the one its severity bounds were applied with.
+#[allow(clippy::too_many_arguments)]
 pub async fn review_scan_report(
     report: &mut ScanReport,
     llm: &dyn LlmPort,

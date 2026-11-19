@@ -370,18 +370,17 @@ pub async fn check_possible_duplicates(
         meter.seed_checkpoint_stop(stop);
     }
 
-    let (checks, note) =
-        run_check(
-            report,
-            llm,
-            &meter,
-            &model,
-            &candidates,
-            cli_backend,
-            job,
-            feedback,
-        )
-        .await;
+    let (checks, note) = run_check(
+        report,
+        llm,
+        &meter,
+        &model,
+        &candidates,
+        cli_backend,
+        job,
+        feedback,
+    )
+    .await;
 
     // What the stage spent joins the scan's usage, run notes and stage telemetry.
     if meter.snapshot().calls > 0 {
@@ -441,6 +440,7 @@ pub async fn check_possible_duplicates(
 
 /// Ask the model about `candidates` on `meter`, unless the spend limit or a cost checkpoint stops
 /// the stage first: every pair answered, or none (with the reason).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_check(
     report: &ScanReport,
     llm: &dyn LlmPort,
@@ -463,12 +463,20 @@ pub(crate) async fn run_check(
         );
     }
     send_calls(
-        report, llm, meter, model, candidates, cli_backend, job, feedback,
+        report,
+        llm,
+        meter,
+        model,
+        candidates,
+        cli_backend,
+        job,
+        feedback,
     )
     .await
 }
 
 /// Send the calls and collect the answers.
+#[allow(clippy::too_many_arguments)]
 async fn send_calls(
     report: &ScanReport,
     llm: &dyn LlmPort,

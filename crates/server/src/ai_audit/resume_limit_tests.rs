@@ -601,7 +601,7 @@ mod batches {
                 job: None,
                 checkpoint: Some(&cp),
                 settings: StageSettings::default(),
-        feedback: None,
+                feedback: None,
             };
             let out = run_stage(Stage::Calibration, &mut first, StageMode::Batch, &ctx).await;
             assert_eq!(out.absorbed.len(), 3, "the first attempt reads the batch");
@@ -631,7 +631,7 @@ mod batches {
                 job: None,
                 checkpoint: Some(&cp),
                 settings: StageSettings::default(),
-        feedback: None,
+                feedback: None,
             };
             let out = run_stage(Stage::Calibration, &mut second, StageMode::Batch, &ctx).await;
             assert_eq!(out.resumed.len(), 3, "every stored item is replayed");

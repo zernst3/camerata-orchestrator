@@ -367,7 +367,10 @@ impl StageFeedback<'_> {
                 "blocked",
             )
         } else {
-            (format!("Done: {answered} of {calls} calls answered."), "done")
+            (
+                format!("Done: {answered} of {calls} calls answered."),
+                "done",
+            )
         };
         let mut line = line;
         crate::onboard::redact::redact_string(&mut line);
