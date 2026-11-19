@@ -617,7 +617,8 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
     stack.click(".engine-correction .queue-prompt-commit", "");
 
     // The card says corrected, and the Held count fell by the one row.
-    stack.wait_text(".engine-state-text", "corrected");
+    // "No, corrected": the held states say "until corrected" too, so the bare word would match a card that is still held.
+    stack.wait_text(".engine-state-text", "No, corrected");
     stack.wait_for("no correction form", "T.count('.engine-correction') === 0");
     assert!(stack
         .page_text()
@@ -1431,7 +1432,8 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
         "this one is reachable without signing in",
     );
     stack.click(".engine-correction .queue-prompt-commit", "");
-    stack.wait_text(".engine-state-text", "corrected");
+    // "No, corrected": the held states say "until corrected" too, so the bare word would match a card that is still held.
+    stack.wait_text(".engine-state-text", "No, corrected");
     assert_eq!(stack.strip().held, 0, "a corrected No holds nothing");
 
     // Card 2: press N, start the correction, then go Next without finishing it. The No is
