@@ -103,6 +103,8 @@ fn rig() -> Rig {
     fx.state
         .projects
         .update(&fx.project_id, |p| {
+            // The fake `claude` plays the engine's scan passes; a new project runs the agent finder.
+            p.review.finder = camerata_api_types::project::ProjectFinder::Engine;
             p.ruleset.selections.push(crate::project::RuleSelection {
                 rule_id: RULE.to_string(),
                 chosen_option: None,

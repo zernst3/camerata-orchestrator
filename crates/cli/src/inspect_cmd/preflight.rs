@@ -355,9 +355,8 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
 /// priced by the formula of the agent finder's design (section 7), not by scan passes, so the
 /// figure is the stage's alone: the group review and the fix stage are priced as in [`build`] and
 /// are not in it. `build` is unchanged for the engine finder. `force_pieces` is the internal
-/// `--finder-force-pieces` value. The call site that picks it when `--finder agent` is set is
-/// the runner build's (`inspect_cmd.rs`); until the merge nothing calls it.
-#[allow(dead_code)]
+/// `--finder-force-pieces` value. `inspect_cmd.rs` prints this text whenever the run's finder is
+/// the agent finder (the default), and `build` otherwise.
 pub fn build_agent_finder(inputs: &PreflightInputs<'_>, force_pieces: Option<usize>) -> Preflight {
     use camerata_ui_core::scan::{
         agent_finder_table_lines, sum_agent_finder, AGENT_FINDER_HIGH_FACTOR,

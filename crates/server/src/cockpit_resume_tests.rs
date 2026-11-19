@@ -145,6 +145,23 @@ async fn finished(state: &AppState, id: &str) -> crate::jobs::JobState {
     }
 }
 
+/// The fake `claude` of these rigs plays the engine's scan passes, and a new project runs the
+/// agent finder, so the engine rigs choose the engine finder explicitly.
+fn use_engine_finder(state: &AppState, project_id: &str) {
+    let project = state.projects.get(project_id).unwrap();
+    state
+        .projects
+        .set_review_settings(
+            project_id,
+            camerata_api_types::project::ReviewSettings {
+                finder: camerata_api_types::project::ProjectFinder::Engine,
+                ..project.review
+            },
+        )
+        .unwrap()
+        .unwrap();
+}
+
 fn stage_calls(log: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
@@ -224,6 +241,7 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
         .projects
         .create("Resume", vec!["acme/one".to_string()])
         .unwrap();
+    use_engine_finder(&state, &project.id);
     state
         .projects
         .set_backend(&project.id, crate::project::ProjectBackend::Cli)
@@ -458,6 +476,7 @@ fn saved_cockpit_run(
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
         args,
@@ -491,6 +510,7 @@ fn saved_cockpit_run_in(
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
         args: serde_json::to_value(audit_request()).unwrap(),
@@ -837,6 +857,7 @@ async fn a_cockpit_scan_killed_mid_run_is_interrupted_and_run_what_remains_compl
         .projects
         .create("Killed", vec!["acme/one".to_string()])
         .unwrap();
+    use_engine_finder(&state, &project.id);
     state
         .projects
         .set_backend(&project.id, crate::project::ProjectBackend::Cli)
@@ -1123,14 +1144,19 @@ async fn scan_rig(mode: &str, agent_finder: bool) -> InterruptedScan {
     state
         .settings
         .set_repo_path("acme/one", Some(repo.to_string_lossy().into_owned()));
-    if agent_finder {
+    // A new project runs the agent finder; the engine rigs choose the engine explicitly.
+    {
         let project = state.projects.get(&project.id).unwrap();
         state
             .projects
             .set_review_settings(
                 &project.id,
                 camerata_api_types::project::ReviewSettings {
-                    finder: camerata_api_types::project::ProjectFinder::Agent,
+                    finder: if agent_finder {
+                        camerata_api_types::project::ProjectFinder::Agent
+                    } else {
+                        camerata_api_types::project::ProjectFinder::Engine
+                    },
                     ..project.review
                 },
             )
@@ -1279,7 +1305,7 @@ async fn resume_job(rig: &InterruptedScan) -> crate::jobs::JobState {
 }
 
 /// A run recorded on Fable 5.1, resumed in a project that has no pick of its own (it holds the
-/// built-in default, Fable 5.2), asks Fable 5.1 for its group review and says so on the run.
+/// built-in default, Opus 5.5), asks Fable 5.1 for its group review and says so on the run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(process_env)]
 async fn a_cockpit_resume_with_no_group_review_pick_stays_on_the_recorded_model_and_says_so() {
@@ -1329,8 +1355,8 @@ async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
         .set_review_settings(
             &rig.project_id,
             camerata_api_types::project::ReviewSettings {
-                group_review_model: "claude-opus-5-5".to_string(),
-                ..camerata_api_types::project::ReviewSettings::default()
+                group_review_model: "claude-fable-5-2".to_string(),
+                ..camerata_api_types::project::ReviewSettings::legacy()
             },
         )
         .expect("the project exists")
@@ -1341,7 +1367,7 @@ async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
     assert_eq!(job.status, "failed", "{:?}", job.message);
     let why = job.message.clone().unwrap_or_default();
     assert!(
-        why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
+        why.contains("claude-fable-5-1") && why.contains("claude-fable-5-2"),
         "{why}"
     );
     assert_eq!(
@@ -1600,6 +1626,48 @@ async fn a_server_scan_on_an_agent_project_runs_the_agent_finder() {
     assert!(
         !stage_calls(&rig.log).iter().any(|s| s == "audit"),
         "the engine's scan pass ran: {:?}",
+        stage_calls(&rig.log)
+    );
+}
+
+/// Outside review Part 1 item 4, route level: an agent finder scan, started from the app, stops
+/// before any call or run spend when a rule file did not load, on both audit routes (the job and
+/// the synchronous one). This rig is an internal project; the command line test
+/// (`a_corrupt_rule_file_stops_every_agent_run_before_any_spend`) covers both kinds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn an_agent_scan_stops_on_both_audit_routes_when_a_rule_file_did_not_load() {
+    if !camerata_test_env::python3_on_path_for("an_agent_scan_stops_on_both_audit_routes") {
+        return;
+    }
+    let corpus = tempfile::tempdir().unwrap();
+    let dir = corpus.path().join("sec");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sec-corrupt-1.toml"),
+        "id = \"SEC-CORRUPT-1\"\n[[[ not toml",
+    )
+    .unwrap();
+    let _corpus = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", corpus.path());
+    let rig = interrupted_scan_with_finder().await;
+    let message = rig.job.message.clone().unwrap_or_default();
+    assert_eq!(rig.job.status, "failed", "{message}");
+    assert!(
+        message.contains("SEC-CORRUPT-1") && message.contains("sec-corrupt-1.toml"),
+        "{message}"
+    );
+    assert!(
+        stage_calls(&rig.log).is_empty(),
+        "no model call: {:?}",
+        stage_calls(&rig.log)
+    );
+    let axum::Json(report) =
+        onboard_audit(State(rig.state.clone()), axum::Json(audit_request())).await;
+    let err = report.ai_error.clone().unwrap_or_default();
+    assert!(err.contains("SEC-CORRUPT-1"), "{err}");
+    assert!(
+        stage_calls(&rig.log).is_empty(),
+        "no model call: {:?}",
         stage_calls(&rig.log)
     );
 }

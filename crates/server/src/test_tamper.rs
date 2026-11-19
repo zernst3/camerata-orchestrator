@@ -189,7 +189,9 @@ mod tests {
         if !p.exists() {
             return None;
         }
-        Some(camerata_rules::load_corpus_lenient(&p).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&p).await;
+        crate::log_corpus_load_errors("test tamper", &errs);
+        Some(set)
     }
 
     #[tokio::test]

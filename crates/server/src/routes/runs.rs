@@ -573,9 +573,9 @@ pub(crate) async fn spawn_brownfield_dev_run(
     //   - `test_tamper_escalation`: the test-tamper rule's active spec specifically, driving its
     //     deterministic detector backstop. `None` when its selected option does not escalate.
     let (escalations_in_scope, test_tamper_escalation) = {
-        let corpus = camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path())
-            .await
-            .0;
+        let (corpus, errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        crate::log_corpus_load_errors("dev run escalations", &errs);
         let selections = state
             .projects
             .active()

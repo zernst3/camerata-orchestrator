@@ -1261,6 +1261,7 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
                 resolved: true,
                 group_review: String::new(),
                 finder: String::new(),
+                finder_model: String::new(),
             },
             ai_scan_key: camerata_server::scan_cache::AiScanKey::new("m", Some("m"), &[]),
             // The cockpit's scan request, not the command line's flags.
@@ -1399,7 +1400,7 @@ async fn resume_with_preflight(
 }
 
 /// A run that started on Fable 5.1 and is resumed with no model flag (the built-in default is
-/// Fable 5.2 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
+/// Opus 5.5 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
 /// in one line.
 #[tokio::test]
 #[serial_test::serial(process_env)]

@@ -877,6 +877,13 @@ async fn a_client_engagement_audit_is_refused_before_any_repository_is_read() {
         .projects
         .create("Client", vec!["acme/never-read".to_string()])
         .unwrap();
+    // The scan model this test checks the lock against is the engine finder's; the agent finder
+    // (a new project's default) does not use it.
+    state
+        .projects
+        .set_review_settings(&p.id, camerata_api_types::project::ReviewSettings::legacy())
+        .unwrap()
+        .unwrap();
     let req = |model: Option<&str>| AuditReq {
         repos: vec!["acme/never-read".to_string()],
         model: model.map(str::to_string),
@@ -941,6 +948,71 @@ async fn a_client_engagement_audit_is_refused_before_any_repository_is_read() {
         ),
         None
     );
+}
+
+/// The same lock on a client project that keeps the AGENT default: its finder model is checked
+/// on both audit routes and the `cli` backend is refused, before any repository is read.
+#[tokio::test]
+async fn a_client_agent_project_is_refused_for_a_non_anthropic_finder_model_and_the_cli_backend() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let p = state
+        .projects
+        .create("Client agent", vec!["acme/never-read".to_string()])
+        .unwrap();
+    assert_eq!(
+        p.review.finder,
+        camerata_api_types::project::ProjectFinder::Agent
+    );
+    state
+        .projects
+        .set_review_settings(
+            &p.id,
+            camerata_api_types::project::ReviewSettings {
+                finder_model: "deepseek/deepseek-chat".to_string(),
+                ..p.review.clone()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let req = || AuditReq {
+        repos: vec!["acme/never-read".to_string()],
+        ..serde_json::from_value(serde_json::json!({ "repos": [] })).unwrap()
+    };
+    state
+        .projects
+        .set_backend(&p.id, crate::project::ProjectBackend::Api)
+        .unwrap();
+    let Json(report) = onboard_audit(State(state.clone()), Json(req())).await;
+    assert!(report.blocked, "{:?}", report.message);
+    assert!(
+        report
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("`deepseek/deepseek-chat`"),
+        "{:?}",
+        report.message
+    );
+    assert_eq!(report.files_scanned, 0);
+    let job_id = start_audit_job(&state, req(), AuditJobOptions::default()).await;
+    let job = state.jobs.get(&job_id).expect("the job exists");
+    assert_eq!(job.status, "failed", "{:?}", job.message);
+    assert!(
+        job.message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("`deepseek/deepseek-chat`"),
+        "{:?}",
+        job.message
+    );
+    // The cli backend is refused for the agent default as well.
+    state
+        .projects
+        .set_backend(&p.id, crate::project::ProjectBackend::Cli)
+        .unwrap();
+    let Json(report) = onboard_audit(State(state.clone()), Json(req())).await;
+    assert!(report.blocked, "{:?}", report.message);
+    assert!(report.message.as_deref().unwrap().contains("`cli` backend"));
 }
 
 /// The model steps of a project (decompose, clarify, authoring, escalation, diagrams, L3 ...)

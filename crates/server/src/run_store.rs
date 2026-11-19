@@ -246,7 +246,16 @@ pub struct ModelsRecord {
     /// older runs still resume: [`Self::hold_finder`] keeps it.
     #[serde(default)]
     pub finder: String,
+    /// The agent finder's resolved model id when the run's finder is the agent finder, so a resume
+    /// finishes the remaining pieces on the model the run started on even after the built-in
+    /// default moves. Empty for an engine run and for a run saved before it was recorded.
+    /// Not part of [`Self::matches_for_resume`]: [`Self::hold_finder_model`] keeps it.
+    #[serde(default)]
+    pub finder_model: String,
 }
+
+/// The agent finder's default model when a run saved without a recorded finder model started.
+const LEGACY_FINDER_MODEL: &str = "claude-fable-5-2";
 
 /// The word a finder is recorded as.
 fn finder_word(finder: crate::ai_audit::agent_finder::FinderChoice) -> &'static str {
@@ -281,7 +290,58 @@ impl ModelsRecord {
             resolved: true,
             group_review: controls.group_review_model_for(),
             finder: finder_word(controls.finder).to_string(),
+            finder_model: if controls.finder == crate::ai_audit::agent_finder::FinderChoice::Agent {
+                controls.finder_model_for()
+            } else {
+                String::new()
+            },
         }
+    }
+
+    /// Hold a resumed agent finder run to the finder model it started with, and return the one
+    /// line the resume pre-flight prints about it. An engine run has no finder model (`None`).
+    /// A model the resume names itself (a flag or a project pick, not the built-in default) that
+    /// differs from the recorded one is refused: the stored pieces came from the recorded model.
+    /// A run saved before the model was recorded keeps the current pick, and the line says so.
+    pub fn hold_finder_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Result<Option<String>, String> {
+        if controls.finder != crate::ai_audit::agent_finder::FinderChoice::Agent {
+            return Ok(None);
+        }
+        let recorded = self.finder_model.trim();
+        let explicit = controls
+            .finder_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty());
+        if recorded.is_empty() {
+            // A run saved before the model was recorded started on the default of that time,
+            // Fable 5.2. With no explicit pick it keeps that model; an explicit pick stands.
+            if explicit.is_some() {
+                return Ok(Some(format!(
+                    "The finder runs on {}: this run did not record a finder model.",
+                    controls.finder_model_for()
+                )));
+            }
+            controls.finder_model = Some(LEGACY_FINDER_MODEL.to_string());
+            return Ok(Some(format!(
+                "The finder stays on {LEGACY_FINDER_MODEL}, the model this run started on (it \
+                 recorded none, and this was the default then)."
+            )));
+        }
+        if let Some(pick) = explicit.filter(|m| *m != recorded) {
+            return Err(format!(
+                "this run's finder is on {recorded}, and this resume asks for {pick}. The stored \
+                 finder pieces came from {recorded}, so resume it with the same model, or start \
+                 a new run"
+            ));
+        }
+        controls.finder_model = Some(recorded.to_string());
+        Ok(Some(format!(
+            "The finder stays on {recorded}, the model this run started with."
+        )))
     }
 
     /// Hold a resumed run to the finder it started with, and return the run note when that
@@ -1023,6 +1083,14 @@ impl RunStore {
             }
         }
         models.hold_group_review_model(controls, explicit)
+    }
+
+    /// [`ModelsRecord::hold_finder_model`] for this run.
+    pub fn hold_finder_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Result<Option<String>, String> {
+        self.record().models.hold_finder_model(controls)
     }
 
     /// [`ModelsRecord::hold_finder`] for this run.

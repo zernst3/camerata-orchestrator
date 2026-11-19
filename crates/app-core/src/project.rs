@@ -487,8 +487,8 @@ pub struct Project {
     pub dev_run_spend_limit_cents: Option<u64>,
     /// The review tree's settings: the escalation rate and floor, the reasons that may exceed
     /// the budget, and the group reviewer's model (design D3, D5, A3). Defaults to the design
-    /// values for a project written before the settings existed.
-    #[serde(default)]
+    /// values for a project written before the settings existed (on the engine finder, as it ran).
+    #[serde(default = "ReviewSettings::legacy")]
     pub review: ReviewSettings,
 }
 
