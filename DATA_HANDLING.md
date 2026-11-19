@@ -191,8 +191,41 @@ It writes a deletion record of what was removed, from where and when.
 
 It keeps, on purpose, any export already written and the review state that is the delivered product: the problems with the lines of code they quote (`inspections/` and `onboarding-draft.json`), the reviewer's edits (`edits`), decisions (`decisions`) and engine-check verdicts (`engine-check`). The project's own record and settings stay as well. So this action removes the copies of the code, not the whole project.
 
-Deleting the project's own records and kept review state is done today by a documented operator procedure, which is held in Camerata's internal runbook and is not linked from this page. An in-app action to delete a project and all its data is built on a branch and is not part of this build, so this page does not describe it.
-<!-- UNVERIFIED as of this commit: `Delete project and all its data` exists only on branch feat/delete-project-and-all-data, not merged into feat/audit-report-export; the runbook lives in the camerata-internal repository (location not checked here) -->
+### Delete project and all its data
+
+The second action is separate and is the one to use at the end of an engagement. In the desktop app, the Projects list has **Delete project and all its data** beside each project. It first shows the list of everything it will remove, with paths and counts, and says how much uncommitted work and how many unpushed commits will be lost with the checkouts. It then removes everything it can attribute to the project: the checkouts and their worktrees, every part of the scan cache, the saved runs (with their finder rooms and traces), the inspections with their findings, the decisions and edits, the Engine Check, the Claude Code session files recorded for the project, the copies held in memory, the stray `.tmp` and `.corrupt` files of those stores, the project's development console records that can be tied to it alone, and last the project record itself.
+<!-- crates/server/src/client_source/delete_project.rs: module comment, delete_all, delete_all_preview, delete_all_handler; routes /api/projects/:id/delete-all-preview and /delete-all in crates/server/src/lib.rs -->
+<!-- crates/server/src/client_source/delete_project_tests.rs: deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_other_projects, the_preview_lists_the_plan_and_removes_nothing, the_preview_and_the_record_state_the_work_that_will_be_lost -->
+<!-- crates/ui/src/delete_project_ui.rs: "Delete project and all its data" -->
+
+The person must type the project name exactly as the dialog shows it. A different name deletes nothing.
+<!-- crates/server/src/client_source/delete_project.rs: DeleteAllRequest.confirm compared with the project name in delete_all -->
+<!-- crates/server/src/client_source/delete_project_tests.rs: a_wrong_typed_name_deletes_nothing; crates/ui/src/delete_project_ui.rs tests: typing_the_wrong_name_sends_nothing_and_the_right_name_deletes -->
+
+It is refused, and removes nothing, while a scan, a governed run or a live saved run of the project is in flight, and in the desktop app, a scan, job or run that tries to start on the project while it is being deleted is refused too (a separate `camerata inspect` process is not). The project record is removed only when every other item is clear, so a deletion that could not remove something keeps the project record and the inspections with their findings, says so, and can be run again to remove the rest.
+<!-- crates/server/src/client_source/delete_project.rs: run_in_flight_refusal use in the plan step, final_block, story_deleting_refusal -->
+<!-- crates/server/src/client_source/delete_project_tests.rs: it_is_refused_while_a_scan_of_the_project_is_running_and_removes_nothing, it_is_refused_while_a_saved_run_of_the_project_is_live, a_scan_or_job_start_while_the_project_is_being_deleted_is_refused, a_governed_run_or_a_routine_start_is_refused_while_the_project_is_being_deleted, a_failed_location_keeps_the_project_so_the_deletion_can_be_retried, the_last_check_keeps_the_project_when_a_scan_started_or_another_item_failed -->
+<!-- crates/ui/src/delete_project_ui.rs tests: a_partial_deletion_says_so_and_does_not_claim_the_project_was_removed, a_refusal_shows_the_servers_sentence -->
+
+It keeps, and names in the record with the reason, these things:
+
+- a checkout, a saved run or a multi-repo scan cache set that another project also uses, because deleting it would remove that project's data; for a shared repository the checkout's command-line cache, ledger and finder run file stay too
+- development console records tied to a repository another project also uses, because they cannot be attributed to this project alone
+- development console records that name no project and no repository, because Camerata cannot tell whether they are this project's; they may include this project's, so the operator checks them by hand
+- the SQLite logs (`artifacts.db`, `enforcement_catches.db`, `governance_events.db`, `orchestrator_decisions.db`, `feedback.db`), which hold ids, rule ids and descriptions, not client code, and are not kept per project
+- `source-records.json`, which holds the paths, counts and dates of earlier source deletions, kept as proof
+The deletion record itself is not part of that list: it is written to `deletion-records/` under the data folder, which no deletion removes, so earlier records there (with the project name, client name and paths) stay.
+<!-- crates/server/src/client_source/delete_project.rs: KeptItem entries (shared checkout, multi-repo scan files, saved run, development console records, SQLite logs, source-records.json) and RECORDS_FOLDER -->
+<!-- crates/server/src/client_source/delete_project_tests.rs: a_checkout_another_project_also_uses_is_kept_and_named_in_the_record, a_cockpit_run_of_another_project_over_a_shared_repo_is_never_removed, console_rows_tied_to_a_shared_repository_are_kept_and_listed, unattributed_rows_and_the_logs_are_listed_as_kept_with_their_reasons, a_second_deletion_finds_the_records_folder_untouched -->
+
+Not removed, and so left to the person: the finder-rooms and finder-traces folders outside a saved run, exports that `camerata inspect` wrote to disk, and a checkout the guard refuses (reported as failed, and the project is kept). The record is written as JSON and as text; if it cannot be saved the deletion has still happened, and the result says so (`record_not_saved`). The deletion record lists names, paths and counts, with no content and no code: what was removed and from where, what was kept and why, the work that was lost, and whether the project record was removed. It also lists the steps only a person can do, because Camerata cannot reach them: backups (Time Machine and others) of the checkout folder, Camerata's data and cache folders and the Claude Code session folder; iCloud and other cloud drives if those folders sit under a synced Desktop or Documents, and other machines; exports the browser downloaded, whose location Camerata does not know, including email attachments and uploads; Claude Code sessions Camerata did not record; the finder-rooms and finder-traces folders outside a saved run; temporary folders and clones made by hand; and a final search of Camerata's folders and the workspace for a client identifier.
+<!-- crates/server/src/client_source/delete_project.rs: ProjectDeletionRecord, MANUAL_STEPS, render_text -->
+<!-- crates/server/src/client_source/delete_project_tests.rs: asserts the record names Time Machine (deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_other_projects) -->
+
+The project card's older **Delete** is now **Remove from list**. It removes only the entry and refuses while the project still holds data on this machine, telling the person to use one of the two actions above first.
+<!-- crates/server/src/client_source/delete_project.rs: project_holds_data -->
+<!-- crates/server/src/client_source/delete_project_tests.rs: the_plain_project_delete_is_refused_while_the_project_holds_data, the_plain_project_delete_still_removes_a_project_with_no_data -->
+<!-- crates/ui/src/cockpit/project_home_tests.rs: the_old_delete_is_relabelled_and_sits_beside_the_data_deletes_not_in_place_of_them -->
 <!-- crates/server/src/client_source/storage.rs: Treatment::Kept entries -->
 
 There is no delete command on the command line. After a `camerata inspect` run, the operator removes the inspected folder, the export, the command-line cache files for that folder and its saved runs (`runs/<run id>/`) themselves. For a run over several repos the cache files are the `project-` pair, which hold every repo of that run, so they are removed once for the whole set.
