@@ -171,6 +171,82 @@ async fn an_unreachable_decision_store_hides_the_queue_and_shows_the_banner() {
     );
 }
 
+/// The real results screen over a stub server whose decision store answers 200 (draft migration
+/// not run yet) and whose migration answers `migrate`. Returns the rendered screen.
+async fn screen_with_migration_answer(migrate: ResponseTemplate) -> String {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/onboard/draft"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "scan": scan_with(serde_json::json!([])),
+            "audit": scan_with(findings()),
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/onboard/draft"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/projects/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "p1", "name": "Acme", "client_name": ""
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/projects/p1/decisions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "decisions": [], "standings": [], "migrated_from_draft": false,
+            "latest_run_id": ""
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/decisions"))
+        .respond_with(migrate)
+        .mount(&server)
+        .await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut vdom = VirtualDom::new(results);
+    vdom.rebuild_in_place();
+    pump(&mut vdom, 800).await;
+    dioxus_ssr::render(&vdom)
+}
+
+/// A new project with no scan rows yet: the store is reachable and the server refuses the draft
+/// migration with 409 `no_rows`. That is not an outage, so no "Decisions not loaded" banner.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn a_no_rows_migration_refusal_does_not_show_the_decisions_banner() {
+    let html =
+        screen_with_migration_answer(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "ok": false, "code": "no_rows",
+            "message": "There are no scan rows yet to translate the saved decisions through."
+        })))
+        .await;
+    // The screen really rendered (its summary and first step), so the absence below means
+    // something.
+    assert!(
+        html.contains("Step 1 — proposed starter ruleset") && html.contains("scan-summary"),
+        "the results screen is not mounted: {html}"
+    );
+    assert!(!html.contains("Decisions not loaded"), "{html}");
+    assert!(
+        !html.contains("decision store could not be reached"),
+        "{html}"
+    );
+}
+
+/// Negative control: a server error on the migration is a real failure and still shows it.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn a_server_error_on_the_migration_still_shows_the_decisions_banner() {
+    let html = screen_with_migration_answer(ResponseTemplate::new(500)).await;
+    assert!(html.contains("Decisions not loaded"), "{html}");
+}
+
 /// M1: two saves queued out of order (the second submitted while the first is still on the
 /// wire, and a third behind it) reach the server one at a time and the NEWEST lands last. The
 /// first response is slow on purpose; without the single in-flight slot the later ones would

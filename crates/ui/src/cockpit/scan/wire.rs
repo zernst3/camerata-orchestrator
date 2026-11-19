@@ -697,11 +697,17 @@ pub(super) async fn refusal_of(
     if status.is_server_error() {
         return OpError::Unreachable(format!("the server answered {status}"));
     }
-    let message = resp
+    let body = resp
         .json::<camerata_api_types::decisions::DecisionError>()
         .await
+        .ok();
+    if status == reqwest::StatusCode::CONFLICT && body.as_ref().is_some_and(|e| e.code == "no_rows")
+    {
+        return OpError::NoRows(body.map(|e| e.message).unwrap_or_default());
+    }
+    let message = body
         .map(|e| e.message)
-        .unwrap_or_else(|_| format!("the server answered {status}"));
+        .unwrap_or_else(|| format!("the server answered {status}"));
     OpError::Refused {
         status: status.as_u16(),
         message,
