@@ -13,6 +13,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// `path` with `suffix` appended to its file name (`onboarding-draft.json` -> `.json.bak`).
+fn sibling(path: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// Write `json` to `path`, first keeping the file's previous content as `<path>.bak` (one
+/// previous copy, replaced on each write).
+fn write_with_backup(path: &std::path::Path, json: &str) -> std::io::Result<()> {
+    if path.exists() {
+        let _ = std::fs::copy(path, sibling(path, ".bak"));
+    }
+    std::fs::write(path, json)
+}
+
 /// Persists per-project onboarding drafts to `<data_dir>/camerata/onboarding-draft.json`
 /// (a `{ project_id: draft }` map), with an in-memory mirror so a session without a
 /// resolvable data dir still works in-run. `Clone` is a shallow handle (shared state) so
@@ -33,10 +49,22 @@ impl DraftStore {
     /// bare draft object, pre-per-project) fails to parse as a map and is dropped — a
     /// one-time loss on upgrade (re-scan to recreate); going forward it's a map.
     pub fn at(path: PathBuf) -> Self {
-        let mem = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<HashMap<String, serde_json::Value>>(&s).ok())
-            .unwrap_or_default();
+        let mem = match std::fs::read_to_string(&path) {
+            Ok(s) => serde_json::from_str::<HashMap<String, serde_json::Value>>(&s)
+                .unwrap_or_else(|e| {
+                    // A file we cannot read as a map is never dropped: it is set aside, so the
+                    // first flush of an empty map cannot overwrite the only copy.
+                    let aside = sibling(&path, ".unreadable");
+                    eprintln!(
+                        "[camerata-server] {} could not be read ({e}); kept untouched at {}",
+                        path.display(),
+                        aside.display()
+                    );
+                    let _ = std::fs::write(&aside, s);
+                    HashMap::new()
+                }),
+            Err(_) => HashMap::new(),
+        };
         Self {
             path: Some(Arc::new(path)),
             mem: Arc::new(Mutex::new(mem)),
@@ -48,7 +76,7 @@ impl DraftStore {
         let Some(p) = &self.path else { return };
         let Ok(map) = self.mem.lock() else { return };
         if let Ok(s) = serde_json::to_string(&*map) {
-            let _ = std::fs::write(p.as_ref().as_path(), s);
+            let _ = write_with_backup(p.as_ref().as_path(), &s);
         }
     }
 
@@ -71,7 +99,7 @@ impl DraftStore {
         kept.remove(project_id);
         if let Some(p) = &self.path {
             let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
-            std::fs::write(p.as_ref().as_path(), json)?;
+            write_with_backup(p.as_ref().as_path(), &json)?;
         }
         *m = kept;
         Ok(())
@@ -90,6 +118,40 @@ impl DraftStore {
             m.insert(project_id.to_string(), v);
         }
         self.flush();
+    }
+
+    /// Put a finished run's `report` into `project_id`'s draft as its `audit`, when the draft is
+    /// of the same repos and holds no audit yet: the review the run produced must be reopenable
+    /// even when no screen was mounted to receive it. Never replaces an audit already there.
+    /// Returns whether the draft changed.
+    pub fn adopt_audit(&self, project_id: &str, repos: &[String], report: serde_json::Value) -> bool {
+        let changed = {
+            let Ok(mut m) = self.mem.lock() else {
+                return false;
+            };
+            let Some(draft) = m.get_mut(project_id).and_then(|d| d.as_object_mut()) else {
+                return false;
+            };
+            let same_scan = draft
+                .get("scan")
+                .and_then(|s| s.get("repos"))
+                .and_then(|r| r.as_array())
+                .is_some_and(|r| {
+                    r.len() == repos.len()
+                        && r.iter().zip(repos).all(|(a, b)| a.as_str() == Some(b.as_str()))
+                });
+            let has_audit = draft.get("audit").is_some_and(|a| !a.is_null());
+            if !same_scan || has_audit {
+                false
+            } else {
+                draft.insert("audit".to_string(), report);
+                true
+            }
+        };
+        if changed {
+            self.flush();
+        }
+        changed
     }
 
     /// Drop `project_id`'s draft (onboarding completed, or the architect started fresh).

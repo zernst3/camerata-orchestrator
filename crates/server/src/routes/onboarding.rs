@@ -853,6 +853,19 @@ pub(crate) async fn onboard_draft_get(
     State(state): State<AppState>,
 ) -> Json<Option<serde_json::Value>> {
     let pid = active_project_id(&state);
+    // A draft with no review but a saved inspection of the same repos gets that inspection as
+    // its review, so "Continue where you left off" reopens a run whose results never reached
+    // the draft (the screen was closed while it ran, or the app restarted).
+    if let Some(draft) = state.draft.load(&pid) {
+        let no_audit = draft.get("audit").is_none_or(|a| a.is_null());
+        if no_audit {
+            if let Some(report) = state.get_last_scan(&pid) {
+                if let Ok(v) = serde_json::to_value(&report) {
+                    state.draft.adopt_audit(&pid, &report.repos, v);
+                }
+            }
+        }
+    }
     Json(state.draft.load(&pid))
 }
 

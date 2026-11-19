@@ -960,3 +960,69 @@ async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&pdf));
     assert!(pdf.starts_with(b"%PDF"));
 }
+
+/// A finished run reaches the project's onboarding draft even when no screen was open to receive
+/// it: the draft is saved with the scan only (as the screen does right after the scan), the run
+/// finishes, and the draft read back holds the run's review. (The job path is the same for both
+/// finders; the fake `claude` plays the engine's passes.)
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_finished_run_lands_in_the_onboarding_draft_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    let scan = serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    fx.state
+        .draft
+        .save(&pid, serde_json::json!({ "scan": scan, "audit": null }));
+
+    inspect(fx).await;
+
+    let (_, body) = call(&fx.state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    let draft = json(&body);
+    assert!(
+        draft["audit"]["findings"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|f| f["path"] == "src/leak.ts")),
+        "the draft's audit holds the run's findings: {draft}"
+    );
+}
+
+/// A draft saved with no review, next to a saved inspection of the same repos (the run's results
+/// never reached the draft): reading the draft for "Continue where you left off" restores the
+/// review from the inspection, and a draft of other repos is left alone.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn continue_restores_the_review_from_the_saved_inspection_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    inspect(fx).await;
+    // What the app held before the fix: a draft with the scan and no review.
+    let scan = serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    fx.state.draft.save(
+        &pid,
+        serde_json::json!({ "scan": scan.clone(), "audit": null, "dispositions": {} }),
+    );
+    // A restart: nothing in memory but the files.
+    let state = fx.restarted();
+    state.projects.set_active(&pid);
+
+    let (_, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    let draft = json(&body);
+    assert!(
+        draft["audit"]["findings"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|f| f["path"] == "src/leak.ts")),
+        "the review came back from the saved inspection: {draft}"
+    );
+    assert_eq!(draft["scan"], scan, "the rest of the draft is untouched");
+
+    // A draft of other repos is not given this inspection's review.
+    let other = serde_json::to_value(crate::onboard::ScanReport::gated(&["acme/other".to_string()])).unwrap();
+    state
+        .draft
+        .save(&pid, serde_json::json!({ "scan": other, "audit": null }));
+    let (_, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert!(json(&body)["audit"].is_null(), "another scan's draft keeps no audit");
+}
