@@ -3157,6 +3157,22 @@ mod batch_route {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_detail_rewrite_round_shows_a_row_in_agent_activity() {
+        let store = crate::transcript::TranscriptStore::new();
+        let llm = RoleLlm::new("{}", Regen::Writes);
+        let route = StageRoute {
+            batch: false,
+            job: None,
+            feedback: Some((&store, "scan-key")),
+        };
+        let _ = run(&llm, route, None).await;
+        let rows = store.get("scan-key");
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].role, format!("Detail rewrite ({REPO})"));
+        assert_eq!(rows[0].status, "done", "{rows:#?}");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_batch_run_sends_the_detail_rewrites_as_a_batch_and_absorbs_them_as_in_real_time() {
         let real_time = RoleLlm::new("{}", Regen::Writes);
         let (expected, expected_failed) = run(&real_time, StageRoute::default(), None).await;

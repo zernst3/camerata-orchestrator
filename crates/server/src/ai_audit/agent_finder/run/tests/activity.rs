@@ -240,3 +240,50 @@ async fn with_no_activity_the_run_is_unchanged_and_shows_nothing() {
     let _ = run(&agent).await;
     assert!(store.get(KEY).is_empty());
 }
+
+#[test]
+fn a_secret_across_the_output_cut_is_redacted_before_the_cut() {
+    use camerata_secrets::fixtures::planted;
+    use camerata_secrets::SecretShape;
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    // The secret starts a few characters before the 20,000 character cut.
+    let mut body = "x".repeat(19_995);
+    body.push_str(&p.text);
+    body.push_str(&"y".repeat(100));
+    let mut run = AgentRun::empty(AgentStop::Finished);
+    run.outputs
+        .insert("_camerata/out/problems-1.json".to_string(), body);
+    let store = TranscriptStore::new();
+    let activity = FinderActivity::new(store.clone(), KEY);
+    activity.begin("s", "role", "prompt");
+    activity.end("s", &Ok(run));
+    let output = store.get(KEY)[0].output.clone();
+    let prefix = &p.text[..12];
+    assert!(
+        !output.contains(prefix),
+        "no part of the secret survives the cut: {}",
+        &output[output.len().saturating_sub(300)..]
+    );
+}
+
+#[test]
+fn a_secret_in_a_failure_reason_is_redacted_in_the_done_or_blocked_line() {
+    use camerata_secrets::fixtures::planted;
+    use camerata_secrets::SecretShape;
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    for stop in [
+        AgentStop::TurnLimit(format!("limit {}", p.text)),
+        AgentStop::SpendLimit(format!("spend {}", p.text)),
+        AgentStop::Refused(format!("refused {}", p.text)),
+        AgentStop::Failed(format!("failed {}", p.text)),
+    ] {
+        let store = TranscriptStore::new();
+        let activity = FinderActivity::new(store.clone(), KEY);
+        activity.begin("s", "role", "prompt");
+        activity.end("s", &Ok(AgentRun::empty(stop.clone())));
+        let row = &store.get(KEY)[0];
+        assert_eq!(row.status, "blocked");
+        assert!(row.output.contains("Did not finish:"), "{stop:?}");
+        assert!(!row.output.contains(&p.text), "{stop:?}: {}", row.output);
+    }
+}

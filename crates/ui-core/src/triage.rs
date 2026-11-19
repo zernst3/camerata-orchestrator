@@ -4564,6 +4564,25 @@ mod tests {
         assert!(h.outcome.contains("tool_failed"), "{:?}", h.outcome);
     }
 
+    /// The hub's outcome line for the model's honest "unsure" reads "Not settled", never the wire
+    /// string "model_declined".
+    #[test]
+    fn the_hub_outcome_for_an_unsure_answer_reads_not_settled() {
+        let rows = vec![hub_row(
+            "o/r",
+            "CLONE-1",
+            "-",
+            serde_json::json!({
+                "kind": "not_assessed", "reason": "model_declined",
+                "reason_detail": "the model was unsure about 1 of 3 candidates; 2 judged"
+            }),
+        )];
+        let h = rule_hub(&rows, "o/r", "CLONE-1").expect("present");
+        assert!(h.outcome.contains("Not settled"), "{:?}", h.outcome);
+        assert!(!h.outcome.contains("model_declined"), "{:?}", h.outcome);
+        assert!(h.outcome.contains("unsure about 1 of 3"), "{:?}", h.outcome);
+    }
+
     /// req_pass2_12: the hub SURFACES the one-rule-one-surface invariant rather than
     /// re-deriving it. The conflict list it carries is exactly what
     /// [`rules_on_multiple_surfaces`] reports for that `(repo, rule)`.

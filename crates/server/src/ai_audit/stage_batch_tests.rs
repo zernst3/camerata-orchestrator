@@ -2505,6 +2505,39 @@ mod activity_rows {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_cancelled_stage_shows_a_blocked_row_saying_how_far_it_got() {
+        let store = TranscriptStore::new();
+        let jobs = Arc::new(JobStore::new());
+        let id = jobs.create("audit", None);
+        let (j2, i2) = (jobs.clone(), id.clone());
+        let rt = Realtime::new(move |item, nth| {
+            if item == "item-010" && nth == 0 {
+                j2.cancel(&i2);
+            }
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(item))))
+        });
+        let mut stage = Scripted::numbered(40);
+        let mut c = with_row(ctx(&rt, None), &store, "Group review");
+        c.job = Some((&jobs, &id));
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert!(out.cancelled.is_some());
+        let rows = store.get(KEY);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].status, "blocked");
+        assert!(
+            rows[0].output.contains("Stopped before the end:") && rows[0].output.contains("of 40"),
+            "{}",
+            rows[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_second_round_of_the_same_stage_gets_its_own_row() {
         let store = TranscriptStore::new();
         let rt = Realtime::ok_after(Duration::from_secs(1));

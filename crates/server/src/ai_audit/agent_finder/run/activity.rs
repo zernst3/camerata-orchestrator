@@ -51,8 +51,10 @@ impl FinderActivity {
                 for (path, body) in &run.outputs {
                     text.push_str(&format!("--- {path} ---\n{body}\n"));
                 }
-                let mut text = clip(&text);
+                // Redact the whole text first, then cut: a secret straddling the cut would stop
+                // matching and leak its prefix.
                 crate::onboard::redact::redact_string(&mut text);
+                let text = clip(&text);
                 if !text.is_empty() {
                     self.store.append_output(&self.key, session, &text);
                 }
@@ -68,6 +70,8 @@ impl FinderActivity {
                     | AgentStop::Refused(why)
                     | AgentStop::Failed(why) => (format!("Did not finish: {why}"), "blocked"),
                 };
+                let mut line = line;
+                crate::onboard::redact::redact_string(&mut line);
                 self.store.append_output(&self.key, session, &line);
                 self.store.set_status(&self.key, session, status);
             }

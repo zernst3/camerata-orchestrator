@@ -486,3 +486,24 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
         "{stored:?}"
     );
 }
+
+#[tokio::test]
+async fn the_check_shows_a_duplicate_check_row_in_agent_activity() {
+    let store = crate::transcript::TranscriptStore::new();
+    let mut r = report();
+    let llm = Script::new(c_same_d_different);
+    check_possible_duplicates(
+        &mut r,
+        &llm,
+        &RunControls::default(),
+        false,
+        None,
+        Some((&store, "scan-key")),
+    )
+    .await;
+    let rows = store.get("scan-key");
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert!(rows[0].role.starts_with("Duplicate check ("), "{rows:#?}");
+    assert_eq!(rows[0].status, "done");
+    assert!(rows[0].output.contains("answered"), "{}", rows[0].output);
+}
