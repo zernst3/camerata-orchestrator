@@ -453,6 +453,11 @@ impl Screen {
             .handle_event("change", dioxus::dioxus_core::Event::new(data, true), id);
     }
 
+    /// The operator sets the checkbox with html id `html_id` to `checked`.
+    fn set_checked(&self, html_id: &str, checked: bool) {
+        self.pick(html_id, if checked { "true" } else { "false" });
+    }
+
     /// The operator clicks the element with html id `html_id`.
     fn click(&self, html_id: &str) {
         let id = *self
@@ -655,6 +660,45 @@ impl Respond for StepModelsReply {
     }
 }
 
+/// `POST /api/projects/:id/backend`: stores the backend and echoes the project.
+struct BackendReply(SharedProject);
+
+impl Respond for BackendReply {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let mut project = self.0 .0.lock().unwrap();
+        project["backend"] = body["backend"].clone();
+        ResponseTemplate::new(200).set_body_json(json!({ "ok": true, "project": *project }))
+    }
+}
+
+/// `POST /api/projects/:id/client-engagement`: stores both flags and echoes the project.
+struct EngagementReply(SharedProject);
+
+impl Respond for EngagementReply {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let mut project = self.0 .0.lock().unwrap();
+        project["client_engagement"] = body["client_engagement"].clone();
+        project["client_tooling_opt_in"] = body["client_tooling_opt_in"].clone();
+        ResponseTemplate::new(200).set_body_json(json!({ "ok": true, "project": *project }))
+    }
+}
+
+/// The stub routes the embedded Backend and Client engagement controls write through.
+async fn mount_where_it_runs_stubs(server: &MockServer, shared: &SharedProject) {
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p-1/backend"))
+        .respond_with(BackendReply(shared.clone()))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p-1/client-engagement"))
+        .respond_with(EngagementReply(shared.clone()))
+        .mount(server)
+        .await;
+}
+
 struct ActiveReply(SharedProject);
 
 impl Respond for ActiveReply {
@@ -689,6 +733,7 @@ async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() 
         .respond_with(StepModelsReply(shared.clone()))
         .mount(&server)
         .await;
+    mount_where_it_runs_stubs(&server, &shared).await;
     Mock::given(method("GET"))
         .and(path("/api/models/registry"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -725,6 +770,16 @@ async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() 
         "the component never reads the review settings route, which refuses before a result"
     );
 
+    // Where it runs: a new project is API with Client engagement on. The recipe is CLI with
+    // Client engagement off, set with the real controls.
+    screen.click(&format!(
+        "{}CLI",
+        crate::cockpit::rules::BACKEND_SEG_ID_PREFIX
+    ));
+    screen.pump(300).await;
+    screen.set_checked(crate::cockpit::rules::CLIENT_ENGAGEMENT_ID, false);
+    screen.pump(300).await;
+
     // The operator sets the recipe with the real selects.
     screen.pick("is-model-finder", "agent");
     screen.pick("is-model-finder_model", "claude-opus-5-5");
@@ -739,6 +794,8 @@ async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() 
     // The saved project values, as the server holds them.
     {
         let saved = shared.0.lock().unwrap();
+        assert_eq!(saved["backend"], json!("cli"));
+        assert_eq!(saved["client_engagement"], json!(false));
         assert_eq!(saved["review"]["finder"], json!("agent"));
         assert_eq!(saved["review"]["finder_model"], json!("claude-opus-5-5"));
         assert_eq!(
@@ -833,5 +890,87 @@ async fn settings_this_project_shows_the_one_component_once_with_the_projects_va
     assert_eq!(
         shared.0.lock().unwrap()["review"]["finder"],
         json!("engine")
+    );
+}
+
+// ── Round 2: the conflict lines follow the real controls ────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn the_cli_with_client_engagement_line_follows_the_real_backend_and_engagement_controls() {
+    let server = MockServer::start().await;
+    let shared = SharedProject(std::sync::Arc::new(std::sync::Mutex::new(
+        new_project_json(),
+    )));
+    mount_where_it_runs_stubs(&server, &shared).await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let fake = Fake::new();
+    let mut screen = mounted(&fake, false).await;
+    assert!(
+        !screen.html().contains("inspection-settings-conflict"),
+        "API with engagement: no conflict"
+    );
+    // Click CLI with Client engagement still on.
+    screen.click(&format!(
+        "{}CLI",
+        crate::cockpit::rules::BACKEND_SEG_ID_PREFIX
+    ));
+    screen.pump(400).await;
+    let html = screen.html();
+    assert!(
+        html.contains("A client engagement runs on the API only."),
+        "{html}"
+    );
+    // Untick Client engagement: the line goes.
+    screen.set_checked(crate::cockpit::rules::CLIENT_ENGAGEMENT_ID, false);
+    screen.pump(400).await;
+    let html = screen.html();
+    assert!(
+        !html.contains("A client engagement runs on the API only."),
+        "{html}"
+    );
+    assert_eq!(shared.0.lock().unwrap()["backend"], json!("cli"));
+    assert_eq!(shared.0.lock().unwrap()["client_engagement"], json!(false));
+}
+
+#[test]
+fn a_non_anthropic_model_on_a_client_engagement_shows_a_one_line_warning() {
+    #[derive(Clone, PartialEq, Props)]
+    struct Case {
+        project: ProjectView,
+    }
+    #[component]
+    fn Shown(props: Case) -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! { InspectionSettingsView { project: props.project, on_event: move |_| {} } }
+    }
+    let make = |engagement: bool| {
+        let mut p = new_project_json();
+        p["review"]["group_review_model"] = json!("meta/llama-3:free");
+        p["client_engagement"] = json!(engagement);
+        p["backend"] = json!("api");
+        crate::test_harness::render_fragment(
+            Shown,
+            Case {
+                project: serde_json::from_value(p).unwrap(),
+            },
+        )
+    };
+    let on = make(true);
+    assert!(
+        on.contains(
+            "This project is a client engagement: only Anthropic models may run. Group review model is set to meta/llama-3:free."
+        ),
+        "{on}"
+    );
+    assert!(!make(false).contains("only Anthropic models may run"));
+}
+
+#[test]
+fn the_fix_row_says_what_runs_when_it_is_not_set() {
+    let html = page("all-unset");
+    assert!(
+        html.contains("or the calibration model when the Haiku fix switch is off"),
+        "{html}"
     );
 }

@@ -263,3 +263,28 @@ async fn the_finder_model_and_clone_judge_model_steps_set_and_clear() {
     assert_eq!(reply["ok"], json!(false), "{text}");
     assert_eq!(reply["message"], json!("unknown step"), "{text}");
 }
+
+#[tokio::test]
+async fn the_model_profile_preview_lists_only_the_steps_applying_changes() {
+    let f = review_fixture(6);
+    let (status, text) = call(
+        &f.app,
+        "GET",
+        &format!(
+            "/api/projects/{}/model-profile/preview?profile=max_efficiency",
+            f.project_id
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let reply: Value = serde_json::from_str(&text).unwrap();
+    let steps = reply["assignments"]["step_models"].as_object().unwrap();
+    for kept in ["audit", "calibration", "fix"] {
+        assert!(
+            !steps.contains_key(kept),
+            "{kept} is kept, so not previewed: {text}"
+        );
+    }
+    assert!(steps.contains_key("research_chat"), "{text}");
+}

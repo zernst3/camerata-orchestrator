@@ -265,6 +265,15 @@ pub const STAGE2_DEFAULT_MODEL: &str = "claude-opus-5-5";
 /// write-ups is small and bounded, so it is Sonnet 5.5.
 pub const DUP_CHECK_DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 
+/// True when `model` is a first-party Anthropic API model id (`claude-sonnet-5`,
+/// `claude-haiku-4-5-20251001`). False for every OpenRouter id (`vendor/model`,
+/// `vendor/model:free`) and for an empty id. The one rule: the server's client lock and the
+/// Inspection settings' warning both call it.
+pub fn is_anthropic_model_id(model: &str) -> bool {
+    let model = model.trim();
+    model.starts_with("claude-") && !model.contains('/') && !model.contains(':')
+}
+
 /// The clone judge's model when neither the `--clone-judge-model` flag nor the project setting
 /// names one: classification over bounded input, Haiku 5.5. Not the project's fast band, so
 /// moving a band never moves the judge.

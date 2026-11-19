@@ -40,8 +40,7 @@ use crate::llm::ProjectBackend;
 /// `claude-haiku-4-5-20251001`). False for every OpenRouter id (`vendor/model`, `vendor/model:free`)
 /// and for an empty id. See the module docs for why this is an allowlist on the id's shape.
 pub fn is_anthropic_api_model(model: &str) -> bool {
-    let model = model.trim();
-    model.starts_with("claude-") && !model.contains('/') && !model.contains(':')
+    camerata_api_types::project::is_anthropic_model_id(model)
 }
 
 /// The reason a client engagement must not run with `backend` and `models` (each a

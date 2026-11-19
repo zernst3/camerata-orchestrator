@@ -13,9 +13,9 @@
 //! so the screen cannot drift from the engine.
 
 use camerata_api_types::project::{
-    model_display_name, ProjectBackend, ProjectFinder, ReviewSettings, StepModels,
-    CLONE_JUDGE_DEFAULT_MODEL, DEFAULT_MODEL, DUP_CHECK_DEFAULT_MODEL, FINDER_DEFAULT_MODEL,
-    FIX_STAGE_HAIKU_MODEL, STAGE1_DEFAULT_MODEL, STAGE2_DEFAULT_MODEL,
+    is_anthropic_model_id, model_display_name, ProjectBackend, ProjectFinder, ReviewSettings,
+    StepModels, CLONE_JUDGE_DEFAULT_MODEL, DEFAULT_MODEL, DUP_CHECK_DEFAULT_MODEL,
+    FINDER_DEFAULT_MODEL, FIX_STAGE_HAIKU_MODEL, STAGE1_DEFAULT_MODEL, STAGE2_DEFAULT_MODEL,
 };
 
 use crate::models::{chat_model_groups, ModelOption, ModelsResp};
@@ -123,7 +123,11 @@ impl Stage {
                 model_display_name(STAGE1_DEFAULT_MODEL)
             ),
             Stage::GroupReview => "Stage 2: one call per rule group, real time.".to_string(),
-            Stage::Fix => "Writes one fix per problem.".to_string(),
+            Stage::Fix => format!(
+                "Writes one fix per problem. Not set: {}, or the calibration model when the \
+                 Haiku fix switch is off.",
+                model_display_name(FIX_STAGE_HAIKU_MODEL)
+            ),
             Stage::DuplicateCheck => "Asks whether two write-ups are the same problem.".to_string(),
             Stage::CloneJudge => "Used only when a clone rule is selected.".to_string(),
         }
@@ -291,6 +295,30 @@ pub fn conflict_line(backend: ProjectBackend, client_engagement: bool) -> Option
         "A client engagement runs on the API only. Choose API, or turn Client engagement off \
          for an internal run.",
     )
+}
+
+/// One line per model row that is set to a non-Anthropic model while Client engagement is on: a
+/// client engagement runs only Anthropic models, and only the run-time pre-flight refuses
+/// otherwise. Rows the finder in effect does not use are not checked, and an unset row names a
+/// built-in Anthropic default.
+pub fn engagement_model_conflicts(values: &InspectionValues) -> Vec<String> {
+    if !values.client_engagement {
+        return Vec::new();
+    }
+    Stage::ALL
+        .into_iter()
+        .filter(|s| *s != Stage::Finder && s.used_by(values.finder))
+        .filter_map(|stage| {
+            let model = values.current(stage).trim();
+            (!model.is_empty() && !is_anthropic_model_id(model)).then(|| {
+                format!(
+                    "This project is a client engagement: only Anthropic models may run. {} is \
+                     set to {model}.",
+                    stage.label()
+                )
+            })
+        })
+        .collect()
 }
 
 /// The read-only "Each run" lines: what is chosen per run on the Inspection screen, and the

@@ -20,8 +20,9 @@ use std::rc::Rc;
 
 use camerata_api_types::project::{ProjectBackend, ProjectFinder};
 use camerata_ui_core::inspection_settings::{
-    conflict_line, each_run_lines, model_groups, rows, unused_rows_button, InspectionValues,
-    RowSpec, Stage, FINDER_CHOICES, MODELS_NOTE, RUN_IN_FLIGHT_NOTE,
+    conflict_line, each_run_lines, engagement_model_conflicts, model_groups, rows,
+    unused_rows_button, InspectionValues, RowSpec, Stage, FINDER_CHOICES, MODELS_NOTE,
+    RUN_IN_FLIGHT_NOTE,
 };
 use camerata_ui_core::models::ModelsResp;
 use dioxus::prelude::*;
@@ -237,6 +238,7 @@ pub(crate) fn InspectionSettingsView(props: InspectionSettingsViewProps) -> Elem
     let specs = rows(&values, props.show_unused);
     let reveal = unused_rows_button(values.finder, props.show_unused);
     let conflict = conflict_line(values.backend, values.client_engagement);
+    let model_conflicts = engagement_model_conflicts(&values);
     let lines = each_run_lines(values.finder, &project.review);
     let on_event = props.on_event;
     let models = props.models.clone();
@@ -294,6 +296,15 @@ pub(crate) fn InspectionSettingsView(props: InspectionSettingsViewProps) -> Elem
             }
             if let Some(line) = conflict {
                 p { class: "review-settings-bad inspection-settings-conflict", role: "alert", "{line}" }
+            }
+
+            for line in model_conflicts {
+                p {
+                    class: "review-settings-bad inspection-settings-conflict",
+                    role: "alert",
+                    key: "{line}",
+                    "{line}"
+                }
             }
 
             h3 { class: "scan-section-h", "Engagement" }

@@ -261,3 +261,36 @@ fn a_select_always_offers_the_model_it_currently_holds() {
         "no registry: the current model alone, never an empty select"
     );
 }
+
+#[test]
+fn the_fix_hint_is_true_with_the_haiku_switch_on_and_off() {
+    let hint = Stage::Fix.hint();
+    assert!(hint.contains("Not set: Claude Haiku 5.5"), "{hint}");
+    assert!(
+        hint.contains("or the calibration model when the Haiku fix switch is off"),
+        "{hint}"
+    );
+}
+
+#[test]
+fn a_non_anthropic_model_on_a_client_engagement_is_named_and_only_then() {
+    let mut v = values(ProjectFinder::Agent);
+    v.client_engagement = true;
+    assert!(
+        engagement_model_conflicts(&v).is_empty(),
+        "unset rows are Anthropic defaults"
+    );
+    v.group_review = "meta/llama-3:free".into();
+    v.scan = "vendor/other".into();
+    assert_eq!(
+        engagement_model_conflicts(&v),
+        ["This project is a client engagement: only Anthropic models may run. Group review model \
+          is set to meta/llama-3:free."],
+        "Scan model is not used by the Agent finder, so it is not checked"
+    );
+    v.client_engagement = false;
+    assert!(engagement_model_conflicts(&v).is_empty());
+    v.client_engagement = true;
+    v.finder = ProjectFinder::Engine;
+    assert_eq!(engagement_model_conflicts(&v).len(), 2);
+}

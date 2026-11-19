@@ -1619,16 +1619,26 @@ pub(crate) async fn preview_model_profile(
             "noop": true,
             "message": "Custom profile: no cascade — user owns every entry.",
         })),
-        Some(a) => Json(serde_json::json!({
-            "ok": true,
-            "profile": q.profile,
-            "noop": false,
-            "assignments": {
-                "tier_map": a.tier_map,
-                "step_models": a.step_models,
-                "l3_review": a.l3_review,
+        Some(a) => {
+            // Applying keeps the inspection models (scan, calibration, fix), so the preview must
+            // not offer them as a change either: it lists the development steps only.
+            let mut step_models = serde_json::to_value(&a.step_models).unwrap_or_default();
+            if let Some(map) = step_models.as_object_mut() {
+                for kept in ["audit", "calibration", "fix"] {
+                    map.remove(kept);
+                }
             }
-        })),
+            Json(serde_json::json!({
+                "ok": true,
+                "profile": q.profile,
+                "noop": false,
+                "assignments": {
+                    "tier_map": a.tier_map,
+                    "step_models": step_models,
+                    "l3_review": a.l3_review,
+                }
+            }))
+        }
     }
 }
 
