@@ -67,11 +67,9 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
     }
     // The ticket file is a CSV with no JSON sibling (one ticket per sub-group, for an importer).
     expected.insert(crate::xlsx_export::tickets::TICKETS_CSV.to_string());
-    // H4: the optional triage log is admitted when present (it is off by default, so a package
-    // without it is complete). Its content is still scanned by the secrets check like every
-    // other member.
-    let mut allowed = expected.clone();
-    allowed.insert(crate::xlsx_export::triage_log::TRIAGE_LOG_CSV.to_string());
+    // The triage log is the operator's file and is never in a client package, so it is not
+    // allowed here: `csv/triage-log.csv` is an unexpected file like any other.
+    let allowed = expected.clone();
     for name in &expected {
         if !entries.contains_key(name) {
             problems.push(problem(name, DATASET_SET, "a promised file is missing"));
@@ -101,6 +99,17 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
                 &xlsx,
                 DATASET_SET,
                 "the workbook is not a zip with a shared-strings table",
+            ));
+        }
+        if super::archive::xlsx_sheet_names(bytes).is_ok_and(|names| {
+            names
+                .iter()
+                .any(|n| n == crate::xlsx_export::triage_log::TRIAGE_LOG_SHEET)
+        }) {
+            problems.push(problem(
+                &xlsx,
+                DATASET_SET,
+                "the workbook has a Triage Log sheet; the triage log is the operator's file and is never in the client package",
             ));
         }
     }

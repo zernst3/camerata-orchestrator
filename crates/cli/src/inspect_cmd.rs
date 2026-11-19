@@ -749,6 +749,37 @@ fn save_ledger(path: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
     }
 }
 
+/// Where the operator's triage log goes for the export zip at `export`: in the zip's own folder,
+/// named for the zip and marked internal (`out.zip` gives `out-triage-log-INTERNAL.csv`).
+pub fn triage_log_path_beside(export: &Path) -> PathBuf {
+    let stem = export.file_stem().map_or_else(
+        || "export".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    export.with_file_name(format!("{stem}-triage-log-INTERNAL.csv"))
+}
+
+/// Write the operator's triage log beside the export zip at `export` (see
+/// [`triage_log_path_beside`]) and return where it went. The same file the review screen's
+/// "Download triage log" saves, built by the same function: its first line marks it internal. It
+/// is never put in the zip.
+pub fn write_triage_log_beside_zip(
+    report: &camerata_server::onboard::SealedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    export: &Path,
+) -> Result<PathBuf, String> {
+    let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
+        HashMap::new();
+    let reviewed =
+        camerata_server::report_export::ReviewedReport::unreviewed(report, &dispositions);
+    let csv =
+        camerata_server::xlsx_export::triage_log::operator_csv(&reviewed, corpus, &HashMap::new())
+            .map_err(|e| format!("{e:#}"))?;
+    let path = triage_log_path_beside(export);
+    std::fs::write(&path, csv).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Build the product-export ZIP bytes for `report`, via the EXACT SAME `report_export` /
 /// `xlsx_export` / zip-assembly functions the `POST /api/projects/:id/product-export` HTTP
 /// handler (`export_product`) calls, in the same order, with the same "nothing manually
@@ -1633,6 +1664,21 @@ pub async fn run_inspect_pipeline_with(
     let written = std::fs::write(&args.export, &zip_bytes);
     let run_notes = finish_run(store.as_ref(), &report, written.is_ok());
     written.map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
+    // `CAMERATA_EXPORT_TRIAGE_LOG` asks for the operator's triage log. It is written beside the
+    // zip, never inside it: the client package carries no triage log, whatever is set.
+    if camerata_server::report_export::triage_log_env_on(
+        std::env::var(camerata_server::report_export::EXPORT_TRIAGE_LOG_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        match write_triage_log_beside_zip(&report, corpus.as_ref(), &args.export) {
+            Ok(path) => eprintln!(
+                "camerata inspect: triage log (internal, not part of the client package): {}",
+                path.display()
+            ),
+            Err(e) => eprintln!("camerata inspect: could not write the triage log: {e}"),
+        }
+    }
 
     Ok(InspectOutcome {
         export_path: args.export,
@@ -2228,6 +2274,44 @@ mod finder_tests;
 mod tests {
     use super::*;
     use camerata_server::scan_ledger::StageAccounting;
+
+    #[test]
+    fn the_triage_log_is_named_for_the_zip_and_marked_internal_in_its_folder() {
+        assert_eq!(
+            triage_log_path_beside(Path::new("/out/run.zip")),
+            PathBuf::from("/out/run-triage-log-INTERNAL.csv")
+        );
+        assert_eq!(
+            triage_log_path_beside(Path::new("run.zip")),
+            PathBuf::from("run-triage-log-INTERNAL.csv")
+        );
+    }
+
+    #[test]
+    fn the_operator_triage_log_is_written_beside_the_zip_and_never_touches_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip = dir.path().join("run.zip");
+        std::fs::write(&zip, b"zip bytes").unwrap();
+        let report =
+            camerata_server::onboard::ScanReport::gated(&["acme/portal".to_string()]).seal();
+        let written = write_triage_log_beside_zip(&report, None, &zip).unwrap();
+        assert_eq!(written, dir.path().join("run-triage-log-INTERNAL.csv"));
+        let text = std::fs::read_to_string(&written).unwrap();
+        let mut lines = text.lines();
+        assert!(
+            lines
+                .next()
+                .unwrap()
+                .starts_with(camerata_server::xlsx_export::triage_log::INTERNAL_MARK),
+            "{text}"
+        );
+        assert!(lines.next().unwrap().starts_with("Rule ID,"), "{text}");
+        assert_eq!(
+            std::fs::read(&zip).unwrap(),
+            b"zip bytes",
+            "the zip is untouched"
+        );
+    }
 
     fn base_args(repo: PathBuf, export: PathBuf) -> InspectArgs {
         InspectArgs {

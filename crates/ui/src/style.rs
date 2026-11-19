@@ -1119,7 +1119,9 @@ html, body {
 /* Critical (security) row highlight: applied to the whole <tr> via chorale 0.2.3's
    row_class hook (replaces the old per-cell stripe). A red left border + faint red tint
    marks the security-floor rows unmistakably; selection background still composes over it. */
-.finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+.finding-row-critical > td:first-child, .finding-row-held > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+/* A row the release gate holds (work order E): the status cell is red AND says so in words. */
+.held-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; background: #d4332b; }
 .finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }
 
 /* Needs-a-choice row highlight (proposed-rules table): a SELECTED rule with alternatives but
