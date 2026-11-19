@@ -52,6 +52,13 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
     { id = "RUSTSEC-2026-0368", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
     { id = "RUSTSEC-2026-0369", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
+    # `chrono` is unmaintained (RUSTSEC-2026-0543, all versions, no safe upgrade). It is a
+    # direct dependency of 14 of the 29 workspace crates and of sqlx's `chrono` feature
+    # (crates/persistence). It is a date and time library with no open vulnerability
+    # advisory against the locked 0.4.45.
+    # Moving to `jiff` or `time` is a workspace-wide migration tracked separately in the
+    # camerata-internal follow-ups.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no safe upgrade; workspace-wide migration to jiff or time tracked separately" },
     # SQLite before 3.54.0 can return stale page-cache memory when a process opens a database
     # together with a crafted `-wal` file of a different page size. `libsqlite3-sys` 0.30 comes
     # from `sqlx-sqlite` 0.8 (crates/persistence), which requires `^0.30.1`; sqlx 0.9.0 still

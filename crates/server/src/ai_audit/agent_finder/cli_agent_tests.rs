@@ -140,8 +140,12 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
+        // The rig lives under the workspace's `target/`, not the OS temp folder: on Linux that is
+        // `/tmp`, and the isolation test checks that the room is never placed under `/tmp`.
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-rigs");
+        std::fs::create_dir_all(&base).expect("rig base folder");
         let rig = Self {
-            dir: tempfile::tempdir().expect("temp dir"),
+            dir: tempfile::tempdir_in(&base).expect("temp dir"),
         };
         for d in ["log", "work"] {
             std::fs::create_dir_all(rig.path().join(d)).unwrap();
