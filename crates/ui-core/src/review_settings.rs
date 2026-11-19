@@ -12,10 +12,7 @@
 use camerata_api_types::review::{EscalationBudget, EscalationReason};
 use camerata_api_types::review_view::{
     EscalationBudgetOutcome, EscalationBudgetReq, ReviewSettingsView, SettingsLimits,
-    StageModelsView,
 };
-
-use crate::models::{chat_model_groups, ModelOption, ModelsResp};
 
 /// The three typed fields of the lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,114 +399,6 @@ pub fn sample_hint(suggested: usize) -> String {
     )
 }
 
-/// The four stages whose model the lane sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stage {
-    Scan,
-    Calibration,
-    GroupReview,
-    Fix,
-    /// The agent finder's model (the finder KIND is [`Stage::Finder`]).
-    FinderModel,
-    /// The possible-duplicate check's model.
-    DuplicateCheck,
-    /// The clone judge's model.
-    CloneJudge,
-    /// Not a model: the project's finder (`agent` or `engine`). It rides the same route but has
-    /// its own row, so it is not in [`Stage::ALL`].
-    Finder,
-}
-
-/// The finder choices the row offers: the word the route takes and what a person reads.
-pub const FINDER_CHOICES: [(&str, &str); 2] = [
-    ("agent", "Agent (one model reviews each part)"),
-    ("engine", "Engine (rule by rule)"),
-];
-
-impl Stage {
-    pub const ALL: [Stage; 7] = [
-        Stage::Scan,
-        Stage::Calibration,
-        Stage::GroupReview,
-        Stage::Fix,
-        Stage::FinderModel,
-        Stage::DuplicateCheck,
-        Stage::CloneJudge,
-    ];
-
-    /// The `step` the step-models route takes for this stage.
-    pub fn step_key(self) -> &'static str {
-        match self {
-            Stage::Scan => "audit",
-            Stage::Calibration => "calibration",
-            Stage::GroupReview => "group_review",
-            Stage::Fix => "fix",
-            Stage::FinderModel => "finder_model",
-            Stage::DuplicateCheck => "duplicate_check",
-            Stage::CloneJudge => "clone_judge",
-            Stage::Finder => "finder",
-        }
-    }
-
-    /// The row label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Stage::Scan => "Scan model",
-            Stage::Calibration => "Calibration (stage 1)",
-            Stage::GroupReview => "Group review (stage 2)",
-            Stage::Fix => "Fix model",
-            Stage::FinderModel => "Finder model",
-            Stage::DuplicateCheck => "Duplicate check",
-            Stage::CloneJudge => "Clone judge",
-            Stage::Finder => "Finder",
-        }
-    }
-
-    /// The short note beside the select.
-    pub fn hint(self) -> String {
-        use camerata_api_types::project::{
-            model_display_name, DUP_CHECK_DEFAULT_MODEL, FINDER_DEFAULT_MODEL,
-        };
-        match self {
-            Stage::Scan | Stage::Fix => String::new(),
-            Stage::Finder => "agent: one model reviews each part; engine: rule by rule".to_string(),
-            Stage::Calibration => "per site, batched".to_string(),
-            Stage::GroupReview => "one call per rule group, real time".to_string(),
-            Stage::FinderModel => format!(
-                "not set: {}; used when the finder is agent",
-                model_display_name(FINDER_DEFAULT_MODEL)
-            ),
-            Stage::DuplicateCheck => {
-                format!("not set: {}", model_display_name(DUP_CHECK_DEFAULT_MODEL))
-            }
-            Stage::CloneJudge => "not set: the project's fast tier model".to_string(),
-        }
-    }
-
-    /// The model the saved settings hold for this stage (empty: not set).
-    pub fn current(self, models: &StageModelsView) -> &str {
-        match self {
-            Stage::Scan => &models.scan,
-            Stage::Calibration => &models.calibration,
-            Stage::GroupReview => &models.group_review,
-            Stage::Fix => &models.fix,
-            Stage::FinderModel => &models.finder_model,
-            Stage::DuplicateCheck => &models.duplicate_check,
-            Stage::CloneJudge => &models.clone_judge,
-            Stage::Finder => &models.finder,
-        }
-    }
-
-    /// Whether the select offers a "(not set)" first option: the models that have a run-time
-    /// default an explicit pick would override.
-    pub fn can_be_unset(self) -> bool {
-        matches!(
-            self,
-            Stage::Fix | Stage::FinderModel | Stage::DuplicateCheck | Stage::CloneJudge
-        )
-    }
-}
-
 /// What a person can do in the lane, as the screen reports it to its host.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsEvent {
@@ -521,28 +410,6 @@ pub enum SettingsEvent {
     ToggleReason(EscalationReason),
     /// The Apply button.
     Apply,
-    /// A stage's model select changed.
-    Model(Stage, String),
-}
-
-/// The option groups for a stage's select: the registry's models, with the stage's current model
-/// always among them so the select never shows a model that is not there.
-pub fn model_groups(models: &Option<ModelsResp>, current: &str) -> Vec<(String, Vec<ModelOption>)> {
-    let mut groups = chat_model_groups(models, current);
-    let listed = groups
-        .iter()
-        .any(|(_, options)| options.iter().any(|m| m.id == current));
-    if !current.trim().is_empty() && !listed {
-        groups.push((
-            "Current".to_string(),
-            vec![ModelOption {
-                label: current.to_string(),
-                id: current.to_string(),
-                provider: String::new(),
-            }],
-        ));
-    }
-    groups
 }
 
 #[cfg(test)]
