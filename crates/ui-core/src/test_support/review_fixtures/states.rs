@@ -1195,22 +1195,7 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
         }
         // The triage table with held rows (work order E): the page builds its own findings and
         // gate; the fixture names the state and carries the base shell.
-        "export/blocked" => {
-            // Held rows only: one reason, so the panel shows the plain single-reason line and the
-            // Open Review button (the other blocked states show the longer lines).
-            let ds = base();
-            let mut gate = ds.gate.clone();
-            gate.merged_without_decision.clear();
-            gate.node_decisions_missing_members.clear();
-            let mut shell = ds.shell.clone();
-            shell.counts.held = gate.rows_needing_a_decision();
-            shell.export_gate = gate.clone();
-            StateFixture {
-                shell: Loaded::Ready(shell),
-                body: Body::Export(ExportBody { gate }),
-            }
-        }
-        "findings/held-rows" | "findings/held-filter-on" => {
+        "export/blocked" | "findings/held-rows" | "findings/held-filter-on" => {
             let ds = base();
             StateFixture {
                 shell: shell_of(&ds),

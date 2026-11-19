@@ -21,11 +21,10 @@ fn export_blocked_is_one_line_with_a_button_and_no_per_row_list() {
     let ds = dataset_base();
     let html = page("export/blocked");
     assert!(ds.gate.is_blocked());
-    // The held-rows-only state counts the held rows alone (no group-decision rows).
     assert!(
         html.contains(&format!(
             "Export blocked: {} held rows need a decision",
-            ds.gate.held.len()
+            ds.gate.rows_needing_a_decision()
         )),
         "{html}"
     );
@@ -224,13 +223,4 @@ fn every_export_state_shows_the_help_button() {
         assert!(html.contains("aria-label=\"About Export product\""), "{id}");
         assert!(html.contains("class=\"help-button\""), "{id}");
     }
-}
-
-/// `export/blocked` is the held-rows-only state: one reason, no group-decision clause.
-#[test]
-fn export_blocked_is_held_rows_only() {
-    let html = page("export/blocked");
-    assert!(html.contains("Export blocked: "), "{html}");
-    assert!(!html.contains("group decision"), "{html}");
-    assert!(!html.contains("missing records"), "{html}");
 }

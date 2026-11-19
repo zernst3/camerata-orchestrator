@@ -294,3 +294,30 @@ fn a_non_anthropic_model_on_a_client_engagement_is_named_and_only_then() {
     v.finder = ProjectFinder::Engine;
     assert_eq!(engagement_model_conflicts(&v).len(), 2);
 }
+
+#[test]
+fn a_refused_write_reads_as_one_operator_sentence() {
+    assert_eq!(
+        save_error_line(Stage::GroupReview, "model must not be empty"),
+        "Not saved. Group review model: a model must be chosen. The previous value was kept."
+    );
+    assert_eq!(
+        save_error_line(Stage::Finder, "The finder must be agent or engine."),
+        "Not saved. Finder: the finder must be agent or engine. The previous value was kept."
+    );
+    assert_eq!(
+        save_error_line(Stage::Fix, ""),
+        "Not saved. Fix model: the server refused the change. The previous value was kept."
+    );
+}
+
+#[test]
+fn with_no_registry_a_blank_model_never_says_loading() {
+    let groups = model_groups(&None, "");
+    let labels: Vec<&str> = groups
+        .iter()
+        .flat_map(|(_, o)| o.iter().map(|m| m.label.as_str()))
+        .collect();
+    assert!(!labels.is_empty(), "never an empty select");
+    assert!(labels.iter().all(|l| !l.contains("Loading")), "{labels:?}");
+}

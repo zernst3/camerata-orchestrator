@@ -1037,7 +1037,10 @@ fn the_backend_help_topic_keeps_the_long_text_true_and_free_of_serial_commas() {
 #[test]
 fn a_run_in_flight_locks_the_backend_control_visibly_and_the_client_name() {
     let html = page("run-in-flight");
-    assert!(html.contains("backend-toggle backend-toggle-locked"), "{html}");
+    assert!(
+        html.contains("backend-toggle backend-toggle-locked"),
+        "{html}"
+    );
     let name = tag_of(&html, "inspection-client-name");
     assert!(name.contains("disabled"), "client name is locked: {name}");
     let free = page("agent-opus");
