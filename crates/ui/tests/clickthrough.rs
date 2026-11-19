@@ -665,6 +665,11 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
     // gate holds one row fewer and the export panel counts it out.
     stack.click(".triage-tab", "Tree");
     open_site(&stack, "cat:injection", "SEC-NO-RAW-SQL-CONCAT-1", &place);
+    let detail = stack.text(".site-detail");
+    assert!(
+        detail.contains("Held from export: critical, no decision. Decide it to release."),
+        "Review says why the row is held: {detail}"
+    );
     stack.click(".site-detail-actions .pane-dispose", "Confirmed");
     stack.wait_for(
         "the gate to release the row",
@@ -1356,13 +1361,20 @@ fn adding_a_finding_with_a_stale_snippet_is_held_and_the_gate_refuses_the_export
         "the Export button is gone"
     );
     // Follow the door with a real click: Review shows that row, at that place, held for the reason.
+    assert!(
+        stack.js_bool("(() => { const w = document.querySelector('.site-detail .site-detail-where'); return !w || !w.textContent.includes('src/orders/repo.rs:5'); })()"),
+        "Review does not already show the held row before the door is used"
+    );
     stack.click(".export-blocked .export-open-review", "Open Review");
     stack.wait_for(
         "the held row in Review",
         "T.has('.site-detail .site-detail-where', 'src/orders/repo.rs:5')",
     );
+    assert_eq!(
+        stack.text(".site-detail .site-detail-where").trim(),
+        "Where\nacme/portal src/orders/repo.rs:5"
+    );
     let detail = stack.text(".site-detail");
-    assert!(detail.contains("src/orders/repo.rs:5"), "{detail}");
     assert!(
         detail.contains("Held from export: evidence unverified. Decide it to release."),
         "{detail}"
