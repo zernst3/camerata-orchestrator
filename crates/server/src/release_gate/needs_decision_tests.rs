@@ -258,10 +258,7 @@ fn the_budget_and_the_reviewed_count_are_printed_in_the_pdf_and_the_workbook() {
     );
     assert!(package.data_json.contains(&budget), "the PDF data");
     let cells = xlsx_strings(&package.xlsx).expect("the workbook strings");
-    assert!(
-        cells.iter().any(|c| *c == budget),
-        "the workbook: {cells:?}"
-    );
+    assert!(cells.contains(&budget), "the workbook: {cells:?}");
     // And the template prints it.
     let template = include_str!("../../templates/audit_report.typ");
     assert!(template.contains("d.escalations.review_line"));
