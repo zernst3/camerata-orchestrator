@@ -626,6 +626,9 @@ pub(in crate::cockpit) const HELD_CELL_TEXT: &str = "Held: decide before export"
 
 /// What the held column holds on every other row. It sorts after [`HELD_WORD`], so an ascending
 /// sort puts the held rows first.
+/// The held column's width in pixels: wide enough for the whole pill, [`HELD_CELL_TEXT`].
+pub(in crate::cockpit) const HELD_COLUMN_WIDTH: f64 = 240.0;
+
 const NOT_HELD_WORD: &str = "Not held";
 
 /// The site keys the release gate holds, shared with the column's accessor and the row class. Both
@@ -658,7 +661,7 @@ pub(in crate::cockpit) fn held_column(store: HeldStore) -> ColumnDef<FindingView
     .filter(FilterKind::MultiSelect {
         options: vec![HELD_WORD.to_string()],
     })
-    .initial_width(170.0)
+    .initial_width(HELD_COLUMN_WIDTH)
 }
 
 /// The row class: the critical highlight, plus a red left edge on a row the gate holds.

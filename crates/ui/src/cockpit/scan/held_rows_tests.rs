@@ -985,3 +985,50 @@ fn a_critical_held_row_shows_the_held_tint_because_its_rule_comes_last() {
         "the held tint must follow the critical tint"
     );
 }
+
+/// The held pill said "Held: decide before expo" because its column was narrower than the words.
+/// The column is wide enough for the whole pill and the pill never wraps or clips mid-word.
+#[test]
+fn the_held_pill_has_room_for_its_whole_text() {
+    // About 7px a character at the pill's 12px bold size, plus its padding and the cell's.
+    let needed = HELD_CELL_TEXT.chars().count() as f64 * 7.0 + 16.0 + 16.0;
+    assert!(
+        HELD_COLUMN_WIDTH >= needed,
+        "the column ({HELD_COLUMN_WIDTH}px) must hold {HELD_CELL_TEXT:?} ({needed}px)"
+    );
+    let css = crate::style::GLOBAL_CSS;
+    let rule = css.find(".held-status {").expect("the pill rule");
+    let end = css[rule..].find('}').unwrap();
+    assert!(css[rule..rule + end].contains("white-space: nowrap"));
+}
+
+/// chorale gives the checkbox cell (the first cell) an inline `box-shadow` for its row separator;
+/// an inline style beats a plain stylesheet rule, so the held edge only shows if its rule is
+/// `!important`. The edge is 7px, wider than the critical row's 4px.
+#[test]
+fn the_held_edge_rule_beats_the_first_cells_inline_box_shadow() {
+    let css = crate::style::GLOBAL_CSS;
+    let at = css
+        .find(".finding-row-held > td:first-child {")
+        .expect("the held edge rule");
+    let end = css[at..].find('}').unwrap();
+    let rule = &css[at..at + end];
+    assert!(rule.contains("inset 7px 0 0 0"), "{rule}");
+    assert!(rule.contains("!important"), "{rule}");
+}
+
+/// The held tint is not the critical tint (a flat 6% red): it is a striped, stronger red.
+#[test]
+fn the_held_tint_differs_from_the_critical_tint() {
+    let css = crate::style::GLOBAL_CSS;
+    let tint = |sel: &str| {
+        let at = css.find(sel).unwrap_or_else(|| panic!("{sel}"));
+        let end = css[at..].find('}').unwrap();
+        css[at..at + end].to_string()
+    };
+    let critical = tint(".finding-row-critical > td { background");
+    let held = tint(".finding-row-held > td { background");
+    assert!(critical.contains("rgba(212, 51, 43, 0.06)"));
+    assert!(held.contains("repeating-linear-gradient"), "{held}");
+    assert!(!held.contains("0.06"), "{held}");
+}
