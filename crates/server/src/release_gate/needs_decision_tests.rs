@@ -389,7 +389,9 @@ fn node_record(
 #[test]
 fn a_group_record_after_a_personal_decision_does_not_decide_a_critical() {
     use camerata_api_types::decisions::DecisionState;
-    let row = critical_below_the_line();
+    // An escalated row: a group record on it reads as PersonallyReviewed in the overlay.
+    let mut row = critical_below_the_line();
+    row.review.escalation_state = EscalationState::Escalated;
     let sealed = report_with(row).seal();
     let key = sealed
         .findings
