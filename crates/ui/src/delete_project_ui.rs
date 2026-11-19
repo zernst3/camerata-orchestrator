@@ -36,6 +36,10 @@ pub struct DeleteAllPlan {
     pub kept: Vec<KeptLine>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Per checkout: "N uncommitted changes and M unpushed commits will be lost." The deletion
+    /// takes uncommitted work along, so the dialog says so before the name is typed.
+    #[serde(default)]
+    pub loss_sentences: Vec<String>,
 }
 
 /// What a finished deletion hands back.
@@ -146,11 +150,15 @@ pub fn DeleteProjectModalView(
                     }
                 }
                 if let Some(done) = result.clone() {
-                    p { class: "rule-modal-detail",
-                        "The project and its data were removed from this machine. Keep this record as your proof."
-                    }
                     if let Some(note) = done.partial_message.clone() {
+                        p { class: "rule-modal-detail",
+                            "Some items could not be removed; the project is kept so you can retry. This record lists what was and was not removed."
+                        }
                         p { class: "src-refusal", "{note}" }
+                    } else {
+                        p { class: "rule-modal-detail",
+                            "The project and its data were removed from this machine. Keep this record as your proof."
+                        }
                     }
                     if let Some(path) = done.record_path.clone() {
                         p { class: "src-method", "Record saved at {path}" }
@@ -187,6 +195,9 @@ pub fn DeleteProjectModalView(
                             p { class: "src-plan-total", "Total: {plan.total_summary}" }
                             for k in plan.kept.iter() {
                                 p { key: "{k.what}", class: "src-method", "Kept: {k.what}. {k.why}." }
+                            }
+                            for l in plan.loss_sentences.iter() {
+                                p { key: "{l}", class: "src-warning", "{l}" }
                             }
                             for w in plan.warnings.iter() {
                                 p { key: "{w}", class: "src-warning", "{w}" }
@@ -616,6 +627,105 @@ mod tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Camerata project deletion record"), "{html}");
         assert!(html.contains("/d/deletion-records/x.json"), "{html}");
+    }
+
+    /// Open the dialog on a stub whose preview and delete answers the caller chose.
+    async fn mounted(
+        plan: serde_json::Value,
+        delete: serde_json::Value,
+    ) -> (MockServer, camerata_test_env::EnvGuard, VirtualDom, Wired) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p1/delete-all-preview"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(plan))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p1/delete-all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(delete))
+            .mount(&server)
+            .await;
+        let env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let mut vdom = VirtualDom::new(zone);
+        let mut w = Wired::default();
+        w.take(&vdom.rebuild_to_vec());
+        fire(&vdom, "click", marked(&w, "dp-open"));
+        pump(&mut vdom, &mut w, 500).await;
+        (server, env, vdom, w)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_dialog_says_how_much_uncommitted_and_unpushed_work_will_be_lost() {
+        let (_server, _env, vdom, _w) = mounted(
+            serde_json::json!({ "ok": true, "plan": {
+                "item_view": [{ "label": "checkout", "path": "/w/acme/app", "counts": "12 files, 3.4 KB" }],
+                "total_summary": "12 files, 3.4 KB", "kept": [], "warnings": [],
+                "losses": [{ "repo": "acme/app", "uncommitted": 3, "unpushed": 2 }],
+                "loss_sentences": ["acme/app: 3 uncommitted changes and 2 unpushed commits will be lost."],
+            }}),
+            serde_json::json!({}),
+        )
+        .await;
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("acme/app: 3 uncommitted changes and 2 unpushed commits will be lost."),
+            "{html}"
+        );
+        // And it is there before the name is typed, with the confirm button still off.
+        assert!(confirm_tag(&html).contains("disabled"), "{html}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_partial_deletion_says_so_and_does_not_claim_the_project_was_removed() {
+        let (_server, _env, mut vdom, mut w) = mounted(
+            plan_body(),
+            serde_json::json!({
+                "ok": false, "code": "partial",
+                "message": "2 locations could not be removed, so the project was kept; see the record.",
+                "record_text": "Camerata project deletion record\nLocations\n  FAILED",
+                "record_path": "/d/deletion-records/x.json"
+            }),
+        )
+        .await;
+        fire_input(&vdom, marked(&w, "dp-name"), "Acme");
+        pump(&mut vdom, &mut w, 200).await;
+        fire(&vdom, "click", marked(&w, "dp-confirm"));
+        pump(&mut vdom, &mut w, 500).await;
+
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Some items could not be removed; the project is kept so you can retry."),
+            "{html}"
+        );
+        assert!(html.contains("2 locations could not be removed"), "{html}");
+        assert!(
+            !html.contains("were removed from this machine"),
+            "a partial result must not claim success: {html}"
+        );
+        assert!(html.contains("Camerata project deletion record"), "{html}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_complete_deletion_still_says_the_project_and_its_data_were_removed() {
+        let (_server, _env, mut vdom, mut w) = mounted(
+            plan_body(),
+            serde_json::json!({
+                "ok": true, "code": "deleted", "record_text": "Camerata project deletion record",
+                "record_path": "/d/deletion-records/x.json"
+            }),
+        )
+        .await;
+        fire_input(&vdom, marked(&w, "dp-name"), "Acme");
+        pump(&mut vdom, &mut w, 200).await;
+        fire(&vdom, "click", marked(&w, "dp-confirm"));
+        pump(&mut vdom, &mut w, 500).await;
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("The project and its data were removed from this machine."), "{html}");
+        assert!(!html.contains("could not be removed"), "{html}");
     }
 
     #[tokio::test]

@@ -1875,14 +1875,24 @@ enum ImportResult {
     Cancelled,
 }
 
-/// Delete a project by id. Returns true on success.
-async fn delete_project(id: &str) -> bool {
-    reqwest::Client::new()
+/// Remove a project from the list by id. This does not delete its data: the server refuses
+/// while the project still holds any, and `Err` carries the server's sentence for that (or a
+/// generic one when the server could not be reached).
+async fn delete_project(id: &str) -> Result<(), String> {
+    let resp = reqwest::Client::new()
         .delete(format!("{}/api/projects/{}", crate::bff_base(), id))
         .send()
         .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+        .map_err(|_| "Could not reach the Camerata server.".to_string())?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    Err(body
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("Could not remove the project from the list.")
+        .to_string())
 }
 
 /// Clear a project's onboarded marker (keeping its repos and ruleset) so it can be
@@ -2175,6 +2185,7 @@ fn ProjectsHome() -> Element {
                                 let id_reset = p.id.clone();
                                 let has_onboarded = !p.onboarded.is_empty();
                                 let is_pending = pending_delete().as_deref() == Some(p.id.as_str());
+                                let remove_mark = "remove-from-list";
                                 let is_pending_reset = pending_reset().as_deref() == Some(p.id.as_str());
                                 rsx! {
                                     div { class: "pg-card", key: "{p.id}",
@@ -2235,26 +2246,30 @@ fn ProjectsHome() -> Element {
                                             }
                                             button {
                                                 class: if is_pending { "pg-btn-danger confirm" } else { "pg-btn-danger" },
+                                                "data-test": remove_mark,
                                                 onclick: move |_| {
                                                     let id = id_del.clone();
                                                     if pending_delete().as_deref() == Some(id.as_str()) {
                                                         // Second click — delete.
                                                         pending_delete.set(None);
                                                         spawn(async move {
-                                                            if delete_project(&id).await {
-                                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Project deleted.");
-                                                                refresh += 1;
-                                                            } else {
-                                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not delete the project.");
+                                                            match delete_project(&id).await {
+                                                                Ok(()) => {
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Project removed from the list.");
+                                                                    refresh += 1;
+                                                                }
+                                                                Err(message) => {
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message);
+                                                                }
                                                             }
                                                         });
                                                     } else {
                                                         // First click — warn + arm the confirm.
                                                         pending_delete.set(Some(id));
-                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Click Confirm to permanently delete \u{201c}{name_del}\u{201d}. This can't be undone."));
+                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Click Confirm to remove \u{201c}{name_del}\u{201d} from the list. This does not delete its data on this machine."));
                                                     }
                                                 },
-                                                if is_pending { "Confirm delete" } else { "Delete" }
+                                                if is_pending { "Confirm remove" } else { "Remove from list" }
                                             }
                                             button {
                                                 class: "btn-run",
@@ -5277,7 +5292,7 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_project("p-9").await;
 
-        assert!(ok);
+        assert!(ok.is_ok());
     }
 
     /// `fetch_provider` GETs /api/provider and parses the connection view.
@@ -6694,3 +6709,6 @@ mod tests {
         assert_eq!(v(None, Some("a")), "");
     }
 }
+
+#[cfg(test)]
+mod project_home_tests;
