@@ -1860,6 +1860,10 @@ fn place_id_of_tree(tree: &ReviewTree) -> String {
 async fn a_place_decision_writes_the_node_record_and_one_site_record_per_rule_it_covers() {
     let (state, app, pid) = app_with_project();
     let mut rows = place_rows();
+    // A critical row is kept out of a batch (the release gate wants it decided in person), and
+    // this test is about what a place decision covers, so the carrier is a high.
+    rows[0].severity = "high".to_string();
+    rows[1].severity = "medium".to_string();
     // SEC-C is held (its quoted evidence is not verified): a batch leaves it for a ruling by name.
     rows[2].captures.insert(
         crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),

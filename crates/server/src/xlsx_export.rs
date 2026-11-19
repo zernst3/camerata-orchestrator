@@ -1275,6 +1275,8 @@ pub(crate) struct CountRow {
     pub kind: CountKind,
     pub tool_preview: bool,
     pub escalated: bool,
+    /// A person read this row (its review level is `personally_reviewed`).
+    pub reviewed_in_person: bool,
     pub rule_id: String,
 }
 
@@ -1344,6 +1346,7 @@ pub(crate) fn counting_view(
             },
             tool_preview: r.provenance.starts_with("Preview:"),
             escalated: r.facts.escalated,
+            reviewed_in_person: r.facts.review_level == "personally_reviewed",
             rule_id: r.rule_id.clone(),
         })
         .collect();
@@ -2426,6 +2429,20 @@ pub struct FindingsExport {
     /// The Fixes: the rule groups whose places are one change, with every place and rule of each
     /// (item #1). Every row's `fix_id` names one of these.
     pub fixes: Vec<crate::review_tree::FixNode>,
+}
+
+impl FindingsExport {
+    /// The Place ids ([`crate::report_export::RowFacts::site_id`]) of the rows shown at critical
+    /// severity: the severity the PDF and the workbook print, with every bound applied. The release
+    /// gate holds each of these to a reviewer's decision
+    /// ([`crate::release_gate::needs_decision`]).
+    pub(crate) fn shown_critical_site_ids(&self) -> std::collections::HashSet<&str> {
+        self.findings
+            .iter()
+            .filter(|r| r.severity == "critical")
+            .map(|r| r.facts.site_id.as_str())
+            .collect()
+    }
 }
 
 /// The `summary` of findings.json: the executive summary's sentence and its tallies, every tally

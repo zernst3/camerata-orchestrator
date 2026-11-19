@@ -602,6 +602,11 @@
 // whatever the number of rules at it. Every other place is on the All problems sheet.
 #section("Escalations", sec(6))
 
+#if d.escalations.review_line != "" [
+  #text(size: 9pt, fill: ink_soft)[#d.escalations.review_line]
+  #v(4pt)
+]
+
 #if d.escalations.items.len() == 0 [
   No place was sent for review in person in this inspection.
 ] else [

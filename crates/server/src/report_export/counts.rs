@@ -36,6 +36,26 @@ pub struct ReportCounts {
     pub problems: ProblemCounts,
     pub fixes: FixCounts,
     pub other: OtherCounts,
+    /// What was read in person, and the review budget.
+    #[serde(default)]
+    pub review: ReviewCounts,
+}
+
+/// What a person read, and the review budget that bounds it. The PDF and the workbook print these
+/// words from here ([`crate::xlsx_export::vocabulary::review_line`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewCounts {
+    /// Places (problems) where any row was reviewed in person: the number of "Reviewed in
+    /// person" cells marked on the All problems sheet.
+    pub reviewed_in_person: usize,
+    /// How many places the review budget allows a person to read: from the review tree. `None`
+    /// for a report with no review tree.
+    pub review_budget: Option<usize>,
+    /// No finding shown at critical severity and no finding the finder was unsure of lacks a
+    /// reviewer's decision of its own. The release gate refuses a package where this is false, so
+    /// a client package states what a person read only when it is true
+    /// ([`crate::release_gate::needs_decision`]).
+    pub every_critical_and_unsure_decided: bool,
 }
 
 /// Rows: for the reconciliation line and the tool files only, never a client headline.
@@ -187,7 +207,7 @@ pub fn report_counts(
         .iter()
         .filter(|f| view.fix_ids_to_do.contains(&f.id))
         .count();
-    counts_of(
+    let mut counts = counts_of(
         &view,
         FixCounts {
             total: fixes_total,
@@ -200,7 +220,13 @@ pub fn report_counts(
             rules_with_problems: 0,
             client_suppressions_found: report.ledger.client_suppressions_found(),
         },
-    )
+    );
+    counts.review.review_budget = report.tree.as_ref().map(|t| t.budget.budget);
+    counts.review.every_critical_and_unsure_decided =
+        crate::release_gate::needs_decision::undecided(&report.findings, reviewed)
+            .next()
+            .is_none();
+    counts
 }
 
 /// The counts of a counting view; split from [`report_counts`] so the arithmetic is testable on
@@ -230,6 +256,10 @@ pub(crate) fn counts_of(
         total: places.len(),
         ..ProblemCounts::default()
     };
+    let reviewed_in_person = places
+        .iter()
+        .filter(|place| place.members.iter().any(|m| m.reviewed_in_person))
+        .count();
     for place in &places {
         p.by_severity.add(&place.head.severity);
         match place.class {
@@ -282,6 +312,10 @@ pub(crate) fn counts_of(
         problems: p,
         fixes,
         other,
+        review: ReviewCounts {
+            reviewed_in_person,
+            ..ReviewCounts::default()
+        },
     };
     debug_assert!(
         counts.identity_failures().is_empty(),
