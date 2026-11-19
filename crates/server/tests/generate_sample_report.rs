@@ -255,7 +255,8 @@ async fn regenerate_sample_report() {
     );
     // The release gate refuses a critical problem with no decision of its own, so the sample's
     // two critical problems carry the auditor's own confirmation (not a client's).
-    for critical in [&rls_enabled, &key_service_role] {
+    let edge_jwt = fn_by_rule(&all_findings, "SUPABASE-AUTH-EDGE-JWT-1");
+    for critical in [&rls_enabled, &key_service_role, &edge_jwt] {
         dispositions.insert(
             report_export::finding_key(critical),
             DispositionWire {
@@ -445,8 +446,10 @@ async fn regenerate_sample_report() {
     // the reconciliation whole (see below). Reconfirmed on the 2026-10-20 sample regen (W27).
     assert_eq!(json.methodology.candidates_reviewed, 10);
     assert_eq!(json.methodology.excluded_false_positive, 3);
-    assert_eq!(json.executive_summary.curated_total, 5);
-    assert_eq!(json.executive_summary.held_for_review, 1); // the needs-review AUTH-EDGE-JWT row
+    // The auditor confirmed the needs-review AUTH-EDGE-JWT row (the release gate wants it decided),
+    // so it is curated again and nothing is held.
+    assert_eq!(json.executive_summary.curated_total, 6);
+    assert_eq!(json.executive_summary.held_for_review, 0);
     assert_eq!(json.dependency_snapshot.rows.len(), 1);
     // The reconciliation invariant, asserted whole so a future drift names itself:
     // candidates_reviewed == curated + held + false_positive + dependency_advisories.
