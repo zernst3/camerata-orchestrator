@@ -2418,19 +2418,21 @@ fn HeldGalleryPage(props: HeldGalleryProps) -> Element {
         }
     });
     rsx! {
-        div { class: "audit-export-panel",
-            crate::cockpit::export_gate::ExportGate {
-                gate,
-                table_keys: Some(keys),
-                button { class: "btn-run", "Export product" }
+        div { class: "held-gallery",
+            div { class: "audit-export-panel",
+                crate::cockpit::export_gate::ExportGate {
+                    gate,
+                    table_keys: Some(keys),
+                    button { class: "btn-run", "Export product" }
+                }
             }
-        }
-        FindingsTable {
-            findings,
-            repos: vec!["acme/portal".to_string()],
-            descriptions: std::collections::HashMap::new(),
-            dispositions,
-            order_preset,
+            FindingsTable {
+                findings,
+                repos: vec!["acme/portal".to_string()],
+                descriptions: std::collections::HashMap::new(),
+                dispositions,
+                order_preset,
+            }
         }
     }
 }

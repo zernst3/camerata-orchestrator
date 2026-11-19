@@ -1131,7 +1131,11 @@ html, body {
 /* Critical (security) row highlight: applied to the whole <tr> via chorale 0.2.3's
    row_class hook (replaces the old per-cell stripe). A red left border + faint red tint
    marks the security-floor rows unmistakably; selection background still composes over it. */
-.finding-row-critical > td:first-child, .finding-row-held > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+.finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+/* A row the release gate holds (work order E): a wider, darker edge and its own tint, so it reads
+   apart from the critical highlight even on a critical row. */
+.finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d; }
+.finding-row-held > td { background: rgba(143, 29, 29, 0.12); }
 /* A row the release gate holds (work order E): the status cell is red AND says so in words. */
 .held-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; background: #d4332b; }
 .finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }
@@ -7337,7 +7341,13 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
   margin: 10px 0; padding: 10px 12px; border: 1px solid var(--danger-color); border-radius: 6px;
   background: rgba(220, 38, 38, 0.08);
 }
-.export-blocked-head { margin: 0 0 8px; font-weight: 700; color: var(--ink); }
+.export-blocked { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.export-blocked-head { flex: 1 1 100%; margin: 0 0 2px; font-weight: 700; color: var(--ink); }
+/* The gallery's held-rows pages hold the table alone: it must start at the left edge and scroll
+   inside the page (the app root centres its children, which cuts a wide table off on the left),
+   and the empty detail pane draws nothing. */
+.held-gallery { align-self: stretch; width: 100%; min-width: 0; box-sizing: border-box; padding: 0 16px; overflow-x: auto; }
+.held-gallery .finding-pane { display: none; }
 .gate-rows { display: flex; flex-direction: column; gap: 4px; }
 .gate-row {
   display: grid; grid-template-columns: 56px minmax(240px, 2fr) 90px 3fr auto;

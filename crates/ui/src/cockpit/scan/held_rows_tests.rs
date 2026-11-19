@@ -403,6 +403,10 @@ async fn forty_held_rows_are_red_in_the_table_and_the_panel_is_one_line() {
         count(&html, "finding-row-held"),
         "every marked cell sits in a row with the red edge"
     );
+    assert!(
+        html.contains(">Held</"),
+        "the column header is drawn: {html}"
+    );
     assert!(html.contains("Held: decide before export"), "{html}");
     assert!(
         !html.contains(">Needs a decision<"),
