@@ -101,6 +101,7 @@ pub async fn load_decisions<T: DecisionTransport>(t: &T, queue: &DraftQueue) -> 
         return unreachable_store(queue);
     };
     let mut migrated_now = false;
+    let mut held_back = false;
     if !got.migrated_from_draft {
         let req = migration_request(&queue.pending).unwrap_or(MigrateDraftReq {
             migrated_from_draft: true,
@@ -117,7 +118,7 @@ pub async fn load_decisions<T: DecisionTransport>(t: &T, queue: &DraftQueue) -> 
                 }
                 None => return unreachable_store(queue),
             },
-            Err(OpError::NoRows(_)) => {}
+            Err(OpError::NoRows(_)) => held_back = true,
             Err(_) => return unreachable_store(queue),
         }
     }
@@ -131,6 +132,11 @@ pub async fn load_decisions<T: DecisionTransport>(t: &T, queue: &DraftQueue) -> 
     };
     let mut bridge = DecisionBridge::from_decisions(&got.decisions);
     bridge.restore_stamps(&queue.stamps, &pending);
+    if held_back {
+        // Under their old keys these entries would be posted as site decisions that match no
+        // row; they wait, untouched, for the migration.
+        bridge.hold_legacy(queue);
+    }
     bridge.set_run_id(&got.latest_run_id);
     Loaded {
         shown: overlay_pending(stored, &pending),

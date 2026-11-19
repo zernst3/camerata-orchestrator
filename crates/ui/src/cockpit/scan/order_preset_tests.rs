@@ -581,3 +581,49 @@ async fn the_decision_transport_reports_a_no_rows_refusal_apart_from_an_outage()
     assert_eq!(loaded.bridge.availability(), Availability::Live);
     assert!(loaded.banner.is_none());
 }
+
+/// Negative control: a 409 with another code, and a server error, are not the no-rows case. Both
+/// still end in the "Decisions not loaded" banner.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn other_migration_failures_still_give_the_banner() {
+    use camerata_api_types::decisions::{DecisionError, DecisionsResp};
+    use camerata_ui_core::decision_sync::load_decisions;
+    use camerata_ui_core::decisions::{Availability, DraftQueue};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for migrate_answer in [
+        ResponseTemplate::new(409).set_body_json(DecisionError {
+            ok: false,
+            code: "something_else".to_string(),
+            message: "no".to_string(),
+        }),
+        ResponseTemplate::new(500),
+    ] {
+        let server = MockServer::start().await;
+        let uri = "/api/projects/p1/decisions";
+        Mock::given(method("GET"))
+            .and(path(uri))
+            .respond_with(ResponseTemplate::new(200).set_body_json(DecisionsResp {
+                decisions: Vec::new(),
+                standings: Vec::new(),
+                migrated_from_draft: false,
+                latest_run_id: String::new(),
+            }))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(uri))
+            .respond_with(migrate_answer)
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let transport = HttpDecisions {
+            project_id: "p1".to_string(),
+        };
+        let loaded = load_decisions(&transport, &DraftQueue::default()).await;
+        assert_ne!(loaded.bridge.availability(), Availability::Live);
+        assert!(loaded.banner.is_some());
+    }
+}

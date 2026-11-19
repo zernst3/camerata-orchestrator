@@ -303,6 +303,17 @@ fn a_no_rows_refusal_keeps_the_drafts_queue_pending_and_migrates_once_rows_exist
     assert_eq!(loaded.shown, legacy);
     assert_eq!(loaded.bridge.draft_queue(&loaded.shown).pending, legacy);
 
+    // The sync loop must not post them under their old, untranslated keys, nor show them as
+    // refusals, and the draft still holds them afterwards.
+    let screen = loaded.shown.clone();
+    let bridge = RefCell::new(loaded.bridge);
+    let out = sync(&bridge, &store, &screen);
+    assert!(store.posted.borrow().is_empty(), "no post under an old key");
+    assert!(!out.stored_any && out.unreachable.is_none() && out.refused.is_empty());
+    assert_eq!(bridge.borrow().draft_queue(&screen).pending, legacy);
+    assert_eq!(bridge.borrow().draft_queue(&screen).stamps, queue.stamps);
+    assert_eq!(bridge.borrow().unsynced(&screen).len(), legacy.len());
+
     // Once rows exist the same load migrates, and the draft's old entries are consumed.
     store.migrate_refuses = false;
     let loaded = block_on(load_decisions(&store, &queue));
