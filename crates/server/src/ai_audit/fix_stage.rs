@@ -1326,7 +1326,8 @@ async fn resume_held_fixes(
         job: route.job,
         checkpoint: Some(&checkpoint),
         settings: stage_batch::StageSettings::default(),
-        feedback: route.feedback_for("Fix"),
+        // resume_held replays stored replies and ignores this row; the rounds that follow show their own.
+        feedback: None,
     };
     let mut stage = FixRound {
         llm,

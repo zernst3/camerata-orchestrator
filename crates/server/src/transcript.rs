@@ -225,7 +225,9 @@ mod tests {
         let rows = store.get("k");
         let open = rows.iter().find(|a| a.session_id == "open").unwrap();
         assert_eq!(open.status, "blocked");
-        assert!(open.output.contains("the scan ended before this call finished"));
+        assert!(open
+            .output
+            .contains("the scan ended before this call finished"));
         let done = rows.iter().find(|a| a.session_id == "finished").unwrap();
         assert_eq!(done.status, "done");
         assert!(done.output.is_empty());

@@ -1711,7 +1711,8 @@ async fn resume_held_details(
         job: route.job,
         checkpoint: Some(&checkpoint),
         settings: StageSettings::default(),
-        feedback: route.feedback_for("Detail rewrite"),
+        // resume_held replays stored replies and ignores this row; the rounds that follow show their own.
+        feedback: None,
     };
     let mut stage = DetailRound {
         llm,

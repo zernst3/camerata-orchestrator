@@ -246,8 +246,8 @@ fn a_secret_across_the_output_cut_is_redacted_before_the_cut() {
     use camerata_secrets::fixtures::planted;
     use camerata_secrets::SecretShape;
     let p = planted(SecretShape::StripeLiveSecretKey);
-    // The secret starts a few characters before the 20,000 character cut.
-    let mut body = "x".repeat(19_995);
+    // The secret starts 32 characters before the 20,000 character cut (after the file header).
+    let mut body = "x".repeat(19_930);
     body.push_str(&p.text);
     body.push_str(&"y".repeat(100));
     let mut run = AgentRun::empty(AgentStop::Finished);
@@ -258,7 +258,7 @@ fn a_secret_across_the_output_cut_is_redacted_before_the_cut() {
     activity.begin("s", "role", "prompt");
     activity.end("s", &Ok(run));
     let output = store.get(KEY)[0].output.clone();
-    let prefix = &p.text[..12];
+    let prefix = &p.value[8..14];
     assert!(
         !output.contains(prefix),
         "no part of the secret survives the cut: {}",
