@@ -1757,3 +1757,41 @@ fn req_pass2_9_bulk_bar_is_absent_from_the_non_unresolved_tables() {
         );
     }
 }
+
+/// The model's honest "unsure" is not a refusal. The Not assessed tab groups it under the
+/// operator's words, with the producer's sentence beneath, never the wire string "model_declined".
+#[test]
+fn the_not_assessed_panel_calls_an_unsure_answer_not_settled_never_model_declined() {
+    fn harness() -> Element {
+        rsx! {
+            NotAssessedPanel {
+                findings: vec![
+                    kinded_finding(
+                        "ARCH-SINGLE-SOURCE-LOGIC-1",
+                        "info",
+                        serde_json::json!({
+                            "kind": "not_assessed",
+                            "reason": "model_declined",
+                            "reason_detail": "the model was unsure about 1 of 3 candidates; 2 judged",
+                        }),
+                    ),
+                ],
+            }
+        }
+    }
+    let mut vdom = VirtualDom::new(harness);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+    assert!(
+        html.contains("Not settled \u{00b7} 1"),
+        "the heading reads in the operator's words; html=\n{html}"
+    );
+    assert!(
+        html.contains("the model was unsure about 1 of 3 candidates; 2 judged"),
+        "the producer's sentence; html=\n{html}"
+    );
+    assert!(
+        !html.contains("model_declined") && !html.contains("MODEL_DECLINED"),
+        "the wire string is gone; html=\n{html}"
+    );
+}

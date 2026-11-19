@@ -98,6 +98,28 @@ impl TranscriptStore {
         }
     }
 
+    /// Close every row of `run_id` still `running`: blocked, with `reason` as its last output line.
+    /// A call that was cut off (a panic, a dropped future, a cancel) never reached its own close,
+    /// so the scan's end sweeps it. Returns how many rows it closed.
+    pub fn block_running(&self, run_id: &str, reason: &str) -> usize {
+        let Ok(mut g) = self.inner.lock() else {
+            return 0;
+        };
+        let Some(list) = g.get_mut(run_id) else {
+            return 0;
+        };
+        let mut closed = 0;
+        for a in list.iter_mut().filter(|a| a.status == "running") {
+            if !a.output.is_empty() {
+                a.output.push('\n');
+            }
+            a.output.push_str(reason);
+            a.status = "blocked".to_string();
+            closed += 1;
+        }
+        closed
+    }
+
     /// Set an agent's status (`running` | `done` | `blocked`).
     pub fn set_status(&self, run_id: &str, session_id: &str, status: &str) {
         if let Ok(mut g) = self.inner.lock() {
@@ -107,6 +129,30 @@ impl TranscriptStore {
                 }
             }
         }
+    }
+}
+
+/// Held for the length of a scan: when it drops (the scan ended, panicked, was cancelled or its
+/// future was dropped) every row of the scan still `running` is closed as blocked, so no row can
+/// show running forever.
+pub struct SweepOnDrop {
+    store: TranscriptStore,
+    key: String,
+}
+
+impl SweepOnDrop {
+    pub fn new(store: TranscriptStore, key: &str) -> Self {
+        Self {
+            store,
+            key: key.to_string(),
+        }
+    }
+}
+
+impl Drop for SweepOnDrop {
+    fn drop(&mut self) {
+        self.store
+            .block_running(&self.key, "the scan ended before this call finished");
     }
 }
 
@@ -165,6 +211,39 @@ mod tests {
             .find(|a| a.session_id == "frontend-1")
             .unwrap();
         assert_eq!(fe.status, "blocked");
+    }
+
+    #[test]
+    fn the_end_of_a_scan_closes_every_row_still_running_and_leaves_the_others() {
+        let store = TranscriptStore::new();
+        store.register("k", agent("open"));
+        store.register("k", agent("finished"));
+        store.set_status("k", "finished", "done");
+        {
+            let _sweep = SweepOnDrop::new(store.clone(), "k");
+        }
+        let rows = store.get("k");
+        let open = rows.iter().find(|a| a.session_id == "open").unwrap();
+        assert_eq!(open.status, "blocked");
+        assert!(open
+            .output
+            .contains("the scan ended before this call finished"));
+        let done = rows.iter().find(|a| a.session_id == "finished").unwrap();
+        assert_eq!(done.status, "done");
+        assert!(done.output.is_empty());
+    }
+
+    #[test]
+    fn a_panic_in_a_scan_still_closes_its_running_rows() {
+        let store = TranscriptStore::new();
+        store.register("k", agent("open"));
+        let s2 = store.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _sweep = SweepOnDrop::new(s2, "k");
+            panic!("the scan blew up");
+        }));
+        assert!(result.is_err());
+        assert_eq!(store.get("k")[0].status, "blocked");
     }
 
     #[test]

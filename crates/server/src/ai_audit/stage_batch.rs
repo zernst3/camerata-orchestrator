@@ -246,6 +246,16 @@ pub struct StageRoute<'a> {
     pub batch: bool,
     /// The job whose progress line and activity the runner keeps, and whose cancel it honors.
     pub job: Option<(&'a JobStore, &'a str)>,
+    /// The transcript store and key Agent activity reads; the stage shows a row there.
+    pub feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
+}
+
+impl<'a> StageRoute<'a> {
+    /// The stage's row in Agent activity under `name`, when the run has a panel.
+    pub fn feedback_for(&self, name: &'a str) -> Option<StageFeedback<'a>> {
+        self.feedback
+            .map(|(store, key)| StageFeedback { store, key, name })
+    }
 }
 
 /// The mode a stage round runs in, and the batch API it can use: [`StageMode::Batch`] when the
@@ -284,6 +294,89 @@ pub struct StageCtx<'a> {
     /// Where to keep resume state; `None` runs without it.
     pub checkpoint: Option<&'a StageCheckpoint>,
     pub settings: StageSettings,
+    /// Where the stage shows in Agent activity; `None` for a stage that records its own calls
+    /// (stage 1, calibration, alternatives) or has no panel.
+    pub feedback: Option<StageFeedback<'a>>,
+}
+
+/// A stage's row in Agent activity: the transcript store, the key the panel reads and the stage's
+/// name in the operator's words (for example "Group review" or "Fix").
+#[derive(Clone, Copy)]
+pub struct StageFeedback<'a> {
+    pub store: &'a crate::transcript::TranscriptStore,
+    pub key: &'a str,
+    pub name: &'a str,
+}
+
+impl StageFeedback<'_> {
+    /// Open the stage's running row and return its session id. A later round of the same stage on
+    /// the same repo gets its own row, never one that replaces the first.
+    fn begin(&self, repo: &str, calls: usize, prompt: &str) -> String {
+        let base = format!("stage:{}:{repo}", self.name);
+        let earlier = self
+            .store
+            .get(self.key)
+            .iter()
+            .filter(|a| a.session_id == base || a.session_id.starts_with(&format!("{base}#")))
+            .count();
+        let (session, label) = if earlier == 0 {
+            (base, self.name.to_string())
+        } else {
+            (
+                format!("{base}#{}", earlier + 1),
+                format!("{}, round {}", self.name, earlier + 1),
+            )
+        };
+        let mut prompt = prompt.to_string();
+        crate::onboard::redact::redact_string(&mut prompt);
+        let shown = if calls > 1 {
+            format!("{calls} calls in this stage; the first call's prompt is shown.\n\n{prompt}")
+        } else {
+            prompt
+        };
+        self.store.register(
+            self.key,
+            crate::transcript::AgentTranscript {
+                session_id: session.clone(),
+                role: format!("{label} ({repo})"),
+                prompt: shown,
+                output: String::new(),
+                status: "running".to_string(),
+            },
+        );
+        session
+    }
+
+    /// Close the row once the stage has run: done when every call was answered (or kept from an
+    /// earlier attempt), blocked with the first reason when any had no answer or the run was
+    /// cancelled.
+    fn end<Id>(&self, session: &str, calls: usize, outcome: &StageOutcome<Id>) {
+        let answered = outcome.absorbed.len() + outcome.resumed.len();
+        let (line, status) = if let Some(first) = outcome.failed.first() {
+            (
+                format!(
+                    "Not finished: {} of {calls} calls had no answer ({}). {answered} answered.",
+                    outcome.failed.len(),
+                    first.reason
+                ),
+                "blocked",
+            )
+        } else if outcome.cancelled.is_some() {
+            (
+                format!("Stopped before the end: {answered} of {calls} calls answered."),
+                "blocked",
+            )
+        } else {
+            (
+                format!("Done: {answered} of {calls} calls answered."),
+                "done",
+            )
+        };
+        let mut line = line;
+        crate::onboard::redact::redact_string(&mut line);
+        self.store.append_output(self.key, session, &line);
+        self.store.set_status(self.key, session, status);
+    }
 }
 
 /// An item that did not come back, with everything the failed-part report needs.
@@ -512,6 +605,20 @@ where
         order = reqs.keys().cloned().collect();
     }
 
+    let activity_row = ctx.feedback.map(|f| {
+        let first = reqs.values().next().map_or_else(
+            || {
+                "(this stage builds its calls as it goes; the prompts are not listed up front)"
+                    .to_string()
+            },
+            |r| match &r.system {
+                Some(sys) => format!("{sys}\n\n{}", r.prompt),
+                None => r.prompt.clone(),
+            },
+        );
+        (f, f.begin(ctx.repo, book.total, &first))
+    });
+
     replay_checkpoint(stage, s, ctx, &mut book, &by_key);
 
     // A7: no request is submitted or sent without passing the size check. An eager stage's
@@ -581,7 +688,12 @@ where
     if let Some((jobs, id)) = ctx.job {
         jobs.clear_stage_progress(id);
     }
-    book.into_outcome()
+    let total_calls = book.total;
+    let outcome = book.into_outcome();
+    if let Some((f, session)) = &activity_row {
+        f.end(session, total_calls, &outcome);
+    }
+    outcome
 }
 
 /// The name the spend limit and the ledger know a stage by when it is refused (the name the stage's

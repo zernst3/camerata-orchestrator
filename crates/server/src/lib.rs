@@ -2363,6 +2363,8 @@ async fn onboard_audit(
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
+    // However this scan ends, no row of it stays "running".
+    let _sweep = crate::transcript::SweepOnDrop::new(state.transcripts.clone(), SCAN_AUDIT_KEY);
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
     let active_project = state.projects.active();
     let project_id = active_project.as_ref().map(|p| p.id.clone());
@@ -2627,6 +2629,7 @@ async fn onboard_audit(
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
                 corpus.as_ref(),
             )
             .await;
@@ -2637,6 +2640,7 @@ async fn onboard_audit(
                 &review_controls,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
             )
             .await;
         }
@@ -2847,7 +2851,10 @@ pub(crate) async fn start_audit_job(
         // never got to handle.
         let body_jobs = jobs.clone();
         let body_jid = jid.clone();
+        let sweep = crate::transcript::SweepOnDrop::new(transcripts.clone(), SCAN_AUDIT_KEY);
         run_job_body_with_panic_guard(&jobs, &jid, async move {
+            // Held to the end of the body (normal end, cancel, panic): closes any row left running.
+            let _sweep = sweep;
             if sources.is_empty() {
                 body_jobs.fail(
                     &body_jid,
@@ -3341,6 +3348,7 @@ pub(crate) async fn start_audit_job(
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                             corpus.as_ref(),
                         )
                         .await;
@@ -3352,6 +3360,7 @@ pub(crate) async fn start_audit_job(
                             &review_controls,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                         )
                         .await;
                     }),

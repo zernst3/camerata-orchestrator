@@ -283,6 +283,17 @@ impl NotAssessedReason {
     }
 }
 
+impl NotAssessedReason {
+    /// The heading a reviewer reads over a group of these rows. The model's honest "unsure" is
+    /// not a refusal, so it reads "Not settled"; the other classes keep their wire string.
+    pub fn heading(self) -> &'static str {
+        match self {
+            NotAssessedReason::ModelDeclined => "Not settled",
+            other => other.as_str(),
+        }
+    }
+}
+
 /// Payload of [`FindingKind::NotAssessed`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotAssessedKind {

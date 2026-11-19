@@ -8,6 +8,7 @@
 //! Coverage is read from the tool trace only ([`super::coverage`]); nothing the model says about
 //! its own work changes a state.
 
+mod activity;
 mod conventions;
 mod joints;
 mod piece;
@@ -35,6 +36,7 @@ use crate::onboard::{Finding, ProposedRule};
 use crate::scan_ledger::{ScanLedger, StageAccounting, StageSample};
 use crate::scan_routing::AuditRule;
 use crate::stage_telemetry::Stage;
+pub use activity::FinderActivity;
 use piece::{PieceReport, Shared, StoredPiece};
 
 /// Settings of one finder run that are not on [`RunControls`].
@@ -704,6 +706,7 @@ pub async fn find_repo(
         options,
         meter,
         n_pieces: works.len(),
+        activity: FINDER_ACTIVITY.try_with(Clone::clone).ok(),
     };
 
     // Run the pieces, a few at a time, keeping their order.
@@ -1187,6 +1190,22 @@ pub async fn find_repo(
         .map(|(rule, _)| rule)
         .collect();
     Ok((verified, proposed, recs, failed, stage_samples, extras))
+}
+
+tokio::task_local! {
+    static FINDER_ACTIVITY: FinderActivity;
+}
+
+/// Run `fut` with the finder's model calls shown in Agent activity when `activity` is `Some`,
+/// carried with the future like the finder setup: never global.
+pub async fn with_finder_activity<F: std::future::Future>(
+    activity: Option<FinderActivity>,
+    fut: F,
+) -> F::Output {
+    match activity {
+        Some(a) => FINDER_ACTIVITY.scope(a, fut).await,
+        None => fut.await,
+    }
 }
 
 tokio::task_local! {

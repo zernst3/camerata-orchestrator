@@ -120,7 +120,7 @@ fn c_same_d_different(prompt: &str) -> String {
 }
 
 async fn run(report: &mut ScanReport, llm: &Script) {
-    check_possible_duplicates(report, llm, &RunControls::default(), false, None).await;
+    check_possible_duplicates(report, llm, &RunControls::default(), false, None, None).await;
 }
 
 fn hinted(report: &ScanReport, path: &str) -> bool {
@@ -270,7 +270,7 @@ async fn a_resume_replays_the_stored_answers_with_no_new_call() {
     let llm = Script::new(c_same_d_different);
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, None),
+        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, None, None),
     )
     .await;
     assert_eq!(llm.calls(), 2);
@@ -283,7 +283,14 @@ async fn a_resume_replays_the_stored_answers_with_no_new_call() {
     let again = Script::new(|_| panic!("a resume must not ask the model again"));
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints),
-        check_possible_duplicates(&mut resumed, &again, &RunControls::default(), false, None),
+        check_possible_duplicates(
+            &mut resumed,
+            &again,
+            &RunControls::default(),
+            false,
+            None,
+            None,
+        ),
     )
     .await;
     assert_eq!(again.calls(), 0);
@@ -300,7 +307,7 @@ async fn the_check_runs_on_the_set_model_and_is_metered_under_its_own_stage() {
     let llm = Script::new(c_same_d_different);
     let mut controls = RunControls::default();
     controls.review.dup_check_model = "claude-opus-5-5".to_string();
-    check_possible_duplicates(&mut r, &llm, &controls, false, None).await;
+    check_possible_duplicates(&mut r, &llm, &controls, false, None, None).await;
     assert!(llm
         .seen
         .lock()
@@ -397,7 +404,7 @@ async fn a_limit_reached_by_the_first_call_stops_the_check_and_not_the_run() {
     };
     // One call at a time, so the first call's spend is on the meter before the second is admitted.
     let llm = Script::new(c_same_d_different);
-    check_possible_duplicates(&mut r, &llm, &controls, true, None).await;
+    check_possible_duplicates(&mut r, &llm, &controls, true, None, None).await;
     assert_limit_stop_leaves_the_run_whole(&r, failed, &reasons);
 }
 
@@ -424,7 +431,7 @@ async fn a_cost_checkpoint_stop_stops_the_check_and_not_the_run() {
     });
     let reasons_with_record = r.incomplete_reasons();
     let llm = Script::new(c_same_d_different);
-    check_possible_duplicates(&mut r, &llm, &RunControls::default(), false, None).await;
+    check_possible_duplicates(&mut r, &llm, &RunControls::default(), false, None, None).await;
     assert_eq!(llm.calls(), 0, "a paused run sends nothing");
     let _ = reasons;
     assert_limit_stop_leaves_the_run_whole(&r, failed, &reasons_with_record);
@@ -440,7 +447,7 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
     let llm = Script::new(c_same_d_different);
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, None),
+        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, None, None),
     )
     .await;
     assert_eq!(llm.calls(), 2);
@@ -456,7 +463,7 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
     let none = Script::new(|_| panic!("the same model must not be asked again"));
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut same, &none, &RunControls::default(), false, None),
+        check_possible_duplicates(&mut same, &none, &RunControls::default(), false, None, None),
     )
     .await;
     assert_eq!(none.calls(), 0);
@@ -468,7 +475,7 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
     let again = Script::new(c_same_d_different);
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints),
-        check_possible_duplicates(&mut changed, &again, &controls, false, None),
+        check_possible_duplicates(&mut changed, &again, &controls, false, None, None),
     )
     .await;
     assert_eq!(again.calls(), 2, "a model change asks again");
@@ -478,4 +485,25 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
         stored.pairs.iter().all(|p| p.model == "claude-opus-5-5"),
         "{stored:?}"
     );
+}
+
+#[tokio::test]
+async fn the_check_shows_a_duplicate_check_row_in_agent_activity() {
+    let store = crate::transcript::TranscriptStore::new();
+    let mut r = report();
+    let llm = Script::new(c_same_d_different);
+    check_possible_duplicates(
+        &mut r,
+        &llm,
+        &RunControls::default(),
+        false,
+        None,
+        Some((&store, "scan-key")),
+    )
+    .await;
+    let rows = store.get("scan-key");
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert!(rows[0].role.starts_with("Duplicate check ("), "{rows:#?}");
+    assert_eq!(rows[0].status, "done");
+    assert!(rows[0].output.contains("answered"), "{}", rows[0].output);
 }

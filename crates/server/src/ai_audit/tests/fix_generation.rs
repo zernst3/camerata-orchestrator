@@ -741,6 +741,43 @@ async fn generate_fix_specifics_includes_deterministic_floor_findings_not_just_a
 }
 
 #[tokio::test]
+async fn the_fix_round_shows_a_fix_row_in_agent_activity() {
+    let files = vec![(".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string())];
+    let f = fx(
+        "SEC-NO-SECRET-FILE-1",
+        ".env",
+        0,
+        "SEC-NO-SECRET-FILE-1: path `.env` is a secret-bearing file type",
+        ".env",
+    );
+    let completer = SequencedCompleter::new(&[
+        r#"{"fixes":[{"index":0,"fix":"Remove .env from the repository and its git history, and rotate the exposed credential."}]}"#,
+    ]);
+    let store = crate::transcript::TranscriptStore::new();
+    let _ = crate::ai_audit::fix_stage::generate_fix_specifics_in(
+        &completer,
+        "o/r",
+        vec![f],
+        &files,
+        None,
+        None,
+        None,
+        crate::ai_audit::stage_batch::StageRoute {
+            batch: false,
+            job: None,
+            feedback: Some((&store, "scan-key")),
+        },
+    )
+    .await;
+    let rows = store.get("scan-key");
+    assert!(
+        rows.iter()
+            .any(|r| r.role == "Fix (o/r)" && r.status == "done"),
+        "{rows:#?}"
+    );
+}
+
+#[tokio::test]
 async fn generate_fix_specifics_total_failure_never_hedges_or_tags_detail() {
     // C3-1b: fix-generation exhausting every retry is a PIPELINE failure, not a
     // confidence judgement — it must never set `needs_review`, never touch `confidence`,

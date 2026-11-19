@@ -423,7 +423,9 @@ pub(super) async fn run_joints(
         "{JOINTS_BRIEF}\n\nThe cards are in {CARDS_PATH}, the leads in {LEADS_PATH} and the problems already reported in {PROBLEMS_PATH}. {numbering}"
     );
     let _ = adopted;
-    let first = shared.agent.run(&room, &brief, &limits).await?;
+    let first = shared
+        .run_shown("Finder, joints between the pieces", &room, &brief, &limits)
+        .await?;
     meter_turns(shared, &first);
     let mut runs = vec![first];
     // One repair turn for an output that could not be used, as the parts get; a second failure
@@ -432,7 +434,16 @@ pub(super) async fn run_joints(
     if runs[0].stop.is_finished() && !unusable.is_empty() {
         let turn = FollowUp::text(repair_message(&unusable));
         let prior = runs[0].clone();
-        match shared.agent.follow_up(&room, &prior, &turn, &limits).await {
+        match shared
+            .follow_up_shown(
+                "Finder, joints between the pieces, repair turn",
+                &room,
+                &prior,
+                &turn,
+                &limits,
+            )
+            .await
+        {
             Ok(run) => {
                 meter_turns(shared, &run);
                 runs.push(run);

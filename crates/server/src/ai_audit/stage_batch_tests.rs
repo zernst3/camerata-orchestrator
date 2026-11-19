@@ -543,6 +543,7 @@ fn ctx<'a>(realtime: &'a dyn LlmPort, batch: Option<&'a dyn BatchApi>) -> StageC
         job: None,
         checkpoint: None,
         settings: settings(),
+        feedback: None,
     }
 }
 
@@ -2396,4 +2397,184 @@ async fn a_refused_admission_carries_the_cause_it_was_refused_for() {
         panic!("the limit is reached");
     };
     assert_eq!(cause, RefusalCause::LimitReached);
+}
+
+// ── Agent activity rows ─────────────────────────────────────────────────────────────────────────
+
+mod activity_rows {
+    use super::*;
+    use crate::ai_audit::stage_batch::StageFeedback;
+    use crate::transcript::TranscriptStore;
+
+    const KEY: &str = "scan-key";
+
+    fn with_row<'a>(
+        mut c: StageCtx<'a>,
+        store: &'a TranscriptStore,
+        name: &'a str,
+    ) -> StageCtx<'a> {
+        c.feedback = Some(StageFeedback {
+            store,
+            key: KEY,
+            name,
+        });
+        c
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_shows_a_running_row_before_its_first_call_returns_and_a_done_row_after() {
+        let store = TranscriptStore::new();
+        let seen_during: Arc<Mutex<Vec<Vec<crate::transcript::AgentTranscript>>>> = Arc::default();
+        let (watch, sink) = (store.clone(), seen_during.clone());
+        let rt = Realtime::new(move |id, _| {
+            sink.lock().unwrap().push(watch.get(KEY));
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+        });
+        let mut stage = Scripted::new(&["a", "b"]);
+        let c = with_row(ctx(&rt, None), &store, "Group review");
+
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert!(out.failed.is_empty());
+
+        let during = seen_during.lock().unwrap().clone();
+        assert!(!during.is_empty(), "the model was called");
+        for view in &during {
+            assert_eq!(view.len(), 1, "{view:#?}");
+            assert_eq!(view[0].role, "Group review (acme/widgets)");
+            assert_eq!(
+                view[0].status, "running",
+                "the row is there while calls run"
+            );
+            assert!(
+                view[0].prompt.contains("ITEM=a;"),
+                "the generated prompt is shown: {}",
+                view[0].prompt
+            );
+            assert!(view[0].prompt.contains("2 calls in this stage"));
+        }
+        let after = store.get(KEY);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].status, "done");
+        assert!(
+            after[0].output.contains("Done: 2 of 2 calls answered."),
+            "{}",
+            after[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_with_a_call_that_had_no_answer_shows_blocked_with_the_reason() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::new(|id, _| {
+            if id == "b" {
+                (
+                    Duration::from_secs(1),
+                    Err(content_error("the model refused this request")),
+                )
+            } else {
+                (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+            }
+        });
+        let mut stage = Scripted::new(&["a", "b"]);
+        let c = with_row(ctx(&rt, None), &store, "Fix");
+
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert_eq!(failed_ids(&out), ids(&["b"]));
+
+        let rows = store.get(KEY);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].status, "blocked");
+        assert!(
+            rows[0].output.contains("1 of 2 calls had no answer")
+                && rows[0].output.contains("the model refused this request"),
+            "{}",
+            rows[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_stage_shows_a_blocked_row_saying_how_far_it_got() {
+        let store = TranscriptStore::new();
+        let jobs = Arc::new(JobStore::new());
+        let id = jobs.create("audit", None);
+        let (j2, i2) = (jobs.clone(), id.clone());
+        let rt = Realtime::new(move |item, nth| {
+            if item == "item-010" && nth == 0 {
+                j2.cancel(&i2);
+            }
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(item))))
+        });
+        let mut stage = Scripted::numbered(40);
+        let mut c = with_row(ctx(&rt, None), &store, "Group review");
+        c.job = Some((&jobs, &id));
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert!(out.cancelled.is_some());
+        let rows = store.get(KEY);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].status, "blocked");
+        assert!(
+            rows[0].output.contains("Stopped before the end:") && rows[0].output.contains("of 40"),
+            "{}",
+            rows[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_round_of_the_same_stage_gets_its_own_row() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::ok_after(Duration::from_secs(1));
+        for _ in 0..2 {
+            let mut stage = Scripted::new(&["a"]);
+            let c = with_row(ctx(&rt, None), &store, "Fix");
+            run_stage(
+                STAGE,
+                &mut stage,
+                StageMode::Parallel { max_in_flight: 1 },
+                &c,
+            )
+            .await;
+        }
+        let rows = store.get(KEY);
+        let roles: Vec<&str> = rows.iter().map(|r| r.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            ["Fix (acme/widgets)", "Fix, round 2 (acme/widgets)"],
+            "{rows:#?}"
+        );
+        assert!(rows.iter().all(|r| r.status == "done"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_with_no_activity_panel_shows_nothing() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::ok_after(Duration::from_secs(1));
+        let mut stage = Scripted::new(&["a"]);
+        let c = ctx(&rt, None);
+        run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 1 },
+            &c,
+        )
+        .await;
+        assert!(store.get(KEY).is_empty());
+    }
 }
