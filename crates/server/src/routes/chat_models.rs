@@ -350,6 +350,7 @@ const PROJECT_LAYER_MARKERS: [&str; 6] = [
 /// - No project but the system prompt carries a project layer header: refused, because project
 ///   data would then ride on a request the lock cannot see.
 /// - A client-engagement project on the `cli` chat backend, or with a non-Anthropic model: refused.
+///
 /// Returns the `Llm` to run on. Pure of model calls, so it is testable.
 pub(crate) fn chat_lock(
     state: &AppState,

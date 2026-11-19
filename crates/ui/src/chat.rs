@@ -287,6 +287,12 @@ pub(crate) fn render_uow_section(snaps: &[UowSnapshot]) -> String {
 struct ProjectContextLite {
     #[serde(default)]
     pub ok: bool,
+    /// The active project's stable id (what the chat request names).
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Whether the project is a client engagement (the chat then runs only on the API).
+    #[serde(default)]
+    pub client_engagement: bool,
     /// The active project's name (present when `ok=true`). Surfaced into the
     /// Layer 3 / Layer 3d headers so the assistant names which project it's
     /// grounded in.
@@ -308,38 +314,56 @@ struct ProjectContextLite {
     pub ruleset_summary: Option<String>,
 }
 
-/// Fetch the active project's name plus the scan-results section (Layer 3c),
-/// the selected-rules section (Layer 3d), and the committed ruleset summary
-/// (Layer 3e) from `GET /api/projects/active/context` in a single round-trip.
-/// Returns `(project_name, scan_section, selected_rules_section, ruleset_summary)`
-/// where each is `None` when absent/empty. Silently degrades: all are `None`
-/// when the endpoint is unreachable or there is no active project.
-async fn fetch_project_context_sections() -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-) {
+/// The project open on screen, as the chat sees it. `id` is what the chat request names so the
+/// server applies THAT project's client-engagement lock.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct OpenProject {
+    pub id: String,
+    pub name: String,
+    pub client_engagement: bool,
+}
+
+/// The project layers fetched for the open project: who it is, plus the three context sections
+/// (scan results 3c, selected rules 3d, committed ruleset 3e). Blank sections are `None`.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct ProjectCtx {
+    pub project: OpenProject,
+    pub scan: Option<String>,
+    pub selected_rules: Option<String>,
+    pub ruleset: Option<String>,
+}
+
+/// Fetch the open project's identity and context sections from `GET /api/projects/active/context`
+/// in one round-trip. The caller only asks when a project is open on screen (the open project is
+/// the server's active one: opening a project makes it active). `None` when the endpoint is
+/// unreachable, reports no project, or names none.
+async fn fetch_project_context() -> Option<ProjectCtx> {
     let ctx: ProjectContextLite =
-        match reqwest::get(format!("{}/api/projects/active/context", crate::bff_base()))
+        reqwest::get(format!("{}/api/projects/active/context", crate::bff_base()))
             .await
-            .ok()
-        {
-            Some(r) => match r.json::<ProjectContextLite>().await {
-                Ok(v) => v,
-                Err(_) => return (None, None, None, None),
-            },
-            None => return (None, None, None, None),
-        };
+            .ok()?
+            .json::<ProjectContextLite>()
+            .await
+            .ok()?;
     if !ctx.ok {
-        return (None, None, None, None);
+        return None;
     }
-    (
-        ctx.project_name.filter(|s| !s.trim().is_empty()),
-        ctx.scan_results_section.filter(|s| !s.trim().is_empty()),
-        ctx.selected_rules_section.filter(|s| !s.trim().is_empty()),
-        ctx.ruleset_summary.filter(|s| !s.trim().is_empty()),
-    )
+    let id = ctx.project_id.filter(|s| !s.trim().is_empty())?;
+    let name = ctx
+        .project_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| id.clone());
+    let nonblank = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
+    Some(ProjectCtx {
+        project: OpenProject {
+            id,
+            name,
+            client_engagement: ctx.client_engagement,
+        },
+        scan: nonblank(ctx.scan_results_section),
+        selected_rules: nonblank(ctx.selected_rules_section),
+        ruleset: nonblank(ctx.ruleset_summary),
+    })
 }
 
 // ── Layer 4: focused finding ──────────────────────────────────────────────────
@@ -354,7 +378,7 @@ async fn fetch_project_context_sections() -> (
 /// in scope; this just adds a focused lens on top.
 ///
 /// When `None`, the assistant answers about Camerata in general.
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default, Debug)]
 pub struct FindingContext {
     /// The rule id that fired (e.g. `SEC-NO-HARDCODED-SECRETS-1`).
     pub rule_id: String,
@@ -445,26 +469,8 @@ pub(crate) fn unified_system_prompt(
          concrete.\n\n"
     );
 
-    // ── Layer 1a: Camerata technical reference ────────────────────────────────
-    // Stable prefix — benefits from automatic system-prompt caching.
-    p.push_str("=== LAYER 1: CAMERATA TECHNICAL REFERENCE ===\n");
-    p.push_str(TECHNICAL_DOC);
-    p.push_str("\n\n");
-
-    // ── Layer 1b: Camerata user guide ─────────────────────────────────────────
-    p.push_str("=== LAYER 1b: CAMERATA USER GUIDE ===\n");
-    p.push_str(USER_GUIDE);
-    p.push_str("\n\n");
-
-    // ── Layer 2: governance rules catalog ─────────────────────────────────────
-    // Also stable per session (fetched once from /api/corpus-rules).
-    if !rules_catalog.trim().is_empty() {
-        p.push_str(
-            "=== LAYER 2: GOVERNANCE RULES CATALOG (every rule: domain · scope, alternatives) ===\n",
-        );
-        p.push_str(rules_catalog);
-        p.push_str("\n\n");
-    }
+    // ── Layers 1, 1b, 2: the static prefix (stable, benefits from prompt caching) ──
+    push_static_layers(&mut p, rules_catalog);
 
     // ── Layer 3: live development state (UoW snapshot) ────────────────────────
     // Refreshed per turn — appended as the tail so it does not disturb the
@@ -590,6 +596,246 @@ pub(crate) fn unified_system_prompt(
     p
 }
 
+// ── one context for the panel and the prompt ────────────────────────────────
+
+/// One line of the "what this assistant can see" panel.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct ContextRow {
+    pub label: String,
+    /// True when the layer is in the next message. Only the rules catalog is ever dim: it is
+    /// still loading, so it is NOT sent yet and the row says so.
+    pub lit: bool,
+}
+
+/// Everything the next message's system prompt is built from. The panel rows and the prompt are
+/// BOTH made from this one value, so the panel cannot claim a layer that is not sent or hide one
+/// that is. `project` is the project open on screen: with `None` (home screen) every project
+/// layer is dropped here, whatever was passed in, and the request names no project.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub(crate) struct ChatContext {
+    pub rules_catalog: String,
+    pub project: Option<OpenProject>,
+    pub uow: Vec<UowSnapshot>,
+    pub pulled_issues: Option<String>,
+    pub finding: Option<FindingContext>,
+    pub scan: Option<String>,
+    pub selected_rules: Option<String>,
+    pub ruleset: Option<String>,
+}
+
+impl ChatContext {
+    /// Assemble the context. `project_open` is whether a project is open on screen; only then are
+    /// `fetched` (the project context), `uow`, `pulled_issues` and `finding` used.
+    pub(crate) fn assemble(
+        project_open: bool,
+        rules_catalog: String,
+        fetched: Option<ProjectCtx>,
+        uow: Option<Vec<UowSnapshot>>,
+        pulled_issues: Option<String>,
+        finding: Option<FindingContext>,
+    ) -> Self {
+        let blank = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
+        let fetched = if project_open { fetched } else { None };
+        let Some(f) = fetched else {
+            return Self {
+                rules_catalog,
+                ..Self::default()
+            };
+        };
+        Self {
+            rules_catalog,
+            project: Some(f.project),
+            uow: uow.unwrap_or_default(),
+            pulled_issues: blank(pulled_issues),
+            finding: finding.filter(|f| !f.rule_id.is_empty()),
+            scan: f.scan,
+            selected_rules: f.selected_rules,
+            ruleset: f.ruleset,
+        }
+    }
+
+    /// The id the chat request names (the project whose data the prompt carries), or `None`.
+    pub(crate) fn project_id(&self) -> Option<&str> {
+        self.project.as_ref().map(|p| p.id.as_str())
+    }
+
+    /// The system prompt for the next message.
+    pub(crate) fn system_prompt(&self) -> String {
+        match &self.project {
+            None => no_project_system_prompt(&self.rules_catalog),
+            Some(p) => unified_system_prompt(
+                &self.rules_catalog,
+                &render_uow_section(&self.uow),
+                self.pulled_issues.as_deref(),
+                self.finding.as_ref(),
+                self.scan.as_deref(),
+                self.selected_rules.as_deref(),
+                self.ruleset.as_deref(),
+                Some(&p.name),
+            ),
+        }
+    }
+
+    /// The panel's one-line statement of which project (if any) the answers come from.
+    pub(crate) fn project_line(&self) -> String {
+        match &self.project {
+            None => {
+                "No project open: answers come from the guides and the rules catalog".to_string()
+            }
+            Some(p) => format!("Project open: {}", p.name),
+        }
+    }
+
+    /// The panel rows: the layers in the next message, in prompt order, each with content. The
+    /// first three (technical reference, user guide, rules catalog) are always shown.
+    pub(crate) fn rows(&self) -> Vec<ContextRow> {
+        let lit = |label: String| ContextRow { label, lit: true };
+        let mut rows = vec![
+            lit("Technical reference (docs/TECHNICAL.md)".to_string()),
+            lit("User guide (docs/USER_GUIDE.md)".to_string()),
+        ];
+        if rules_catalog_loaded(&self.rules_catalog) {
+            rows.push(lit("Governance rules catalog (live)".to_string()));
+        } else {
+            rows.push(ContextRow {
+                label: "Governance rules catalog (loading\u{2026})".to_string(),
+                lit: false,
+            });
+        }
+        let Some(p) = &self.project else {
+            return rows;
+        };
+        let name = &p.name;
+        if !self.uow.is_empty() {
+            rows.push(lit(format!(
+                "Development state ({} stories, {name})",
+                self.uow.len()
+            )));
+        }
+        if let Some(sec) = self.pulled_issues.as_deref() {
+            // An issue spine renders each item on a line starting with "#" or "- ".
+            let n = sec
+                .lines()
+                .map(|l| l.trim_start())
+                .filter(|l| l.starts_with('#') || l.starts_with("- "))
+                .count();
+            rows.push(lit(if n > 0 {
+                format!("Pulled issues ({n})")
+            } else {
+                "Pulled issues (loaded)".to_string()
+            }));
+        }
+        // The scan layer is the server's `scan_results_section` (the sealed review report when an
+        // inspection exists). The per-finding summary is not sent, so it is not claimed.
+        if self.scan.is_some() {
+            rows.push(lit(format!("Scan results ({name})")));
+        }
+        if let Some(sec) = &self.selected_rules {
+            // The first line is "Total selected: N rule(s)".
+            let n = sec
+                .lines()
+                .next()
+                .and_then(|l| l.strip_prefix("Total selected: "))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(0);
+            rows.push(lit(format!("Selected rules ({n} selected, {name})")));
+        }
+        if self.ruleset.is_some() {
+            rows.push(lit(format!("Project ruleset (committed, {name})")));
+        }
+        if let Some(f) = &self.finding {
+            rows.push(lit(format!(
+                "Focused finding ({} at {}:{})",
+                f.rule_id, f.path, f.line
+            )));
+        }
+        rows
+    }
+
+    /// Why Send must be disabled, or `None`. A client engagement runs only on the API; with the
+    /// Chat backend set to `cli` the server would refuse (409), so say so before the operator types.
+    pub(crate) fn send_block(&self, chat_backend: Option<&str>) -> Option<String> {
+        let p = self.project.as_ref()?;
+        if p.client_engagement && chat_backend.is_some_and(|b| b.eq_ignore_ascii_case("cli")) {
+            Some(
+                "This project is a client engagement: the chat runs only on the API. Set Chat \
+                 backend to API in Settings, or turn off Client engagement in this project's \
+                 settings."
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    }
+}
+
+/// The system prompt when NO project is open: the guides and the rules catalog only. It carries
+/// no project layer (no development state, pulled issues, scan results, selected rules, ruleset
+/// or focused finding), so nothing of any client's can ride into a chat started on the home screen.
+pub(crate) fn no_project_system_prompt(rules_catalog: &str) -> String {
+    let not_covered = UNIFIED_NOT_COVERED_PHRASE;
+    let mut p = format!(
+        "You are Camerata's in-app AI assistant. No project is open, so you answer ONLY about \
+         Camerata's internals (how it works, crates, modules), how to USE Camerata (onboarding, \
+         scanning, rules), and which governance rules exist, from the context layers below and \
+         nothing else. If a question cannot be answered from those layers, respond with exactly \
+         \"{not_covered}\" followed by a brief statement of what IS available. You have NO \
+         information about any project's scan findings, selected rules, ruleset or development \
+         state: if asked, say that no project is open and that the user can open one to ask \
+         about it. The Layer 2 catalog lists rules that EXIST in Camerata, not rules anyone has \
+         selected. Never fabricate facts. Be concise and concrete.\n\n"
+    );
+    push_static_layers(&mut p, rules_catalog);
+    p
+}
+
+/// Layers 1, 1b and 2: the static prefix shared by every prompt.
+fn push_static_layers(p: &mut String, rules_catalog: &str) {
+    p.push_str("=== LAYER 1: CAMERATA TECHNICAL REFERENCE ===\n");
+    p.push_str(TECHNICAL_DOC);
+    p.push_str("\n\n");
+    p.push_str("=== LAYER 1b: CAMERATA USER GUIDE ===\n");
+    p.push_str(USER_GUIDE);
+    p.push_str("\n\n");
+    if !rules_catalog.trim().is_empty() {
+        p.push_str(
+            "=== LAYER 2: GOVERNANCE RULES CATALOG (every rule: domain · scope, alternatives) ===\n",
+        );
+        p.push_str(rules_catalog);
+        p.push_str("\n\n");
+    }
+}
+
+/// Build the context for a send: the project context and development state are fetched fresh,
+/// but only when a project is open on screen; then the same [`ChatContext::assemble`] the panel
+/// uses. Both send paths (Enter and the Send button) call this.
+async fn build_send_context(
+    project_open: bool,
+    rules_catalog: String,
+    pulled_issues: Option<String>,
+    finding: Option<FindingContext>,
+) -> ChatContext {
+    let fetched = if project_open {
+        fetch_project_context().await
+    } else {
+        None
+    };
+    let uow = if fetched.is_some() {
+        fetch_uow_snapshot().await
+    } else {
+        None
+    };
+    ChatContext::assemble(
+        project_open,
+        rules_catalog,
+        fetched,
+        uow,
+        pulled_issues,
+        finding,
+    )
+}
+
 // ── network helpers ───────────────────────────────────────────────────────────
 
 /// Wire shape from `GET /api/models/registry`.
@@ -707,6 +953,22 @@ async fn fetch_app_chat_model() -> Option<String> {
         .filter(|m| !m.trim().is_empty() && !m.trim().eq_ignore_ascii_case("default"))
 }
 
+/// The Chat backend setting (`cli` or `api`) from `GET /api/settings`; `None` when unreachable.
+async fn fetch_chat_backend() -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct BackendLite {
+        #[serde(default)]
+        chat_backend: Option<String>,
+    }
+    let s: BackendLite = reqwest::get(format!("{}/api/settings", crate::bff_base()))
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    s.chat_backend.filter(|b| !b.trim().is_empty())
+}
+
 /// Persist the app-level chat assistant model via `POST /api/settings/chat-model`. Best-effort.
 async fn save_app_chat_model(model: &str) -> bool {
     let body = serde_json::json!({ "model": model });
@@ -776,16 +1038,42 @@ fn turns_to_history(turns: &[Turn]) -> Vec<ChatHistoryTurn> {
         .collect()
 }
 
+/// One chat turn: build the context fresh (project layers only when a project is open), build
+/// the system prompt from it, and send it naming the same project. Both send paths call this.
+async fn run_turn(
+    project_open: bool,
+    catalog: String,
+    pulled_issues: Option<String>,
+    finding: Option<FindingContext>,
+    prompt: &str,
+    model: &str,
+    history: Vec<ChatHistoryTurn>,
+) -> Result<ChatResp, String> {
+    let ctx = build_send_context(project_open, catalog, pulled_issues, finding).await;
+    send_chat(
+        prompt,
+        model,
+        &ctx.system_prompt(),
+        ctx.project_id(),
+        history,
+    )
+    .await
+}
+
 async fn send_chat(
     prompt: &str,
     model: &str,
     system: &str,
+    project_id: Option<&str>,
     history: Vec<ChatHistoryTurn>,
 ) -> Result<ChatResp, String> {
+    // `project_id` names the project whose data the system prompt carries (null on the home
+    // screen); the server applies THAT project's client-engagement lock.
     let body = serde_json::json!({
         "prompt": prompt,
         "model": model,
         "system": system,
+        "project_id": project_id,
         "history": history,
     });
     let resp = reqwest::Client::new()
@@ -814,7 +1102,7 @@ fn chat_reply_text(reply: Result<ChatResp, String>) -> String {
     match reply {
         Ok(r) if !r.text.trim().is_empty() => r.text,
         Ok(_) => "(the model returned an empty response)".to_string(),
-        Err(e) => format!("\u{26a0} chat failed — {e}"),
+        Err(e) => format!("\u{26a0} chat failed: {e}"),
     }
 }
 
@@ -837,6 +1125,11 @@ pub struct ChatBubbleProps {
     /// opaquely, keeping the chat module free of WorkItem dependencies.
     #[props(default)]
     pub pulled_issues_section: Option<String>,
+    /// Whether a project is open on screen (the cockpit is inside a project, not on the projects
+    /// home). With `false` the chat sends NO project layer and names no project, whatever the
+    /// server's last active project is.
+    #[props(default)]
+    pub project_open: bool,
     /// Mount with the panel already open (tests drive the open panel without a click).
     #[props(default)]
     pub start_open: bool,
@@ -953,35 +1246,44 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
         });
     }
 
-    // Layer 3: UoW snapshot — re-fetched on each tick (and once on mount). Reading
-    // `refresh_tick()` inside the closure registers the dependency that re-runs it.
-    let uow_res = use_resource(move || {
-        let _ = refresh_tick();
-        fetch_uow_snapshot()
-    });
-    let uow_snaps: Vec<UowSnapshot> = uow_res.read().clone().flatten().unwrap_or_default();
-    // `Some(_)` means the fetch RESOLVED (even to empty); `None` means still pending.
-    // Lets the strip distinguish "loading" from "loaded but genuinely empty".
-    let uow_resolved = uow_res.read().is_some();
+    // Whether a project is open on screen, mirrored into a signal so the resources below re-run
+    // when the operator opens or leaves a project (props are not reactive inside a resource).
+    let mut project_open_sig = use_signal(|| props.project_open);
+    if project_open_sig() != props.project_open {
+        project_open_sig.set(props.project_open);
+    }
 
-    // Layers 3c + 3d (+ project name): scan results, selected-rules sections, and
-    // the active project name — fetched together from the active project context
-    // endpoint, also re-fetched on each tick so the strip stays live.
-    //
-    // NOTE: these reads ONLY feed the "what this assistant can see" status strip
-    // below. The send paths (onkeydown / onclick) refetch this context fresh
-    // inside their spawn so each message reflects the latest selection / project /
-    // scan independently of this strip.
+    // The project layers for the PANEL: fetched only while a project is open, re-fetched on each
+    // tick so the strip stays live. The send paths refetch fresh and build their prompt through
+    // the very same `ChatContext::assemble`, so the panel and the prompt cannot disagree.
     let ctx_res = use_resource(move || {
         let _ = refresh_tick();
-        fetch_project_context_sections()
+        let open_project = project_open_sig();
+        async move {
+            if open_project {
+                fetch_project_context().await
+            } else {
+                None
+            }
+        }
     });
-    let (_active_project_name, scan_section, selected_rules_section, ruleset_summary): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = ctx_res.read().clone().unwrap_or((None, None, None, None));
+    let uow_res = use_resource(move || {
+        let _ = refresh_tick();
+        let open_project = project_open_sig();
+        async move {
+            if open_project {
+                fetch_uow_snapshot().await
+            } else {
+                None
+            }
+        }
+    });
+    // The Chat backend setting, for the client-engagement line and the disabled Send.
+    let backend_res = use_resource(move || {
+        let _ = refresh_tick();
+        fetch_chat_backend()
+    });
+    let chat_backend: Option<String> = backend_res.read().clone().flatten();
 
     // Layer 4: track the last-injected finding by a stable key to avoid
     // re-opening/re-clearing on unrelated re-renders.
@@ -1006,22 +1308,27 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
         }
     }
 
-    // Pre-build the static prefix (Layers 1+2) once — this is what Anthropic
-    // caches automatically across turns. The UoW tail (Layer 3) is assembled
-    // fresh at send time so it always reflects the latest snapshot.
-    let static_prefix_catalog = rules_catalog.clone();
-    // Clone the session-static rules catalog (Layer 2, fetched once per session)
-    // for the two send closures (onkeydown + onclick each move-capture). The UoW
-    // snapshot (Layer 3), scan results (Layer 3c), selected rules (Layer 3d), and
-    // active project name are NOT captured here — each send refetches them fresh
-    // inside its spawn so a message always reflects the live state.
+    // The ONE context the panel shows and the next message is built from (see `ChatContext`).
+    let chat_ctx = ChatContext::assemble(
+        props.project_open,
+        rules_catalog.clone(),
+        ctx_res.read().clone().flatten(),
+        uow_res.read().clone().flatten(),
+        props.pulled_issues_section.clone(),
+        active_finding.read().clone(),
+    );
+    let ctx_rows = chat_ctx.rows();
+    let project_line = chat_ctx.project_line();
+    let send_block = chat_ctx.send_block(chat_backend.as_deref());
+    // The first three rows are always visible; the rest sit behind "see more".
+    const CTX_ALWAYS_ROWS: usize = 3;
+    let ctx_extra_rows = ctx_rows.len().saturating_sub(CTX_ALWAYS_ROWS);
     let catalog_kd = rules_catalog.clone();
     let catalog_btn = rules_catalog;
-
-    // The number of rows the "see more" toggle reveals (uow state, pulled issues, scan
-    // results, selected rules, ruleset) — named so the toggle label can't silently drift
-    // from the actual row count if a row is added/removed below.
-    const CTX_EXTRA_ROWS: usize = 5;
+    let project_open_kd = props.project_open;
+    let project_open_btn = props.project_open;
+    let block_kd = send_block.clone();
+    let block_btn = send_block.clone();
 
     rsx! {
         // Floating launcher — reuses the same amber square FAB as the rest of the app.
@@ -1089,156 +1396,35 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                 crate::provider_safety::ProviderPicker { model, models: models.clone() }
 
                 // ── "what this assistant can see" affordance ─────────────
+                // Built from the same `ChatContext` the next message is built from: it lists
+                // the layers that will be sent, and says plainly when no project is open.
                 div {
                     class: "chat-context",
                     div { class: "chat-context-title", "What this assistant can see:" }
+                    div { class: "chat-context-project", "{project_line}" }
                     div { class: "chat-context-list",
-                        div { class: "chat-context-row",
-                            span { class: "chat-context-dot on", "●" }
-                            span { "Technical reference (docs/TECHNICAL.md)" }
-                        }
-                        div { class: "chat-context-row",
-                            span { class: "chat-context-dot on", "●" }
-                            span { "User guide (docs/USER_GUIDE.md)" }
-                        }
-                        div { class: "chat-context-row",
-                            span {
-                                class: if rules_catalog_loaded(&static_prefix_catalog) {
-                                    "chat-context-dot on"
-                                } else {
-                                    "chat-context-dot"
-                                },
-                                "●"
-                            }
-                            span {
-                                if rules_catalog_loaded(&static_prefix_catalog) {
-                                    "Governance rules catalog (live)"
-                                } else {
-                                    "Governance rules catalog (loading…)"
+                        for (i , row) in ctx_rows.iter().enumerate() {
+                            if i < CTX_ALWAYS_ROWS || ctx_expanded() {
+                                div { key: "{i}", class: "chat-context-row",
+                                    span {
+                                        class: if row.lit { "chat-context-dot on" } else { "chat-context-dot" },
+                                        "\u{25cf}"
+                                    }
+                                    span { "{row.label}" }
                                 }
                             }
                         }
-                        // The rest of the context items collapse behind "see more". Always
-                        // exactly CTX_EXTRA_ROWS rows (uow/pulled-issues/scan/selected-rules/
-                        // ruleset), so the toggle label below can't drift out of sync with them.
-                        if ctx_expanded() {
-                        {
-                            let uow_label = if !uow_snaps.is_empty() {
-                                format!("Development state ({} stories, live)", uow_snaps.len())
-                            } else if uow_resolved {
-                                "Development state (no stories tracked yet)".to_string()
-                            } else {
-                                "Development state (loading\u{2026})".to_string()
-                            };
-                            // Lit once resolved (even if empty); dim only while pending.
-                            let uow_dot_cls = if uow_resolved { "chat-context-dot on" } else { "chat-context-dot" };
-                            rsx! {
-                                div { class: "chat-context-row",
-                                    span { class: "{uow_dot_cls}", "\u{25cf}" }
-                                    span { "{uow_label}" }
-                                }
+                        if ctx_extra_rows > 0 {
+                            button {
+                                class: "chat-context-toggle",
+                                aria_expanded: "{ctx_expanded()}",
+                                onclick: move |_| ctx_expanded.toggle(),
+                                if ctx_expanded() { "see less" } else { "see more ({ctx_extra_rows} more)" }
                             }
                         }
-                        // Layer 3b: pulled issues indicator — shown when GitHub issues
-                        // have been pulled into the session and handed to the assistant.
-                        {
-                            let pis = props.pulled_issues_section.as_deref().filter(|s| !s.trim().is_empty());
-                            let pis_dot_cls = if pis.is_some() { "chat-context-dot on" } else { "chat-context-dot" };
-                            let pis_label = if let Some(sec) = pis {
-                                // Count issue lines: an issue spine renders each item on a line
-                                // starting with "#" (e.g. "#42 …") or "- " (Epic/child bullets).
-                                let n = sec
-                                    .lines()
-                                    .map(|l| l.trim_start())
-                                    .filter(|l| l.starts_with('#') || l.starts_with("- "))
-                                    .count();
-                                if n > 0 {
-                                    format!("Pulled issues ({n})")
-                                } else {
-                                    "Pulled issues (loaded)".to_string()
-                                }
-                            } else {
-                                "Pulled issues (none pulled yet)".to_string()
-                            };
-                            rsx! {
-                                div { class: "chat-context-row",
-                                    span { class: "{pis_dot_cls}", "\u{25cf}" }
-                                    span { "{pis_label}" }
-                                }
-                            }
-                        }
-                        // Layer 3c: scan results indicator — shown when a scan has been run.
-                        {
-                            let scan_dot_cls = if scan_section.is_some() { "chat-context-dot on" } else { "chat-context-dot" };
-                            let scan_label = if scan_section.is_some() {
-                                "Scan results (active project, live)"
-                            } else {
-                                "Scan results (none yet — run a scan to populate)"
-                            };
-                            rsx! {
-                                div { class: "chat-context-row",
-                                    span { class: "{scan_dot_cls}", "\u{25cf}" }
-                                    span { "{scan_label}" }
-                                }
-                            }
-                        }
-                        // Layer 3d: selected rules — available pre-scan, from the onboarding draft.
-                        {
-                            let sel_dot_cls = if selected_rules_section.is_some() { "chat-context-dot on" } else { "chat-context-dot" };
-                            let sel_label = if let Some(ref sec) = selected_rules_section {
-                                // Extract the count from the first line "Total selected: N rule(s)".
-                                let n = sec
-                                    .lines()
-                                    .next()
-                                    .and_then(|l| l.strip_prefix("Total selected: "))
-                                    .and_then(|rest| rest.split_whitespace().next())
-                                    .and_then(|n| n.parse::<usize>().ok())
-                                    .unwrap_or(0);
-                                format!("Selected rules ({n} selected)")
-                            } else {
-                                "Selected rules (none yet)".to_string()
-                            };
-                            rsx! {
-                                div { class: "chat-context-row",
-                                    span { class: "{sel_dot_cls}", "\u{25cf}" }
-                                    span { "{sel_label}" }
-                                }
-                            }
-                        }
-                        // Layer 3e: committed ruleset indicator — present post-onboard,
-                        // once the project's governing rules have been applied.
-                        {
-                            let rs_dot_cls = if ruleset_summary.is_some() { "chat-context-dot on" } else { "chat-context-dot" };
-                            let rs_label = if ruleset_summary.is_some() {
-                                "Project ruleset (committed)"
-                            } else {
-                                "Project ruleset (none yet)"
-                            };
-                            rsx! {
-                                div { class: "chat-context-row",
-                                    span { class: "{rs_dot_cls}", "\u{25cf}" }
-                                    span { "{rs_label}" }
-                                }
-                            }
-                        }
-                        }
-                        // Layer 4: only shown when a finding is focused.
-                        if let Some(ref f) = *active_finding.read() {
-                            if !f.rule_id.is_empty() {
-                                div {
-                                    class: "chat-context-finding",
-                                    span { class: "chat-context-finding-icon", "◆" }
-                                    span { "Focused finding: " }
-                                    span { class: "mono", "{f.rule_id}" }
-                                    span { " {f.path}:{f.line}" }
-                                }
-                            }
-                        }
-                        button {
-                            class: "chat-context-toggle",
-                            onclick: move |_| ctx_expanded.toggle(),
-                            if ctx_expanded() { "see less" } else { "see more ({CTX_EXTRA_ROWS} more)" }
-                        }
+                    }
+                    if let Some(why) = send_block.as_deref() {
+                        div { class: "chat-context-blocked", "{why}" }
                     }
                 }
 
@@ -1307,11 +1493,13 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             let catalog_kd2 = catalog_kd.clone();
                             let finding_kd = active_finding.read().clone();
                             let pis_kd = props.pulled_issues_section.clone();
+                            let block_kd = block_kd.clone();
                             move |e: Event<KeyboardData>| {
                                 if e.key() == Key::Enter && !e.modifiers().shift() {
                                     e.prevent_default();
                                     let prompt = draft().trim().to_string();
-                                    if prompt.is_empty() || sending() {
+                                    // A client engagement on the CLI cannot send: the line above says why.
+                                    if prompt.is_empty() || sending() || block_kd.is_some() {
                                         return;
                                     }
                                     let mdl = model();
@@ -1329,26 +1517,16 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         // for the whole chat turn so the machine runs while the
                                         // assistant is thinking and stops when the reply returns.
                                         let _guard = crate::loading::LoadingGuard::new();
-                                        // Per-turn refetch: pull the LIVE dev state + project context
-                                        // (scan results, selected rules, project name) so the prompt
-                                        // reflects the user's CURRENT selection / project / story state
-                                        // rather than the snapshot taken when the chat was opened.
-                                        let uow_snaps =
-                                            fetch_uow_snapshot().await.unwrap_or_default();
-                                        let (project_name, scan_section, rules_section, ruleset_section) =
-                                            fetch_project_context_sections().await;
-                                        let uow_sec = render_uow_section(&uow_snaps);
-                                        let sys = unified_system_prompt(
-                                            &catalog_send,
-                                            &uow_sec,
-                                            pis_send.as_deref(),
-                                            finding_send.as_ref(),
-                                            scan_section.as_deref(),
-                                            rules_section.as_deref(),
-                                            ruleset_section.as_deref(),
-                                            project_name.as_deref(),
-                                        );
-                                        let reply = send_chat(&prompt, &mdl, &sys, history).await;
+                                        let reply = run_turn(
+                                            project_open_kd,
+                                            catalog_send,
+                                            pis_send,
+                                            finding_send,
+                                            &prompt,
+                                            &mdl,
+                                            history,
+                                        )
+                                        .await;
                                         sending.set(false);
                                         turns.write().push(Turn { role: "ai", text: chat_reply_text(reply) });
                                     });
@@ -1365,14 +1543,16 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             // `if {} else {}` text into the CSS string (no `{}` interpolation), so it
                             // was never valid CSS and the button never visibly dimmed.
                             class: "chat-send",
-                            disabled: sending() || draft().trim().is_empty(),
+                            disabled: sending() || draft().trim().is_empty() || send_block.is_some(),
+                            title: send_block.clone().unwrap_or_default(),
                             onclick: {
                                 let catalog_btn2 = catalog_btn.clone();
                                 let finding_btn = active_finding.read().clone();
                                 let pis_btn = props.pulled_issues_section.clone();
+                                let block_btn = block_btn.clone();
                                 move |_| {
                                     let prompt = draft().trim().to_string();
-                                    if prompt.is_empty() || sending() {
+                                    if prompt.is_empty() || sending() || block_btn.is_some() {
                                         return;
                                     }
                                     let mdl = model();
@@ -1386,30 +1566,17 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     let finding_send = finding_btn.clone();
                                     let pis_send = pis_btn.clone();
                                     spawn(async move {
-                                        // The Bombe is reserved for AI work: hold a loading guard
-                                        // for the whole chat turn so the machine runs while the
-                                        // assistant is thinking and stops when the reply returns.
                                         let _guard = crate::loading::LoadingGuard::new();
-                                        // Per-turn refetch: pull the LIVE dev state + project context
-                                        // (scan results, selected rules, project name) so the prompt
-                                        // reflects the user's CURRENT selection / project / story state
-                                        // rather than the snapshot taken when the chat was opened.
-                                        let uow_snaps =
-                                            fetch_uow_snapshot().await.unwrap_or_default();
-                                        let (project_name, scan_section, rules_section, ruleset_section) =
-                                            fetch_project_context_sections().await;
-                                        let uow_sec = render_uow_section(&uow_snaps);
-                                        let sys = unified_system_prompt(
-                                            &catalog_send,
-                                            &uow_sec,
-                                            pis_send.as_deref(),
-                                            finding_send.as_ref(),
-                                            scan_section.as_deref(),
-                                            rules_section.as_deref(),
-                                            ruleset_section.as_deref(),
-                                            project_name.as_deref(),
-                                        );
-                                        let reply = send_chat(&prompt, &mdl, &sys, history).await;
+                                        let reply = run_turn(
+                                            project_open_btn,
+                                            catalog_send,
+                                            pis_send,
+                                            finding_send,
+                                            &prompt,
+                                            &mdl,
+                                            history,
+                                        )
+                                        .await;
                                         sending.set(false);
                                         turns.write().push(Turn { role: "ai", text: chat_reply_text(reply) });
                                     });
@@ -1519,6 +1686,7 @@ mod tests {
                 "prompt": "What is CAM-1 blocked on?",
                 "model": "claude-opus-5",
                 "system": "SYS PROMPT",
+                "project_id": "p-1",
                 "history": [
                     { "role": "user", "content": "hi" },
                     { "role": "assistant", "content": "hello" },
@@ -1546,6 +1714,7 @@ mod tests {
             "What is CAM-1 blocked on?",
             "claude-opus-5",
             "SYS PROMPT",
+            Some("p-1"),
             history,
         )
         .await;
@@ -1574,7 +1743,7 @@ mod tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let res = super::send_chat("hi", "m", "s", Vec::new()).await;
+        let res = super::send_chat("hi", "m", "s", None, Vec::new()).await;
 
         let err = res.expect_err("a 500 must be an Err");
         assert!(
@@ -1917,11 +2086,11 @@ mod tests {
         assert_eq!(snaps[0].story_id, "CAM-9");
     }
 
-    // ── Tier-2: fetch_project_context_sections GETs /api/projects/active/context ──
-    // Asserts the four-tuple projection: name, scan section, selected-rules section, ruleset summary.
+    // ── Tier-2: fetch_project_context GETs /api/projects/active/context ──
+    // Asserts the projection: identity (id, name, client flag) plus the three sections.
     #[tokio::test]
     #[serial_test::serial(process_env)]
-    async fn fetch_project_context_sections_projects_all_four_fields() {
+    async fn fetch_project_context_projects_identity_and_sections() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1930,6 +2099,8 @@ mod tests {
             .and(path("/api/projects/active/context"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
+                "project_id": "p-1",
+                "client_engagement": true,
                 "project_name": "agora-api",
                 "scan_results_section": "Total findings: 3\n",
                 "selected_rules_section": "Total selected: 2 rule(s)\n",
@@ -1939,18 +2110,28 @@ mod tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let (name, scan, selected, ruleset) = super::fetch_project_context_sections().await;
+        let got = super::fetch_project_context().await.expect("ok context");
 
-        assert_eq!(name, Some("agora-api".to_string()));
-        assert_eq!(scan, Some("Total findings: 3\n".to_string()));
-        assert_eq!(selected, Some("Total selected: 2 rule(s)\n".to_string()));
-        assert_eq!(ruleset, Some("SEC-1: all repos\n".to_string()));
+        assert_eq!(
+            got.project,
+            super::OpenProject {
+                id: "p-1".into(),
+                name: "agora-api".into(),
+                client_engagement: true
+            }
+        );
+        assert_eq!(got.scan, Some("Total findings: 3\n".to_string()));
+        assert_eq!(
+            got.selected_rules,
+            Some("Total selected: 2 rule(s)\n".to_string())
+        );
+        assert_eq!(got.ruleset, Some("SEC-1: all repos\n".to_string()));
     }
 
-    // When the context reports `ok: false` (no active project), all four fields degrade to None.
+    // When the context reports `ok: false` (no active project) there is no project context.
     #[tokio::test]
     #[serial_test::serial(process_env)]
-    async fn fetch_project_context_sections_all_none_when_not_ok() {
+    async fn fetch_project_context_none_when_not_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1964,19 +2145,13 @@ mod tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let tuple = super::fetch_project_context_sections().await;
-
-        assert_eq!(
-            tuple,
-            (None, None, None, None),
-            "ok=false must degrade every section to None"
-        );
+        assert_eq!(super::fetch_project_context().await, None);
     }
 
     // Whitespace-only sections must be filtered to None (empty sections are not meaningful grounding).
     #[tokio::test]
     #[serial_test::serial(process_env)]
-    async fn fetch_project_context_sections_filters_whitespace_sections() {
+    async fn fetch_project_context_filters_whitespace_sections() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1985,6 +2160,7 @@ mod tests {
             .and(path("/api/projects/active/context"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
+                "project_id": "p-1",
                 "project_name": "   ",
                 "scan_results_section": "\n  \t",
                 "selected_rules_section": "real\n"
@@ -1993,16 +2169,16 @@ mod tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let (name, scan, selected, ruleset) = super::fetch_project_context_sections().await;
+        let got = super::fetch_project_context().await.expect("ok context");
 
-        assert_eq!(name, None, "whitespace-only project_name filters to None");
-        assert_eq!(scan, None, "whitespace-only scan section filters to None");
+        assert_eq!(got.project.name, "p-1", "blank name falls back to the id");
+        assert!(!got.project.client_engagement);
         assert_eq!(
-            selected,
-            Some("real\n".to_string()),
-            "non-blank section survives"
+            got.scan, None,
+            "whitespace-only scan section filters to None"
         );
-        assert_eq!(ruleset, None, "absent ruleset_summary is None");
+        assert_eq!(got.selected_rules, Some("real\n".to_string()));
+        assert_eq!(got.ruleset, None, "absent ruleset_summary is None");
     }
 
     // (chat_model_groups tests moved to camerata-ui-core::models — pure, now unit-tested with no
@@ -2945,99 +3121,6 @@ mod tests {
 
     // (ModelsResp::grouped provider-partitioning tests moved to camerata-ui-core::models.)
 
-    // ── real-component regression: the chat select heals after a failed first fetch ──
-    // Startup race: the registry endpoint is not answering when the bubble mounts. The select
-    // must still end up listing the registry's models once the server answers (it used to stay
-    // stuck on the single fallback option forever).
-    use dioxus::prelude::*;
-
-    #[derive(Clone, PartialEq, Props)]
-    struct BubbleHarnessProps {
-        open: bool,
-    }
-
-    #[component]
-    fn BubbleHarness(props: BubbleHarnessProps) -> Element {
-        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
-        let rules = use_resource(|| async { Option::<String>::None });
-        use_context_provider(|| rules);
-        crate::provider_safety::provide_provider_policy_context();
-        rsx! { super::ChatBubble { start_open: props.open } }
-    }
-
-    /// Drive the real component to the point where `done(html)` holds or `max` elapses.
-    async fn render_until(
-        open: bool,
-        max: std::time::Duration,
-        done: impl Fn(&str) -> bool,
-    ) -> String {
-        let mut vdom = VirtualDom::new_with_props(BubbleHarness, BubbleHarnessProps { open });
-        vdom.rebuild_in_place();
-        let deadline = tokio::time::Instant::now() + max;
-        loop {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_millis(200), vdom.wait_for_work())
-                    .await;
-            vdom.render_immediate(&mut dioxus::core::NoOpMutations);
-            let html = dioxus_ssr::render(&vdom);
-            if done(&html) || tokio::time::Instant::now() >= deadline {
-                return html;
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(process_env)]
-    async fn chat_model_select_heals_after_a_failed_first_registry_fetch() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        // First request fails (the server is not ready), every later one answers.
-        Mock::given(method("GET"))
-            .and(path("/api/models/registry"))
-            .respond_with(ResponseTemplate::new(503))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/models/registry"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "models": [
-                    { "id": "claude-opus-5", "display": "Opus", "provider": "claude" },
-                    { "id": "claude-sonnet-5", "display": "Sonnet", "provider": "claude" }
-                ]
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/settings"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "chat_model": "default" })),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&server)
-            .await;
-
-        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let html = render_until(true, std::time::Duration::from_secs(15), |h| {
-            h.contains("claude-sonnet-5")
-        })
-        .await;
-        assert!(
-            html.contains("claude-opus-5") && html.contains("claude-sonnet-5"),
-            "the select must list the registry models after the first fetch failed; html=\n{html}"
-        );
-        assert!(
-            !html.contains("value=\"default\""),
-            "the placeholder must never be an option; html=\n{html}"
-        );
-    }
-
     // Choosing the id-less fallback option (or the word "default") must post nothing: the
     // placeholder is never saved as the app chat model.
     #[tokio::test]
@@ -3097,5 +3180,245 @@ mod tests {
             backend: String::new(),
         });
         assert!(super::persist_chat_choice(&loaded, "claude-opus-5").await);
+    }
+
+    // ── Parts 2 and 3: one context for the panel and the prompt; one project for context + lock ──
+
+    use super::{ChatContext, OpenProject, ProjectCtx};
+
+    fn open_project(client: bool) -> OpenProject {
+        OpenProject {
+            id: "proj-16".into(),
+            name: "Faktura Test".into(),
+            client_engagement: client,
+        }
+    }
+
+    fn project_ctx(
+        scan: Option<&str>,
+        selected: Option<&str>,
+        ruleset: Option<&str>,
+    ) -> ProjectCtx {
+        ProjectCtx {
+            project: open_project(true),
+            scan: scan.map(str::to_string),
+            selected_rules: selected.map(str::to_string),
+            ruleset: ruleset.map(str::to_string),
+        }
+    }
+
+    const PROJECT_HEADERS: [(&str, &str); 6] = [
+        ("=== LAYER 3:", "Development state"),
+        ("=== LAYER 3b:", "Pulled issues"),
+        ("=== LAYER 3c:", "Scan results"),
+        ("=== LAYER 3d:", "Selected rules"),
+        ("=== LAYER 3e:", "Project ruleset"),
+        ("=== LAYER 4:", "Focused finding"),
+    ];
+
+    /// The project layers that carry CONTENT in the prompt: the header is present and the body is
+    /// not an explicit empty marker (NONE / no stories). Returns each layer's row-label prefix.
+    fn prompt_layers_with_content(prompt: &str) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for (header, label) in PROJECT_HEADERS {
+            let Some(at) = prompt.find(header) else {
+                continue;
+            };
+            let body = prompt[at..].lines().nth(1).unwrap_or("");
+            if body.starts_with("NONE") || body.starts_with("No development stories") {
+                continue;
+            }
+            out.push(label);
+        }
+        out
+    }
+
+    fn row_layers(ctx: &ChatContext) -> Vec<&'static str> {
+        let rows = ctx.rows();
+        PROJECT_HEADERS
+            .iter()
+            .map(|(_, l)| *l)
+            .filter(|l| rows.iter().any(|r| r.lit && r.label.starts_with(l)))
+            .collect()
+    }
+
+    #[test]
+    fn no_project_open_means_no_project_layer_and_the_panel_says_so() {
+        // Everything is offered (a stale active client project's data, pulled issues, a finding)
+        // but nothing is open on screen, so none of it may reach the prompt or the panel.
+        let ctx = ChatContext::assemble(
+            false,
+            "R-1: sec · repo\n".into(),
+            Some(project_ctx(
+                Some("Total findings: 41\n"),
+                Some("Total selected: 96 rule(s)\n"),
+                Some("SEC-1: all repos\n"),
+            )),
+            Some(vec![make_uow("S-1", "development", false)]),
+            Some("#1 an issue\n".into()),
+            Some(make_finding()),
+        );
+        let prompt = ctx.system_prompt();
+        for (header, _) in PROJECT_HEADERS {
+            assert!(!prompt.contains(header), "{header} must not be sent");
+        }
+        assert!(
+            !prompt.contains("Faktura") && !prompt.contains("Total findings: 41"),
+            "no project data"
+        );
+        assert!(prompt.contains("=== LAYER 2:"), "the rules catalog stays");
+        assert_eq!(ctx.project_id(), None, "the request names no project");
+        assert!(ctx.project_line().starts_with("No project open"));
+        assert_eq!(ctx.rows().len(), 3, "guides and catalog only");
+        assert!(row_layers(&ctx).is_empty());
+    }
+
+    #[test]
+    fn panel_rows_equal_the_prompts_layers_for_each_state() {
+        let uow = vec![make_uow("S-1", "development", false)];
+        let sel = "Total selected: 96 rule(s)\nSEC-1\n";
+        let states: Vec<(&str, ChatContext)> = vec![
+            (
+                "project with a review",
+                ChatContext::assemble(
+                    true,
+                    "R-1\n".into(),
+                    Some(project_ctx(
+                        Some("Total findings: 41\n"),
+                        Some(sel),
+                        Some("SEC-1: all repos\n"),
+                    )),
+                    Some(uow.clone()),
+                    Some("#1 an issue\n".into()),
+                    None,
+                ),
+            ),
+            (
+                "project with only an onboarding draft",
+                ChatContext::assemble(
+                    true,
+                    "R-1\n".into(),
+                    Some(project_ctx(None, Some(sel), None)),
+                    Some(vec![]),
+                    None,
+                    None,
+                ),
+            ),
+            (
+                "focused finding",
+                ChatContext::assemble(
+                    true,
+                    "R-1\n".into(),
+                    Some(project_ctx(Some("Total findings: 1\n"), None, None)),
+                    None,
+                    None,
+                    Some(make_finding()),
+                ),
+            ),
+            (
+                "no project",
+                ChatContext::assemble(
+                    false,
+                    "R-1\n".into(),
+                    Some(project_ctx(Some("x\n"), Some(sel), None)),
+                    Some(uow),
+                    None,
+                    Some(make_finding()),
+                ),
+            ),
+        ];
+        for (name, ctx) in states {
+            assert_eq!(
+                row_layers(&ctx),
+                prompt_layers_with_content(&ctx.system_prompt()),
+                "{name}: the panel rows must be exactly the layers the prompt carries"
+            );
+        }
+    }
+
+    #[test]
+    fn rows_name_the_open_project_and_label_the_scan_from_what_is_sent() {
+        let with_scan = ChatContext::assemble(
+            true,
+            "R-1\n".into(),
+            Some(project_ctx(Some("Total findings: 41\n"), None, None)),
+            None,
+            None,
+            None,
+        );
+        let labels: Vec<String> = with_scan.rows().into_iter().map(|r| r.label).collect();
+        assert!(
+            labels.contains(&"Scan results (Faktura Test)".to_string()),
+            "{labels:?}"
+        );
+        assert_eq!(with_scan.project_line(), "Project open: Faktura Test");
+        assert_eq!(with_scan.project_id(), Some("proj-16"));
+        // No scan section is sent, so no scan row is claimed (the findings summary is not sent).
+        let without = ChatContext::assemble(
+            true,
+            "R-1\n".into(),
+            Some(project_ctx(None, None, None)),
+            None,
+            None,
+            None,
+        );
+        assert!(without
+            .rows()
+            .iter()
+            .all(|r| !r.label.starts_with("Scan results")));
+    }
+
+    #[test]
+    fn no_ui_text_has_em_or_en_dashes() {
+        let ctx = ChatContext::assemble(
+            true,
+            "R-1\n".into(),
+            Some(project_ctx(
+                Some("s\n"),
+                Some("Total selected: 2 rule(s)\n"),
+                Some("r\n"),
+            )),
+            Some(vec![make_uow("S-1", "development", false)]),
+            Some("#1 x\n".into()),
+            Some(make_finding()),
+        );
+        let mut texts: Vec<String> = ctx.rows().into_iter().map(|r| r.label).collect();
+        texts.push(ctx.project_line());
+        texts.push(ctx.send_block(Some("cli")).unwrap_or_default());
+        texts.push(ChatContext::default().project_line());
+        for t in texts {
+            assert!(!t.contains('\u{2014}') && !t.contains('\u{2013}'), "{t}");
+        }
+    }
+
+    #[test]
+    fn send_is_blocked_only_for_a_client_project_on_the_cli() {
+        let client = ChatContext::assemble(
+            true,
+            "R\n".into(),
+            Some(project_ctx(None, None, None)),
+            None,
+            None,
+            None,
+        );
+        let why = client.send_block(Some("cli")).expect("blocked");
+        assert!(
+            why.contains("client engagement") && why.contains("Chat backend"),
+            "{why}"
+        );
+        assert_eq!(client.send_block(Some("api")), None);
+        assert_eq!(
+            client.send_block(None),
+            None,
+            "unknown backend: the server decides"
+        );
+        // A non-client project on the CLI is allowed.
+        let mut mine = project_ctx(None, None, None);
+        mine.project.client_engagement = false;
+        let mine = ChatContext::assemble(true, "R\n".into(), Some(mine), None, None, None);
+        assert_eq!(mine.send_block(Some("cli")), None);
+        // Home screen with CLI is allowed.
+        let home = ChatContext::assemble(false, "R\n".into(), None, None, None, None);
+        assert_eq!(home.send_block(Some("cli")), None);
     }
 }

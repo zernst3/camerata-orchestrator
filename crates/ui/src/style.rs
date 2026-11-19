@@ -6678,6 +6678,11 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
    panel had no dark-themed precedent to reuse verbatim. ── */
 .chat-context { padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--paper); font-size: 11px; }
 .chat-context-title { font-weight: 700; color: var(--ink-soft); margin-bottom: 4px; }
+.chat-context-project { color: var(--ink); font-weight: 600; margin-bottom: 4px; }
+.chat-context-blocked {
+  margin-top: 6px; padding: 4px 8px; border-radius: 6px; color: var(--ink);
+  background: var(--accent-wash); border: 1px solid rgba(202,138,4,0.35);
+}
 .chat-context-list { display: flex; flex-direction: column; gap: 2px; }
 .chat-context-row { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); }
 .chat-context-dot { color: var(--ink-faint); }
