@@ -599,6 +599,12 @@ impl DecisionStore {
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref().map(PathBuf::as_path)
     }
+
+    /// Drop everything held IN MEMORY for `project_id` (the file is removed by the caller). Used
+    /// when a project and all its data are deleted, so nothing is served or written back after.
+    pub fn forget_project(&self, project_id: &str) {
+        self.lock().remove(project_id);
+    }
 }
 
 /// The on-disk form: the project id is inside the file because the file name is an encoding.

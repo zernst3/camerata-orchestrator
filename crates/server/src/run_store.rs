@@ -1805,6 +1805,64 @@ pub fn runs_covering(runs_root: &Path, checkout: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The saved runs that belong to one cockpit project, sorted into what may go with it and what
+/// may not. See [`runs_of_project`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectRuns {
+    /// Run folders that belong to the project alone: deleted with it.
+    pub mine: Vec<PathBuf>,
+    /// Command line runs (no project recorded) that cover one of the project's checkouts AND a
+    /// checkout of another project: they hold the other project's answers too, so they stay.
+    pub shared: Vec<PathBuf>,
+    /// Run ids of the project's runs a live process is working on right now.
+    pub live: Vec<String>,
+}
+
+/// The saved runs under `runs_root` that belong to `project_id`: a cockpit run records its
+/// project and belongs to it and to no other, whatever repos two projects share; a command line
+/// run (no project recorded) belongs to the project when it covers one of `own_dirs`, unless it
+/// also covers one of `other_dirs` (another project's checkout), when it is `shared` and kept.
+pub fn runs_of_project(
+    runs_root: &Path,
+    project_id: &str,
+    own_dirs: &[PathBuf],
+    other_dirs: &[PathBuf],
+) -> ProjectRuns {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let own: Vec<PathBuf> = own_dirs.iter().map(|d| canon(d)).collect();
+    let others: Vec<PathBuf> = other_dirs.iter().map(|d| canon(d)).collect();
+    let mut out = ProjectRuns::default();
+    let Ok(entries) = std::fs::read_dir(runs_root) else {
+        return out;
+    };
+    let mut dirs: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    dirs.sort();
+    for dir in dirs {
+        let Ok(record) = load_record(&dir) else {
+            continue;
+        };
+        let covered: Vec<PathBuf> = record.repos.iter().map(|r| canon(Path::new(&r.dir))).collect();
+        match &record.project_id {
+            Some(owner) if owner == project_id => {}
+            Some(_) => continue,
+            None => {
+                if !covered.iter().any(|c| own.contains(c)) {
+                    continue;
+                }
+                if covered.iter().any(|c| others.contains(c)) {
+                    out.shared.push(dir);
+                    continue;
+                }
+            }
+        }
+        if liveness_of(&dir) == Liveness::Live {
+            out.live.push(record.run_id.clone());
+        }
+        out.mine.push(dir);
+    }
+    out
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────────────────────────────────
 
 /// Delete the oldest runs of `project_key` beyond the newest `keep`. A run that is not complete

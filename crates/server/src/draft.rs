@@ -60,6 +60,13 @@ impl DraftStore {
             .and_then(|m| m.get(project_id).cloned())
     }
 
+    /// The size in bytes of `project_id`'s saved draft as stored (0 when there is none).
+    pub fn stored_bytes(&self, project_id: &str) -> u64 {
+        self.load(project_id)
+            .and_then(|v| serde_json::to_vec(&v).ok())
+            .map_or(0, |b| b.len() as u64)
+    }
+
     /// Replace `project_id`'s draft.
     pub fn save(&self, project_id: &str, v: serde_json::Value) {
         if let Ok(mut m) = self.mem.lock() {

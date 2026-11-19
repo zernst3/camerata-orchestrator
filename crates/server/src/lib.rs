@@ -1114,6 +1114,30 @@ impl AppState {
         guard.clone()
     }
 
+    /// Drop the in-memory copies of a project's last completed scan: its entry in `last_scan`,
+    /// and the project-agnostic `recent_scan` when that scan covered one of the project's repos
+    /// (it may be this project's). Returns how many copies were dropped. Used when a project and
+    /// all its data are deleted; the persisted inspections are removed by the caller.
+    pub(crate) fn forget_project_scans(&self, project_id: &str, repos: &[String]) -> usize {
+        let mut dropped = 0;
+        let mut last = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
+        if last.remove(project_id).is_some() {
+            dropped += 1;
+        }
+        drop(last);
+        let mut recent = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
+        let covers_project = recent.as_ref().is_some_and(|r| {
+            r.repos
+                .iter()
+                .any(|scanned| repos.iter().any(|own| own.eq_ignore_ascii_case(scanned)))
+        });
+        if covers_project {
+            *recent = None;
+            dropped += 1;
+        }
+        dropped
+    }
+
     /// Build state seeded with the representative spine + seeded open clarifications,
     /// native provider. Used by tests and the creds-free demo default.
     pub fn seeded() -> Self {

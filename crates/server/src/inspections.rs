@@ -259,6 +259,12 @@ impl InspectionStore {
         self.dir.as_deref().map(PathBuf::as_path)
     }
 
+    /// Drop everything held IN MEMORY for `project_id` (the file is removed by the caller). Used
+    /// when a project and all its data are deleted, so nothing is served or written back after.
+    pub fn forget_project(&self, project_id: &str) {
+        self.lock().remove(project_id);
+    }
+
     /// The file one project's entries are persisted in, if the store is file-backed. The
     /// project id is encoded so any id is a safe single path component and distinct ids can
     /// never collide.
