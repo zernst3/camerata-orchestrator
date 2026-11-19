@@ -496,17 +496,27 @@ impl AppState {
     }
 
     /// The client-engagement lock for a step whose model id comes from the request (the routine
-    /// prompt draft, the escalation review chat, the chat), checked against the ACTIVE project.
+    /// prompt draft, the escalation review chat), checked against the ACTIVE project.
     /// [`AppState::llm_for_project`] is handed no model and so cannot check one: without this a
     /// non-Anthropic id would be routed to OpenRouter by `build_completer`. A blank id is the
     /// server default (a Claude model) and passes; with no active project there is no client
     /// code in the step's context and nothing is refused.
     pub fn client_lock_step_model_refusal(&self, model: &str) -> Option<String> {
+        self.client_lock_model_refusal_for(self.projects.active().as_ref(), model)
+    }
+
+    /// [`AppState::client_lock_step_model_refusal`] for an explicit project (`None` = no project,
+    /// nothing refused). The chat uses this with the project its request names.
+    pub fn client_lock_model_refusal_for(
+        &self,
+        project: Option<&crate::project::Project>,
+        model: &str,
+    ) -> Option<String> {
         let model = model.trim();
         if model.is_empty() {
             return None;
         }
-        let p = self.projects.active()?;
+        let p = project?;
         crate::client_lock::refusal(
             p.client_engagement,
             p.backend,
@@ -515,14 +525,23 @@ impl AppState {
         .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
     }
 
-    /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
-    /// project, so `settings.chat_backend` decides.
-    ///
-    /// When the ACTIVE project is a client engagement, the chat backend setting must pass the
-    /// client-engagement lock too (a `cli` chat is refused with the lock's message): the chat can
-    /// carry that project's context, and the setting is global, not the project's own.
+    /// The `Llm` for the CHAT assistant when it is NOT tied to a project (home screen): the Chat
+    /// backend setting decides and no client lock applies, because the request carries no
+    /// project data. Same as `chat_llm_for(None)`.
     pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
-        if let Some(p) = self.projects.active() {
+        self.chat_llm_for(None)
+    }
+
+    /// The `Llm` for the chat assistant, locked by ONE project: the project the chat request
+    /// names (its `project_id`), NOT the server's last active project. With `Some(project)` a
+    /// client engagement refuses a `cli` chat with the lock's message; with `None` the chat runs
+    /// on the Chat backend setting and nothing is locked (the chat then carries no project
+    /// layer).
+    pub fn chat_llm_for(
+        &self,
+        project: Option<&crate::project::Project>,
+    ) -> Result<crate::llm::Llm, String> {
+        if let Some(p) = project {
             let backend = self.settings.chat_backend();
             if let Some(why) = crate::client_lock::refusal(p.client_engagement, backend, &[]) {
                 return Err(format!(

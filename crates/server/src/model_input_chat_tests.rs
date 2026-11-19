@@ -64,6 +64,7 @@ async fn the_chat_assistants_context_reaches_the_transport_redacted() {
         prompt: format!("Is this the same key? {}", in_question.text),
         model: "claude-sonnet-5-5".to_string(),
         system: Some(system),
+        project_id: None,
         history: vec![
             ChatTurn {
                 role: "user".to_string(),
