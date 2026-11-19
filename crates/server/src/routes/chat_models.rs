@@ -313,13 +313,13 @@ pub(crate) fn render_chat_prompt(history: &[ChatTurn], prompt: &str) -> String {
 ///   2. `app_chat_model` — the app-level (cross-project) [`crate::settings::Settings::chat_model`].
 ///   3. [`crate::llm::DEFAULT_MODEL`] — the floor when neither is set.
 ///
-/// Blank / whitespace-only candidates are treated as unset (trimmed-empty is ignored), so a
+/// Blank / whitespace-only candidates and the placeholder word "default" are treated as unset (trimmed-empty is ignored), so a
 /// cleared selector or a cleared setting falls through to the next tier. Pure (no I/O) so the
 /// precedence is unit-testable.
 pub fn resolve_chat_model(req_model: Option<&str>, app_chat_model: Option<&str>) -> String {
     let pick = |m: Option<&str>| {
         m.map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| crate::settings::is_real_model_id(s))
             .map(str::to_string)
     };
     pick(req_model)

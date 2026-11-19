@@ -88,6 +88,13 @@ pub struct SettingsStore {
     path: Option<std::sync::Arc<std::path::PathBuf>>,
 }
 
+/// True for a usable model id: not blank and not the placeholder word "default" (a UI fallback
+/// label that must never be stored or sent to the model backend as a model).
+pub fn is_real_model_id(m: &str) -> bool {
+    let t = m.trim();
+    !t.is_empty() && !t.eq_ignore_ascii_case("default")
+}
+
 impl SettingsStore {
     /// An empty, NON-persisted store (tests / clean in-memory use).
     pub fn new() -> Self {
@@ -146,9 +153,16 @@ impl SettingsStore {
         updated
     }
 
-    /// The app-level chat-assistant model, if one is set and non-empty.
+    /// True for a usable model id: not blank and not the placeholder word "default" (a UI fallback
+/// label that must never be stored or sent to the model backend as a model).
+pub fn is_real_model_id(m: &str) -> bool {
+    let t = m.trim();
+    !t.is_empty() && !t.eq_ignore_ascii_case("default")
+}
+
+/// The app-level chat-assistant model, if one is set and non-empty.
     pub fn chat_model(&self) -> Option<String> {
-        self.get().chat_model.filter(|m| !m.trim().is_empty())
+        self.get().chat_model.filter(|m| is_real_model_id(m))
     }
 
     /// Set (or clear) the app-level chat-assistant model, persisting the change.
@@ -158,7 +172,7 @@ impl SettingsStore {
                 Ok(s) => s,
                 Err(_) => return Settings::default(),
             };
-            s.chat_model = model.filter(|m| !m.trim().is_empty());
+            s.chat_model = model.filter(|m| is_real_model_id(m));
             s.clone()
         };
         self.save();
