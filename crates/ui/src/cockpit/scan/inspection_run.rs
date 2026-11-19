@@ -88,7 +88,11 @@ pub(crate) fn InspectionRunControls(props: RunControlsProps) -> Element {
                         value: "{checks_value}",
                         onchange: move |e| on_checks.call(ChecksToRun::from_value(&e.value())),
                         for option in ChecksToRun::OPTIONS {
-                            option { value: option.value(), "{option.label()}" }
+                            option {
+                                value: option.value(),
+                                selected: option.value() == checks_value,
+                                "{option.label()}"
+                            }
                         }
                     }
                     HelpButton { topic: help_text::checks_topic() }
@@ -109,7 +113,7 @@ pub(crate) fn InspectionRunControls(props: RunControlsProps) -> Element {
                             value: "{props.run_mode}",
                             onchange: move |e| on_mode.call(e.value()),
                             for (value , label) in RUN_MODES {
-                                option { value, "{label}" }
+                                option { value, selected: value == props.run_mode.as_str(), "{label}" }
                             }
                         }
                         if props.run_mode == props.recommended_mode {
@@ -501,7 +505,7 @@ pub(in crate::cockpit) fn engine_estimate_block(
     let dollar_str = if dollars < 0.01 {
         "<$0.01".to_string()
     } else {
-        format!("~${dollars:.2}")
+        format!("about ${dollars:.2}")
     };
     EstimateShown {
         short: dollar_str.clone(),

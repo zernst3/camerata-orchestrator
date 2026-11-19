@@ -3094,25 +3094,26 @@ pub(super) fn BackendEditor(
 
     rsx! {
         div { class: "tier-map-editor backend-editor",
-            p { class: "tier-map-heading", "Backend" }
-            p { class: "section-hint tier-map-hint",
-                "CLI is your Claude Code subscription, no key needed. API is the Anthropic API, \
-                 it needs an Anthropic API key and is the compliant, metered chain for client \
-                 code. This governs every AI call this project makes: the scan, alternative \
-                 recommendations, rescans, and the governed dev loop."
+            // One short line below; the longer text is the help topic behind the "?".
+            div { class: "export-heading",
+                p { class: "tier-map-heading", "Backend" }
+                crate::cockpit::help::HelpButton {
+                    topic: camerata_ui_core::help::inspection::backend_topic(),
+                }
             }
             div { class: "tier-map-row backend-toggle-row",
                 label { class: "tier-map-band-label", "Project backend" }
-                div { class: "backend-toggle",
+                div {
+                    class: if disabled { "backend-toggle backend-toggle-locked" } else { "backend-toggle" },
                     {seg(ProjectBackend::Cli, "CLI")}
                     {seg(ProjectBackend::Api, "API")}
                 }
             }
             span { class: "l3-review-toggle-hint backend-toggle-hint",
                 if backend() == ProjectBackend::Cli {
-                    "CLI selected. Scans and the dev loop run on your Claude Code subscription."
+                    "CLI selected. Runs on your Claude Code subscription."
                 } else {
-                    "API selected. If no Anthropic API key is configured, AI steps on this project will not run until one is saved; the deterministic floor still runs."
+                    "API selected. Runs on the Anthropic API. Needs a saved Anthropic API key."
                 }
             }
         }
@@ -8152,8 +8153,10 @@ mod render_tests {
             "the API-selected hint renders; html=\n{html}"
         );
         assert!(
-            html.contains("AI steps on this project will not run"),
-            "the no-key consequence is explained; html=\n{html}"
+            html.contains(
+                "API selected. Runs on the Anthropic API. Needs a saved Anthropic API key."
+            ),
+            "the API hint renders; html=\n{html}"
         );
         assert!(
             !html.contains("CLI selected"),

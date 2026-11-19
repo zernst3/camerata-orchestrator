@@ -44,7 +44,7 @@ fn agent_figure() -> EstimateBlock {
 
 fn engine_figure() -> EstimateBlock {
     EstimateBlock::Engine {
-        dollars: "~$3.40".to_string(),
+        dollars: "about $3.40".to_string(),
         meta: "~120k tokens \u{b7} 4 pass(es) \u{b7} 12 rule(s)".to_string(),
         repo_lines: Vec::new(),
         scope_line: camerata_ui_core::scan::inspection_run::engine_scope_line(true),
@@ -126,4 +126,47 @@ states! {
     estimate_unavailable => "inspection/estimate-unavailable",
     deterministic_only => "inspection/deterministic-only",
     help_open => "inspection/help-open",
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style::GLOBAL_CSS;
+
+    /// The `<select id=...>` chunk of a rendered page.
+    fn select_of(html: &str, id: &str) -> String {
+        let at = html
+            .find(&format!("<select id=\"{id}\""))
+            .unwrap_or_else(|| panic!("no select {id}: {html}"));
+        let end = html[at..].find("</select>").unwrap();
+        html[at..at + end].to_string()
+    }
+
+    /// Setting only the select's `value` shows nothing in a static page: the option that matches
+    /// must carry `selected`, or the select reads "All checks" whatever the state is.
+    #[test]
+    fn the_checks_select_marks_the_matching_option_selected() {
+        let html = render("inspection/deterministic-only").replace(GLOBAL_CSS, "");
+        let select = select_of(&html, "inspection-checks");
+        let value = ChecksToRun::DeterministicOnly.value();
+        assert!(
+            select.contains(&format!("value=\"{value}\" selected")),
+            "{select}"
+        );
+        assert_eq!(select.matches(" selected").count(), 1, "{select}");
+        let all = render("inspection/start-agent").replace(GLOBAL_CSS, "");
+        let select = select_of(&all, "inspection-checks");
+        assert!(
+            select.contains(&format!("value=\"{}\" selected", ChecksToRun::All.value())),
+            "{select}"
+        );
+    }
+
+    /// The Run mode select (Engine finder only) marks its current mode too.
+    #[test]
+    fn the_run_mode_select_marks_the_current_mode_selected() {
+        let html = render("inspection/start-engine").replace(GLOBAL_CSS, "");
+        let select = select_of(&html, "inspection-run-mode");
+        assert_eq!(select.matches(" selected").count(), 1, "{select}");
+    }
 }

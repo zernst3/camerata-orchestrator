@@ -33,7 +33,13 @@ pub(super) fn ExportPage(props: PageProps) -> Element {
     rsx! {
         ReviewShell { status: (&fx.shell).into(), active: Lane::Tree,
             div { class: "audit-export-panel",
-                p { class: "section-label", "Export product (ZIP: PDF + Excel + JSON)" }
+                // The real panel's heading row: the title and the "?" help button.
+                div { class: "export-heading",
+                    p { class: "section-label", "{camerata_ui_core::export_panel::HEADING}" }
+                    crate::cockpit::help::HelpButton {
+                        topic: camerata_ui_core::help::export::export_topic(),
+                    }
+                }
                 ExportGate { gate: body.gate.clone(), table_keys: Some(table_keys),
                     // The panel's own button, as it stands when the gate lets the package out.
                     button { class: "btn-run", "Export product" }

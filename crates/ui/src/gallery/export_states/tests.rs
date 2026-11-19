@@ -80,7 +80,7 @@ fn the_held_styles_are_their_own_rules() {
         "the line's buttons are 8px apart"
     );
     assert!(
-        css.contains(".finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d; }"),
+        css.contains(".finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d,"),
         "the held edge is its own wider, darker rule"
     );
     assert!(
@@ -89,7 +89,7 @@ fn the_held_styles_are_their_own_rules() {
         ),
         "the critical edge is unchanged and not shared"
     );
-    assert!(css.contains(".finding-row-held > td { background: rgba(143, 29, 29, 0.12); }"));
+    assert!(css.contains(".finding-row-held > td { background: repeating-linear-gradient("));
 }
 
 /// The held-rows pages render the app's own table container, with no gallery wrapper: it fills
@@ -207,4 +207,20 @@ fn a_row_two_checks_refuse_is_counted_once_and_names_both_reasons() {
             && both.contains("Engine Check said No, no correction yet"),
         "{both}"
     );
+}
+
+/// The export panel's "?" help button is drawn in every export state (the gallery once drew the
+/// heading as bare text, so no blocked or clear state showed it).
+#[test]
+fn every_export_state_shows_the_help_button() {
+    for id in [
+        "export/clear",
+        "export/blocked",
+        "export/one-line-two-reasons",
+        "export/blocked-many",
+    ] {
+        let html = page(id);
+        assert!(html.contains("aria-label=\"About Export product\""), "{id}");
+        assert!(html.contains("class=\"help-button\""), "{id}");
+    }
 }

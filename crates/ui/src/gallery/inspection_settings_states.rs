@@ -4,7 +4,7 @@
 //! Settings > This project and Review > Settings mount.
 
 use camerata_api_types::project::{ProjectBackend, ProjectFinder, ReviewSettings, StepModels};
-use camerata_ui_core::inspection_settings::Stage;
+use camerata_ui_core::inspection_settings::{save_error_line, Stage};
 use camerata_ui_core::models::{ModelOption, ModelsResp};
 use dioxus::prelude::*;
 
@@ -141,7 +141,19 @@ pub(crate) fn page_props(id: &str) -> Option<PageProps> {
             ..base
         },
         "inspection-settings/save-error" => PageProps {
-            save_error: Some("model must not be empty".to_string()),
+            save_error: Some(save_error_line(
+                Stage::GroupReview,
+                "model must not be empty",
+            )),
+            ..base
+        },
+        "inspection-settings/non-anthropic-warning" => PageProps {
+            project: project(|review, _| {
+                review.finder = ProjectFinder::Agent;
+                review.finder_model = "claude-opus-5-5".to_string();
+                review.group_review_model = "openai/gpt-5".to_string();
+                (ProjectBackend::Api, true)
+            }),
             ..base
         },
         "inspection-settings/registry-missing" => PageProps {
@@ -178,4 +190,5 @@ states! {
     run_in_flight => "inspection-settings/run-in-flight",
     save_error => "inspection-settings/save-error",
     registry_missing => "inspection-settings/registry-missing",
+    non_anthropic_warning => "inspection-settings/non-anthropic-warning",
 }

@@ -200,6 +200,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "run-in-flight",
             "save-error",
             "registry-missing",
+            "non-anthropic-warning",
         ],
     ),
     (
