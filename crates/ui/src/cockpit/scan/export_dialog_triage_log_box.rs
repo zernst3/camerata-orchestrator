@@ -95,7 +95,7 @@ async fn clicking_the_help_button_opens_a_dialog_with_the_description_and_close_
             .collect()
     };
     fn help_only() -> Element {
-        rsx! { super::exports::ExportHelp {} }
+        rsx! { crate::cockpit::help::HelpButton { topic: camerata_ui_core::help::export::export_topic() } }
     }
     let mut vdom = VirtualDom::new(help_only);
     let first = clicks(&vdom.rebuild_to_vec());

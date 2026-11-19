@@ -2889,6 +2889,30 @@ html, body {
 .audit-model-select:hover:not(:disabled) { border-color: var(--accent); }
 .audit-model-select:disabled { opacity: .55; cursor: default; }
 .audit-model-hint { font-size: 11.5px; color: var(--ink-soft); }
+/* The shared help dialog: a small "?" button beside a heading or control, and the fixed overlay it
+   opens. The text is selectable and the body scrolls when it is long. */
+.help-button {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; margin-left: 6px; padding: 0; vertical-align: middle;
+  border: 1px solid var(--line); border-radius: 50%; background: var(--surface);
+  color: var(--ink-soft); font-size: 12px; font-weight: 700; line-height: 1; cursor: pointer;
+}
+.help-button:hover, .help-button:focus-visible { border-color: var(--accent); color: var(--accent-ink); }
+.help-backdrop {
+  position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center;
+  justify-content: center; background: rgba(0,0,0,.55);
+}
+.help-dialog {
+  display: flex; flex-direction: column; width: min(560px, calc(100vw - 32px));
+  max-height: min(70vh, 640px); padding: 16px 18px; border: 1px solid var(--line);
+  border-radius: var(--r-lg); background: var(--paper); color: var(--ink);
+  box-shadow: var(--shadow-pop); user-select: text; -webkit-user-select: text;
+}
+.help-dialog:focus { outline: none; }
+.help-title { margin: 0 0 8px; font-size: 15px; font-weight: 700; }
+.help-body { flex: 1 1 auto; overflow-y: auto; font-size: 13px; line-height: 1.5; color: var(--ink-soft); }
+.help-body p { margin: 0 0 10px; }
+.help-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 /* Thorough-calibration checkbox (#51). */
 .audit-thorough-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink); cursor: pointer; }
 .audit-thorough-toggle input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }

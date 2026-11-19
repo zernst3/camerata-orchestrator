@@ -3462,6 +3462,7 @@ mod decision_cards;
 pub(crate) mod engine_check;
 pub(crate) mod export_gate;
 mod freshness;
+pub(crate) mod help;
 pub(crate) mod inspection_settings;
 pub mod live_run;
 #[cfg(feature = "liveview-review")]
