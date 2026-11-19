@@ -1098,7 +1098,7 @@ async fn a_save_whose_answer_could_not_be_read_says_it_saved() {
     screen.pump(300).await;
     let html = screen.html();
     assert!(
-        html.contains("saved, but the server's answer could not be read"),
+        html.contains("saved, but the server&#39;s answer could not be read"),
         "{html}"
     );
     assert!(!html.contains("Not saved"), "{html}");
@@ -1111,23 +1111,23 @@ fn the_step_answer_tells_a_refusal_from_an_unreadable_save_from_a_garbled_answer
     // The server said ok but the project is not one this app can read: the write landed.
     let unreadable = json!({ "ok": true, "project": { "nonsense": 1 } });
     assert_eq!(
-        read_step_answer(&unreadable),
-        Err(SaveFailure::SavedUnreadable)
+        read_step_answer(&unreadable).err(),
+        Some(SaveFailure::SavedUnreadable)
     );
     let no_project = json!({ "ok": true });
     assert_eq!(
-        read_step_answer(&no_project),
-        Err(SaveFailure::SavedUnreadable)
+        read_step_answer(&no_project).err(),
+        Some(SaveFailure::SavedUnreadable)
     );
     let refused = json!({ "ok": false, "message": "no such project" });
     assert_eq!(
-        read_step_answer(&refused),
-        Err(SaveFailure::Refused("no such project".to_string()))
+        read_step_answer(&refused).err(),
+        Some(SaveFailure::Refused("no such project".to_string()))
     );
     // Neither ok nor not ok: nothing can be said about whether it saved.
     assert_eq!(
-        read_step_answer(&json!({ "x": 1 })),
-        Err(SaveFailure::Unconfirmed)
+        read_step_answer(&json!({ "x": 1 })).err(),
+        Some(SaveFailure::Unconfirmed)
     );
 }
 
@@ -1142,6 +1142,7 @@ fn a_blank_row_says_loading_only_while_the_registry_loads() {
         use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         let mut p = new_project_json();
         p["review"]["finder"] = json!("engine");
+        p["step_models"]["audit"] = json!("");
         rsx! {
             InspectionSettingsView {
                 project: serde_json::from_value::<ProjectView>(p).unwrap(),
