@@ -1003,7 +1003,7 @@ pub(in crate::cockpit) fn NotAssessedPanel(
         Default::default();
     for f in &findings {
         let reason = match &f.kind {
-            Some(FindingKind::NotAssessed(na)) => na.reason.as_str(),
+            Some(FindingKind::NotAssessed(na)) => na.reason.heading(),
             _ => "unknown",
         };
         by_reason.entry(reason).or_default().push(f.clone());

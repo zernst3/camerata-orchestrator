@@ -90,6 +90,9 @@ pub struct JudgeCounts {
     /// Candidates within the cap that got no definite verdict: `unsure`, no verdict, a failed
     /// batch, or no model.
     pub unjudged: u32,
+    /// Of `unjudged`, the ones the model answered "unsure" (an allowed verdict: the candidate
+    /// is reported as not checked, never as clean). The rest got no usable answer.
+    pub unsure: u32,
     /// Candidates past the per-scan cap: counted, never judged.
     pub over_cap: u32,
     /// Of `judged`, the ones answered from the verdict cache.
@@ -257,7 +260,24 @@ pub async fn judge_clone_candidates(
         if let Some(row) = not_assessed_row(&req, rule, &counts, llm.is_some(), &outcome) {
             outcome.not_assessed.push(row);
         }
-        finish_transcript(feedback, &session, rule, candidates, &judged, &counts);
+        let call_failure = if llm.is_none() {
+            Some("no model was available, so nothing was judged".to_string())
+        } else {
+            outcome
+                .failed
+                .iter()
+                .find(|f| f.reason.starts_with(rule.id()))
+                .map(|f| f.reason.clone())
+        };
+        finish_transcript(
+            feedback,
+            &session,
+            rule,
+            candidates,
+            &judged,
+            &counts,
+            call_failure.as_deref(),
+        );
         outcome.counts.insert(rule, counts);
     }
     cache.trim(MAX_CACHED_VERDICTS);
@@ -377,6 +397,7 @@ async fn judge_rule(
                 continue; // no verdict: unjudged
             };
             if verdict.word == "unsure" {
+                counts.unsure += 1;
                 continue; // retried next scan: never cached, never shipped
             }
             cache.insert(
@@ -445,6 +466,23 @@ fn not_assessed_row(
     } else {
         NotAssessedReason::ModelDeclined
     };
+    if !failed {
+        // The model answered; what it left unsettled is said in the operator's words.
+        return Some(findings::not_assessed_row(
+            req.repo,
+            rule,
+            reason,
+            unsettled_summary(counts),
+            format!(
+                "{} of the {} candidate site groups for {id} were not settled in this scan: \
+                 {}. Those candidates are not reported, so the rule is reported as not fully \
+                 assessed rather than clean.",
+                counts.unjudged + counts.over_cap,
+                counts.found,
+                unsettled_clauses(counts).join("; ")
+            ),
+        ));
+    }
     let mut parts: Vec<String> = Vec::new();
     if counts.unjudged > 0 {
         parts.push(format!(
@@ -478,6 +516,40 @@ fn not_assessed_row(
             counts.found
         ),
     ))
+}
+
+/// What the model left unsettled for a rule, as clauses in the operator's words.
+fn unsettled_clauses(counts: &JudgeCounts) -> Vec<String> {
+    let noun = |n: u32| if n == 1 { "candidate" } else { "candidates" };
+    let mut clauses = Vec::new();
+    if counts.unsure > 0 {
+        clauses.push(format!(
+            "the model was unsure about {} of {} {}",
+            counts.unsure,
+            counts.found,
+            noun(counts.found)
+        ));
+    }
+    let silent = counts.unjudged.saturating_sub(counts.unsure);
+    if silent > 0 {
+        clauses.push(format!("{silent} got no usable answer"));
+    }
+    if counts.over_cap > 0 {
+        clauses.push(format!(
+            "{} were beyond the limit of {CLONE_JUDGE_MAX_PER_RULE} assessed per scan",
+            counts.over_cap
+        ));
+    }
+    clauses
+}
+
+/// The row's short line: what was unsettled, then how many were judged.
+fn unsettled_summary(counts: &JudgeCounts) -> String {
+    format!(
+        "{}; {} judged",
+        unsettled_clauses(counts).join("; "),
+        counts.judged
+    )
 }
 
 fn register_transcript(
@@ -537,6 +609,7 @@ fn finish_transcript(
     candidates: &[Candidate],
     judged: &BTreeMap<String, Verdict>,
     counts: &JudgeCounts,
+    call_failure: Option<&str>,
 ) {
     let Some((store, key)) = feedback else {
         return;
@@ -562,15 +635,31 @@ fn finish_transcript(
             counts.over_cap
         ),
     );
-    store.set_status(
-        key,
-        session,
-        if counts.fully_assessed() {
-            "done"
-        } else {
-            "blocked"
-        },
-    );
+    // A call that answered is done, an honest "unsure" included; its line says what was not
+    // settled. Only a call that really failed (no answer, an unusable answer, an error, the
+    // spend limit) gets the failure look, with the reason.
+    let (line, status) = match call_failure {
+        Some(why) => (format!("Did not finish: {why}"), "blocked"),
+        None => {
+            let mut line = format!("Done: {} judged", counts.judged);
+            if counts.unsure > 0 {
+                line.push_str(&format!(", {} unsure", counts.unsure));
+            }
+            let silent = counts.unjudged.saturating_sub(counts.unsure);
+            if silent > 0 {
+                line.push_str(&format!(", {silent} with no usable answer"));
+            }
+            if counts.over_cap > 0 {
+                line.push_str(&format!(", {} beyond the limit", counts.over_cap));
+            }
+            if !counts.fully_assessed() {
+                line.push_str(" (reported as not checked)");
+            }
+            (line, "done")
+        }
+    };
+    store.append_output(key, session, &line);
+    store.set_status(key, session, status);
 }
 
 /// Record every armed rule in the ledger, once per repo, under the architectural tier.

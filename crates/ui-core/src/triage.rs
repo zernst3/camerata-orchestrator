@@ -647,7 +647,7 @@ pub fn rule_hub(findings: &[FindingView], repo: &str, rule_id: &str) -> Option<R
         ),
         Some(FindingKind::NotAssessed(na)) => format!(
             "Not assessed \u{2014} {}{}",
-            na.reason.as_str(),
+            na.reason.heading(),
             if na.reason_detail.is_empty() {
                 String::new()
             } else {
