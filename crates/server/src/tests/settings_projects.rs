@@ -33,6 +33,83 @@ fn resolve_chat_model_precedence() {
     );
 }
 
+/// A saved placeholder "default" is not a model: it resolves like blank, so it falls through
+/// to the next tier (and finally DEFAULT_MODEL) instead of reaching Claude Code as `--model default`.
+#[test]
+fn resolve_chat_model_treats_default_as_unset() {
+    assert_eq!(
+        resolve_chat_model(Some("default"), Some("app-model")),
+        "app-model"
+    );
+    assert_eq!(
+        resolve_chat_model(None, Some("default")),
+        crate::llm::DEFAULT_MODEL
+    );
+    assert_eq!(
+        resolve_chat_model(Some(" Default "), Some("default")),
+        crate::llm::DEFAULT_MODEL
+    );
+    assert_eq!(
+        resolve_chat_model(Some("default"), None),
+        crate::llm::DEFAULT_MODEL
+    );
+}
+
+/// `POST /api/settings/chat-model` never stores the placeholder "default" or a blank value.
+#[tokio::test]
+async fn post_chat_model_default_and_blank_store_none() {
+    for body in [
+        r#"{"model":"default"}"#,
+        r#"{"model":"  Default "}"#,
+        r#"{"model":"   "}"#,
+        r#"{"model":null}"#,
+    ] {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_chat_model(Some("claude-opus-5".to_string()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/chat-model")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["chat_model"].is_null(), "body {body}: {json}");
+        assert_eq!(state.settings.chat_model(), None, "body {body}");
+    }
+}
+
+/// A real model id is still stored.
+#[tokio::test]
+async fn post_chat_model_real_id_is_stored() {
+    let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+    let app = router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/settings/chat-model")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"claude-opus-5"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        state.settings.chat_model().as_deref(),
+        Some("claude-opus-5")
+    );
+}
+
 /// Scan-type selector flags default to TRUE when absent (today's behaviour: both scans run).
 #[test]
 fn audit_req_scan_type_flags_default_true() {

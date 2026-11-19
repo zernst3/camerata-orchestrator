@@ -19,6 +19,8 @@ use camerata_ui::desktop_chrome::{self, CLIPBOARD_SHIM_SCRIPT, GOOGLE_FONTS_LINK
 mod agent_activity;
 mod bombe_bg;
 mod chat;
+#[cfg(test)]
+mod chat_ui_tests;
 mod cockpit;
 mod credentials;
 mod design;
@@ -158,6 +160,11 @@ fn App() -> Element {
     // CockpitShell) and ChatBubble (reader, sibling of CockpitShell) share the
     // same signal. CockpitApp detects this via `try_consume_context` and skips
     // its own `use_context_provider` call when the parent already provides it.
+    // Which cockpit screen is showing (projects home or inside a project), lifted here so the chat
+    // bubble knows whether a project is open on screen. CockpitShell reads this same signal.
+    let screen = use_signal(|| cockpit::CockpitScreen::Projects);
+    use_context_provider(|| screen);
+
     let ask_finding = use_signal(|| Option::<chat::FindingContext>::None);
     use_context_provider(|| ask_finding);
 
@@ -212,7 +219,7 @@ fn App() -> Element {
         // in Project mode focused on that finding.
         chat::ChatBubble {
             finding: ask_finding(),
-            pulled_issues_section: cockpit::pulled_issues_chat_section(),
+            project_open: screen() == cockpit::CockpitScreen::InProject,
         }
         // The in-app terminal: a floating PTY-backed shell panel with tab support.
         // FAB sits to the LEFT of the chat FAB so both are reachable without overlap.

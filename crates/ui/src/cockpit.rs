@@ -1764,7 +1764,7 @@ pub(crate) enum CockpitView {
 /// A project CONTAINS everything (repos, ruleset, baseline, workspace), so nothing in
 /// the cockpit is reachable until you open one.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CockpitScreen {
+pub(crate) enum CockpitScreen {
     /// The projects home: pick one to open, create a new one, or import.
     Projects,
     /// Inside the active project (the cockpit tabs).
@@ -1790,8 +1790,17 @@ enum HomeView {
 /// can navigate back to the projects list.
 #[component]
 pub fn CockpitShell() -> Element {
-    let screen = use_signal(|| CockpitScreen::Projects);
-    use_context_provider(|| screen);
+    // Which screen is showing. Lifted to App (main.rs) so the chat bubble, a sibling of this shell,
+    // knows whether a project is open on screen; this shell provides its own signal only when
+    // mounted without an App parent (the same pattern as the ask-a-finding signal).
+    let own = use_signal(|| CockpitScreen::Projects);
+    let screen = match try_consume_context::<Signal<CockpitScreen>>() {
+        Some(existing) => existing,
+        None => {
+            use_context_provider(|| own);
+            own
+        }
+    };
     // The inspection walkthrough's state (shared by the switch, the offer, the Help menu and the
     // palette), and its popup host. The host draws nothing while the walkthrough is off.
     crate::walkthrough::provide_tour();
@@ -2993,6 +3002,15 @@ async fn save_app_chat_model(model: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The value the Chat assistant setting's select shows: `chosen` when it is one of the registry's
+/// `ids`, otherwise the empty string (the "(not set)" option). Pure so it is unit-tested.
+fn chat_model_setting_value(ids: Option<&[&str]>, chosen: Option<&str>) -> String {
+    match (ids, chosen) {
+        (Some(ids), Some(c)) if ids.contains(&c) => c.to_string(),
+        _ => String::new(),
+    }
+}
+
 /// Cross-project chat-assistant model selector. The in-app chat is a GLOBAL assistant, so its
 /// model is an APP-LEVEL setting (applies to every project). Reads/writes the app-level
 /// `chat_model` via `GET /api/settings` + `POST /api/settings/chat-model`, using the same
@@ -3007,18 +3025,19 @@ fn ChatModelSetting() -> Element {
     let app_model = use_resource(fetch_app_chat_model);
     let app_model = app_model.read().clone().flatten();
 
-    let mut selected = use_signal(String::new);
+    // The operator's pick this session (None until they choose).
+    let mut picked = use_signal(|| Option::<String>::None);
     let mut saving = use_signal(|| false);
-    // Seed once: prefer the persisted app-level chat model, else the registry default.
-    if selected().is_empty() {
-        if let Some(m) = &app_model {
-            selected.set(m.clone());
-        } else if let Some(m) = &models {
-            if !m.default.is_empty() {
-                selected.set(m.default.clone());
-            }
-        }
-    }
+    // What the select shows: the operator's pick, else the saved model, but ONLY when it is a
+    // model in the registry. A saved value that is not (or nothing saved) shows the "(not set)"
+    // option selected: the select must never tick a model that is not actually set.
+    let selected = chat_model_setting_value(
+        models
+            .as_ref()
+            .map(|m| m.models.iter().map(|o| o.id.as_str()).collect::<Vec<_>>())
+            .as_deref(),
+        picked().as_deref().or(app_model.as_deref()),
+    );
 
     rsx! {
         div { class: "tier-map-editor step-models-editor",
@@ -3039,7 +3058,11 @@ fn ChatModelSetting() -> Element {
                             disabled: saving(),
                             onchange: move |e| {
                                 let model = e.value();
-                                selected.set(model.clone());
+                                // "(not set)" is not a model: picking it saves nothing.
+                                if model.trim().is_empty() {
+                                    return;
+                                }
+                                picked.set(Some(model.clone()));
                                 saving.set(true);
                                 spawn(async move {
                                     if save_app_chat_model(&model).await {
@@ -3050,12 +3073,13 @@ fn ChatModelSetting() -> Element {
                                     saving.set(false);
                                 });
                             },
+                            option { value: "", selected: selected.is_empty(), "(not set)" }
                             for (group_label , opts) in m.grouped().into_iter() {
                                 optgroup { label: "{group_label}",
                                     for opt in opts.into_iter() {
                                         option {
                                             value: "{opt.id}",
-                                            selected: selected() == opt.id,
+                                            selected: selected == opt.id,
                                             "{opt.label}"
                                         }
                                     }
@@ -3472,6 +3496,7 @@ mod tests {
         JobStateView, JobStatusEnvelope, ProjectBackend, RunGateEvent, RunView,
         StallThresholdsView, TierMapView,
     };
+    use dioxus::prelude::*;
 
     /// The job-state view deserializes the server's `deterministic` progress section
     /// (per-tool rows + done/total). An old server omitting the field defaults to empty.
@@ -6462,5 +6487,205 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_hierarchy_schema("p-9", &schema).await;
         assert!(ok, "the helper POSTs the schema graph and reports success");
+    }
+
+    // ── Settings > Chat assistant tells the truth about what is set ──────────────────
+    #[component]
+    fn ChatModelSettingHarness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! { super::ChatModelSetting {} }
+    }
+
+    async fn render_chat_model_setting(saved: serde_json::Value, ready: &str) -> String {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "id": "claude-haiku-4-5", "display": "Haiku", "provider": "claude" },
+                    { "id": "claude-opus-5", "display": "Opus", "provider": "claude" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(saved))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(ChatModelSettingHarness);
+        vdom.rebuild_in_place();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(200), vdom.wait_for_work())
+                    .await;
+            vdom.render_immediate(&mut dioxus::core::NoOpMutations);
+            let html = dioxus_ssr::render(&vdom);
+            if html.contains(ready) || tokio::time::Instant::now() >= deadline {
+                return html;
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn chat_assistant_setting_shows_not_set_when_saved_value_is_not_a_registry_model() {
+        for saved in [
+            serde_json::json!({ "chat_model": "default" }),
+            serde_json::json!({ "chat_model": null }),
+            serde_json::json!({}),
+        ] {
+            let html = render_chat_model_setting(saved.clone(), "(not set)").await;
+            assert!(html.contains("(not set)"), "saved {saved}; html=\n{html}");
+            assert!(
+                html.contains("value=\"\" selected=true"),
+                "(not set) must be the selected option; saved {saved}; html=\n{html}"
+            );
+            assert!(
+                !html.contains("value=\"claude-haiku-4-5\" selected=true"),
+                "no model may look ticked; saved {saved}; html=\n{html}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn chat_assistant_setting_ticks_a_saved_registry_model() {
+        let html = render_chat_model_setting(
+            serde_json::json!({ "chat_model": "claude-opus-5" }),
+            "value=\"claude-opus-5\" selected=true",
+        )
+        .await;
+        assert!(
+            html.contains("value=\"claude-opus-5\" selected=true"),
+            "html=\n{html}"
+        );
+        assert!(!html.contains("value=\"\" selected=true"), "html=\n{html}");
+    }
+
+    /// The operator's real action on the real Settings control: pick in the select. The stub
+    /// server records what is saved; the screen must keep telling the truth afterwards.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn picking_in_the_chat_assistant_select_saves_a_real_model_and_not_the_not_set_option() {
+        use dioxus::dioxus_core::Mutation;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "id": "claude-haiku-4-5", "display": "Haiku", "provider": "claude" },
+                    { "id": "claude-opus-5", "display": "Opus", "provider": "claude" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "chat_model": "default" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/chat-model"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let mut vdom = VirtualDom::new(ChatModelSettingHarness);
+        let mut change = None;
+        let mut take = |m: &dioxus::dioxus_core::Mutations| {
+            for e in &m.edits {
+                if let Mutation::NewEventListener { name, id } = e {
+                    if name == "change" {
+                        change = Some(*id);
+                    }
+                }
+            }
+        };
+        take(&vdom.rebuild_to_vec());
+        for _ in 0..30 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            take(&vdom.render_immediate_to_vec());
+        }
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("(not set)"), "{html}");
+        assert!(html.contains("value=\"\" selected=true"), "{html}");
+        let select = change.expect("the select registered a change listener");
+        let runtime = vdom.runtime();
+        let pick = |value: &str| {
+            let data: std::rc::Rc<dyn std::any::Any> =
+                std::rc::Rc::new(dioxus::html::PlatformEventData::new(Box::new(
+                    dioxus::html::SerializedFormData::new(value.to_string(), Vec::new()),
+                )));
+            runtime.handle_event(
+                "change",
+                dioxus::dioxus_core::Event::new(data, true),
+                select,
+            );
+        };
+        // Picking "(not set)" saves nothing.
+        pick("");
+        for _ in 0..10 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            vdom.render_immediate_to_vec();
+        }
+        let posts = || async {
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .filter(|r| {
+                    r.method.as_str() == "POST" && r.url.path() == "/api/settings/chat-model"
+                })
+                .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            posts().await.is_empty(),
+            "(not set) is not a model and is not saved"
+        );
+        // Picking a real model saves it.
+        pick("claude-opus-5");
+        for _ in 0..20 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            vdom.render_immediate_to_vec();
+        }
+        assert_eq!(
+            posts().await,
+            vec![serde_json::json!({ "model": "claude-opus-5" })]
+        );
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("value=\"claude-opus-5\" selected=true"),
+            "{html}"
+        );
+        assert!(!html.contains("value=\"\" selected=true"), "{html}");
+    }
+
+    #[test]
+    fn chat_model_setting_value_only_returns_registry_ids() {
+        use super::chat_model_setting_value as v;
+        let ids = ["a", "b"];
+        assert_eq!(v(Some(&ids), Some("a")), "a");
+        assert_eq!(v(Some(&ids), Some("default")), "");
+        assert_eq!(v(Some(&ids), None), "");
+        assert_eq!(v(None, Some("a")), "");
     }
 }

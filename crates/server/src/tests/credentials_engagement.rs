@@ -470,7 +470,7 @@ async fn a_client_engagement_refuses_a_chat_on_the_cli_backend() {
     let p = state.projects.create("Client", vec![]).unwrap();
     assert!(p.client_engagement);
     let why = state
-        .chat_llm()
+        .chat_llm_for(Some(&p))
         .expect_err("cli chat refused on client work");
     assert!(why.contains("`cli` backend"), "{why}");
 
@@ -481,7 +481,10 @@ async fn a_client_engagement_refuses_a_chat_on_the_cli_backend() {
                 .method("POST")
                 .uri("/api/chat")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"prompt":"hi"}"#))
+                .body(Body::from(format!(
+                    r#"{{"prompt":"hi","project_id":"{}"}}"#,
+                    p.id
+                )))
                 .unwrap(),
         )
         .await
@@ -496,7 +499,7 @@ async fn a_client_engagement_refuses_a_chat_on_the_cli_backend() {
     state
         .settings
         .set_chat_backend(crate::project::ProjectBackend::Api);
-    assert!(state.chat_llm().is_ok());
+    assert!(state.chat_llm_for(Some(&p)).is_ok());
     state
         .settings
         .set_chat_backend(crate::project::ProjectBackend::Cli);
@@ -504,7 +507,164 @@ async fn a_client_engagement_refuses_a_chat_on_the_cli_backend() {
         .projects
         .set_client_engagement(&p.id, false, false)
         .unwrap();
-    assert!(state.chat_llm().is_ok());
+    let p = state.projects.get(&p.id).unwrap();
+    assert!(state.chat_llm_for(Some(&p)).is_ok());
+}
+
+fn chat_req(project_id: Option<&str>, system: Option<&str>) -> ChatReq {
+    ChatReq {
+        prompt: "What model is this?".to_string(),
+        model: String::new(),
+        system: system.map(str::to_string),
+        project_id: project_id.map(str::to_string),
+        history: Vec::new(),
+    }
+}
+
+/// Part 3: the chat's lock follows the project the REQUEST names, never the server's stale
+/// active project. Home screen (no project id, no project layer) on the CLI is allowed even
+/// while a client engagement is the server's last active project.
+#[test]
+#[serial_test::serial(process_env)]
+fn chat_with_no_project_runs_on_cli_even_when_a_stale_client_project_is_active() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    state
+        .settings
+        .set_chat_backend(crate::project::ProjectBackend::Cli);
+    let stale = state.projects.create("Stale client", vec![]).unwrap();
+    assert!(stale.client_engagement);
+    assert!(state.projects.set_active(&stale.id));
+    assert!(
+        state.projects.active().is_some(),
+        "the stale active project"
+    );
+    let req = chat_req(
+        None,
+        Some("=== LAYER 1: CAMERATA TECHNICAL REFERENCE ===\n"),
+    );
+    assert!(chat_lock(&state, &req, "").is_ok());
+}
+
+/// The phase chats (investigation and development) post a system prompt headed `=== STORY ===`
+/// or `=== INVESTIGATION NOTE ===`. Posted with NO project id while a client engagement is the
+/// server's active project on the cli (the old "bare body" shape), they are refused by the
+/// header allowlist, over HTTP too (refused before any model is called).
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_phase_chat_without_a_project_id_is_refused_while_a_client_project_is_active() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    state
+        .settings
+        .set_chat_backend(crate::project::ProjectBackend::Cli);
+    let p = state.projects.create("Client", vec![]).unwrap();
+    assert!(state.projects.set_active(&p.id));
+    for system in [
+        "You are the development agent.\n=== STORY ===\nS-1\n",
+        "You are the investigation agent.\n=== INVESTIGATION NOTE ===\nsecret client note\n",
+    ] {
+        let req = chat_req(None, Some(system));
+        let err = chat_lock(&state, &req, "").expect_err(system);
+        assert_eq!(err.status, StatusCode::CONFLICT, "{system}");
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "prompt": "hi", "system": system }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "{system}");
+    }
+    // The same phase chat NAMING the client project is refused on the cli by the lock itself.
+    let named = chat_req(Some(&p.id), Some("=== STORY ===\nS-1\n"));
+    let err = chat_lock(&state, &named, "").expect_err("client on cli");
+    assert!(err.err.to_string().contains("`cli` backend"));
+}
+
+/// With no project id, ONLY the static layer headers (LAYER 1, 1b, 2) are allowed; any other
+/// `=== ` header line is refused, including ones no layer defines today.
+#[test]
+fn chat_with_no_project_allows_only_the_static_layer_headers() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    state
+        .settings
+        .set_chat_backend(crate::project::ProjectBackend::Cli);
+    let static_only = "intro\n=== LAYER 1: CAMERATA TECHNICAL REFERENCE ===\ndoc\n\
+                       === LAYER 1b: CAMERATA USER GUIDE ===\nguide\n\
+                       === LAYER 2: GOVERNANCE RULES CATALOG (every rule) ===\nR-1\n";
+    assert!(chat_lock(&state, &chat_req(None, Some(static_only)), "").is_ok());
+    // A bare prompt with no system is allowed too.
+    assert!(chat_lock(&state, &chat_req(None, None), "").is_ok());
+    for header in [
+        "=== STORY ===",
+        "=== INVESTIGATION NOTE ===",
+        "=== APPROVED DECISIONS (x) ===",
+        "=== SOMETHING NEW ===",
+        "   === INDENTED ===",
+    ] {
+        let sys = format!("{static_only}{header}\nbody\n");
+        let err = chat_lock(&state, &chat_req(None, Some(&sys)), "").expect_err(header);
+        assert_eq!(err.status, StatusCode::CONFLICT, "{header}");
+    }
+}
+
+/// A client-engagement project named by the request is refused on the CLI, at the server.
+#[test]
+fn chat_naming_a_client_project_on_cli_is_refused() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    state
+        .settings
+        .set_chat_backend(crate::project::ProjectBackend::Cli);
+    let p = state.projects.create("Client", vec![]).unwrap();
+    let req = chat_req(Some(&p.id), None);
+    let err = chat_lock(&state, &req, "").expect_err("refused");
+    assert_eq!(err.status, StatusCode::CONFLICT);
+}
+
+/// A non-client project named by the request on the CLI is allowed.
+#[test]
+fn chat_naming_a_non_client_project_on_cli_is_allowed() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    state
+        .settings
+        .set_chat_backend(crate::project::ProjectBackend::Cli);
+    let p = state.projects.create("Mine", vec![]).unwrap();
+    state
+        .projects
+        .set_client_engagement(&p.id, false, false)
+        .unwrap();
+    let req = chat_req(Some(&p.id), Some("=== LAYER 3c: SCAN ===\n"));
+    assert!(chat_lock(&state, &req, "").is_ok());
+}
+
+/// Project data without a project id cannot dodge the lock: every project layer header is
+/// refused when the request names no project, and an unknown project id is refused too.
+#[test]
+fn chat_with_project_layers_but_no_project_is_refused() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    state
+        .settings
+        .set_chat_backend(crate::project::ProjectBackend::Cli);
+    for marker in [
+        "=== LAYER 3: LIVE DEVELOPMENT STATE",
+        "=== LAYER 3b: PULLED ISSUES",
+        "=== LAYER 3c: ACTIVE PROJECT SCAN RESULTS",
+        "=== LAYER 3d: SELECTED RULES",
+        "=== LAYER 3e: PROJECT RULESET",
+        "=== LAYER 4: FOCUSED FINDING",
+    ] {
+        let req = chat_req(None, Some(&format!("intro\n{marker}\nbody")));
+        let err = chat_lock(&state, &req, "").expect_err(marker);
+        assert_eq!(err.status, StatusCode::CONFLICT, "{marker}");
+    }
+    let err =
+        chat_lock(&state, &chat_req(Some("no-such-project"), None), "").expect_err("unknown id");
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
 }
 
 /// H2: the investigation run has only the CLI driver, so a client engagement fails it at
@@ -620,7 +780,14 @@ async fn a_client_engagement_refuses_a_non_anthropic_model_on_request_model_step
     };
     let chat = post(
         "/api/chat".to_string(),
-        r#"{"prompt":"hi","model":"deepseek/deepseek-chat"}"#,
+        // The chat names the project whose data it carries; that project's lock applies.
+        Box::leak(
+            format!(
+                r#"{{"prompt":"hi","model":"deepseek/deepseek-chat","project_id":"{}"}}"#,
+                p.id
+            )
+            .into_boxed_str(),
+        ),
     )
     .await;
     assert_eq!(chat.status(), StatusCode::CONFLICT, "the chat");

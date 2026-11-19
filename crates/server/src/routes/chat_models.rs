@@ -246,6 +246,11 @@ pub(crate) struct ChatReq {
     pub(crate) model: String,
     #[serde(default)]
     pub(crate) system: Option<String>,
+    /// The project whose data this chat request carries (the project open on screen), or absent
+    /// when it carries none (the home screen). It alone decides the client-engagement lock: the
+    /// server's last "active" project is never consulted for the chat.
+    #[serde(default)]
+    pub(crate) project_id: Option<String>,
     /// Prior turns in chronological order (oldest first). Empty on the first message.
     /// The UI accumulates turns client-side and sends them with every POST.
     /// Back-compat: omitted or null → treated as empty (same as before this fix).
@@ -313,18 +318,77 @@ pub(crate) fn render_chat_prompt(history: &[ChatTurn], prompt: &str) -> String {
 ///   2. `app_chat_model` — the app-level (cross-project) [`crate::settings::Settings::chat_model`].
 ///   3. [`crate::llm::DEFAULT_MODEL`] — the floor when neither is set.
 ///
-/// Blank / whitespace-only candidates are treated as unset (trimmed-empty is ignored), so a
+/// Blank / whitespace-only candidates and the placeholder word "default" are treated as unset (trimmed-empty is ignored), so a
 /// cleared selector or a cleared setting falls through to the next tier. Pure (no I/O) so the
 /// precedence is unit-testable.
 pub fn resolve_chat_model(req_model: Option<&str>, app_chat_model: Option<&str>) -> String {
     let pick = |m: Option<&str>| {
         m.map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| crate::settings::is_real_model_id(s))
             .map(str::to_string)
     };
     pick(req_model)
         .or_else(|| pick(app_chat_model))
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
+}
+
+/// The only `=== ` section headers a system prompt may carry when the request names no project:
+/// the static layers (technical reference, user guide, rules catalog). Any other header (the
+/// project layers 3 to 4, a phase chat's `=== STORY ===` or `=== INVESTIGATION NOTE ===`, anything
+/// new) is project data. The UI builds the prompt, so the server cannot see what is inside a
+/// section, but it can see these header lines. The shipped docs contain no `=== ` lines.
+const PROJECT_FREE_HEADERS: [&str; 3] = ["=== LAYER 1:", "=== LAYER 1b:", "=== LAYER 2:"];
+
+/// The first `=== ` header line in `system` that a project-free request may not carry.
+fn project_header(system: &str) -> Option<&str> {
+    system
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with("=== ") && !PROJECT_FREE_HEADERS.iter().any(|h| l.starts_with(h)))
+}
+
+/// The one place the chat decides its project and its client lock. The request names the project
+/// (`project_id`) or none; that project, not the server's last active one, decides the lock.
+/// - Unknown project id: refused (fail closed).
+/// - No project but the system prompt carries any header other than the static layers: refused,
+///   because project data would then ride on a request the lock cannot see.
+/// - A client-engagement project on the `cli` chat backend, or with a non-Anthropic model: refused.
+///
+/// Returns the `Llm` to run on. Pure of model calls, so it is testable.
+pub(crate) fn chat_lock(
+    state: &AppState,
+    req: &ChatReq,
+    model: &str,
+) -> Result<crate::llm::Llm, AppError> {
+    let project = match req
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => Some(state.projects.get(id).ok_or_else(|| {
+            AppError::with_status(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("the chat names a project that does not exist: {id}"),
+            )
+        })?),
+        None => None,
+    };
+    if project.is_none() {
+        if let Some(header) = req.system.as_deref().and_then(project_header) {
+            return Err(backend_refused(format!(
+                "This chat request carries project data ({header}) but names no project, so \
+                 the client-engagement lock cannot be checked. Nothing was sent to a model."
+            )));
+        }
+    }
+    let llm = state
+        .chat_llm_for(project.as_ref())
+        .map_err(backend_refused)?;
+    if let Some(why) = state.client_lock_model_refusal_for(project.as_ref(), model) {
+        return Err(backend_refused(why));
+    }
+    Ok(llm)
 }
 
 /// The research chat: one completion through the configured backend. The side-by-side
@@ -347,10 +411,7 @@ pub(crate) async fn chat(
     // others. Returns an error when the model is OpenRouter-provider but no key is set.
     // The Anthropic side runs on the transport chosen in Settings (Chat backend), with the key
     // resolved now; `Api` with no key refuses rather than silently downgrading to the CLI.
-    let chat_llm = state.chat_llm().map_err(backend_refused)?;
-    if let Some(why) = state.client_lock_step_model_refusal(&model) {
-        return Err(backend_refused(why));
-    }
+    let chat_llm = chat_lock(&state, &req, &model)?;
     let completer = crate::llm::build_completer(
         &model,
         &state.model_registry,

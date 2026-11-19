@@ -1127,6 +1127,33 @@ fn zip_now_reflects_the_current_year() {
     );
 }
 
+/// The context names whether the project is a client engagement, so the chat panel can say the
+/// chat runs only on the API before the operator types.
+#[tokio::test]
+async fn active_project_context_reports_client_engagement() {
+    let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+    let p = state.projects.create("Client", vec![]).unwrap();
+    let get = |state: AppState| async move {
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/active/context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        body_json(resp).await
+    };
+    assert_eq!(get(state.clone()).await["client_engagement"], true);
+    state
+        .projects
+        .set_client_engagement(&p.id, false, false)
+        .unwrap();
+    assert_eq!(get(state.clone()).await["client_engagement"], false);
+    assert_eq!(get(state.clone()).await["project_id"], p.id);
+}
+
 /// active_project_context returns scan_results_section from last_scan when no draft.
 #[tokio::test]
 async fn active_project_context_uses_last_scan_when_no_draft() {
