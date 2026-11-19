@@ -910,6 +910,36 @@ impl UowStore {
         removed
     }
 
+    /// Delete several UoWs at once and persist once. When the write fails nothing is removed
+    /// (memory and file agree) and the error is returned. Returns how many were removed.
+    pub fn remove_many(&self, story_ids: &[String]) -> std::io::Result<usize> {
+        let mut map = self.mem.lock().expect("uow mutex poisoned");
+        let kept: HashMap<String, UnitOfWork> = map
+            .iter()
+            .filter(|(id, _)| !story_ids.iter().any(|s| s == *id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let removed = map.len() - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        if let Some(p) = &self.path {
+            let next = self
+                .next_native
+                .lock()
+                .map_err(|_| std::io::Error::other("uow counter poisoned"))?;
+            let file = StoreFileRef {
+                version: 2,
+                next_native_number: *next,
+                units: &kept,
+            };
+            let json = serde_json::to_string(&file).map_err(std::io::Error::other)?;
+            std::fs::write(p.as_ref(), json)?;
+        }
+        *map = kept;
+        Ok(removed)
+    }
+
     /// Return the UoW for `story_id`, creating a default one if it does not exist yet.
     ///
     /// When this materializes a NEW UoW it persists immediately. Without this, a UoW

@@ -24,6 +24,7 @@ mod chat;
 mod chat_ui_tests;
 mod cockpit;
 mod credentials;
+mod delete_project_ui;
 mod design;
 mod gallery;
 pub mod loading;

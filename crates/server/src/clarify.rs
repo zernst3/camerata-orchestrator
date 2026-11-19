@@ -231,6 +231,47 @@ impl ClarificationStore {
         }
     }
 
+    /// The ids held for the given stories (the ids [`Self::remove_ids`] takes).
+    pub fn ids_for_stories(&self, story_ids: &[String]) -> Vec<String> {
+        self.items
+            .lock()
+            .map(|map| {
+                map.iter()
+                    .filter(|(_, c)| story_ids.iter().any(|s| s == &c.story_id))
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Remove the entries with these ids and persist. When the write fails nothing is removed
+    /// and the error is returned. Returns the removed ids.
+    pub fn remove_ids(&self, ids: &[String]) -> std::io::Result<Vec<String>> {
+        let mut map = self
+            .items
+            .lock()
+            .map_err(|_| std::io::Error::other("store mutex poisoned"))?;
+        let doomed: Vec<String> = map
+            .iter()
+            .filter(|(id, _)| ids.contains(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if doomed.is_empty() {
+            return Ok(doomed);
+        }
+        let kept: HashMap<String, Clarification> = map
+            .iter()
+            .filter(|(id, _)| !doomed.contains(id))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Some(p) = &self.path {
+            let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
+            std::fs::write(p.as_ref(), json)?;
+        }
+        *map = kept;
+        Ok(doomed)
+    }
+
     /// A store pre-seeded with a couple of open clarifications, so the cockpit's
     /// NEEDS YOU queue has real (not hardcoded) content on first load. These are
     /// genuine store entries, just seeded the way the spine is.

@@ -19,6 +19,8 @@ struct Inner {
     exclusive: HashSet<String>,
     /// project -> number of scans running in a request.
     scans: HashMap<String, usize>,
+    /// Projects being deleted with all their data: no scan or job may start on them.
+    deleting: HashSet<String>,
 }
 
 /// Shared, cloneable registry of in-flight source operations.
@@ -68,6 +70,27 @@ impl SourceOps {
         }
     }
 
+    /// Mark `project_id` as being deleted with all its data until the guard drops; `None` when it
+    /// already is. While marked, every scan and job start for it is refused
+    /// ([`Self::deleting_refusal`]).
+    pub fn begin_deleting(&self, project_id: &str) -> Option<DeletingGuard> {
+        if !self.lock().deleting.insert(project_id.to_string()) {
+            return None;
+        }
+        Some(DeletingGuard {
+            ops: self.clone(),
+            project_id: project_id.to_string(),
+        })
+    }
+
+    /// The sentence a scan or job start is refused with while `project_id` is being deleted.
+    pub fn deleting_refusal(&self, project_id: &str) -> Option<String> {
+        self.lock().deleting.contains(project_id).then(|| {
+            "This project is being deleted with all its data, so nothing can be started on it."
+                .to_string()
+        })
+    }
+
     /// Whether a request-scoped scan of `project_id` is running.
     pub fn scan_running(&self, project_id: &str) -> bool {
         self.lock().scans.get(project_id).is_some_and(|n| *n > 0)
@@ -83,6 +106,18 @@ pub struct OpGuard {
 impl Drop for OpGuard {
     fn drop(&mut self) {
         self.ops.lock().exclusive.remove(&self.key);
+    }
+}
+
+/// Releases the "being deleted" mark of a project on drop.
+pub struct DeletingGuard {
+    ops: SourceOps,
+    project_id: String,
+}
+
+impl Drop for DeletingGuard {
+    fn drop(&mut self) {
+        self.ops.lock().deleting.remove(&self.project_id);
     }
 }
 

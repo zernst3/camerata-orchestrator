@@ -299,6 +299,19 @@ pub(crate) async fn run_routine_now(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Routine>, AppError> {
+    if let Some(why) = state
+        .routines
+        .list()
+        .into_iter()
+        .find(|r| r.id == id)
+        .and_then(|r| r.project_id)
+        .and_then(|project| state.source_ops.deleting_refusal(&project))
+    {
+        return Err(AppError::with_status(
+            StatusCode::CONFLICT,
+            anyhow::anyhow!(why),
+        ));
+    }
     let routine = state
         .routines
         .run_now(&id)

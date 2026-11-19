@@ -60,6 +60,30 @@ impl DraftStore {
             .and_then(|m| m.get(project_id).cloned())
     }
 
+    /// Drop `project_id`'s draft and write the file; when the write fails nothing is dropped and
+    /// the error is returned.
+    pub fn clear_checked(&self, project_id: &str) -> std::io::Result<()> {
+        let mut m = self
+            .mem
+            .lock()
+            .map_err(|_| std::io::Error::other("draft store mutex poisoned"))?;
+        let mut kept = m.clone();
+        kept.remove(project_id);
+        if let Some(p) = &self.path {
+            let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
+            std::fs::write(p.as_ref().as_path(), json)?;
+        }
+        *m = kept;
+        Ok(())
+    }
+
+    /// The size in bytes of `project_id`'s saved draft as stored (0 when there is none).
+    pub fn stored_bytes(&self, project_id: &str) -> u64 {
+        self.load(project_id)
+            .and_then(|v| serde_json::to_vec(&v).ok())
+            .map_or(0, |b| b.len() as u64)
+    }
+
     /// Replace `project_id`'s draft.
     pub fn save(&self, project_id: &str, v: serde_json::Value) {
         if let Ok(mut m) = self.mem.lock() {

@@ -225,6 +225,12 @@ impl EditStore {
         self.dir.as_deref().map(PathBuf::as_path)
     }
 
+    /// Drop everything held IN MEMORY for `project_id` (the file is removed by the caller). Used
+    /// when a project and all its data are deleted, so nothing is served or written back after.
+    pub fn forget_project(&self, project_id: &str) {
+        self.lock().remove(project_id);
+    }
+
     /// Every edit of a project (discarded ones too), in the order they were written.
     pub fn list(&self, project_id: &str) -> Vec<Edit> {
         self.lock()
