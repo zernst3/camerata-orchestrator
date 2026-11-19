@@ -154,13 +154,13 @@ impl SettingsStore {
     }
 
     /// True for a usable model id: not blank and not the placeholder word "default" (a UI fallback
-/// label that must never be stored or sent to the model backend as a model).
-pub fn is_real_model_id(m: &str) -> bool {
-    let t = m.trim();
-    !t.is_empty() && !t.eq_ignore_ascii_case("default")
-}
+    /// label that must never be stored or sent to the model backend as a model).
+    pub fn is_real_model_id(m: &str) -> bool {
+        let t = m.trim();
+        !t.is_empty() && !t.eq_ignore_ascii_case("default")
+    }
 
-/// The app-level chat-assistant model, if one is set and non-empty.
+    /// The app-level chat-assistant model, if one is set and non-empty.
     pub fn chat_model(&self) -> Option<String> {
         self.get().chat_model.filter(|m| is_real_model_id(m))
     }
