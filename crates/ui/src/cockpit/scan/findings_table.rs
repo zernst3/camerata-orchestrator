@@ -317,7 +317,7 @@ pub(in crate::cockpit) fn FindingDetailPane(
         .unwrap_or_default();
     rsx! {
         aside {
-            class: "finding-pane",
+            class: if row.is_some() { "finding-pane" } else { "finding-pane finding-pane-empty" },
             id: "{DETAIL_PANE_ID}",
             "data-finding-key": "{pane_key}",
             // The pane is a focusable REGION: tabbing into it arms the keys, tabbing out
@@ -2418,21 +2418,19 @@ fn HeldGalleryPage(props: HeldGalleryProps) -> Element {
         }
     });
     rsx! {
-        div { class: "held-gallery",
-            div { class: "audit-export-panel",
-                crate::cockpit::export_gate::ExportGate {
-                    gate,
-                    table_keys: Some(keys),
-                    button { class: "btn-run", "Export product" }
-                }
+        div { class: "audit-export-panel",
+            crate::cockpit::export_gate::ExportGate {
+                gate,
+                table_keys: Some(keys),
+                button { class: "btn-run", "Export product" }
             }
-            FindingsTable {
-                findings,
-                repos: vec!["acme/portal".to_string()],
-                descriptions: std::collections::HashMap::new(),
-                dispositions,
-                order_preset,
-            }
+        }
+        FindingsTable {
+            findings,
+            repos: vec!["acme/portal".to_string()],
+            descriptions: std::collections::HashMap::new(),
+            dispositions,
+            order_preset,
         }
     }
 }

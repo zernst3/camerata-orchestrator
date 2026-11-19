@@ -959,4 +959,12 @@ async fn a_decision_in_the_table_reaches_the_export_line_through_the_store() {
         html.contains("Export blocked: 39 held rows need a decision"),
         "the export line did not follow the stored decision: {html}"
     );
+    // The real results screen hosts the table in the container that fills its width and scrolls
+    // from the left edge (the rules are pinned in the gallery tests), with the Held column in it.
+    assert!(html.contains("class=\"queue-split\""), "{html}");
+    assert!(html.contains("queue-split-table"), "{html}");
+    assert!(
+        html.contains(">Held</"),
+        "the real screen's table has the Held column"
+    );
 }

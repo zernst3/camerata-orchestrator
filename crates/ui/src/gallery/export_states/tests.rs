@@ -92,20 +92,32 @@ fn the_held_styles_are_their_own_rules() {
     assert!(css.contains(".finding-row-held > td { background: rgba(143, 29, 29, 0.12); }"));
 }
 
-/// The held-rows pages start at the left edge and scroll inside the page: they sit in the
-/// `held-gallery` wrapper (the app root centres its children, which cut a wide table off on the
-/// left), and the empty detail pane is not drawn.
+/// The held-rows pages render the app's own table container, with no gallery wrapper: it fills
+/// the width it is given and scrolls inside its own column from the left edge, so the Held column
+/// the table adds is not cut off. The real container's rules are pinned here and the real screen
+/// is checked in `held_rows_tests`.
 #[test]
-fn the_findings_pages_sit_in_a_wrapper_that_starts_at_the_left_edge() {
+fn the_findings_pages_use_the_real_container_that_scrolls_from_the_left_edge() {
     for id in ["findings/held-rows", "findings/held-filter-on"] {
         let html = page(id);
-        assert!(html.contains("class=\"held-gallery\""), "{id}");
+        assert!(
+            !html.contains("held-gallery"),
+            "{id}: no gallery-only wrapper"
+        );
+        assert!(html.contains("class=\"queue-split\""), "{id}");
+        assert!(html.contains("queue-split-table"), "{id}");
         assert!(html.contains(">Held</"), "{id}: the Held header is drawn");
         assert!(html.contains("Held: decide before export"), "{id}");
         assert!(html.contains("finding-row-held"), "{id}");
     }
-    assert!(GLOBAL_CSS.contains(".held-gallery { align-self: stretch;"));
-    assert!(GLOBAL_CSS.contains(".held-gallery .finding-pane { display: none; }"));
+    let css = GLOBAL_CSS;
+    assert!(!css.contains(".held-gallery"));
+    assert!(css.contains(".queue-split { display: flex; align-items: flex-start; gap: 12px; width: 100%; min-width: 0; align-self: stretch; box-sizing: border-box; }"));
+    assert!(css.contains(".queue-split-table { flex: 1 1 auto; min-width: 0; overflow-x: auto; }"));
+    assert!(
+        css.contains(".finding-pane-empty { display: none; }"),
+        "an empty pane draws nothing when stacked"
+    );
 }
 
 /// The triage table with held rows: the red cell and its words, and the panel's one line above.
