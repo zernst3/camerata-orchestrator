@@ -21,6 +21,10 @@ pub const REBUILD_COMMAND: &str = "cargo build -p camerata-server -p camerata-ui
 /// (whose own connection errors then say what is wrong).
 const WAIT_FOR_SERVER: Duration = Duration::from_secs(45);
 
+/// After the cockpit has been let through, how long the app keeps checking (slowly) for a server
+/// that was started by hand late. When it finally answers, the check runs once then.
+const LATE_WAIT: Duration = Duration::from_secs(12 * 60 * 60);
+
 /// What a healthy server said about the build it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerBuild {
@@ -63,7 +67,11 @@ async fn probe(client: &reqwest::Client, base: &str) -> Option<ServerBuild> {
 
 /// Ask the server which build it is, retrying until it answers or `give_up` passes (the app starts
 /// the server itself, so the first probes usually find nothing yet). `None` means it never answered.
-pub async fn fetch_server_build(base: &str, give_up: Duration) -> Option<ServerBuild> {
+pub async fn fetch_server_build(
+    base: &str,
+    give_up: Duration,
+    every: Duration,
+) -> Option<ServerBuild> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(750))
         .build()
@@ -76,7 +84,7 @@ pub async fn fetch_server_build(base: &str, give_up: Duration) -> Option<ServerB
         if started.elapsed() >= give_up {
             return None;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(every).await;
     }
 }
 
@@ -108,7 +116,18 @@ fn describe_server(server: &ServerBuild) -> String {
 pub struct BuildGuardProps {
     /// The commit this app was built from (`None` for a build outside a git checkout).
     pub ui_build: Option<String>,
+    /// How long to wait for the first answer before letting the cockpit through.
+    #[props(default = WAIT_FOR_SERVER)]
+    pub wait: Duration,
     pub children: Element,
+}
+
+/// Where the check stands.
+#[derive(Clone, PartialEq)]
+enum Phase {
+    Waiting,
+    GaveUp,
+    Answered(ServerBuild),
 }
 
 /// Shows `children` (the cockpit) only once the server answering on the BFF address is from the
@@ -117,18 +136,34 @@ pub struct BuildGuardProps {
 /// errors say what is wrong. A different or unreported build shows [`MismatchScreen`] instead.
 #[component]
 pub fn BuildGuard(props: BuildGuardProps) -> Element {
-    let check =
-        use_resource(|| async { fetch_server_build(&crate::bff_base(), WAIT_FOR_SERVER).await });
+    let mut phase = use_signal(|| Phase::Waiting);
+    let wait = props.wait;
+    use_future(move || async move {
+        let base = crate::bff_base();
+        let quick = Duration::from_millis(250);
+        match fetch_server_build(&base, wait, quick).await {
+            Some(build) => phase.set(Phase::Answered(build)),
+            None => {
+                // The cockpit shows now; a server that answers later is still checked, once.
+                phase.set(Phase::GaveUp);
+                if let Some(build) =
+                    fetch_server_build(&base, LATE_WAIT, Duration::from_secs(2)).await
+                {
+                    phase.set(Phase::Answered(build));
+                }
+            }
+        }
+    });
     let ui_build = props.ui_build.clone();
-    let verdict = check.read().clone();
-    match verdict {
-        None => rsx! {
+    let current = phase.read().clone();
+    match current {
+        Phase::Waiting => rsx! {
             div { class: "build-guard-wait", "Starting the server..." }
         },
-        Some(Some(server)) if !builds_match(ui_build.as_deref(), &server) => rsx! {
+        Phase::Answered(server) if !builds_match(ui_build.as_deref(), &server) => rsx! {
             MismatchScreen { ui_build, server }
         },
-        Some(_) => rsx! { {props.children} },
+        Phase::Answered(_) | Phase::GaveUp => rsx! { {props.children} },
     }
 }
 
@@ -168,6 +203,7 @@ mod tests {
     use super::*;
     use camerata_test_env::EnvGuard;
     use serial_test::serial;
+    use std::time::Duration;
 
     const UI_COMMIT: &str = "1111111111111111111111111111111111111111";
     const OLD_COMMIT: &str = "2222222222222222222222222222222222222222";
@@ -283,6 +319,97 @@ mod tests {
         );
     }
 
+    #[derive(Clone, PartialEq, Props)]
+    struct LateHarness {
+        ui_build: Option<String>,
+    }
+
+    #[component]
+    fn LateGuardedCockpit(props: LateHarness) -> Element {
+        rsx! {
+            BuildGuard {
+                ui_build: props.ui_build.clone(),
+                wait: Duration::from_millis(200),
+                div { class: "the-cockpit", "COCKPIT-RENDERED" }
+            }
+        }
+    }
+
+    async fn settle(vdom: &mut VirtualDom, rounds: usize) {
+        for _ in 0..rounds {
+            let _ = tokio::time::timeout(Duration::from_millis(100), vdom.wait_for_work()).await;
+            vdom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        }
+    }
+
+    /// The cockpit is let through when the server has not answered in time; a server started by
+    /// hand later, from a different build, is still caught once it answers.
+    #[tokio::test]
+    #[serial(process_env)]
+    async fn a_server_that_answers_late_from_a_different_build_is_still_caught() {
+        let server = wiremock::MockServer::start().await;
+        let _env = EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new_with_props(
+            LateGuardedCockpit,
+            LateHarness {
+                ui_build: Some(UI_COMMIT.to_string()),
+            },
+        );
+        vdom.rebuild_in_place();
+        settle(&mut vdom, 8).await;
+        let early = dioxus_ssr::render(&vdom);
+        assert!(
+            early.contains("COCKPIT-RENDERED"),
+            "no answer in time lets the cockpit through: {early}"
+        );
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/health"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "status": "ok", "service": "camerata-server",
+                                    "commit": OLD_COMMIT, "dirty": false }),
+            ))
+            .mount(&server)
+            .await;
+        let mut late = String::new();
+        for _ in 0..12 {
+            settle(&mut vdom, 5).await;
+            late = dioxus_ssr::render(&vdom);
+            if late.contains("come from different builds") {
+                break;
+            }
+        }
+        assert_mismatch_screen(&late);
+    }
+
+    /// The real `AppShell` (what `App` renders) wraps the cockpit in the guard: against a server
+    /// from another build it shows the mismatch screen and no app root.
+    #[tokio::test]
+    #[serial(process_env)]
+    async fn the_app_wraps_the_cockpit_in_the_guard() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/health"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "status": "ok", "service": "camerata-server",
+                                    "commit": "not-the-apps-commit", "dirty": false }),
+            ))
+            .mount(&server)
+            .await;
+        let _env = EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(crate::AppShell);
+        vdom.rebuild_in_place();
+        settle(&mut vdom, 20).await;
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("This app and its server come from different builds"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("class=\"app-root\""),
+            "the cockpit's app root must not render behind the guard"
+        );
+    }
+
     #[test]
     fn builds_match_compares_commits_and_treats_a_silent_server_as_a_mismatch() {
         let server = |c: Option<&str>| ServerBuild {
@@ -305,7 +432,12 @@ mod tests {
     #[tokio::test]
     async fn a_server_that_never_answers_gives_none_after_the_wait() {
         // Nothing listens on this port.
-        let got = fetch_server_build("http://127.0.0.1:9", Duration::from_millis(300)).await;
+        let got = fetch_server_build(
+            "http://127.0.0.1:9",
+            Duration::from_millis(300),
+            Duration::from_millis(50),
+        )
+        .await;
         assert_eq!(got, None);
     }
 }

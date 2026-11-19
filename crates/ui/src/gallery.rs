@@ -21,6 +21,7 @@ use dioxus::prelude::*;
 
 use crate::test_harness;
 
+mod app_states;
 mod detail_states;
 mod engine_states;
 mod export_states;
@@ -184,6 +185,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
         "WO10",
         &["clear", "blocked", "one-line-two-reasons"],
     ),
+    ("app", "build-guard", &["build-mismatch"]),
 ];
 
 /// A state id and the function that renders its page.
@@ -200,6 +202,7 @@ fn built_renderers() -> Vec<BuiltRenderer> {
     all.extend(detail_states::states());
     all.extend(export_states::states());
     all.extend(settings_states::states());
+    all.extend(app_states::states());
     all
 }
 

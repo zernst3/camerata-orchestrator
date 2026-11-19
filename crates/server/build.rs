@@ -82,8 +82,8 @@ fn watch_head() {
 /// - `HEAD` always.
 /// - A symbolic `HEAD` (`ref: refs/heads/main`) adds the one ref file it names, from the common
 ///   dir. When that ref exists only in `packed-refs` (no loose file yet), `packed-refs` is
-///   watched instead, plus the ref's own directory so the loose file a new commit creates is
-///   seen.
+///   watched instead, plus the ref's own directory (or its nearest existing ancestor down to
+///   `refs/heads`) so the loose file a new commit creates is seen.
 /// - A detached `HEAD` holds the SHA itself, so `HEAD` alone is enough.
 ///
 /// Only paths that exist are returned.
@@ -100,8 +100,20 @@ pub fn watched_paths(
             candidates.push(loose);
         } else {
             candidates.push(common_dir.join("packed-refs"));
-            if let Some(dir) = loose.parent() {
-                candidates.push(dir.to_path_buf());
+            // The ref's own directory, or when git has removed it (a packed `feat/x` after
+            // `git gc` leaves no empty `refs/heads/feat`) the nearest ancestor that still exists,
+            // stopping at `refs/heads`: the next commit recreates the loose ref there.
+            let stop = common_dir.join("refs").join("heads");
+            let mut dir = loose.parent();
+            while let Some(d) = dir {
+                if exists(d) {
+                    candidates.push(d.to_path_buf());
+                    break;
+                }
+                if d == stop {
+                    break;
+                }
+                dir = d.parent();
             }
         }
     }

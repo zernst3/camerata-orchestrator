@@ -142,6 +142,14 @@ fn App() -> Element {
         });
     });
 
+    rsx! { AppShell {} }
+}
+
+/// Everything the window shows once the launch side effects are under way: the shared contexts,
+/// the global chrome, and the cockpit behind the build guard. Split from `App` so a test can mount
+/// it (and prove the guard wraps the cockpit) without starting a server.
+#[component]
+fn AppShell() -> Element {
     // Global ref-counted in-flight loading count.  Any component or async
     // helper that holds a `loading::LoadingGuard` for its duration
     // increments this; the background Bombe machine watches it and activates
