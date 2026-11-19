@@ -783,8 +783,8 @@ pub(crate) fn nonce_for_room(room: &Room) -> FrameNonce {
 /// controlled. A token inside the text can only have come from the model (it knows the token
 /// from the system text) writing it into a room file, so it is cut out rather than trusted.
 fn fence(nonce: &FrameNonce, label: &str, text: &str) -> String {
-    let body = text.replace(nonce.as_str(), "[frame token removed]");
-    frame_untrusted(nonce, label, &body)
+    let cut = |s: &str| s.replace(nonce.as_str(), "[frame token removed]");
+    frame_untrusted(nonce, &cut(label), &cut(text))
 }
 
 fn str_arg<'a>(input: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -830,7 +830,13 @@ fn serve(
                             out.total_lines
                         )
                     } else {
-                        fence(nonce, path, &out.text)
+                        // The room's own checklist is the harness's instructions (the brief says
+                        // to open it and follow it), not client text: the one exception.
+                        if super::room::is_checklist_path(path) {
+                            out.text
+                        } else {
+                            fence(nonce, path, &out.text)
+                        }
                     }
                 }
                 Err(e) => {
