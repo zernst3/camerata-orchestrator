@@ -19,6 +19,7 @@ pub mod export_panel;
 pub mod git;
 pub mod govdev;
 pub mod help;
+pub mod inspection_settings;
 pub mod lenient;
 pub mod models;
 pub mod order_preset;

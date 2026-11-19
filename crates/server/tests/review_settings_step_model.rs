@@ -36,9 +36,23 @@ async fn the_step_models_route_sets_the_group_review_model_and_leaves_the_rest_o
 }
 
 #[tokio::test]
-async fn a_blank_group_review_model_is_refused_and_changes_nothing() {
+async fn a_blank_group_review_model_clears_the_setting_and_the_run_resolves_the_built_in_default() {
     let f = review_fixture(6);
+    // Start from an explicit pick so the clear is visible.
+    let (_, text) = call(
+        &f.app,
+        "POST",
+        &format!("/api/projects/{}/step-models", f.project_id),
+        Some(json!({ "step": "group_review", "model": "claude-fable-5-2" })),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["ok"],
+        json!(true),
+        "{text}"
+    );
     let before = f.state.projects().get(&f.project_id).unwrap();
+    assert_eq!(before.review.group_review_model, "claude-fable-5-2");
     let (_, text) = call(
         &f.app,
         "POST",
@@ -47,21 +61,60 @@ async fn a_blank_group_review_model_is_refused_and_changes_nothing() {
     )
     .await;
     let reply: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(reply["ok"], json!(false), "{text}");
-    // The unknown-step branch also answers ok:false, so the reason is what pins this route.
     assert_eq!(
-        reply["message"],
-        json!("model must not be empty"),
-        "the blank model is refused by name, not as an unknown step: {text}"
+        reply["ok"],
+        json!(true),
+        "a blank clears, it is not refused: {text}"
     );
+    let after = f.state.projects().get(&f.project_id).unwrap();
+    assert_eq!(after.review.group_review_model, "");
     assert_eq!(
-        f.state
-            .projects()
-            .get(&f.project_id)
-            .unwrap()
-            .review
-            .group_review_model,
-        before.review.group_review_model
+        after.review.escalation_floor, before.review.escalation_floor,
+        "the other review settings are untouched"
+    );
+    let controls = camerata_server::cost_cap::RunControls {
+        review: after.review.clone(),
+        ..camerata_server::cost_cap::RunControls::default()
+    };
+    assert_eq!(
+        controls.group_review_model_for(),
+        camerata_api_types::project::STAGE2_DEFAULT_MODEL,
+        "an unset group review model resolves to the built-in default"
+    );
+}
+
+#[tokio::test]
+async fn applying_a_model_profile_keeps_the_inspection_models_and_sets_the_development_fields() {
+    let f = review_fixture(6);
+    let id = f.project_id.clone();
+    // The operator's inspection picks, set through the project store.
+    f.state
+        .projects()
+        .update(&id, |p| {
+            p.step_models.audit = "claude-opus-5-5".to_string();
+            p.step_models.calibration = "claude-sonnet-5-5".to_string();
+            p.step_models.fix = "claude-opus-5-5".to_string();
+        })
+        .unwrap();
+    let before = f.state.projects().get(&id).unwrap();
+    let (status, text) = call(
+        &f.app,
+        "POST",
+        &format!("/api/projects/{id}/model-profile"),
+        Some(json!({ "profile": "max_efficiency" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let after = f.state.projects().get(&id).unwrap();
+    assert_eq!(after.step_models.audit, before.step_models.audit);
+    assert_eq!(
+        after.step_models.calibration,
+        before.step_models.calibration
+    );
+    assert_eq!(after.step_models.fix, before.step_models.fix);
+    assert_ne!(
+        after.step_models.research_chat, before.step_models.research_chat,
+        "the development fields still follow the profile"
     );
 }
 
@@ -72,7 +125,7 @@ async fn the_step_models_route_sets_the_project_finder_and_it_reads_back_from_th
     assert_eq!(
         before.review.finder,
         camerata_api_types::project::ProjectFinder::Agent,
-        "a project starts on the agent finder (the default)"
+        "a new project starts on the agent finder"
     );
     let (status, text) = call(
         &f.app,
@@ -191,7 +244,7 @@ async fn the_finder_model_and_clone_judge_model_steps_set_and_clear() {
         &f.app,
         "POST",
         &url,
-        Some(json!({ "step": "finder", "model": "agent" })),
+        Some(json!({ "step": "finder", "model": "engine" })),
     )
     .await;
     assert_eq!(
@@ -209,4 +262,29 @@ async fn the_finder_model_and_clone_judge_model_steps_set_and_clear() {
     let reply: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(reply["ok"], json!(false), "{text}");
     assert_eq!(reply["message"], json!("unknown step"), "{text}");
+}
+
+#[tokio::test]
+async fn the_model_profile_preview_lists_only_the_steps_applying_changes() {
+    let f = review_fixture(6);
+    let (status, text) = call(
+        &f.app,
+        "GET",
+        &format!(
+            "/api/projects/{}/model-profile/preview?profile=max_efficiency",
+            f.project_id
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    let reply: Value = serde_json::from_str(&text).unwrap();
+    let steps = reply["assignments"]["step_models"].as_object().unwrap();
+    for kept in ["audit", "calibration", "fix"] {
+        assert!(
+            !steps.contains_key(kept),
+            "{kept} is kept, so not previewed: {text}"
+        );
+    }
+    assert!(steps.contains_key("research_chat"), "{text}");
 }

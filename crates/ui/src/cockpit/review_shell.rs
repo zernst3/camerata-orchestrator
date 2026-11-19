@@ -297,8 +297,9 @@ pub(crate) fn applied_message(outcome: &EscalationBudgetOutcome) -> String {
     effect_sentence(outcome)
 }
 
-/// The Settings lane: the host over the shell's api, the model registry for its selects, and a
-/// run-in-flight flag from the scan panel's job. After an apply it says what happened and has the
+/// The Settings lane: the shared Inspection settings (they read the project, so they show before
+/// the first inspection), then the host over the shell's api, and a run-in-flight flag from the
+/// scan panel's job. After an apply it says what happened and has the
 /// shell read the counts again (the line moved, so the Escalations count may have).
 #[component]
 fn SettingsLane() -> Element {
@@ -309,13 +310,16 @@ fn SettingsLane() -> Element {
     // The app-scope in-flight job id (the scan panel's); a job running locks the lane.
     let run_in_flight =
         try_use_context::<Signal<Option<String>>>().is_some_and(|job| job.read().is_some());
-    let models = use_resource(crate::chat::fetch_models);
-    let models = models.read().clone().flatten();
     rsx! {
+        // The Inspection settings read the PROJECT, so they show before the first inspection has
+        // a result; the lane below them is the part that waits for one.
+        super::inspection_settings::InspectionSettingsHost {
+            project_id: String::new(),
+            run_in_flight,
+        }
         ReviewSettingsHost {
             api,
             run_in_flight,
-            models,
             on_applied: move |outcome: EscalationBudgetOutcome| {
                 if let Some(mut applied) = applied {
                     applied.0.set(Some(outcome.clone()));
@@ -375,6 +379,21 @@ mod tests {
         let html = lane_html(Lane::Settings);
         assert!(html.contains("Loading settings"), "{html}");
         assert!(!html.contains("not built yet"), "{html}");
+    }
+
+    /// Review > Settings mounts the shared Inspection settings component above the lane, and it
+    /// does not wait for the review settings route (which refuses until a result exists).
+    #[test]
+    fn the_settings_lane_mounts_the_shared_inspection_settings_above_the_lane() {
+        let html = lane_html(Lane::Settings);
+        let inspection = html
+            .find("class=\"inspection-settings\"")
+            .unwrap_or_else(|| panic!("no Inspection settings in the lane: {html}"));
+        let lane = html.find("class=\"review-settings\"").expect("the lane");
+        assert!(
+            inspection < lane,
+            "the component sits above the lane: {html}"
+        );
     }
 
     #[test]

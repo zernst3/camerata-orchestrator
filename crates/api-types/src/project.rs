@@ -265,6 +265,20 @@ pub const STAGE2_DEFAULT_MODEL: &str = "claude-opus-5-5";
 /// write-ups is small and bounded, so it is Sonnet 5.5.
 pub const DUP_CHECK_DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 
+/// True when `model` is a first-party Anthropic API model id (`claude-sonnet-5`,
+/// `claude-haiku-4-5-20251001`). False for every OpenRouter id (`vendor/model`,
+/// `vendor/model:free`) and for an empty id. The one rule: the server's client lock and the
+/// Inspection settings' warning both call it.
+pub fn is_anthropic_model_id(model: &str) -> bool {
+    let model = model.trim();
+    model.starts_with("claude-") && !model.contains('/') && !model.contains(':')
+}
+
+/// The clone judge's model when neither the `--clone-judge-model` flag nor the project setting
+/// names one: classification over bounded input, Haiku 5.5. Not the project's fast band, so
+/// moving a band never moves the judge.
+pub const CLONE_JUDGE_DEFAULT_MODEL: &str = "claude-haiku-5-5";
+
 /// The agent finder's model when neither the `--finder-model` flag nor the project setting names
 /// one. The server's `DEFAULT_FINDER_MODEL` is this value.
 pub const FINDER_DEFAULT_MODEL: &str = "claude-opus-5-5";
@@ -417,6 +431,17 @@ where
 }
 
 impl ReviewSettings {
+    /// The settings a NEW project starts with: the defaults of [`Default`] (the agent finder,
+    /// the built-in model for every unset row) with the group review model stored explicitly.
+    /// Every value is read from the named constants, so this cannot drift from what the engine
+    /// resolves. A project file that loads is not touched by this.
+    pub fn for_new_project() -> Self {
+        Self {
+            group_review_model: STAGE2_DEFAULT_MODEL.to_string(),
+            ..Self::default()
+        }
+    }
+
     /// The settings of a project saved before the review settings existed: the design values with
     /// the engine finder, which is what such a project has always run. A new project uses
     /// [`Default`] (the agent finder). The project file's `review` field loads this when absent.
@@ -448,6 +473,21 @@ impl Default for ReviewSettings {
 mod review_settings_tests {
     use super::*;
     use crate::review::EscalationReason;
+
+    #[test]
+    fn a_new_projects_settings_read_the_named_constants_and_old_projects_do_not_move() {
+        let fresh = ReviewSettings::for_new_project();
+        assert_eq!(fresh.finder, ProjectFinder::default());
+        assert_eq!(fresh.finder, ProjectFinder::Agent);
+        assert_eq!(fresh.group_review_model, STAGE2_DEFAULT_MODEL);
+        // Unset rows stay unset: the screen names the built-in default, the engine resolves it.
+        assert!(fresh.finder_model.is_empty());
+        assert!(fresh.dup_check_model.is_empty());
+        assert!(fresh.clone_judge_model.is_empty());
+        assert_eq!(CLONE_JUDGE_DEFAULT_MODEL, "claude-haiku-5-5");
+        // A project saved before the settings existed still loads as the engine.
+        assert_eq!(ReviewSettings::legacy().finder, ProjectFinder::Engine);
+    }
 
     #[test]
     fn the_duplicate_check_model_is_unset_by_default_and_its_built_in_default_is_sonnet_5_5() {
