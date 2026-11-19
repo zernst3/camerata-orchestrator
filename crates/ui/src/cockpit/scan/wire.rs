@@ -659,32 +659,55 @@ pub(in crate::cockpit) struct OnboardingDraft {
     pub review_log: camerata_ui_core::review_timer::SavedReviewLog,
 }
 
-/// Load the saved onboarding draft: `Ok(None)` when nothing is in progress, `Err` (in words for
-/// the operator) when the server could not be reached, refused the read, or sent a draft this
-/// build cannot read. A draft with a part it cannot read is NEVER turned into "no draft" or into
-/// a draft with that part blank: the saved review is the one thing that must not vanish quietly.
-pub(in crate::cockpit) async fn load_onboarding_draft() -> Result<Option<OnboardingDraft>, String> {
+/// Why the saved onboarding draft could not be loaded, in words for the operator.
+/// `unparseable_draft` is true only when a draft EXISTS that this build cannot read (so nothing
+/// may be written over it); a refused or unreachable read is told once and saving goes on.
+#[derive(Debug, Clone)]
+pub(in crate::cockpit) struct DraftLoadError {
+    pub message: String,
+    pub unparseable_draft: bool,
+}
+
+impl DraftLoadError {
+    fn told(message: String) -> Self {
+        Self {
+            message,
+            unparseable_draft: false,
+        }
+    }
+}
+
+/// Load the saved onboarding draft: `Ok(None)` when nothing is in progress, `Err` when the server
+/// could not be reached, refused the read, or sent a draft this build cannot read. A draft with a
+/// part it cannot read is NEVER turned into "no draft" or into a draft with that part blank: the
+/// saved review is the one thing that must not vanish quietly.
+pub(in crate::cockpit) async fn load_onboarding_draft(
+) -> Result<Option<OnboardingDraft>, DraftLoadError> {
     let resp = reqwest::Client::new()
         .get(format!("{}/api/onboard/draft", crate::bff_base()))
         .send()
         .await
-        .map_err(|e| format!("The saved onboarding draft could not be loaded ({e})."))?;
+        .map_err(|e| {
+            DraftLoadError::told(format!("The saved onboarding draft could not be loaded ({e})."))
+        })?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.json::<serde_json::Value>().await.ok();
-        return Err(body
-            .as_ref()
-            .and_then(|b| b.get("message"))
-            .and_then(|m| m.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                format!("The saved onboarding draft could not be loaded (the server answered {status}).")
-            }));
+        return Err(DraftLoadError::told(
+            body.as_ref()
+                .and_then(|b| b.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "The saved onboarding draft could not be loaded (the server answered {status})."
+                    )
+                }),
+        ));
     }
-    let value = resp
-        .json::<Option<serde_json::Value>>()
-        .await
-        .map_err(|e| format!("The saved onboarding draft could not be loaded ({e})."))?;
+    let value = resp.json::<Option<serde_json::Value>>().await.map_err(|e| {
+        DraftLoadError::told(format!("The saved onboarding draft could not be loaded ({e})."))
+    })?;
     let Some(value) = value else { return Ok(None) };
     serde_json::from_value::<OnboardingDraft>(value.clone())
         .map(Some)
@@ -696,9 +719,12 @@ pub(in crate::cockpit) async fn load_onboarding_draft() -> Result<Option<Onboard
             } else {
                 "Your saved onboarding draft"
             };
-            format!(
-                "{part} could not be read ({e}). It is kept as it is on this machine and nothing was deleted."
-            )
+            DraftLoadError {
+                message: format!(
+                    "{part} could not be read ({e}). It is kept as it is on this machine and nothing was deleted."
+                ),
+                unparseable_draft: true,
+            }
         })
 }
 

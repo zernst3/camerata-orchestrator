@@ -2297,7 +2297,7 @@ fn ProjectsHome() -> Element {
                                                                     // A draft that cannot be read is said out
                                                                     // loud, then the project opens as it would
                                                                     // with none; the file is left as it is.
-                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message);
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message.message);
                                                                     screen.set(CockpitScreen::InProject);
                                                                 }
                                                             }

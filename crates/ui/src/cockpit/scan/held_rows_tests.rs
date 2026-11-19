@@ -1072,3 +1072,183 @@ fn the_plain_edge_rules_leave_other_tables_first_cell_markers_alone() {
         assert!(!rule.contains("!important"), "{rule}");
     }
 }
+
+// ── A saved draft this build cannot read: decisions still reach the store, the draft is left alone ──
+
+fn note_tours(m: &dioxus::dioxus_core::Mutations, tours: &mut Vec<(String, ElementId)>) {
+    use dioxus::dioxus_core::{AttributeValue, Mutation};
+    for e in &m.edits {
+        if let Mutation::SetAttribute {
+            name: "data-tour",
+            value: AttributeValue::Text(text),
+            id,
+            ..
+        } = e
+        {
+            tours.push((text.clone(), *id));
+        }
+    }
+}
+
+async fn pump_tours(vdom: &mut VirtualDom, ms: u64, tours: &mut Vec<(String, ElementId)>) {
+    let until = tokio::time::Instant::now() + Duration::from_millis(ms * 4);
+    while tokio::time::Instant::now() < until {
+        let _ = tokio::time::timeout(Duration::from_millis(10), vdom.wait_for_work()).await;
+        let m = vdom.render_immediate_to_vec();
+        note_listeners(&m);
+        note_tours(&m, tours);
+    }
+}
+
+fn screen_with_a_rule() -> Element {
+    use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+    use_context_provider(|| Signal::new(None::<ScanReportView>));
+    use_context_provider(|| Signal::new(CockpitView::Stories));
+    use_context_provider(|| Signal::new(None::<String>));
+    use_context_provider(|| Signal::new(0_usize) as crate::loading::LoadingCount);
+    let report: ScanReportView = serde_json::from_value(serde_json::json!({
+        "repos": ["acme/portal"], "files_scanned": 1, "findings": [], "gated": false,
+        "proposed_rules": [{
+            "id": "R-1", "title": "No raw SQL", "kind": "semantic", "scope": "repo-local",
+            "repos": ["acme/portal"], "is_auto_recommended": true, "recommended": true,
+            "verification": "grounded"
+        }]
+    }))
+    .expect("a scan with one pre-selected rule");
+    rsx! { ScanResults { report } }
+}
+
+/// The saved draft has an audit this build cannot read. The screen says so in a banner that
+/// stays, writes nothing over the draft, and still writes the reviewer's decisions to the store:
+/// the draft's save is the only thing switched off.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn an_unreadable_draft_switches_off_only_the_draft_save_never_a_decision() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let store = Store::default();
+    // The draft: a scan, and an audit whose findings is a number.
+    Mock::given(method("GET"))
+        .and(path("/api/onboard/draft"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "scan": { "repos": ["acme/portal"], "files_scanned": 1, "findings": [],
+                      "proposed_rules": [], "gated": false },
+            "audit": { "repos": ["acme/portal"], "findings": 7 },
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/onboard/draft"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+        .mount(&server)
+        .await;
+    // Run mode is the Engine finder's control; the first mock mounted wins.
+    Mock::given(method("GET"))
+        .and(path("/api/projects/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "p1", "name": "Acme", "repos": ["acme/portal"],
+            "review": { "finder": "engine" },
+            "backend": "api", "client_engagement": true, "client_name": "",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/projects/p1/decisions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "decisions": [], "standings": [], "migrated_from_draft": true,
+            "latest_run_id": "insp-1"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p1/decisions"))
+        .respond_with(DecisionPost(store.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/projects/p1/review/export-gate"))
+        .respond_with(GateGet(store.clone()))
+        .mount(&server)
+        .await;
+    // The reviewer runs an inspection on this screen; its report has one finding.
+    Mock::given(method("POST"))
+        .and(path("/api/onboard/audit/start"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "job_id": "job-9"
+        })))
+        .mount(&server)
+        .await;
+    let report = serde_json::json!({
+        "repos": ["acme/portal"], "files_scanned": 1, "gated": false, "proposed_rules": [],
+        "findings": [finding_json(0, true)], "run_id": "20261118T101500Z-ab12cd"
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/onboard/audit/job/job-9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "job": { "status": "done", "done": 1, "total": 1, "findings": [],
+                     "report": report, "message": null },
+            "idle_ms": null, "cancel_requested": false
+        })))
+        .mount(&server)
+        .await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+    LISTENERS.with(|l| l.borrow_mut().clear());
+    let mut tours = Vec::new();
+    let mut vdom = VirtualDom::new(screen_with_a_rule);
+    let first = vdom.rebuild_to_vec();
+    note_listeners(&first);
+    note_tours(&first, &mut tours);
+    pump_tours(&mut vdom, 200, &mut tours).await;
+
+    // The banner is up, and stays up.
+    let html = rendered(&vdom);
+    assert!(
+        html.contains("could not be read") && html.contains("is not saving this review"),
+        "a banner, not only a toast: {html}"
+    );
+
+    // Run the inspection, then decide the finding in the table.
+    let run = tours
+        .iter()
+        .rev()
+        .find(|(t, _)| t == "run-inspection")
+        .map(|(_, id)| *id)
+        .expect("the run button");
+    send(
+        &vdom,
+        "click",
+        run,
+        Box::new(dioxus::html::SerializedMouseData::default()),
+    );
+    let mut html = String::new();
+    for _ in 0..60 {
+        pump_tours(&mut vdom, 50, &mut tours).await;
+        html = rendered(&vdom);
+        if html.contains("camerata-finding-pane") {
+            break;
+        }
+    }
+    assert!(html.contains("camerata-finding-pane"), "the Queue never drew: {html}");
+    let request = screen_request(&vdom);
+    confirm_in_the_table(&mut vdom, request, key_of(0)).await;
+    pump_tours(&mut vdom, 100, &mut tours).await;
+
+    assert!(
+        store.decided.lock().is_ok_and(|d| d.contains(&key_of(0))),
+        "the decision reached the store"
+    );
+    let draft_posts = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+        .count();
+    assert_eq!(draft_posts, 0, "nothing was written over the unreadable draft");
+    assert!(
+        rendered(&vdom).contains("is not saving this review"),
+        "the banner is still there after the decision"
+    );
+}

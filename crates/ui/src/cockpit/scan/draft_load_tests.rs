@@ -33,9 +33,11 @@ async fn a_malformed_audit_is_an_error_naming_the_saved_review_not_no_draft() {
     .await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let result = load_onboarding_draft().await;
-    let Err(message) = result else {
+    let Err(error) = result else {
         panic!("a draft whose audit cannot be read must not load as Ok");
     };
+    assert!(error.unparseable_draft, "a draft exists that cannot be read");
+    let message = error.message;
     assert!(
         message.starts_with("The saved review in your onboarding draft could not be read"),
         "{message}"
@@ -53,7 +55,12 @@ async fn the_servers_own_refusal_is_shown_when_the_draft_file_was_unreadable() {
     )
     .await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-    let message = load_onboarding_draft().await.err().expect("refused");
+    let error = load_onboarding_draft().await.err().expect("refused");
+    assert!(
+        !error.unparseable_draft,
+        "a refused read is told once; saving goes on"
+    );
+    let message = error.message;
     assert!(
         message.contains("kept untouched at /x/onboarding-draft.json.unreadable"),
         "{message}"

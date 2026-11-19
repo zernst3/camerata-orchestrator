@@ -265,7 +265,7 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
                 Ok(draft) => draft,
                 Err(message) => {
                     // An unreadable draft is said out loud, never taken for "nothing saved".
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message);
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message.message);
                     None
                 }
             };
