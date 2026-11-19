@@ -79,6 +79,10 @@ const SPEC_STATES: &[&str] = &[
     "export/clear",
     "export/blocked",
     "export/one-line-two-reasons",
+    "export/blocked-many",
+    "findings/held-rows",
+    "findings/held-filter-on",
+    "app/build-mismatch",
 ];
 
 /// The states still placeholders, with the work order that owns each. A work order that builds a
@@ -205,7 +209,7 @@ fn the_index_links_every_page_grouped_by_screen_with_the_placeholder_count_on_to
     );
     assert!(index.contains(&format!("{} placeholders", report.placeholders)));
     for screen in [
-        "shell", "tree", "queue", "engine", "detail", "settings", "export",
+        "shell", "tree", "queue", "engine", "detail", "settings", "export", "findings",
     ] {
         assert!(
             index.contains(&format!("<h2>{screen}</h2>")),
@@ -315,7 +319,13 @@ fn no_gallery_page_renders_a_native_control_the_stylesheet_does_not_theme() {
 #[test]
 fn fixtures_cover_every_state() {
     use camerata_ui_core::test_support::review_fixtures::{fixture, FIXTURE_IDS};
-    let registered: Vec<String> = registry().iter().map(GalleryState::id).collect();
+    // The `app/*` states are not review screens and have no review fixture: they render from pure
+    // props of their own. Every other state is a review state and has one.
+    let registered: Vec<String> = registry()
+        .iter()
+        .map(GalleryState::id)
+        .filter(|id| !id.starts_with("app/"))
+        .collect();
     for id in &registered {
         assert!(
             fixture(id).is_some(),

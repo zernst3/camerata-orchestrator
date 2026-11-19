@@ -474,7 +474,6 @@ async fn the_product_export_request_carries_no_review_log() {
     let options = camerata_ui_core::product_export::ProductExportOptions {
         project_title: "Title".to_string(),
         prepared_by: "Me".to_string(),
-        triage_log: true,
         ..Default::default()
     };
     export_product_zip("p1", &dispositions, &options)
@@ -490,10 +489,9 @@ async fn the_product_export_request_carries_no_review_log() {
         .collect();
     keys.sort_unstable();
     assert_eq!(keys, vec!["dispositions", "options"]);
-    assert_eq!(
-        body["options"]["triage_log"],
-        serde_json::json!(true),
-        "the ticked triage-log box reaches the request"
+    assert!(
+        body["options"].get("triage_log").is_none(),
+        "the triage log is not an export option any more"
     );
     assert!(
         body["options"].get("client_name").is_none(),

@@ -227,6 +227,7 @@ fn LiveviewApp(project_id: String) -> Element {
     use_context_provider(|| DoorRequest(door));
     let refresh = use_signal(|| 0u32);
     use_context_provider(|| ShellRefresh(refresh));
+    use_context_provider(super::export_gate::HeldRows::new);
     // The export panel posts the stored decisions, not a screen's draft: it starts with none.
     let dispositions = use_signal(HashMap::new);
 

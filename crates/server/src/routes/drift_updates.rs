@@ -350,7 +350,8 @@ pub(crate) async fn compute_rule_drift(
     if !corpus_path.exists() {
         return Vec::new();
     }
-    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    let (corpus, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    crate::log_corpus_load_errors("rule drift", &errs);
     drift_for_projects(&state.projects.list(), project_filter, &corpus)
 }
 
@@ -395,7 +396,8 @@ pub(crate) async fn load_corpus_for_baseline() -> Option<camerata_rules::RuleSet
     if !corpus_path.exists() {
         return None;
     }
-    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    let (corpus, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    crate::log_corpus_load_errors("rule baseline", &errs);
     Some(corpus)
 }
 
@@ -488,7 +490,8 @@ pub(crate) async fn accept_rule_drift(
     if !corpus_path.exists() {
         return Json(serde_json::json!({ "ok": false, "message": "corpus not found" }));
     }
-    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    let (corpus, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    crate::log_corpus_load_errors("rule update", &errs);
     let Some(rule) = corpus.get_by_id(&rule_id) else {
         return Json(serde_json::json!({ "ok": false, "message": "rule not in corpus" }));
     };

@@ -660,11 +660,14 @@ const FILE_ROUTES: [(&str, &str); 2] = [
 /// a client deliverable. Each is named here so it cannot escape the scan, and each must say so in
 /// its first line, its panel and its saved filename (below). `(route, saved filename)`.
 ///
-/// `export_deep_report` is the only one: the deep-tier lenses are model-written prose with no
-/// reviewer overlay and no gate. Making it a gated package artifact is a later work order; until
-/// then it is labelled for what it is.
-const OPERATOR_ONLY_ROUTES: [(&str, &str); 1] =
-    [("export_deep_report", "camerata-deep-report-INTERNAL.md")];
+/// `export_deep_report`: the deep-tier lenses are model-written prose with no reviewer overlay
+/// and no gate. Making it a gated package artifact is a later work order; until then it is
+/// labelled for what it is. `export_triage_log`: the triage log left the client package; it is the
+/// operator's file, marked internal on its first line and in its filename.
+const OPERATOR_ONLY_ROUTES: [(&str, &str); 2] = [
+    ("export_deep_report", "camerata-deep-report-INTERNAL.md"),
+    ("export_triage_log", "camerata-triage-log-INTERNAL.csv"),
+];
 
 /// What the operator-only deep report says on its first line, in the cockpit panel and on its
 /// saved name.
@@ -829,9 +832,8 @@ async fn the_deep_report_says_it_is_operator_only_on_its_first_line_and_in_its_f
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_default();
-    for (_, filename) in OPERATOR_ONLY_ROUTES {
-        assert!(disposition.contains(filename), "{disposition}");
-    }
+    let (_, filename) = OPERATOR_ONLY_ROUTES[0];
+    assert!(disposition.contains(filename), "{disposition}");
     use http_body_util::BodyExt;
     let bytes = resp.into_body().collect().await.expect("body").to_bytes();
     let markdown = String::from_utf8(bytes.to_vec()).expect("Markdown");
@@ -858,5 +860,61 @@ fn the_cockpit_panel_and_saved_name_of_the_deep_report_say_it_is_operator_only()
     assert!(
         panel.contains(OPERATOR_ONLY_LABEL),
         "the panel carries the label"
+    );
+}
+
+// ---- the operator-only triage log (work order E) -----------------------------------------------
+
+/// The triage log route hands the operator the CSV: marked internal on its first line and in its
+/// saved filename, outside the client package. A project with no scan has none to hand over.
+#[tokio::test]
+async fn the_triage_log_route_says_it_is_internal_on_its_first_line_and_in_its_filename() {
+    use http_body_util::BodyExt;
+    let state = crate::AppState::new(std::sync::Arc::new(crate::InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Acme", vec!["acme/portal".to_string()])
+        .expect("project created");
+
+    let none = crate::export_triage_log(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(project.id.clone()),
+    )
+    .await;
+    assert_eq!(
+        none.status(),
+        axum::http::StatusCode::NOT_FOUND,
+        "no scan results, no log"
+    );
+
+    state.set_last_scan_in_memory(
+        project.id.clone(),
+        crate::onboard::ScanReport::gated(&["acme/portal".to_string()]),
+    );
+    let resp =
+        crate::export_triage_log(axum::extract::State(state), axum::extract::Path(project.id))
+            .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let disposition = resp
+        .headers()
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_default();
+    let (_, filename) = OPERATOR_ONLY_ROUTES[1];
+    assert!(disposition.contains(filename), "{disposition}");
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let csv = String::from_utf8(bytes.to_vec()).expect("CSV text");
+    let mut lines = csv.lines();
+    assert!(
+        lines
+            .next()
+            .unwrap_or_default()
+            .starts_with(crate::xlsx_export::triage_log::INTERNAL_MARK),
+        "the first line marks it internal: {csv}"
+    );
+    assert!(
+        lines.next().unwrap_or_default().starts_with("Rule ID,"),
+        "then the header: {csv}"
     );
 }

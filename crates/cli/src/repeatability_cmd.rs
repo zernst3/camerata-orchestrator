@@ -423,7 +423,8 @@ pub async fn run_repeatability_with(
         // Repeatability measures the drift of the default configuration.
         clone_judge_model: None,
         consensus: false,
-        // Repeatability measures the default (engine) finder.
+        // Repeatability still measures the engine finder (a bare `inspect` now defaults to the agent
+        // finder), so the finder is set explicitly here.
         finder: camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
         finder_model: None,
         finder_force_pieces: None,

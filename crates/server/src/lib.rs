@@ -1901,6 +1901,8 @@ pub fn router(state: AppState) -> Router {
         )
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
+        // ── Triage log (the operator's file, never in the client package) ─────
+        .route("/api/projects/:id/triage-log.csv", get(export_triage_log))
         // ── Audit-report (PDF) export ─────────────────────────────────────────
         .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
@@ -2428,6 +2430,19 @@ async fn onboard_audit(
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
         _ => crate::llm::Backend::Cli,
     };
+    // An agent finder run stops, before any spend, when a rule file did not load (the rule would
+    // silently not be checked).
+    if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
+        &run_controls,
+        run_ai_review && !ai_review_blocked,
+        &corpus_load_failures,
+    ) {
+        let mut r = crate::onboard::ScanReport::gated(&repos);
+        r.gated = false;
+        r.ai_error = Some(why.clone());
+        r.message = Some(why);
+        return Json(r);
+    }
     // The agent finder's setup, built by the one function the command line uses (this request has
     // no run folder of its own, so the rooms go under the per-user state folder).
     let finder_setup = match crate::ai_audit::agent_finder::run::finder_setup_for_run(
@@ -2669,6 +2684,12 @@ async fn onboard_audit(
     };
 
     Json(report)
+}
+
+/// True when a finished audit job records its enforcement catches: a fresh full scan only (see
+/// the call in [`start_audit_job`]).
+pub(crate) fn captures_enforcement_catches(is_resume: bool, is_delta_retest: bool) -> bool {
+    !is_resume && !is_delta_retest
 }
 
 /// Start the audit job for `req` and return its id. The asynchronous body of
@@ -3000,6 +3021,17 @@ pub(crate) async fn start_audit_job(
                                 return;
                             }
                         }
+                        // The agent finder finishes on the finder model it started with.
+                        match store.hold_finder_model(&mut run_controls) {
+                            Ok(Some(line)) => {
+                                store.add_note(&line);
+                            }
+                            Ok(None) => {}
+                            Err(why) => {
+                                body_jobs.fail(&body_jid, why);
+                                return;
+                            }
+                        }
                         // The kept model was not part of the pick the lock checked before the
                         // job started: check every model the resumed run will call, before any
                         // call.
@@ -3097,6 +3129,16 @@ pub(crate) async fn start_audit_job(
                 &backend_resolution,
                 crate::llm::BackendResolution::Blocked { .. }
             );
+            // An agent finder run stops, before any spend, when a rule file did not load (the rule
+            // would silently not be checked).
+            if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
+                &run_controls,
+                run_ai_review && !ai_review_blocked,
+                &corpus_load_failures,
+            ) {
+                body_jobs.fail(&body_jid, why);
+                return;
+            }
             // The agent finder's setup, built by the one function the command line uses: the
             // rooms folder inside the run's own folder, the saved key, the project's engagement
             // kind. A missing key stops the run before the first call.
@@ -3330,10 +3372,20 @@ pub(crate) async fn start_audit_job(
                 crate::run_store::note_report(store, &mut report);
             }
 
-            // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
-            // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
-            // handler. If you add ledger capture here in the future, follow the same
-            // background-spawn pattern used there.)
+            // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
+            // The cockpit runs every scan as this job, so the capture the synchronous
+            // `onboard_audit` handler makes runs here too. Same background-spawn pattern,
+            // best-effort: a failed write is logged and swallowed.
+            // Only a fresh full scan: a resume re-opens a run whose earlier attempt may already
+            // have recorded its catches, and a delta retest re-reads files an earlier scan
+            // recorded; the capture has no dedup, so either would record them twice.
+            if captures_enforcement_catches(resume_run.is_some(), delta.is_some()) {
+                let ledger = state.enforcement_ledger.clone();
+                let all_findings = report.findings.clone();
+                tokio::spawn(async move {
+                    crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
+                });
+            }
 
             // ── Write last_scan + recent_scan (async job path) ──────────────────────────
             // Store the completed report before finishing the job so any concurrent chat
@@ -3531,6 +3583,80 @@ async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String
         .into_response()
 }
 
+/// `GET /api/projects/:id/triage-log.csv` — the operator's triage log: per rule, what the AI pass
+/// proposed, what review kept, held or set aside and threw out, and why. The first line marks it
+/// internal. It is written outside the client package and is not gated, because no client reads
+/// it; the client package never carries it. 404 when the project or its scan results are missing.
+async fn export_triage_log(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Some(project) = state.projects.get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    };
+    // The reviewer's work is read exactly as the exports read it; a damaged file means it is
+    // unknown, so nothing is written from guesses.
+    if state.decisions.is_corrupt(&id) {
+        return crate::decisions::routes::corrupt_response();
+    }
+    if state.edits.is_corrupt(&id) {
+        return crate::edits::routes::corrupt_response();
+    }
+    let Some(report) = state.get_last_scan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No scan results available for this project. Run an inspection first."
+            })),
+        )
+            .into_response();
+    };
+    let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
+        &state.decisions.active(&id),
+    ));
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+    let reviewed = reviewed_for_export(&state, &id, &report, &std::collections::HashMap::new());
+    let csv = match xlsx_export::triage_log::operator_csv(
+        &reviewed,
+        corpus.as_ref(),
+        &project_chosen_options(&project),
+    ) {
+        Ok(csv) => csv,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": format!("{e:#}") })),
+            )
+                .into_response();
+        }
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}\"",
+                    xlsx_export::triage_log::INTERNAL_FILE_NAME
+                ),
+            ),
+        ],
+        csv,
+    )
+        .into_response()
+}
+
 /// The deep report as Markdown for the operator: the lens prose is model-written text read back
 /// from the job store, so it is redacted here, at the export, whatever path stored it. It is
 /// labelled as the operator's working notes ([`DEEP_REPORT_OPERATOR_LABEL`]); it is not a client
@@ -3661,7 +3787,9 @@ async fn export_audit_report(
     // model-inferred." rather than failing the export.
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };
@@ -3988,7 +4116,9 @@ async fn export_product(
 
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };
@@ -4607,6 +4737,13 @@ impl ManifestProvenance {
 /// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
 pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
 
+/// Whether the tree had uncommitted changes when this binary was built (`build.rs`). Reported on
+/// `/api/health` for information; the app compares commits only.
+pub const ENGINE_DIRTY: bool = match option_env!("CAMERATA_GIT_DIRTY") {
+    Some(flag) => flag.len() == 1 && flag.as_bytes()[0] == b'1',
+    None => false,
+};
+
 /// The README line of an internal package made from a run that did not complete.
 pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this inspection did not \
      run to completion and is not for a client.";
@@ -4867,6 +5004,24 @@ impl From<anyhow::Error> for AppError {
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod enforcement_capture_tests {
+    use super::captures_enforcement_catches;
+
+    #[test]
+    fn only_a_fresh_full_scan_records_enforcement_catches() {
+        assert!(captures_enforcement_catches(false, false));
+        assert!(
+            !captures_enforcement_catches(true, false),
+            "a resume would record twice"
+        );
+        assert!(
+            !captures_enforcement_catches(false, true),
+            "a delta retest would record twice"
+        );
+    }
+}
 
 #[cfg(test)]
 mod lib_multirepo_tests;

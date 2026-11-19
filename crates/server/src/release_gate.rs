@@ -808,6 +808,9 @@ pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
 mod tests;
 
 #[cfg(test)]
+mod panel_names_tests;
+
+#[cfg(test)]
 mod triage_log_tests;
 
 #[cfg(test)]

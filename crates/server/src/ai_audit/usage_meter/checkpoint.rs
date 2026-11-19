@@ -210,8 +210,8 @@ impl UsageMeter {
         cp.stopped_before = before.to_string();
         // The hard limit refuses a new piece once spent plus the pieces in flight x the largest
         // call reaches it: the advised resume limit holds that back too.
-        let in_flight = self.budget().in_flight.max(1);
-        cp.reserve_usd = in_flight as f64 * self.reserve_micro_usd() as f64 / 1_000_000.0;
+        let held = self.held_reserve_micro(&self.budget());
+        cp.reserve_usd = held as f64 / 1_000_000.0;
     }
 
     /// True once the checkpoint stopped the run.

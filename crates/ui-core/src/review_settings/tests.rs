@@ -598,7 +598,7 @@ fn each_stage_names_the_step_the_server_route_takes_and_reads_its_own_saved_mode
     }
     assert_eq!(
         Stage::FinderModel.hint(),
-        "not set: Claude Fable 5.2; used when the finder is agent"
+        "not set: Claude Opus 5.5; used when the finder is agent"
     );
     assert_eq!(Stage::DuplicateCheck.hint(), "not set: Claude Sonnet 5.5");
 }

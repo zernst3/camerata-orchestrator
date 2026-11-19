@@ -115,8 +115,9 @@ pub struct RunControls {
     /// `camerata inspect --group-review-model`, `--escalation-rate` and `--escalation-floor`).
     /// A blank `group_review_model` means the built-in default. Never the environment.
     pub review: camerata_api_types::project::ReviewSettings,
-    /// `--finder agent|engine`: which finder the run uses. `Engine` (the existing scan passes) is
-    /// the default until the graded comparison decides.
+    /// `--finder agent|engine`: which finder the run uses. A new project and a bare `camerata inspect`
+    /// run `Agent`; this struct's own default stays `Engine` (the existing scan passes), the value
+    /// a saved run record without a finder resumes with.
     pub finder: crate::ai_audit::agent_finder::FinderChoice,
     /// `--finder-model`: the agent finder's model. `None` or blank = the built-in default
     /// ([`crate::ai_audit::agent_finder::DEFAULT_FINDER_MODEL`]). Never the environment.
@@ -599,7 +600,13 @@ impl CostCapRecord {
 /// The mutable half of the cap, owned by the [`crate::ai_audit::UsageMeter`].
 #[derive(Debug, Default)]
 pub(crate) struct BudgetState {
+    /// Every admitted pass in flight, request-scoped or not.
     pub in_flight: u64,
+    /// The part of `in_flight` admitted for one request ([`crate::ai_audit::UsageMeter::admit_for_request`]).
+    pub scoped_in_flight: u64,
+    /// What those request-scoped passes reserve in total, in micro-dollars: each one its OWN
+    /// request's ceiling, not the run's worst call.
+    pub scoped_reserved_micro: u64,
     pub not_run_passes: Vec<NotRunPass>,
     pub not_run_stages: Vec<NotRunStage>,
     pub notes: Vec<String>,
@@ -691,19 +698,19 @@ mod tests {
     fn the_models_a_run_uses_are_listed_by_role_and_deduplicated() {
         let off = fix_follows_calibration();
         let all = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &["ARCH-1"], &off);
-        // A13: stage 1 and stage 2 have defaults of their own now (Opus 5.5 and Fable 5.2), so
-        // the scan and the fix pass share a model and the two reviewers each have theirs.
+        // Stage 1 and stage 2 have defaults of their own (both Opus 5.5), so the scan and the
+        // fix pass share a model and the two reviewers share Opus 5.5.
         let by_model: std::collections::BTreeMap<&str, &str> = all
             .iter()
             .map(|(roles, model)| (model.as_str(), roles.as_str()))
             .collect();
-        // The duplicate check's own default, Sonnet 5.5, is a fourth.
-        assert_eq!(all.len(), 4, "four models fill the roles: {all:?}");
+        // The duplicate check's own default, Sonnet 5.5, is a third.
+        assert_eq!(all.len(), 3, "three models fill the roles: {all:?}");
         assert_eq!(by_model["claude-sonnet-5-5"], "the duplicate check");
         assert!(by_model["claude-sonnet-5"].contains("the scan"));
         assert!(by_model["claude-sonnet-5"].contains("fix generation"));
-        assert_eq!(by_model["claude-opus-5-5"], "calibration");
-        assert_eq!(by_model["claude-fable-5-2"], "group review");
+        assert!(by_model["claude-opus-5-5"].contains("calibration"));
+        assert!(by_model["claude-opus-5-5"].contains("group review"));
         assert!(!all
             .iter()
             .any(|(roles, _)| roles.contains("clone judge") || roles.contains("deep")));
@@ -768,7 +775,7 @@ mod tests {
         // A blank project: the built-in defaults.
         let mut blank = RunControls::default();
         blank.fill_models_from_project(&ReviewSettings::default());
-        assert_eq!(blank.finder_model_for(), "claude-fable-5-2");
+        assert_eq!(blank.finder_model_for(), "claude-opus-5-5");
         assert_eq!(blank.dup_check_model_for(), "claude-sonnet-5-5");
         assert_eq!(blank.clone_judge_model_for(), "claude-haiku-5-5");
         // A flag wins over the project, for every role.

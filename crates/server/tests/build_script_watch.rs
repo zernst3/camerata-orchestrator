@@ -84,6 +84,29 @@ fn a_packed_only_branch_watches_packed_refs_and_its_own_directory() {
     );
 }
 
+/// After `git gc` or `git pack-refs` a packed `feat/x` branch has no loose file, and git removes
+/// the then-empty `refs/heads/feat` directory. The next commit recreates both the directory and
+/// the loose ref, which touches neither `HEAD` nor `packed-refs`, so the nearest directory that
+/// still exists (here `refs/heads`) must be watched or the recorded commit goes stale.
+#[test]
+fn a_packed_branch_whose_directory_is_gone_watches_the_nearest_existing_ancestor() {
+    let dir = tempfile::tempdir().expect("test setup");
+    let git = dir.path().join(".git");
+    write(&git.join("HEAD"), "ref: refs/heads/feat/export\n");
+    write(&git.join("packed-refs"), "aaaa refs/heads/feat/export\n");
+    fs::create_dir_all(git.join("refs/heads")).expect("test setup");
+    let watched =
+        build_script::watched_paths(&git, &git, "ref: refs/heads/feat/export\n", &on_disk);
+    assert_eq!(
+        watched,
+        vec![
+            git.join("HEAD"),
+            git.join("packed-refs"),
+            git.join("refs/heads")
+        ]
+    );
+}
+
 #[test]
 fn a_path_that_does_not_exist_is_never_watched() {
     let dir = tempfile::tempdir().expect("test setup");

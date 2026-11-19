@@ -56,7 +56,9 @@ pub(crate) async fn get_rewrite_advisory(
     // or unreadable corpus leaves both to the rows, as every export does.
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rewrite advisory", &errs);
+        Some(set)
     } else {
         None
     };

@@ -176,7 +176,7 @@ enum Command {
         #[arg(long = "clone-judge-model")]
         clone_judge_model: Option<String>,
         /// Model for the group reviewer (stage 2), the architect's first reader of each rule
-        /// group. Unset: the built-in default, Fable 5.2. Set only here or in a project's
+        /// group. Unset: the built-in default, Opus 5.5. Set only here or in a project's
         /// settings, never by the environment.
         #[arg(long = "group-review-model")]
         group_review_model: Option<String>,
@@ -247,14 +247,15 @@ enum Command {
         /// dropped.
         #[arg(long)]
         consensus: bool,
-        /// Which finder reviews the code: `engine` (the default: the scan passes, then the
-        /// calibration stage) or `agent` (one review agent for each piece of code, with the rules
-        /// as its checklist; the files it read come from its tool trace). The agent finder
+        /// Which finder reviews the code: `agent` (the default: one review agent for each piece
+        /// of code, with the rules as its checklist; the files it read come from its tool trace)
+        /// or `engine` (the scan passes, then the calibration stage). The agent finder
         /// needs a full inspection (it cannot be combined with `--consensus`, and it needs
-        /// `--full` when an earlier inspection of the same code exists).
-        #[arg(long, default_value = "engine", value_parser = camerata::inspect_cmd::finder::parse_finder)]
+        /// `--full` when an earlier inspection of the same code exists); pass `--finder engine`
+        /// for either.
+        #[arg(long, default_value = "agent", value_parser = camerata::inspect_cmd::finder::parse_finder)]
         finder: camerata_server::ai_audit::agent_finder::FinderChoice,
-        /// The agent finder's model. Unset: the built-in default (Fable 5.2). Set only here or in
+        /// The agent finder's model. Unset: the built-in default (Opus 5.5). Set only here or in
         /// a project's settings, never by the environment.
         #[arg(long = "finder-model")]
         finder_model: Option<String>,
@@ -1332,8 +1333,8 @@ mod cli_parse_tests {
                 assert!(resume.is_none(), "a new run unless --resume is given");
                 assert_eq!(
                     finder,
-                    camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
-                    "the scan passes unless the agent finder is asked for"
+                    camerata_server::ai_audit::agent_finder::FinderChoice::Agent,
+                    "the agent finder unless the engine is asked for"
                 );
                 assert!(finder_model.is_none() && finder_force_pieces.is_none());
                 assert!(compare_with.is_none());
@@ -1392,6 +1393,37 @@ mod cli_parse_tests {
                 ..
             }
         ));
+    }
+
+    /// Outside review Part 1 item 3: a bare `camerata inspect` runs the agent finder; the flag
+    /// still wins; the finder and group review models default to Opus 5.5.
+    #[test]
+    fn inspect_defaults_to_the_agent_finder_on_opus_5_5() {
+        let parse = |extra: &[&str]| {
+            let mut v = vec![
+                "camerata",
+                "inspect",
+                "--repo",
+                "/tmp/r",
+                "--export",
+                "/tmp/o.zip",
+                "--client",
+                "Example Client Ltd",
+            ];
+            v.extend_from_slice(extra);
+            match Cli::try_parse_from(v).expect("must parse").command {
+                Command::Inspect { finder, .. } => finder,
+                _ => panic!("expected inspect"),
+            }
+        };
+        let agent = camerata_server::ai_audit::agent_finder::FinderChoice::Agent;
+        let engine = camerata_server::ai_audit::agent_finder::FinderChoice::Engine;
+        assert_eq!(parse(&[]), agent);
+        assert_eq!(parse(&["--finder", "engine"]), engine);
+        assert_eq!(parse(&["--finder", "agent"]), agent);
+        let controls = camerata_server::cost_cap::RunControls::default();
+        assert_eq!(controls.finder_model_for(), "claude-opus-5-5");
+        assert_eq!(controls.group_review_model_for(), "claude-opus-5-5");
     }
 
     /// The finder flags parse: `--finder agent`, its model, the forced pieces and the comparison.

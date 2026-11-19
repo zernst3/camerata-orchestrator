@@ -116,6 +116,7 @@ fn models() -> ModelsRecord {
         resolved: true,
         group_review: String::new(),
         finder: String::new(),
+        finder_model: String::new(),
     }
 }
 
@@ -2257,7 +2258,7 @@ fn the_models_record_stores_the_resolved_group_review_model() {
     );
 }
 
-/// A run started on Fable 5.1 and resumed with no model flag (the default is now Fable 5.2)
+/// A run started on Fable 5.1 and resumed with no model flag (the default is now Opus 5.5)
 /// makes its remaining group review calls on Fable 5.1: no mixed models in one run.
 #[test]
 fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on() {
@@ -2271,7 +2272,7 @@ fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on()
     let mut resumed = crate::cost_cap::RunControls::default();
     assert_eq!(
         resumed.group_review_model_for(),
-        "claude-fable-5-2",
+        "claude-opus-5-5",
         "the default has moved on"
     );
     let notice = started
@@ -2296,7 +2297,7 @@ fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on()
         why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
         "{why}"
     );
-    assert_eq!(other.group_review_model_for(), "claude-fable-5-2");
+    assert_eq!(other.group_review_model_for(), "claude-opus-5-5");
 }
 
 /// A run saved before the group reviewer was recorded has nothing to keep: the current pick stands.
@@ -2470,4 +2471,73 @@ fn the_finder_hold_keeps_the_recorded_finder_and_defaults_to_the_engine() {
     let mut c = controls_with_finder(FinderChoice::Agent);
     assert_eq!(record("agent").hold_finder(&mut c), None);
     assert_eq!(c.finder, FinderChoice::Agent);
+}
+
+// ---- a resumed agent run keeps its finder model ----
+
+/// Outside review round 1: a run started on one finder model finishes on it after the built-in
+/// default moves, and says so; a different explicit pick is refused; an engine run has none.
+#[test]
+fn the_finder_model_hold_keeps_the_recorded_model_and_says_so() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let record = |model: &str| ModelsRecord {
+        finder: "agent".to_string(),
+        finder_model: model.to_string(),
+        ..models()
+    };
+    // Recorded from the picks: the resolved model of an agent run, none for an engine run.
+    let agent = controls_with_finder(FinderChoice::Agent);
+    let rec = ModelsRecord::from_picks(None, None, &agent, "api", "parallel");
+    assert_eq!(rec.finder_model, agent.finder_model_for());
+    let engine = controls_with_finder(FinderChoice::Engine);
+    assert_eq!(
+        ModelsRecord::from_picks(None, None, &engine, "api", "parallel").finder_model,
+        ""
+    );
+    // The default is Opus now; the run started on Fable 5.2: it stays on Fable 5.2.
+    let mut c = controls_with_finder(FinderChoice::Agent);
+    let line = record("claude-fable-5-2")
+        .hold_finder_model(&mut c)
+        .unwrap();
+    assert_eq!(c.finder_model_for(), "claude-fable-5-2");
+    assert_eq!(
+        line.as_deref(),
+        Some("The finder stays on claude-fable-5-2, the model this run started with.")
+    );
+    // The same explicit pick is fine; a different one is refused.
+    let mut same = controls_with_finder(FinderChoice::Agent);
+    same.finder_model = Some("claude-fable-5-2".to_string());
+    assert!(record("claude-fable-5-2")
+        .hold_finder_model(&mut same)
+        .is_ok());
+    let mut other = controls_with_finder(FinderChoice::Agent);
+    other.finder_model = Some("claude-opus-5-5".to_string());
+    let why = record("claude-fable-5-2")
+        .hold_finder_model(&mut other)
+        .unwrap_err();
+    assert!(
+        why.contains("claude-fable-5-2") && why.contains("claude-opus-5-5"),
+        "{why}"
+    );
+    // An older run recorded none and the resume names none: it keeps Fable 5.2, the default
+    // when it started, and the line says so.
+    let mut old = controls_with_finder(FinderChoice::Agent);
+    let line = record("").hold_finder_model(&mut old).unwrap().unwrap();
+    assert!(
+        line.contains("claude-fable-5-2") && line.contains("recorded none"),
+        "{line}"
+    );
+    assert_eq!(old.finder_model_for(), "claude-fable-5-2");
+    // With an explicit pick on such a run, the pick stands.
+    let mut picked = controls_with_finder(FinderChoice::Agent);
+    picked.finder_model = Some("claude-opus-5-5".to_string());
+    let line = record("").hold_finder_model(&mut picked).unwrap().unwrap();
+    assert!(line.contains("did not record a finder model"), "{line}");
+    assert_eq!(picked.finder_model_for(), "claude-opus-5-5");
+    // An engine run has no finder model to hold.
+    let mut e = controls_with_finder(FinderChoice::Engine);
+    assert_eq!(
+        record("claude-fable-5-2").hold_finder_model(&mut e),
+        Ok(None)
+    );
 }

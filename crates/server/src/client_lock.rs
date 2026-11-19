@@ -316,3 +316,26 @@ mod tests {
         assert!(!r.client_tooling_allowed);
     }
 }
+
+#[cfg(test)]
+mod refusal_prefix_tests {
+    use super::*;
+
+    /// The desktop recognises a client-lock refusal of a scan by this prefix
+    /// (`crates/ui/src/cockpit/scan/banners_panels.rs`, `job_failure_kind`) and shows the
+    /// server's text under its own heading, with no backend-setup hint. Every refusal text must
+    /// keep it.
+    #[test]
+    fn every_scan_lock_refusal_starts_with_the_prefix_the_screen_matches() {
+        const PREFIX: &str = "This is a client engagement";
+        let cli = refusal(true, ProjectBackend::Cli, &[]).expect("cli is refused");
+        assert!(cli.starts_with(PREFIX), "{cli}");
+        let models = [(
+            "the scan".to_string(),
+            "some-other-provider/model".to_string(),
+        )];
+        let other = refusal(true, ProjectBackend::Api, &models).expect("a non-Anthropic model");
+        assert!(other.starts_with(PREFIX), "{other}");
+        assert_eq!(refusal(false, ProjectBackend::Cli, &[]), None);
+    }
+}

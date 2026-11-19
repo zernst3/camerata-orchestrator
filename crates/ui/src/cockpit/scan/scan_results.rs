@@ -449,8 +449,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| crate::cockpit::tree::DoorRequest(door));
     // Bumped after every write in the tree, so the shell's counts and the export panel's gate
     // read again.
-    let review_refresh = use_signal(|| 0u32);
+    let mut review_refresh = use_signal(|| 0u32);
     use_context_provider(|| crate::cockpit::tree::ShellRefresh(review_refresh));
+    // The rows the release gate holds, shared by the export panel and the triage table.
+    use_context_provider(crate::cockpit::export_gate::HeldRows::new);
     use_effect(move || {
         if door.read().is_some() {
             review_open.set(true);
@@ -722,6 +724,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                     if out.stored_any {
                         // Re-save the draft now that those changes are stored.
                         bridge_tick += 1;
+                        // The release gate reads the store: read it again, so the export line
+                        // and the table's red marks follow a decision made in the table.
+                        review_refresh += 1;
                     }
                 });
             }
@@ -1319,13 +1324,13 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                     return;
                                 }
                             };
-                            // Deterministic-only is fast, but its PROGRESS is only pollable on
-                            // the async job path (the sync path holds one request and returns
-                            // the final report). So route a deterministic-ONLY scan through the
-                            // job path regardless of the picked mode — that's where the
-                            // per-tool progress streams into the "Deterministic scan" component.
-                            let deterministic_only = det && !ai;
-                            let use_job = mode == "job" || deterministic_only;
+                            // Every scan runs as a saved server-side job, whatever the picked mode:
+                            // the job is the only path that saves the run (its journal and
+                            // checkpoints), so it is the only one "Run what remains" can resume,
+                            // and its progress is pollable. The picked mode still decides HOW the
+                            // model is called (see `exec_mode`); "Background job" is the server's
+                            // default.
+                            let exec_mode = job_exec_mode(&mode);
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
@@ -1350,7 +1355,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             // like this new run already failed before it even began.
                             job_failed_message.set(None);
                             auditing.set(true);
-                            if use_job {
+                            {
                                 // Async job: submit, record the id (app-scope, so a later
                                 // mount can resume), then poll. The server runs it decoupled
                                 // from any single request.
@@ -1365,7 +1370,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "auto", incremental, deep, ai, det, max_cost).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, &exec_mode, incremental, deep, ai, det, max_cost).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -1388,24 +1393,6 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                         loading_count,
                                     )
                                     .await;
-                                });
-                            } else {
-                                // Synchronous: hold the request until the (shorter) run finishes.
-                                spawn(async move {
-                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, incremental, deep, ai, det, max_cost).await;
-                                    if result.is_none() {
-                                        // The sync request itself failed (network error, server
-                                        // unreachable) — the server-side crash path already
-                                        // returns a normal 200 JSON with `ai_error` set, so
-                                        // `None` here means the response never arrived at all.
-                                        job_failed_message.set(Some(
-                                            "The scan request failed (no response from the \
-                                             server). Please retry."
-                                                .to_string(),
-                                        ));
-                                    }
-                                    audit.set(result);
-                                    auditing.set(false);
                                 });
                             }
                         },
@@ -1530,16 +1517,16 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         disabled: auditing(),
                         value: "{audit_mode}",
                         onchange: move |e| audit_mode.set(e.value()),
-                        option { value: "auto", "Default (batch on the API backend, else parallel)" }
+                        option { value: "auto", "Default (batch on the API backend, else parallel; saved, resumable)" }
                         option { value: "parallel", "Parallel (real time)" }
                         option { value: "sequential", "Sequential (real time, slower, gentlest)" }
-                        option { value: "job", "Background job (walk away, default mode)" }
+                        option { value: "job", "Large scan (same as Default; picked for big codebases)" }
                         option { value: "batch", "Batch (50% off, async, API key required)" }
                     }
                     if audit_mode() == recommended_mode {
                         span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
                     }
-                    span { class: "audit-model-hint", "Default runs the scan as a Message Batch on the API backend (half price, results when the whole batch is done) and in real time on the CLI backend. Parallel and Sequential force real time. Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
+                    span { class: "audit-model-hint", "Default runs the scan as a Message Batch on the API backend (half price, results when the whole batch is done) and in real time on the CLI backend. Parallel and Sequential force real time. Parallel runs rule-batches concurrently. Every scan runs server-side as a saved job, so you can leave and watch findings stream in, and Run what remains can resume it. Large scan is the same as Default; it is only what is picked for huge or multi-repo codebases. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
                 }
                 // Incremental scan — on by default; re-scans only pay AI for changed files.
                 // The checkbox forces a full re-scan over every file.
@@ -1855,6 +1842,11 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 // discovered) + a findings-so-far count, so a walk-away scan shows life.
                 if let Some((done, total, nf, not_run)) = job_progress() {
                     {
+                        let not_run_cause = if cost_checkpoint().is_some_and(|c| c.stopped) {
+                            NotRunCause::Checkpoint
+                        } else {
+                            NotRunCause::Unknown
+                        };
                         let pct = (done * 100).checked_div(total).unwrap_or(0).min(100);
                         let n_repos = report.repos.len();
                         rsx! {
@@ -1862,7 +1854,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 div { class: "job-progress-track",
                                     div { class: "job-progress-fill", style: "width: {pct}%" }
                                 }
-                                span { class: "job-progress-label", "{job_progress_label(done, total, nf, not_run)}" }
+                                span { class: "job-progress-label", "{job_progress_label_for(done, total, nf, not_run, not_run_cause)}" }
                                 // Multi-repo scans run ONE repo at a time, and the pass
                                 // denominator grows as each repo is reached — so the agent
                                 // activity below shows only the repo currently running, not all

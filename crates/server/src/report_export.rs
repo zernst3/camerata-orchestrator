@@ -98,12 +98,6 @@ pub struct ReportOptions {
     /// provenance. Server-populated, never client-supplied (`serde(skip)`).
     #[serde(skip)]
     pub model: Option<crate::ModelRecord>,
-    /// H4: also export the triage log (per rule, what the AI pass proposed, what review kept
-    /// and threw out, and why) as a workbook sheet and `csv/triage-log.csv`. OFF by default:
-    /// the export dialog (or `camerata inspect` via [`EXPORT_TRIAGE_LOG_ENV`]) asks for it.
-    /// See `xlsx_export::triage_log`.
-    #[serde(default)]
-    pub triage_log: bool,
     /// Every repo the project holds, in the project's order. Server-populated from the project,
     /// never client-supplied (`serde(skip)`). The package assembly refuses a report that covers
     /// fewer repos than this ([`require_all_repos`]); empty means the caller names no project
@@ -124,8 +118,9 @@ pub struct ReportOptions {
     pub internal: bool,
 }
 
-/// Env var that turns the optional triage log on for an export when set to `1` or `true`
-/// (folded in by [`ReportOptions::apply_env_defaults`], like the brand). Unset means off.
+/// Env var that makes `camerata inspect` write the operator's triage log beside the export zip
+/// when set to `1` or `true`. It never adds anything to the package: the client package carries no
+/// triage log, whatever is set (see `xlsx_export::triage_log`). Unset means no file.
 pub const EXPORT_TRIAGE_LOG_ENV: &str = "CAMERATA_EXPORT_TRIAGE_LOG";
 
 /// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog
@@ -212,14 +207,12 @@ impl ReportOptions {
             .unwrap_or_default();
         self.prepared_by =
             resolve_prepared_by(self, std::env::var(REPORT_PREPARED_BY_ENV).ok().as_deref());
-        self.triage_log = self.triage_log
-            || triage_log_env_on(std::env::var(EXPORT_TRIAGE_LOG_ENV).ok().as_deref());
     }
 }
 
-/// Whether the [`EXPORT_TRIAGE_LOG_ENV`] value turns the triage log on: `1` or `true` (any
-/// case), nothing else. Split out so it is testable without touching the process environment.
-pub(crate) fn triage_log_env_on(value: Option<&str>) -> bool {
+/// Whether the [`EXPORT_TRIAGE_LOG_ENV`] value asks for the operator's triage log file: `1` or
+/// `true` (any case), nothing else. Split out so it is testable without touching the process environment.
+pub fn triage_log_env_on(value: Option<&str>) -> bool {
     value.is_some_and(|v| {
         let v = v.trim();
         v == "1" || v.eq_ignore_ascii_case("true")

@@ -2275,8 +2275,8 @@ async fn set_credential_for_non_anthropic_name_does_not_touch_the_anthropic_cach
 
 // ── GET /api/models/registry — backend-aware Claude portion (Feature A) ────────
 
-/// The project's finder setting is the run's finder: an agent project runs the agent finder, a
-/// new project runs the engine, and the setting is read when the run starts (never the
+/// The project's finder setting is the run's finder: a new project runs the agent finder, an
+/// engine project runs the engine, and the setting is read when the run starts (never the
 /// environment).
 #[test]
 fn the_projects_finder_reaches_the_audit_runs_controls() {
@@ -2287,9 +2287,9 @@ fn the_projects_finder_reaches_the_audit_runs_controls() {
         .create("Finder wiring", vec!["me/repo".to_string()])
         .expect("create active project");
     let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
-    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Engine);
+    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Agent);
     let settings = camerata_api_types::project::ReviewSettings {
-        finder: camerata_api_types::project::ProjectFinder::Agent,
+        finder: camerata_api_types::project::ProjectFinder::Engine,
         ..project.review
     };
     state
@@ -2297,7 +2297,7 @@ fn the_projects_finder_reaches_the_audit_runs_controls() {
         .set_review_settings(&project.id, settings)
         .unwrap()
         .unwrap();
-    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Agent);
+    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Engine);
 }
 
 /// The project's finder, duplicate check and clone judge models are the UI-started run's models;
@@ -2311,11 +2311,11 @@ fn the_projects_finder_dup_check_and_clone_judge_models_reach_the_audit_runs_con
         .expect("create active project");
     let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
     let before = req.run_controls_for(&state);
-    assert_eq!(before.finder_model_for(), "claude-fable-5-2");
+    assert_eq!(before.finder_model_for(), "claude-opus-5-5");
     assert_eq!(before.dup_check_model_for(), "claude-sonnet-5-5");
     assert_eq!(before.clone_judge_model_for(), "claude-haiku-5-5");
     let settings = camerata_api_types::project::ReviewSettings {
-        finder_model: "claude-opus-5-5".to_string(),
+        finder_model: "claude-fable-5-2".to_string(),
         dup_check_model: "claude-haiku-5-5".to_string(),
         clone_judge_model: "claude-haiku-4-5-20251001".to_string(),
         ..project.review
@@ -2326,7 +2326,19 @@ fn the_projects_finder_dup_check_and_clone_judge_models_reach_the_audit_runs_con
         .unwrap()
         .unwrap();
     let after = req.run_controls_for(&state);
-    assert_eq!(after.finder_model_for(), "claude-opus-5-5");
+    assert_eq!(after.finder_model_for(), "claude-fable-5-2");
     assert_eq!(after.dup_check_model_for(), "claude-haiku-5-5");
     assert_eq!(after.clone_judge_model_for(), "claude-haiku-4-5-20251001");
+}
+
+/// Outside review round 1: an app run with no project runs as a new project does (the agent
+/// finder on Opus 5.5), not on the library's engine default.
+#[test]
+fn a_run_with_no_project_takes_the_new_project_defaults() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+    let c = req.run_controls_for_project(None);
+    assert_eq!(c.finder, FinderChoice::Agent);
+    assert_eq!(c.finder_model_for(), "claude-opus-5-5");
+    assert_eq!(c.group_review_model_for(), "claude-opus-5-5");
 }

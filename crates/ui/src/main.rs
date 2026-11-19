@@ -18,6 +18,7 @@ use camerata_ui::desktop_chrome::{self, CLIPBOARD_SHIM_SCRIPT, GOOGLE_FONTS_LINK
 
 mod agent_activity;
 mod bombe_bg;
+mod build_guard;
 mod chat;
 #[cfg(test)]
 mod chat_ui_tests;
@@ -143,6 +144,14 @@ fn App() -> Element {
         });
     });
 
+    rsx! { AppShell {} }
+}
+
+/// Everything the window shows once the launch side effects are under way: the shared contexts,
+/// the global chrome, and the cockpit behind the build guard. Split from `App` so a test can mount
+/// it (and prove the guard wraps the cockpit) without starting a server.
+#[component]
+fn AppShell() -> Element {
     // Global ref-counted in-flight loading count.  Any component or async
     // helper that holds a `loading::LoadingGuard` for its duration
     // increments this; the background Bombe machine watches it and activates
@@ -202,27 +211,31 @@ fn App() -> Element {
         // below the app shell (z-index 1).
         bombe_bg::BombeBg {}
 
-        div { class: "app-root",
-            // Watches connection health and pushes warning/error toasts; renders nothing.
-            toast::ConnectionWatcher {}
-            // Drains the server-side event-ingest feed (tracker/deploy) into toasts.
-            toast::NotificationPoller {}
-            cockpit::CockpitShell {}
+        // The cockpit and its floating panels show only when the server answering on the BFF
+        // address is from the same build as this app (build_guard).
+        build_guard::BuildGuard { ui_build: build_guard::UI_COMMIT.map(str::to_string),
+            div { class: "app-root",
+                // Watches connection health and pushes warning/error toasts; renders nothing.
+                toast::ConnectionWatcher {}
+                // Drains the server-side event-ingest feed (tracker/deploy) into toasts.
+                toast::NotificationPoller {}
+                cockpit::CockpitShell {}
+            }
+            // The toast stack is a SEPARATE top-layer overlay — a sibling of app-root,
+            // position:fixed, pointer-events:none on the layer (so it never blocks the
+            // UI behind it) with pointer-events:auto on each toast.
+            toast::ToastHost {}
+            // The research chat bubble: a floating, always-available AI scratchpad.
+            // Receives the ask-a-finding signal: when any FindingsTable row's "Ask AI"
+            // button fires, it writes a FindingContext here and the panel auto-opens
+            // in Project mode focused on that finding.
+            chat::ChatBubble {
+                finding: ask_finding(),
+                project_open: screen() == cockpit::CockpitScreen::InProject,
+            }
+            // The in-app terminal: a floating PTY-backed shell panel with tab support.
+            // FAB sits to the LEFT of the chat FAB so both are reachable without overlap.
+            terminal::TerminalBubble {}
         }
-        // The toast stack is a SEPARATE top-layer overlay — a sibling of app-root,
-        // position:fixed, pointer-events:none on the layer (so it never blocks the
-        // UI behind it) with pointer-events:auto on each toast.
-        toast::ToastHost {}
-        // The research chat bubble: a floating, always-available AI scratchpad.
-        // Receives the ask-a-finding signal: when any FindingsTable row's "Ask AI"
-        // button fires, it writes a FindingContext here and the panel auto-opens
-        // in Project mode focused on that finding.
-        chat::ChatBubble {
-            finding: ask_finding(),
-            project_open: screen() == cockpit::CockpitScreen::InProject,
-        }
-        // The in-app terminal: a floating PTY-backed shell panel with tab support.
-        // FAB sits to the LEFT of the chat FAB so both are reachable without overlap.
-        terminal::TerminalBubble {}
     }
 }

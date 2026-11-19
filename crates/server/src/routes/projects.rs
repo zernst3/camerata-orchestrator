@@ -1141,7 +1141,8 @@ pub(crate) async fn rescan_alternatives_handler(
     if !corpus_path.exists() {
         return Json(serde_json::json!({ "ok": false, "message": "Rule corpus unavailable." }));
     }
-    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    let (corpus, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    crate::log_corpus_load_errors("rerun with overrides", &errs);
 
     // Validate every override AGAINST the corpus before any model call. A rule id that isn't a
     // real multi-option semantic rule, or an option id that isn't real on that rule, is

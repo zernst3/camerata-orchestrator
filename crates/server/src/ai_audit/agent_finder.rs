@@ -42,8 +42,9 @@ mod types_tests;
 
 pub use room::{BuiltRoom, NotServed, Room};
 
-/// Which finder a run uses. `Engine` is the existing scan-pass finder (the default until the
-/// graded comparison decides); `Agent` is this module.
+/// Which finder a run uses. `Agent` is this module (the default for a new project and a bare
+/// `camerata inspect`); `Engine` is the existing scan-pass finder (this type's own default, kept
+/// for saved runs that recorded no finder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FinderChoice {
     #[default]

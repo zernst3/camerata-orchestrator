@@ -100,7 +100,7 @@ pub struct InspectArgs {
     /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
     pub fix_model: Option<String>,
     /// `--group-review-model`: the group reviewer's (stage 2) model. `None`/blank = the built-in
-    /// default, Fable 5.2 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
+    /// default, Opus 5.5 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
     /// Never the environment.
     #[serde(default)]
     pub group_review_model: Option<String>,
@@ -749,6 +749,37 @@ fn save_ledger(path: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
     }
 }
 
+/// Where the operator's triage log goes for the export zip at `export`: in the zip's own folder,
+/// named for the zip and marked internal (`out.zip` gives `out-triage-log-INTERNAL.csv`).
+pub fn triage_log_path_beside(export: &Path) -> PathBuf {
+    let stem = export.file_stem().map_or_else(
+        || "export".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    export.with_file_name(format!("{stem}-triage-log-INTERNAL.csv"))
+}
+
+/// Write the operator's triage log beside the export zip at `export` (see
+/// [`triage_log_path_beside`]) and return where it went. The same file the review screen's
+/// "Download triage log" saves, built by the same function: its first line marks it internal. It
+/// is never put in the zip.
+pub fn write_triage_log_beside_zip(
+    report: &camerata_server::onboard::SealedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    export: &Path,
+) -> Result<PathBuf, String> {
+    let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
+        HashMap::new();
+    let reviewed =
+        camerata_server::report_export::ReviewedReport::unreviewed(report, &dispositions);
+    let csv =
+        camerata_server::xlsx_export::triage_log::operator_csv(&reviewed, corpus, &HashMap::new())
+            .map_err(|e| format!("{e:#}"))?;
+    let path = triage_log_path_beside(export);
+    std::fs::write(&path, csv).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Build the product-export ZIP bytes for `report`, via the EXACT SAME `report_export` /
 /// `xlsx_export` / zip-assembly functions the `POST /api/projects/:id/product-export` HTTP
 /// handler (`export_product`) calls, in the same order, with the same "nothing manually
@@ -1042,6 +1073,13 @@ pub async fn run_inspect_pipeline_with(
             .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
             .map_err(InspectError::Failed)?;
         group_review_notice = Some(notice);
+        // An agent finder run finishes its remaining pieces on the finder model it started with.
+        if let Some(line) = store
+            .hold_finder_model(&mut controls)
+            .map_err(InspectError::Failed)?
+        {
+            group_review_notice = group_review_notice.map(|n| format!("{n}\n{line}"));
+        }
         // The kept model was not part of the pick the client lock checked at the top of this
         // run, so it is checked here, on every model the resumed run will call, before any call.
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
@@ -1074,6 +1112,16 @@ pub async fn run_inspect_pipeline_with(
         &controls,
         incremental_prior.is_some(),
         !args.client_engagement,
+    )
+    .map_err(InspectError::Failed)?;
+
+    // A rule file that did not load is a rule the agent finder would silently not check. An agent
+    // finder run stops here, before the estimate and before anything is spent (an engine run
+    // goes on and records the failure, see `record_corpus_load_failures` below).
+    camerata_server::ai_audit::agent_finder::run::refuse_unloadable_rules(
+        &controls,
+        !matches!(backend_resolution, BackendResolution::Blocked { .. }),
+        &corpus_load_failures,
     )
     .map_err(InspectError::Failed)?;
 
@@ -1167,7 +1215,7 @@ pub async fn run_inspect_pipeline_with(
         )
         .iter()
         .any(|(roles, _)| roles.contains("the clone judge"));
-        let pf = preflight::build(&preflight::PreflightInputs {
+        let preflight_inputs = preflight::PreflightInputs {
             backend: args.backend,
             batch,
             fix_model: Some(camerata_server::ai_audit::resolve_audit_model(
@@ -1186,7 +1234,14 @@ pub async fn run_inspect_pipeline_with(
             exact,
             terse_output: controls.efficiency.terse_output,
             consensus: controls.consensus,
-        });
+        };
+        // The agent finder is priced by its own formula, never by the engine's scan passes.
+        let pf = if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent
+        {
+            preflight::build_agent_finder(&preflight_inputs, controls.finder_force_pieces)
+        } else {
+            preflight::build(&preflight_inputs)
+        };
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
         // The cost checkpoint's pre-flight figures for the agent finder: the cost of one piece,
@@ -1633,6 +1688,21 @@ pub async fn run_inspect_pipeline_with(
     let written = std::fs::write(&args.export, &zip_bytes);
     let run_notes = finish_run(store.as_ref(), &report, written.is_ok());
     written.map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
+    // `CAMERATA_EXPORT_TRIAGE_LOG` asks for the operator's triage log. It is written beside the
+    // zip, never inside it: the client package carries no triage log, whatever is set.
+    if camerata_server::report_export::triage_log_env_on(
+        std::env::var(camerata_server::report_export::EXPORT_TRIAGE_LOG_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        match write_triage_log_beside_zip(&report, corpus.as_ref(), &args.export) {
+            Ok(path) => eprintln!(
+                "camerata inspect: triage log (internal, not part of the client package): {}",
+                path.display()
+            ),
+            Err(e) => eprintln!("camerata inspect: could not write the triage log: {e}"),
+        }
+    }
 
     Ok(InspectOutcome {
         export_path: args.export,
@@ -2228,6 +2298,44 @@ mod finder_tests;
 mod tests {
     use super::*;
     use camerata_server::scan_ledger::StageAccounting;
+
+    #[test]
+    fn the_triage_log_is_named_for_the_zip_and_marked_internal_in_its_folder() {
+        assert_eq!(
+            triage_log_path_beside(Path::new("/out/run.zip")),
+            PathBuf::from("/out/run-triage-log-INTERNAL.csv")
+        );
+        assert_eq!(
+            triage_log_path_beside(Path::new("run.zip")),
+            PathBuf::from("run-triage-log-INTERNAL.csv")
+        );
+    }
+
+    #[test]
+    fn the_operator_triage_log_is_written_beside_the_zip_and_never_touches_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip = dir.path().join("run.zip");
+        std::fs::write(&zip, b"zip bytes").unwrap();
+        let report =
+            camerata_server::onboard::ScanReport::gated(&["acme/portal".to_string()]).seal();
+        let written = write_triage_log_beside_zip(&report, None, &zip).unwrap();
+        assert_eq!(written, dir.path().join("run-triage-log-INTERNAL.csv"));
+        let text = std::fs::read_to_string(&written).unwrap();
+        let mut lines = text.lines();
+        assert!(
+            lines
+                .next()
+                .unwrap()
+                .starts_with(camerata_server::xlsx_export::triage_log::INTERNAL_MARK),
+            "{text}"
+        );
+        assert!(lines.next().unwrap().starts_with("Rule ID,"), "{text}");
+        assert_eq!(
+            std::fs::read(&zip).unwrap(),
+            b"zip bytes",
+            "the zip is untouched"
+        );
+    }
 
     fn base_args(repo: PathBuf, export: PathBuf) -> InspectArgs {
         InspectArgs {
@@ -3250,7 +3358,7 @@ mod tests {
         let defaults = args.run_controls().unwrap();
         assert!((defaults.review.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
         assert_eq!(defaults.review.escalation_floor, 20);
-        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-2");
+        assert_eq!(defaults.group_review_model_for(), "claude-opus-5-5");
         assert_eq!(defaults.dup_check_model_for(), "claude-sonnet-5-5");
         args.dup_check_model = Some("claude-opus-5-5".to_string());
         assert_eq!(
@@ -3271,7 +3379,7 @@ mod tests {
         args.group_review_model = Some("  ".to_string());
         assert_eq!(
             args.run_controls().unwrap().group_review_model_for(),
-            "claude-fable-5-2"
+            "claude-opus-5-5"
         );
     }
 

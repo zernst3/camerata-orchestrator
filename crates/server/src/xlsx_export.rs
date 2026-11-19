@@ -2354,13 +2354,6 @@ pub fn build_workbook_with_counts(
         tables::write_table(&mut wb, &fmts, table)
             .with_context(|| format!("writing the {} sheet", table.name))?;
     }
-    // H4: the optional triage log, last so every existing sheet keeps its position. Off by
-    // default; see `triage_log`.
-    if triage_log::wanted(opts) {
-        let log = triage_log::build_triage_log(reviewed, corpus, &opts.chosen_options);
-        triage_log::write_triage_log_sheet(&mut wb, &log, report.ledger.deduped_total(), &fmts)
-            .context("writing the Triage Log sheet")?;
-    }
 
     // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
     // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,
@@ -2765,15 +2758,6 @@ pub fn build_csv_exports(
         tickets::TICKETS_CSV.to_string(),
         tickets::tickets_csv(reviewed, corpus, &opts.chosen_options)?,
     ));
-    // H4: the optional triage log's CSV, only when asked for (it has no `json/` sibling and is
-    // not one of the eight `DATASETS`; the release gate admits it as an optional member).
-    if triage_log::wanted(opts) {
-        let log = triage_log::build_triage_log(reviewed, corpus, &opts.chosen_options);
-        csv.push((
-            triage_log::TRIAGE_LOG_CSV.to_string(),
-            triage_log::triage_log_csv(&log)?,
-        ));
-    }
     Ok(csv)
 }
 

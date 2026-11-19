@@ -3,8 +3,15 @@
 
 use crate::*;
 
+/// Liveness plus the build identity: the app compares `commit` with its own and refuses to run
+/// against a server from a different build. `commit` is `null` for a build outside a git checkout.
 pub(crate) async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "service": "camerata-server" }))
+    Json(serde_json::json!({
+        "status": "ok",
+        "service": "camerata-server",
+        "commit": ENGINE_COMMIT,
+        "dirty": ENGINE_DIRTY,
+    }))
 }
 
 /// The gate's enforced rules, minus the GOV-1 verification fixture (kept in the
@@ -566,9 +573,9 @@ pub(crate) async fn spawn_brownfield_dev_run(
     //   - `test_tamper_escalation`: the test-tamper rule's active spec specifically, driving its
     //     deterministic detector backstop. `None` when its selected option does not escalate.
     let (escalations_in_scope, test_tamper_escalation) = {
-        let corpus = camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path())
-            .await
-            .0;
+        let (corpus, errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        crate::log_corpus_load_errors("dev run escalations", &errs);
         let selections = state
             .projects
             .active()

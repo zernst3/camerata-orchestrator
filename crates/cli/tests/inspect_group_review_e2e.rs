@@ -2,8 +2,8 @@
 //! END-TO-END, scripted model, zero spend: `camerata inspect` runs the group reviewer (stage 2)
 //! after the scan, over the planted findings of the shared fixture repo.
 //!
-//! * the group reviewer is asked on the model the `--group-review-model` flag names (else Fable
-//!   5.1), never one from the environment;
+//! * the group reviewer is asked on the model the `--group-review-model` flag names (else Opus
+//!   5.5), never one from the environment;
 //! * the escalation settings (`--escalation-rate`, `--escalation-floor`) reach the budget;
 //! * the operator ledger and the printed summary state "Escalated N of a budget of B (...)";
 //! * what it said about a site is internal: no client export carries it.
@@ -238,13 +238,13 @@ async fn the_group_reviewer_runs_on_its_flag_and_the_ledger_states_the_budget() 
 
 #[tokio::test]
 #[serial_test::serial(process_env)]
-async fn with_no_flag_the_group_reviewer_runs_on_fable_and_the_environment_is_ignored() {
+async fn with_no_flag_the_group_reviewer_runs_on_opus_and_the_environment_is_ignored() {
     let Some((_, requests, findings_json, _)) = run(|_| {}).await else {
         return;
     };
     assert!(!requests.is_empty());
     for req in &requests {
-        assert_eq!(req.model, "claude-fable-5-2");
+        assert_eq!(req.model, "claude-opus-5-5");
         assert_ne!(req.model, "env-picked-model");
     }
     // This export is the operator's own (the project is not a client engagement). What the group

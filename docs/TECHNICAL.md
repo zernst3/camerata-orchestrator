@@ -22,8 +22,8 @@
 > the other commands and the state folder: 6i. The pre-flight estimate, the spend limit, the cost
 > panel, run to completion and the two backends: 6j. The release gate's 18 checks and the files in
 > the export package: 6c. Saved runs and the resume rules: 14. The current defaults: the finder is
-> **Engine**; the scan model is Sonnet 5.5; calibration is Opus 5.5; the group reviewer and the
-> agent finder are Fable 5.2; the duplicate check is Sonnet 5.5; the fix stage is Haiku 5.5; the
+> **Agent**; the scan model is Sonnet 5.5; calibration is Opus 5.5; the group reviewer and the
+> agent finder are Opus 5.5; the duplicate check is Sonnet 5.5; the fix stage is Haiku 5.5; the
 > clone judge is Haiku 5.5.
 >
 > | Word | Meaning in this file |
@@ -4268,8 +4268,8 @@ review, flags, export) is the same for both.
 | Idea | The engine cuts the code into chunks, asks the model about each chunk against the rules in batches, then a calibration stage rates each site | One model agent reads each part of the code in a review room and writes its problems. The rules are its checklist. |
 | Switch (app) | Settings, Finder row, "Engine (rule by rule)" | Settings, Finder row, "Agent (one model reviews each part)" |
 | Switch (CLI) | `--finder engine` | `--finder agent` |
-| Default today | **Engine.** `ProjectFinder::default()` is `Engine` (`crates/api-types/src/project.rs`) and `--finder` defaults to `engine`. | Opt in |
-| Model setting | scan model and calibration model | finder model (built-in default Fable 5.2) |
+| Default today | Opt in | **Agent.** `ProjectFinder::default()` is `Agent` (`crates/api-types/src/project.rs`) and `--finder` defaults to `agent`. A project saved before the setting existed loads as Engine. |
+| Model setting | scan model and calibration model | finder model (built-in default Opus 5.5) |
 | Stages used | alternatives, scan passes, resolution, detail, calibration | the agent stages of this section (pieces, joints, conventions) |
 | Rating of a row | calibration (stage 1) | the agent's own `sure`, `effort` and `label`, through the same `apply_verdicts` code a calibration verdict goes through (`run/rating.rs`). The stored note says "Rated by the review agent that found it; no second reviewer rated this problem." |
 | Needs a full inspection | no | yes: the CLI refuses it with an earlier baseline unless `--full` is given |
@@ -4653,12 +4653,12 @@ are locked until it finishes.").
 |---|---|---|---|---|
 | Scan model | `audit` | The engine finder's scan passes, the alternatives stage and the detail step. Unused by the agent finder. | Sonnet 5.5 (`DEFAULT_MODEL`, `claude-sonnet-5-5`) | no |
 | Calibration (stage 1) | `calibration` | Per site, batched: severity, real or not, effort, a one line reason. Unused by the agent finder. | Opus 5.5 (`STAGE1_DEFAULT_MODEL`, `claude-opus-5-5`). A new project is seeded with it. An older project keeps the pick it stored. | no |
-| Group review (stage 2) | `group_review` | One call per rule group, in real time: the architect's first reader (section 6g). | Fable 5.2 (`STAGE2_DEFAULT_MODEL`, `claude-fable-5-2`). The row shows it selected when nothing is stored. A blank model is refused. | no |
+| Group review (stage 2) | `group_review` | One call per rule group, in real time: the architect's first reader (section 6g). | Opus 5.5 (`STAGE2_DEFAULT_MODEL`, `claude-opus-5-5`). The row shows it selected when nothing is stored. A blank model is refused. | no |
 | Fix model | `fix` | One concrete fix for each row | With `fix_on_haiku` on (the default): Haiku 5.5 (`claude-haiku-5-5`) at effort `low`. With it off: the calibration model, else the scan model. | yes |
-| Finder model | `finder_model` | The agent finder's model. Used only when the finder is Agent. | Fable 5.2 (`FINDER_DEFAULT_MODEL`). Hint: "not set: Claude Fable 5.2; used when the finder is agent". | yes |
+| Finder model | `finder_model` | The agent finder's model. Used only when the finder is Agent. | Opus 5.5 (`FINDER_DEFAULT_MODEL`). Hint: "not set: Claude Opus 5.5; used when the finder is agent". | yes |
 | Duplicate check | `duplicate_check` | The possible-duplicate check (section 6h) | Sonnet 5.5 (`DUP_CHECK_DEFAULT_MODEL`). Hint: "not set: Claude Sonnet 5.5". | yes |
 | Clone judge | `clone_judge` | The duplicate-code checker, which judges clone candidates. Runs only when a clone rule is selected. | The project's fast tier model, whose built-in default is Haiku 5.5. Hint: "not set: the project's fast tier model". | yes |
-| Finder (separate row) | `finder` | Not a model. `agent` or `engine`. The choices read "Agent (one model reviews each part)" and "Engine (rule by rule)". Hint: "agent: one model reviews each part; engine: rule by rule". | **Engine** (`ProjectFinder::default()`) | no |
+| Finder (separate row) | `finder` | Not a model. `agent` or `engine`. The choices read "Agent (one model reviews each part)" and "Engine (rule by rule)". Hint: "agent: one model reviews each part; engine: rule by rule". | **Agent** (`ProjectFinder::default()`; a project saved before the setting existed loads as Engine) | no |
 
 "(not set)" means the setting is empty and the run uses the default named in the table. It is
 offered only where a run-time default exists that an explicit pick would override. Choosing it sends

@@ -47,6 +47,7 @@ fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: "claude-a".to_string(),
