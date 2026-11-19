@@ -789,6 +789,8 @@ async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() 
 fn settings_page() -> Element {
     use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
     use_context_provider(|| Signal::new(None::<String>));
+    crate::loading::provide_loading_context();
+    crate::provider_safety::provide_provider_policy_context();
     rsx! { super::super::SettingsView { global_only: false } }
 }
 
