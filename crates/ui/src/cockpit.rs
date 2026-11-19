@@ -2371,7 +2371,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 class: cls(CockpitView::Onboard),
                 "data-tour": camerata_ui_core::walkthrough::target::NAV_ONBOARD,
                 onclick: move |_| view.set(CockpitView::Onboard),
-                "Onboard repos"
+                "Inspection"
             }
             button {
                 class: cls(CockpitView::Stories),
@@ -3220,7 +3220,7 @@ fn CockpitNotice(kind: String) -> Element {
         ),
         _ => (
             "No stories yet — clean slate",
-            "Nothing is seeded. Connect GitHub, then onboard one or more repos (the \u{201c}Onboard repos\u{201d} tab) or adopt a tracker issue to bring real stories into the spine.",
+            "Nothing is seeded. Connect GitHub, then onboard one or more repos (the \u{201c}Inspection\u{201d} tab) or adopt a tracker issue to bring real stories into the spine.",
         ),
     };
     rsx! {

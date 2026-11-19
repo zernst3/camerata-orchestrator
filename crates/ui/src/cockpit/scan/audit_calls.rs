@@ -21,15 +21,15 @@ pub(in crate::cockpit) fn audit_rules_json(rules: &[SelectedAuditRule]) -> Vec<s
         .collect()
 }
 
-/// The body of an audit request, shared by the synchronous and the background-job routes. The
+/// The body of an inspection request, shared by the synchronous and the background-job routes. The
 /// retired `thorough` option is not part of it: calibration runs one pass per site whatever a
-/// client sends, so nothing in the request can change that.
+/// client sends, so nothing in the request can change that. It carries no model either: every
+/// model is the project's (Inspection settings), which the server resolves when the request names
+/// none.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::cockpit) fn audit_request_json(
     repos: &[String],
     rules: &[SelectedAuditRule],
-    model: &str,
-    calibration_model: &str,
     mode: &str,
     incremental: bool,
     deep: bool,
@@ -40,8 +40,6 @@ pub(in crate::cockpit) fn audit_request_json(
     serde_json::json!({
         "repos": repos,
         "rules": audit_rules_json(rules),
-        "model": model,
-        "calibration_model": calibration_model,
         "mode": mode,
         "incremental": incremental,
         "deep": deep,
@@ -62,8 +60,6 @@ pub(in crate::cockpit) fn audit_request_json(
 pub(in crate::cockpit) async fn audit_against(
     repos: &[String],
     rules: &[SelectedAuditRule],
-    model: &str,
-    calibration_model: &str,
     mode: &str,
     incremental: bool,
     deep: bool,
@@ -76,8 +72,6 @@ pub(in crate::cockpit) async fn audit_against(
     let body = audit_request_json(
         repos,
         rules,
-        model,
-        calibration_model,
         mode,
         incremental,
         deep,
@@ -425,6 +419,9 @@ pub(in crate::cockpit) struct RepoSizeView {
 #[derive(Clone, PartialEq, serde::Deserialize)]
 pub(in crate::cockpit) struct AgentFinderSizeView {
     pub pieces: usize,
+    /// The extra calls across the pieces: one for a repository cut into two or more.
+    #[serde(default)]
+    pub joints_calls: usize,
     pub expected_usd: f64,
     pub low_usd: f64,
     pub high_usd: f64,
@@ -629,8 +626,6 @@ pub(in crate::cockpit) fn job_exec_mode(picked: &str) -> String {
 pub(in crate::cockpit) async fn audit_job_start(
     repos: &[String],
     rules: &[SelectedAuditRule],
-    model: &str,
-    calibration_model: &str,
     exec_mode: &str,
     incremental: bool,
     deep: bool,
@@ -641,8 +636,6 @@ pub(in crate::cockpit) async fn audit_job_start(
     let body = audit_request_json(
         repos,
         rules,
-        model,
-        calibration_model,
         exec_mode,
         incremental,
         deep,

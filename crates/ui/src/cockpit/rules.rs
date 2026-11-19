@@ -4669,9 +4669,9 @@ pub(super) fn ProposedRulesTable(
                 },
                 if auditing {
                     span { class: "spinner" }
-                    "Auditing\u{2026}"
+                    "Inspecting\u{2026}"
                 } else {
-                    "Audit code against selected rules"
+                    "Inspect code against selected rules"
                 }
             }
             button {

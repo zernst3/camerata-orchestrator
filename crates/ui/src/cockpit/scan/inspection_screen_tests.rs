@@ -347,11 +347,15 @@ fn block(html: &str, id: &str) -> String {
         .find(&format!("id=\"{id}\""))
         .unwrap_or_else(|| panic!("no block {id} in {html}"));
     let rest = &html[start..];
-    let end = ["class=\"findings-toolbar\"", "class=\"job-progress\"", "class=\"audit-thinking\""]
-        .iter()
-        .filter_map(|m| rest.find(m))
-        .min()
-        .unwrap_or(rest.len());
+    let end = [
+        "id=\"inspection-estimate\"",
+        "class=\"job-progress\"",
+        "class=\"audit-thinking\"",
+    ]
+    .iter()
+    .filter_map(|m| rest[1..].find(m).map(|at| at + 1))
+    .min()
+    .unwrap_or(rest.len());
     rest[..end].to_string()
 }
 
@@ -363,6 +367,15 @@ fn tag_of(html: &str, id: &str) -> String {
     let start = html[..at].rfind('<').unwrap();
     let end = html[at..].find('>').unwrap() + at;
     html[start..=end].to_string()
+}
+
+/// The button carrying the `data-tour` marker `tour`, tag and text.
+fn button_of(html: &str, tour: &str) -> String {
+    let at = html
+        .find(&format!("data-tour=\"{tour}\""))
+        .unwrap_or_else(|| panic!("no element marked {tour}: {html}"));
+    let rest = &html[at..];
+    rest[..rest.find("</button>").unwrap()].to_string()
 }
 
 async fn requests_to(server: &MockServer, route: &str) -> Vec<Value> {
@@ -505,9 +518,9 @@ async fn the_inspect_button_starts_a_saved_job_with_no_model_and_its_label_chang
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let mut screen = Screen::mount(rules_proposed);
     screen.pump(900).await;
-    let before = visible_text(&screen.html());
+    let before = visible_text(&button_of(&screen.html(), "run-inspection"));
     assert!(before.contains("Inspect code against selected rules"), "{before}");
-    assert!(!before.contains("Audit code against selected rules"), "{before}");
+    assert!(!before.contains("Audit"), "{before}");
 
     screen.click_tour("run-inspection");
     screen.pump(1500).await;
@@ -525,7 +538,7 @@ async fn the_inspect_button_starts_a_saved_job_with_no_model_and_its_label_chang
     assert_eq!(body["run_ai_review"], json!(true));
     assert_eq!(body["run_deterministic"], json!(true));
     // While it runs the button reads Inspecting and the old label is gone.
-    let running = visible_text(&screen.html());
+    let running = visible_text(&button_of(&screen.html(), "run-inspection"));
     assert!(running.contains("Inspecting"), "{running}");
     assert!(!running.contains("Auditing"), "{running}");
     assert!(!running.contains("Inspect code against selected rules"), "{running}");
