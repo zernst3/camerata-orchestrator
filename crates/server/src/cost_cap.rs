@@ -599,7 +599,13 @@ impl CostCapRecord {
 /// The mutable half of the cap, owned by the [`crate::ai_audit::UsageMeter`].
 #[derive(Debug, Default)]
 pub(crate) struct BudgetState {
+    /// Every admitted pass in flight, request-scoped or not.
     pub in_flight: u64,
+    /// The part of `in_flight` admitted for one request ([`crate::ai_audit::UsageMeter::admit_for_request`]).
+    pub scoped_in_flight: u64,
+    /// What those request-scoped passes reserve in total, in micro-dollars: each one its OWN
+    /// request's ceiling, not the run's worst call.
+    pub scoped_reserved_micro: u64,
     pub not_run_passes: Vec<NotRunPass>,
     pub not_run_stages: Vec<NotRunStage>,
     pub notes: Vec<String>,

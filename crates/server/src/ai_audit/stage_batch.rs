@@ -970,16 +970,32 @@ fn resend_or_fail<Id: Clone + Ord>(
 
 /// Why a part was not sent: the outage stop or the spend limit.
 fn refusal_class(ctx: &StageCtx<'_>) -> (FailureClass, &'static str) {
-    if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
-        (
+    refusal_class_for(ctx.meter.map(UsageMeter::refusal_cause))
+}
+
+/// [`refusal_class`] for a cause already known: the one the refused admission itself carried, read
+/// at the moment of refusal and not afterwards, when the state may have moved on.
+fn refusal_class_for(
+    cause: Option<super::usage_meter::RefusalCause>,
+) -> (FailureClass, &'static str) {
+    use super::usage_meter::RefusalCause;
+    match cause {
+        Some(RefusalCause::Outage) => (
             FailureClass::OutageStop,
             "the run stopped because the model provider could not be reached before this item was sent",
-        )
-    } else {
-        (
+        ),
+        Some(RefusalCause::CostUnknown) => (
+            FailureClass::SpendLimit,
+            "a call's cost was unknown, so the limit set for this run could not be enforced and this item was not sent",
+        ),
+        Some(RefusalCause::CheckpointStop) => (
+            FailureClass::SpendLimit,
+            "the run was paused at a cost checkpoint, so this item was not sent",
+        ),
+        _ => (
             FailureClass::SpendLimit,
             "the spend limit stopped the run before this item was sent",
-        )
+        ),
     }
 }
 
@@ -1097,8 +1113,8 @@ impl Aimd {
 // ── the parallel fallback ───────────────────────────────────────────────────────────────────────
 
 enum Called {
-    /// Not admitted: the spend cap or the outage stop refused the call.
-    Refused,
+    /// Not admitted, for the reason the refusal itself carried.
+    Refused(super::usage_meter::RefusalCause),
     Done(Result<LlmResponse, anyhow::Error>),
 }
 
@@ -1180,9 +1196,9 @@ async fn run_parallel<S>(
                     // limit has nothing to refuse, and refusing it would drop paid work.
                     let permit = match meter {
                         Some(m) if !realtime.replays(&req) => {
-                            match m.admit_for_stage(repo, label).await {
+                            match m.admit_for_stage_request(repo, label, stage, &req).await {
                                 Ok(permit) => Some(permit),
-                                Err(_) => return (work, Called::Refused),
+                                Err(cause) => return (work, Called::Refused(cause)),
                             }
                         }
                         _ => None,
@@ -1242,8 +1258,8 @@ async fn run_parallel<S>(
         };
 
         match called {
-            Called::Refused => {
-                let (class, why) = refusal_class(ctx);
+            Called::Refused(cause) => {
+                let (class, why) = refusal_class_for(Some(cause));
                 book.fail(&work.id, class, why, None);
                 report_progress(ctx, stage, book);
             }

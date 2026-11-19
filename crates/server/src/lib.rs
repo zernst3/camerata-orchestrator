@@ -2671,6 +2671,30 @@ async fn onboard_audit(
     Json(report)
 }
 
+/// True when a finished audit job records its enforcement catches: a fresh full scan only (see
+/// the call in [`start_audit_job`]).
+pub(crate) fn captures_enforcement_catches(is_resume: bool, is_delta_retest: bool) -> bool {
+    !is_resume && !is_delta_retest
+}
+
+#[cfg(test)]
+mod enforcement_capture_tests {
+    use super::captures_enforcement_catches;
+
+    #[test]
+    fn only_a_fresh_full_scan_records_enforcement_catches() {
+        assert!(captures_enforcement_catches(false, false));
+        assert!(
+            !captures_enforcement_catches(true, false),
+            "a resume would record twice"
+        );
+        assert!(
+            !captures_enforcement_catches(false, true),
+            "a delta retest would record twice"
+        );
+    }
+}
+
 /// Start the audit job for `req` and return its id. The asynchronous body of
 /// [`onboard_audit_start`], shared with the delta rescan (`client_source::rescan`) so there is
 /// ONE implementation of "run an audit as a job". See [`AuditJobOptions`].
@@ -3330,10 +3354,20 @@ pub(crate) async fn start_audit_job(
                 crate::run_store::note_report(store, &mut report);
             }
 
-            // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
-            // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
-            // handler. If you add ledger capture here in the future, follow the same
-            // background-spawn pattern used there.)
+            // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
+            // The cockpit runs every scan as this job, so the capture the synchronous
+            // `onboard_audit` handler makes runs here too. Same background-spawn pattern,
+            // best-effort: a failed write is logged and swallowed.
+            // Only a fresh full scan: a resume re-opens a run whose earlier attempt may already
+            // have recorded its catches, and a delta retest re-reads files an earlier scan
+            // recorded; the capture has no dedup, so either would record them twice.
+            if captures_enforcement_catches(resume_run.is_some(), delta.is_some()) {
+                let ledger = state.enforcement_ledger.clone();
+                let all_findings = report.findings.clone();
+                tokio::spawn(async move {
+                    crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
+                });
+            }
 
             // ── Write last_scan + recent_scan (async job path) ──────────────────────────
             // Store the completed report before finishing the job so any concurrent chat
