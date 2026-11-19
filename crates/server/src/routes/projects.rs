@@ -767,8 +767,8 @@ pub fn fix_step_model(state: &AppState) -> Option<String> {
         .filter(|m| !m.is_empty())
 }
 
-/// The clone judge's model for the active project: its own setting when set, else its fast
-/// (Haiku) band primary, or `None` when there is no active project (the built-in default then
+/// The clone judge's model for the active project: its own setting when set, else the built-in
+/// clone judge default (Haiku 5.5), or `None` when there is no active project (the built-in default then
 /// applies). The judge is classification
 /// over bounded input, the fast band's job; the project's tier map is where that band is set.
 pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
@@ -779,12 +779,12 @@ pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
         .filter(|m| !m.is_empty())
 }
 
-/// The clone judge's model for `project`: the review setting when set, else the fast band's
-/// primary.
+/// The clone judge's model for `project`: the review setting when set, else
+/// [`CLONE_JUDGE_DEFAULT_MODEL`], whatever the project's fast band says.
 pub(crate) fn clone_judge_model_of(project: &crate::project::Project) -> String {
     let own = project.review.clone_judge_model.trim();
     if own.is_empty() {
-        project.tier_map.fast_primary().trim().to_string()
+        camerata_api_types::project::CLONE_JUDGE_DEFAULT_MODEL.to_string()
     } else {
         own.to_string()
     }
@@ -801,7 +801,8 @@ pub(crate) struct SetStepModelReq {
     pub(crate) step: String,
     /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix`, `duplicate_check`,
     /// `finder_model` and `clone_judge`, where it clears the setting back to the default (see
-    /// [`fix_step_model`]); every other step refuses a blank model.
+    /// [`fix_step_model`]); `group_review` clears the same way; every other step refuses a blank
+    /// model.
     pub(crate) model: String,
 }
 
@@ -865,12 +866,9 @@ pub(crate) async fn set_step_model(
 }
 
 /// Set the project's group review model (`step: "group_review"` on the step-models route). The
-/// other review settings are kept as they are. A blank model is refused: the stage 2 default
-/// applies only when the setting was never written.
+/// other review settings are kept as they are. A blank model clears the setting, so the stage 2
+/// built-in default applies again (the engine already reads blank that way).
 fn set_group_review_model(state: &AppState, id: &str, model: &str) -> Json<serde_json::Value> {
-    if model.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
-    }
     let Some(project) = state.projects.get(id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
@@ -1664,7 +1662,15 @@ pub(crate) async fn apply_model_profile(
         p.model_profile = profile;
         if let Some(ref a) = assignments {
             p.tier_map = a.tier_map.clone();
-            p.step_models = a.step_models.clone();
+            // The profile writes only the development steps. The inspection models (scan,
+            // calibration, fix) are the operator's own picks in the Inspection settings.
+            let kept = p.step_models.clone();
+            p.step_models = crate::project::StepModels {
+                audit: kept.audit,
+                calibration: kept.calibration,
+                fix: kept.fix,
+                ..a.step_models.clone()
+            };
             // A profile assigns the reviewer's on/off and model. The reviewer POLICY (fail
             // closed, fix rounds, tier) is the architect's own choice and is kept.
             let policy = p.l3_review.clone();

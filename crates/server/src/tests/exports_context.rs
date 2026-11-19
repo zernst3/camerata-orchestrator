@@ -869,12 +869,12 @@ fn an_audit_request_carries_its_spend_limit_into_the_run_controls() {
     );
 }
 
-/// The clone judge follows the open project's fast (Haiku) band: the run's controls carry the
-/// band's primary model (default Haiku 5.5), a project that moves the band moves the judge,
-/// and with no project the built-in default applies. The environment has no say.
+/// The clone judge resolves to its own built-in default (Haiku 5.5) when the project's clone
+/// judge model is unset, whatever the project's fast band says, and a model set on the project
+/// wins. With no project the built-in default applies. The environment has no say.
 #[test]
 #[serial_test::serial(process_env)]
-fn the_clone_judge_follows_the_projects_fast_band() {
+fn the_clone_judge_resolves_haiku_when_unset_even_if_the_fast_band_moves() {
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_CLONE_JUDGE_MODEL", "env-judge");
     let state = AppState::seeded();
     let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
@@ -892,7 +892,7 @@ fn the_clone_judge_follows_the_projects_fast_band() {
     assert_eq!(
         clone_judge_step_model(&state).as_deref(),
         Some("claude-haiku-5-5"),
-        "a new project's fast band is Haiku 5.5"
+        "a new project's clone judge is Haiku 5.5"
     );
     state
         .projects()
@@ -902,8 +902,19 @@ fn the_clone_judge_follows_the_projects_fast_band() {
         .unwrap();
     assert_eq!(
         req.run_controls_for(&state).clone_judge_model_for(),
+        "claude-haiku-5-5",
+        "an unset clone judge is Haiku 5.5 even when the fast band moved"
+    );
+    state
+        .projects()
+        .update(&project.id, |p| {
+            p.review.clone_judge_model = "claude-haiku-4-5-20251001".to_string();
+        })
+        .unwrap();
+    assert_eq!(
+        req.run_controls_for(&state).clone_judge_model_for(),
         "claude-haiku-4-5-20251001",
-        "the project's fast band chooses the judge; the older id stays selectable"
+        "a clone judge set on the project wins; the older id stays selectable"
     );
 }
 
