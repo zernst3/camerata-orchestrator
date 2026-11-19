@@ -1022,7 +1022,10 @@ async fn a_failure_after_the_stories_leaves_the_unit_the_retry_needs_to_find_the
     let stories = fx.root.join("data").join("stories.json");
     chmod(&stories, 0o444);
     assert!(
-        std::fs::OpenOptions::new().append(true).open(&stories).is_err(),
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stories)
+            .is_err(),
         "run these tests as an ordinary user"
     );
 
@@ -1047,7 +1050,10 @@ async fn a_failure_after_the_stories_leaves_the_unit_the_retry_needs_to_find_the
         .filter(|i| i.category == "development console record" && !i.outcome.is_clear())
         .map(|i| i.path.as_str())
         .collect();
-    assert!(failed.iter().any(|p| p.starts_with("stories.json#")), "{failed:?}");
+    assert!(
+        failed.iter().any(|p| p.starts_with("stories.json#")),
+        "{failed:?}"
+    );
     assert!(
         failed.iter().any(|p| p.starts_with("uow.json#")),
         "the unit set is reported as not attempted: {failed:?}"
@@ -1081,8 +1087,16 @@ async fn unattributed_rows_and_the_logs_are_listed_as_kept_with_their_reasons() 
         .iter()
         .find(|k| k.what.starts_with("1 development console record"))
         .expect("the unattributed unit is counted");
-    assert!(unassigned.why.contains("may include this project's"), "{}", unassigned.why);
-    assert!(unassigned.why.contains("check them by hand"), "{}", unassigned.why);
+    assert!(
+        unassigned.why.contains("may include this project's"),
+        "{}",
+        unassigned.why
+    );
+    assert!(
+        unassigned.why.contains("check them by hand"),
+        "{}",
+        unassigned.why
+    );
     let logs = out
         .record
         .kept
@@ -1090,7 +1104,11 @@ async fn unattributed_rows_and_the_logs_are_listed_as_kept_with_their_reasons() 
         .find(|k| k.what.contains("enforcement_catches.db"))
         .expect("the SQLite logs are listed");
     assert!(logs.why.contains("not client code"), "{}", logs.why);
-    assert!(out.record.kept.iter().any(|k| k.what == "source-records.json"));
+    assert!(out
+        .record
+        .kept
+        .iter()
+        .any(|k| k.what == "source-records.json"));
     assert!(out.record.render_text().contains("check them by hand"));
 }
 
@@ -1115,19 +1133,36 @@ async fn a_refused_checkout_names_the_way_out_in_the_record_and_in_the_remove_re
     let super::PurgeOutcome::Failed { error } = &blocked.outcome else {
         panic!("not failed")
     };
-    assert!(error.contains("is a clone of"), "the guard's own reason is kept: {error}");
+    assert!(
+        error.contains("is a clone of"),
+        "the guard's own reason is kept: {error}"
+    );
     assert!(
         error.contains("The way out: unlink acme/app in the project's repositories"),
         "{error}"
     );
-    assert!(error.contains("remove the folder by hand, then delete again."), "{error}");
+    assert!(
+        error.contains("remove the folder by hand, then delete again."),
+        "{error}"
+    );
 
     // Remove from list is blocked by the same dead end, and says the same way out.
-    let (status, body) = http(&fx.state, "DELETE", &format!("/api/projects/{}", fx.project_id)).await;
+    let (status, body) = http(
+        &fx.state,
+        "DELETE",
+        &format!("/api/projects/{}", fx.project_id),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     let message = body["message"].as_str().unwrap();
-    assert!(message.starts_with("This project still has data on this machine."), "{message}");
-    assert!(message.contains("The way out: unlink acme/app"), "{message}");
+    assert!(
+        message.starts_with("This project still has data on this machine."),
+        "{message}"
+    );
+    assert!(
+        message.contains("The way out: unlink acme/app"),
+        "{message}"
+    );
 }
 
 #[tokio::test]
@@ -1136,7 +1171,10 @@ async fn the_last_check_keeps_the_project_when_a_scan_started_or_another_item_fa
     let fx = &w.fx;
     let project = fx.state.projects.get(&fx.project_id).unwrap();
     let clear: Vec<super::delete_project::ProjectDeletionItem> = Vec::new();
-    assert_eq!(super::delete_project::final_block(&fx.state, &project, &clear), None);
+    assert_eq!(
+        super::delete_project::final_block(&fx.state, &project, &clear),
+        None
+    );
 
     // A scan job that started after the checks at the top of the deletion.
     let job = fx.state.jobs.create("audit", Some(fx.project_id.clone()));
@@ -1156,7 +1194,10 @@ async fn the_last_check_keeps_the_project_when_a_scan_started_or_another_item_fa
     }];
     let why = super::delete_project::final_block(&fx.state, &project, &failed)
         .expect("a failed item blocks the last phase");
-    assert!(why.contains("another location could not be removed"), "{why}");
+    assert!(
+        why.contains("another location could not be removed"),
+        "{why}"
+    );
 }
 
 #[tokio::test]
@@ -1177,7 +1218,8 @@ async fn a_governed_run_or_a_routine_start_is_refused_while_the_project_is_being
         .pop()
         .expect("A's routine");
     let _deleting = fx.state.source_ops.begin_deleting(&fx.project_id).unwrap();
-    let sentence = "This project is being deleted with all its data, so nothing can be started on it.";
+    let sentence =
+        "This project is being deleted with all its data, so nothing can be started on it.";
 
     let (status, body) = post(&fx.state, &format!("/api/stories/{}/run", unit.story_id)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");

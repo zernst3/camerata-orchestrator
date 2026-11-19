@@ -901,8 +901,7 @@ pub(super) fn final_block(
     project: &Project,
     items: &[ProjectDeletionItem],
 ) -> Option<String> {
-    if state.jobs.has_running_for_project(&project.id)
-        || state.source_ops.scan_running(&project.id)
+    if state.jobs.has_running_for_project(&project.id) || state.source_ops.scan_running(&project.id)
     {
         return Some(
             "a scan started during the deletion; the project is kept so you can retry".to_string(),
@@ -910,8 +909,7 @@ pub(super) fn final_block(
     }
     if items.iter().any(|i| !i.outcome.is_clear()) {
         return Some(
-            "kept because another location could not be removed; delete again to retry"
-                .to_string(),
+            "kept because another location could not be removed; delete again to retry".to_string(),
         );
     }
     None
@@ -1015,7 +1013,9 @@ pub async fn project_holds_data(state: &AppState, project_id: &str) -> Option<Re
     let mut message = BASE.to_string();
     for b in &built.blocked {
         if let PurgeOutcome::Failed { error } = &b.outcome {
-            message.push_str(&format!(" One folder cannot be deleted by Camerata: {error}"));
+            message.push_str(&format!(
+                " One folder cannot be deleted by Camerata: {error}"
+            ));
         }
     }
     Some(Refusal::conflict("project_holds_data", message))

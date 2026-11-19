@@ -131,7 +131,8 @@ pub(crate) async fn start_run(
     }
 
     // A project being deleted with all its data starts no governed work.
-    if let Some(why) = crate::client_source::delete_project::story_deleting_refusal(&state, &story_id)
+    if let Some(why) =
+        crate::client_source::delete_project::story_deleting_refusal(&state, &story_id)
     {
         return (
             StatusCode::CONFLICT,
