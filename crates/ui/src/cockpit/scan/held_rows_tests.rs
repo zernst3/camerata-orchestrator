@@ -980,5 +980,8 @@ fn a_critical_held_row_shows_the_held_tint_because_its_rule_comes_last() {
     let held = css
         .find(".finding-row-held > td { background")
         .expect("the held tint rule");
-    assert!(held > critical, "the held tint must follow the critical tint");
+    assert!(
+        held > critical,
+        "the held tint must follow the critical tint"
+    );
 }
