@@ -1135,10 +1135,11 @@ html, body {
 /* A row the release gate holds (work order E): a wider, darker edge and its own tint, so it reads
    apart from the critical highlight even on a critical row. */
 .finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d; }
-.finding-row-held > td { background: rgba(143, 29, 29, 0.12); }
 /* A row the release gate holds (work order E): the status cell is red AND says so in words. */
 .held-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; background: #d4332b; }
 .finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }
+/* After the critical tint, so a row that is both critical and held shows the held tint. */
+.finding-row-held > td { background: rgba(143, 29, 29, 0.12); }
 
 /* Needs-a-choice row highlight (proposed-rules table): a SELECTED rule with alternatives but
    no chosen option. Amber tint + left border marks the rows that block audit/arm until the

@@ -968,3 +968,17 @@ async fn a_decision_in_the_table_reaches_the_export_line_through_the_store() {
         "the real screen's table has the Held column"
     );
 }
+
+/// A row that is both critical and held shows the held tint: the held background rule must come
+/// after the critical one in the stylesheet (same specificity, so the later rule wins).
+#[test]
+fn a_critical_held_row_shows_the_held_tint_because_its_rule_comes_last() {
+    let css = crate::style::GLOBAL_CSS;
+    let critical = css
+        .find(".finding-row-critical > td { background")
+        .expect("the critical tint rule");
+    let held = css
+        .find(".finding-row-held > td { background")
+        .expect("the held tint rule");
+    assert!(held > critical, "the held tint must follow the critical tint");
+}
