@@ -90,14 +90,18 @@
       { "site": "sql-12", "reason": "junk_content" },
       { "site": "sql-10", "reason": "merged_without_decision" },
       { "site": "thrown-01", "reason": "restored_without_decision" },
-      { "site": "sql-11", "reason": "engine_check_no_without_correction" }
+      { "site": "sql-11", "reason": "engine_check_no_without_correction" },
+      { "site": "sec-01", "reason": "critical_without_decision" },
+      { "site": "sec-02", "reason": "critical_without_decision" }
     ],
     "moved": [
       { "site": "sql-02", "reason": "evidence_unverified" },
       { "site": "sql-12", "reason": "junk_content" },
       { "site": "sql-10", "reason": "merged_without_decision" },
       { "site": "thrown-01", "reason": "restored_without_decision" },
-      { "site": "sql-11", "reason": "engine_check_no_without_correction" }
+      { "site": "sql-11", "reason": "engine_check_no_without_correction" },
+      { "site": "sec-01", "reason": "critical_without_decision" },
+      { "site": "sec-02", "reason": "critical_without_decision" }
     ],
     "clean": []
   }

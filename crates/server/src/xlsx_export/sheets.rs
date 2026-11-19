@@ -1986,6 +1986,11 @@ pub(super) fn write_start_here(
     r += 1;
     ws.write_text(r, 0, v::P_WHAT_WE_CHECKED)?;
     ws.write_text(r, 1, &facts.coverage_summary)?;
+    r += 1;
+    // What a person read and the review budget: the PDF's words, so a blank Reviewed in person
+    // cell is explained.
+    ws.write_text(r, 0, v::H_REVIEWED_IN_PERSON)?;
+    ws.write_text(r, 1, v::review_line(&facts.totals.review))?;
     if let Some((flagged, decided)) = facts.possible_false_positives {
         r += 1;
         ws.write_text(r, 0, v::P_POSSIBLE_FALSE_POSITIVES)?;
