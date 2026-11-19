@@ -23,7 +23,7 @@ use dioxus::prelude::*;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::scan::{AiReviewBlockedBanner, OnboardView, ScanJobFailedBanner, ScanResults};
+use super::scan::{AiReviewBlockedBanner, OnboardView, ScanJobFailedBanner};
 use super::{
     CockpitNav, CockpitScreen, CockpitView, HomeNav, HomeView, ProjectsHome, ScanReportView,
 };
@@ -82,15 +82,17 @@ fn scan_json(findings: serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// The inspection screen once rules are proposed: the results sit inside it, under the
+/// Inspection settings (which carry the client-name field).
 fn scan_results_screen() -> Element {
     use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
-    use_context_provider(|| Signal::new(None::<ScanReportView>));
+    let report: ScanReportView =
+        serde_json::from_value(scan_json(serde_json::json!([]))).expect("the scan");
+    use_context_provider(move || Signal::new(Some(report)));
     use_context_provider(|| Signal::new(CockpitView::Stories));
     use_context_provider(|| Signal::new(None::<String>));
     use_context_provider(|| Signal::new(0_usize) as crate::loading::LoadingCount);
-    let report: ScanReportView =
-        serde_json::from_value(scan_json(serde_json::json!([]))).expect("the scan");
-    rsx! { ScanResults { report } }
+    rsx! { OnboardView { connection: None } }
 }
 
 /// The scan result with a finished inspection: the saved draft brings the audit back, so the
