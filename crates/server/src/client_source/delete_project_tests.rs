@@ -5,6 +5,12 @@
 
 use std::path::{Path, PathBuf};
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use std::os::unix::fs::PermissionsExt;
+use tower::ServiceExt;
+
 use camerata_api_types::decisions::{DecisionState, NewDecisionReq, Scope};
 use camerata_api_types::edits::EditField;
 use camerata_api_types::review_view::EngineCheckVerdictReq;
@@ -289,13 +295,109 @@ struct World {
     b_files: Vec<PathBuf>,
 }
 
-fn world() -> World {
+/// Seed the development console rows of one project (a unit of work, a story, a question, a
+/// resume point, a routine, a checkpoint and an escalation), each carrying `sentinel`.
+async fn seed_dev(fx: &Fx, pid: &str, repo: &str, sentinel: &str) {
+    use crate::checkpoint::NewCheckpoint;
+    use crate::clarify_resume::{ClarifyResumeContext, PausedPhase};
+    use camerata_app_core::escalation::{RaiseEscalationReq, SubjectKind};
+    use camerata_app_core::routine::CreateRoutineReq;
+    use camerata_worktracker::{CanonicalStory, FeatureStatus, RepoTarget};
+    let state = &fx.state;
+    let unit = state
+        .uow
+        .create_native(Some(repo.to_string()), Some(pid.to_string()))
+        .unwrap();
+    let sid = unit.story_id.clone();
+    state.uow.append_investigation_chat(&sid, "user", sentinel);
+    state
+        .stories
+        .upsert(CanonicalStory {
+            id: format!("story-{pid}"),
+            external_ref: None,
+            title: sentinel.to_string(),
+            description: sentinel.to_string(),
+            status: FeatureStatus::Intake,
+            created_by: "zach".to_string(),
+            targets: vec![RepoTarget {
+                repo: repo.to_string(),
+                role: None,
+            }],
+        })
+        .await
+        .unwrap();
+    let clar = state
+        .clarifications
+        .post(&sid, &format!("question {sentinel}"), "zach");
+    state.clarify_resume.put(
+        &clar.id,
+        ClarifyResumeContext {
+            run_id: "run-1".to_string(),
+            story_id: sid.clone(),
+            story_title: sentinel.to_string(),
+            story_desc: String::new(),
+            model: "m".to_string(),
+            phase: PausedPhase::Investigation,
+            original_task: sentinel.to_string(),
+            asked_question: String::new(),
+        },
+    );
+    state.routines.create(&CreateRoutineReq {
+        name: "nightly".to_string(),
+        schedule: "daily".to_string(),
+        intent: sentinel.to_string(),
+        prompt: String::new(),
+        scope: String::new(),
+        model: None,
+        project_id: Some(pid.to_string()),
+    });
+    state.checkpoints.create(NewCheckpoint {
+        story_id: sid.clone(),
+        run_id: "run-1".to_string(),
+        escalation_id: String::new(),
+        pause_reason: sentinel.to_string(),
+        repo: repo.to_string(),
+        branch: String::new(),
+        worktree_dir: String::new(),
+        base_commit: String::new(),
+        iteration: 0,
+        max_iterations: 1,
+        model: String::new(),
+        project_id: Some(pid.to_string()),
+    });
+    state.escalations.raise(
+        RaiseEscalationReq {
+            subject_kind: SubjectKind::Uow,
+            routine_id: sid,
+            reason: sentinel.to_string(),
+            stopped_for: String::new(),
+            suggestions: Vec::new(),
+            raw_context: String::new(),
+            checkpoint_id: None,
+        },
+        "run",
+    );
+}
+
+const DEV_FILES: [&str; 7] = [
+    "uow.json",
+    "stories.json",
+    "clarifications.json",
+    "clarify-resume.json",
+    "routines.json",
+    "checkpoints.json",
+    "escalations.json",
+];
+
+async fn world() -> World {
     let fx = fixture();
     let (b_id, b_checkout) = add_project_b(&fx);
     let a_checkout = fx.checkout.clone();
     let pid = fx.project_id.clone();
     seed(&fx, &pid, REPO, &a_checkout, SENT_A, "aaaaaaaaaaaa");
     let b_files = seed(&fx, &b_id, REPO_B, &b_checkout, SENT_B, "bbbbbbbbbbbb");
+    seed_dev(&fx, &pid, REPO, SENT_A).await;
+    seed_dev(&fx, &b_id, REPO_B, SENT_B).await;
     World { fx, b_id, b_files }
 }
 
@@ -307,7 +409,7 @@ fn req(name: &str) -> DeleteAllRequest {
 
 #[tokio::test]
 async fn deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_other_projects() {
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     assert!(!hits(&fx.root, SENT_A).is_empty(), "the seed reached disk");
 
@@ -384,6 +486,20 @@ async fn deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_ot
         .any(|n| n.contains("Time Machine")));
     assert!(record_path.with_extension("txt").is_file());
 
+    // The development console rows: A's are gone from every store file, B's are still there.
+    for f in DEV_FILES {
+        let text = std::fs::read_to_string(fx.root.join("data").join(f)).unwrap();
+        assert!(!text.contains(SENT_A), "{f} still holds A");
+        assert!(text.contains(SENT_B), "{f} lost B's row");
+    }
+    assert!(out
+        .record
+        .items
+        .iter()
+        .any(|i| i.category == "development console record" && i.path.starts_with("uow.json#")));
+    // The deleting mark is released when the deletion ends.
+    assert!(fx.state.source_ops.deleting_refusal(&fx.project_id).is_none());
+
     // A restart finds nothing of A either (the files, not the memory, were removed).
     let again = fx.restarted();
     assert!(again.inspections.list(&fx.project_id).is_empty());
@@ -392,7 +508,7 @@ async fn deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_ot
 
 #[tokio::test]
 async fn a_second_deletion_finds_the_records_folder_untouched() {
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     let first = delete_all(&fx.state, &fx.project_id, &req("Acme"))
         .await
@@ -407,7 +523,7 @@ async fn a_second_deletion_finds_the_records_folder_untouched() {
 
 #[tokio::test]
 async fn it_is_refused_while_a_scan_of_the_project_is_running_and_removes_nothing() {
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     let _scan = fx.state.source_ops.begin_scan(&fx.project_id);
 
@@ -424,7 +540,7 @@ async fn it_is_refused_while_a_scan_of_the_project_is_running_and_removes_nothin
 
 #[tokio::test]
 async fn it_is_refused_while_a_saved_run_of_the_project_is_live() {
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     // A live lock on the run: hold the OS lock the store probes.
     let run_dir = fx
@@ -447,7 +563,7 @@ async fn it_is_refused_while_a_saved_run_of_the_project_is_live() {
 
 #[tokio::test]
 async fn a_wrong_typed_name_deletes_nothing() {
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     for typed in ["", "acme", "Acme ", "Beta"] {
         let refused = delete_all(&fx.state, &fx.project_id, &req(typed))
@@ -463,7 +579,7 @@ async fn a_wrong_typed_name_deletes_nothing() {
 
 #[tokio::test]
 async fn a_checkout_another_project_also_uses_is_kept_and_named_in_the_record() {
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     // Project C lists A's repo too.
     let c = fx
@@ -490,7 +606,7 @@ async fn a_checkout_another_project_also_uses_is_kept_and_named_in_the_record() 
 
 #[tokio::test]
 async fn a_cockpit_run_of_another_project_over_a_shared_repo_is_never_removed() {
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     // B's run records B as its project but covers A's checkout too (a shared folder).
     let cli = fx.roots().cli_state_dir.unwrap();
@@ -509,7 +625,7 @@ async fn a_cockpit_run_of_another_project_over_a_shared_repo_is_never_removed() 
 
 #[tokio::test]
 async fn a_failed_location_keeps_the_project_so_the_deletion_can_be_retried() {
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     // Make the inspection file undeletable by turning it into a non-empty directory? A plain
     // directory is removable, so block instead through a repo the guard refuses: point the repo
@@ -537,7 +653,7 @@ async fn a_failed_location_keeps_the_project_so_the_deletion_can_be_retried() {
 #[tokio::test]
 async fn the_preview_lists_the_plan_and_removes_nothing() {
     use axum::extract::{Path as AxPath, State};
-    let w = world();
+    let w = world().await;
     let fx = &w.fx;
     let resp = super::delete_project::delete_all_preview(
         State(fx.state.clone()),
@@ -571,4 +687,295 @@ async fn the_preview_lists_the_plan_and_removes_nothing() {
     }
     assert!(fx.checkout.exists());
     assert!(fx.state.projects.get(&fx.project_id).is_some());
+}
+
+// ── round 2 ──────────────────────────────────────────────────────────────────────────────
+
+fn b_checkout(fx: &Fx) -> PathBuf {
+    fx.root.join("work").join(REPO_B)
+}
+
+fn chmod(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A test that makes a file unwritable needs a user the permission bits bind.
+fn assert_permissions_bind(dir: &Path) {
+    let probe = dir.join("probe-root-check");
+    assert!(
+        std::fs::write(&probe, "x").is_err(),
+        "run these tests as an ordinary user: the permission bits do not bind this one"
+    );
+}
+
+#[tokio::test]
+async fn a_folder_linked_to_the_wrong_repo_loses_nothing_of_another_projects() {
+    let w = world().await;
+    let fx = &w.fx;
+    // Project A's repo is linked (by the machine-local path setting) to project B's checkout.
+    fx.state
+        .settings
+        .set_repo_path(REPO, Some(b_checkout(fx).to_string_lossy().into_owned()));
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    for f in &w.b_files {
+        assert!(f.exists(), "B's file was removed: {}", f.display());
+    }
+    assert!(out.partial, "the refused folder is reported, the project kept");
+    assert!(fx.state.projects.get(&fx.project_id).is_some());
+    assert!(out
+        .record
+        .items
+        .iter()
+        .any(|i| i.category == "checkout" && !i.outcome.is_clear()));
+}
+
+#[tokio::test]
+async fn a_failed_session_removal_is_found_again_by_the_retry() {
+    let w = world().await;
+    let fx = &w.fx;
+    let folder = fx
+        .roots()
+        .claude_projects_dir
+        .unwrap()
+        .join("-work-aaaaaaaaaaaa");
+    let session = folder.join("6f1d2c3a-1111-4222-8333-aaaaaaaaaaaa.jsonl");
+    chmod(&folder, 0o555);
+    assert_permissions_bind(&folder);
+
+    let first = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(first.partial);
+    assert!(session.exists(), "the session file could not be removed");
+    assert!(
+        !fx.state.inspections.list(&fx.project_id).is_empty(),
+        "the inspections, which record the session ids, are kept until everything else is clear"
+    );
+    assert!(fx.state.projects.get(&fx.project_id).is_some());
+
+    chmod(&folder, 0o755);
+    let second = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(!second.partial, "{:?}", second.record.items);
+    assert!(!session.exists(), "the retry found and removed the session file");
+    assert!(hits(&fx.root, SENT_A).is_empty());
+    assert!(fx.state.projects.get(&fx.project_id).is_none());
+}
+
+#[tokio::test]
+async fn a_write_that_fails_is_reported_failed_not_removed_and_a_retry_succeeds() {
+    for (file, category) in [
+        ("scan-cache.json", "scan cache entry"),
+        ("onboarding-draft.json", "onboarding draft"),
+        ("uow.json", "development console record"),
+        ("projects.json", "project record"),
+    ] {
+        let w = world().await;
+        let fx = &w.fx;
+        let path = fx.root.join("data").join(file);
+        chmod(&path, 0o444);
+        assert!(
+            std::fs::OpenOptions::new().append(true).open(&path).is_err(),
+            "run these tests as an ordinary user"
+        );
+
+        let first = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+            .await
+            .unwrap();
+
+        assert!(first.partial, "{file}: {:?}", first.record.items);
+        assert!(
+            first
+                .record
+                .items
+                .iter()
+                .any(|i| i.category == category && matches!(i.outcome, super::PurgeOutcome::Failed { .. })),
+            "{file}: no failed {category} item in {:?}",
+            first.record.items
+        );
+        assert!(
+            !first
+                .record
+                .items
+                .iter()
+                .any(|i| i.path.contains(file.trim_end_matches(".json")) && i.category == category
+                    && i.outcome == super::PurgeOutcome::Removed),
+            "{file}: reported removed although the write failed"
+        );
+        assert!(fx.state.projects.get(&fx.project_id).is_some(), "{file}");
+
+        chmod(&path, 0o644);
+        let second = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+            .await
+            .unwrap();
+        assert!(!second.partial, "{file}: {:?}", second.record.items);
+        assert!(hits(&fx.root, SENT_A).is_empty(), "{file}: A data left after the retry");
+        assert!(fx.state.projects.get(&fx.project_id).is_none(), "{file}");
+    }
+}
+
+#[tokio::test]
+async fn a_scan_or_job_start_while_the_project_is_being_deleted_is_refused() {
+    let fx = fixture();
+    let _deleting = fx
+        .state
+        .source_ops
+        .begin_deleting(&fx.project_id)
+        .expect("not yet marked");
+    let project = fx.state.projects.get(&fx.project_id).unwrap();
+    let request = super::rescan::project_scan_request(&project, &[REPO.to_string()])
+        .await
+        .unwrap();
+
+    let job = crate::start_audit_job(
+        &fx.state,
+        request,
+        crate::AuditJobOptions {
+            project_id: Some(fx.project_id.clone()),
+            ..crate::AuditJobOptions::default()
+        },
+    )
+    .await;
+
+    let state = fx.state.jobs.get(&job).expect("the refused job is recorded");
+    assert_eq!(state.status, "failed");
+    assert!(
+        state.message.unwrap_or_default().contains("being deleted"),
+        "the refusal says why"
+    );
+    // A second deletion of the same project is refused too.
+    let again = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .err()
+        .expect("refused");
+    assert!(again.message.contains("already being deleted"));
+}
+
+#[tokio::test]
+async fn the_preview_and_the_record_state_the_work_that_will_be_lost() {
+    use axum::extract::{Path as AxPath, State};
+    let w = world().await;
+    let fx = &w.fx;
+    let resp = super::delete_project::delete_all_preview(
+        State(fx.state.clone()),
+        AxPath(fx.project_id.clone()),
+    )
+    .await;
+    let body = axum::body::to_bytes(
+        axum::response::IntoResponse::into_response(resp).into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let sentences: Vec<String> = v["plan"]["loss_sentences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(sentences.len(), 1, "{sentences:?}");
+    assert!(
+        sentences[0].starts_with("acme/app: 1 uncommitted change and "),
+        "{sentences:?}"
+    );
+    assert!(sentences[0].ends_with("will be lost."), "{sentences:?}");
+    assert_eq!(v["plan"]["losses"][0]["repo"], "acme/app");
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+    assert_eq!(out.record.lost_work, sentences);
+    assert!(out.record.render_text().contains("will be lost."));
+}
+
+#[tokio::test]
+async fn console_rows_tied_to_a_shared_repository_are_kept_and_listed() {
+    let w = world().await;
+    let fx = &w.fx;
+    fx.state
+        .projects
+        .create("Gamma", vec![REPO.to_string()])
+        .unwrap();
+    // A unit with no project of its own on the shared repo: not attributable to Acme alone.
+    let shared = fx
+        .state
+        .uow
+        .create_native(Some(REPO.to_string()), None)
+        .unwrap();
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(fx.state.uow.get(&shared.story_id).is_some(), "the shared unit stays");
+    assert!(out
+        .record
+        .kept
+        .iter()
+        .any(|k| k.what.contains("development console record") && k.why.contains("another project")));
+    // Acme's own unit (it records its project) went.
+    assert!(fx
+        .state
+        .uow
+        .list()
+        .iter()
+        .all(|u| u.project_id.as_deref() != Some(fx.project_id.as_str())));
+}
+
+async fn http(state: &crate::AppState, method: &str, uri: &str) -> (StatusCode, serde_json::Value) {
+    let resp = crate::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+#[tokio::test]
+async fn the_plain_project_delete_is_refused_while_the_project_holds_data() {
+    let w = world().await;
+    let fx = &w.fx;
+    let (status, body) = http(&fx.state, "DELETE", &format!("/api/projects/{}", fx.project_id)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "project_holds_data");
+    assert_eq!(
+        body["message"],
+        "This project still has data on this machine. Use Delete source code from this machine \
+         or Delete project and all its data first."
+    );
+    assert!(fx.state.projects.get(&fx.project_id).is_some());
+
+    // The findings the source-only delete keeps are data too.
+    let findings = fx.state.projects.create("Findings", Vec::new()).unwrap();
+    fx.state
+        .set_last_scan(findings.id.clone(), report_at(REPO, &"1".repeat(40)));
+    let (status, body) = http(&fx.state, "DELETE", &format!("/api/projects/{}", findings.id)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(fx.state.projects.get(&findings.id).is_some());
+}
+
+#[tokio::test]
+async fn the_plain_project_delete_still_removes_a_project_with_no_data() {
+    let fx = fixture();
+    let empty = fx.state.projects.create("Empty", Vec::new()).unwrap();
+    let (status, body) = http(&fx.state, "DELETE", &format!("/api/projects/{}", empty.id)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true);
+    assert!(fx.state.projects.get(&empty.id).is_none());
 }

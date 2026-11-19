@@ -79,11 +79,22 @@ pub(crate) async fn active_project(
 }
 
 /// Delete a project.
+///
+/// This only removes the project from the list. It is refused while the project still holds data
+/// on this machine (the checkouts, inspections and every other store would be orphaned): the
+/// operator first uses "Delete source code from this machine" or "Delete project and all its
+/// data" (`client_source::delete_project`).
 pub(crate) async fn delete_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": state.projects.delete(&id) }))
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if state.projects.get(&id).is_some()
+        && crate::client_source::delete_project::project_holds_data(&state, &id).await
+    {
+        return crate::client_source::delete_project::holds_data_refusal().into_response();
+    }
+    Json(serde_json::json!({ "ok": state.projects.delete(&id) })).into_response()
 }
 
 /// A project export: the full project (name, repos, ruleset, onboarded) PLUS its

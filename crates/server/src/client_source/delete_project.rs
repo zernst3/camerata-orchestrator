@@ -937,6 +937,29 @@ fn build_id() -> String {
     )
 }
 
+/// Whether the project still holds data Camerata keeps on this machine: a checkout, scan caches,
+/// saved runs, inspections, review stores, session files or development console rows (the
+/// project record and the in-memory copies do not count). A run in flight counts as data.
+/// The plain "Remove from list" is refused while this is true.
+pub async fn project_holds_data(state: &AppState, project_id: &str) -> bool {
+    let Ok(built) = build(state, project_id, true).await else {
+        return true;
+    };
+    built
+        .items()
+        .iter()
+        .any(|i| !matches!(i.category.as_str(), "in-memory copy" | "project record"))
+}
+
+/// The refusal the plain project delete answers with while the project still holds data.
+pub fn holds_data_refusal() -> Refusal {
+    Refusal::conflict(
+        "project_holds_data",
+        "This project still has data on this machine. Use Delete source code from this machine \
+         or Delete project and all its data first.",
+    )
+}
+
 /// What a project deletion ended in.
 pub struct DeleteAllOutcome {
     pub record: ProjectDeletionRecord,
@@ -1182,6 +1205,8 @@ pub async fn delete_all_preview(
                 "{} files, {}", group_thousands(total_files), format_bytes(total_bytes)
             ),
             "kept": built.kept,
+            "losses": built.losses,
+            "loss_sentences": built.losses.iter().map(Loss::sentence).collect::<Vec<_>>(),
             "warnings": built.blocked.iter().map(|b| match &b.outcome {
                 PurgeOutcome::Failed { error } => format!("{}: {error}", b.path),
                 _ => b.path.clone(),
