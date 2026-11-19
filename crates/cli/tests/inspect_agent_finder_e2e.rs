@@ -684,11 +684,11 @@ fn the_agent_finder_prints_its_own_estimate_never_the_engines() {
     })
 }
 
-/// Outside review Part 1 item 4: a rule file that does not parse stops a client agent run before
+/// Outside review Part 1 item 4: a rule file that does not parse stops an agent run before
 /// the estimate, the agent and any model call, and names the rule, the file and the reason.
 #[test]
 #[serial_test::serial(process_env)]
-fn a_corrupt_rule_file_stops_a_client_agent_run_before_any_spend() {
+fn a_corrupt_rule_file_stops_every_agent_run_before_any_spend() {
     on_a_big_stack(async {
         let state = tempfile::tempdir().unwrap();
         let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
@@ -702,18 +702,21 @@ fn a_corrupt_rule_file_stops_a_client_agent_run_before_any_spend() {
         )
         .unwrap();
         let _corpus = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", corpus.path());
-        let agent = Arc::new(Reviewer::new(vec![real_problem()]));
-        let calls = agent.calls.clone();
-        let run = run_agent(agent, true, |_| {}).await;
-        let why = run
-            .result
-            .expect_err("a client agent run must not go on with a rule file missing")
-            .to_string();
-        assert!(
-            why.contains("SEC-CORRUPT-1") && why.contains("sec-corrupt-1.toml"),
-            "{why}"
-        );
-        assert_eq!((calls.load(Ordering::SeqCst), run.model_calls), (0, 0));
-        assert!(!run.export.exists());
+        // Client and internal runs alike: graded evidence must not come from a broken rule set.
+        for client in [true, false] {
+            let agent = Arc::new(Reviewer::new(vec![real_problem()]));
+            let calls = agent.calls.clone();
+            let run = run_agent(agent, client, |_| {}).await;
+            let why = run
+                .result
+                .expect_err("an agent run must not go on with a rule file missing")
+                .to_string();
+            assert!(
+                why.contains("SEC-CORRUPT-1") && why.contains("sec-corrupt-1.toml"),
+                "{why}"
+            );
+            assert_eq!((calls.load(Ordering::SeqCst), run.model_calls), (0, 0));
+            assert!(!run.export.exists());
+        }
     })
 }

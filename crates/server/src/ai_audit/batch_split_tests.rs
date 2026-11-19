@@ -276,6 +276,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<crate::run_store::RunStore> {
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: MODEL.to_string(),

@@ -2330,3 +2330,15 @@ fn the_projects_finder_dup_check_and_clone_judge_models_reach_the_audit_runs_con
     assert_eq!(after.dup_check_model_for(), "claude-haiku-5-5");
     assert_eq!(after.clone_judge_model_for(), "claude-haiku-4-5-20251001");
 }
+
+/// Outside review round 1: an app run with no project runs as a new project does (the agent
+/// finder on Opus 5.5), not on the library's engine default.
+#[test]
+fn a_run_with_no_project_takes_the_new_project_defaults() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+    let c = req.run_controls_for_project(None);
+    assert_eq!(c.finder, FinderChoice::Agent);
+    assert_eq!(c.finder_model_for(), "claude-opus-5-5");
+    assert_eq!(c.group_review_model_for(), "claude-opus-5-5");
+}

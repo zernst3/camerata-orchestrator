@@ -115,8 +115,9 @@ pub struct RunControls {
     /// `camerata inspect --group-review-model`, `--escalation-rate` and `--escalation-floor`).
     /// A blank `group_review_model` means the built-in default. Never the environment.
     pub review: camerata_api_types::project::ReviewSettings,
-    /// `--finder agent|engine`: which finder the run uses. `Engine` (the existing scan passes) is
-    /// the default until the graded comparison decides.
+    /// `--finder agent|engine`: which finder the run uses. A new project and a bare `camerata inspect`
+    /// run `Agent`; this struct's own default stays `Engine` (the existing scan passes), the value
+    /// a saved run record without a finder resumes with.
     pub finder: crate::ai_audit::agent_finder::FinderChoice,
     /// `--finder-model`: the agent finder's model. `None` or blank = the built-in default
     /// ([`crate::ai_audit::agent_finder::DEFAULT_FINDER_MODEL`]). Never the environment.

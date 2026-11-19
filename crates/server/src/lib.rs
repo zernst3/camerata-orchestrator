@@ -2428,11 +2428,11 @@ async fn onboard_audit(
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
         _ => crate::llm::Backend::Cli,
     };
-    // A client engagement on the agent finder stops, before any spend, when a rule file did not
-    // load (the rule would silently not be checked).
+    // An agent finder run stops, before any spend, when a rule file did not load (the rule would
+    // silently not be checked).
     if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
         &run_controls,
-        active_project.as_ref().is_none_or(|p| p.client_engagement),
+        run_ai_review && !ai_review_blocked,
         &corpus_load_failures,
     ) {
         let mut r = crate::onboard::ScanReport::gated(&repos);
@@ -3013,6 +3013,17 @@ pub(crate) async fn start_audit_job(
                                 return;
                             }
                         }
+                        // The agent finder finishes on the finder model it started with.
+                        match store.hold_finder_model(&mut run_controls) {
+                            Ok(Some(line)) => {
+                                store.add_note(&line);
+                            }
+                            Ok(None) => {}
+                            Err(why) => {
+                                body_jobs.fail(&body_jid, why);
+                                return;
+                            }
+                        }
                         // The kept model was not part of the pick the lock checked before the
                         // job started: check every model the resumed run will call, before any
                         // call.
@@ -3110,13 +3121,11 @@ pub(crate) async fn start_audit_job(
                 &backend_resolution,
                 crate::llm::BackendResolution::Blocked { .. }
             );
-            // A client engagement on the agent finder stops, before any spend, when a rule file
-            // did not load (the rule would silently not be checked).
+            // An agent finder run stops, before any spend, when a rule file did not load (the rule
+            // would silently not be checked).
             if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
                 &run_controls,
-                engagement_project
-                    .as_ref()
-                    .is_none_or(|p| p.client_engagement),
+                run_ai_review && !ai_review_blocked,
                 &corpus_load_failures,
             ) {
                 body_jobs.fail(&body_jid, why);

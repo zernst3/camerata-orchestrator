@@ -198,14 +198,16 @@ pub fn refuse_unsupported_finder_settings(
     if controls.consensus {
         return Err(
             "--finder agent cannot be combined with --consensus. The agent finder reviews each part \
-             once; the consensus option repeats the scan passes it replaces."
+             once; the consensus option repeats the scan passes it replaces. Pass --finder engine \
+             to use --consensus."
                 .to_string(),
         );
     }
     if incremental {
         return Err(
             "--finder agent needs a full inspection; it cannot re-inspect only the files that \
-             changed. Pass --full to inspect everything."
+             changed. Pass --full to inspect everything. Pass --finder engine to re-inspect \
+             only the changed files."
                 .to_string(),
         );
     }
@@ -213,18 +215,18 @@ pub fn refuse_unsupported_finder_settings(
 }
 
 /// Outside review Part 1 item 4: a rule file that did not parse never reaches the agent finder's
-/// checklist, so a client engagement on the agent finder stops before any spend when one failed to
-/// load (a run with a rule silently missing would read as clean for that rule). `client_engagement`
-/// is the project's kind (the command line's non `--internal`). The message names each rule id and
-/// the file with the parser's reason, for the operator. An internal run is not stopped: the same
-/// failures are recorded in the run's ledger, coverage notes and integrity gate by
-/// `record_corpus_load_failures`, which every run calls.
+/// checklist, so an agent finder run, client or internal, stops before any spend when one failed
+/// to load (a run with a rule silently missing would read as clean for that rule, and graded
+/// evidence must not come from a broken rule set). The message names each rule id and the file
+/// with the parser's reason, for the operator. The same failures are also recorded in the run's
+/// ledger, coverage notes and integrity gate by `record_corpus_load_failures`. `ai_review` is
+/// whether the AI review (and so the finder) runs at all: a deterministic-only scan is not stopped.
 pub fn refuse_unloadable_rules(
     controls: &RunControls,
-    client_engagement: bool,
+    ai_review: bool,
     failures: &[crate::CorpusLoadFailure],
 ) -> Result<(), String> {
-    if controls.finder != super::FinderChoice::Agent || !client_engagement || failures.is_empty() {
+    if controls.finder != super::FinderChoice::Agent || !ai_review || failures.is_empty() {
         return Ok(());
     }
     let lines: Vec<String> = failures

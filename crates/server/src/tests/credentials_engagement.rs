@@ -877,6 +877,13 @@ async fn a_client_engagement_audit_is_refused_before_any_repository_is_read() {
         .projects
         .create("Client", vec!["acme/never-read".to_string()])
         .unwrap();
+    // The scan model this test checks the lock against is the engine finder's; the agent finder
+    // (a new project's default) does not use it.
+    state
+        .projects
+        .set_review_settings(&p.id, camerata_api_types::project::ReviewSettings::legacy())
+        .unwrap()
+        .unwrap();
     let req = |model: Option<&str>| AuditReq {
         repos: vec!["acme/never-read".to_string()],
         model: model.map(str::to_string),

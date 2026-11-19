@@ -1042,6 +1042,13 @@ pub async fn run_inspect_pipeline_with(
             .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
             .map_err(InspectError::Failed)?;
         group_review_notice = Some(notice);
+        // An agent finder run finishes its remaining pieces on the finder model it started with.
+        if let Some(line) = store
+            .hold_finder_model(&mut controls)
+            .map_err(InspectError::Failed)?
+        {
+            group_review_notice = group_review_notice.map(|n| format!("{n}\n{line}"));
+        }
         // The kept model was not part of the pick the client lock checked at the top of this
         // run, so it is checked here, on every model the resumed run will call, before any call.
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
@@ -1077,12 +1084,12 @@ pub async fn run_inspect_pipeline_with(
     )
     .map_err(InspectError::Failed)?;
 
-    // A rule file that did not load is a rule the agent finder would silently not check. A client
-    // engagement stops here, before the estimate and before anything is spent; an internal run
-    // goes on and records the failure (see `record_corpus_load_failures` below).
+    // A rule file that did not load is a rule the agent finder would silently not check. An agent
+    // finder run stops here, before the estimate and before anything is spent (an engine run
+    // goes on and records the failure, see `record_corpus_load_failures` below).
     camerata_server::ai_audit::agent_finder::run::refuse_unloadable_rules(
         &controls,
-        args.client_engagement,
+        !matches!(backend_resolution, BackendResolution::Blocked { .. }),
         &corpus_load_failures,
     )
     .map_err(InspectError::Failed)?;
