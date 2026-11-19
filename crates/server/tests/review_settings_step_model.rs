@@ -71,14 +71,14 @@ async fn the_step_models_route_sets_the_project_finder_and_it_reads_back_from_th
     let before = f.state.projects().get(&f.project_id).unwrap();
     assert_eq!(
         before.review.finder,
-        camerata_api_types::project::ProjectFinder::Engine,
-        "a project starts on the engine finder"
+        camerata_api_types::project::ProjectFinder::Agent,
+        "a project starts on the agent finder (the default)"
     );
     let (status, text) = call(
         &f.app,
         "POST",
         &format!("/api/projects/{}/step-models", f.project_id),
-        Some(json!({ "step": "finder", "model": "agent" })),
+        Some(json!({ "step": "finder", "model": "engine" })),
     )
     .await;
     assert_eq!(status, 200, "{text}");
@@ -87,7 +87,7 @@ async fn the_step_models_route_sets_the_project_finder_and_it_reads_back_from_th
     let after = f.state.projects().get(&f.project_id).unwrap();
     assert_eq!(
         after.review.finder,
-        camerata_api_types::project::ProjectFinder::Agent
+        camerata_api_types::project::ProjectFinder::Engine
     );
     assert_eq!(
         after.review.group_review_model, before.review.group_review_model,
@@ -102,7 +102,7 @@ async fn the_step_models_route_sets_the_project_finder_and_it_reads_back_from_th
     )
     .await;
     let view: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(view["stage_models"]["finder"], json!("agent"), "{text}");
+    assert_eq!(view["stage_models"]["finder"], json!("engine"), "{text}");
 }
 
 #[tokio::test]
@@ -124,7 +124,7 @@ async fn an_unknown_finder_word_is_refused_by_name_and_changes_nothing() {
     );
     assert_eq!(
         f.state.projects().get(&f.project_id).unwrap().review.finder,
-        camerata_api_types::project::ProjectFinder::Engine
+        camerata_api_types::project::ProjectFinder::Agent
     );
 }
 
