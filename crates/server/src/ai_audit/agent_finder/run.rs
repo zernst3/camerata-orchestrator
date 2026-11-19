@@ -975,6 +975,25 @@ pub async fn find_repo(
     rows.extend(unresolved);
     rows.extend(conv.departures);
     rows.extend(conv.undecided);
+    // The deterministic backstop: a reviewer-addressed phrase in the code is a row of its own, so
+    // the plant is seen even when the model obeyed it and reported nothing (the same checker the
+    // floor runs when the rule is armed; the combined set collapses the same place later).
+    let planted = crate::onboard::audit_architectural(
+        repo,
+        &model_files,
+        &HashSet::from([
+            camerata_checks::ai_reviewer_injection_checker::RULE_AI_REVIEWER_INSTRUCTIONS,
+        ]),
+    );
+    for row in planted {
+        let already = rows.iter().any(|f| {
+            f.rule_id.eq_ignore_ascii_case(&row.rule_id)
+                && (f.path.as_str(), f.line) == (row.path.as_str(), row.line)
+        });
+        if !already {
+            rows.push(row);
+        }
+    }
     let mut seen = HashSet::new();
     proposed.retain(|p| seen.insert(p.id.clone()));
 

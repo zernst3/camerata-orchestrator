@@ -95,6 +95,13 @@ pub struct Room {
     out: Mutex<BTreeMap<String, String>>,
 }
 
+/// Whether `path` names the room's own checklist: the harness's instructions, written by the
+/// engine from its rule corpus. A repository file cannot occupy this path (`Room::build` leaves
+/// out every file under `_camerata/`, in any letter case), so the text at it is never client text.
+pub(super) fn is_checklist_path(path: &str) -> bool {
+    normalize(path).as_deref() == Some(CHECKLIST_PATH)
+}
+
 /// The tree file: every path of the repository, one a line.
 const TREE_PATH: &str = "_camerata/context/tree.txt";
 const NEIGHBOURS_PATH: &str = "_camerata/context/neighbours.md";
@@ -386,6 +393,14 @@ impl Room {
     pub fn paths(&self) -> Vec<String> {
         let mut all: BTreeSet<String> = self.files.keys().cloned().collect();
         all.extend(self.out_lock().keys().cloned());
+        all.into_iter().collect()
+    }
+
+    /// The path and text of every file the room serves, the output files included: the texts a
+    /// frame token must avoid (`FrameNonce::generate_avoiding_files`).
+    pub fn file_pairs(&self) -> Vec<(String, String)> {
+        let mut all: BTreeMap<String, String> = self.files.clone();
+        all.extend(self.out_lock().iter().map(|(k, v)| (k.clone(), v.clone())));
         all.into_iter().collect()
     }
 
