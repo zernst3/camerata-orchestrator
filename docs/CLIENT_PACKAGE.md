@@ -101,7 +101,7 @@ A report that no human reviewer has signed off carries a draft banner on every p
 
 The inspection finds more problems than a person can read one by one. A group reviewer first reads each rule's problems together and splits them into fixes. It then ranks the places that most need a person's eyes. A budget decides how many of those places the architect reads in person. By default it is one place for every 1,000 counted lines of code, with a minimum of 20. The places above that line are the escalated places. A critical place whose reason is one of the severe kinds (unauthenticated reach, a secret exposed, data loss, cross-tenant access, authorization bypass, injection, unverified evidence) is escalated even past the budget. A high place passes the budget too when its reason is a secret exposed, data loss, cross-tenant access, authorization bypass or injection. Each one is read in person, and the workbook marks it "Reviewed in person".
 
-A place below the line is not left unchecked. The engine checked it against the code, and it is on the workbook like any other problem, with the Reviewed in person cell blank. The PDF's "The most serious problems" section prints the escalated places, worst first. The Start here sheet and the PDF's most serious problems section print how many places were reviewed in person and the review budget, so a blank cell is explained. A critical place and a place the engine was unsure of are never left below the line unread: the release gate refuses a package until each carries a reviewer's decision.
+A place below the line is not left unchecked. The engine checked it against the code, and it is on the workbook like any other problem, with the Reviewed in person cell blank. The PDF's "The most serious problems" section prints the escalated places, worst first. The Start here sheet and the PDF's most serious problems section print how many places were reviewed in person and the review budget, so a blank cell is explained. A critical place and a place the review marked unsure are never left below the line unread: the release gate refuses a package until each carries a reviewer's decision.
 
 ## What is not in the package
 
@@ -152,7 +152,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | Related standard | A published standard matched to a model-reviewed problem by topic. It is not a rule we checked. | The Standard cited column |
 | Standard cited | The published standard, such as an OWASP or CWE entry, behind the rule. | All problems; Rules checked |
 | Reviewed in person | Yes when a person read the problem in your code. Blank means the engine checked it against your files without a person reading it. | All problems; Dependencies |
-| Review budget | How many places a person reads in person in one inspection, set from the amount of code. Every critical place and every place the engine was unsure of is read whatever the budget. | Start here; the PDF's most serious problems |
+| Review budget | How many places a person reads in person in one inspection, set from the amount of code. Every critical place and every place the review marked unsure is read whatever the budget. | Start here; the PDF's most serious problems |
 | Engine verified | Checked by the engine against your files, without a person reading it. | How problems were grouped |
 | Example from your code | A fix written for the code at one place in your repo. | Fix plan |
 | Standard fix | The rule's own guidance, not written for your code. | The Fix type column |

@@ -16,18 +16,20 @@
 //!   what the PDF and the workbook print (the exporters re-apply the same bounds, which change
 //!   nothing a second time). The bounds that need no rule (the deviation ceiling and the
 //!   unlocated downgrade) are applied here too, as the exporters apply them.
-//! - Unsure: the finder marked the row `needs_review`, which is what the workbook's "Needs a
-//!   decision" and "Confidence: Low" cells say. A row that waits only because it reads as a
-//!   convention to consider (the information-only bucket) is not unsure.
+//! - Unsure: the finder or the group review marked the row unsure (`needs_review`, or a
+//!   needs-review confidence). A row the workbook also prints as Low only because it sits in the
+//!   held or information-only bucket (no published standard backs it, or it reads as a convention)
+//!   was not marked unsure by a review and is not forced: the wording says "marked unsure".
 //!
-//! A decision made only as part of a group does not count for a critical or an unsure row: those
-//! rows are kept out of group decisions ([`super::holds`]), so the reviewer decides each one.
+//! A decision made only as part of a group does not count for a critical or an unsure row: the
+//! effective record must be the row's own (`inherited_from` empty), and every such row is kept out
+//! of group decisions ([`super::holds`]), decided or not, so a later group decision cannot
+//! overwrite a decision made in person.
 
 use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::onboard::Finding;
 use crate::report_export::ReviewedReport;
-use camerata_api_types::review::REVIEWED_AS_PATTERN_PREFIX;
 
 /// Why a row needs a decision of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,20 +45,23 @@ pub enum Why {
 pub fn why(f: &Finding) -> Option<Why> {
     if crate::severity_bounds::bounded_severity(f, None) == "critical" {
         Some(Why::Critical)
-    } else if f.needs_review {
+    } else if f.needs_review || f.confidence.as_deref() == Some("needs-review") {
         Some(Why::Unsure)
     } else {
         None
     }
 }
 
-/// Whether the reviewer decided `f` in person: a decision applies to it, and it was not decided
-/// only as one of a group's rows.
+/// Whether the reviewer decided `f` in person: the effective record for the row (the latest
+/// live one) is its own, not one inherited from a group decision. A group record that came after
+/// the reviewer's own overwrites it, and then the row is undecided again. With no record at all
+/// (an older client's request dispositions) the row's own disposition counts.
 fn decided_in_person(f: &Finding, reviewed: &ReviewedReport) -> bool {
-    reviewed.has_decision(f)
-        && !reviewed
-            .review_level(f)
-            .is_some_and(|level| level.as_wire().starts_with(REVIEWED_AS_PATTERN_PREFIX))
+    let effective = camerata_api_types::decisions::effective_by_key(reviewed.records());
+    match effective.get(f.site_key.as_str()) {
+        Some(record) => record.inherited_from.is_none(),
+        None => reviewed.has_decision(f),
+    }
 }
 
 /// The rows shown at critical severity or marked unsure that `reviewed` has no decision of their
@@ -83,10 +88,10 @@ fn undecided_as_shown<'a>(
     findings
         .iter()
         .filter_map(move |f| {
-            let shown =
-                shown_critical.contains(crate::report_export::site_id(&f.site_key).as_str());
+            let id = crate::report_export::site_id(&f.site_key);
+            let critical = shown_critical.contains(id.as_str());
             why(f)
-                .or_else(|| shown.then_some(Why::Critical))
+                .or_else(|| critical.then_some(Why::Critical))
                 .map(|w| (f, w))
         })
         .filter(|(f, _)| !decided_in_person(f, reviewed))

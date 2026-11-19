@@ -520,7 +520,7 @@ pub fn review_line(c: &crate::report_export::ReviewCounts) -> String {
     }
     if n > 0 && c.every_critical_and_unsure_decided {
         out.push_str(
-            " Every critical place and every place the engine was unsure of is among them, \
+            " Every critical place and every place the review marked unsure is among them, \
              whatever the budget.",
         );
     }
@@ -799,7 +799,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Review budget",
-        "How many places a person reads in person in one inspection, set from the amount of code. Every critical place and every place the engine was unsure of is read whatever the budget.",
+        "How many places a person reads in person in one inspection, set from the amount of code. Every critical place and every place the review marked unsure is read whatever the budget.",
         "Start here; the PDF's most serious problems",
     ),
     e(

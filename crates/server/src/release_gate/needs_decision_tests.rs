@@ -356,3 +356,76 @@ fn a_row_the_exports_show_at_critical_through_a_rule_floor_needs_a_decision() {
         package.critical_or_unsure_without_decision
     );
 }
+
+fn node_record(
+    key: &str,
+    state: camerata_api_types::decisions::DecisionState,
+    id: &str,
+    parent: Option<&str>,
+) -> camerata_api_types::decisions::Decision {
+    use camerata_api_types::decisions::{Decision, Scope};
+    Decision {
+        id: id.to_string(),
+        key: key.to_string(),
+        state,
+        reason: "r".to_string(),
+        scope: Scope::Site,
+        applies_to: Vec::new(),
+        except: Vec::new(),
+        inherited_from: parent.map(str::to_string),
+        decided_by: "reviewer".to_string(),
+        decided_at: "2026-11-04T09:00:00Z".to_string(),
+        run_id: "insp-1".to_string(),
+        engine_version: "0.0.0-test".to_string(),
+        needed_me: None,
+        sample_verdict: None,
+        confirmed_by_client: None,
+        revoked_at: None,
+    }
+}
+
+/// A group record that comes after the reviewer's own decision overwrites it: the critical is
+/// undecided again, and the gate refuses.
+#[test]
+fn a_group_record_after_a_personal_decision_does_not_decide_a_critical() {
+    use camerata_api_types::decisions::DecisionState;
+    let row = critical_below_the_line();
+    let sealed = report_with(row).seal();
+    let key = sealed
+        .findings
+        .iter()
+        .find(|f| f.path == "src/admin.rs")
+        .unwrap()
+        .site_key
+        .clone();
+    let personal = node_record(&key, DecisionState::Confirmed, "dec-1", None);
+    let mut node = node_record("", DecisionState::FalsePositive, "dec-0", None);
+    node.scope = camerata_api_types::decisions::Scope::Node("n".to_string());
+    node.applies_to = vec![key.clone()];
+    let group = node_record(&key, DecisionState::FalsePositive, "dec-2", Some("dec-0"));
+    let own = crate::report_export::apply_overlay(&sealed, &[personal.clone()], &[], &[]);
+    assert!(needs_decision::undecided(&own.report().findings, &own)
+        .next()
+        .is_none());
+    let overwritten =
+        crate::report_export::apply_overlay(&sealed, &[personal, node, group], &[], &[]);
+    let rows: Vec<_> =
+        needs_decision::undecided(&overwritten.report().findings, &overwritten).collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "an inherited record is not a decision in person"
+    );
+    // And a decided critical is still kept out of a batch.
+    assert!(holds::hold_set(&own).kept_out_of_a_batch.contains(&key));
+}
+
+/// A row the workbook prints as Confidence Low through a needs-review confidence needs a decision.
+#[test]
+fn a_needs_review_confidence_alone_makes_a_row_unsure() {
+    let mut row = unsure_medium();
+    row.needs_review = false;
+    row.confidence = Some("needs-review".to_string());
+    let package = package_with(report_with(row), &HashMap::new());
+    assert_eq!(package.critical_or_unsure_without_decision.len(), 1);
+}

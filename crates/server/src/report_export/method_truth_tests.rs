@@ -75,7 +75,7 @@ fn a_reviewed_report_with_places_below_the_line_never_says_every_advisory_findin
     );
     assert!(
         note.contains(
-            "including every critical problem and every problem the engine was unsure of"
+            "including every critical problem and every problem the review marked unsure"
         ),
         "{note}"
     );
@@ -232,4 +232,44 @@ fn an_agent_finder_run_says_the_model_did_not_read_a_repo_it_did_not_read() {
     let note = &json.methodology.ai_tier_note;
     assert!(!note.contains("tier"), "{note}");
     assert!(note.contains("did not read the code of 1 repo"), "{note}");
+}
+
+#[test]
+fn the_reconciling_line_does_not_say_the_whole_export_was_reviewed() {
+    let report = mixed_report();
+    let dispositions = decided(&report, 1);
+    let json = build_report_json(
+        &ReviewedReport::unreviewed(&report.seal(), &dispositions),
+        None,
+        &empty_opts(),
+    );
+    let line = &json.methodology.reconciliation;
+    assert!(!line.contains("Reviewed by a human reviewer"), "{line}");
+    assert!(
+        line.contains("A person has ruled on part of this export"),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_severity_paragraph_follows_the_finder_that_ran() {
+    let engine = build_report_json(
+        &ReviewedReport::unreviewed(&mixed_report().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    assert!(engine
+        .methodology
+        .severity_scale_note
+        .contains("advisory findings"));
+    let agent = build_report_json(
+        &ReviewedReport::unreviewed(&agent_run().seal(), &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    let note = &agent.methodology.severity_scale_note;
+    assert!(
+        !note.contains("advisory") && !note.contains("calibrated"),
+        "{note}"
+    );
 }

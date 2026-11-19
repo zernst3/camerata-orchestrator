@@ -1209,7 +1209,7 @@ fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
     assert!(
         json.methodology
             .reconciliation
-            .contains("Reviewed by a human reviewer"),
+            .contains("A person has ruled on part of this export"),
         "{}",
         json.methodology.reconciliation
     );
@@ -1333,10 +1333,13 @@ fn shipped_template_methodology_line_is_gated_on_review_state() {
     let counts = counts_of_problems(3, 1, 0);
     let raw = counts_prose::methodology_line(&counts, ReviewState::Raw);
     assert!(raw.contains("has not yet had a human review"), "{raw}");
-    assert!(!raw.contains("Reviewed by a human reviewer"), "{raw}");
+    assert!(
+        !raw.contains("A person has ruled on part of this export"),
+        "{raw}"
+    );
     let reviewed = counts_prose::methodology_line(&counts, ReviewState::Reviewed);
     assert!(
-        reviewed.contains("Reviewed by a human reviewer"),
+        reviewed.contains("A person has ruled on part of this export"),
         "{reviewed}"
     );
     assert!(

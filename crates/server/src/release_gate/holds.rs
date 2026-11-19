@@ -83,6 +83,16 @@ pub fn hold_set(reviewed: &ReviewedReport) -> HoldSet {
         reviewed.engine_check(),
     ));
     kept_out_of_a_batch.extend(awaiting_a_ruling.iter().cloned());
+    // A critical or unsure row is decided by name, decided already or not: a group record would
+    // overwrite the decision made in person.
+    kept_out_of_a_batch.extend(
+        reviewed
+            .report()
+            .findings
+            .iter()
+            .filter(|f| needs_decision::why(f).is_some())
+            .map(|f| f.site_key.clone()),
+    );
     let mut reasons: std::collections::BTreeMap<String, Vec<(HoldReason, String)>> =
         std::collections::BTreeMap::new();
     for held in gate.held.iter().chain(&gate.merged_without_decision) {

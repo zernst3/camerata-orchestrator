@@ -2055,13 +2055,7 @@ pub fn build_report_json_with_counts(
                 .to_string(),
             NOT_ASSESSED_LINE.to_string(),
         ],
-        severity_scale_note:
-            "Severity is bimodal by design. Deterministic floor findings are proven defects \
-             rated by impact; advisory findings are rated by likely impact together with \
-             calibrated confidence. There is deliberately no single numeric score or letter \
-             grade: a grade hides which specific object is exposed, which is exactly what a \
-             remediation team needs to know."
-                .to_string(),
+        severity_scale_note: severity_scale_note_for(method_facts.finder),
         failed_passes: failed_pass_notes,
         failed_passes_more_line,
     };

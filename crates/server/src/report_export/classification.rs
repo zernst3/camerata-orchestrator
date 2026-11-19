@@ -994,6 +994,26 @@ pub(crate) fn deterministic_note_for(finder: FinderRan) -> String {
     }
 }
 
+/// The severity paragraph, for the finder that ran.
+pub(crate) fn severity_scale_note_for(finder: FinderRan) -> String {
+    match finder {
+        FinderRan::Engine => "Severity is bimodal by design. Deterministic floor findings are \
+             proven defects rated by impact; advisory findings are rated by likely impact \
+             together with calibrated confidence. There is deliberately no single numeric score \
+             or letter grade: a grade hides which specific object is exposed, which is exactly \
+             what a remediation team needs to know."
+            .to_string(),
+        FinderRan::Agent => {
+            "Severity is rated by likely impact, and a rule's own floor or ceiling \
+             holds where it sets one. Problems the model was unsure of are marked, and a person \
+             decides them. There is deliberately no single numeric score or letter grade: a \
+             grade hides which specific object is exposed, which is exactly what a remediation \
+             team needs to know."
+                .to_string()
+        }
+    }
+}
+
 /// What a person read, in the first person of the signed report, from the review store's counts.
 /// The clause about every critical and unsure finding is printed only when the release gate
 /// guarantees it ([`ReviewCounts::every_critical_and_unsure_decided`]).
@@ -1006,7 +1026,7 @@ fn read_in_person_sentence(review: &ReviewCounts) -> String {
             .to_string();
     }
     let clause = if review.every_critical_and_unsure_decided {
-        ", including every critical problem and every problem the engine was unsure of"
+        ", including every critical problem and every problem the review marked unsure"
     } else {
         ""
     };
