@@ -4,11 +4,18 @@
 //! checkout (a source tarball, a vendored copy) simply records no commit rather than failing.
 //!
 //! A release pipeline can set `CAMERATA_GIT_COMMIT` itself; that value wins over `git`.
+//!
+//! Also records `CAMERATA_GIT_DIRTY` (`1` when the tree had uncommitted changes, `0` when clean),
+//! read through `option_env!` and reported on `/api/health` next to the commit. It is a snapshot
+//! taken when this script last ran, shown for information and never compared.
+//!
+//! The app (`crates/ui`) includes this file by path as its own build script, so both binaries
+//! name their build the same way (the app refuses to run against a server from another build).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn main() {
+pub fn main() {
     println!("cargo:rerun-if-env-changed=CAMERATA_GIT_COMMIT");
     if let Ok(commit) = std::env::var("CAMERATA_GIT_COMMIT") {
         if is_commit(&commit) {
@@ -20,6 +27,10 @@ fn main() {
         return;
     };
     println!("cargo:rustc-env=CAMERATA_GIT_COMMIT={commit}");
+    if let Some(status) = git(&["status", "--porcelain"]) {
+        let dirty = if status.is_empty() { "0" } else { "1" };
+        println!("cargo:rustc-env=CAMERATA_GIT_DIRTY={dirty}");
+    }
     watch_head();
 }
 

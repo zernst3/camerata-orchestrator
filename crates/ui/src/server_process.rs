@@ -19,8 +19,10 @@
 //! held :8787 (newest launch wins), because the squatter was, by construction, a stale
 //! embedded server running old code. Now that the server is a separate binary, a healthy
 //! responder is more likely deliberate (standalone dev server), so a healthy BFF is
-//! REUSED and only unhealthy squatters are killed. The residual risk — reusing a healthy
-//! server built from older code — is called out in the Phase G notes.
+//! REUSED and only unhealthy squatters are killed. The residual risk (reusing a healthy
+//! server built from older code) is closed by `build_guard`: the app compares the build
+//! the server reports on `/api/health` with its own and shows a mismatch screen instead of the
+//! cockpit.
 //!
 //! LIFECYCLE: [`ServerGuard`] terminates the spawned child on Drop (SIGTERM first so the
 //! server's own shutdown hook can reap in-flight `claude` subprocesses, then SIGKILL).

@@ -362,6 +362,18 @@ html, body {
 }
 .btn-quiet:hover { color: var(--ink); }
 
+/* ---- build guard: the app and its server come from different builds ---- */
+.build-guard-wait { padding: 48px; color: var(--ink-soft); }
+.build-guard-mismatch { max-width: 640px; margin: 12vh auto 0; position: relative; z-index: 2; }
+.build-guard-command {
+  font-family: "Courier Prime", ui-monospace, monospace;
+  background: var(--accent-wash);
+  border-radius: var(--r-md);
+  padding: 12px 16px;
+  margin: 12px 0 24px;
+  overflow-x: auto;
+}
+
 /* ---- clarify (hero) --------------------------------------------------- */
 .clarify {
   width: 100%;

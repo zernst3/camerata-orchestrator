@@ -3,8 +3,15 @@
 
 use crate::*;
 
+/// Liveness plus the build identity: the app compares `commit` with its own and refuses to run
+/// against a server from a different build. `commit` is `null` for a build outside a git checkout.
 pub(crate) async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "service": "camerata-server" }))
+    Json(serde_json::json!({
+        "status": "ok",
+        "service": "camerata-server",
+        "commit": ENGINE_COMMIT,
+        "dirty": ENGINE_DIRTY,
+    }))
 }
 
 /// The gate's enforced rules, minus the GOV-1 verification fixture (kept in the
