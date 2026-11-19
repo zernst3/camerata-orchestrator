@@ -372,7 +372,9 @@ mod tests {
     }
 
     fn confirm_tag(html: &str) -> String {
-        let at = html.find("btn-solid-danger").expect("the confirm button renders");
+        let at = html
+            .find("btn-solid-danger")
+            .expect("the confirm button renders");
         let start = html[..at].rfind("<button").unwrap();
         let end = html[at..].find('>').unwrap() + at;
         html[start..=end].to_string()
@@ -380,13 +382,25 @@ mod tests {
 
     #[test]
     fn the_dialog_names_what_goes_says_it_cannot_be_undone_and_points_at_the_source_only_delete() {
-        let html = render(Case { typed: String::new(), loaded: true });
-        assert!(html.contains("Delete project Acme and all its data"), "{html}");
+        let html = render(Case {
+            typed: String::new(),
+            loaded: true,
+        });
+        assert!(
+            html.contains("Delete project Acme and all its data"),
+            "{html}"
+        );
         assert!(html.contains("This cannot be undone."), "{html}");
         assert!(html.contains("the saved runs"), "{html}");
-        assert!(html.contains("the inspections with their findings"), "{html}");
+        assert!(
+            html.contains("the inspections with their findings"),
+            "{html}"
+        );
         assert!(html.contains("keep the findings"), "{html}");
-        assert!(html.contains("Delete source code from this machine"), "{html}");
+        assert!(
+            html.contains("Delete source code from this machine"),
+            "{html}"
+        );
         assert!(!html.contains('\u{2014}') && !html.contains('\u{2013}'));
         assert!(!html.contains(", and"), "no serial comma");
     }
@@ -394,13 +408,22 @@ mod tests {
     #[test]
     fn the_confirm_button_stays_disabled_until_the_exact_project_name_is_typed() {
         for typed in ["", "acme", "Acme ", " Acme", "Acme2", "ACME"] {
-            let tag = confirm_tag(&render(Case { typed: typed.to_string(), loaded: true }));
+            let tag = confirm_tag(&render(Case {
+                typed: typed.to_string(),
+                loaded: true,
+            }));
             assert!(tag.contains("disabled"), "typed {typed:?}: {tag}");
         }
-        let tag = confirm_tag(&render(Case { typed: "Acme".to_string(), loaded: true }));
+        let tag = confirm_tag(&render(Case {
+            typed: "Acme".to_string(),
+            loaded: true,
+        }));
         assert!(!tag.contains("disabled"), "{tag}");
         // Nothing loaded yet: nothing can be confirmed even with the right name.
-        let tag = confirm_tag(&render(Case { typed: "Acme".to_string(), loaded: false }));
+        let tag = confirm_tag(&render(Case {
+            typed: "Acme".to_string(),
+            loaded: false,
+        }));
         assert!(tag.contains("disabled"), "{tag}");
     }
 
@@ -514,7 +537,10 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Delete project and all its data"), "{html}");
-        assert!(!html.contains("Delete source code from this machine"), "{html}");
+        assert!(
+            !html.contains("Delete source code from this machine"),
+            "{html}"
+        );
         assert!(html.contains("Danger zone"));
     }
 
@@ -536,7 +562,10 @@ mod tests {
 
         fire(&vdom, "click", marked(&w, "dp-cancel"));
         pump(&mut vdom, &mut w, 200).await;
-        assert!(!dioxus_ssr::render(&vdom).contains("Type "), "the dialog closed");
+        assert!(
+            !dioxus_ssr::render(&vdom).contains("Type "),
+            "the dialog closed"
+        );
         assert_eq!(delete_calls(&server).await, 0, "cancel deletes nothing");
     }
 

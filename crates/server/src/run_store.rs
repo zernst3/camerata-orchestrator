@@ -1841,7 +1841,11 @@ pub fn runs_of_project(
         let Ok(record) = load_record(&dir) else {
             continue;
         };
-        let covered: Vec<PathBuf> = record.repos.iter().map(|r| canon(Path::new(&r.dir))).collect();
+        let covered: Vec<PathBuf> = record
+            .repos
+            .iter()
+            .map(|r| canon(Path::new(&r.dir)))
+            .collect();
         match &record.project_id {
             Some(owner) if owner == project_id => {}
             Some(_) => continue,

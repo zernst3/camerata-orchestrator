@@ -100,9 +100,6 @@ pub const DATA_DIR_ENTRIES: &[(&str, Treatment)] = &[
     ("projects.json", Treatment::NoClientCode),
     ("settings.json", Treatment::NoClientCode),
     ("source-records.json", Treatment::NoClientCode),
-    // Project deletion records: names, paths and counts, no content. Kept as proof; no deletion
-    // removes this folder.
-    ("deletion-records", Treatment::NoClientCode),
     // Governed-development state: agent chat text and ids, no source files.
     ("uow.json", Treatment::NoClientCode),
     ("stories.json", Treatment::NoClientCode),

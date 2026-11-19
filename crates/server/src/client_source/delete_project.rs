@@ -275,8 +275,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     let cli_dir = state.storage_roots.cli_state_dir.clone();
 
     // A run of the project in flight (a scan, a governed run, a live saved run) refuses it all.
-    if state.jobs.has_running_for_project(&project.id)
-        || state.source_ops.scan_running(&project.id)
+    if state.jobs.has_running_for_project(&project.id) || state.source_ops.scan_running(&project.id)
     {
         return Err(Refusal::conflict(
             "scan_in_progress",
@@ -339,8 +338,9 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
                             | PurgedKind::InMemory
                     ) && !is_set_file(&s.item.path)
                 });
-                p.steps
-                    .retain(|s| seen.insert((s.item.kind.label().to_string(), s.item.path.clone())));
+                p.steps.retain(|s| {
+                    seen.insert((s.item.kind.label().to_string(), s.item.path.clone()))
+                });
                 targets.push((target, p));
             }
             Err(r) if matches!(r.code, "no_path" | "not_a_directory") => {
@@ -513,7 +513,10 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         ("inspection store", state.inspections.file_for(&project.id)),
         ("decision store", state.decisions.file_for(&project.id)),
         ("edit store", state.edits.file_for(&project.id)),
-        ("engine check store", state.engine_check.file_for(&project.id)),
+        (
+            "engine check store",
+            state.engine_check.file_for(&project.id),
+        ),
     ];
     for (cat, main) in stores {
         for f in store_files(main) {
@@ -691,7 +694,8 @@ pub async fn delete_all(
     }
 
     let removed = items.iter().filter(|i| i.outcome == PurgeOutcome::Removed);
-    let (total_files, total_bytes) = removed.fold((0u64, 0u64), |(f, b), i| (f + i.files, b + i.bytes));
+    let (total_files, total_bytes) =
+        removed.fold((0u64, 0u64), |(f, b), i| (f + i.files, b + i.bytes));
     let completed_at = now_rfc3339();
     let compact: String = completed_at.chars().filter(char::is_ascii_digit).collect();
     let record = ProjectDeletionRecord {

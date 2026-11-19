@@ -16,8 +16,8 @@ use crate::decisions::DecisionCtx;
 use crate::edits::{EditCtx, EditDraft};
 use crate::onboard::Finding;
 use crate::run_store::{ModelsRecord, RunOrigin, RunRecord, RunStatus, STORE_SCHEMA_VERSION};
-use crate::scan_cache::{ScanManifest, MANIFEST_VERSION};
 use crate::scan_cache::state_dir::repo_state_key;
+use crate::scan_cache::{ScanManifest, MANIFEST_VERSION};
 
 const SENT_A: &str = "SENTINEL-ALPHA-9F31";
 const SENT_B: &str = "SENTINEL-BETA-77C2";
@@ -26,7 +26,11 @@ const NOW: &str = "2026-11-19T09:00:00Z";
 
 /// A second project over its own repo, cloned under the workspace.
 fn add_project_b(fx: &Fx) -> (String, PathBuf) {
-    let b = fx.state.projects.create("Beta", vec![REPO_B.to_string()]).unwrap();
+    let b = fx
+        .state
+        .projects
+        .create("Beta", vec![REPO_B.to_string()])
+        .unwrap();
     let base = fx.root.join("remote-other-lib");
     std::fs::create_dir_all(&base).unwrap();
     let (_bare, url, _sha) = crate::test_git::bare_remote(&base, &[("lib.rs", "pub fn f() {}\n")]);
@@ -55,7 +59,14 @@ fn write(path: &Path, body: &str) {
 
 /// Seed every location for one project and return the paths (and what each holds) that a
 /// sentinel was written into as plain files.
-fn seed(fx: &Fx, pid: &str, repo: &str, checkout: &Path, sentinel: &str, tag: &str) -> Vec<PathBuf> {
+fn seed(
+    fx: &Fx,
+    pid: &str,
+    repo: &str,
+    checkout: &Path,
+    sentinel: &str,
+    tag: &str,
+) -> Vec<PathBuf> {
     let state = &fx.state;
     let roots = fx.roots();
     let cli = roots.cli_state_dir.clone().unwrap();
@@ -74,9 +85,10 @@ fn seed(fx: &Fx, pid: &str, repo: &str, checkout: &Path, sentinel: &str, tag: &s
         findings: vec![finding(repo, sentinel)],
         ..ScanManifest::default()
     };
-    manifest
-        .files
-        .insert(repo.to_string(), [("src/main.rs".to_string(), "ab".to_string())].into());
+    manifest.files.insert(
+        repo.to_string(),
+        [("src/main.rs".to_string(), "ab".to_string())].into(),
+    );
     state.scan_cache.put(pid, manifest);
 
     // Inspection (persisted), with a recorded model session and its file.
@@ -95,10 +107,17 @@ fn seed(fx: &Fx, pid: &str, repo: &str, checkout: &Path, sentinel: &str, tag: &s
             },
         )
         .unwrap();
-    put(claude.join(format!("-work-{tag}")).join(format!("{session}.jsonl")), sentinel.to_string());
+    put(
+        claude
+            .join(format!("-work-{tag}"))
+            .join(format!("{session}.jsonl")),
+        sentinel.to_string(),
+    );
 
     // Onboarding draft entry.
-    state.draft.save(pid, serde_json::json!({ "note": sentinel }));
+    state
+        .draft
+        .save(pid, serde_json::json!({ "note": sentinel }));
 
     // Decisions, edits, engine check.
     state
@@ -167,10 +186,19 @@ fn seed(fx: &Fx, pid: &str, repo: &str, checkout: &Path, sentinel: &str, tag: &s
 
     // CLI bookkeeping keyed by the checkout, finder files, a multi-repo set.
     let key = repo_state_key(checkout);
-    for suffix in [".cache.json", ".ledger.json", ".finder-run.json", ".run-difference.md"] {
+    for suffix in [
+        ".cache.json",
+        ".ledger.json",
+        ".finder-run.json",
+        ".run-difference.md",
+    ] {
         put(cli.join(format!("{key}{suffix}")), sentinel.to_string());
     }
-    let canon = checkout.canonicalize().unwrap().to_string_lossy().into_owned();
+    let canon = checkout
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let set = format!("project-1-{tag}00000");
     put(
         cli.join(format!("{set}.repos.json")),
@@ -220,9 +248,15 @@ fn seed(fx: &Fx, pid: &str, repo: &str, checkout: &Path, sentinel: &str, tag: &s
         incomplete_reasons: Vec::new(),
         notes: Vec::new(),
     };
-    put(run_dir.join("run.json"), serde_json::to_string(&record).unwrap());
+    put(
+        run_dir.join("run.json"),
+        serde_json::to_string(&record).unwrap(),
+    );
     put(run_dir.join("calls").join("c.json"), sentinel.to_string());
-    put(run_dir.join("finder-rooms/room-1/code/a.rs"), sentinel.to_string());
+    put(
+        run_dir.join("finder-rooms/room-1/code/a.rs"),
+        sentinel.to_string(),
+    );
     put(run_dir.join("finder-traces/t.jsonl"), sentinel.to_string());
     files
 }
@@ -240,9 +274,9 @@ fn hits(root: &Path, needle: &str) -> Vec<PathBuf> {
         };
         if meta.is_dir() {
             out.extend(hits(&p, needle));
-        } else if std::fs::read(&p).is_ok_and(|b| {
-            b.windows(needle.len()).any(|w| w == needle.as_bytes())
-        }) {
+        } else if std::fs::read(&p)
+            .is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes()))
+        {
             out.push(p);
         }
     }
@@ -285,7 +319,10 @@ async fn deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_ot
     let left = hits(&fx.root, SENT_A);
     assert!(left.is_empty(), "A data left behind: {left:?}");
     assert!(!fx.checkout.exists());
-    assert!(fx.state.projects.get(&fx.project_id).is_none(), "project record gone");
+    assert!(
+        fx.state.projects.get(&fx.project_id).is_none(),
+        "project record gone"
+    );
     assert!(fx.state.inspections.list(&fx.project_id).is_empty());
     assert!(fx.state.decisions.list(&fx.project_id).is_empty());
     assert!(fx.state.edits.list(&fx.project_id).is_empty());
@@ -302,7 +339,10 @@ async fn deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_ot
             continue; // holds folder paths, not the sentinel
         }
         assert!(
-            std::fs::read(f).unwrap().windows(SENT_B.len()).any(|x| x == SENT_B.as_bytes()),
+            std::fs::read(f)
+                .unwrap()
+                .windows(SENT_B.len())
+                .any(|x| x == SENT_B.as_bytes()),
             "{}",
             f.display()
         );
@@ -321,11 +361,27 @@ async fn deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_ot
     let text = std::fs::read_to_string(&record_path).unwrap();
     assert!(!text.contains(SENT_A));
     assert!(out.record.total_files > 0 && out.record.project_removed);
-    assert!(out.record.items.iter().any(|i| i.category == "checkout" && i.files > 0));
+    assert!(out
+        .record
+        .items
+        .iter()
+        .any(|i| i.category == "checkout" && i.files > 0));
     assert!(out.record.items.iter().any(|i| i.category == "saved run"));
-    assert!(out.record.items.iter().any(|i| i.category == "model session file"));
-    assert!(out.record.items.iter().any(|i| i.category == "finder run file"));
-    assert!(out.record.not_reached.iter().any(|n| n.contains("Time Machine")));
+    assert!(out
+        .record
+        .items
+        .iter()
+        .any(|i| i.category == "model session file"));
+    assert!(out
+        .record
+        .items
+        .iter()
+        .any(|i| i.category == "finder run file"));
+    assert!(out
+        .record
+        .not_reached
+        .iter()
+        .any(|n| n.contains("Time Machine")));
     assert!(record_path.with_extension("txt").is_file());
 
     // A restart finds nothing of A either (the files, not the memory, were removed).
@@ -338,9 +394,14 @@ async fn deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_ot
 async fn a_second_deletion_finds_the_records_folder_untouched() {
     let w = world();
     let fx = &w.fx;
-    let first = delete_all(&fx.state, &fx.project_id, &req("Acme")).await.unwrap();
+    let first = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
     let second = delete_all(&fx.state, &w.b_id, &req("Beta")).await.unwrap();
-    assert!(first.record_path.unwrap().is_file(), "the first record survives the second delete");
+    assert!(
+        first.record_path.unwrap().is_file(),
+        "the first record survives the second delete"
+    );
     assert!(second.record_path.unwrap().is_file());
 }
 
@@ -350,7 +411,10 @@ async fn it_is_refused_while_a_scan_of_the_project_is_running_and_removes_nothin
     let fx = &w.fx;
     let _scan = fx.state.source_ops.begin_scan(&fx.project_id);
 
-    let refused = delete_all(&fx.state, &fx.project_id, &req("Acme")).await.err().expect("refused");
+    let refused = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .err()
+        .expect("refused");
 
     assert_eq!(refused.code, "scan_in_progress");
     assert!(fx.checkout.exists());
@@ -363,10 +427,18 @@ async fn it_is_refused_while_a_saved_run_of_the_project_is_live() {
     let w = world();
     let fx = &w.fx;
     // A live lock on the run: hold the OS lock the store probes.
-    let run_dir = fx.roots().cli_state_dir.unwrap().join("runs").join("run-aaaaaaaaaaaa");
+    let run_dir = fx
+        .roots()
+        .cli_state_dir
+        .unwrap()
+        .join("runs")
+        .join("run-aaaaaaaaaaaa");
     let lock = crate::run_store::RunLock::acquire(&run_dir).expect("lock");
 
-    let refused = delete_all(&fx.state, &fx.project_id, &req("Acme")).await.err().expect("refused");
+    let refused = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .err()
+        .expect("refused");
 
     drop(lock);
     assert_eq!(refused.code, "scan_in_progress");
@@ -378,7 +450,10 @@ async fn a_wrong_typed_name_deletes_nothing() {
     let w = world();
     let fx = &w.fx;
     for typed in ["", "acme", "Acme ", "Beta"] {
-        let refused = delete_all(&fx.state, &fx.project_id, &req(typed)).await.err().expect("refused");
+        let refused = delete_all(&fx.state, &fx.project_id, &req(typed))
+            .await
+            .err()
+            .expect("refused");
         assert_eq!(refused.code, "confirmation_mismatch", "{typed:?}");
     }
     assert!(fx.checkout.exists());
@@ -391,12 +466,22 @@ async fn a_checkout_another_project_also_uses_is_kept_and_named_in_the_record() 
     let w = world();
     let fx = &w.fx;
     // Project C lists A's repo too.
-    let c = fx.state.projects.create("Gamma", vec![REPO.to_string()]).unwrap();
+    let c = fx
+        .state
+        .projects
+        .create("Gamma", vec![REPO.to_string()])
+        .unwrap();
 
-    let out = delete_all(&fx.state, &fx.project_id, &req("Acme")).await.unwrap();
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
 
     assert!(fx.checkout.exists(), "the shared checkout stays");
-    assert!(out.record.kept.iter().any(|k| k.what.contains(REPO) && k.why.contains("Gamma")));
+    assert!(out
+        .record
+        .kept
+        .iter()
+        .any(|k| k.what.contains(REPO) && k.why.contains("Gamma")));
     assert!(fx.state.projects.get(&c.id).is_some());
     // The project's own stores are still gone.
     assert!(fx.state.inspections.list(&fx.project_id).is_empty());
@@ -410,11 +495,14 @@ async fn a_cockpit_run_of_another_project_over_a_shared_repo_is_never_removed() 
     // B's run records B as its project but covers A's checkout too (a shared folder).
     let cli = fx.roots().cli_state_dir.unwrap();
     let run_json = cli.join("runs/run-bbbbbbbbbbbb/run.json");
-    let mut rec: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&run_json).unwrap()).unwrap();
+    let mut rec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&run_json).unwrap()).unwrap();
     rec["repos"][0]["dir"] = serde_json::json!(fx.checkout.to_string_lossy());
     std::fs::write(&run_json, rec.to_string()).unwrap();
 
-    delete_all(&fx.state, &fx.project_id, &req("Acme")).await.unwrap();
+    delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
 
     assert!(run_json.is_file(), "B's run stays");
 }
@@ -429,11 +517,16 @@ async fn a_failed_location_keeps_the_project_so_the_deletion_can_be_retried() {
     let wrong = fx.root.join("work").join("acme").join("app");
     std::fs::remove_dir_all(wrong.join(".git")).unwrap();
 
-    let out = delete_all(&fx.state, &fx.project_id, &req("Acme")).await.unwrap();
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
 
     assert!(out.partial);
     assert!(!out.record.project_removed);
-    assert!(fx.state.projects.get(&fx.project_id).is_some(), "the project stays for a retry");
+    assert!(
+        fx.state.projects.get(&fx.project_id).is_some(),
+        "the project stays for a retry"
+    );
     assert!(out
         .record
         .items
@@ -451,9 +544,12 @@ async fn the_preview_lists_the_plan_and_removes_nothing() {
         AxPath(fx.project_id.clone()),
     )
     .await;
-    let body = axum::body::to_bytes(axum::response::IntoResponse::into_response(resp).into_body(), usize::MAX)
-        .await
-        .unwrap();
+    let body = axum::body::to_bytes(
+        axum::response::IntoResponse::into_response(resp).into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["ok"], true);
     let labels: Vec<String> = v["plan"]["item_view"]
@@ -462,8 +558,16 @@ async fn the_preview_lists_the_plan_and_removes_nothing() {
         .iter()
         .map(|i| i["label"].as_str().unwrap().to_string())
         .collect();
-    for want in ["checkout", "inspection store", "saved run", "project record"] {
-        assert!(labels.iter().any(|l| l == want), "{want} missing from {labels:?}");
+    for want in [
+        "checkout",
+        "inspection store",
+        "saved run",
+        "project record",
+    ] {
+        assert!(
+            labels.iter().any(|l| l == want),
+            "{want} missing from {labels:?}"
+        );
     }
     assert!(fx.checkout.exists());
     assert!(fx.state.projects.get(&fx.project_id).is_some());
