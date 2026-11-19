@@ -325,6 +325,71 @@ fn a_no_rows_refusal_keeps_the_drafts_queue_pending_and_migrates_once_rows_exist
     );
 }
 
+/// A load with no scan rows over a draft queue holding `old\0key` as Ignored.
+fn held_load() -> (FakeStore, DraftQueue, Loaded) {
+    let mut store = FakeStore::new(Vec::new());
+    *store.migrated.borrow_mut() = false;
+    store.migrate_refuses = true;
+    let queue = DraftQueue {
+        pending: map(&[("old\0key", disp(TriageState::Ignored, "fixture"))]),
+        ..DraftQueue::default()
+    };
+    let loaded = block_on(load_decisions(&store, &queue));
+    (store, queue, loaded)
+}
+
+#[test]
+fn a_changed_held_key_holds_the_new_value_with_a_fresh_stamp_and_is_never_posted() {
+    let (store, _queue, loaded) = held_load();
+    let mut screen = loaded.shown.clone();
+    let changed = disp(TriageState::Confirmed, "");
+    screen.insert("old\0key".into(), changed.clone());
+    let bridge = RefCell::new(loaded.bridge);
+    bridge
+        .borrow_mut()
+        .observe(&screen, "insp-2", "2026-11-18T10:00:00Z");
+    let out = sync(&bridge, &store, &screen);
+    assert!(store.posted.borrow().is_empty() && store.revoked.borrow().is_empty());
+    assert!(out.refused.is_empty() && !out.stored_any);
+    let saved = bridge.borrow().draft_queue(&screen);
+    assert_eq!(saved.pending, map(&[("old\0key", changed.clone())]));
+    assert_eq!(saved.stamps["old\0key"].run_id, "insp-2");
+    assert_eq!(bridge.borrow().unsynced(&screen).len(), 1);
+    // A reload shows the operator's choice, still held.
+    let again = block_on(load_decisions(&store, &saved));
+    assert_eq!(again.shown, map(&[("old\0key", changed)]));
+    assert!(again.banner.is_none());
+}
+
+#[test]
+fn an_undone_held_key_leaves_the_hold_and_the_draft() {
+    let (store, _queue, loaded) = held_load();
+    let mut screen = loaded.shown.clone();
+    screen.remove("old\0key");
+    let bridge = RefCell::new(loaded.bridge);
+    bridge
+        .borrow_mut()
+        .observe(&screen, "insp-2", "2026-11-18T10:00:00Z");
+    let out = sync(&bridge, &store, &screen);
+    assert!(store.posted.borrow().is_empty() && store.revoked.borrow().is_empty());
+    assert!(out.refused.is_empty());
+    let saved = bridge.borrow().draft_queue(&screen);
+    assert!(
+        saved.pending.is_empty() && saved.stamps.is_empty(),
+        "{saved:?}"
+    );
+    assert!(bridge.borrow().unsynced(&screen).is_empty());
+    // Shown Unresolved (rather than removed) is the same undo.
+    let mut screen = HashMap::new();
+    screen.insert("old\0key".into(), Disposition::default());
+    let (_s, _q, again) = held_load();
+    let bridge = again.bridge;
+    assert!(bridge.draft_queue(&screen).pending.is_empty());
+    // A reload shows no decision.
+    let reloaded = block_on(load_decisions(&store, &saved));
+    assert!(reloaded.shown.is_empty());
+}
+
 #[test]
 fn an_unreachable_migrate_still_gives_the_banner() {
     let mut store = FakeStore::new(Vec::new());
