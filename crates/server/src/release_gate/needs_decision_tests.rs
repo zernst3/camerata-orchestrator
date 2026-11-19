@@ -403,7 +403,8 @@ fn a_group_record_after_a_personal_decision_does_not_decide_a_critical() {
     node.scope = camerata_api_types::decisions::Scope::Node("n".to_string());
     node.applies_to = vec![key.clone()];
     let group = node_record(&key, DecisionState::FalsePositive, "dec-2", Some("dec-0"));
-    let own = crate::report_export::apply_overlay(&sealed, &[personal.clone()], &[], &[]);
+    let own =
+        crate::report_export::apply_overlay(&sealed, std::slice::from_ref(&personal), &[], &[]);
     assert!(needs_decision::undecided(&own.report().findings, &own)
         .next()
         .is_none());
