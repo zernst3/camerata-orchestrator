@@ -1498,17 +1498,11 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
     held_one.held = 1;
     stack.assert_shell_counts(&held_one);
     stack.wait_for("the export panel", "T.count('.export-blocked') === 1");
-    let panel = stack.text(".export-blocked");
-    assert!(
-        panel.contains("Export blocked: 1 row needs a decision"),
-        "{panel}"
-    );
-    assert!(
-        panel.contains(&second),
-        "the panel lists the row of card 2: {panel}"
-    );
-    assert!(
-        panel.contains("Engine Check said No, no correction yet"),
+    // The panel is one line and a door (deliberate design, export_panel.rs): the row is named
+    // where the door leads, not in the panel.
+    let panel = stack.text(".export-blocked-head");
+    assert_eq!(
+        panel, "Export blocked: 1 held row needs a decision (it is in Review).",
         "{panel}"
     );
     assert_eq!(
@@ -1517,13 +1511,26 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
         "the Export button is gone"
     );
 
-    // The panel's door on that row takes the reviewer to that card in the Engine Check lane.
-    stack.click_in(".gate-row", &second, "button");
+    // The panel's door takes the reviewer to that row's card in the Engine Check lane.
+    stack.click(".export-blocked .export-open-review", "Open Review");
     stack.wait_for(
         "card 2 again",
         "T.text('.engine-card-pos').startsWith('Card 2 of')",
     );
     assert_eq!(stack.text(".engine-card .site-pane-code"), second);
+    // The gate names that same row, at that place, for the Engine Check's uncorrected No.
+    let held = stack.gate_held();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(
+        held[0]["reason"], "engine_check_no_without_correction",
+        "{held:?}"
+    );
+    assert_eq!(
+        format!("{}:{}", held[0]["path"].as_str().unwrap(), held[0]["line"]),
+        second,
+        "{held:?}"
+    );
+    stack.wait_text(".engine-state-text", "held from export until corrected");
     assert!(
         stack.js_bool("T.has('.triage-tab.active', 'Engine Check')"),
         "the Engine Check lane is showing"
@@ -1535,9 +1542,15 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
     stack.type_into(
         ".engine-correction .queue-reason-input",
         "",
-        "this one is a real finding at critical",
+        "this one is a real finding, just a medium one",
     );
-    stack.js("(() => { const s = T.find('.engine-correction select'); s.value = 'critical'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()");
+    // Not critical: a row corrected to critical is also held until it is decided in person (release
+    // gate check 12), which the wrong-severity test above covers. This test is about the Engine
+    // Check hold falling, so the correction picks a severity the row does not already have, below
+    // critical (the row's own severity is read from the form).
+    let current = stack.js_string("T.find('.engine-correction select').value");
+    let chosen = if current == "medium" { "low" } else { "medium" };
+    stack.js(&format!("(() => {{ const s = T.find('.engine-correction select'); s.value = '{chosen}'; s.dispatchEvent(new Event('change', {{ bubbles: true }})); return s.value; }})()"));
     stack.click(".engine-correction .queue-prompt-commit", "");
     stack.wait_for(
         "the Export button",
