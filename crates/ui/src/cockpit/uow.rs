@@ -399,19 +399,37 @@ pub(super) fn development_chat_system_prompt(
 
 /// Build the JSON body for a phase-chat `POST /api/chat` request. Pure (no I/O) so the
 /// request shape is unit-testable without a live model call. Mirrors the global
-/// assistant's body: `{ prompt, model, system, history }`.
+/// assistant's body: `{ prompt, model, system, project_id, history }`. `project_id` names the
+/// project whose story data the system prompt carries, so the server applies THAT project's
+/// client-engagement lock (a phase chat carries the story and its investigation note).
 pub(super) fn phase_chat_body(
     prompt: &str,
     model: &str,
     system: &str,
+    project_id: Option<&str>,
     history: &[PhaseChatHistoryTurn],
 ) -> serde_json::Value {
     serde_json::json!({
         "prompt": prompt,
         "model": model,
         "system": system,
+        "project_id": project_id,
         "history": history,
     })
+}
+
+/// One phase-chat turn for the project open on screen: resolves that project's id and sends it
+/// with the request. Both phase chats (investigation and development) call this. With no
+/// project id the request names none, and the server refuses a system prompt that carries story
+/// data (nothing is sent to a model).
+pub(super) async fn phase_chat_turn(
+    prompt: &str,
+    model: &str,
+    system: &str,
+    history: Vec<PhaseChatHistoryTurn>,
+) -> Result<String, String> {
+    let project_id = super::fetch_active_project().await.map(|p| p.id);
+    send_phase_chat(prompt, model, system, project_id.as_deref(), history).await
 }
 
 /// The AI reply text returned by `/api/chat` (`crate::llm::LlmResponse`); only `text` is
@@ -433,9 +451,10 @@ pub(super) async fn send_phase_chat(
     prompt: &str,
     model: &str,
     system: &str,
+    project_id: Option<&str>,
     history: Vec<PhaseChatHistoryTurn>,
 ) -> Result<String, String> {
-    let body = phase_chat_body(prompt, model, system, &history);
+    let body = phase_chat_body(prompt, model, system, project_id, &history);
     let resp = reqwest::Client::new()
         .post(format!("{}/api/chat", crate::bff_base()))
         .json(&body)
@@ -1582,15 +1601,33 @@ pub(super) static GOV_DEV_STATE: GlobalSignal<GovDevState> = Signal::global(GovD
 /// happened this session (the chat caller omits the layer entirely in that case).
 /// Called from `main.rs` to pass the section into `ChatBubble` without exposing the
 /// `GOV_DEV_STATE` signal or `WorkItem` type outside this module.
-pub(crate) fn pulled_issues_chat_section() -> Option<String> {
+pub(crate) fn pulled_issues_chat_section_for(project_id: &str) -> Option<String> {
     let guard = GOV_DEV_STATE.read();
-    let items = guard.pulled_items()?;
+    // The pull cache is keyed by project id: only the project's own pull is ever returned.
+    let items = guard.pulled_for(project_id)?;
     let section = render_pulled_issues_for_chat(items);
     if section.is_empty() {
         None
     } else {
         Some(section)
     }
+}
+
+/// Test seam: record a pull of one open issue for `project_id` in the app-lifetime cache the chat
+/// reads. Must run inside a Dioxus runtime (the cache is a global signal).
+#[cfg(test)]
+pub(crate) fn seed_pulled_issue_for_chat_tests(project_id: &str, number: u64, title: &str) {
+    GOV_DEV_STATE.write().apply(GovDevMsg::WorkItemsPulled {
+        project_id: project_id.to_string(),
+        items: vec![WorkItem {
+            id: format!("github:me/api#{number}"),
+            repo: "me/api".to_string(),
+            number,
+            title: title.to_string(),
+            state: "open".to_string(),
+            ..WorkItem::default()
+        }],
+    });
 }
 
 /// The `POST /api/workitems/pull` envelope.
@@ -4991,7 +5028,7 @@ pub(super) fn InvestigationPhaseView(
                                     note.as_deref(),
                                     &decisions,
                                 );
-                                match send_phase_chat(&msg, &model, &system, history).await {
+                                match phase_chat_turn(&msg, &model, &system, history).await {
                                     Ok(reply) => {
                                         // Persist the REAL AI turn (role "agent") so the
                                         // transcript round-trips on reload.
@@ -5722,7 +5759,7 @@ pub(super) fn DevelopmentPhaseView(
                                                     .map(|r| approved_decision_lines(&r))
                                                     .unwrap_or_default();
                                                 let system = development_chat_system_prompt(&sid, &decisions);
-                                                match send_phase_chat(&msg, &model, &system, history).await {
+                                                match phase_chat_turn(&msg, &model, &system, history).await {
                                                     Ok(reply) => {
                                                         // Persist the REAL AI turn so the chat round-trips.
                                                         let _ = append_development_chat(&sid, "agent", &reply).await;
@@ -8256,10 +8293,14 @@ mod bff_tests {
             role: "user".to_string(),
             content: "earlier".to_string(),
         }];
-        let body = super::phase_chat_body("hello", "claude-sonnet-5", "SYS", &hist);
+        let body = super::phase_chat_body("hello", "claude-sonnet-5", "SYS", Some("p-1"), &hist);
         assert_eq!(body["prompt"], "hello");
         assert_eq!(body["model"], "claude-sonnet-5");
         assert_eq!(body["system"], "SYS");
+        assert_eq!(
+            body["project_id"], "p-1",
+            "the phase chat names its project"
+        );
         assert_eq!(body["history"][0]["role"], "user");
         assert_eq!(body["history"][0]["content"], "earlier");
     }
@@ -8327,6 +8368,7 @@ mod bff_tests {
                 "prompt": "hi",
                 "model": "m",
                 "system": "SYS",
+                "project_id": "p-1",
                 "history": [ { "role": "user", "content": "prior" } ],
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -8337,7 +8379,7 @@ mod bff_tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let out = super::send_phase_chat("hi", "m", "SYS", hist).await;
+        let out = super::send_phase_chat("hi", "m", "SYS", Some("p-1"), hist).await;
 
         assert_eq!(out.unwrap(), "grounded reply");
     }
@@ -8357,7 +8399,7 @@ mod bff_tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let out = super::send_phase_chat("hi", "m", "SYS", vec![]).await;
+        let out = super::send_phase_chat("hi", "m", "SYS", None, vec![]).await;
 
         let err = out.unwrap_err();
         assert!(err.contains("500"), "status surfaced: {err}");
@@ -8381,7 +8423,7 @@ mod bff_tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let out = super::send_phase_chat("hi", "m", "SYS", vec![]).await;
+        let out = super::send_phase_chat("hi", "m", "SYS", None, vec![]).await;
 
         assert!(out.unwrap_err().contains("empty response"));
     }
@@ -9561,7 +9603,7 @@ mod bff_tests {
 mod render_tests {
     use super::{
         CiRuleItem, CiRulesPanel, CreateOrOpenUow, DecisionsReviewPanel, GovDevSel,
-        NewAuthoredUowButton, RunView, UowListEntry, UowStage, WorkItem,
+        InvestigationPhaseView, NewAuthoredUowButton, RunView, UowListEntry, UowStage, WorkItem,
     };
     use dioxus::prelude::*;
 
@@ -9856,5 +9898,162 @@ mod render_tests {
             !html.contains("Approve decisions"),
             "the Approve decisions button must not render once past Investigating; html=\n{html}"
         );
+    }
+
+    // ── the phase chats name the open project (the client lock follows it) ────────────
+
+    async fn stub_for_phase_chat(active: serde_json::Value) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(active))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "text": "ok", "backend": "cli" })),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn chat_bodies(server: &wiremock::MockServer) -> Vec<serde_json::Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/chat")
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect()
+    }
+
+    // Both phase chats go through `phase_chat_turn`: it must name the project open on screen.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn phase_chat_turn_names_the_open_project() {
+        let server =
+            stub_for_phase_chat(serde_json::json!({ "id": "proj-16", "name": "Faktura" })).await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let out = super::phase_chat_turn("hi", "", "=== STORY ===\nS-1\n", vec![]).await;
+        assert_eq!(out.as_deref(), Ok("ok"));
+        let bodies = chat_bodies(&server).await;
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["project_id"], "proj-16");
+    }
+
+    // With no project the request names none (the server then refuses story data).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn phase_chat_turn_with_no_open_project_names_none() {
+        let server = stub_for_phase_chat(serde_json::Value::Null).await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let _ = super::phase_chat_turn("hi", "", "=== STORY ===\nS-1\n", vec![]).await;
+        let bodies = chat_bodies(&server).await;
+        assert!(bodies[0]["project_id"].is_null(), "{}", bodies[0]);
+    }
+
+    // The REAL investigation panel: type a message, click Send, and the chat request names the
+    // project open on screen.
+    #[component]
+    fn InvestigationHarness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let uow_refresh = use_signal(|| 0u32);
+        let uows_refresh = use_signal(|| 0u32);
+        let active_run = use_signal(|| Option::<RunView>::None);
+        let invest_model = use_signal(String::new);
+        let finished = use_signal(|| false);
+        rsx! {
+            InvestigationPhaseView {
+                story_id: "S-1".to_string(),
+                story_work_item_id: "github:me/api#1".to_string(),
+                uow_refresh,
+                uows_refresh,
+                active_run,
+                models: None,
+                invest_model,
+                investigation_finished: finished,
+                stage: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_investigation_chat_send_names_the_open_project() {
+        use dioxus::dioxus_core::Mutation;
+        use dioxus::html::{SerializedFormData, SerializedMouseData};
+        let server =
+            stub_for_phase_chat(serde_json::json!({ "id": "proj-16", "name": "Faktura" })).await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let mut vdom = VirtualDom::new(InvestigationHarness);
+        let mut listeners: Vec<(String, dioxus::dioxus_core::ElementId)> = Vec::new();
+        let take = |m: &dioxus::dioxus_core::Mutations, l: &mut Vec<_>| {
+            for e in &m.edits {
+                if let Mutation::NewEventListener { name, id } = e {
+                    l.push((name.clone(), *id));
+                }
+            }
+        };
+        take(&vdom.rebuild_to_vec(), &mut listeners);
+        for _ in 0..20 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            take(&vdom.render_immediate_to_vec(), &mut listeners);
+        }
+        // The chat textarea is the first input listener; its Send button is the click listener
+        // registered right after it in the same render (document order).
+        let input_pos = listeners
+            .iter()
+            .position(|(n, _)| n == "input")
+            .expect("chat input");
+        let input_id = listeners[input_pos].1;
+        let send_id = listeners[input_pos + 1..]
+            .iter()
+            .find(|(n, _)| n == "click")
+            .expect("send button")
+            .1;
+        let runtime = vdom.runtime();
+        let fire = |name: &str, id, data: Box<dyn std::any::Any>| {
+            let platform: std::rc::Rc<dyn std::any::Any> =
+                std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
+            runtime.handle_event(name, dioxus::dioxus_core::Event::new(platform, true), id);
+        };
+        fire(
+            "input",
+            input_id,
+            Box::new(SerializedFormData::new(
+                "What did the note say?".to_string(),
+                Vec::new(),
+            )),
+        );
+        for _ in 0..10 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            take(&vdom.render_immediate_to_vec(), &mut listeners);
+        }
+        let click: Box<dyn std::any::Any> = Box::new(SerializedMouseData::default());
+        fire("click", send_id, click);
+        for _ in 0..60 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(30), vdom.wait_for_work())
+                    .await;
+            take(&vdom.render_immediate_to_vec(), &mut listeners);
+        }
+        let bodies = chat_bodies(&server).await;
+        assert_eq!(bodies.len(), 1, "one chat request: {bodies:?}");
+        assert_eq!(bodies[0]["project_id"], "proj-16", "{}", bodies[0]);
+        assert!(bodies[0]["system"]
+            .as_str()
+            .unwrap()
+            .contains("=== STORY ==="));
     }
 }

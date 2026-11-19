@@ -219,7 +219,6 @@ fn App() -> Element {
         // in Project mode focused on that finding.
         chat::ChatBubble {
             finding: ask_finding(),
-            pulled_issues_section: cockpit::pulled_issues_chat_section(),
             project_open: screen() == cockpit::CockpitScreen::InProject,
         }
         // The in-app terminal: a floating PTY-backed shell panel with tab support.

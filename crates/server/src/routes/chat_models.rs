@@ -332,23 +332,26 @@ pub fn resolve_chat_model(req_model: Option<&str>, app_chat_model: Option<&str>)
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
 }
 
-/// Headers of the system-prompt layers that carry a PROJECT's data (development state, pulled
-/// issues, scan results, selected rules, ruleset, focused finding). The UI builds the prompt, so
-/// the server cannot see what is inside a layer, but it can see these headers.
-const PROJECT_LAYER_MARKERS: [&str; 6] = [
-    "=== LAYER 3:",
-    "=== LAYER 3b:",
-    "=== LAYER 3c:",
-    "=== LAYER 3d:",
-    "=== LAYER 3e:",
-    "=== LAYER 4:",
-];
+/// The only `=== ` section headers a system prompt may carry when the request names no project:
+/// the static layers (technical reference, user guide, rules catalog). Any other header (the
+/// project layers 3 to 4, a phase chat's `=== STORY ===` or `=== INVESTIGATION NOTE ===`, anything
+/// new) is project data. The UI builds the prompt, so the server cannot see what is inside a
+/// section, but it can see these header lines. The shipped docs contain no `=== ` lines.
+const PROJECT_FREE_HEADERS: [&str; 3] = ["=== LAYER 1:", "=== LAYER 1b:", "=== LAYER 2:"];
+
+/// The first `=== ` header line in `system` that a project-free request may not carry.
+fn project_header(system: &str) -> Option<&str> {
+    system
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with("=== ") && !PROJECT_FREE_HEADERS.iter().any(|h| l.starts_with(h)))
+}
 
 /// The one place the chat decides its project and its client lock. The request names the project
 /// (`project_id`) or none; that project, not the server's last active one, decides the lock.
 /// - Unknown project id: refused (fail closed).
-/// - No project but the system prompt carries a project layer header: refused, because project
-///   data would then ride on a request the lock cannot see.
+/// - No project but the system prompt carries any header other than the static layers: refused,
+///   because project data would then ride on a request the lock cannot see.
 /// - A client-engagement project on the `cli` chat backend, or with a non-Anthropic model: refused.
 ///
 /// Returns the `Llm` to run on. Pure of model calls, so it is testable.
@@ -372,13 +375,11 @@ pub(crate) fn chat_lock(
         None => None,
     };
     if project.is_none() {
-        if let Some(sys) = req.system.as_deref() {
-            if let Some(marker) = PROJECT_LAYER_MARKERS.iter().find(|m| sys.contains(**m)) {
-                return Err(backend_refused(format!(
-                    "This chat request carries project data ({marker}) but names no project, so \
-                     the client-engagement lock cannot be checked. Nothing was sent to a model."
-                )));
-            }
+        if let Some(header) = req.system.as_deref().and_then(project_header) {
+            return Err(backend_refused(format!(
+                "This chat request carries project data ({header}) but names no project, so \
+                 the client-engagement lock cannot be checked. Nothing was sent to a model."
+            )));
         }
     }
     let llm = state

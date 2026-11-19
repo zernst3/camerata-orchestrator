@@ -25,6 +25,14 @@ use crate::chat::{ChatBubble, FindingContext};
 struct HarnessProps {
     project_open: bool,
     finding: Option<FindingContext>,
+    /// Seed an issue pull for this project id into the app-lifetime pull cache.
+    pulled_for: Option<String>,
+}
+
+thread_local! {
+    /// The harness's "is a project open on screen" signal, so a test can open or leave a project
+    /// the way the cockpit does (the real bubble re-renders with the new `project_open`).
+    static OPEN_SIG: std::cell::Cell<Option<Signal<bool>>> = const { std::cell::Cell::new(None) };
 }
 
 #[component]
@@ -34,8 +42,16 @@ fn Harness(props: HarnessProps) -> Element {
     let rules = use_resource(crate::chat::fetch_rules_catalog);
     use_context_provider(|| rules);
     crate::provider_safety::provide_provider_policy_context();
+    let pulled_for = props.pulled_for.clone();
+    use_hook(move || {
+        if let Some(id) = pulled_for {
+            crate::cockpit::seed_pulled_issue_for_chat_tests(&id, 7, "client issue");
+        }
+    });
+    let open_sig = use_signal(|| props.project_open);
+    OPEN_SIG.with(|c| c.set(Some(open_sig)));
     rsx! {
-        ChatBubble { project_open: props.project_open, finding: props.finding.clone() }
+        ChatBubble { project_open: open_sig(), finding: props.finding.clone() }
     }
 }
 
@@ -94,12 +110,21 @@ struct Page {
 impl Page {
     /// Mount the real bubble (panel closed) against whatever `CAMERATA_BFF_URL` points at.
     async fn mount(project_open: bool, finding: Option<FindingContext>) -> Self {
+        Self::mount_with(project_open, finding, None).await
+    }
+
+    async fn mount_with(
+        project_open: bool,
+        finding: Option<FindingContext>,
+        pulled_for: Option<&str>,
+    ) -> Self {
         dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
         let mut vdom = VirtualDom::new_with_props(
             Harness,
             HarnessProps {
                 project_open,
                 finding,
+                pulled_for: pulled_for.map(str::to_string),
             },
         );
         let mut seen = Seen::default();
@@ -199,6 +224,17 @@ impl Page {
         self.settle(500).await;
     }
 
+    /// Open or leave a project on screen (what the cockpit does when the operator opens a
+    /// project or goes back to the projects home).
+    async fn set_project_open(&mut self, open: bool) {
+        let sig = OPEN_SIG.with(|c| c.get()).expect("harness mounted");
+        self.vdom.in_runtime(|| {
+            let mut sig = sig;
+            sig.set(open);
+        });
+        self.settle(600).await;
+    }
+
     async fn click_see_more(&mut self) {
         let toggle = self
             .seen
@@ -296,6 +332,45 @@ impl Stub {
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&self.server)
+            .await;
+    }
+
+    /// The project context answers only after `ms` (the panel must say it is loading meanwhile).
+    async fn project_delayed(&self, ms: u64) {
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active/context"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(ms))
+                    .set_body_json(serde_json::json!({
+                        "ok": true, "project_id": "proj-16", "project_name": "Faktura Test",
+                        "client_engagement": false,
+                        "selected_rules_section": "Total selected: 96 rule(s)\n"
+                    })),
+            )
+            .mount(&self.server)
+            .await;
+    }
+
+    /// The project context cannot be loaded.
+    async fn project_failing(&self) {
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active/context"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&self.server)
+            .await;
+    }
+
+    /// The chat answers with `text` (instead of the default "ok").
+    async fn chat_replies(&self, text: &str) {
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "text": text, "backend": "cli" })),
+            )
+            .with_priority(1)
             .mount(&self.server)
             .await;
     }
@@ -588,6 +663,7 @@ async fn a_focused_finding_is_a_row_and_is_sent() {
         snippet: String::new(),
         detail: "Hardcoded password literal.".into(),
         repo: "me/api".into(),
+        project_id: "proj-16".into(),
     };
     let mut page = Page::mount(true, Some(finding)).await;
     page.settle(500).await; // a finding opens the panel by itself
@@ -660,4 +736,148 @@ async fn a_client_project_on_the_api_is_allowed() {
     let posts = stub.chat_posts().await;
     assert_eq!(posts.len(), 1, "{posts:?}");
     assert_eq!(posts[0]["project_id"], "proj-16");
+}
+
+// ── Round 2: a project's conversation, finding and pulled issues stay with that project ──
+
+/// LEAVING A CLIENT PROJECT. The replies about it are gone from the transcript, and the next
+/// message (from the home screen) carries no history of it.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn leaving_a_client_project_clears_the_conversation() {
+    let stub = Stub::start("api", None).await;
+    stub.registry_ok().await;
+    stub.project(true, true).await;
+    stub.chat_replies("CLIENT-SECRET-REPLY").await;
+    let _env = bff!(stub);
+    let mut page = Page::mount(true, None).await;
+    page.click_fab().await;
+    page.settle_until("Project open: Faktura Test", 5000).await;
+    page.type_text("Tell me about the client").await;
+    page.press_enter().await;
+    page.settle_until("CLIENT-SECRET-REPLY", 5000).await;
+    assert!(
+        page.html().contains("CLIENT-SECRET-REPLY"),
+        "the reply is shown"
+    );
+    // Back to the projects home.
+    page.set_project_open(false).await;
+    let html = page.html();
+    assert!(!html.contains("CLIENT-SECRET-REPLY"), "reply gone; {html}");
+    assert!(
+        !html.contains("Tell me about the client"),
+        "question gone; {html}"
+    );
+    assert!(html.contains(NO_PROJECT_LINE), "{html}");
+    // The next message from the home screen carries no history.
+    page.type_text("Anything else?").await;
+    page.press_enter().await;
+    let posts = stub.chat_posts().await;
+    let last = posts.last().unwrap();
+    assert_eq!(
+        last["history"],
+        serde_json::json!([]),
+        "no history rides along: {last}"
+    );
+    assert!(last["project_id"].is_null());
+}
+
+/// A FINDING from another project is not shown and not sent under the open project.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_finding_from_another_project_is_not_sent_under_the_open_project() {
+    let stub = Stub::start("cli", None).await;
+    stub.registry_ok().await;
+    stub.project(false, true).await; // proj-16, a normal project
+    let _env = bff!(stub);
+    let finding = FindingContext {
+        rule_id: "SEC-NO-HARDCODED-SECRETS-1".into(),
+        severity: "high".into(),
+        path: "src/main.rs".into(),
+        line: 42,
+        snippet: "client secret snippet".into(),
+        detail: "from the client project".into(),
+        repo: "client/api".into(),
+        project_id: "proj-CLIENT".into(),
+    };
+    let mut page = Page::mount(true, Some(finding)).await; // a finding opens the panel itself
+    page.settle(500).await;
+    page.settle_until("Project open: Faktura Test", 5000).await;
+    page.click_see_more().await;
+    assert!(!page.html().contains("Focused finding"), "{}", page.html());
+    page.type_text("Why?").await;
+    page.press_enter().await;
+    let posts = stub.chat_posts().await;
+    let sys = posts[0]["system"].as_str().unwrap();
+    assert!(
+        !sys.contains("=== LAYER 4:") && !sys.contains("client secret snippet"),
+        "{sys}"
+    );
+}
+
+/// PULLED ISSUES belong to the project they were pulled for. Another project's pull is not shown
+/// and not sent; the open project's own pull is both.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn pulled_issues_follow_the_project_they_were_pulled_for() {
+    for (pulled_for, expect_rows) in [("proj-CLIENT", false), ("proj-16", true)] {
+        let stub = Stub::start("cli", None).await;
+        stub.registry_ok().await;
+        stub.project(false, true).await;
+        let _env = bff!(stub);
+        let mut page = Page::mount_with(true, None, Some(pulled_for)).await;
+        page.click_fab().await;
+        page.settle_until("Project open: Faktura Test", 5000).await;
+        page.click_see_more().await;
+        let html = page.html();
+        assert_eq!(
+            html.contains("Pulled issues"),
+            expect_rows,
+            "{pulled_for}; {html}"
+        );
+        page.type_text("Which issues?").await;
+        page.press_enter().await;
+        let posts = stub.chat_posts().await;
+        let sys = posts[0]["system"].as_str().unwrap();
+        assert_eq!(sys.contains("=== LAYER 3b:"), expect_rows, "{pulled_for}");
+        assert_eq!(sys.contains("client issue"), expect_rows, "{pulled_for}");
+    }
+}
+
+/// A project is open but its context is still loading, or failed: the panel never says "No
+/// project open" (that is the home screen), and the two states read differently.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn an_open_project_whose_context_is_loading_or_failed_is_not_called_no_project() {
+    // Still loading.
+    let stub = Stub::start("cli", None).await;
+    stub.registry_ok().await;
+    stub.project_delayed(1200).await;
+    let _env = bff!(stub);
+    let mut page = Page::mount(true, None).await;
+    page.click_fab().await;
+    let html = page.html();
+    assert!(
+        html.contains("Loading this project&#39;s context"),
+        "{html}"
+    );
+    assert!(!html.contains("No project open"), "{html}");
+    page.settle_until("Project open: Faktura Test", 8000).await;
+    assert!(page.html().contains("Project open: Faktura Test"));
+    drop(_env);
+    // Failed.
+    let stub = Stub::start("cli", None).await;
+    stub.registry_ok().await;
+    stub.project_failing().await;
+    let _env = bff!(stub);
+    let mut page = Page::mount(true, None).await;
+    page.click_fab().await;
+    page.settle_until("Could not load this project", 5000).await;
+    let html = page.html();
+    assert!(
+        html.contains("Could not load this project&#39;s context"),
+        "{html}"
+    );
+    assert!(!html.contains("No project open"), "{html}");
+    assert!(!html.contains("Loading this project"), "{html}");
 }

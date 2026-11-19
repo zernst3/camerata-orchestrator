@@ -393,6 +393,10 @@ pub struct FindingContext {
     pub detail: String,
     /// Repo (`owner/repo`) this finding came from.
     pub repo: String,
+    /// The id of the project the finding came from. A finding is sent only while THAT project
+    /// is the one open on screen; a blank or different id is dropped (fail closed), so a client
+    /// project's finding can never ride under another project.
+    pub project_id: String,
 }
 
 // ── system prompt assembly ────────────────────────────────────────────────────
@@ -614,6 +618,10 @@ pub(crate) struct ContextRow {
 #[derive(Clone, PartialEq, Debug, Default)]
 pub(crate) struct ChatContext {
     pub rules_catalog: String,
+    /// Whether the cockpit has a project open on screen (even if its context has not loaded).
+    pub project_open: bool,
+    /// Whether the project context fetch has finished (successfully or not).
+    pub context_resolved: bool,
     pub project: Option<OpenProject>,
     pub uow: Vec<UowSnapshot>,
     pub pulled_issues: Option<String>,
@@ -639,19 +647,32 @@ impl ChatContext {
         let Some(f) = fetched else {
             return Self {
                 rules_catalog,
+                project_open,
                 ..Self::default()
             };
         };
+        // The finding and the pulled issues belong to the project they came from: any that do
+        // not belong to the open project are dropped here.
+        let finding = finding.filter(|fi| !fi.rule_id.is_empty() && fi.project_id == f.project.id);
         Self {
             rules_catalog,
+            project_open,
+            context_resolved: true,
             project: Some(f.project),
             uow: uow.unwrap_or_default(),
             pulled_issues: blank(pulled_issues),
-            finding: finding.filter(|f| !f.rule_id.is_empty()),
+            finding,
             scan: f.scan,
             selected_rules: f.selected_rules,
             ruleset: f.ruleset,
         }
+    }
+
+    /// Record whether the project context fetch has finished, so the panel can tell "still
+    /// loading" from "could not load".
+    pub(crate) fn with_context_resolved(mut self, resolved: bool) -> Self {
+        self.context_resolved = resolved;
+        self
     }
 
     /// The id the chat request names (the project whose data the prompt carries), or `None`.
@@ -679,9 +700,15 @@ impl ChatContext {
     /// The panel's one-line statement of which project (if any) the answers come from.
     pub(crate) fn project_line(&self) -> String {
         match &self.project {
-            None => {
+            None if !self.project_open => {
                 "No project open: answers come from the guides and the rules catalog".to_string()
             }
+            // A project is open but its context is not here (yet): say so, never "No project open".
+            None if self.context_resolved => {
+                "Could not load this project's context: answers come from the guides and the rules catalog"
+                    .to_string()
+            }
+            None => "Loading this project's context".to_string(),
             Some(p) => format!("Project open: {}", p.name),
         }
     }
@@ -813,7 +840,6 @@ fn push_static_layers(p: &mut String, rules_catalog: &str) {
 async fn build_send_context(
     project_open: bool,
     rules_catalog: String,
-    pulled_issues: Option<String>,
     finding: Option<FindingContext>,
 ) -> ChatContext {
     let fetched = if project_open {
@@ -826,6 +852,7 @@ async fn build_send_context(
     } else {
         None
     };
+    let pulled_issues = pulled_for(&fetched);
     ChatContext::assemble(
         project_open,
         rules_catalog,
@@ -834,6 +861,13 @@ async fn build_send_context(
         pulled_issues,
         finding,
     )
+}
+
+/// The pulled-issues section for the project in `fetched` only (the app-lifetime pull cache is
+/// keyed by project id); `None` when nothing was pulled for that project.
+fn pulled_for(fetched: &Option<ProjectCtx>) -> Option<String> {
+    let id = &fetched.as_ref()?.project.id;
+    crate::cockpit::pulled_issues_chat_section_for(id)
 }
 
 // ── network helpers ───────────────────────────────────────────────────────────
@@ -1043,13 +1077,12 @@ fn turns_to_history(turns: &[Turn]) -> Vec<ChatHistoryTurn> {
 async fn run_turn(
     project_open: bool,
     catalog: String,
-    pulled_issues: Option<String>,
     finding: Option<FindingContext>,
     prompt: &str,
     model: &str,
     history: Vec<ChatHistoryTurn>,
 ) -> Result<ChatResp, String> {
-    let ctx = build_send_context(project_open, catalog, pulled_issues, finding).await;
+    let ctx = build_send_context(project_open, catalog, finding).await;
     send_chat(
         prompt,
         model,
@@ -1119,12 +1152,6 @@ pub struct ChatBubbleProps {
     /// finding.
     #[props(default)]
     pub finding: Option<FindingContext>,
-    /// Pre-rendered issue spine injected by the caller from the app-lifetime
-    /// `GOV_DEV_STATE` pull cache. When `Some`, this becomes Layer 3b of the
-    /// system prompt. The caller computes the text; `ChatBubble` injects it
-    /// opaquely, keeping the chat module free of WorkItem dependencies.
-    #[props(default)]
-    pub pulled_issues_section: Option<String>,
     /// Whether a project is open on screen (the cockpit is inside a project, not on the projects
     /// home). With `false` the chat sends NO project layer and names no project, whatever the
     /// server's last active project is.
@@ -1309,14 +1336,29 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     }
 
     // The ONE context the panel shows and the next message is built from (see `ChatContext`).
+    let fetched_ctx = ctx_res.read().clone().flatten();
+    let pulled_now = pulled_for(&fetched_ctx);
     let chat_ctx = ChatContext::assemble(
         props.project_open,
         rules_catalog.clone(),
-        ctx_res.read().clone().flatten(),
+        fetched_ctx,
         uow_res.read().clone().flatten(),
-        props.pulled_issues_section.clone(),
+        pulled_now,
         active_finding.read().clone(),
-    );
+    )
+    .with_context_resolved(ctx_res.read().is_some());
+    // A different (or closed) project must not inherit the last one's conversation or finding:
+    // clear both when the open project's id changes or closes.
+    let mut last_project_id = use_signal(|| Option::<String>::None);
+    let now_project_id = chat_ctx.project_id().map(str::to_string);
+    if last_project_id() != now_project_id {
+        if last_project_id().is_some() {
+            turns.write().clear();
+            active_finding.set(None);
+            last_injected_finding.set(None);
+        }
+        last_project_id.set(now_project_id);
+    }
     let ctx_rows = chat_ctx.rows();
     let project_line = chat_ctx.project_line();
     let send_block = chat_ctx.send_block(chat_backend.as_deref());
@@ -1492,7 +1534,6 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                         onkeydown: {
                             let catalog_kd2 = catalog_kd.clone();
                             let finding_kd = active_finding.read().clone();
-                            let pis_kd = props.pulled_issues_section.clone();
                             let block_kd = block_kd.clone();
                             move |e: Event<KeyboardData>| {
                                 if e.key() == Key::Enter && !e.modifiers().shift() {
@@ -1511,7 +1552,6 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     sending.set(true);
                                     let catalog_send = catalog_kd2.clone();
                                     let finding_send = finding_kd.clone();
-                                    let pis_send = pis_kd.clone();
                                     spawn(async move {
                                         // The Bombe is reserved for AI work: hold a loading guard
                                         // for the whole chat turn so the machine runs while the
@@ -1520,7 +1560,6 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         let reply = run_turn(
                                             project_open_kd,
                                             catalog_send,
-                                            pis_send,
                                             finding_send,
                                             &prompt,
                                             &mdl,
@@ -1548,7 +1587,6 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             onclick: {
                                 let catalog_btn2 = catalog_btn.clone();
                                 let finding_btn = active_finding.read().clone();
-                                let pis_btn = props.pulled_issues_section.clone();
                                 let block_btn = block_btn.clone();
                                 move |_| {
                                     let prompt = draft().trim().to_string();
@@ -1564,13 +1602,11 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     sending.set(true);
                                     let catalog_send = catalog_btn2.clone();
                                     let finding_send = finding_btn.clone();
-                                    let pis_send = pis_btn.clone();
                                     spawn(async move {
                                         let _guard = crate::loading::LoadingGuard::new();
                                         let reply = run_turn(
                                             project_open_btn,
                                             catalog_send,
-                                            pis_send,
                                             finding_send,
                                             &prompt,
                                             &mdl,
@@ -2229,6 +2265,7 @@ mod tests {
             snippet: "let pwd = \"hunter2\";".to_string(),
             detail: "Hardcoded password literal found.".to_string(),
             repo: "me/api".to_string(),
+            project_id: "proj-16".to_string(),
         }
     }
 
@@ -3420,5 +3457,55 @@ mod tests {
         // Home screen with CLI is allowed.
         let home = ChatContext::assemble(false, "R\n".into(), None, None, None, None);
         assert_eq!(home.send_block(Some("cli")), None);
+    }
+
+    #[test]
+    fn project_line_tells_home_loading_failed_and_open_apart() {
+        let home = ChatContext::assemble(false, "R\n".into(), None, None, None, None);
+        assert!(home.project_line().starts_with("No project open"));
+        let loading = ChatContext::assemble(true, "R\n".into(), None, None, None, None);
+        assert_eq!(loading.project_line(), "Loading this project's context");
+        let failed = loading.clone().with_context_resolved(true);
+        assert!(failed
+            .project_line()
+            .starts_with("Could not load this project's context"));
+        let open = ChatContext::assemble(
+            true,
+            "R\n".into(),
+            Some(project_ctx(None, None, None)),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(open.project_line(), "Project open: Faktura Test");
+    }
+
+    #[test]
+    fn a_finding_is_dropped_unless_it_belongs_to_the_open_project() {
+        let mut other = make_finding();
+        other.project_id = "proj-OTHER".into();
+        let mut blank = make_finding();
+        blank.project_id = String::new();
+        for f in [other, blank] {
+            let ctx = ChatContext::assemble(
+                true,
+                "R\n".into(),
+                Some(project_ctx(Some("s\n"), None, None)),
+                None,
+                None,
+                Some(f),
+            );
+            assert!(ctx.finding.is_none());
+            assert!(!ctx.system_prompt().contains("=== LAYER 4:"));
+        }
+        let ctx = ChatContext::assemble(
+            true,
+            "R\n".into(),
+            Some(project_ctx(Some("s\n"), None, None)),
+            None,
+            None,
+            Some(make_finding()),
+        );
+        assert!(ctx.system_prompt().contains("=== LAYER 4:"));
     }
 }
