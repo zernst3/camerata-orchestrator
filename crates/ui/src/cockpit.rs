@@ -60,7 +60,7 @@ struct RulesetView {
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-struct ProjectView {
+pub(crate) struct ProjectView {
     id: String,
     name: String,
     #[serde(default)]
@@ -3167,18 +3167,21 @@ fn SettingsView(global_only: bool) -> Element {
                 Some(p) => {
                     let p_owned = p.clone();
                     rsx! {
-                        // ── Backend (per-project) ──────────────────────────────
-                        // Placed first: this is the setting that governs which chain (CLI
-                        // subscription vs. Anthropic API) every project-scoped AI call on this
-                        // project runs on. See docs/design/2026-09-22_per-project-backend.md.
-                        p { class: "section-label settings-label", "Backend" }
-                        rules::BackendEditor { project: p_owned.clone() }
-
-                        // ── Client engagement (per-project) ────────────────────
-                        // Right after the backend: it decides which backends and models this
-                        // project may use at all, and whether its own tooling may run.
-                        p { class: "section-label settings-label", "Client engagement" }
-                        rules::ClientEngagementEditor { project: p_owned.clone() }
+                        // ── Inspection settings (per-project) ──────────────────
+                        // The one shared component (finder, models, backend, client engagement,
+                        // client name), the same one the inspection start screen and Review >
+                        // Settings mount. It reads the project, so the three cannot disagree.
+                        p { class: "section-label settings-label", "Inspection settings" }
+                        // A key is only honoured among siblings in a list, so the host is
+                        // rendered as a list of one: another project is a fresh host.
+                        for project_id in [p_owned.id.clone()] {
+                            inspection_settings::InspectionSettingsHost {
+                                key: "{project_id}",
+                                project_id: project_id.clone(),
+                                run_in_flight: try_use_context::<Signal<Option<String>>>()
+                                    .is_some_and(|job| job.read().is_some()),
+                            }
+                        }
 
                         // ── Loop guard ────────────────────────────────────────
                         LoopGuardControl {}
@@ -3479,6 +3482,7 @@ mod decision_cards;
 pub(crate) mod engine_check;
 pub(crate) mod export_gate;
 mod freshness;
+pub(crate) mod inspection_settings;
 pub mod live_run;
 #[cfg(feature = "liveview-review")]
 #[path = "liveview.rs"]

@@ -273,6 +273,11 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
         }
     });
 
+    // The open project, for the Inspection settings: the start screen shows them BEFORE any run.
+    let active_project = use_resource(fetch_active_project);
+    let active_project = active_project.read().clone().flatten();
+    let run_in_flight = active_audit_job.read().is_some();
+
     let brownfield_cls = if path() == OnboardPath::Brownfield {
         "onboard-path on"
     } else {
@@ -308,6 +313,23 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
                 p { class: "onboard-sub", "Bring a repo new to Camerata under the gate. This sets up the REPO's rules and CI enforcement — separate from a story's Investigation phase, which refines one piece of work." }
                 // The inspection's start screen carries the "Guided inspection" switch.
                 crate::walkthrough::GuidedSwitch {}
+            }
+
+            // The Inspection settings: the finder, every model, where it runs and the client name,
+            // set before the first run. The one shared component, reading the project. It leaves
+            // the screen once a scan is showing, because the scan's own results carry the client
+            // name field then.
+            if scan().is_none() {
+                if let Some(p) = active_project.as_ref() {
+                    div { class: "onboard-inspection-settings",
+                        p { class: "scan-section-h", "Inspection settings" }
+                        super::super::inspection_settings::InspectionSettingsHost {
+                            key: "{p.id}",
+                            project_id: p.id.clone(),
+                            run_in_flight,
+                        }
+                    }
+                }
             }
 
             // Path chooser.

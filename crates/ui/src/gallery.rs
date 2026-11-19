@@ -25,6 +25,7 @@ mod app_states;
 mod detail_states;
 mod engine_states;
 mod export_states;
+pub(crate) mod inspection_settings_states;
 mod queue_states;
 mod shell_states;
 mod tree_states;
@@ -186,6 +187,20 @@ const SPEC: &[(&str, &str, &[&str])] = &[
         &["clear", "blocked", "one-line-two-reasons", "blocked-many"],
     ),
     ("findings", "WO-E", &["held-rows", "held-filter-on"]),
+    (
+        "inspection-settings",
+        "WO-A",
+        &[
+            "agent-opus",
+            "engine",
+            "all-unset",
+            "hidden-rows-shown",
+            "cli-client-conflict",
+            "run-in-flight",
+            "save-error",
+            "registry-missing",
+        ],
+    ),
     ("app", "build-guard", &["build-mismatch"]),
 ];
 
@@ -203,6 +218,7 @@ fn built_renderers() -> Vec<BuiltRenderer> {
     all.extend(detail_states::states());
     all.extend(export_states::states());
     all.extend(settings_states::states());
+    all.extend(inspection_settings_states::states());
     all.extend(app_states::states());
     all
 }

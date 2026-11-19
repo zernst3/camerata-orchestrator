@@ -178,6 +178,8 @@ fn inspect(w: &World, export: &Path, extra: &[&str], envs: &[(&str, &str)]) -> C
         "cli",
         "--realtime",
         "--full",
+        "--finder",
+        "engine",
     ])
     .args(["--client", "Example Client Ltd", "--repo-name", "acme/one"])
     .args([

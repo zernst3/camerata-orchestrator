@@ -190,11 +190,7 @@ impl ProjectStore {
                 client_tooling_opt_in: false,
                 dev_run_spend_limit_cents: None,
                 // Stage 2 has a default of its own too; a new project seeds it (A15).
-                review: ReviewSettings {
-                    group_review_model: camerata_api_types::project::STAGE2_DEFAULT_MODEL
-                        .to_string(),
-                    ..ReviewSettings::default()
-                },
+                review: ReviewSettings::for_new_project(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);

@@ -114,6 +114,33 @@ fn key_at(f: &ReviewFixture, path: &str) -> String {
         .clone()
 }
 
+/// Decide, in person, every row the release gate holds for a missing decision on a critical or an
+/// unsure row: a group decision leaves those out, so a project that exports has each decided by
+/// name.
+async fn decide_critical_and_unsure(f: &ReviewFixture) {
+    let gate: ExportGateView = get(f, "the export gate", "/review/export-gate").await;
+    for held in gate.held.iter().filter(|h| {
+        matches!(
+            h.reason,
+            HoldReason::CriticalWithoutDecision | HoldReason::UnsureWithoutDecision
+        )
+    }) {
+        let (status, text) = call(
+            &f.app,
+            "POST",
+            &format!("{}/decisions", base(f)),
+            Some(decision(
+                Scope::Site,
+                &held.key,
+                DecisionState::Confirmed,
+                "read in person",
+            )),
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+    }
+}
+
 /// The first half of the story: everything a reviewer writes against the inspection the scan
 /// made (decisions, a client acknowledgement, an edit, the line).
 async fn decorate_decisions(f: &ReviewFixture) {
@@ -378,6 +405,7 @@ async fn every_review_route_round_trips_into_the_ui_type() {
         HoldReason::RestoredWithoutDecision,
         HoldReason::MergedWithoutDecision,
         HoldReason::EngineCheckNoWithoutCorrection,
+        HoldReason::CriticalWithoutDecision,
     ]
     .iter()
     .map(|r| format!("{r:?}"))
@@ -962,7 +990,15 @@ async fn the_budget_routes_refuse_a_set_that_leaves_out_evidence_unverified() {
 async fn an_engine_check_no_holds_the_row_until_it_is_corrected() {
     let f = review_fixture(12);
     let lane: EngineCheckLane = get(&f, "the lane", "/review/engine-check").await;
-    let key = lane.cards[0].site.site_key.clone();
+    // A row the gate already holds (a critical nobody decided) gains no hold from a No.
+    let key = lane
+        .cards
+        .iter()
+        .find(|c| c.site.held.is_none())
+        .expect("a card for a row that is not held")
+        .site
+        .site_key
+        .clone();
     let held_before = get::<ReviewShellView>(&f, "the shell", "/review")
         .await
         .counts
@@ -1463,7 +1499,8 @@ async fn call_bytes(
 async fn after_a_budget_post_the_reviewed_report_and_the_product_export_agree_on_the_escalated_keys(
 ) {
     let f = review_fixture(12);
-    // Clear the gate: the row with unverified evidence is decided and the merge has its record.
+    // Clear the gate: the row with unverified evidence is decided and the merge has its record,
+    // and every critical row nobody had decided is decided in person (below).
     for (uri, body) in [
         (
             "/decisions",
@@ -1482,6 +1519,8 @@ async fn after_a_budget_post_the_reviewed_report_and_the_product_export_agree_on
         let (status, text) = call(&f.app, "POST", &format!("{}{uri}", base(&f)), Some(body)).await;
         assert_eq!(status, 200, "{uri}: {text}");
     }
+
+    decide_critical_and_unsure(&f).await;
 
     // The inspection setup names the client, as an export needs.
     let (status, text) = call(
@@ -1749,6 +1788,7 @@ async fn every_editable_field_round_trips_from_the_details_request_into_every_ex
     )
     .await;
     assert_eq!(status, 200, "{text}");
+    decide_critical_and_unsure(&f).await;
     let (status, text) = call(
         &f.app,
         "POST",

@@ -361,7 +361,10 @@ fn the_agent_finders_package_passes_the_release_gate() {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let agent = Arc::new(Reviewer::new(vec![real_problem()]));
         let calls = agent.calls.clone();
-        let run = run_agent(agent, true, |_| {}).await;
+        // The operator's own (internal) package: the fixture's three critical problems have no
+        // reviewer decision, which refuses a client package (the test below), and the headless
+        // command has no way to record one.
+        let run = run_agent(agent, false, |_| {}).await;
         let outcome = run.result.expect("the agent finder's package is released");
         assert!(
             outcome.release_gate.starts_with("release gate: passed"),
@@ -395,6 +398,33 @@ fn the_agent_finders_package_passes_the_release_gate() {
             "the agent's problem is in the package"
         );
         assert!(!findings.contains("finder-run") && !findings.contains("finder-piece"));
+    })
+}
+
+/// The release gate refuses a client package while a critical problem has no reviewer decision,
+/// naming the places. The headless command records no decision, so a run with a critical problem
+/// is exported as an internal package, or reviewed and exported from the cockpit.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_agent_finders_client_package_is_refused_while_a_critical_problem_has_no_decision() {
+    on_a_big_stack(async {
+        if !typst_available("the_agent_finders_client_package_is_refused_while_a_critical") {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let agent = Arc::new(Reviewer::new(vec![real_problem()]));
+        let run = run_agent(agent, true, |_| {}).await;
+        let err = run
+            .result
+            .expect_err("a client package with an undecided critical problem is refused");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("CriticalOrUnsureWithoutDecision") && text.contains("src/db.rs line 9"),
+            "{text}"
+        );
+        assert!(!run.export.exists(), "nothing is written");
     })
 }
 

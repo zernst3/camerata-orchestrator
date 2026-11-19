@@ -41,7 +41,13 @@ fn placed_report() -> SealedReport {
 }
 
 fn reviewed() -> ReviewedReport {
-    apply_overlay(&placed_report(), &[], &[], &[])
+    let sealed = placed_report();
+    apply_overlay(
+        &sealed,
+        &with_critical_and_unsure_decided(&sealed, &[]),
+        &[],
+        &[],
+    )
 }
 
 fn options() -> ReportOptions {
@@ -281,7 +287,13 @@ fn a_place_is_as_severe_as_its_worst_rule_even_when_a_less_severe_row_carries_it
     held.needs_review = true;
     held.confidence = Some("needs-review".to_string());
     report.findings = vec![held, row("SEC-RULE-SURE-1", "high", "src/held.ts", 9)];
-    let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+    let sealed = report.seal();
+    let reviewed = apply_overlay(
+        &sealed,
+        &with_critical_and_unsure_decided(&sealed, &[]),
+        &[],
+        &[],
+    );
     let entries = released_entries(&reviewed, &options());
     let findings = findings_json(&entries);
     let rows = findings["findings"].as_array().unwrap();
@@ -354,7 +366,13 @@ fn a_place_reads_as_a_defect_when_a_departure_carries_one() {
         },
     ));
     report.findings = vec![defect, departure];
-    let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
+    let sealed = report.seal();
+    let reviewed = apply_overlay(
+        &sealed,
+        &with_critical_and_unsure_decided(&sealed, &[]),
+        &[],
+        &[],
+    );
     let entries = released_entries(&reviewed, &options());
     let findings = findings_json(&entries);
     let rows = findings["findings"].as_array().unwrap();
@@ -473,7 +491,12 @@ fn a_false_positive_neither_carries_nor_is_carried() {
         camerata_api_types::decisions::DecisionState::FalsePositive,
         "not real",
     );
-    let reviewed = apply_overlay(&sealed, &[fp], &[], &[]);
+    let reviewed = apply_overlay(
+        &sealed,
+        &with_critical_and_unsure_decided(&sealed, &[fp]),
+        &[],
+        &[],
+    );
     let entries = released_entries(&reviewed, &options());
     let findings = findings_json(&entries);
     let rows = findings["findings"].as_array().unwrap();

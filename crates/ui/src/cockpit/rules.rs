@@ -1979,10 +1979,9 @@ fn build_change_summary(
 
     // Step models
     if let Some(sm) = a.get("step_models") {
+        // The inspection models (scan, calibration, fix) are not here: applying a profile keeps
+        // them, so the popup must not offer them as a change.
         let steps = [
-            ("audit", &project.step_models.audit),
-            ("calibration", &project.step_models.calibration),
-            ("fix", &project.step_models.fix),
             ("research_chat", &project.step_models.research_chat),
             ("story_authoring", &project.step_models.story_authoring),
             ("decomposition", &project.step_models.decomposition),
@@ -2923,8 +2922,23 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
 /// loop's build and tests) run only with the separate opt-in below. Off is the maintainer's own
 /// development. Auto-saves on change and reconciles from the server's echoed values, like
 /// [`BackendEditor`]; a failed save reverts both controls.
+/// The html id of the Client engagement checkbox, and the prefix of each Backend segment's id
+/// (`backend-seg-CLI`, `backend-seg-API`), so a test drives the real controls.
+pub(crate) const CLIENT_ENGAGEMENT_ID: &str = "client-engagement-toggle";
+pub(crate) const BACKEND_SEG_ID_PREFIX: &str = "backend-seg-";
+
 #[component]
-pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
+pub(super) fn ClientEngagementEditor(
+    project: ProjectView,
+    /// Told the server's confirmed `(client_engagement, client_tooling_opt_in)` after each save,
+    /// so a screen that shows a line derived from them (the Inspection settings' conflict line)
+    /// follows the control.
+    #[props(default)]
+    on_changed: Option<EventHandler<(bool, bool)>>,
+    /// Locked while a run is in flight.
+    #[props(default)]
+    disabled: bool,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let pid = project.id.clone();
     let mut engagement = use_signal(|| project.client_engagement);
@@ -2942,6 +2956,9 @@ pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
                 Some((confirmed_engagement, confirmed_opt_in)) => {
                     engagement.set(confirmed_engagement);
                     opt_in.set(confirmed_opt_in);
+                    if let Some(on_changed) = on_changed {
+                        on_changed.call((confirmed_engagement, confirmed_opt_in));
+                    }
                 }
                 None => {
                     engagement.set(previous.0);
@@ -2967,8 +2984,9 @@ pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
                 input {
                     r#type: "checkbox",
                     class: "l3-review-checkbox",
+                    id: "{CLIENT_ENGAGEMENT_ID}",
                     checked: engagement(),
-                    disabled: saving(),
+                    disabled: saving() || disabled,
                     onchange: move |e: Event<FormData>| save_engagement(e.checked(), opt_in()),
                 }
                 span { class: "l3-review-toggle-hint",
@@ -2986,7 +3004,7 @@ pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
                         r#type: "checkbox",
                         class: "l3-review-checkbox",
                         checked: opt_in(),
-                        disabled: saving(),
+                        disabled: saving() || disabled,
                         onchange: move |e: Event<FormData>| save_opt_in(engagement(), e.checked()),
                     }
                     span { class: "l3-review-toggle-hint",
@@ -3003,7 +3021,15 @@ pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
 }
 
 #[component]
-pub(super) fn BackendEditor(project: ProjectView) -> Element {
+pub(super) fn BackendEditor(
+    project: ProjectView,
+    /// Told the server's confirmed backend after each save (see [`ClientEngagementEditor`]).
+    #[props(default)]
+    on_changed: Option<EventHandler<ProjectBackend>>,
+    /// Locked while a run is in flight.
+    #[props(default)]
+    disabled: bool,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let pid = project.id.clone();
     let mut backend = use_signal(|| project.backend);
@@ -3018,13 +3044,14 @@ pub(super) fn BackendEditor(project: ProjectView) -> Element {
         rsx! {
             button {
                 key: "{label}",
+                id: "{BACKEND_SEG_ID_PREFIX}{label}",
                 r#type: "button",
                 class: if is_active {
                     "backend-seg backend-seg-active"
                 } else {
                     "backend-seg"
                 },
-                disabled: saving() || is_active,
+                disabled: saving() || is_active || disabled,
                 onclick: move |_| {
                     if is_active {
                         return;
@@ -3039,6 +3066,9 @@ pub(super) fn BackendEditor(project: ProjectView) -> Element {
                         match set_project_backend(&pid, candidate).await {
                             Some(confirmed) => {
                                 backend.set(confirmed);
+                                if let Some(on_changed) = on_changed {
+                                    on_changed.call(confirmed);
+                                }
                                 crate::toast::push_toast(
                                     toasts,
                                     crate::toast::ToastKind::Info,
@@ -6341,23 +6371,15 @@ mod tests {
         );
     }
 
-    // build_change_summary step_models diff branch: a project whose `step_models.audit`
-    // differs from the preview's `assignments.step_models.audit` must produce a
-    // `step.audit: <cur> → <new>` line and bump the count. Unchanged steps (calibration,
-    // etc., absent from the preview) must NOT produce noise lines.
+    // build_change_summary step_models diff branch: a project whose `step_models.research_chat`
+    // differs from the preview's must produce a `step.research_chat: <cur> -> <new>` line and bump
+    // the count. Unchanged steps must NOT produce noise lines.
     #[test]
     fn build_change_summary_reports_step_model_change() {
-        // The project's audit step differs from every other step (which take the sonnet
-        // default via serde). The preview echoes the current value for all seven steps and
-        // changes ONLY audit, so exactly one diff line is produced. (A preview that omitted
-        // the unchanged steps would read them as "" and spuriously diff all seven — this
-        // fixture pins them to prove the audit branch in isolation.)
         let project = project_from_json(serde_json::json!({
             "id": "p", "name": "n",
             "step_models": {
-                "audit": "claude-opus-5",
-                "calibration": "claude-sonnet-5",
-                "research_chat": "claude-sonnet-5",
+                "research_chat": "claude-opus-5",
                 "story_authoring": "claude-sonnet-5",
                 "decomposition": "claude-sonnet-5",
                 "escalation": "claude-sonnet-5",
@@ -6367,8 +6389,6 @@ mod tests {
         let preview = Some(serde_json::json!({
             "assignments": {
                 "step_models": {
-                    "audit": "claude-sonnet-5",
-                    "calibration": "claude-sonnet-5",
                     "research_chat": "claude-sonnet-5",
                     "story_authoring": "claude-sonnet-5",
                     "decomposition": "claude-sonnet-5",
@@ -6378,13 +6398,43 @@ mod tests {
             }
         }));
         let (lines, count) = super::build_change_summary(&project, &preview);
-        assert_eq!(count, 1, "exactly the audit step changed; lines={lines:?}");
+        assert_eq!(count, 1, "exactly one step changed; lines={lines:?}");
         assert!(
-            lines.iter().any(|l| l.contains("step.audit")
+            lines.iter().any(|l| l.contains("step.research_chat")
                 && l.contains("claude-opus-5")
                 && l.contains("claude-sonnet-5")),
             "lines={lines:?}"
         );
+    }
+
+    // Applying a profile keeps the scan, calibration and fix models, so the confirm popup must
+    // not list them as "current -> new" even when a (stale) preview carries different values.
+    #[test]
+    fn build_change_summary_never_offers_the_inspection_models_as_a_change() {
+        let project = project_from_json(serde_json::json!({
+            "id": "p", "name": "n",
+            "step_models": {
+                "audit": "claude-opus-5-5", "calibration": "claude-sonnet-5-5", "fix": "claude-opus-5-5",
+                "research_chat": "claude-sonnet-5", "story_authoring": "claude-sonnet-5",
+                "decomposition": "claude-sonnet-5", "escalation": "claude-sonnet-5",
+                "clarification": "claude-sonnet-5"
+            }
+        }));
+        let preview = Some(serde_json::json!({
+            "assignments": {
+                "step_models": {
+                    "audit": "claude-haiku-5-5", "calibration": "claude-haiku-5-5", "fix": "claude-haiku-5-5",
+                    "research_chat": "claude-sonnet-5", "story_authoring": "claude-sonnet-5",
+                    "decomposition": "claude-sonnet-5", "escalation": "claude-sonnet-5",
+                    "clarification": "claude-sonnet-5"
+                }
+            }
+        }));
+        let (lines, count) = super::build_change_summary(&project, &preview);
+        assert_eq!(count, 0, "lines={lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("step.audit")
+            || l.contains("step.calibration")
+            || l.contains("step.fix")));
     }
 
     // build_change_summary l3_review diff branch: both the `enabled` toggle flip and the
