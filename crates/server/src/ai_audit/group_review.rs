@@ -1885,6 +1885,23 @@ fn summary_prompt(
     p
 }
 
+/// Every text the group reviewer's prompts frame for `findings`: the path, detail and snippet, and
+/// the whole site line (it adds the per-site reviewer's reason, the effort and the flags). The
+/// run's frame token is drawn to occur in none of them.
+pub(super) fn texts_to_frame(findings: &[Finding]) -> Vec<String> {
+    findings
+        .iter()
+        .flat_map(|f| {
+            [
+                f.path.clone(),
+                f.detail.clone(),
+                f.snippet.clone(),
+                member_line(f, 0, true),
+            ]
+        })
+        .collect()
+}
+
 /// Run the group reviewer over `report`'s tree: one call per rule group (more for a big one),
 /// then the escalation formula over what they asked for. Writes the summaries, sub-groups,
 /// outliers, escalation candidates and the rows' columns, records the stage and the escalation
@@ -1907,11 +1924,7 @@ pub async fn review_groups(
     }
 
     // One delimiter token for every call of the run, drawn so it occurs in no text it frames.
-    let texts: Vec<String> = report
-        .findings
-        .iter()
-        .flat_map(|f| [f.path.clone(), f.detail.clone(), f.snippet.clone()])
-        .collect();
+    let texts = texts_to_frame(&report.findings);
     let avoid: Vec<&str> = texts.iter().map(String::as_str).collect();
     let nonce = crate::prompt_frame::FrameNonce::generate_avoiding(&avoid);
     let repo_label = report.repos.join(", ");

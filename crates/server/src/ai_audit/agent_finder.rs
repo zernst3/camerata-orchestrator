@@ -220,6 +220,25 @@ impl FollowUp {
     /// so is never reported as shown. Every transport builds its message with this, so what
     /// "shown in full" means is one rule.
     pub fn render(&self, room: &Room) -> (String, Vec<String>) {
+        self.render_with(room, None)
+    }
+
+    /// [`Self::render`] with each file framed as untrusted client content under `nonce`: the
+    /// form the API transport sends, where the files are client text. The command line transport
+    /// (internal runs only) sends the plain form.
+    pub fn render_framed(
+        &self,
+        room: &Room,
+        nonce: &crate::prompt_frame::FrameNonce,
+    ) -> (String, Vec<String>) {
+        self.render_with(room, Some(nonce))
+    }
+
+    fn render_with(
+        &self,
+        room: &Room,
+        nonce: Option<&crate::prompt_frame::FrameNonce>,
+    ) -> (String, Vec<String>) {
         let mut text = self.message.clone();
         let mut shown = Vec::new();
         for path in &self.send_files {
@@ -229,7 +248,15 @@ impl FollowUp {
             if shown.contains(path) {
                 continue;
             }
-            text.push_str(&format!("\n\n--- {path} ---\n{body}"));
+            match nonce {
+                Some(nonce) => {
+                    // A token in a body can only have been put there after it was drawn.
+                    let body = body.replace(nonce.as_str(), "[frame token removed]");
+                    text.push_str("\n\n");
+                    text.push_str(&crate::prompt_frame::frame_untrusted(nonce, path, &body));
+                }
+                None => text.push_str(&format!("\n\n--- {path} ---\n{body}")),
+            }
             shown.push(path.clone());
         }
         (text, shown)
