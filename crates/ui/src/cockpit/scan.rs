@@ -200,3 +200,8 @@ mod order_preset_followup_tests;
 /// enables the button and a click fetches the plan.
 #[cfg(test)]
 mod resume_button_tests;
+
+/// The Inspection screen tells the truth (work order C): per finder, the "This run" block, the
+/// estimate, the Inspect button and the help behind "?".
+#[cfg(test)]
+mod inspection_screen_tests;
