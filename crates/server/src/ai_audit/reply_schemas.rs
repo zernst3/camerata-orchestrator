@@ -201,8 +201,11 @@ pub(crate) fn stage2_reply_schema() -> Value {
             ("label", string()),
             ("cause", string()),
             ("summary", string()),
+            ("why_business", string()),
+            ("why_technical", string()),
             ("members", array(integer())),
         ],
+        // The two client reasons are optional: a reply without them is read, with none.
         &["label", "cause", "summary", "members"],
     );
     let outlier = object(

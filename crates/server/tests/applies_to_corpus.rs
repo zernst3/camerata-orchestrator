@@ -18,6 +18,12 @@ enum Family {
     SupabaseConfig,
     /// Pipeline definition files of any CI system.
     CiPipelines,
+    /// Code that reads a list of records through a query builder, an ORM or raw SQL.
+    ListQueries,
+    /// ECMAScript files that use a React effect hook.
+    ReactEffects,
+    /// ECMAScript files with async functions or promise chains.
+    AsyncCode,
 }
 
 impl Family {
@@ -74,15 +80,123 @@ impl Family {
                 (".woodpecker/build.yaml", ""),
                 ("Jenkinsfile", "pipeline {}"),
             ],
+            Family::ListQueries => vec![
+                // Supabase / PostgREST in a Next.js server action.
+                (
+                    "app/orders/actions.ts",
+                    "const { data } = await supabase.from('orders').select('*');",
+                ),
+                // Prisma in a route handler.
+                (
+                    "app/api/orders/route.ts",
+                    "const rows = await prisma.order.findMany({ where: { userId } });",
+                ),
+                // Mongoose, Sequelize, TypeORM.
+                ("src/routes/users.js", "const users = await User.find({});"),
+                ("src/routes/items.js", "const items = await Item.findAll();"),
+                (
+                    "src/repo/events.ts",
+                    "return this.repo.createQueryBuilder('e').getMany();",
+                ),
+                // Django, SQLAlchemy, Rails, Entity Framework.
+                ("orders/views.py", "orders = Order.objects.all()"),
+                ("app/api.py", "rows = session.query(Order).all()"),
+                ("app/controllers/orders_controller.rb", "@orders = Order.all.order(:id)"),
+                ("Controllers/OrdersController.cs", "var rows = await db.Orders.ToListAsync();"),
+                // Raw SQL in a Go handler.
+                ("internal/http/orders.go", "rows, err := db.Query(\"SELECT id FROM orders\")"),
+                // Rails: a bare `Order.all` at the end of a line, and a `where` query.
+                ("app/controllers/all_orders_controller.rb", "@orders = Order.all\n"),
+                ("app/models/order_scopes.rb", "Order.where(status: 'open')"),
+                // Raw SQL with a newline or a tab after SELECT.
+                ("internal/db/orders_nl.go", "const q = `SELECT\n id FROM orders`"),
+                ("internal/db/orders_tab.go", "const q = `SELECT\tid FROM orders`"),
+                // SeaORM, Diesel, Kysely, SQLAlchemy 2.
+                (
+                    "src/repo/orders.rs",
+                    "let rows = order::Entity::find().all(&db).await?;",
+                ),
+                ("src/repo/diesel_orders.rs", "let rows = orders.load::<Order>(&mut conn)?;"),
+                (
+                    "src/repo/kysely_orders.ts",
+                    "const rows = await db.selectFrom('orders').execute();",
+                ),
+                (
+                    "app/sa2.py",
+                    "rows = session.execute(select(Order)).scalars()",
+                ),
+                // Firestore, Laravel, Entity Framework, Spring Data.
+                ("src/feed/firestore.ts", "const snap = await getDocs(collection(db, 'orders'));"),
+                (
+                    "src/feed/firestore_admin.ts",
+                    "const snap = await admin.firestore().collection('orders').get();",
+                ),
+                ("app/Http/Controllers/OrderController.php", "$orders = Order::all();"),
+                ("app/Http/Controllers/OrderGetController.php", "$orders = Order::query()->get();"),
+                ("Controllers/ArrayController.cs", "var rows = await db.Orders.ToArrayAsync();"),
+                (
+                    "src/main/java/OrderService.java",
+                    "List<Order> rows = orderRepository.findByStatus(status);",
+                ),
+                // Django queryset methods other than `all` and `filter`.
+                ("orders/exclude_views.py", "rows = Order.objects.exclude(status='x')"),
+                ("orders/values_views.py", "rows = Order.objects.values('id')"),
+            ],
+            Family::ReactEffects => vec![
+                ("src/components/Clock.tsx", "useEffect(() => { setInterval(tick, 1000); }, []);"),
+                ("app/feed/page.jsx", "React.useEffect(() => { ch.subscribe(); });"),
+                ("src/hooks/usePosition.ts", "useLayoutEffect(() => measure(), []);"),
+                ("lib/legacy.js", "import { useEffect } from 'react';"),
+                // Effect hooks reached through a wrapper name.
+                (
+                    "src/hooks/useSize.ts",
+                    "useIsomorphicLayoutEffect(() => { window.addEventListener('resize', f); }, []);",
+                ),
+                (
+                    "src/hooks/useTick.ts",
+                    "useUpdateEffect(() => { setInterval(tick, 1000); }, [n]);",
+                ),
+                (
+                    "src/hooks/useDeep.ts",
+                    "useDeepCompareEffect(() => { ch.subscribe(); }, [opts]);",
+                ),
+            ],
+            Family::AsyncCode => vec![
+                (
+                    "src/components/SaveButton.tsx",
+                    "<button onClick={async () => { await save(form); }} />",
+                ),
+                ("app/api/orders/route.ts", "export async function POST(req) {}"),
+                ("app/actions.ts", "'use server'; export async function createOrder() {}"),
+                ("src/hooks/useFeed.js", "useEffect(() => { load().then(setRows); }, []);"),
+                ("server/index.mjs", "app.get('/x', async (req, res) => {});"),
+            ],
         }
     }
 
     /// `(path, content)` that must NOT be sent.
     fn must_skip(self) -> (&'static str, &'static str) {
-        (
-            "src/lib/format.ts",
-            "export const money = (n: number) => n;",
-        )
+        match self {
+            // A component that renders a list it was handed reads nothing itself.
+            Family::ListQueries => (
+                "src/components/OrderList.tsx",
+                "export const OrderList = ({ orders }) => <ul>{orders.map((o) => <li key={o.id}>{o.id}</li>)}</ul>;",
+            ),
+            // A component with no effect hook cannot hold an effect without cleanup.
+            Family::ReactEffects => (
+                "src/components/Badge.tsx",
+                "export const Badge = ({ n }) => <b>{n}</b>;",
+            ),
+            // Synchronous code awaits nothing and chains no promise.
+            Family::AsyncCode => (
+                "src/components/Badge.tsx",
+                "export const Badge = ({ n }) => <b>{n}</b>;",
+            ),
+            _ => (
+                "src/lib/format.ts",
+                "export const money = (n: number) => n;",
+            ),
+        }
     }
 }
 
@@ -118,6 +232,9 @@ const REVIEWED: &[(&str, Family)] = &[
     ("CICD-PIN-THIRD-PARTY-ACTIONS-1", Family::CiPipelines),
     ("CICD-LEAST-PRIVILEGE-TOKEN-1", Family::CiPipelines),
     ("CICD-NO-SECRETS-ON-FORK-PR-1", Family::CiPipelines),
+    ("ARCH-BOUNDED-LIST-READS-1", Family::ListQueries),
+    ("JAVASCRIPT-REACT-EFFECT-CLEANUP-1", Family::ReactEffects),
+    ("JAVASCRIPT-ASYNC-REJECTION-HANDLED-1", Family::AsyncCode),
 ];
 
 async fn corpus() -> camerata_rules::RuleSet {

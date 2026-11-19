@@ -234,7 +234,7 @@ pub(crate) fn install_fake_claude(
     )
     .unwrap();
     let script = format!(
-        "#!/bin/sh\nD=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" >> \"$D/prompts.log\"\ncase \"$*\" in\n  *'codebase-specific fix per finding'*) python3 \"$D/fix.py\" \"$D/fix.json\" \"$@\" ;;\n  *{trigger}*) cat \"$D/with-finding.json\" ;;\n  *) cat \"$D/empty.json\" ;;\nesac\n"
+        "#!/bin/sh\n[ \"$*\" = --version ] && {{ echo '2.1.321 (Claude Code)'; exit 0; }}\nD=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" >> \"$D/prompts.log\"\ncase \"$*\" in\n  *'codebase-specific fix per finding'*) python3 \"$D/fix.py\" \"$D/fix.json\" \"$@\" ;;\n  *{trigger}*) cat \"$D/with-finding.json\" ;;\n  *) cat \"$D/empty.json\" ;;\nesac\n"
     );
     let bin = dir.join("claude");
     std::fs::write(&bin, script).unwrap();

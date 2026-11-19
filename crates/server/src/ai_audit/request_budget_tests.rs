@@ -199,6 +199,8 @@ impl LlmPort for Capture {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.requests.lock().unwrap().push(req);
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: "{\"findings\":[]}".to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),

@@ -357,9 +357,6 @@ type RowId = (String, String, String, usize);
 /// buckets) must equal `findings.json`'s. A row in one and not the other is named by its rule
 /// and location (never its text).
 pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
-    if report.reduced {
-        return reduced_row_parity(report, findings);
-    }
     let mut pdf: BTreeSet<RowId> = BTreeSet::new();
     for bucket in [
         &report.matrix.do_now,
@@ -403,48 +400,6 @@ pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Pr
             &describe(row),
             "a row in findings.json is missing from the PDF",
         ));
-    }
-    problems
-}
-
-/// Row parity for the reshaped PDF (above 30,000 sites), which lists no row: the count of rows in
-/// each bucket, severity and kind that the PDF states must equal `findings.json`'s.
-fn reduced_row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
-    let mut pdf: BTreeMap<(String, String, String), usize> = BTreeMap::new();
-    for r in &report.reduced_matrix {
-        *pdf.entry((r.bucket.clone(), r.severity.clone(), r.kind.clone()))
-            .or_default() += r.count;
-    }
-    let value = serde_json::to_value(findings).unwrap_or(Value::Null);
-    let mut json: BTreeMap<(String, String, String), usize> = BTreeMap::new();
-    for row in value
-        .get("findings")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        *json
-            .entry((
-                row["bucket"].as_str().unwrap_or_default().to_string(),
-                row["severity"].as_str().unwrap_or_default().to_string(),
-                row["kind"].as_str().unwrap_or_default().to_string(),
-            ))
-            .or_default() += 1;
-    }
-    let mut problems = Vec::new();
-    let keys: BTreeSet<&(String, String, String)> = pdf.keys().chain(json.keys()).collect();
-    for key in keys {
-        let (p, j) = (
-            pdf.get(key).copied().unwrap_or(0),
-            json.get(key).copied().unwrap_or(0),
-        );
-        if p != j {
-            problems.push(problem(
-                "PDF data",
-                &format!("bucket {}, severity {}, kind {}", key.0, key.1, key.2),
-                format!("the reshaped PDF counts {p} rows here and findings.json has {j}"),
-            ));
-        }
     }
     problems
 }
@@ -537,6 +492,63 @@ fn json_tally(entries: &Entries) -> Option<Result<Tally, Problem>> {
     )
 }
 
+/// `json/all-findings.json` by `(severity, kind)` for the rows of `kinds`, one row for each place:
+/// the first row at a (repo, file, line) heads it, as it does on the All problems sheet, so the
+/// sheet is held to the places and not to the rows behind them.
+fn places_tally(entries: &Entries, kinds: &[&str]) -> Tally {
+    let mut tally = Tally::new();
+    let Some(rows) = entries
+        .get("json/all-findings.json")
+        .and_then(|bytes| rows_of(bytes).ok())
+    else {
+        return tally;
+    };
+    // Each place: the row that carries the others heads it (the first row there when none does),
+    // at the worst severity of any row at the place, as the All problems sheet prints it.
+    let mut places: BTreeMap<(String, String, String, String), Vec<&Value>> = BTreeMap::new();
+    for row in &rows {
+        if !kinds.contains(&cell_text(row, "kind").as_str()) {
+            continue;
+        }
+        places
+            .entry(super::counts_check::place_key_of(row))
+            .or_default()
+            .push(row);
+    }
+    let severity_slot = |s: &str| match s {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    };
+    for members in places.values() {
+        let ids: BTreeSet<String> = members
+            .iter()
+            .map(|m| cell_text(m, "carried_by"))
+            .filter(|id| !id.is_empty())
+            .collect();
+        let head = members
+            .iter()
+            .find(|m| ids.contains(&cell_text(m, "site_id")))
+            .unwrap_or(&members[0]);
+        // The head first, then the rest in file order: on a tie (`low` and `info` share a rank)
+        // the head's own word stands, as on the sheet.
+        let worst = std::iter::once(head)
+            .chain(members.iter().filter(|m| !std::ptr::eq(*m, head)))
+            .map(|m| cell_text(m, "severity"))
+            .min_by_key(|s| severity_slot(s))
+            .unwrap_or_default();
+        // The place is as actionable as its worst kind: a defect over a departure.
+        let kind = if members.iter().any(|m| cell_text(m, "kind") == "defect") {
+            "defect".to_string()
+        } else {
+            cell_text(head, "kind")
+        };
+        *tally.entry((worst, kind)).or_insert(0) += 1;
+    }
+    tally
+}
+
 /// `csv/all-findings.csv` by `(severity, kind)`, located by header name.
 fn csv_tally(bytes: &[u8]) -> Result<Tally, String> {
     let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
@@ -566,22 +578,26 @@ fn csv_tally(bytes: &[u8]) -> Result<Tally, String> {
     Ok(tally)
 }
 
-/// The workbook's "All Findings" sheet by `(severity, kind)` (its Severity cells are
-/// title-cased for the reader; compared lower-cased).
+/// The workbook's All problems sheet by `(severity, kind)` (its Severity cells are title-cased
+/// for the reader; compared lower-cased).
 fn workbook_rows_tally(xlsx: &[u8]) -> Result<Tally, String> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, "All Findings")?;
-    let header = grid.first().ok_or("the All Findings sheet is empty")?;
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::ALL_PROBLEMS)?;
+    let header = grid
+        .first()
+        .ok_or_else(|| format!("the {} sheet is empty", v::ALL_PROBLEMS))?;
     let col = |name: &str| {
         header
             .iter()
             .position(|h| h == name)
-            .ok_or_else(|| format!("the All Findings sheet has no {name:?} column"))
+            .ok_or_else(|| format!("the {} sheet has no {name:?} column", v::ALL_PROBLEMS))
     };
-    let (sev, kind) = (col("Severity")?, col("Kind")?);
+    let (sev, kind) = (col(v::H_SEVERITY)?, col(v::H_KIND)?);
     let mut tally = Tally::new();
     for row in grid.iter().skip(1) {
         let cell = |c: usize| row.get(c).map(String::as_str).unwrap_or("");
-        if row.iter().all(String::is_empty) {
+        // The note on an empty sheet sits in the first column with no Severity beside it.
+        if cell(sev).is_empty() && cell(kind).is_empty() {
             continue;
         }
         *tally
@@ -591,19 +607,28 @@ fn workbook_rows_tally(xlsx: &[u8]) -> Result<Tally, String> {
     Ok(tally)
 }
 
-/// The Conventions sheet's rows by kind, read from the Status cell (the sheet prints no kind
-/// tag). A Status cell with neither known wording counts under `"unrecognised status"`, so an
-/// edited cell shows up as a disagreement instead of vanishing.
+/// The Your conventions sheet's rows by kind, read from the How consistently cell (the sheet
+/// prints no kind tag in its plain columns). A cell with neither known wording counts under
+/// `"unrecognised status"`, so an edited cell shows up as a disagreement instead of vanishing.
 fn conventions_sheet_tally(xlsx: &[u8]) -> Result<BTreeMap<String, usize>, String> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, "Conventions")?;
-    let header = grid.first().ok_or("the Conventions sheet is empty")?;
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::YOUR_CONVENTIONS)?;
+    let header = grid
+        .first()
+        .ok_or_else(|| format!("the {} sheet is empty", v::YOUR_CONVENTIONS))?;
     let status = header
         .iter()
-        .position(|h| h == "Status")
-        .ok_or("the Conventions sheet has no \"Status\" column")?;
+        .position(|h| h == v::H_HOW_CONSISTENTLY)
+        .ok_or_else(|| {
+            format!(
+                "the {} sheet has no {:?} column",
+                v::YOUR_CONVENTIONS,
+                v::H_HOW_CONSISTENTLY
+            )
+        })?;
     let mut tally = BTreeMap::new();
     for row in grid.iter().skip(1) {
-        // The note on an empty sheet sits in the first column with no Status beside it.
+        // The note on an empty sheet sits in the first column with no status beside it.
         let cell = row.get(status).map(String::as_str).unwrap_or("");
         if cell.is_empty() {
             continue;
@@ -620,70 +645,72 @@ fn conventions_sheet_tally(xlsx: &[u8]) -> Result<BTreeMap<String, usize>, Strin
     Ok(tally)
 }
 
-/// How many rows the Coverage sheet lists under "Checks we could not complete this scan": its
-/// `not_assessed` rows. The section is absent when there are none.
-fn coverage_sheet_not_assessed(xlsx: &[u8]) -> Result<usize, String> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, "Coverage")?;
-    let Some(title) = grid.iter().position(|row| {
-        row.first()
-            .is_some_and(|c| c == crate::xlsx_export::NOT_ASSESSED_SECTION_TITLE)
-    }) else {
+/// How many rows the Not checked sheet lists as "Rule could not be completed": its
+/// `not_assessed` rows.
+fn not_checked_sheet_not_assessed(xlsx: &[u8]) -> Result<usize, String> {
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::NOT_CHECKED)?;
+    let Some(gap) = grid
+        .first()
+        .and_then(|header| header.iter().position(|h| h == v::H_GAP))
+    else {
         return Ok(0);
     };
-    // The title, then the column headers, then one row per check until the next blank row.
     Ok(grid
         .iter()
-        .skip(title + 2)
-        .take_while(|row| row.iter().any(|c| !c.is_empty()))
+        .skip(1)
+        .filter(|row| {
+            row.get(gap)
+                .is_some_and(|c| c == v::GAP_RULE_COULD_NOT_COMPLETE)
+        })
         .count())
 }
 
-/// The workbook Index's summaries: the "Statement types" count per kind tag, and the
-/// "Findings by category" Total row per severity column.
-type IndexSummary = (BTreeMap<String, usize>, BTreeMap<&'static str, usize>);
+/// Start here's summaries: the row count it states for each sheet, and the scorecard's Total row
+/// per severity column.
+type StartSummary = (BTreeMap<String, usize>, BTreeMap<&'static str, usize>);
 
-fn workbook_index_summary(xlsx: &[u8]) -> Result<IndexSummary, String> {
-    let grid = super::archive::xlsx_sheet_grid(xlsx, "Index")?;
+fn workbook_start_summary(xlsx: &[u8]) -> Result<StartSummary, String> {
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::START_HERE)?;
     let number = |row: &Vec<String>, c: usize| -> usize {
         row.get(c)
             .and_then(|t| t.parse::<f64>().ok())
             .map_or(0, |n| n as usize)
     };
-    let mut kinds = BTreeMap::new();
-    for (tag, label) in crate::xlsx_export::STATEMENT_TYPES {
-        // "Unclassified" renders only when non-zero; an absent line is zero.
+    let mut sheet_counts = BTreeMap::new();
+    for sheet in [v::ALL_PROBLEMS, v::YOUR_CONVENTIONS] {
         let count = grid
             .iter()
-            .find(|row| row.first().is_some_and(|c| c == label))
-            .map_or(0, |row| number(row, 1));
-        if count > 0 {
-            kinds.insert(tag.to_string(), count);
-        }
+            .find(|row| row.first().is_some_and(|c| c == sheet))
+            .map_or(0, |row| number(row, 2));
+        sheet_counts.insert(sheet.to_string(), count);
     }
     let header_at = grid
         .iter()
         .position(|row| {
-            row.first().is_some_and(|c| c == "Category") && row.get(5).is_some_and(|c| c == "Total")
+            row.first().is_some_and(|c| c == v::H_AREA) && row.get(5).is_some_and(|c| c == "Total")
         })
-        .ok_or("the Index has no category matrix")?;
+        .ok_or("Start here has no scorecard")?;
     let total_row = grid
         .iter()
         .skip(header_at + 1)
         .find(|row| row.first().is_some_and(|c| c == "Total"))
-        .ok_or("the Index category matrix has no Total row")?;
+        .ok_or("the Start here scorecard has no Total row")?;
     let severities = ["critical", "high", "medium", "low"]
         .into_iter()
         .enumerate()
         .map(|(i, s)| (s, number(total_row, i + 1)))
         .collect();
-    Ok((kinds, severities))
+    Ok((sheet_counts, severities))
 }
 
-/// 22d, over the archive: the CSV, the workbook's "All Findings" rows, the Conventions and
-/// Coverage sheets' rows (by kind) and the workbook Index's summaries agree with
+/// 22d, over the archive: the CSV, the workbook's All problems rows, the Your conventions and
+/// Not checked sheets' rows (by kind) and Start here's summaries agree with
 /// `json/all-findings.json` by severity AND kind, not only in total.
 /// Missing files are the dataset-set check's to report.
 pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
+    use crate::xlsx_export::vocabulary as v;
     let json = match json_tally(entries) {
         None => return Vec::new(),
         Some(Err(p)) => return vec![p],
@@ -708,41 +735,38 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
     let Some(xlsx) = entries.get(&xlsx_name) else {
         return problems;
     };
-    let sheet_kinds = crate::xlsx_export::ALL_FINDINGS_SHEET_KINDS;
-    let json_for_sheet: Tally = json
-        .iter()
-        .filter(|((_, kind), _)| sheet_kinds.contains(&kind.as_str()))
-        .map(|(k, n)| (k.clone(), *n))
-        .collect();
+    let sheet_kinds = crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS;
+    // All problems lists one row for each place (the row that heads the rows at that place), so the
+    // reference is the JSON rows of those kinds collapsed to their places the same way.
+    let json_for_sheet: Tally = places_tally(entries, &sheet_kinds);
     match workbook_rows_tally(xlsx) {
         Ok(tally) => problems.extend(tally_differences(
             &xlsx_name,
-            "the All Findings sheet",
+            "the All problems sheet",
             &json_for_sheet,
             &tally,
         )),
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
-    // The Conventions and Coverage sheets hold the other three kinds, grouped by sheet rather
-    // than by severity, so their rows are tallied by kind against the same JSON rows. (The
-    // Index summaries below count from the report, so they cannot see a row dropped from a
-    // sheet.)
+    // Your conventions and Not checked hold the other three kinds, grouped by sheet rather than
+    // by severity, so their rows are tallied by kind against the same JSON rows. (Start here's
+    // summaries below count from the report, so they cannot see a row dropped from a sheet.)
     let json_kinds = by_kind(&json);
     let mut listed_rows: Vec<(&str, String, usize)> = Vec::new();
     match conventions_sheet_tally(xlsx) {
         Ok(listed) => {
             for kind in ["convention_observed", "no_convention"] {
                 let n = listed.get(kind).copied().unwrap_or(0);
-                listed_rows.push(("Conventions", kind.to_string(), n));
+                listed_rows.push((v::YOUR_CONVENTIONS, kind.to_string(), n));
             }
             if let Some(n) = listed.get("unrecognised status") {
-                listed_rows.push(("Conventions", "unrecognised status".to_string(), *n));
+                listed_rows.push((v::YOUR_CONVENTIONS, "unrecognised status".to_string(), *n));
             }
         }
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
-    match coverage_sheet_not_assessed(xlsx) {
-        Ok(n) => listed_rows.push(("Coverage", "not_assessed".to_string(), n)),
+    match not_checked_sheet_not_assessed(xlsx) {
+        Ok(n) => listed_rows.push((v::NOT_CHECKED, "not_assessed".to_string(), n)),
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
     for (sheet, kind, listed) in listed_rows {
@@ -755,33 +779,34 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
             ));
         }
     }
-    match workbook_index_summary(xlsx) {
-        Ok((kinds, severities)) => {
-            let want_kinds = by_kind(&json);
-            for kind in want_kinds
-                .keys()
-                .chain(kinds.keys())
-                .collect::<BTreeSet<_>>()
-            {
-                let (w, g) = (
-                    want_kinds.get(kind).copied().unwrap_or(0),
-                    kinds.get(kind).copied().unwrap_or(0),
-                );
+    match workbook_start_summary(xlsx) {
+        Ok((sheet_counts, severities)) => {
+            let want_problems: usize = json_for_sheet.values().sum();
+            let want_conventions = ["convention_observed", "no_convention"]
+                .iter()
+                .map(|k| json_kinds.get(*k).copied().unwrap_or(0))
+                .sum::<usize>();
+            for (sheet, w) in [
+                (v::ALL_PROBLEMS, want_problems),
+                (v::YOUR_CONVENTIONS, want_conventions),
+            ] {
+                let g = sheet_counts.get(sheet).copied().unwrap_or(0);
                 if w != g {
                     problems.push(problem(
                         &xlsx_name,
-                        &format!("sheet \"Index\" statement types, kind {kind}"),
-                        format!("the Index counts {g} and json/all-findings.json has {w}"),
+                        &format!("sheet \"Start here\" row count, sheet {sheet}"),
+                        format!("Start here counts {g} and json/all-findings.json has {w}"),
                     ));
                 }
             }
-            for (severity, w) in by_severity_bucket(&json) {
+            // The scorecard counts problems, one for each place, as All problems lists them.
+            for (severity, w) in by_severity_bucket(&json_for_sheet) {
                 let g = severities.get(severity).copied().unwrap_or(0);
                 if w != g {
                     problems.push(problem(
                         &xlsx_name,
-                        &format!("sheet \"Index\" category totals, severity {severity}"),
-                        format!("the Index counts {g} and json/all-findings.json has {w}"),
+                        &format!("sheet \"Start here\" scorecard totals, severity {severity}"),
+                        format!("Start here counts {g} and json/all-findings.json has {w}"),
                     ));
                 }
             }
@@ -789,6 +814,23 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
     problems
+}
+
+/// Every count in the package, held to the files in it (single counts, design 5.7): the object in
+/// `findings.json` and the PDF data equals an independent recount, the four identities hold,
+/// every surface equals the object, every count sentence equals the one the counts give and an
+/// executive summary override states no number that is no count.
+///
+/// ENFORCED: `gate_report` records it under the counts check, so a package whose printed numbers
+/// differ from the files in it is refused. See [`super::counts_check`].
+pub fn counts_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
+    super::counts_check::counts_problems_with(
+        entries,
+        report,
+        super::counts_check::CountsChecks {
+            folded_rows_name_their_head: true,
+        },
+    )
 }
 
 const PATTERNS: &str = "patterns across services";
@@ -801,13 +843,40 @@ const PATTERNS: &str = "patterns across services";
 ///   when it does not, and the workbook has the matching sheet or none;
 /// * the section carries no severity anywhere;
 /// * no pattern row sits inside the `findings` array, so every count read off that array (and
-///   off `json/all-findings.json`, which the rest of this check holds it to) is findings only.
+///   off `json/all-findings.json`, which the rest of this check holds it to) is findings only;
+/// * no cell says clean for a service and rule that has an open problem in the package
+///   ([`patterns_clean_cell_problems`]);
+/// * `findings.json` lists nothing under `open_beside_ruled_out`: every place of another rule
+///   that a ruled-out row carries has a row of its own.
 pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
-    let mut problems = Vec::new();
+    let mut problems = patterns_clean_cell_problems(entries, report);
     let findings_json: Option<Value> = entries
         .get("findings.json")
         .and_then(|bytes| serde_json::from_slice(bytes).ok());
     if let Some(value) = &findings_json {
+        // The backstop for the unfold: a place of another rule that a ruled-out row still carries
+        // must have a row of its own, so the key lists nothing in a package that may ship.
+        for (i, site) in value
+            .get("open_beside_ruled_out")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            problems.push(problem(
+                "findings.json",
+                &format!("open_beside_ruled_out[{i}]"),
+                format!(
+                    "{} line {} in {} is a place of {} that a ruled-out row still carries and \
+                     that has no row of its own, so it is counted nowhere. Export again so the \
+                     place becomes a row that needs a decision",
+                    cell_text(site, "path"),
+                    cell_text(site, "line"),
+                    cell_text(site, "repo"),
+                    cell_text(site, "rule_id"),
+                ),
+            ));
+        }
         let section = value.get("patterns_across_services");
         match (&report.patterns_across_services, section) {
             (Some(_), None) => problems.push(problem(
@@ -863,7 +932,7 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
             if let Ok(names) = super::archive::xlsx_sheet_names(xlsx) {
                 let has_sheet = names
                     .iter()
-                    .any(|n| n == crate::xlsx_export::PATTERNS_SHEET);
+                    .any(|n| n == crate::xlsx_export::vocabulary::PATTERNS_ACROSS_SERVICES);
                 if has_sheet != report.patterns_across_services.is_some() {
                     problems.push(problem(
                         &format!("{stem}-findings.xlsx"),
@@ -881,10 +950,214 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
     problems
 }
 
+/// The open problems `findings.json` holds, by service and rule: the count for `(repo, rule)`
+/// read the way the patterns section reads a cell. A row counts for its own rule, for the rule
+/// its sub-group stands under (`group` is `sub:<rule>/<n>`), for every rule a source collapsed
+/// into it was flagged under (`flagged_by`) and for every rule it also matches (`also_matches`,
+/// ids and titles), and every absorbed site (`also_locations`) counts in its own repo for its
+/// own rule. A convention the service follows and a check that could not be completed are not
+/// problems. A ruled-out problem is not in `findings.json`, so it is never counted; a problem
+/// that needs a decision is, because it is open.
+struct OpenProblems {
+    /// `(repo, upper-cased rule id or title)` to the number of open problems.
+    by_repo_rule: BTreeMap<(String, String), usize>,
+    /// `(repo, upper-cased also_matches text)` of every open row that has one. The text is a list
+    /// of rule titles joined by `, `, and a title may itself hold a comma, so it is searched for
+    /// an exact title rather than split ([`lists_name`]).
+    also_matches: Vec<(String, String)>,
+}
+
+/// Whether `list` (names joined by `, `) holds `name` as one whole entry. Matches whole entries
+/// only, so a title that holds a comma is found as itself and a shorter name is not found inside a
+/// longer one. Both are upper-cased.
+fn lists_name(list: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    list.match_indices(name).any(|(at, _)| {
+        let before = at == 0 || list[..at].ends_with(", ");
+        let rest = &list[at + name.len()..];
+        before && (rest.is_empty() || rest.starts_with(", "))
+    })
+}
+
+impl OpenProblems {
+    fn of(rows: &[Value]) -> Self {
+        let mut by_repo_rule: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut also_matches: Vec<(String, String)> = Vec::new();
+        for row in rows {
+            let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
+            if matches!(kind, "convention_observed" | "not_assessed") {
+                continue;
+            }
+            let repo = cell_text(row, "repo");
+            let mut names: BTreeSet<String> = BTreeSet::new();
+            names.insert(cell_text(row, "rule_id"));
+            if let Some(rule) = row
+                .get("group")
+                .and_then(Value::as_str)
+                .and_then(|g| g.strip_prefix("sub:"))
+                .and_then(|g| g.rsplit_once('/'))
+                .map(|(rule, _)| rule.to_string())
+            {
+                names.insert(rule);
+            }
+            for source in row
+                .get("flagged_by")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                names.insert(cell_text(source, "rule_id"));
+            }
+            let also = cell_text(row, "also_matches").trim().to_ascii_uppercase();
+            if !also.is_empty() {
+                also_matches.push((repo.clone(), also));
+            }
+            for name in names {
+                let name = name.trim().to_ascii_uppercase();
+                if !name.is_empty() {
+                    *by_repo_rule.entry((repo.clone(), name)).or_insert(0) += 1;
+                }
+            }
+            for site in row
+                .get("also_locations")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let rule = cell_text(site, "rule_id").trim().to_ascii_uppercase();
+                if !rule.is_empty() {
+                    *by_repo_rule
+                        .entry((cell_text(site, "repo"), rule))
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+        Self {
+            by_repo_rule,
+            also_matches,
+        }
+    }
+
+    /// Add the places of other rules that ruled-out rows carry (`open_beside_ruled_out`): the
+    /// ruled-out row is not among the rows, but these places are still open.
+    fn add_sites(&mut self, sites: Option<&Value>) {
+        for site in sites.and_then(Value::as_array).into_iter().flatten() {
+            let rule = cell_text(site, "rule_id").trim().to_ascii_uppercase();
+            if !rule.is_empty() {
+                *self
+                    .by_repo_rule
+                    .entry((cell_text(site, "repo"), rule))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// The open problems for the rule (by its id or its title) in `repo`.
+    fn count(&self, repo: &str, rule_id: &str, title: &str) -> usize {
+        let get = |name: &str| {
+            let name = name.trim().to_ascii_uppercase();
+            let direct = self
+                .by_repo_rule
+                .get(&(repo.to_string(), name.clone()))
+                .copied()
+                .unwrap_or(0);
+            let listed = self
+                .also_matches
+                .iter()
+                .filter(|(r, list)| r == repo && lists_name(list, &name))
+                .count();
+            direct + listed
+        };
+        let by_id = get(rule_id);
+        if title.trim().is_empty() || title.eq_ignore_ascii_case(rule_id) {
+            by_id
+        } else {
+            by_id.max(get(title))
+        }
+    }
+}
+
+/// One problem for each cell of a patterns section that says clean for a service and rule that
+/// has an open problem in the package: a false all-clear a reader could trust. `section` is the
+/// section as it ships in `file` (`findings.json`'s key, or the PDF's data).
+fn clean_beside_open_problem(file: &str, section: &Value, open: &OpenProblems) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (i, row) in section
+        .get("rows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let rule_id = cell_text(row, "rule_id");
+        let title = cell_text(row, "title");
+        for (j, cell) in row
+            .get("cells")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if cell.get("state").and_then(Value::as_str) != Some("clean") {
+                continue;
+            }
+            let repo = cell_text(cell, "repo");
+            let n = open.count(&repo, &rule_id, &title);
+            if n > 0 {
+                problems.push(problem(
+                    file,
+                    &format!("patterns_across_services.rows[{i}].cells[{j}]"),
+                    format!(
+                        "the patterns section says {rule_id} is clean in {repo}, and the package \
+                         holds {} open for that rule in {repo}; a clean cell beside an open \
+                         problem is a false all-clear",
+                        crate::xlsx_export::vocabulary::places_count(n)
+                    ),
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// The patterns section never says clean beside an open problem: for every cell that reads
+/// clean, in `findings.json`'s section and in the PDF's data, `findings.json` holds no open
+/// problem for that service and rule ([`OpenProblems`]). A `findings.json` that is absent or
+/// does not parse is left to the checks that read it first.
+pub fn patterns_clean_cell_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
+    let Some(findings_json) = entries
+        .get("findings.json")
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+    else {
+        return Vec::new();
+    };
+    let rows: Vec<Value> = findings_json
+        .get("findings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut open = OpenProblems::of(&rows);
+    open.add_sites(findings_json.get("open_beside_ruled_out"));
+    let mut problems = Vec::new();
+    if let Some(section) = findings_json.get("patterns_across_services") {
+        problems.extend(clean_beside_open_problem("findings.json", section, &open));
+    }
+    if let Some(section) = report
+        .patterns_across_services
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok())
+    {
+        problems.extend(clean_beside_open_problem("PDF data", &section, &open));
+    }
+    problems
+}
+
 /// 22d, the PDF side (the in-memory release, which holds the PDF's data): the rows the PDF
 /// counts (all six matrix buckets) agree with `json/all-findings.json` by severity and kind, the
-/// finding cards it renders (curated plus held for review) agree with those matrix rows by
-/// severity and kind, and the cover's severity summary agrees by severity column.
+/// report data's curated and held groups (kept beside the matrix, never printed) agree with those
+/// matrix rows by severity and kind, and the cover's severity summary agrees by severity column.
 pub fn pdf_count_reconciliation_problems(
     entries: &Entries,
     report: &AuditReportJson,
@@ -903,19 +1176,12 @@ pub fn pdf_count_reconciliation_problems(
                 .or_insert(0) += 1;
         }
     }
-    // The reshaped PDF (above 30,000 sites) lists no row; it states the counts instead.
-    for r in &report.reduced_matrix {
-        *pdf.entry((r.severity.clone(), r.kind.clone())).or_insert(0) += r.count;
-    }
-    // What the PDF actually draws is its finding cards, "Curated findings" plus "Held for
-    // review", not the matrix the totals above are taken from. Every matrix row must be drawn
-    // exactly once, so a finding that falls out of the cards (or is drawn twice) fails here
-    // even though the matrix, the cover and every total still agree.
+    // The PDF prints no card and no list of problems, so there is no rendered row to count. The
+    // report data still holds the curated and held groups beside the matrix (the template does
+    // not read them). Every matrix row must be in them exactly once, so a problem that falls out
+    // of the groups (or is in them twice) fails here even though the matrix, the cover and every
+    // total still agree. This is a check of two datasets, not of PDF rows.
     let mut rendered = Tally::new();
-    if report.reduced {
-        // No card is drawn by design, so the cards are the counts.
-        rendered = pdf.clone();
-    }
     for group in report
         .curated_findings
         .iter()
@@ -929,7 +1195,7 @@ pub fn pdf_count_reconciliation_problems(
     }
     let mut problems = tally_differences_against(
         "PDF data",
-        "the PDF's rendered finding cards",
+        "the PDF data's curated and held groups",
         "its own matrix",
         &pdf,
         &rendered,
@@ -944,6 +1210,8 @@ pub fn pdf_count_reconciliation_problems(
         Some(Ok(tally)) => tally,
     };
     problems.extend(tally_differences("PDF data", "the PDF", &json, &pdf));
+    // The cover counts problems, one for each place, as the All problems sheet lists them.
+    let problem_places = places_tally(entries, &crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS);
     let stats = &report.cover.stats;
     for (severity, printed) in [
         ("critical", stats.critical),
@@ -951,7 +1219,7 @@ pub fn pdf_count_reconciliation_problems(
         ("medium", stats.medium),
         ("low", stats.low),
     ] {
-        let w = by_severity_bucket(&json)
+        let w = by_severity_bucket(&problem_places)
             .get(severity)
             .copied()
             .unwrap_or(0);
@@ -960,6 +1228,38 @@ pub fn pdf_count_reconciliation_problems(
                 "PDF data",
                 &format!("cover.stats.{severity}"),
                 format!("the PDF summary counts {printed} and json/all-findings.json has {w}"),
+            ));
+        }
+    }
+    // The grid counts the places the cover counts, minus those whose bucket the grid leaves out
+    // (accepted, informational, held): its total by severity equals the cover's less those.
+    let heads = crate::report_export::problem_places(&report.matrix);
+    for (severity, printed) in [
+        ("critical", stats.critical),
+        ("high", stats.high),
+        ("medium", stats.medium),
+        ("low", stats.low),
+    ] {
+        let left_out = heads
+            .iter()
+            .filter(|p| severity_bucket(&p.head.severity) == severity)
+            .filter(|p| !matches!(p.class, crate::review_tree::PlaceClass::ForAction(_)))
+            .count();
+        let grid: usize = report
+            .priority_grid
+            .rows
+            .iter()
+            .filter(|r| severity_bucket(&r.severity) == severity)
+            .flat_map(|r| &r.cells)
+            .map(|c| c.findings.len())
+            .sum();
+        if grid + left_out != printed {
+            problems.push(problem(
+                "PDF data",
+                &format!("priority_grid.{severity}"),
+                format!(
+                    "the severity by effort matrix counts {grid} problems here ({left_out} more are left out of it) and the cover counts {printed}"
+                ),
             ));
         }
     }
@@ -1238,6 +1538,57 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
     p
 }
 
+/// The README lines of a provenance block, by their opening words. A client README names none of
+/// them: it says what each file is and how to import the tickets, and nothing about how the
+/// inspection was run.
+const PROVENANCE_LINE_OPENINGS: [&str; 16] = [
+    "Prepared for: ",
+    "Repos inspected: ",
+    "Generated: ",
+    "Commit (",
+    "Engine version: ",
+    "Corpus version: ",
+    "Corpus rules applied: ",
+    "Rules last reviewed on ",
+    "Counted lines: ",
+    "Excluded as noise: ",
+    "Model backend: ",
+    "Model provider: ",
+    "Model (",
+    "Client engagement: ",
+    "Release checks: ",
+    "Spend limit: ",
+];
+
+/// A CLIENT package's README carries no provenance line, no vulnerability-data stamp and no
+/// engine or corpus identity, whatever it says elsewhere.
+pub fn client_readme_problems(readme: &str) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (i, line) in readme.lines().enumerate() {
+        let opening = PROVENANCE_LINE_OPENINGS
+            .iter()
+            .find(|opening| line.starts_with(**opening))
+            .copied()
+            .or_else(|| {
+                line.starts_with(crate::vuln_intel::README_PREFIX)
+                    .then_some("Vulnerability data")
+            });
+        if let Some(opening) = opening {
+            problems.push(problem(
+                "README.txt",
+                &format!("line {}", i + 1),
+                format!(
+                    "a client README carries no provenance line, and this one opens with \
+                     \"{}\": the models, the corpus, the engine commit and the release checks \
+                     are in manifest.json",
+                    opening.trim_end()
+                ),
+            ));
+        }
+    }
+    problems
+}
+
 fn manifest_str(manifest: &Value, key: &str) -> Option<String> {
     manifest["inspection"][key].as_str().map(str::to_string)
 }
@@ -1404,6 +1755,432 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
                     ));
                 }
             }
+        }
+    }
+    problems
+}
+
+// ---- one fix, one row (item #1) -------------------------------------------------------------
+
+const FIX_PARITY: &str = "one fix per row";
+
+/// A Fix is one change, so the package must hold it once everywhere. Over the archive:
+///
+/// * every row of `findings.json` that says something is wrong has a Fix id, and every Fix id
+///   names a Fix of its `fixes` list;
+/// * every member of every Fix is a rule group of the package's own tree;
+/// * the tickets and the Fix plan sheet list the same Fixes, each once, and each is a Fix of the
+///   `fixes` list: one ticket for each plan row, one plan row for each Fix with a place to fix.
+pub fn fix_archive_problems(entries: &Entries) -> Vec<Problem> {
+    use crate::xlsx_export::vocabulary as v;
+    let mut problems = Vec::new();
+    let Some(findings) = entries
+        .get("findings.json")
+        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+    else {
+        return problems;
+    };
+    let fixes = findings.get("fixes").and_then(Value::as_array);
+    // A package written before Fixes existed has none to check.
+    let Some(fixes) = fixes else {
+        return problems;
+    };
+    let fix_ids: BTreeSet<String> = fixes
+        .iter()
+        .filter_map(|f| f.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let groups: BTreeSet<String> = findings
+        .get("tree")
+        .and_then(|t| t.get("nodes"))
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| n.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for fix in fixes {
+        let id = fix.get("id").and_then(Value::as_str).unwrap_or("");
+        let members = fix
+            .get("members")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if members.is_empty() {
+            problems.push(problem(
+                "findings.json",
+                &format!("fixes, Fix {id}"),
+                "a Fix has no rule group",
+            ));
+        }
+        for member in members.iter().filter_map(Value::as_str) {
+            if !groups.is_empty() && !groups.contains(member) {
+                problems.push(problem(
+                    "findings.json",
+                    &format!("fixes, Fix {id}"),
+                    format!("the Fix names the rule group {member}, which is not in the tree"),
+                ));
+            }
+        }
+    }
+    let rows = findings
+        .get("findings")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    // A report with no review tree has no Fixes and says so elsewhere; its rows are not held to one.
+    for (i, row) in rows.iter().enumerate().filter(|_| !fixes.is_empty()) {
+        let kind = cell_text(row, "kind");
+        if !crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        let fix_id = cell_text(row, "fix_id");
+        if fix_id.is_empty() && !cell_text(row, "group").is_empty() {
+            problems.push(problem(
+                "findings.json",
+                &format!("findings[{i}]"),
+                "a row in a rule group has no Fix id",
+            ));
+        } else if !fix_id.is_empty() && !fix_ids.contains(&fix_id) {
+            problems.push(problem(
+                "findings.json",
+                &format!("findings[{i}]"),
+                format!("the row names the Fix {fix_id}, which is not in the fixes list"),
+            ));
+        }
+    }
+
+    // Tickets and plan rows.
+    let tickets = entries
+        .get(crate::xlsx_export::tickets::TICKETS_CSV)
+        .map(|b| ticket_fix_ids(b));
+    let plan = package_stem(entries).and_then(|stem| {
+        let xlsx = entries.get(&format!("{stem}-findings.xlsx"))?;
+        Some(plan_fix_ids(xlsx))
+    });
+    let (tickets, plan) = match (tickets, plan) {
+        (Some(t), Some(p)) => (t, p),
+        _ => return problems,
+    };
+    let (tickets, plan) = match (tickets, plan) {
+        (Ok(t), Ok(p)) => (t, p),
+        (Err(e), _) => {
+            problems.push(problem(
+                crate::xlsx_export::tickets::TICKETS_CSV,
+                FIX_PARITY,
+                e,
+            ));
+            return problems;
+        }
+        (_, Err(e)) => {
+            problems.push(problem(
+                "(workbook)",
+                &format!("sheet \"{}\"", v::FIX_PLAN),
+                e,
+            ));
+            return problems;
+        }
+    };
+    for (what, ids) in [("a ticket", &tickets), ("a Fix plan row", &plan)] {
+        let unique: BTreeSet<&String> = ids.iter().collect();
+        if unique.len() != ids.len() {
+            problems.push(problem(
+                "(package)",
+                FIX_PARITY,
+                format!("{what} names the same Fix twice"),
+            ));
+        }
+        for id in ids {
+            if !id.is_empty() && !fix_ids.contains(id) {
+                problems.push(problem(
+                    "(package)",
+                    FIX_PARITY,
+                    format!("{what} names the Fix {id}, which is not in findings.json"),
+                ));
+            }
+        }
+    }
+    let t: BTreeSet<&String> = tickets.iter().collect();
+    let p: BTreeSet<&String> = plan.iter().collect();
+    if t != p {
+        problems.push(problem(
+            "(package)",
+            FIX_PARITY,
+            format!(
+                "the tickets list {} Fixes and the {} sheet lists {}; they must be the same Fixes",
+                tickets.len(),
+                v::FIX_PLAN,
+                plan.len()
+            ),
+        ));
+    }
+    problems
+}
+
+/// The place parity of a package (D2): a row another row at its place carries names that row in
+/// `carried_by`, and the carrier lists the carried rule in `also_matches`.
+///
+/// * every `carried_by` is the `site_id` of a row of `findings.json` at the same repo, file and
+///   line, and that row is not itself carried;
+/// * the carrier lists the carried row's rule (a rule the carrier shares is not listed twice);
+/// * All problems has one row for each place, and the Place id of that row is the carrier's.
+///
+/// A package written before the field existed has no `carried_by` on any row and passes.
+pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
+    use crate::xlsx_export::vocabulary as v;
+    let mut problems = Vec::new();
+    let Some(findings) = entries
+        .get("findings.json")
+        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+    else {
+        return problems;
+    };
+    let rows = findings
+        .get("findings")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if !rows.iter().any(|r| r.get("carried_by").is_some()) {
+        return problems;
+    }
+    let by_id: std::collections::BTreeMap<String, &Value> = rows
+        .iter()
+        .map(|r| (cell_text(r, "site_id"), r))
+        .filter(|(id, _)| !id.is_empty())
+        .collect();
+    let place_of = super::counts_check::place_key_of;
+    // Rows the reviewer ruled out are no problem: they neither carry nor are carried.
+    let ruled_out: BTreeSet<String> = entries
+        .get("json/false-positives.json")
+        .and_then(|b| rows_of(b).ok())
+        .unwrap_or_default()
+        .iter()
+        .chain(rows.iter().filter(|r| cell_text(r, "is_fp") == "true"))
+        .map(|r| cell_text(r, "site_id"))
+        .filter(|id| !id.is_empty())
+        .collect();
+    for (i, row) in rows.iter().enumerate() {
+        let carrier_id = cell_text(row, "carried_by");
+        if carrier_id.is_empty() {
+            continue;
+        }
+        let at = format!("findings[{i}]");
+        if ruled_out.contains(&carrier_id) {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!("the row is carried by {carrier_id}, a ruled-out row: a false positive carries nothing"),
+            ));
+            continue;
+        }
+        if ruled_out.contains(&cell_text(row, "site_id")) {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                "a false positive is carried by another row",
+            ));
+        }
+        let Some(carrier) = by_id.get(&carrier_id) else {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!("the row is carried by {carrier_id}, which is not a row of findings.json"),
+            ));
+            continue;
+        };
+        if place_of(carrier) != place_of(row) {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!("the row is carried by {carrier_id}, a row at another place"),
+            ));
+        }
+        if !cell_text(carrier, "carried_by").is_empty() {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!(
+                    "the row is carried by {carrier_id}, which is itself carried by another row"
+                ),
+            ));
+        }
+        let rule = cell_text(row, "rule_id");
+        let listed = cell_text(carrier, "also_matches");
+        let names_it = rule == cell_text(carrier, "rule_id")
+            || listed
+                .split(", ")
+                .any(|listed_rule| listed_rule.trim() == rule);
+        if !names_it {
+            problems.push(problem(
+                "findings.json",
+                &at,
+                format!(
+                    "the row's carrier {carrier_id} does not list the rule {rule} in also_matches"
+                ),
+            ));
+        }
+    }
+
+    // All problems: one row for each place, headed by the carrier.
+    let Some(stem) = package_stem(entries) else {
+        return problems;
+    };
+    let Some(xlsx) = entries.get(&format!("{stem}-findings.xlsx")) else {
+        return problems;
+    };
+    let Ok(grid) = super::archive::xlsx_sheet_grid(xlsx, v::ALL_PROBLEMS) else {
+        return problems;
+    };
+    let Some(col) = grid
+        .first()
+        .and_then(|h| h.iter().position(|c| c == v::H_PLACE_ID))
+    else {
+        return problems;
+    };
+    let shown: Vec<&str> = grid
+        .iter()
+        .skip(1)
+        .filter_map(|r| r.get(col))
+        .map(String::as_str)
+        .filter(|id| !id.is_empty())
+        .collect();
+    // The rows All problems lists: problem kinds that are not ruled out.
+    let listed: Vec<&Value> = rows
+        .iter()
+        .filter(|r| {
+            crate::xlsx_export::ALL_PROBLEMS_SHEET_KINDS.contains(&cell_text(r, "kind").as_str())
+        })
+        .filter(|r| cell_text(r, "is_fp") != "true")
+        .collect();
+    let places: BTreeSet<(String, String, String, String)> =
+        listed.iter().map(|r| place_of(r)).collect();
+    if shown.len() != places.len() {
+        problems.push(problem(
+            "(workbook)",
+            &format!("sheet \"{}\"", v::ALL_PROBLEMS),
+            format!(
+                "the sheet has {} rows and findings.json has {} places with a problem",
+                shown.len(),
+                places.len()
+            ),
+        ));
+    }
+    for r in &listed {
+        let carried_by = cell_text(r, "carried_by");
+        let id = cell_text(r, "site_id");
+        if !carried_by.is_empty() && shown.contains(&id.as_str()) {
+            problems.push(problem(
+                "(workbook)",
+                &format!("sheet \"{}\"", v::ALL_PROBLEMS),
+                format!("the sheet heads a place with {id}, a row {carried_by} carries"),
+            ));
+        }
+    }
+    problems
+}
+
+/// The Fix id of every ticket of `tickets.csv`.
+fn ticket_fix_ids(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
+    let headers = reader.headers().map_err(|e| e.to_string())?.clone();
+    let col = headers
+        .iter()
+        .position(|h| h == crate::xlsx_export::vocabulary::H_FIX_ID)
+        .ok_or_else(|| "the tickets file has no Fix id column".to_string())?;
+    let mut out = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|e| e.to_string())?;
+        out.push(record.get(col).unwrap_or("").to_string());
+    }
+    Ok(out)
+}
+
+/// The Fix id of every row of the workbook's Fix plan sheet.
+fn plan_fix_ids(xlsx: &[u8]) -> Result<Vec<String>, String> {
+    use crate::xlsx_export::vocabulary as v;
+    let grid = super::archive::xlsx_sheet_grid(xlsx, v::FIX_PLAN)?;
+    let header = grid
+        .first()
+        .ok_or_else(|| format!("the {} sheet is empty", v::FIX_PLAN))?;
+    let col = header
+        .iter()
+        .position(|h| h == v::H_FIX_ID)
+        .ok_or_else(|| format!("the {} sheet has no {:?} column", v::FIX_PLAN, v::H_FIX_ID))?;
+    Ok(grid
+        .iter()
+        .skip(1)
+        .filter_map(|row| row.get(col))
+        .filter(|id| !id.is_empty())
+        .cloned()
+        .collect())
+}
+
+/// Over the rows in memory: the PDF's escalation list has one entry for each place that holds an
+/// escalated row (an escalation slot) and none twice, and the top three are three distinct Fixes
+/// that are Fixes of `findings.json`.
+pub fn fix_report_problems(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let slots: BTreeSet<(String, String, String)> = findings
+        .findings
+        .iter()
+        .filter_map(|r| serde_json::to_value(r).ok())
+        .filter(|r| cell_text(r, "escalated") == "true")
+        .map(|r| {
+            (
+                cell_text(&r, "repo"),
+                cell_text(&r, "path"),
+                cell_text(&r, "line"),
+            )
+        })
+        .collect();
+    let entries: Vec<(String, String, String)> = report
+        .escalations
+        .items
+        .iter()
+        .map(|i| (i.repo.clone(), i.path.clone(), i.line.to_string()))
+        .collect();
+    let listed: BTreeSet<&(String, String, String)> = entries.iter().collect();
+    if listed.len() != entries.len() {
+        problems.push(problem(
+            "PDF data",
+            "escalations",
+            "the escalation list names one place more than once",
+        ));
+    }
+    if entries.len() != slots.len() {
+        problems.push(problem(
+            "PDF data",
+            "escalations",
+            format!(
+                "the escalation list has {} entries and findings.json has {} escalated places",
+                entries.len(),
+                slots.len()
+            ),
+        ));
+    }
+    let fix_ids: BTreeSet<&str> = findings.fixes.iter().map(|f| f.id.as_str()).collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for item in &report.three_things.items {
+        if item.fix_id.is_empty() {
+            continue;
+        }
+        if !seen.insert(item.fix_id.as_str()) {
+            problems.push(problem(
+                "PDF data",
+                "three_things",
+                format!("the top three names the Fix {} twice", item.fix_id),
+            ));
+        }
+        if !fix_ids.contains(item.fix_id.as_str()) {
+            problems.push(problem(
+                "PDF data",
+                "three_things",
+                format!(
+                    "the top three names the Fix {}, which is not a Fix",
+                    item.fix_id
+                ),
+            ));
         }
     }
     problems

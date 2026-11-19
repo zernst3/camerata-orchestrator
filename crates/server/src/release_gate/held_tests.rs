@@ -367,12 +367,12 @@ fn every_export_carries_reviewer_edited_and_the_edit_ids() {
         "{header}"
     );
     assert!(csv.contains("edit-000001"), "{csv}");
-    // The PDF's data.
+    // The PDF's data holds no row, so it carries no row's edit marks.
     assert!(
-        data_json.contains("\"reviewer_edited\":true"),
+        !data_json.contains("\"reviewer_edited\":true"),
         "the PDF data"
     );
-    assert!(data_json.contains("edit-000002"));
+    assert!(!data_json.contains("edit-000002"));
     // The workbook.
     let cells = xlsx_text(&zip);
     assert!(cells.iter().any(|c| c == "Reviewer edited"), "{cells:?}");
@@ -545,10 +545,13 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     };
     let label = "Helper builds SQL by hand";
     let new_outputs: Vec<(&str, String)> = vec![
-        ("Remediation plan sheet", sheet("Remediation plan")),
-        ("Tree sheet", sheet("Tree")),
-        ("Decisions sheet", sheet("Decisions")),
-        ("Sites sheet", sheet("Sites")),
+        ("Fix plan sheet", sheet("Fix plan")),
+        (
+            "How problems were grouped sheet",
+            sheet("How problems were grouped"),
+        ),
+        ("Reviewer decisions sheet", sheet("Reviewer decisions")),
+        ("All source rows sheet", sheet("All source rows")),
         (
             "csv/tickets.csv",
             String::from_utf8_lossy(&entries["csv/tickets.csv"]).into_owned(),
@@ -565,16 +568,13 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
         }
     }
     for name in [
-        "Remediation plan sheet",
-        "Tree sheet",
+        "Fix plan sheet",
+        "How problems were grouped sheet",
         "csv/tickets.csv",
         "PDF patterns",
     ] {
         let text = &new_outputs.iter().find(|(n, _)| *n == name).unwrap().1;
-        assert!(
-            text.contains(label),
-            "{name} does not carry the sub-group's name"
-        );
+        assert!(text.contains(label), "{name} does not carry the fix's name");
     }
 }
 
@@ -609,9 +609,9 @@ fn each_editable_field_round_trips_into_the_exports() {
         (EditField::Category, "secret-exposure", "category"),
     ];
     assert_eq!(
-        cases.len() + 2,
+        cases.len() + 5,
         EditField::ALL.len(),
-        "every editable field but the sub-group and the node summary (both tree edits) has a case here"
+        "every editable field but the sub-group, the node's summary and two client reasons (tree edits) and the row's business reason (a workbook-only cell, tested in wo9/why_tests) has a case here"
     );
     for (n, (field, new, column)) in cases.iter().enumerate() {
         let edits = vec![edit_of(n + 1, &row, *field, "", new)];
@@ -1389,4 +1389,139 @@ fn the_gate_refuses_when_the_engine_check_file_cannot_be_read() {
     let view = crate::release_gate::holds::gate_holds(&moved_aside);
     assert!(view.held.is_empty());
     let _ = EngineCheckError::NotARealIssue;
+}
+
+// ── a problem split out of a ruled-out one ───────────────────────────────────────────────
+
+const SPLIT_RULE: &str = "SEC-LOGGING-1";
+
+/// The portal's rule SQL row absorbed a place of another rule; the reviewer rules that row out, so
+/// the place becomes a problem of its own. Returns the sealed report and the host row's key.
+fn sealed_with_a_ruled_out_host() -> (crate::onboard::SealedReport, String) {
+    let mut report = scan_report();
+    report.findings[0].also_locations = vec![crate::onboard::MergedLocation::site(
+        "acme/portal",
+        "src/log.rs",
+        5,
+        SPLIT_RULE,
+        "log::info!(\"{}\", token)",
+        false,
+    )];
+    let sealed = report.seal();
+    let key = sealed.findings[0].site_key.clone();
+    (sealed, key)
+}
+
+fn host_ruled_out(key: &str) -> Decision {
+    decision(
+        "dec-000001",
+        key,
+        DecisionState::FalsePositive,
+        "the value is a constant",
+    )
+}
+
+fn split_out_key(reviewed: &ReviewedReport) -> String {
+    reviewed
+        .report()
+        .findings
+        .iter()
+        .find(|f| f.rule_id == SPLIT_RULE)
+        .expect("the split-out problem")
+        .site_key
+        .clone()
+}
+
+#[test]
+fn the_gate_refuses_a_package_until_each_split_out_problem_has_its_own_decision() {
+    use camerata_api_types::review_view::HoldReason;
+
+    let (sealed, host) = sealed_with_a_ruled_out_host();
+    let ruled_out = host_ruled_out(&host);
+    let reviewed = apply_overlay(&sealed, std::slice::from_ref(&ruled_out), &[], &[]);
+    let split = split_out_key(&reviewed);
+
+    // The ruling on the host is not a ruling on the split-out problem.
+    match release(package_of(&reviewed)) {
+        Err(ReleaseError::Blocked(failure)) => {
+            let problems = check_problems(&failure, CheckId::SplitOutWithoutDecision);
+            assert_eq!(problems.len(), 1, "{:?}", failure.report);
+            assert!(problems[0].location.contains("src/log.rs"), "{problems:?}");
+        }
+        other => panic!("an undecided split-out problem must block the release: {other:?}"),
+    }
+    let view = crate::release_gate::holds::gate_holds(&reviewed);
+    assert!(
+        view.held
+            .iter()
+            .any(|h| h.key == split && h.reason == HoldReason::SplitOutWithoutDecision),
+        "{view:?}"
+    );
+    assert!(crate::release_gate::holds::hold_set(&reviewed)
+        .awaiting_a_ruling
+        .contains(&split));
+
+    // Its own decision releases it.
+    let decided = apply_overlay(
+        &sealed,
+        &[
+            ruled_out,
+            decision("dec-000002", &split, DecisionState::Confirmed, ""),
+        ],
+        &[],
+        &[],
+    );
+    assert!(
+        super::held::split_out_without_decision(&decided.report().findings, &decided).is_empty()
+    );
+    assert!(release(package_of(&decided)).is_ok());
+}
+
+#[test]
+fn a_package_with_a_decided_split_out_problem_goes_through_the_gate_and_builds_the_workbook() {
+    let (sealed, host) = sealed_with_a_ruled_out_host();
+    let ruled_out = host_ruled_out(&host);
+    let undecided = apply_overlay(&sealed, std::slice::from_ref(&ruled_out), &[], &[]);
+    let split = split_out_key(&undecided);
+    assert!(
+        matches!(
+            release(package_of(&undecided)),
+            Err(ReleaseError::Blocked(_))
+        ),
+        "refused while undecided"
+    );
+
+    let decided = apply_overlay(
+        &sealed,
+        &[
+            ruled_out,
+            decision("dec-000002", &split, DecisionState::Confirmed, ""),
+        ],
+        &[],
+        &[],
+    );
+    let package = package_of(&decided);
+    let xlsx = package.xlsx.clone();
+    let released = release(package);
+    assert!(
+        released.is_ok(),
+        "released once decided: {:?}",
+        released.err()
+    );
+
+    // The client workbook carries the problem and the neutral note, and never the internal
+    // bookkeeping key.
+    let mut text = String::new();
+    for name in crate::release_gate::archive::xlsx_sheet_names(&xlsx).unwrap() {
+        for row in crate::release_gate::archive::xlsx_sheet_grid(&xlsx, &name).unwrap() {
+            text.push_str(&row.join("\t"));
+            text.push('\n');
+        }
+    }
+    assert!(text.contains("src/log.rs"), "the workbook lists the place");
+    assert!(
+        text.contains(crate::report_export::unfold::UNFOLD_CLIENT_NOTE),
+        "the workbook carries the neutral note"
+    );
+    assert!(!text.contains(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE));
 }

@@ -735,6 +735,12 @@ pub(crate) fn assign_deviation_kinds(
             .iter_mut()
             .filter(|f| f.rule_id.eq_ignore_ascii_case(&rec.rule_id))
         {
+            // A row that is an objective fault stays the Defect it was parsed as. It was
+            // already counted in `deviating_sites` above, so the departure statistics still
+            // see it.
+            if is_objective_fault_row(f) {
+                continue;
+            }
             f.kind = Some(FindingKind::Deviation(DeviationKind {
                 deviating_sites,
                 assessed_sites,
@@ -743,6 +749,45 @@ pub(crate) fn assign_deviation_kinds(
             }));
         }
     }
+}
+
+/// Reason phrases that mark a row as an objective fault whichever rule raised it: an
+/// object-level access hole, a cross-tenant reach or data loss. The rule-id scan of
+/// [`finding_class`] covers authorization, injection, secret exposure and the other security
+/// families; these phrases cover the reasons a convention rule's id does not name.
+const OBJECTIVE_FAULT_PHRASES: &[&str] = &[
+    "idor",
+    "insecure direct object reference",
+    "data loss",
+    "lose data",
+    "permanently deleted",
+    "cross-tenant",
+    "cross tenant",
+    "another user's",
+    "other user's",
+    "other users'",
+    "another tenant's",
+    "other tenant's",
+    "other tenants'",
+];
+
+/// Whether `f` states an objective fault (an authorization, injection, secret exposure,
+/// cross-tenant or data-loss class) and not only a departure from the codebase's own
+/// convention. Such a row is a Defect even when the rule it was raised under is decided by the
+/// majority convention. Only a row of at least medium severity qualifies: a low row of the same
+/// rule (access is enforced, only the shape of the check differs) is the consistency statement
+/// the Deviation kind exists for.
+pub(crate) fn is_objective_fault_row(f: &Finding) -> bool {
+    if severity_rank(&f.severity.to_ascii_lowercase()) < severity_rank("medium") {
+        return false;
+    }
+    if finding_class(f) == FindingClass::Security {
+        return true;
+    }
+    let text = format!("{} {}", f.detail, f.snippet).to_ascii_lowercase();
+    OBJECTIVE_FAULT_PHRASES
+        .iter()
+        .any(|p| severity_rules::contains_phrase_as_word(&text, p))
 }
 
 /// Pass-1 W3 (A5.5): one [`FindingKind::ConventionObserved`] row per multi-option rule the
@@ -841,7 +886,7 @@ pub(crate) fn conventions_observed_findings(
             severity: "info".to_string(),
             snippet,
             detail: format!(
-                "The codebase consistently follows \"{}\" for {} — zero violations were \
+                "The codebase consistently follows \"{}\" for {}. Zero violations were \
                  observed this scan. Reported so the convention can be adopted as an explicit \
                  decision and enforced going forward. {}",
                 opt.label, rec.rule_id, rec.recommendation_reasoning
@@ -942,8 +987,8 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
             severity: "info".to_string(),
             snippet: note.clone(),
             detail: format!(
-                "{rule_id} was armed for this scan but could not be evaluated: {note}. \
-                 Reported as not-assessed rather than silently reading as clean."
+                "This check could not be run on this codebase: {note}. It is reported as not \
+                 assessed, so it never reads as clean."
             ),
             located: false,
             kind: Some(FindingKind::NotAssessed(NotAssessedKind {

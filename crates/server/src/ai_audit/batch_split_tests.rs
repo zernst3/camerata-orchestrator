@@ -17,6 +17,8 @@ use crate::llm::{
 
 fn ok_reply() -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: "{\"findings\":[]}".to_string(),
         model: "stub".to_string(),
         backend: "stub".to_string(),
@@ -272,6 +274,8 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<crate::run_store::RunStore> {
             backend: "api".to_string(),
             mode: "batch".to_string(),
             resolved: true,
+            group_review: String::new(),
+            finder: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: MODEL.to_string(),

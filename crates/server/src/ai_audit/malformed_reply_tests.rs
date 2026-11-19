@@ -41,6 +41,8 @@ impl ScriptedLlm {
 
 fn response(text: &str, truncated: bool) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),

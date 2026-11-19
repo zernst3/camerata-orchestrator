@@ -19,6 +19,8 @@ use crate::run_store::{ModelsRecord, NewRun, RunOrigin, RunStore};
 
 pub(super) fn response(text: &str, backend: &str, model: &str) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: model.to_string(),
         backend: backend.to_string(),
@@ -592,6 +594,8 @@ fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
             backend: "api".to_string(),
             mode: "parallel".to_string(),
             resolved: true,
+            group_review: String::new(),
+            finder: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: "claude-a".to_string(),

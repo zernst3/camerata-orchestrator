@@ -326,6 +326,9 @@ pub fn collapse_identical(mut findings: Vec<Finding>, tools: &ToolMap) -> Collap
                 .unwrap_or_else(|| row.severity.clone());
             let mut donor: Option<Finding> = None;
             let mut folded_rows: Vec<Finding> = Vec::new();
+            // Taken before any stage 1 record is carried over: a survivor nobody doubted stays
+            // undoubted when it takes a folded source's record.
+            let survivor_undoubted = crate::follow_reviewers::reviewer_doubt(&row).is_none();
             for &s in sources {
                 let Some(src) = sources_taken[s].take() else {
                     continue;
@@ -346,6 +349,13 @@ pub fn collapse_identical(mut findings: Vec<Finding>, tools: &ToolMap) -> Collap
                     folded_rows.push(src.clone());
                 }
                 carry_stage1_record(&mut row, &src);
+                // A source nobody doubted folded into a doubted survivor, or a survivor nobody
+                // doubted that took a doubted source's record, makes the row undoubted for
+                // severity (the raise below stands) and holds it (R-7).
+                if survivor_undoubted || crate::follow_reviewers::reviewer_doubt(&src).is_none() {
+                    crate::follow_reviewers::mark_undoubted_source_folded(&mut row);
+                }
+                crate::follow_reviewers::hold_partly_doubted(&mut row);
                 if donor.is_none() && src.fix_specific.is_some() {
                     donor = Some(src);
                 }

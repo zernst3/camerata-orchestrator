@@ -121,6 +121,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         fix_model: None,
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,
@@ -131,6 +132,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false)
@@ -292,6 +294,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         fix_model: None,
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,
@@ -302,6 +305,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false).await;

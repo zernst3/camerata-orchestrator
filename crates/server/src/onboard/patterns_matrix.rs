@@ -17,7 +17,10 @@
 //! The cell states are the ledger's own ([`CellState`] is defined once, in `scan_ledger`); this
 //! module only refines a cell with the report's findings, which can only move a cell toward
 //! violated (a finding is a finding) or away from clean (a check that could not be completed is
-//! not a clean check).
+//! not a clean check). The one move toward clean is a reviewer's: a cell whose every problem the
+//! reviewer ruled out reads clean ([`cell_with`]). A cell is clean only when its service has no
+//! open problem for the rule or its family, and the release gate refuses a package where one
+//! says otherwise.
 //!
 //! An optional model pass can group the rows into themes ([`Theme`]). It sees only the rows and
 //! one headline per violated cell, never code, and [`keep_valid_themes`] drops any theme that
@@ -28,7 +31,7 @@ use std::collections::BTreeSet;
 use camerata_api_types::audit::FindingKind;
 use serde::{Deserialize, Serialize};
 
-use super::ScanReport;
+use super::{Finding, ScanReport};
 use crate::scan_ledger::CellState;
 
 /// The sentence every pattern row is introduced with. Fixed wording: it states a difference and
@@ -123,39 +126,119 @@ fn is_violation(kind: Option<&FindingKind>) -> bool {
     )
 }
 
-/// The ledger's cell for (rule, repo), refined with the report's findings for it.
+/// Whether the row itself stands under `rule_id`: its own rule id, or the rule node the review
+/// tree files it under (a tool's row the mapping assigns to the native rule is in that rule's
+/// family, [`crate::review_tree::family_of`]).
+fn stands_under(f: &Finding, rule_id: &str) -> bool {
+    f.rule_id.eq_ignore_ascii_case(rule_id)
+        || f.group_path
+            .get(1)
+            .and_then(|node| node.strip_prefix("rule:"))
+            .is_some_and(|node| node.eq_ignore_ascii_case(rule_id))
+}
+
+/// Whether a place that row `f` carries (an absorbed site in `also_locations`, or a rule in
+/// `also_matches` at the row's own place) belongs to another rule or another service than the
+/// row's own: the place is in a repo other than the row's, or the rule is not one the row
+/// stands under ([`stands_under`]; a tool's row the review tree files under a native rule is in
+/// that rule's family). The ONE definition: [`cell_with`], the unfold of a ruled-out row's
+/// carried places and the release gate's backstop all ask it, so they cannot disagree about
+/// which places a ruling on the row leaves open.
+pub(crate) fn is_other_rules_place(f: &Finding, place_repo: &str, place_rule_id: &str) -> bool {
+    f.repo != place_repo || !stands_under(f, place_rule_id)
+}
+
+/// The ledger's cell for (rule, repo), refined with the report's findings for it. Every problem
+/// counts, held or not; see [`cell_with`]. The exports read [`cell_with`] with the reviewer's
+/// rulings; this is the same cell with none.
+#[cfg(test)]
 pub(crate) fn cell_for(report: &ScanReport, rule_id: &str, repo: &str) -> CellState {
+    cell_with(report, rule_id, repo, &|_| false)
+}
+
+/// The cell for (rule, repo), where `ruled_out` names the rows a reviewer ruled out.
+///
+/// The cell is clean only when the service has no open problem for the rule or its family: a
+/// row under the rule ([`stands_under`]), a row that carries it (a rule demoted into it by `also_matches`, or a source collapsed into it, `flagged_by`) or a site a merge
+/// absorbed under it (`also_locations`, which may sit in another repo than the row that holds
+/// it). A row that needs a decision, or that the reviewer put back after the engine threw it
+/// out, is open: nothing here reads a hold. A row the reviewer ruled out is not open, and neither are its own rule's sites
+/// merged into it or the sources collapsed into it; another rule's problem that a merge put on the
+/// row stays open until it is ruled on itself.
+///
+/// When the service has no open problem, the ledger decides. A ledger that counted findings
+/// reads clean only when the rows account for them: a convention the service follows, or a
+/// problem the reviewer ruled out. A followed convention never outweighs a problem: problems are
+/// counted first and any open one makes the cell violated.
+pub(crate) fn cell_with(
+    report: &ScanReport,
+    rule_id: &str,
+    repo: &str,
+    ruled_out: &dyn Fn(&Finding) -> bool,
+) -> CellState {
     let applies = report.ledger.rule_applies_to_repo(rule_id, repo);
     let base = report.ledger.cell_state(rule_id, repo, applies);
-    let mut violations = 0usize;
+    let mut open = 0usize;
     let mut convention_seen = false;
     let mut not_assessed = false;
-    for f in report.findings.iter().filter(|f| f.repo == repo) {
-        if f.rule_id.eq_ignore_ascii_case(rule_id) {
-            match f.kind.as_ref() {
-                Some(FindingKind::ConventionObserved(_)) => convention_seen = true,
-                Some(FindingKind::NotAssessed(_)) => not_assessed = true,
-                other => violations += usize::from(is_violation(other)),
-            }
-        } else if f
-            .also_matches
-            .iter()
-            .any(|m| m.eq_ignore_ascii_case(rule_id))
-        {
-            violations += 1;
-        }
-    }
-    // A site a merge absorbed into another rule's row still fired, and may live in another repo
-    // than the row that absorbed it.
+    let mut ruled_out_seen = false;
     for f in &report.findings {
-        violations += f
+        let own = f.repo == repo && stands_under(f, rule_id);
+        let flagged = f.repo == repo
+            && !own
+            && f.flagged_by
+                .iter()
+                .any(|b| b.rule_id.eq_ignore_ascii_case(rule_id));
+        let also_matched = f.repo == repo
+            && !own
+            && !flagged
+            && f.also_matches
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(rule_id));
+        let sites = f
             .also_locations
             .iter()
-            .filter(|l| l.repo == repo && l.rule_id.eq_ignore_ascii_case(rule_id))
-            .count();
+            .filter(|l| l.repo == repo && l.rule_id.eq_ignore_ascii_case(rule_id));
+        // A site of the row's own rule in the row's own service is the row's place; any other
+        // rule's or service's site merged into the row is a problem of its own.
+        let (absorbed_same, absorbed_other) = sites.fold((0usize, 0usize), |(same, other), l| {
+            if !is_other_rules_place(f, &l.repo, &l.rule_id) {
+                (same + 1, other)
+            } else {
+                (same, other + 1)
+            }
+        });
+        if !own && !flagged && !also_matched && absorbed_same + absorbed_other == 0 {
+            continue;
+        }
+        // A ruling clears the row, its own rule's sites merged into it and the sources collapsed
+        // into it (the same site). It does not rule out another rule's problem that a merge
+        // happened to put on the row: that stays open until it is ruled on itself.
+        let ruled = ruled_out(f);
+        let mut cleared = false;
+        if ruled {
+            cleared = own || flagged || absorbed_same > 0;
+        }
+        if !ruled {
+            if own {
+                match f.kind.as_ref() {
+                    Some(FindingKind::ConventionObserved(_)) => convention_seen = true,
+                    Some(FindingKind::NotAssessed(_)) => not_assessed = true,
+                    other => open += usize::from(is_violation(other)),
+                }
+            }
+            if flagged || also_matched {
+                open += 1;
+            }
+            open += absorbed_same;
+        } else if also_matched {
+            open += 1;
+        }
+        open += absorbed_other;
+        ruled_out_seen |= cleared;
     }
-    if violations > 0 {
-        return CellState::Violated { sites: violations };
+    if open > 0 {
+        return CellState::Violated { sites: open };
     }
     let not_completed = || CellState::NotReviewed {
         reason: "the check could not be completed on this service".to_string(),
@@ -164,7 +247,7 @@ pub(crate) fn cell_for(report: &ScanReport, rule_id: &str, repo: &str) -> CellSt
         CellState::Violated { sites } => {
             if not_assessed {
                 not_completed()
-            } else if convention_seen {
+            } else if convention_seen || ruled_out_seen {
                 CellState::Clean
             } else {
                 CellState::Violated { sites }
@@ -179,6 +262,16 @@ pub(crate) fn cell_for(report: &ScanReport, rule_id: &str, repo: &str) -> CellSt
 /// The dependency audit is left out: an advisory against a package is not a way of doing
 /// something that one service could adopt from another.
 pub fn build(report: &ScanReport) -> PatternsAcrossServices {
+    build_with(report, &|_| false)
+}
+
+/// [`build`] with the rows a reviewer ruled out ([`cell_with`]). The exports call this on the
+/// reviewed rows, so the section reads the same rows, holds and rulings as the rest of the
+/// report rather than the rows as they stood at the seal.
+pub fn build_with(
+    report: &ScanReport,
+    ruled_out: &dyn Fn(&Finding) -> bool,
+) -> PatternsAcrossServices {
     let mut repos: Vec<String> = Vec::new();
     for repo in report
         .repos
@@ -204,7 +297,7 @@ pub fn build(report: &ScanReport) -> PatternsAcrossServices {
             .iter()
             .map(|repo| RepoRuleCell {
                 repo: repo.clone(),
-                state: cell_for(report, &rule_id, repo),
+                state: cell_with(report, &rule_id, repo, ruled_out),
             })
             .collect();
         let violated = cells
@@ -355,6 +448,23 @@ mod tests {
     }
 
     #[test]
+    fn a_service_whose_rule_was_judged_not_a_problem_here_is_never_a_clean_cell() {
+        // Violated in a; in b the model looked and judged the rule's letter unmet but harmless.
+        // That is not "checked and compliant": no clean cell, so no row, and the cell says so.
+        let mut r = report(&["acme/a", "acme/b"]);
+        ran(&mut r, "acme/a", RULE, 1);
+        r.ledger.note_not_a_problem_rule("acme/b", RULE);
+        ran(&mut r, "acme/b", RULE, 0);
+        r.findings.push(finding("acme/a", RULE, None));
+        let m = build(&r);
+        assert!(m.rows.is_empty(), "{:?}", m.rows);
+        assert!(matches!(
+            r.ledger.cell_state(RULE, "acme/b", true),
+            CellState::NotReviewed { reason } if reason.contains("not shown")
+        ));
+    }
+
+    #[test]
     fn a_service_with_nothing_recorded_is_not_reviewed_never_clean() {
         let mut r = report(&["acme/a", "acme/b", "acme/c"]);
         ran(&mut r, "acme/a", RULE, 1);
@@ -464,6 +574,56 @@ mod tests {
         r.findings.push(host);
         let m = build(&r);
         assert_eq!(state(&m, RULE, "acme/a"), CellState::Violated { sites: 1 });
+    }
+
+    #[test]
+    fn ruling_out_a_row_leaves_another_rules_absorbed_site_in_another_service_open() {
+        let mut r = report(&["acme/api", "acme/web"]);
+        ran(&mut r, "acme/api", "RULE-A", 1);
+        ran(&mut r, "acme/web", "RULE-B", 1);
+        let mut host = finding("acme/api", "RULE-A", None);
+        host.also_locations = vec![crate::onboard::MergedLocation::site(
+            "acme/web", "src/w.ts", 4, "RULE-B", "w", false,
+        )];
+        r.findings.push(host);
+        let ruled = |f: &Finding| f.rule_id == "RULE-A";
+        assert_eq!(
+            cell_with(&r, "RULE-A", "acme/api", &ruled),
+            CellState::Clean,
+            "the ruled-out row's own rule is cleared"
+        );
+        assert_eq!(
+            cell_with(&r, "RULE-B", "acme/web", &ruled),
+            CellState::Violated { sites: 1 },
+            "a ruling on the host does not rule out the other rule's absorbed site"
+        );
+    }
+
+    #[test]
+    fn ruling_out_a_row_leaves_a_rule_it_also_matches_open_but_clears_its_flagged_sources() {
+        let mut r = report(&["acme/api", "acme/web"]);
+        ran(&mut r, "acme/api", "RULE-A", 1);
+        ran(&mut r, "acme/api", "RULE-C", 1);
+        ran(&mut r, "acme/api", "RULE-D", 1);
+        let mut host = finding("acme/api", "RULE-A", None);
+        host.also_matches = vec!["RULE-C".to_string()];
+        host.flagged_by = vec![crate::review_tree::FlaggedBy {
+            rule_id: "RULE-D".to_string(),
+            tool: None,
+            site_key: "k".to_string(),
+            path: "src/index.ts".to_string(),
+            line: 3,
+        }];
+        r.findings.push(host);
+        let ruled = |f: &Finding| f.rule_id == "RULE-A";
+        assert_eq!(
+            cell_with(&r, "RULE-C", "acme/api", &ruled),
+            CellState::Violated { sites: 1 }
+        );
+        assert_eq!(
+            cell_with(&r, "RULE-D", "acme/api", &ruled),
+            CellState::Clean
+        );
     }
 
     #[test]

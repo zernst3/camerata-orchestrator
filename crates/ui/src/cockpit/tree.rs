@@ -35,7 +35,7 @@ use camerata_ui_core::edits::context_for;
 use camerata_ui_core::tree::batch::{
     batch_allowed, batch_blocked_reason, batch_heading, batch_plan, decision_request,
     decision_state_for, plan_sentence, stale_summary_note, summary_edit_request, summary_text,
-    BatchPlan, TreeUndo,
+    why_text, BatchPlan, TreeUndo,
 };
 use camerata_ui_core::tree::export::Door;
 use camerata_ui_core::tree::keys::{keys_hint, tree_command, tree_keys_armed, TreeCommand};
@@ -78,8 +78,10 @@ pub(crate) enum TreeStatus {
     Ready,
 }
 
-/// A prompt open in the right pane.
+/// A prompt open in the right pane. One prompt is open at a time, so the larger plan variant
+/// costs nothing worth boxing it for.
 #[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum TreePrompt {
     /// Reading every page of a node to work out what a batch would write.
     Planning {
@@ -105,6 +107,15 @@ pub(crate) enum TreePrompt {
         reason: String,
         error: Option<String>,
     },
+    /// Editing one of a node's two client reasons (why it matters to the business, or
+    /// technically).
+    Why {
+        node: String,
+        field: camerata_api_types::edits::EditField,
+        text: String,
+        reason: String,
+        error: Option<String>,
+    },
     /// The reason for one site's Ignore or False positive.
     Site {
         node: String,
@@ -123,6 +134,7 @@ impl TreePrompt {
             | Self::Batch { node, .. }
             | Self::PlanFailed { node, .. }
             | Self::Summary { node, .. }
+            | Self::Why { node, .. }
             | Self::Site { node, .. } => node,
         }
     }
@@ -162,11 +174,15 @@ pub(crate) fn TreeScreen(
     #[props(default)] on_focus_node: Callback<String>,
     #[props(default)] on_focus_site: Callback<(String, String)>,
     #[props(default)] on_tick: Callback<String>,
+    /// Open another row of the same place: its key, rule id and sub-group.
+    #[props(default)]
+    on_goto: Callback<(String, String, String)>,
     #[props(default)] on_more: Callback<String>,
     #[props(default)] on_retry_node: Callback<String>,
     #[props(default)] on_retry: Callback<()>,
     #[props(default)] on_batch: Callback<TriageState>,
     #[props(default)] on_edit_summary: Callback<()>,
+    #[props(default)] on_edit_why: Callback<camerata_api_types::edits::EditField>,
     #[props(default)] on_prompt_reason: Callback<String>,
     #[props(default)] on_prompt_text: Callback<String>,
     #[props(default)] on_prompt_commit: Callback<()>,
@@ -285,6 +301,7 @@ pub(crate) fn TreeScreen(
                                             ticked: state.ticked.clone(),
                                             on_focus_site,
                                             on_tick,
+                                            on_goto,
                                             on_more,
                                             on_retry: on_retry_node,
                                         }
@@ -309,6 +326,7 @@ pub(crate) fn TreeScreen(
                         prompt: prompt.clone(),
                         on_batch,
                         on_edit_summary,
+                        on_edit_why,
                         on_prompt_reason,
                         on_prompt_text,
                         on_prompt_commit,
@@ -318,13 +336,20 @@ pub(crate) fn TreeScreen(
                     {
                         let node_label = index.node(&node).map(|n| n.label.clone()).unwrap_or_default();
                         let ctx = context_for(&index, &state, &node, &row);
-                        let site_prompt = prompt.clone().filter(
-                            |p| matches!(p, TreePrompt::Site { key, .. } if *key == row.site_key),
-                        );
+                        // A site's own reason prompt, or the place decision this row heads.
+                        let site_prompt = prompt.clone().filter(|p| match p {
+                            TreePrompt::Site { key, .. } => *key == row.site_key,
+                            TreePrompt::Batch { node, .. } => {
+                                !row.place_id.is_empty() && *node == row.place_id
+                            }
+                            _ => false,
+                        });
+                        let node_label = if row.place_id.is_empty() { node_label } else { "this place".to_string() };
                         rsx! {
                             SiteDetailView {
                                 position: site_position(&state, &node, &row),
                                 ticked: state.ticked.contains(&row.site_key),
+                                unticked: state.place_unticked.clone(),
                                 panel: detail.clone(),
                                 ctx,
                                 row,
@@ -501,6 +526,7 @@ fn SiteTable(
     ticked: BTreeSet<String>,
     on_focus_site: Callback<(String, String)>,
     on_tick: Callback<String>,
+    on_goto: Callback<(String, String, String)>,
     on_more: Callback<String>,
     on_retry: Callback<String>,
 ) -> Element {
@@ -552,6 +578,7 @@ fn SiteTable(
                                 row,
                                 on_focus_site,
                                 on_tick,
+                                on_goto,
                             }
                         }
                     }
@@ -606,9 +633,13 @@ fn SiteRowView(
     ticked: bool,
     on_focus_site: Callback<(String, String)>,
     on_tick: Callback<String>,
+    on_goto: Callback<(String, String, String)>,
 ) -> Element {
     let token = dom_token(&row.site_key);
     let cell = marker_cell(&row);
+    let also = camerata_ui_core::tree::place::also_match_chip(&row);
+    let pointer = camerata_ui_core::tree::place::carried_pointer(&row);
+    let carrier = row.carried_by.clone();
     let fold = cell.fold_label();
     let fold_tip = cell.fold_tip();
     let (kind_class, kind_label, kind_tip) = kind_chip_parts(kind_tag_of(&row));
@@ -626,6 +657,9 @@ fn SiteRowView(
     }
     if row.held.is_some() {
         class.push_str(" row-held");
+    }
+    if row.carried_by.is_some() {
+        class.push_str(" row-carried");
     }
     if focused {
         class.push_str(" focused");
@@ -661,6 +695,9 @@ fn SiteRowView(
                     if let Some(fold) = fold {
                         span { class: "mark-fold", title: "{fold_tip}", "{fold}" }
                     }
+                    if let Some(chip) = also {
+                        span { class: "{chip.class}", title: "{chip.tip}", "{chip.label}" }
+                    }
                 }
             }
             td { class: "col-sev",
@@ -672,7 +709,23 @@ fn SiteRowView(
                 span { class: "{kind_class}", title: "{kind_tip}", "{kind_label}" }
             }
             td { class: "col-loc", title: "{row.repo}", "{file_line(&row)}" }
-            td { class: "col-headline", title: "{row.headline}", "{row.headline}" }
+            td { class: "col-headline", title: "{row.headline}",
+                if let (Some(text), Some(by)) = (pointer, carrier) {
+                    a {
+                        class: "carried-pointer",
+                        href: "#",
+                        title: "Open the row that carries this rule",
+                        onclick: move |e| {
+                            e.prevent_default();
+                            e.stop_propagation();
+                            on_goto.call((by.site_key.clone(), by.rule_id.clone(), by.node_id.clone()));
+                        },
+                        "{text}"
+                    }
+                } else {
+                    "{row.headline}"
+                }
+            }
             td { class: "col-s1", title: "{row.stage1.reason}", "{stage1_cell(&row)}" }
             td { class: "col-s2",
                 title: row.stage2.as_ref().map(|s| s.why.clone()).unwrap_or_default(),
@@ -689,6 +742,9 @@ fn SiteRowView(
                 if decision.inherited {
                     span { class: "dec-inherited", "inherited" }
                 }
+                if let Some(note) = decision.note.clone() {
+                    span { class: "dec-carried-note", "{note}" }
+                }
             }
         }
     }
@@ -704,6 +760,7 @@ fn NodeSide(
     prompt: Option<TreePrompt>,
     on_batch: Callback<TriageState>,
     on_edit_summary: Callback<()>,
+    on_edit_why: Callback<camerata_api_types::edits::EditField>,
     on_prompt_reason: Callback<String>,
     on_prompt_text: Callback<String>,
     on_prompt_commit: Callback<()>,
@@ -764,6 +821,29 @@ fn NodeSide(
             }
             if let Some(note) = stale_note {
                 p { class: "node-stale-note", "{note}" }
+            }
+            for field in [
+                camerata_api_types::edits::EditField::WhyBusiness,
+                camerata_api_types::edits::EditField::WhyTechnical,
+            ] {
+                div { key: "{field.wire_name()}", class: "node-why",
+                    div { class: "node-summary-head",
+                        span { "{camerata_ui_core::edits::field_label(field)}" }
+                        if !matches!(&prompt_here, Some(TreePrompt::Why { field: f, .. }) if *f == field) {
+                            button {
+                                class: "btn-edit-sm",
+                                title: "Edit this text. The client workbook reads it. It needs a reason.",
+                                onclick: move |_| on_edit_why.call(field),
+                                "Edit"
+                            }
+                        }
+                    }
+                    if why_text(&node, field).trim().is_empty() {
+                        p { class: "node-summary-none", "None written for this node." }
+                    } else {
+                        p { class: "node-summary", "{why_text(&node, field)}" }
+                    }
+                }
             }
             if !node.flags.is_empty() {
                 div { class: "node-flags",
@@ -923,6 +1003,36 @@ fn TreePromptView(
                     },
                 }
                 label { class: "rule-modal-label", "Why the model's summary was wrong (required)" }
+                ReasonField { reason, placeholder: "why (recorded with the edit)", on_reason, on_commit, on_cancel }
+                if let Some(error) = error {
+                    p { class: "batch-error", role: "alert", "{error}" }
+                }
+                PromptButtons { commit_disabled: false, on_commit, on_cancel }
+            }
+        },
+        TreePrompt::Why {
+            field,
+            text,
+            reason,
+            error,
+            ..
+        } => rsx! {
+            div { class: "queue-reason-prompt",
+                label { class: "rule-modal-label", "Edit: {camerata_ui_core::edits::field_label(field)}" }
+                textarea {
+                    class: "addressee-input summary-input",
+                    rows: "5",
+                    autofocus: true,
+                    value: "{text}",
+                    oninput: move |e| on_text.call(e.value()),
+                    onkeydown: move |e: KeyboardEvent| {
+                        e.stop_propagation();
+                        if e.key() == Key::Escape {
+                            on_cancel.call(());
+                        }
+                    },
+                }
+                label { class: "rule-modal-label", "Why the text was wrong (required)" }
                 ReasonField { reason, placeholder: "why (recorded with the edit)", on_reason, on_commit, on_cancel }
                 if let Some(error) = error {
                     p { class: "batch-error", role: "alert", "{error}" }
@@ -1393,6 +1503,46 @@ pub(crate) fn TreeHost(
         }
     });
 
+    // A decision on a row that carries other rules at its place is a decision on the place
+    // (D2): the plan names every rule it writes and every rule it leaves out, and the reason is
+    // required. Returns false for a row that carries nothing, which decides as before.
+    let open_place = use_callback(move |st: TriageState| -> bool {
+        let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() else {
+            return false;
+        };
+        let Some(row) = state.peek().site(&node, &key).cloned() else {
+            return false;
+        };
+        if row.carries.is_empty() || row.place_id.is_empty() {
+            return false;
+        }
+        let Some(decision) = decision_state_for(st) else {
+            return false;
+        };
+        let plan = camerata_ui_core::tree::place::place_plan(
+            &row,
+            &decision,
+            &state.peek().place_unticked,
+        );
+        prompt.set(Some(TreePrompt::Batch {
+            node: plan.node.clone(),
+            state: st,
+            plan,
+            reason: String::new(),
+            error: None,
+        }));
+        true
+    });
+    let goto = use_callback(move |(key, rule_id, node_id): (String, String, String)| {
+        if let Some(mut d) = door {
+            d.0.set(Some(Door::Site {
+                key,
+                rule_id,
+                node_id,
+            }));
+        }
+    });
+
     let commit = use_callback({
         let api = api.clone();
         move |()| {
@@ -1452,6 +1602,50 @@ pub(crate) fn TreeHost(
                             }
                             Err(message) => prompt.set(Some(TreePrompt::Summary {
                                 node,
+                                text,
+                                reason,
+                                error: Some(message),
+                            })),
+                        }
+                    });
+                }
+                Some(TreePrompt::Why {
+                    node,
+                    field,
+                    text,
+                    reason,
+                    ..
+                }) => {
+                    let idx = index.peek().clone();
+                    let Some(view) = idx.node(&node).cloned() else {
+                        return;
+                    };
+                    let api = api.clone();
+                    let run = run_id();
+                    spawn(async move {
+                        let sent = match camerata_ui_core::tree::batch::why_edit_request(
+                            &view, field, &text, &reason, &run,
+                        ) {
+                            Ok(req) => api
+                                .writes
+                                .post_edit(req)
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| e.message),
+                            Err(e) => Err(e.message().to_string()),
+                        };
+                        match sent {
+                            Ok(()) => {
+                                prompt.set(None);
+                                toast.call((
+                                    crate::toast::ToastKind::Info,
+                                    "Saved. The client workbook reads your text.".to_string(),
+                                ));
+                                after_write.call(());
+                            }
+                            Err(message) => prompt.set(Some(TreePrompt::Why {
+                                node,
+                                field,
                                 text,
                                 reason,
                                 error: Some(message),
@@ -1536,6 +1730,8 @@ pub(crate) fn TreeHost(
                     open_batch.call((id, st));
                 }
             }
+            TreeCommand::Site(PaneCommand::Dispose(st) | PaneCommand::PromptFor(st))
+                if open_place.call(st) => {}
             TreeCommand::Site(PaneCommand::Dispose(st)) => {
                 if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
                     decide_site.call((node, key, st, String::new()));
@@ -1616,6 +1812,7 @@ pub(crate) fn TreeHost(
             on_toggle,
             on_focus_node: move |id: String| state.write().focus_node(&id),
             on_focus_site: move |(node, key): (String, String)| state.write().focus_site(&node, &key),
+            on_goto: goto,
             on_tick: move |key: String| {
                 let found = {
                     let st = state.peek();
@@ -1648,6 +1845,9 @@ pub(crate) fn TreeHost(
             on_detail: move |event: DetailEvent| match event {
                 // The lane's own: a decision, the outlier tick, the viewer and the stack.
                 DetailEvent::Decide(st) => {
+                    if open_place.call(st) {
+                        return;
+                    }
                     if let Some(TreeRef::Site { node, key }) = state.peek().cursor.clone() {
                         if refuses.call((node.clone(), key.clone(), st)) {
                             return;
@@ -1664,6 +1864,14 @@ pub(crate) fn TreeHost(
                         state.write().toggle_tick(&row.site_key.clone(), &row);
                     }
                 }
+                DetailEvent::TickCarried(carried_key) => {
+                    if let Some((row, _)) = cursor_site() {
+                        if let Some(rule) = row.carries.iter().find(|c| c.site_key == carried_key) {
+                            state.write().toggle_carried(rule);
+                        }
+                    }
+                }
+                DetailEvent::GoTo(key, rule_id, node_id) => goto.call((key, rule_id, node_id)),
                 DetailEvent::OpenCode => open_code.call(()),
                 DetailEvent::OpenStack => open_stack.call(()),
                 other => {
@@ -1678,10 +1886,25 @@ pub(crate) fn TreeHost(
                     open_summary(&idx, &id, prompt);
                 }
             },
+            on_edit_why: move |field: camerata_api_types::edits::EditField| {
+                if let Some(TreeRef::Node(id)) = state.peek().cursor.clone() {
+                    let idx = index.peek().clone();
+                    if let Some(view) = idx.node(&id) {
+                        prompt.set(Some(TreePrompt::Why {
+                            node: id.clone(),
+                            field,
+                            text: camerata_ui_core::tree::batch::why_text(view, field).to_string(),
+                            reason: String::new(),
+                            error: None,
+                        }));
+                    }
+                }
+            },
             on_prompt_reason: move |text: String| {
                 if let Some(
                     TreePrompt::Batch { reason, .. }
                     | TreePrompt::Summary { reason, .. }
+                    | TreePrompt::Why { reason, .. }
                     | TreePrompt::Site { reason, .. },
                 ) = prompt.write().as_mut()
                 {
@@ -1689,7 +1912,10 @@ pub(crate) fn TreeHost(
                 }
             },
             on_prompt_text: move |text: String| {
-                if let Some(TreePrompt::Summary { text: t, .. }) = prompt.write().as_mut() {
+                if let Some(
+                    TreePrompt::Summary { text: t, .. } | TreePrompt::Why { text: t, .. },
+                ) = prompt.write().as_mut()
+                {
                     *t = text;
                 }
             },

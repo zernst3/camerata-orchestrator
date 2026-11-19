@@ -25,6 +25,8 @@ const OUTPUT_TOKENS: u64 = 10;
 
 fn reply_of(text: &str) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "stub".to_string(),
@@ -832,6 +834,10 @@ fn a_batch_run_reaches_every_post_scan_stage_with_its_job() {
 
 fn capped_meter(cap: f64, hint: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(crate::cost_cap::RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: crate::efficiency::EfficiencyConfig::default(),
         max_cost_usd: Some(cap),
@@ -839,6 +845,7 @@ fn capped_meter(cap: f64, hint: Option<f64>) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 

@@ -13,7 +13,7 @@ fn page(id: &str) -> String {
 
 #[test]
 fn every_engine_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 11, "every engine state is built");
+    assert_eq!(states().len(), 12, "every engine state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -323,4 +323,16 @@ fn a_floor_binding_lane_says_the_floor_won_over_the_sample_size() {
     for a in lane.allocation.iter().filter(|a| a.unread >= 3) {
         assert!(a.drawn >= 3, "{} drew {}", a.category, a.drawn);
     }
+}
+
+/// The second-look card: its chip and question, the one No answer's state line, and the rate of
+/// its own stratum.
+#[test]
+fn a_held_second_look_card_asks_its_own_question_and_says_how_it_is_freed() {
+    let html = page("engine/second-look-held");
+    assert!(html.contains("ruled out while flagged"), "the stratum chip");
+    assert!(html.contains("Was it right to rule this out?"), "{html}");
+    assert!(html.contains("held from export until corrected"), "{html}");
+    assert!(html.contains("Real problems among rows ruled out while flagged"));
+    assert!(html.contains("second look"), "the lane note: {html}");
 }

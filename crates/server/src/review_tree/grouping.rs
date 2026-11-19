@@ -192,6 +192,8 @@ pub fn group_semantic(
             outliers,
             summary: None,
             summary_source: TextSource::Model,
+            why_business: None,
+            why_technical: None,
             escalations: Vec::new(),
             flags: Vec::new(),
         });
@@ -288,6 +290,34 @@ pub(super) fn cluster_rows(
                     if let Some(prev) = last_of_rule.insert(findings[i].rule_id.as_str(), i) {
                         test(prev, i, findings, &mut uf, &mut edges);
                     }
+                }
+            }
+        }
+        // The rows of one problem the model reported at several places (a problem and its
+        // sibling rows) are one cause, in whatever files they lie: they share one fix.
+        let mut by_problem: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+        for &i in rows {
+            let captures = &findings[i].captures;
+            if let (Some(piece), Some(problem)) = (
+                captures.get(crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE),
+                captures.get(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE),
+            ) {
+                by_problem
+                    .entry((piece.as_str(), problem.as_str()))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        for members in by_problem.values().filter(|m| m.len() > 1) {
+            for pair in members.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                if findings[a].rule_id == findings[b].rule_id {
+                    uf.union(a, b);
+                    edges.push(Edge {
+                        a,
+                        b,
+                        signal: CauseSignal::SameProblem,
+                    });
                 }
             }
         }

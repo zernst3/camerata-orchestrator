@@ -212,6 +212,8 @@ pub struct TreeState {
     pub cursor: Option<TreeRef>,
     /// Outlier site keys the reviewer ticked into a batch (spec section 5, "Tick an outlier").
     pub ticked: BTreeSet<String>,
+    /// Carried rules the reviewer unticked out of the next place decision (D2).
+    pub place_unticked: BTreeSet<String>,
     /// A sub-group the reviewer asked to enter with Enter before its first page was in: the
     /// cursor moves to its first site when the page arrives.
     pub enter_when_loaded: Option<String>,
@@ -553,6 +555,19 @@ impl TreeState {
     }
 
     // ── ticks ─────────────────────────────────────────────────────────────────────────────
+
+    /// Tick or untick a carried rule into the next place decision. A held rule is locked out.
+    pub fn toggle_carried(
+        &mut self,
+        rule: &camerata_api_types::review_view::CarriedRuleView,
+    ) -> bool {
+        let mut ticks = super::place::PlaceTicks {
+            unticked: std::mem::take(&mut self.place_unticked),
+        };
+        let changed = ticks.toggle(rule);
+        self.place_unticked = ticks.unticked;
+        changed
+    }
 
     /// Tick or untick an outlier into the batch. A site that is not an outlier is not ticked.
     pub fn toggle_tick(&mut self, key: &str, row: &SiteRow) -> bool {

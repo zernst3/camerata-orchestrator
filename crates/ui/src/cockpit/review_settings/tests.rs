@@ -86,11 +86,64 @@ fn defaults_show_the_saved_formula_and_a_disabled_apply() {
     assert!(!html.contains("review-settings-locked"));
     // The group review model is the fixture's, selected.
     assert!(
-        html.contains("value=\"claude-fable-5-1\" selected"),
+        html.contains("value=\"claude-fable-5-2\" selected"),
         "{html}"
     );
     // The fix model offers "(not set)".
     assert!(html.contains("(not set)"));
+}
+
+/// Every settable model has its own row in Stage models, with the current value selected and a
+/// "(not set)" option when it has a built-in default.
+#[test]
+fn every_settable_model_has_a_row_with_its_current_value_selected() {
+    let mut props = page_props("settings/defaults").expect("a settings state");
+    let Loaded::Ready(view) = &mut props.body.view else {
+        panic!("the defaults state is ready");
+    };
+    view.stage_models.finder_model = "claude-opus-5-5".to_string();
+    view.stage_models.duplicate_check = "claude-haiku-4-5-20251001".to_string();
+    let html = crate::test_harness::render_fragment(
+        crate::gallery::settings_states::SettingsStatePage,
+        props,
+    );
+    for (step, label) in [
+        ("audit", "Scan model"),
+        ("calibration", "Calibration (stage 1)"),
+        ("group_review", "Group review (stage 2)"),
+        ("fix", "Fix model"),
+        ("finder_model", "Finder model"),
+        ("duplicate_check", "Duplicate check"),
+        ("clone_judge", "Clone judge"),
+    ] {
+        assert!(
+            html.contains(&format!("id=\"rs-model-{step}\"")),
+            "a row for {step}\n{html}"
+        );
+        assert!(html.contains(label), "{label}\n{html}");
+    }
+    let select_of = |step: &str| {
+        let at = html.find(&format!("id=\"rs-model-{step}\"")).unwrap();
+        let end = html[at..].find("</select>").unwrap() + at;
+        html[at..end].to_string()
+    };
+    assert!(
+        select_of("finder_model").contains("value=\"claude-opus-5-5\" selected"),
+        "{html}"
+    );
+    assert!(
+        select_of("duplicate_check").contains("value=\"claude-haiku-4-5-20251001\" selected"),
+        "{html}"
+    );
+    // Unset models offer "(not set)" and say what the default is.
+    for step in ["finder_model", "duplicate_check", "clone_judge"] {
+        assert!(select_of(step).contains("(not set)"), "{step}");
+    }
+    assert!(
+        html.contains("not set: Claude Fable 5.2; used when the finder is agent"),
+        "{html}"
+    );
+    assert!(html.contains("not set: Claude Sonnet 5.5"), "{html}");
 }
 
 #[test]
@@ -170,7 +223,7 @@ fn a_run_in_flight_locks_every_control_and_says_why() {
     let html = fragment("settings/run-in-flight");
     assert!(html.contains(RUN_IN_FLIGHT_NOTE), "{html}");
     let selects = html.matches("<select").count();
-    assert_eq!(selects, 4, "one per stage");
+    assert_eq!(selects, 8, "one per stage (seven models) and the finder");
     for chunk in html.split("<select").skip(1) {
         let tag = &chunk[..chunk.find('>').unwrap()];
         assert!(tag.contains("disabled"), "a select is still live: {tag}");

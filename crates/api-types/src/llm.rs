@@ -47,6 +47,18 @@ pub struct LlmResponse {
     /// backend gives no stop reason (the CLI path), which means "not known to be truncated".
     #[serde(default)]
     pub truncated: bool,
+    /// The model the backend says answered, when it says (the CLI backend names it in its
+    /// `assistant` and `message_start` events and keys its `modelUsage` by it). `model` above is
+    /// the model that was REQUESTED; the two differ when the backend ran something else, which is
+    /// what a bill at another model's rates would mean. `None` when the backend does not report one.
+    #[serde(default)]
+    pub reported_model: Option<String>,
+    /// The dollar figure the `claude` CLI itself reported (`total_cost_usd`), kept beside
+    /// `cost_usd` for comparison. On the CLI backend `cost_usd` is computed from the recorded
+    /// token counts through the engine's own price registry, because the CLI prices a model id
+    /// it does not know at a default (Opus-class) rate. `None` on every other backend.
+    #[serde(default)]
+    pub cli_cost_usd: Option<f64>,
 }
 
 impl LlmResponse {
@@ -87,6 +99,8 @@ mod tests {
     /// Build a bare LlmResponse for accounting tests: only the token fields matter.
     fn resp_with_tokens(input: Option<u64>, cache_read: u64, cache_creation: u64) -> LlmResponse {
         LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: String::new(),
             model: "m".to_string(),
             backend: "test".to_string(),

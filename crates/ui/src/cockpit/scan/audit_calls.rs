@@ -411,6 +411,19 @@ pub(in crate::cockpit) struct RepoSizeView {
     pub code_chars: usize,
     #[serde(default)]
     pub error: Option<String>,
+    /// The agent finder's figures for this repo (the server computes them with the one estimate
+    /// function the command line prints from). `None` for a repo that could not be read.
+    #[serde(default)]
+    pub agent_finder: Option<AgentFinderSizeView>,
+}
+
+/// The agent finder's pre-flight figures for one repo, as the preflight route sends them.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(in crate::cockpit) struct AgentFinderSizeView {
+    pub pieces: usize,
+    pub expected_usd: f64,
+    pub low_usd: f64,
+    pub high_usd: f64,
 }
 
 /// Ask the server how big each repo is as the scan will read it. The scan chunks and calibrates
@@ -569,6 +582,10 @@ pub(in crate::cockpit) struct JobStateView {
     /// look it up in the Anthropic console. `None` for parallel/sequential mode jobs.
     #[serde(default)]
     pub batch_id: Option<String>,
+    /// The cost checkpoint of a run with a spend limit: spent against the approved amount, and
+    /// the pause when the run stopped before going over. `None` for a run with no limit.
+    #[serde(default)]
+    pub cost_checkpoint: Option<camerata_api_types::cost_checkpoint::CostCheckpoint>,
 }
 
 /// Full envelope for `GET /api/onboard/audit/job/:id` — the server wraps
@@ -652,6 +669,10 @@ pub(in crate::cockpit) struct ResumePlanView {
     /// Why the resume cannot start now, in plain words; `None` when it can.
     #[serde(default)]
     pub refusal: Option<String>,
+    /// The spend limit the run was saved with; `None` when it had none. The confirmation
+    /// prefills its limit field with it.
+    #[serde(default)]
+    pub saved_limit_usd: Option<f64>,
 }
 
 /// Fetch the resume plan of a saved run.
@@ -674,13 +695,27 @@ pub(in crate::cockpit) async fn resume_plan(run_id: &str) -> Result<ResumePlanVi
         .map_err(|e| format!("the plan could not be read: {e}"))
 }
 
+/// The resume route of a saved run, with the spend limit the operator approved when there is one.
+pub(in crate::cockpit) fn resume_url(base: &str, run_id: &str, limit: Option<f64>) -> String {
+    let route = format!("{base}/api/inspections/{run_id}/resume");
+    match limit {
+        Some(usd) => format!("{route}?max_cost_usd={usd:.2}"),
+        None => route,
+    }
+}
+
 /// Start the resume of a saved run as a background job; returns the job id, or the plain reason.
 pub(in crate::cockpit) async fn resume_start(run_id: &str) -> Result<String, String> {
+    resume_start_at(run_id, None).await
+}
+
+/// [`resume_start`] at a raised spend limit (the operator approved a paused run's new estimate).
+pub(in crate::cockpit) async fn resume_start_at(
+    run_id: &str,
+    limit: Option<f64>,
+) -> Result<String, String> {
     let resp = reqwest::Client::new()
-        .post(format!(
-            "{}/api/inspections/{run_id}/resume",
-            crate::bff_base()
-        ))
+        .post(resume_url(&crate::bff_base(), run_id, limit))
         .send()
         .await
         .map_err(|e| format!("could not reach the app's server: {e}"))?;
@@ -764,6 +799,9 @@ pub(in crate::cockpit) async fn poll_job(
     // Live DETERMINISTIC-pass progress (floor + preview tools), rendered by the
     // "Deterministic scan" component above the AI agent-activity drawer. `None` clears it.
     mut det_progress: Signal<Option<DetProgressView>>,
+    // The run's cost checkpoint as of the latest poll. Kept after the job ends so the panel
+    // shows a pause the run stopped on; a poll without one leaves the last in place.
+    mut cost_checkpoint: Signal<Option<camerata_api_types::cost_checkpoint::CostCheckpoint>>,
     mut active_audit_job: Signal<Option<String>>,
     mut scan_idle_ms: Signal<Option<u128>>,
     // Set on `failed` (with the server's reason) or when the job vanishes mid-poll; cleared
@@ -793,6 +831,9 @@ pub(in crate::cockpit) async fn poll_job(
                 // component appears the moment the floor starts (not only once findings land).
                 if js.job.deterministic.total > 0 {
                     det_progress.set(Some(js.job.deterministic.clone()));
+                }
+                if js.job.cost_checkpoint.is_some() {
+                    cost_checkpoint.set(js.job.cost_checkpoint.clone());
                 }
                 match js.job.status.as_str() {
                     "done" => {

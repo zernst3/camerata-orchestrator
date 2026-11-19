@@ -138,6 +138,12 @@ pub struct JobState {
     /// iteration order. `None` while the job is still running / failed / cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at_ms: Option<u128>,
+    /// The run's cost against the amount approved (its spend limit): approved, spent, projected,
+    /// pieces done and left, and on a stop the new estimate and the difference (see
+    /// [`crate::cost_checkpoint`]). `None` for a job with no spend limit or before the first
+    /// piece finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_checkpoint: Option<crate::cost_checkpoint::CostCheckpoint>,
 }
 
 /// In-memory job store, shared into handlers + the background worker.
@@ -230,6 +236,11 @@ impl JobStore {
     /// Mark `n` passes complete.
     pub fn inc_done(&self, id: &str, n: usize) {
         self.with(id, |j| j.done += n);
+    }
+
+    /// Keep the run's latest cost checkpoint on the job, for the UI that polls it.
+    pub fn set_cost_checkpoint(&self, id: &str, cp: crate::cost_checkpoint::CostCheckpoint) {
+        self.with(id, |j| j.cost_checkpoint = Some(cp));
     }
 
     /// Record `n` passes that were refused and did not run. NOT counted in `done`.

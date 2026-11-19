@@ -39,6 +39,8 @@ pub(super) enum Reply {
 
 fn response(text: &str, truncated: bool, cost: f64) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api/batch".to_string(),
@@ -298,6 +300,10 @@ fn eff(batch_default: bool) -> EfficiencyConfig {
 
 fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: cap,
@@ -305,6 +311,7 @@ fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 
@@ -951,7 +958,8 @@ async fn submit_failures_in_batch_mode_trip_the_outage_stop() {
     let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
     api.submit_fails_always = true;
     api.realtime.fails = true;
-    let m = meter(eff(true), None);
+    // Each failure lands a minute after the one before: a long outage, not one wave.
+    let m = meter(eff(true), None).with_health(crate::run_health::RunHealth::stepping(60));
 
     let (_f, ok, failures) = run(&api, &m).await;
     assert_eq!(ok, 0);
@@ -1001,7 +1009,8 @@ async fn submit_failures_in_batch_mode_trip_the_outage_stop() {
 async fn poll_failures_in_batch_mode_trip_the_outage_stop() {
     let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
     api.poll_fails = true;
-    let m = meter(eff(true), None);
+    // Each failure lands a minute after the one before: a long outage, not one wave.
+    let m = meter(eff(true), None).with_health(crate::run_health::RunHealth::stepping(60));
     let (_f, _ok, failures) = run(&api, &m).await;
     assert_eq!(failures.len(), 4);
     assert!(m.outage_stopped(), "repeated poll failures are an outage");

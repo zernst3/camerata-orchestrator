@@ -155,7 +155,7 @@ impl OrderPreset {
 
 /// A finding's enforcement rank: active before suppressed, the first term of every order.
 fn enforced(f: &FindingView) -> u8 {
-    u8::from(f.status != "active")
+    u8::from(f.status != "active" || f.preview)
 }
 
 /// Compare two findings under `preset`. Total and stable: ties fall through to the curated key,
@@ -230,7 +230,7 @@ mod tests {
             finding("R-A", "critical", "src/a.rs", 9, "active"),
             finding("R-B", "critical", "src/a.rs", 2, "active"),
             finding("R-A", "high", "src/a.rs", 1, "active"),
-            finding("R-C", "critical", "src/m.rs", 7, "suppressed-baseline"),
+            finding("R-C", "critical", "src/m.rs", 7, "carried-baseline"),
         ]
     }
 

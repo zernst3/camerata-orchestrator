@@ -521,3 +521,248 @@ fn the_verdicts_in_force_give_the_lane_an_earlier_runs_no_marked_as_carried() {
     // The run's own list (what the lane used to read) holds nothing for the second run.
     assert!(store.latest_for_run("p1", &second.id).is_empty());
 }
+
+// ── the second look at rows ruled out while flagged ───────────────────────────────────────
+
+fn ruled_out(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("flagged-{i:03}")).collect()
+}
+
+#[test]
+fn the_second_look_draws_a_fifth_of_the_ruled_out_flagged_rows_at_least_three_or_all() {
+    for (pool, want) in [
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (10, 3),
+        (15, 3),
+        (16, 4),
+        (50, 10),
+        (100, 20),
+        (101, 21),
+    ] {
+        let rows = ruled_out(pool);
+        let drawn = draw_ruled_out_flagged(RUN, &rows);
+        assert_eq!(drawn.len(), want, "pool of {pool}");
+        let distinct: BTreeSet<&String> = drawn.iter().collect();
+        assert_eq!(distinct.len(), drawn.len(), "no row twice");
+        assert!(
+            drawn.iter().all(|k| rows.contains(k)),
+            "only ruled-out rows"
+        );
+    }
+}
+
+#[test]
+fn the_second_look_is_the_same_every_time_and_depends_on_the_run() {
+    let rows = ruled_out(40);
+    assert_eq!(
+        draw_ruled_out_flagged(RUN, &rows),
+        draw_ruled_out_flagged(RUN, &rows)
+    );
+    assert_ne!(
+        draw_ruled_out_flagged(RUN, &rows),
+        draw_ruled_out_flagged("insp-2", &rows),
+        "another run draws another set"
+    );
+}
+
+#[test]
+fn a_later_ruling_never_takes_a_row_out_of_the_second_look_but_can_add_one() {
+    let rows = ruled_out(60);
+    let mut before: Vec<String> = Vec::new();
+    let mut grew = false;
+    for n in 1..=rows.len() {
+        let now = draw_ruled_out_flagged(RUN, &rows[..n]);
+        assert!(
+            before.iter().all(|k| now.contains(k)),
+            "pool {n}: a row already drawn was dropped: {before:?} -> {now:?}"
+        );
+        grew |= now.len() > before.len();
+        before = now;
+    }
+    assert!(grew, "new rulings do add rows");
+    assert_eq!(before.len(), 12);
+}
+
+// ── a No on a second-look card: only un-ruling the row frees it ───────────────────────────
+
+fn ruled_out_no(key: &str, at: &str) -> EngineCheckVerdict {
+    EngineCheckVerdict {
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
+        ..verdict(key, false, at, None)
+    }
+}
+
+fn ruling(id: &str, key: &str, state: DecisionState, at: &str) -> Decision {
+    Decision {
+        state,
+        ..decision(id, key, at)
+    }
+}
+
+#[test]
+fn a_second_look_no_is_not_freed_by_another_rule_out_an_edit_or_a_group_rule_out() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T10:00:00Z";
+    let t2 = "2026-11-04T11:00:00Z";
+    let no = [ruled_out_no("k", t1)];
+    let held = |decisions: &[Decision], edits: &[Edit]| {
+        uncorrected_keys(&no, RUN, decisions, edits) == vec!["k".to_string()]
+    };
+    let first = ruling("dec-000001", "k", DecisionState::FalsePositive, t0);
+    assert!(
+        held(std::slice::from_ref(&first), &[]),
+        "the ruling before the No"
+    );
+    // Ruled out again, later.
+    let again = ruling("dec-000002", "k", DecisionState::FalsePositive, t2);
+    assert!(held(&[first.clone(), again], &[]), "a later rule-out");
+    // A severity or wording edit, later.
+    assert!(
+        held(std::slice::from_ref(&first), &[edit("edit-1", "k", t2)]),
+        "an edit"
+    );
+    // A group rule-out covering the row, later.
+    let mut node = ruling("dec-000003", "rule:x", DecisionState::FalsePositive, t2);
+    node.scope = Scope::Node("rule:x".to_string());
+    node.applies_to = vec!["k".to_string()];
+    let mut site = ruling("dec-000003.00000", "k", DecisionState::FalsePositive, t2);
+    site.inherited_from = Some("dec-000003".to_string());
+    assert!(held(&[first, node, site], &[]), "a group rule-out");
+}
+
+#[test]
+fn a_second_look_no_is_freed_by_un_ruling_the_row_or_by_a_later_yes() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T10:00:00Z";
+    let t2 = "2026-11-04T11:00:00Z";
+    let no = [ruled_out_no("k", t1)];
+    let ruled_out = ruling("dec-000001", "k", DecisionState::FalsePositive, t0);
+    // Kept as a problem, later.
+    let kept = ruling("dec-000002", "k", DecisionState::Confirmed, t2);
+    assert!(uncorrected_keys(&no, RUN, &[ruled_out.clone(), kept], &[]).is_empty());
+    // The ruling undone (no live ruling at all).
+    assert!(uncorrected_keys(&no, RUN, &[], &[]).is_empty());
+    // A later Yes replaces the No.
+    let yes = [ruled_out_no("k", t1), verdict("k", true, t2, None)];
+    assert!(uncorrected_keys(&yes, RUN, &[ruled_out], &[]).is_empty());
+}
+
+#[test]
+fn a_second_look_card_takes_only_its_own_no_and_no_other_card_takes_it() {
+    use camerata_api_types::review_view::SampleStratum::{Kept, RuledOutFlagged, ThrownOut};
+    let own = req(false, Some(EngineCheckError::RuledOutRealProblem));
+    let other = req(false, Some(EngineCheckError::NotARealIssue));
+    assert!(answer_fits_stratum(RuledOutFlagged, &own).is_ok());
+    assert!(answer_fits_stratum(RuledOutFlagged, &req(true, None)).is_ok());
+    assert_eq!(
+        answer_fits_stratum(RuledOutFlagged, &other),
+        Err(EngineCheckStoreError::WrongAnswerForCard)
+    );
+    for stratum in [Kept, ThrownOut] {
+        assert_eq!(
+            answer_fits_stratum(stratum, &own),
+            Err(EngineCheckStoreError::WrongAnswerForCard)
+        );
+        assert!(answer_fits_stratum(stratum, &other).is_ok());
+    }
+}
+
+#[test]
+fn the_drawn_second_look_rows_are_kept_append_only_per_run_and_survive_a_restart() {
+    let dir = std::env::temp_dir().join(format!("camerata-second-look-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = EngineCheckStore::at(dir.clone());
+    let keys = |ks: &[&str]| ks.iter().map(|k| (*k).to_string()).collect::<Vec<_>>();
+    store.add_second_look("p", RUN, &keys(&["a", "b"])).unwrap();
+    store.add_second_look("p", RUN, &keys(&["b", "c"])).unwrap();
+    store.add_second_look("p", "insp-2", &keys(&["z"])).unwrap();
+    assert_eq!(store.second_look("p", RUN), keys(&["a", "b", "c"]));
+    assert_eq!(store.second_look("p", "insp-2"), keys(&["z"]));
+    assert!(store.second_look("other", RUN).is_empty());
+    // Verdicts and draws share the file and neither loses the other.
+    store
+        .record("p", "a", &req(true, None), RUN, "2026-11-04T09:00:00Z")
+        .unwrap();
+    let reopened = EngineCheckStore::at(dir);
+    assert_eq!(reopened.second_look("p", RUN), keys(&["a", "b", "c"]));
+    assert_eq!(reopened.list("p").len(), 1);
+}
+
+#[test]
+fn a_second_look_no_is_not_freed_by_a_merge_into_a_row_that_is_itself_ruled_out() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T10:00:00Z";
+    let t2 = "2026-11-04T11:00:00Z";
+    let no = [ruled_out_no("k", t1)];
+    let ruled_out = ruling("dec-000001", "k", DecisionState::FalsePositive, t0);
+    let target_ruled_out = ruling("dec-000002", "t", DecisionState::FalsePositive, t0);
+    let merge = ruling(
+        "dec-000003",
+        "k",
+        DecisionState::MergedInto("t".to_string()),
+        t2,
+    );
+    // The target is ruled out too: the row is still, in effect, ruled out.
+    assert_eq!(
+        uncorrected_keys(
+            &no,
+            RUN,
+            &[ruled_out.clone(), target_ruled_out, merge.clone()],
+            &[]
+        ),
+        vec!["k".to_string()]
+    );
+    // Into a target that is a problem, or one with no ruling, the row is no longer ruled out.
+    let target_kept = ruling("dec-000002", "t", DecisionState::Confirmed, t0);
+    assert!(uncorrected_keys(
+        &no,
+        RUN,
+        &[ruled_out.clone(), target_kept, merge.clone()],
+        &[]
+    )
+    .is_empty());
+    assert!(uncorrected_keys(&no, RUN, &[ruled_out, merge], &[]).is_empty());
+}
+
+#[test]
+fn a_second_look_no_stays_held_on_a_merge_cycle_or_a_chain_too_long_to_follow() {
+    let t0 = "2026-11-04T09:00:00Z";
+    let t1 = "2026-11-04T10:00:00Z";
+    let t2 = "2026-11-04T11:00:00Z";
+    let merged = |id: &str, key: &str, into: &str| {
+        ruling(id, key, DecisionState::MergedInto(into.to_string()), t2)
+    };
+    let no = [ruled_out_no("a", t1)];
+    let ruled_out = ruling("dec-000001", "a", DecisionState::FalsePositive, t0);
+    // A merged into B, B merged into A: no row at the end of the chain says it is kept.
+    let cycle = [
+        merged("dec-000002", "a", "b"),
+        merged("dec-000003", "b", "a"),
+    ];
+    assert_eq!(
+        uncorrected_keys(
+            &no,
+            RUN,
+            &[ruled_out.clone(), cycle[0].clone(), cycle[1].clone()],
+            &[]
+        ),
+        vec!["a".to_string()]
+    );
+    // A chain of twelve merges, longer than the walk follows.
+    let mut chain = vec![ruled_out];
+    for i in 0..12 {
+        let (from, to) = if i == 0 {
+            ("a".to_string(), "r1".to_string())
+        } else {
+            (format!("r{i}"), format!("r{}", i + 1))
+        };
+        chain.push(merged(&format!("dec-1{i:05}"), &from, &to));
+    }
+    assert_eq!(
+        uncorrected_keys(&no, RUN, &chain, &[]),
+        vec!["a".to_string()]
+    );
+}

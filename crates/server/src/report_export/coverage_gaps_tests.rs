@@ -148,7 +148,7 @@ fn the_workbook_coverage_sheet_lists_the_gaps() {
     .unwrap();
     let strings = crate::release_gate::xlsx_strings(&bytes).expect("a workbook");
     let all = strings.join("\n");
-    assert!(all.contains("Not reviewed this scan"), "{all}");
+    assert!(all.contains("File not read"), "{all}");
     assert!(all.contains("data/huge.json"));
     assert!(all.contains("src/z/last.rs"));
     assert!(all.contains("beyond the 20,000-file limit"));

@@ -60,6 +60,45 @@ pub fn sort_rows(rows: &mut [&QueueRow]) {
     });
 }
 
+/// Inside each band, the possible false positives first, each part in the order it had (the sort
+/// is stable). The bands keep their order, so the line still falls after the budgeted rows.
+pub fn flagged_first(rows: &mut [&QueueRow]) {
+    rows.sort_by_key(|r| (band_of(r), r.site.possible_false_positive.is_none()));
+}
+
+/// Inside each band, rows of causes at the same place side by side: a row, then the rows its
+/// [`SiteRow::same_place_as`] links open that are in the same band, then theirs. Each band keeps
+/// its place and its first-come order; a pair split by the line stays split. Rows the server has
+/// not sent stay where they are.
+pub fn duplicates_together(rows: &mut [&QueueRow]) {
+    let at: std::collections::HashMap<&str, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.site.site_key.as_str(), i))
+        .collect();
+    let mut placed = vec![false; rows.len()];
+    let mut out: Vec<&QueueRow> = Vec::with_capacity(rows.len());
+    for head in 0..rows.len() {
+        if placed[head] {
+            continue;
+        }
+        placed[head] = true;
+        let mut waiting = std::collections::VecDeque::from([head]);
+        while let Some(i) = waiting.pop_front() {
+            out.push(rows[i]);
+            for link in &rows[i].site.same_place_as {
+                if let Some(&k) = at.get(link.key.as_str()) {
+                    if !placed[k] && band_of(rows[k]) == band_of(rows[i]) {
+                        placed[k] = true;
+                        waiting.push_back(k);
+                    }
+                }
+            }
+        }
+    }
+    rows.copy_from_slice(&out);
+}
+
 /// The rows of a view in the order the table draws them: escalated rows (inside the budget, then
 /// over it) and, when they are loaded, the candidates below the line.
 pub fn ordered(view: &QueueView) -> Vec<&QueueRow> {
@@ -90,6 +129,12 @@ pub struct QueueState {
     pub shown: usize,
     /// The site key of the row the cursor is on.
     pub cursor: Option<String>,
+    /// List the possible false positives first inside each band. A look only, like
+    /// [`Self::show_below`]: the bands, the line and every row stay; nothing is sent or written.
+    pub fp_first: bool,
+    /// List rows of causes at the same place side by side inside each band. A look only, like
+    /// [`Self::fp_first`].
+    pub dup_together: bool,
 }
 
 impl Default for QueueState {
@@ -98,6 +143,8 @@ impl Default for QueueState {
             show_below: false,
             shown: ROWS_PER_PAGE,
             cursor: None,
+            fp_first: false,
+            dup_together: false,
         }
     }
 }
@@ -106,6 +153,16 @@ impl QueueState {
     /// Show or hide the candidates below the line. Nothing else changes.
     pub fn toggle_below(&mut self) {
         self.show_below = !self.show_below;
+    }
+
+    /// List the possible false positives first, or go back to rank order. Nothing else changes.
+    pub fn toggle_fp_first(&mut self) {
+        self.fp_first = !self.fp_first;
+    }
+
+    /// List possible duplicates together, or go back to rank order. Nothing else changes.
+    pub fn toggle_dup_together(&mut self) {
+        self.dup_together = !self.dup_together;
     }
 
     /// "Show 100 more" escalated rows.
@@ -190,6 +247,12 @@ impl Layout<'_> {
 pub fn layout<'a>(view: &'a QueueView, state: &QueueState) -> Layout<'a> {
     let mut escalated: Vec<&QueueRow> = view.escalated.iter().collect();
     sort_rows(&mut escalated);
+    if state.fp_first {
+        flagged_first(&mut escalated);
+    }
+    if state.dup_together {
+        duplicates_together(&mut escalated);
+    }
     let within = escalated
         .iter()
         .take_while(|r| band_of(r) == Band::WithinBudget)
@@ -215,6 +278,12 @@ pub fn layout<'a>(view: &'a QueueView, state: &QueueState) -> Layout<'a> {
 
     let mut below: Vec<&QueueRow> = view.below.iter().collect();
     sort_rows(&mut below);
+    if state.fp_first {
+        flagged_first(&mut below);
+    }
+    if state.dup_together {
+        duplicates_together(&mut below);
+    }
     let below_unloaded = view.below_total.saturating_sub(below.len());
     if state.show_below && !below.is_empty() {
         entries.push(Entry::BelowHeading(below_heading(view, below.len())));
@@ -333,6 +402,45 @@ pub fn counts_line(view: &QueueView) -> String {
         }
     ));
     parts.join(" \u{b7} ")
+}
+
+/// How many loaded rows (escalated, and the candidates below the line the server has sent) the
+/// engine flagged as possible false positives.
+pub fn possible_false_positive_count(view: &QueueView) -> usize {
+    view.escalated
+        .iter()
+        .chain(&view.below)
+        .filter(|r| r.site.possible_false_positive.is_some())
+        .count()
+}
+
+/// The words of the "Possible false positives first" button, on or off.
+pub fn fp_first_label(view: &QueueView, on: bool) -> String {
+    let n = thousands(possible_false_positive_count(view));
+    if on {
+        format!("Back to rank order ({n} flagged)")
+    } else {
+        format!("Possible false positives first ({n})")
+    }
+}
+
+/// How many loaded rows have another cause at the same place.
+pub fn possible_duplicate_count(view: &QueueView) -> usize {
+    view.escalated
+        .iter()
+        .chain(&view.below)
+        .filter(|r| !r.site.same_place_as.is_empty())
+        .count()
+}
+
+/// The words of the "Possible duplicates together" button, on or off.
+pub fn dup_together_label(view: &QueueView, on: bool) -> String {
+    let n = thousands(possible_duplicate_count(view));
+    if on {
+        format!("Back to rank order ({n} paired)")
+    } else {
+        format!("Possible duplicates together ({n})")
+    }
 }
 
 /// `Needed me: 120 of 140 decided (86%)`.

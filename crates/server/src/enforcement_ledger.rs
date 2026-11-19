@@ -200,7 +200,7 @@ pub async fn capture_scan_findings(ledger: &EnforcementLedger, findings: &[Findi
 
     for finding in findings {
         // Only active (non-suppressed) floor findings.
-        if finding.status != "active" {
+        if finding.status != "active" || finding.preview {
             continue;
         }
         // Only floor (AUDIT_RULES) rule ids.

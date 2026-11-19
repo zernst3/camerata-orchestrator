@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::review_fixtures::dataset_base;
-use crate::tree::batch::summary_edit_request;
+use crate::tree::batch::{summary_edit_request, why_edit_request};
 use camerata_api_types::decisions::ClientAck;
 use camerata_api_types::review_view::{
     DuplicateView, HoldReason, Marker, MergedIntoView, NewSinceDecisionView, SiteRow,
@@ -83,6 +83,9 @@ fn other_value(row: &SiteRow, field: EditField) -> String {
         }
         EditField::Subgroup => "A new sub-group".into(),
         EditField::Summary => "A different summary".into(),
+        EditField::WhyBusiness | EditField::WhyTechnical | EditField::Business => {
+            "A different reason".into()
+        }
     }
 }
 
@@ -93,7 +96,8 @@ fn every_editable_field_has_a_control_and_round_trips() {
     // A deviation, so that moving it to `defect` is a change.
     let row = deviation_row();
     let ctx = ctx();
-    assert_eq!(EditField::ALL.len(), SITE_FIELDS.len() + 1);
+    // The node's summary and its two client reasons are edited at the node, not at a site.
+    assert_eq!(EditField::ALL.len(), SITE_FIELDS.len() + 3);
     for field in EditField::ALL {
         let control = control_for(field, &row, &ctx);
         match field {
@@ -115,7 +119,25 @@ fn every_editable_field_has_a_control_and_round_trips() {
             }
             EditField::Subgroup => assert_eq!(control, Control::Split),
             EditField::Headline => assert_eq!(control, Control::Line),
-            EditField::Detail | EditField::Fix => assert_eq!(control, Control::Multi),
+            EditField::WhyBusiness | EditField::WhyTechnical => {
+                assert_eq!(control, Control::NodeSummary);
+                let node = dataset_base()
+                    .tree
+                    .nodes
+                    .into_iter()
+                    .find(|n| !n.thrown_out)
+                    .expect("a node");
+                let req = why_edit_request(&node, field, "A different reason", "why", "insp-1")
+                    .expect("the node edit builds");
+                assert_eq!((req.field, req.key.as_str()), (field, node.id.as_str()));
+                assert!(SITE_FIELDS.iter().all(|f| *f != field));
+                // A reviewer has to say why.
+                assert!(why_edit_request(&node, field, "Another", " ", "insp-1").is_err());
+                continue;
+            }
+            EditField::Detail | EditField::Fix | EditField::Business => {
+                assert_eq!(control, Control::Multi)
+            }
             EditField::RuleId => assert!(matches!(control, Control::Combo(_))),
             _ => assert!(matches!(control, Control::Select(_)), "{field:?}"),
         }
@@ -565,7 +587,7 @@ fn the_merge_picker_lists_the_duplicate_first_then_a_search_over_path_line_and_r
     };
     let list = merge_candidates(&row, &ctx, "");
     assert_eq!(list[0].key, other.site_key, "the link comes first");
-    assert_eq!(list[0].note.as_deref(), Some("possible duplicate"));
+    assert_eq!(list[0].note.as_deref(), Some("Possible duplicate"));
     assert!(list.len() <= MERGE_LIST_MAX);
     assert!(list.iter().all(|c| c.key != row.site_key), "never itself");
     assert_eq!(
@@ -1121,6 +1143,66 @@ fn also_flagged_by_and_the_possible_duplicate_are_lines_only_when_there_is_somet
 }
 
 #[test]
+fn the_detail_lists_each_possible_false_positive_reason_with_its_sentence() {
+    use camerata_api_types::review::{FpReason, PossibleFalsePositive};
+    let mut row = plain();
+    row.possible_false_positive = None;
+    assert!(possible_false_positive_lines(&row).is_empty());
+    row.possible_false_positive = PossibleFalsePositive::from_reasons(vec![
+        FpReason::ModelOnly,
+        FpReason::GroupReviewerDoubt,
+    ]);
+    assert_eq!(
+        possible_false_positive_lines(&row),
+        vec![
+            (
+                FpReason::GroupReviewerDoubt.label(),
+                FpReason::GroupReviewerDoubt.sentence().to_string()
+            ),
+            (
+                FpReason::ModelOnly.label(),
+                FpReason::ModelOnly.sentence().to_string()
+            ),
+        ]
+    );
+    // A reason with the row's own sentence shows it after the standard one; the others do not.
+    let mut flag =
+        PossibleFalsePositive::from_reasons(vec![FpReason::ModelOnly, FpReason::FinderUnsure])
+            .expect("flag");
+    flag.specifics.insert(
+        FpReason::FinderUnsure,
+        "The caller may be checked elsewhere.".to_string(),
+    );
+    row.possible_false_positive = Some(flag);
+    let lines = possible_false_positive_lines(&row);
+    assert_eq!(lines[0].1, FpReason::ModelOnly.sentence());
+    assert_eq!(
+        lines[1].1,
+        format!(
+            "{} The caller may be checked elsewhere.",
+            FpReason::FinderUnsure.sentence()
+        )
+    );
+    assert!(crate::tree::possible_false_positive_tip(&row)
+        .contains("The caller may be checked elsewhere."));
+    // The flag is a look only: the row is still Unresolved and every field is as it was.
+    let before = plain();
+    let mut flagged = before.clone();
+    flagged.possible_false_positive =
+        PossibleFalsePositive::from_reasons(vec![FpReason::TestCodeOnly]);
+    assert_eq!(flagged.severity, before.severity);
+    assert_eq!(flagged.decision, before.decision);
+    let ctx = DetailContext::default();
+    for field in [EditField::Severity, EditField::Kind, EditField::Headline] {
+        assert_eq!(
+            field_state(&flagged, field, &ctx).value,
+            field_state(&before, field, &ctx).value,
+            "{field:?}"
+        );
+    }
+}
+
+#[test]
 fn the_review_level_reads_in_words_and_a_held_row_has_none() {
     assert_eq!(
         review_level_text(Some(&ReviewLevel::PersonallyReviewed)).as_deref(),
@@ -1672,5 +1754,310 @@ fn a_thrown_out_row_opens_no_edit_form() {
     assert_eq!(
         reduce(DetailMode::Viewing, &DetailAction::PickField, &kept, &ctx()),
         DetailMode::PickField
+    );
+}
+
+// ── Same place as (the possible duplicate hint) ───────────────────────────────────────────
+
+fn same_place(key: &str, line: usize) -> camerata_api_types::review_view::SamePlaceView {
+    camerata_api_types::review_view::SamePlaceView {
+        fix_id: "ab12".into(),
+        title: "Another cause".into(),
+        key: key.into(),
+        rule_id: "SEC-OTHER-1".into(),
+        line,
+        group_id: "sub:SEC-OTHER-1/1".into(),
+        reason: Default::default(),
+    }
+}
+
+#[test]
+fn the_merge_door_of_the_hint_offers_the_other_cause_first_and_opens_on_it() {
+    let all = rows();
+    let mut row = all[0].clone();
+    row.possible_duplicate_of = None;
+    let other = all
+        .iter()
+        .find(|r| r.site_key != row.site_key)
+        .unwrap()
+        .clone();
+    row.same_place_as = vec![same_place(&other.site_key, row.line + 2)];
+    let ctx = DetailContext {
+        pool: pool_of(&all),
+        ..ctx()
+    };
+    let list = merge_candidates(&row, &ctx, "");
+    assert_eq!(list[0].key, other.site_key, "the other cause comes first");
+    assert_eq!(list[0].note.as_deref(), Some("same place"));
+    assert_eq!(list[0].label, format!("{}:{}", row.path, row.line + 2));
+    assert_eq!(
+        list.iter().filter(|c| c.key == other.site_key).count(),
+        1,
+        "listed once"
+    );
+    let mode = reduce(DetailMode::Viewing, &DetailAction::BeginMerge, &row, &ctx);
+    let DetailMode::Merge(d) = mode else {
+        panic!("a merge form");
+    };
+    assert_eq!(d.target.as_deref(), Some(other.site_key.as_str()));
+    // The engine's own duplicate link still wins the default.
+    let mut linked = row.clone();
+    linked.possible_duplicate_of = Some(DuplicateView {
+        key: "dup-key".into(),
+        hint: "h".into(),
+        rule_id: "SEC-KEY-2".into(),
+        path: "web/env.ts".into(),
+        line: 3,
+    });
+    let DetailMode::Merge(d) = reduce(
+        DetailMode::Viewing,
+        &DetailAction::BeginMerge,
+        &linked,
+        &ctx,
+    ) else {
+        panic!("a merge form");
+    };
+    assert_eq!(d.target.as_deref(), Some("dup-key"));
+    // A row with no hint offers nothing extra.
+    let mut plain_row = row.clone();
+    plain_row.same_place_as.clear();
+    assert!(merge_candidates(&plain_row, &ctx, "")
+        .iter()
+        .all(|c| c.note.as_deref() != Some("same place")));
+    assert!(duplicate_entries(&plain_row).is_empty());
+    assert_eq!(duplicate_entries(&row).len(), 1);
+}
+
+#[test]
+fn the_possible_duplicate_line_lists_the_engine_link_then_the_same_place_causes_once() {
+    let all = rows();
+    let mut row = all[0].clone();
+    let (a, b) = (&all[1], &all[2]);
+    row.possible_duplicate_of = Some(DuplicateView {
+        key: a.site_key.clone(),
+        hint: "same line, different family".into(),
+        rule_id: a.rule_id.clone(),
+        path: a.path.clone(),
+        line: a.line,
+    });
+    // The engine's own target is also a same-place cause: listed once, as the engine link.
+    row.same_place_as = vec![
+        same_place(&a.site_key, row.line + 1),
+        same_place(&b.site_key, row.line + 2),
+    ];
+    let entries = duplicate_entries(&row);
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[0].goto, None, "the engine link comes first");
+    assert!(entries[0].label.contains(&a.rule_id), "{:?}", entries[0]);
+    assert_eq!(entries[1].label, "Another cause");
+    // The same-place entry opens its row with its key, rule and group.
+    assert_eq!(
+        entries[1].goto,
+        Some((
+            b.site_key.clone(),
+            "SEC-OTHER-1".to_string(),
+            "sub:SEC-OTHER-1/1".to_string()
+        ))
+    );
+    // Only the engine link, or only the hint, is one entry.
+    let mut only_hint = row.clone();
+    only_hint.possible_duplicate_of = None;
+    assert_eq!(duplicate_entries(&only_hint).len(), 2);
+    let mut only_link = row;
+    only_link.same_place_as.clear();
+    assert_eq!(duplicate_entries(&only_link).len(), 1);
+}
+
+#[test]
+fn two_same_place_causes_with_the_same_title_stay_two_entries_with_their_own_keys() {
+    let all = rows();
+    let mut row = all[0].clone();
+    row.possible_duplicate_of = None;
+    let mut a = same_place(&all[1].site_key, row.line + 1);
+    let mut b = same_place(&all[2].site_key, row.line + 2);
+    a.title = "Same title".into();
+    b.title = "Same title".into();
+    row.same_place_as = vec![a, b];
+    let entries = duplicate_entries(&row);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].label, entries[1].label);
+    assert_ne!(
+        entries[0].key, entries[1].key,
+        "a span key is never the label"
+    );
+    assert_eq!(entries[0].key, all[1].site_key);
+}
+
+#[test]
+fn a_checked_same_place_entry_shows_the_models_reason_in_its_hint() {
+    let mut row = rows()[0].clone();
+    row.possible_duplicate_of = None;
+    row.same_place_as = vec![same_place("other-key", row.line + 2)];
+    row.same_place_as[0].reason = "Both write up the missing owner check.".to_string();
+    let entries = duplicate_entries(&row);
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0]
+            .hint
+            .contains("Both write up the missing owner check."),
+        "{}",
+        entries[0].hint
+    );
+    // With no reason the hint is what it always was.
+    row.same_place_as[0].reason.clear();
+    let plain = duplicate_entries(&row);
+    assert!(
+        !plain[0].hint.contains("The check says"),
+        "{}",
+        plain[0].hint
+    );
+}
+
+// ── The rule's severity bounds on the row ─────────────────────────────────────────────────
+
+fn bounds_row(
+    configure: impl FnOnce(&mut camerata_api_types::review_view::SeverityBoundsView),
+) -> SiteRow {
+    let mut view = camerata_api_types::review_view::SeverityBoundsView {
+        floor: None,
+        ceiling: None,
+        deviation_ceiling: None,
+        applied: Vec::new(),
+    };
+    configure(&mut view);
+    SiteRow {
+        severity_bounds: Some(view),
+        ..plain()
+    }
+}
+
+#[test]
+fn the_bounds_note_words_each_bound_that_moved_the_severity() {
+    use camerata_api_types::review_view::{AppliedBound, AppliedStep};
+    let floor = bounds_row(|v| {
+        v.floor = Some("high".into());
+        v.applied = vec![AppliedStep {
+            bound: AppliedBound::Floor,
+            from: "medium".into(),
+        }];
+    });
+    assert_eq!(
+        severity_bounds_note(&floor).as_deref(),
+        Some("raised from medium by the rule's floor (at least high)")
+    );
+    let ceiling = bounds_row(|v| {
+        v.ceiling = Some("medium".into());
+        v.applied = vec![AppliedStep {
+            bound: AppliedBound::Ceiling,
+            from: "high".into(),
+        }];
+    });
+    assert_eq!(
+        severity_bounds_note(&ceiling).as_deref(),
+        Some("capped from high by the rule's ceiling (at most medium)")
+    );
+    let deviation = bounds_row(|v| {
+        v.deviation_ceiling = Some("medium".into());
+        v.applied = vec![AppliedStep {
+            bound: AppliedBound::DeviationCeiling,
+            from: "high".into(),
+        }];
+    });
+    assert_eq!(
+        severity_bounds_note(&deviation).as_deref(),
+        Some("capped from high: a consistency deviation is at most medium")
+    );
+    let unlocated = bounds_row(|v| {
+        v.applied = vec![AppliedStep {
+            bound: AppliedBound::NoLocation,
+            from: "high".into(),
+        }];
+    });
+    assert_eq!(
+        severity_bounds_note(&unlocated).as_deref(),
+        Some("set to info: the row has no file and line")
+    );
+}
+
+#[test]
+fn bounds_that_changed_nothing_are_worded_quietly_and_no_bounds_say_nothing() {
+    let floor = bounds_row(|v| v.floor = Some("high".into()));
+    assert_eq!(
+        severity_bounds_note(&floor).as_deref(),
+        Some("rule: at least high")
+    );
+    let both = bounds_row(|v| {
+        v.floor = Some("medium".into());
+        v.ceiling = Some("critical".into());
+    });
+    assert_eq!(
+        severity_bounds_note(&both).as_deref(),
+        Some("rule: at least medium, at most critical")
+    );
+    // A row with no bounds says nothing new, and the stage 2 note is a different thing.
+    assert_eq!(severity_bounds_note(&plain()), None);
+}
+
+#[test]
+fn a_row_json_from_before_the_bounds_still_loads_and_says_nothing() {
+    let mut value = serde_json::to_value(plain()).unwrap();
+    assert!(
+        value.get("severity_bounds").is_none(),
+        "left off when empty"
+    );
+    value.as_object_mut().unwrap().remove("severity_bounds");
+    let row: SiteRow = serde_json::from_value(value).unwrap();
+    assert_eq!(row.severity_bounds, None);
+    assert_eq!(severity_bounds_note(&row), None);
+    // And a row that carries them survives the wire.
+    let with = bounds_row(|v| v.floor = Some("high".into()));
+    let back: SiteRow = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+    assert_eq!(back, with);
+}
+
+#[test]
+fn two_bounds_on_one_row_are_worded_in_order_and_joined() {
+    use camerata_api_types::review_view::{AppliedBound, AppliedStep};
+    let both = bounds_row(|v| {
+        v.floor = Some("high".into());
+        v.deviation_ceiling = Some("medium".into());
+        v.applied = vec![
+            AppliedStep {
+                bound: AppliedBound::Floor,
+                from: "low".into(),
+            },
+            AppliedStep {
+                bound: AppliedBound::DeviationCeiling,
+                from: "high".into(),
+            },
+        ];
+    });
+    assert_eq!(
+        severity_bounds_note(&both).as_deref(),
+        Some(
+            "raised from low by the rule's floor (at least high), then capped from high: \
+             a consistency deviation is at most medium"
+        )
+    );
+    let ceilings = bounds_row(|v| {
+        v.ceiling = Some("high".into());
+        v.deviation_ceiling = Some("medium".into());
+        v.applied = vec![
+            AppliedStep {
+                bound: AppliedBound::Ceiling,
+                from: "critical".into(),
+            },
+            AppliedStep {
+                bound: AppliedBound::DeviationCeiling,
+                from: "high".into(),
+            },
+        ];
+    });
+    assert_eq!(
+        severity_bounds_note(&ceilings).as_deref(),
+        Some(
+            "capped from critical by the rule's ceiling (at most high), then capped from high: \
+             a consistency deviation is at most medium"
+        )
     );
 }

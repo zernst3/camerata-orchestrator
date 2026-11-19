@@ -68,7 +68,7 @@ pub(crate) fn stage_effort(stage: Stage) -> Option<&'static str> {
         Stage::GroupReview => Some(s::GROUP_REVIEW_EFFORT),
         Stage::Alternatives => Some(s::ALTERNATIVES_EFFORT),
         Stage::FixGeneration => Some(s::FIX_EFFORT),
-        Stage::DeepTier | Stage::CloneJudge => None,
+        Stage::DeepTier | Stage::CloneJudge | Stage::Finder | Stage::DuplicateCheck => None,
     }
 }
 

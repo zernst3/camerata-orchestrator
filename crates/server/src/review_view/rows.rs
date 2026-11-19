@@ -5,8 +5,9 @@ use camerata_api_types::decisions::Decision;
 use camerata_api_types::edits::{Edit, EditField};
 use camerata_api_types::review::EscalationState;
 use camerata_api_types::review_view::{
-    BreadcrumbItem, DecisionView, DuplicateView, EditView, EscalationStatus, FlaggedByView, Marker,
-    MergedIntoView, NewSinceDecisionView, SiteRow, Stage1View, Stage2View,
+    BreadcrumbItem, CarriedByView, CarriedRuleView, DecisionView, DuplicateView, EditView,
+    EscalationStatus, FlaggedByView, Marker, MergedIntoView, NewSinceDecisionView, SamePlaceView,
+    SiteRow, Stage1View, Stage2View,
 };
 
 use super::ReviewComposer;
@@ -14,6 +15,7 @@ use crate::onboard::Finding;
 use crate::report_export::overlay::{
     current_value, merged_target, PROVENANCE_CAPTURE, REVIEWER_EDITED_CAPTURE, REVIEWER_PROVENANCE,
 };
+use crate::review_tree::PlaceNode;
 
 fn decision_view(d: &Decision) -> DecisionView {
     DecisionView {
@@ -153,6 +155,9 @@ impl<'a> ReviewComposer<'a> {
         if self.hold_of(key).is_some() {
             out.push(Marker::Held);
         }
+        if self.possible_false_positive(f).is_some() {
+            out.push(Marker::PossibleFalsePositive);
+        }
         match candidate {
             Some(c) if c.escalated => {
                 out.push(Marker::Escalated);
@@ -175,13 +180,62 @@ impl<'a> ReviewComposer<'a> {
         if self.inputs.moved.contains_key(key) {
             out.push(Marker::Moved);
         }
-        if f.possible_duplicate_of.is_some() {
+        if f.possible_duplicate_of.is_some() || !self.dup.of(f).is_empty() {
             out.push(Marker::PossibleDuplicate);
+        }
+        if self.carried_by_view(key).is_some() {
+            out.push(Marker::Carried);
         }
         if f.captures.contains_key(REVIEWER_EDITED_CAPTURE) {
             out.push(Marker::Edited);
         }
         out
+    }
+
+    /// The engine's reasons to doubt `f`, for the operator. A row the engine threw out is in no
+    /// package and carries none.
+    pub(super) fn possible_false_positive(
+        &self,
+        f: &Finding,
+    ) -> Option<camerata_api_types::review::PossibleFalsePositive> {
+        if crate::engine_discard::reason_of(f).is_some() {
+            return None;
+        }
+        self.fp.of(f)
+    }
+
+    /// The other causes with a row at the same place as `f`, for the operator, each with its title.
+    pub(super) fn same_place_as(&self, f: &Finding) -> Vec<SamePlaceView> {
+        self.dup
+            .of(f)
+            .iter()
+            .map(|link| SamePlaceView {
+                fix_id: link.fix_id.clone(),
+                title: self.cause_title(link),
+                key: link.key.clone(),
+                rule_id: link.rule_id.clone(),
+                line: link.line,
+                group_id: link.group_id.clone(),
+                reason: link.reason.clone(),
+            })
+            .collect()
+    }
+
+    /// The title of the cause a link points at: its rule group's label, or, for a rule's "no
+    /// shared cause found" group, the headline of the row the link opens.
+    fn cause_title(&self, link: &crate::possible_duplicate::DupLink) -> String {
+        let label = self
+            .node_at
+            .get(link.group_id.as_str())
+            .zip(self.tree)
+            .map(|(i, tree)| tree.nodes[*i].label.clone())
+            .filter(|l| !l.trim().is_empty() && !link.group_id.ends_with("/0"));
+        label.unwrap_or_else(|| {
+            self.row(&link.key)
+                .map(crate::ai_audit::finding_headline)
+                .filter(|h| !h.trim().is_empty())
+                .unwrap_or_else(|| link.rule_id.clone())
+        })
     }
 
     /// The flagged-by entries of `f`.
@@ -211,6 +265,46 @@ impl<'a> ReviewComposer<'a> {
         })
     }
 
+    /// The rules the row at `key` carries, when it heads a place.
+    fn carried_rule_views(&self, key: &str) -> Vec<CarriedRuleView> {
+        let Some(place) = self.place_of(key).filter(|p| p.carrier == key) else {
+            return Vec::new();
+        };
+        place
+            .carried()
+            .filter_map(|k| self.row(k))
+            .map(|f| {
+                let candidate = self.candidate(&f.site_key);
+                CarriedRuleView {
+                    rule_id: f.rule_id.clone(),
+                    site_key: f.site_key.clone(),
+                    node_id: f.group_path.get(2).cloned().unwrap_or_default(),
+                    severity: f.severity.clone(),
+                    kind: f.kind.clone(),
+                    held: self.hold_of(&f.site_key),
+                    stage1_real: self.stage1_view(f).real,
+                    escalation_reason: candidate.map(|c| c.reason),
+                    escalation_rank: candidate.map(|c| c.global_rank),
+                    decision: self.decision_of(&f.site_key),
+                }
+            })
+            .collect()
+    }
+
+    /// The row that carries the row at `key`, when another row at its place does.
+    fn carried_by_view(&self, key: &str) -> Option<CarriedByView> {
+        let place = self.place_of(key).filter(|p| p.carrier != key)?;
+        let carrier = self.row(&place.carrier)?;
+        Some(CarriedByView {
+            site_key: carrier.site_key.clone(),
+            node_id: carrier.group_path.get(2).cloned().unwrap_or_default(),
+            rule_id: carrier.rule_id.clone(),
+            path: carrier.path.clone(),
+            line: carrier.line,
+            decided: self.decision_of(&carrier.site_key).is_some(),
+        })
+    }
+
     /// One site row.
     pub(super) fn site_row(&self, f: &Finding) -> SiteRow {
         let key = f.site_key.as_str();
@@ -221,6 +315,10 @@ impl<'a> ReviewComposer<'a> {
             .map(|list| list.iter().map(|e| self.edit_view(e, f)).collect())
             .unwrap_or_default();
         let has_stale_edit = edits.iter().any(|e| e.stale);
+        let fix = self
+            .tree
+            .zip(f.group_path.get(2))
+            .and_then(|(tree, sub)| tree.fix_of(sub));
 
         SiteRow {
             site_key: f.site_key.clone(),
@@ -233,11 +331,20 @@ impl<'a> ReviewComposer<'a> {
             category: f.category.clone(),
             headline: current_value(f, EditField::Headline),
             detail: current_value(f, EditField::Detail),
+            why_business: current_value(f, EditField::Business),
             fix: current_value(f, EditField::Fix),
             fix_type: current_value(f, EditField::FixType),
             snippet: f.snippet.clone(),
             group_path: f.group_path.clone(),
             group_primary: f.group_role.is_primary(),
+            fix_id: fix.map(|x| x.id.clone()).unwrap_or_default(),
+            fix_rules: fix.map(|x| x.rules.clone()).unwrap_or_default(),
+            place_id: self
+                .place_of(key)
+                .map(PlaceNode::node_id)
+                .unwrap_or_default(),
+            carries: self.carried_rule_views(key),
+            carried_by: self.carried_by_view(key),
             stage1: self.stage1_view(f),
             stage2: self.stage2_view(f),
             markers: self.markers_of(f, has_stale_edit),
@@ -278,6 +385,9 @@ impl<'a> ReviewComposer<'a> {
                 .is_some_and(|v| v == REVIEWER_PROVENANCE),
             thrown_out_reason: crate::engine_discard::reason_of(f).map(str::to_string),
             review_flags: crate::review_flags::flags_of(f),
+            possible_false_positive: self.possible_false_positive(f),
+            same_place_as: self.same_place_as(f),
+            severity_bounds: self.severity_bounds(f),
         }
     }
 }

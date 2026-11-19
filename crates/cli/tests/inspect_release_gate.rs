@@ -81,6 +81,7 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
         fix_model: None,
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,
@@ -91,6 +92,7 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     };
 
     let err = run_inspect_with_key_presence(args, false)

@@ -61,6 +61,7 @@
 
 pub mod audit;
 pub mod claude_cli;
+pub mod cost_checkpoint;
 pub mod credentials;
 pub mod decisions;
 pub mod edits;
@@ -74,6 +75,7 @@ pub mod project;
 pub mod review;
 pub mod review_timing;
 pub mod review_view;
+pub mod rewrite_advisory;
 pub mod run;
 pub mod site_key;
 pub mod snippet;

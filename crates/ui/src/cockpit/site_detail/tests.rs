@@ -64,6 +64,7 @@ struct Case {
     ctx: DetailContext,
     panel: DetailPanel,
     ticked: bool,
+    unticked: std::collections::BTreeSet<String>,
 }
 
 #[component]
@@ -75,6 +76,7 @@ fn Harness(props: Case) -> Element {
             position: "7 of 12",
             panel: props.panel.clone(),
             ticked: props.ticked,
+            unticked: props.unticked.clone(),
         }
     }
 }
@@ -87,9 +89,99 @@ fn page(row: SiteRow, panel: DetailPanel) -> String {
             ctx: ctx(),
             panel,
             ticked: false,
+            unticked: std::collections::BTreeSet::new(),
         },
     )
     .replace(GLOBAL_CSS, "")
+}
+
+fn page_unticked(row: SiteRow, unticked: &[&str]) -> String {
+    test_harness::render_props(
+        Harness,
+        Case {
+            row,
+            ctx: ctx(),
+            panel: DetailPanel::default(),
+            ticked: false,
+            unticked: unticked.iter().map(|k| k.to_string()).collect(),
+        },
+    )
+    .replace(GLOBAL_CSS, "")
+}
+
+fn carried_rule(n: usize, severity: &str) -> camerata_api_types::review_view::CarriedRuleView {
+    camerata_api_types::review_view::CarriedRuleView {
+        rule_id: format!("SEC-CARRIED-{n}"),
+        site_key: format!("carried-key-{n}"),
+        node_id: format!("sub:SEC-CARRIED-{n}/0"),
+        severity: severity.to_string(),
+        kind: Some(camerata_api_types::audit::FindingKind::Defect),
+        held: None,
+        stage1_real: "yes".to_string(),
+        escalation_reason: None,
+        escalation_rank: None,
+        decision: None,
+    }
+}
+
+// ── The place (D2) ────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_carrier_lists_the_rules_it_carries_each_with_a_tick_and_a_decide_alone_control() {
+    let mut row = plain();
+    row.place_id = "place:abc123abc123".to_string();
+    let mut held = carried_rule(2, "medium");
+    held.held = Some(HoldReason::EvidenceUnverified);
+    row.carries = vec![carried_rule(1, "high"), held, carried_rule(3, "low")];
+    let html = page_unticked(row.clone(), &["carried-key-3"]);
+    clean(&html);
+    assert!(html.contains("Also matches at this place"), "{html}");
+    for id in ["SEC-CARRIED-1", "SEC-CARRIED-2", "SEC-CARRIED-3"] {
+        assert!(html.contains(id), "{id} is listed");
+    }
+    assert_eq!(html.matches("Decide alone").count(), 3);
+    assert!(
+        html.contains("held: evidence unverified"),
+        "the hold is shown"
+    );
+    // The head carries the chip.
+    assert!(html.contains("+3 also match"), "{html}");
+    // Three ticks: the first ticked, the held one locked, the unticked one clear.
+    assert_eq!(html.matches("carried-tick").count(), 3);
+    assert_eq!(
+        html.matches("disabled").count(),
+        1,
+        "only the held tick is locked"
+    );
+    // A lone row draws none of it.
+    let alone = page(plain(), DetailPanel::default());
+    assert!(!alone.contains("Also matches at this place"));
+    assert!(!alone.contains("Carried by"));
+}
+
+#[test]
+fn a_carried_row_says_where_it_is_decided_and_offers_a_way_to_the_carrier() {
+    let mut row = plain();
+    row.place_id = "place:abc123abc123".to_string();
+    row.markers = vec![Marker::Carried];
+    row.carried_by = Some(camerata_api_types::review_view::CarriedByView {
+        site_key: "carrier-key".to_string(),
+        node_id: "sub:SEC-A/0".to_string(),
+        rule_id: "SEC-A".to_string(),
+        path: "src/a.rs".to_string(),
+        line: 5,
+        decided: false,
+    });
+    let html = page(row, DetailPanel::default());
+    clean(&html);
+    assert!(html.contains("Carried by"), "{html}");
+    assert!(html.contains("SEC-A at src/a.rs:5"), "{html}");
+    assert!(
+        html.contains("decided there unless you decide this rule alone"),
+        "{html}"
+    );
+    assert!(html.contains("Go to carrier"));
+    assert!(!html.contains("Also matches at this place"));
 }
 
 fn mode(mode: DetailMode) -> DetailPanel {
@@ -130,8 +222,8 @@ fn a_plain_site_draws_every_line_of_spec_section_8_with_an_edit_for_each_field()
             "no {label} line:\n{html}"
         );
     }
-    // One edit control per editable field of the site: nine, the node summary being WO10's.
-    assert_eq!(html.matches("site-detail-edit").count(), 9, "{html}");
+    // One edit control per editable field of the site: ten, the node's texts being WO10's.
+    assert_eq!(html.matches("site-detail-edit").count(), 10, "{html}");
     for field in camerata_ui_core::edits::SITE_FIELDS {
         let title = format!("Edit {}", field_label(field).to_lowercase());
         assert!(html.contains(&title), "no `{title}`");
@@ -386,7 +478,7 @@ fn an_open_edit_swaps_the_value_for_its_control_a_required_reason_and_commit() {
         assert!(html.contains("Cancel"));
         let control = match field {
             EditField::Headline => "<input",
-            EditField::Detail | EditField::Fix => "<textarea",
+            EditField::Detail | EditField::Fix | EditField::Business => "<textarea",
             EditField::RuleId => "<datalist",
             _ => "<select",
         };
@@ -465,7 +557,7 @@ fn the_merge_picker_lists_the_possible_duplicate_first_and_marks_the_pick() {
     assert!(html.contains("the row stays in the tree"));
     let list = html.find("site-detail-candidates").unwrap();
     let dup = html[list..]
-        .find("<span class=\"mark-dup\">possible duplicate")
+        .find("<span class=\"mark-dup\">Possible duplicate")
         .unwrap();
     let first_row = html[list..].find("<li").unwrap();
     assert!(first_row < dup, "the linked duplicate is a row of the list");
@@ -648,6 +740,7 @@ fn an_outlier_offers_the_batch_tick_and_a_checked_box_when_ticked() {
             ctx: ctx(),
             panel: DetailPanel::default(),
             ticked: true,
+            unticked: std::collections::BTreeSet::new(),
         },
     );
     assert!(html.contains("Include this outlier in the next batch decision"));
@@ -822,7 +915,7 @@ async fn an_edit_button_opens_that_fields_form_and_enter_commits_while_esc_cance
     seen.take(&vdom.rebuild_to_vec());
     settle(&mut vdom, &mut seen).await;
     EVENTS.with(|l| l.borrow_mut().clear());
-    // Click every button: the doors, the nine edit buttons, the decisions, merge and add.
+    // Click every button: the doors, the ten edit buttons, the decisions, merge and add.
     let clicks = seen.0.iter().filter(|(n, _)| n == "click").count();
     for n in 0..clicks {
         click(&vdom, seen.nth("click", n));
@@ -1253,6 +1346,7 @@ fn the_merge_pickers_empty_line_is_the_hosts_own_text() {
             ctx: context.clone(),
             panel: mode(m),
             ticked: false,
+            unticked: std::collections::BTreeSet::new(),
         },
     )
     .replace(GLOBAL_CSS, "");
@@ -1399,4 +1493,112 @@ async fn a_ruling_the_server_would_refuse_on_a_thrown_out_row_posts_nothing() {
     .await
     .unwrap();
     assert_eq!(writes.log.borrow().len(), 3);
+}
+
+// ── The rule's severity bounds beside the severity ────────────────────────────────────────
+
+fn with_bounds(
+    configure: impl FnOnce(&mut camerata_api_types::review_view::SeverityBoundsView),
+) -> SiteRow {
+    let mut view = camerata_api_types::review_view::SeverityBoundsView {
+        floor: None,
+        ceiling: None,
+        deviation_ceiling: None,
+        applied: Vec::new(),
+    };
+    configure(&mut view);
+    SiteRow {
+        severity_bounds: Some(view),
+        ..plain()
+    }
+}
+
+#[test]
+fn each_applied_bound_is_worded_after_the_severity() {
+    use camerata_api_types::review_view::{AppliedBound, AppliedStep};
+    let cases = [
+        (
+            with_bounds(|v| {
+                v.floor = Some("high".into());
+                v.applied = vec![AppliedStep {
+                    bound: AppliedBound::Floor,
+                    from: "medium".into(),
+                }];
+            }),
+            "raised from medium by the rule&#39;s floor (at least high)",
+        ),
+        (
+            with_bounds(|v| {
+                v.ceiling = Some("medium".into());
+                v.applied = vec![AppliedStep {
+                    bound: AppliedBound::Ceiling,
+                    from: "high".into(),
+                }];
+            }),
+            "capped from high by the rule&#39;s ceiling (at most medium)",
+        ),
+        (
+            with_bounds(|v| {
+                v.deviation_ceiling = Some("medium".into());
+                v.applied = vec![AppliedStep {
+                    bound: AppliedBound::DeviationCeiling,
+                    from: "high".into(),
+                }];
+            }),
+            "capped from high: a consistency deviation is at most medium",
+        ),
+        (
+            with_bounds(|v| {
+                v.applied = vec![AppliedStep {
+                    bound: AppliedBound::NoLocation,
+                    from: "high".into(),
+                }];
+            }),
+            "set to info: the row has no file and line",
+        ),
+    ];
+    for (row, words) in cases {
+        let html = page(row, DetailPanel::default());
+        assert!(html.contains("site-detail-bounds"), "{html}");
+        assert!(html.contains(words), "{words}\n{html}");
+    }
+}
+
+#[test]
+fn bounds_that_changed_nothing_are_quiet_and_a_rule_without_bounds_adds_nothing() {
+    let html = page(
+        with_bounds(|v| v.floor = Some("high".into())),
+        DetailPanel::default(),
+    );
+    assert!(html.contains("rule: at least high"), "{html}");
+    assert!(!html.contains("raised from"), "{html}");
+    let html = page(plain(), DetailPanel::default());
+    assert!(!html.contains("site-detail-bounds"), "{html}");
+    assert!(!html.contains("rule: at"), "{html}");
+}
+
+#[test]
+fn the_bounds_line_sits_beside_the_group_reviewers_disagreement_and_does_not_replace_it() {
+    use camerata_api_types::review_view::AppliedBound;
+    let mut row = plain();
+    row.stage2.as_mut().unwrap().disagreements.push(
+        camerata_api_types::review::Stage2Disagreement {
+            field: camerata_api_types::review::DisagreementField::Severity,
+            stage1: "low".to_string(),
+            mine: "high".to_string(),
+            why: String::new(),
+        },
+    );
+    row.severity_bounds = Some(camerata_api_types::review_view::SeverityBoundsView {
+        floor: Some("high".into()),
+        ceiling: None,
+        deviation_ceiling: None,
+        applied: vec![camerata_api_types::review_view::AppliedStep {
+            bound: AppliedBound::Floor,
+            from: "medium".into(),
+        }],
+    });
+    let html = page(row, DetailPanel::default());
+    assert!(html.contains("stage 2 disagrees"), "{html}");
+    assert!(html.contains("raised from medium"), "{html}");
 }

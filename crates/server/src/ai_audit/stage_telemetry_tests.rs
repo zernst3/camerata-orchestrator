@@ -16,6 +16,8 @@ struct UsageStub {
 impl LlmPort for UsageStub {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: super::reply_schemas::check::address_by_id(&req.prompt, &self.text),
             model: "stub".to_string(),
             backend: "api".to_string(),
@@ -68,6 +70,8 @@ fn fixture_finding() -> Finding {
 fn record_stage_keeps_the_aggregate_equal_to_the_sum_of_the_stages() {
     let meter = UsageMeter::default();
     let r = |cost| LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: String::new(),
         model: "m".to_string(),
         backend: "api".to_string(),
@@ -102,6 +106,8 @@ fn record_stage_keeps_the_aggregate_equal_to_the_sum_of_the_stages() {
 fn a_wasted_attempt_is_attributed_to_its_stage_without_changing_the_aggregate() {
     let meter = UsageMeter::default();
     let resp = LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: String::new(),
         model: "m".to_string(),
         backend: "api".to_string(),
@@ -294,6 +300,8 @@ struct CutOffCalibration;
 impl LlmPort for CutOffCalibration {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"severity":"hi"#.to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),

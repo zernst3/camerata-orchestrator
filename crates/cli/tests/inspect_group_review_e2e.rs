@@ -58,6 +58,8 @@ impl Scripted {
 impl LlmPort for Scripted {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: self.reply(&req),
             model: req.model.clone(),
             backend: "stub".to_string(),
@@ -131,6 +133,7 @@ fn args(repo: &Path, export: &Path) -> InspectArgs {
         fix_model: None,
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,
@@ -141,6 +144,7 @@ fn args(repo: &Path, export: &Path) -> InspectArgs {
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     }
 }
 
@@ -240,18 +244,33 @@ async fn with_no_flag_the_group_reviewer_runs_on_fable_and_the_environment_is_ig
     };
     assert!(!requests.is_empty());
     for req in &requests {
-        assert_eq!(req.model, "claude-fable-5-1");
+        assert_eq!(req.model, "claude-fable-5-2");
         assert_ne!(req.model, "env-picked-model");
     }
-    // What the group reviewer said is internal: the client's findings.json carries none of it.
+    // This export is the operator's own (the project is not a client engagement). What the group
+    // reviewer said stays out of its findings.json, but for the one thing a row states: why it
+    // was escalated, in the closed reason vocabulary.
     let text = String::from_utf8(findings_json).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut seen = 0;
+    for row in doc["findings"].as_array().unwrap() {
+        if let Some(reason) = row["escalation_reason"].as_str() {
+            seen += 1;
+            assert!(
+                camerata_api_types::review::EscalationReason::parse(reason).is_some(),
+                "{reason} is not in the reason vocabulary"
+            );
+        }
+    }
+    assert!(
+        seen >= 1,
+        "the operator export names at least one escalation reason"
+    );
     for internal in [
-        "escalation_reason",
         "escalation_why",
         "subgroup_cause",
         "stage2_disagreement",
         "global_rank",
-        "conflicting_verdicts",
         "summary_omits_member",
     ] {
         assert!(

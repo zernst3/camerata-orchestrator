@@ -258,7 +258,46 @@ pub const STAGE1_DEFAULT_MODEL: &str = "claude-opus-5-5";
 
 /// The model stage 2 (the group reviewer) runs on when no group review model is set by the
 /// `--group-review-model` flag or the project setting (A13).
-pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-1";
+pub const STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-2";
+
+/// The model the possible-duplicate check runs on when no duplicate check model is set by the
+/// `--dup-check-model` flag or the project setting: the one question it asks of a pair of
+/// write-ups is small and bounded, so it is Sonnet 5.5.
+pub const DUP_CHECK_DEFAULT_MODEL: &str = "claude-sonnet-5-5";
+
+/// The agent finder's model when neither the `--finder-model` flag nor the project setting names
+/// one. The server's `DEFAULT_FINDER_MODEL` is this value.
+pub const FINDER_DEFAULT_MODEL: &str = "claude-fable-5-2";
+
+/// Which finder a project's scans use. `Engine` (the default until the calibration passes) is the
+/// rule by rule scan; `Agent` has one model review each part of the code. The server turns it
+/// into the run's finder choice. Set only on the project, never by the environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectFinder {
+    #[default]
+    Engine,
+    Agent,
+}
+
+impl ProjectFinder {
+    /// The word the settings route and the screen use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectFinder::Engine => "engine",
+            ProjectFinder::Agent => "agent",
+        }
+    }
+
+    /// Read the word back; `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "engine" => Some(ProjectFinder::Engine),
+            "agent" => Some(ProjectFinder::Agent),
+            _ => None,
+        }
+    }
+}
 
 /// The project's review-tree settings (design D3, D5 and A3): how many escalations a run may put
 /// in the architect's queue, which reasons may exceed that number, and the group reviewer's
@@ -283,10 +322,29 @@ pub struct ReviewSettings {
     /// Set only here or by the `--group-review-model` flag, never by the environment.
     #[serde(default)]
     pub group_review_model: String,
+    /// The possible-duplicate check's model. Empty means not set: the run uses
+    /// [`DUP_CHECK_DEFAULT_MODEL`]. Set only here or by the `--dup-check-model` flag, never by
+    /// the environment. A project written before the setting existed loads it empty.
+    #[serde(default)]
+    pub dup_check_model: String,
+    /// The agent finder's model. Empty means not set: the run uses [`FINDER_DEFAULT_MODEL`].
+    /// Set only here or by the `--finder-model` flag, never by the environment. A project written
+    /// before the setting existed loads it empty.
+    #[serde(default)]
+    pub finder_model: String,
+    /// The clone judge's model. Empty means not set: the run uses the project's fast tier model,
+    /// else the built-in fast default. Set only here or by the `--clone-judge-model` flag, never
+    /// by the environment. A project written before the setting existed loads it empty.
+    #[serde(default)]
+    pub clone_judge_model: String,
     /// How many rows the Engine Check draws per run (design A2b). 0 turns the lane off. A project
     /// written before the setting existed loads with [`DEFAULT_SAMPLE_SIZE_PER_RUN`].
     #[serde(default = "default_sample_size_per_run")]
     pub sample_size_per_run: usize,
+    /// Which finder the project's scans use. A project written before the setting existed loads
+    /// with the default.
+    #[serde(default)]
+    pub finder: ProjectFinder,
 }
 
 /// The default `sample_size_per_run`: the size design A2b suggests for an early engagement.
@@ -358,7 +416,11 @@ impl Default for ReviewSettings {
             escalation_floor: default_escalation_floor(),
             over_budget_reasons: default_over_budget_reasons(),
             group_review_model: String::new(),
+            dup_check_model: String::new(),
+            finder_model: String::new(),
+            clone_judge_model: String::new(),
             sample_size_per_run: default_sample_size_per_run(),
+            finder: ProjectFinder::default(),
         }
     }
 }
@@ -367,6 +429,36 @@ impl Default for ReviewSettings {
 mod review_settings_tests {
     use super::*;
     use crate::review::EscalationReason;
+
+    #[test]
+    fn the_duplicate_check_model_is_unset_by_default_and_its_built_in_default_is_sonnet_5_5() {
+        assert_eq!(DUP_CHECK_DEFAULT_MODEL, "claude-sonnet-5-5");
+        assert!(ReviewSettings::default().dup_check_model.is_empty());
+        // A project written before the setting existed loads with it unset.
+        let old: ReviewSettings =
+            serde_json::from_str(r#"{"group_review_model":"claude-opus-5-5"}"#).unwrap();
+        assert!(old.dup_check_model.is_empty());
+        let set: ReviewSettings =
+            serde_json::from_str(r#"{"dup_check_model":"claude-haiku-5-5"}"#).unwrap();
+        assert_eq!(set.dup_check_model, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn the_finder_and_clone_judge_models_are_unset_by_default_and_an_old_project_loads() {
+        assert_eq!(FINDER_DEFAULT_MODEL, "claude-fable-5-2");
+        let d = ReviewSettings::default();
+        assert!(d.finder_model.is_empty() && d.clone_judge_model.is_empty());
+        // A project written before either setting existed loads with both unset.
+        let old: ReviewSettings =
+            serde_json::from_str(r#"{"group_review_model":"claude-opus-5-5"}"#).unwrap();
+        assert!(old.finder_model.is_empty() && old.clone_judge_model.is_empty());
+        let set: ReviewSettings = serde_json::from_str(
+            r#"{"finder_model":"claude-opus-5-5","clone_judge_model":"claude-haiku-5-5"}"#,
+        )
+        .unwrap();
+        assert_eq!(set.finder_model, "claude-opus-5-5");
+        assert_eq!(set.clone_judge_model, "claude-haiku-5-5");
+    }
 
     #[test]
     fn the_review_settings_default_to_the_design_values() {
@@ -422,9 +514,9 @@ mod review_settings_tests {
     }
 
     #[test]
-    fn the_stage_defaults_are_opus_5_5_and_fable_5_1() {
+    fn the_stage_defaults_are_opus_5_5_and_fable_5_2() {
         assert_eq!(STAGE1_DEFAULT_MODEL, "claude-opus-5-5");
-        assert_eq!(STAGE2_DEFAULT_MODEL, "claude-fable-5-1");
+        assert_eq!(STAGE2_DEFAULT_MODEL, "claude-fable-5-2");
         assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
     }
 }

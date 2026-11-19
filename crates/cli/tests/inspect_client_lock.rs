@@ -27,6 +27,8 @@ impl LlmPort for Scripted {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
@@ -108,6 +110,7 @@ fn args(repo: &Path, export: &Path, backend: ProjectBackend) -> InspectArgs {
         fix_model: None,
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,
@@ -118,6 +121,7 @@ fn args(repo: &Path, export: &Path, backend: ProjectBackend) -> InspectArgs {
         client_engagement: true,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     }
 }
 
@@ -299,13 +303,12 @@ async fn a_client_engagement_on_the_api_runs_and_records_backend_models_and_enga
     assert_eq!(inspection["model_provider"], "anthropic");
     assert_eq!(inspection["client_engagement"], true);
     assert_eq!(inspection["models"][0]["model"], "claude-sonnet-5");
+    // A client README says what each file is and how to import the tickets; how the inspection
+    // was run (the models, the engagement) is in manifest.json, asserted above.
     let readme = zip_entry(&export, "README.txt");
-    assert!(readme.contains("Model backend: api\n"), "{readme}");
-    assert!(
-        readme.contains("Model (the scan): claude-sonnet-5\n"),
-        "{readme}"
-    );
-    assert!(readme.contains("Client engagement: yes\n"), "{readme}");
+    assert!(!readme.contains("Model backend"), "{readme}");
+    assert!(!readme.contains("Model (the scan)"), "{readme}");
+    assert!(!readme.contains("Client engagement"), "{readme}");
 
     let ledger: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&outcome.ledger_path).unwrap()).unwrap();

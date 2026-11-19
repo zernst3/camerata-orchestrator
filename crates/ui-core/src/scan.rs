@@ -205,18 +205,29 @@ pub const CALIBRATION_SITE_INPUT_TOKENS: f64 = 560.0;
 /// The verdict one site's reply holds; the server's cap per site is built from the same figure.
 pub const CALIBRATION_OUTPUT_TOKENS_PER_SITE: f64 = 150.0;
 
-/// What the Claude Code CLI itself adds to EVERY call it makes, on top of the stage's own prompt:
-/// its system prompt and tool framing, written to the prompt cache each time because every call is
-/// a fresh subprocess. MEASURED on the faktura cli run (20261105T205200Z-39d435), where each
-/// stage's cache writes per call exceeded the stage's own prompt by about this much: stage 1
-/// 11.0k written against a 3.5k prompt, stage 2 10.5k against 2.4k, a scan pass 21.5k against
-/// 15.7k. The API backend pays none of it.
-pub const CLI_CALL_OVERHEAD_TOKENS: f64 = 7_500.0;
+/// What the Claude Code CLI itself adds to EVERY call it makes, on top of the stage's own prompt,
+/// written to the prompt cache each time: its framing of the request. The calls go out with no
+/// tools and the caller's own system prompt in place of the CLI's, so this is small now.
+/// MEASURED on the two complete cli runs made since: the stage 1 calibration calls of lumen
+/// (141 calls, run 20261106T233054) wrote 1,983 tokens each and of the supabase-portal fixture
+/// (102 calls) 2,566 each, against a 560-token site prompt, so 1.4k to 2.0k of overhead; stage 2
+/// wrote 1,397 (lumen) and 1,982 (supabase-portal) tokens a call. It was 7,500 on the runs made
+/// before the change (faktura, tutorly and the first lumen run of 2026-11-05, which wrote about
+/// 11,000 tokens a stage 1 call), which is why those runs cost three times what the same repos
+/// cost now. The API backend pays none of it.
+pub const CLI_CALL_OVERHEAD_TOKENS: f64 = 1_700.0;
 /// What a prompt-cache WRITE costs on the CLI backend, as a multiple of the input price. The CLI
 /// writes its cache with the one-hour lifetime, which bills at twice the input price (the API's
 /// default five-minute write is 1.25 times). MEASURED: Opus 5.5 stage 1 calls billed $0.093
 /// each for 11.0k written tokens at $4 per million, which is exactly twice the input price.
 pub const CLI_CACHE_WRITE_MULT: f64 = 2.0;
+/// The model whose rates the CLI backend bills a request for the fast model (`claude-haiku-5-5`),
+/// as a stand-in for the calibration model. MEASURED, not understood: on all five complete cli
+/// runs the fix stage and the clone judge, requested on `claude-haiku-5-5`, billed to the cent at
+/// the Opus 5.5 rate for their tokens (lumen: 143,154 tokens written and 63,051 written out came
+/// to $2.4066 at $8 and $20 per million). The estimate prices them at the calibration model's
+/// rates on the CLI backend until the cause is found.
+pub const CLI_FAST_MODEL_BILLED_AS_CALIBRATION: bool = true;
 
 /// What stage 1 costs over a number of sites.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -243,21 +254,29 @@ pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationE
             output_tokens: 0.0,
         };
     }
+    // The system prompt and shared prefix are the same bytes on every call, so they are written
+    // once and read back by the rest (on the CLI backend too, now that its calls carry no tools:
+    // 2,800 of the 3,500 tokens a call read came from the cache). What each call writes is its
+    // own site text; on the CLI backend also its own overhead, at the CLI's write price.
     let prefix = match backend {
-        // The CLI's own per-call prompt is written to the cache with the prefix, every call.
         ProjectBackend::Cli => {
-            (CALIBRATION_PREFIX_TOKENS + CLI_CALL_OVERHEAD_TOKENS)
-                * CLI_CACHE_WRITE_MULT
-                * calls as f64
+            CALIBRATION_PREFIX_TOKENS * CLI_CACHE_WRITE_MULT
+                + CALIBRATION_PREFIX_TOKENS * CACHE_READ_MULT * (calls - 1) as f64
         }
         ProjectBackend::Api => {
             CALIBRATION_PREFIX_TOKENS * CACHE_WRITE_MULT
                 + CALIBRATION_PREFIX_TOKENS * CACHE_READ_MULT * (calls - 1) as f64
         }
     };
+    let per_call_own = match backend {
+        ProjectBackend::Cli => {
+            (CALIBRATION_SITE_INPUT_TOKENS + CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT
+        }
+        ProjectBackend::Api => CALIBRATION_SITE_INPUT_TOKENS,
+    };
     CalibrationEstimate {
         calls,
-        input_tokens: calls as f64 * CALIBRATION_SITE_INPUT_TOKENS + prefix,
+        input_tokens: calls as f64 * per_call_own + prefix,
         output_tokens: calls as f64 * CALIBRATION_OUTPUT_TOKENS_PER_SITE,
     }
 }
@@ -268,7 +287,7 @@ pub fn calibration_estimate(sites: f64, backend: ProjectBackend) -> CalibrationE
 /// headline), and writes the summary, the sub-groups by index and the few escalations. No batch
 /// discount and no cache breakpoint: the architect is waiting on it. Pinned to the real prompt by
 /// `group_review_tests::the_estimators_figures_cover_the_real_prompt`.
-pub const GROUP_REVIEW_SYSTEM_TOKENS: f64 = 1_900.0;
+pub const GROUP_REVIEW_SYSTEM_TOKENS: f64 = 2_100.0;
 /// See [`GROUP_REVIEW_SYSTEM_TOKENS`]: the repository line, the rule text and the hint header.
 pub const GROUP_REVIEW_CALL_OVERHEAD_TOKENS: f64 = 400.0;
 /// See [`GROUP_REVIEW_SYSTEM_TOKENS`]: one site's line, at full width (an 80-character path, a
@@ -299,6 +318,54 @@ pub const GROUP_REVIEW_SATURATION_K: f64 = 0.85;
 /// The most sites one group reviewer call is asked about (`group_review::MAX_CHUNK_MEMBERS`).
 pub const GROUP_REVIEW_MAX_CHUNK_SITES: f64 = 150.0;
 
+/// The constants of the run estimate that are FITTED to saved runs, gathered so a fit made from
+/// some of the runs can be tried on one it was not made from (the leave-one-out check in
+/// `saved_runs_tests`). The tokens a stage writes per unit are the largest value any saved run
+/// showed, so the quote is not under any of them; the sites per file are the median, which the
+/// comment on [`RUN_FIT`] explains. The comments there name the runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunFit {
+    /// Sites stage 1 calibrates per file the scan reads.
+    pub sites_per_file: f64,
+    /// The most sites per file any run showed, which the ceiling beside the estimate is quoted on.
+    pub sites_per_file_high: f64,
+    /// Input tokens the fix stage writes per site on the CLI backend (the CLI's own prompt of each
+    /// call is priced beside it).
+    pub fix_cli_input_tokens_per_site: f64,
+    /// Output tokens the fix stage writes per site on the CLI backend.
+    pub fix_cli_output_tokens_per_site: f64,
+    /// Tokens a stage 2 call writes to the cache on the CLI backend before its site lines: the
+    /// rule text and the CLI's own framing.
+    pub group_review_cli_tokens_per_call: f64,
+}
+
+/// The fit the estimate is made with, FITTED on 2026-11-08 to the ledgers of four complete cli runs
+/// of the engine as it stands (1ada6108): the supabase portal fixture (36 files, 80 sites),
+/// faktura (39 files, 119 sites), tutorly (45 files, 132 sites) and the lumen run of 2026-11-06
+/// (54 files, 141 sites). The tokens written per unit are the largest value any of the four showed,
+/// rounded up, so the quote is not under any of them; the sites per file are their median, not the
+/// largest, because repositories differ in them by more than the whole band the quote is held to
+/// (80 sites for 36 files and 119 for 39, at the same code size), and the largest would quote the
+/// 36-file repository 1.5 times what it cost. `saved_runs_tests` holds the runs, checks these against them and
+/// leaves each run out of the fit in turn. The scan ledger records `files` beside the sites and
+/// groups ([`GroupReviewCounts`] in the server crate), so the next fit reads the next runs.
+pub const RUN_FIT: RunFit = RunFit {
+    // 2.22, 3.05, 2.93 and 2.61 sites a file: the median is 2.77.
+    sites_per_file: 2.78,
+    // 300 sites over 87 files (hearth, run of 2026-11-05, engine 74d3ef07, whose calibration stage
+    // finished before the run was stopped): the largest rate seen in any run. That engine
+    // calibrated about 12 percent more sites than today's, so it is a high side, not an expectation.
+    sites_per_file_high: 3.45,
+    // The fix stage wrote 929, 955, 1,006 and 931 tokens to the cache per site beyond the CLI's own
+    // prompt of each call (the old 1,200 was 20 percent over the largest).
+    fix_cli_input_tokens_per_site: 1_010.0,
+    // 413, 456, 446 and 447 output tokens per site (the old 600 was a third over).
+    fix_cli_output_tokens_per_site: 460.0,
+    // A stage 2 call wrote 1,176, 1,165, 1,174 and 1,157 tokens before its site lines (the old
+    // 2,100, the rule text plus the 1,700 the CLI was thought to add, was 80 percent over).
+    group_review_cli_tokens_per_call: 1_180.0,
+};
+
 /// What stage 2 costs over a number of sites.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupReviewEstimate {
@@ -315,6 +382,17 @@ pub struct GroupReviewEstimate {
 /// The CLI backend adds its own per-call prompt, written to the cache at twice the input price
 /// ([`CLI_CALL_OVERHEAD_TOKENS`]); the API backend sends the prompt once at the input price.
 pub fn group_review_estimate(
+    sites: f64,
+    rules: usize,
+    backend: ProjectBackend,
+) -> GroupReviewEstimate {
+    group_review_estimate_with(&RUN_FIT, sites, rules, backend)
+}
+
+/// [`group_review_estimate`] with the fitted constants given, so a fit made from some of the saved
+/// runs can be tried on one it was not made from.
+pub fn group_review_estimate_with(
+    fit: &RunFit,
     sites: f64,
     rules: usize,
     backend: ProjectBackend,
@@ -339,7 +417,16 @@ pub fn group_review_estimate(
     let per_call = GROUP_REVIEW_SYSTEM_TOKENS + GROUP_REVIEW_CALL_OVERHEAD_TOKENS;
     let prompt = calls * per_call + sites * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
     let input_tokens = match backend {
-        ProjectBackend::Cli => (prompt + calls * CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT,
+        // The system prompt is the same on every call: written once and read back by the rest
+        // (1,400 to 2,000 tokens a call written, 2,400 read, in the two runs measured). What a
+        // call writes is its rule text, its site lines and the CLI's overhead.
+        ProjectBackend::Cli => {
+            let own = calls * fit.group_review_cli_tokens_per_call
+                + sites * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
+            own * CLI_CACHE_WRITE_MULT
+                + GROUP_REVIEW_SYSTEM_TOKENS * CLI_CACHE_WRITE_MULT
+                + GROUP_REVIEW_SYSTEM_TOKENS * 0.10 * (calls - 1.0).max(0.0)
+        }
         ProjectBackend::Api => prompt,
     };
     GroupReviewEstimate {
@@ -918,6 +1005,8 @@ const ALTERNATIVES_BATCH_RULES: usize = 25;
 /// `low`). Measured on both runs: 3.2k and 4.2k input, 0.7k and 1.0k output per finding.
 const FIX_INPUT_TOKENS_PER_FINDING: f64 = 3_000.0;
 const FIX_OUTPUT_TOKENS_PER_FINDING: f64 = 800.0;
+// The same on the CLI backend: see `RUN_FIT` (`fix_cli_input_tokens_per_site`, which writes what
+// it sends to the CLI's cache at `CLI_CACHE_WRITE_MULT`, and `fix_cli_output_tokens_per_site`).
 
 /// The clone judge: two calls on a fast model (measured: $0.009 on Haiku 4.5).
 const CLONE_JUDGE_CALLS: f64 = 2.0;
@@ -940,6 +1029,7 @@ const CLONE_JUDGE_OUTPUT_TOKENS: f64 = 500.0;
 pub fn output_scale(model_id: &str) -> f64 {
     match model_id {
         "claude-sonnet-5-5" => 0.35,
+        "claude-opus-5-5" => 1.25,
         "claude-haiku-5-5" => 2.2,
         _ => 1.0,
     }
@@ -972,6 +1062,9 @@ pub struct RunModels<'a> {
 pub struct RunRepoInput {
     pub repo: String,
     pub code_chars: usize,
+    /// Files the scan will read from the repo (0 when the caller does not know: the stage 1 site
+    /// count is then sized from the code, as it was before files were an input).
+    pub files: usize,
     pub selected: usize,
     pub multi_option_selected: usize,
     pub routing_groups: usize,
@@ -987,18 +1080,42 @@ pub struct RunFlags {
 
 /// How many findings (sites) the run estimate assumes the scan reports, and so how many stage 1
 /// calls it prices.
-pub fn estimated_sites(repo: &RunRepoInput, mode: &str) -> usize {
-    run_findings(repo, mode).1 as usize
+/// The sites the ceiling beside the estimate is quoted on: the files times the highest rate seen.
+pub fn estimated_ceiling_sites(repo: &RunRepoInput, mode: &str, _backend: ProjectBackend) -> usize {
+    run_findings(&ceiling_fit(), repo, mode).1 as usize
+}
+
+/// [`RUN_FIT`] with the sites quoted on the highest rate seen, for the ceiling.
+fn ceiling_fit() -> RunFit {
+    RunFit {
+        sites_per_file: RUN_FIT.sites_per_file_high,
+        ..RUN_FIT
+    }
+}
+
+/// The sites do not depend on the backend (they are what the scan reports, not how the calls are
+/// sent); the argument stays so a caller names the run it is quoting.
+pub fn estimated_sites(repo: &RunRepoInput, mode: &str, _backend: ProjectBackend) -> usize {
+    run_findings(&RUN_FIT, repo, mode).1 as usize
 }
 
 /// The scan's output volume in tokens (before the model's scale) and the findings it implies, for
 /// the run estimate: the arithmetic the scan and calibration terms are sized from.
-fn run_findings(repo: &RunRepoInput, mode: &str) -> (f64, f64) {
+fn run_findings(fit: &RunFit, repo: &RunRepoInput, mode: &str) -> (f64, f64) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
     const CHARS_PER_TOKEN: f64 = 4.0;
     const OUT_TOKENS_PER_PASS: f64 = 2_600.0;
     const OUTPUT_PER_CODE_TOKEN: f64 = 0.022;
+    // The files the scan reads, when the caller knows them: the sites stage 1 calibrates follow
+    // them (2.2 to 3.1 a file in four runs), where the code size and the rule batches the older
+    // sizing used gave the same figure to a 36-file repository that calibrated 80 sites and a
+    // 39-file one that calibrated 119. The same on both backends: the site count is what the scan
+    // reports, not how its calls are sent (only the per-site token costs differ by backend).
+    if repo.files > 0 && repo.selected > 0 {
+        let sites = (fit.sites_per_file * repo.files as f64).ceil();
+        return (sites * REGEN_SCAN_TOKENS_PER_FINDING, sites);
+    }
     let chunks = repo.code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
     let groups = repo.routing_groups.max(1);
     let batches_per_group = if mode == "sequential" {
@@ -1025,10 +1142,24 @@ pub fn estimate_run_cost_bounds(
     models: &RunModels<'_>,
     flags: RunFlags,
 ) -> AuditCostBounds {
-    let expected =
-        estimate_run_with_regeneration(repo, mode, models, flags, regeneration_expected, true);
-    let (_, ceiling_usd, _) =
-        estimate_run_with_regeneration(repo, mode, models, flags, regeneration_estimate, false);
+    let expected = estimate_run_with_regeneration(
+        &RUN_FIT,
+        repo,
+        mode,
+        models,
+        flags,
+        regeneration_expected,
+        true,
+    );
+    let (_, ceiling_usd, _) = estimate_run_with_regeneration(
+        &ceiling_fit(),
+        repo,
+        mode,
+        models,
+        flags,
+        regeneration_estimate,
+        false,
+    );
     AuditCostBounds {
         expected,
         ceiling_usd,
@@ -1098,6 +1229,7 @@ pub fn cockpit_run_estimate(
 /// The arithmetic of [`estimate_run_cost_bounds`], with the regeneration stage priced by
 /// `regen_of` (the expected figure or the ceiling).
 fn estimate_run_with_regeneration(
+    fit: &RunFit,
     repo: &RunRepoInput,
     mode: &str,
     models: &RunModels<'_>,
@@ -1105,6 +1237,86 @@ fn estimate_run_with_regeneration(
     regen_of: fn(f64) -> RegenerationEstimate,
     scale_regen_output: bool,
 ) -> (u64, f64, usize) {
+    let (tokens, stages, passes) = estimate_run_stages_with_regeneration(
+        fit,
+        repo,
+        mode,
+        models,
+        flags,
+        regen_of,
+        scale_regen_output,
+    );
+    (tokens, stages.total(), passes)
+}
+
+/// The dollars a run estimate puts on each stage, named as the run's telemetry table names them
+/// (the scan row includes the resolution round).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RunStageDollars {
+    pub scan: f64,
+    pub alternatives: f64,
+    pub detail: f64,
+    pub calibration: f64,
+    pub group_review: f64,
+    pub fix: f64,
+    pub deep: f64,
+    pub clone_judge: f64,
+}
+
+impl RunStageDollars {
+    /// The estimate's expected dollars: every stage together.
+    pub fn total(&self) -> f64 {
+        self.scan
+            + self.alternatives
+            + self.detail
+            + self.calibration
+            + self.group_review
+            + self.fix
+            + self.deep
+            + self.clone_judge
+    }
+}
+
+/// [`estimate_run_cost_bounds`]'s expected figure, split by stage.
+pub fn estimate_run_stage_dollars(
+    repo: &RunRepoInput,
+    mode: &str,
+    models: &RunModels<'_>,
+    flags: RunFlags,
+) -> RunStageDollars {
+    estimate_run_stage_dollars_with(&RUN_FIT, repo, mode, models, flags)
+}
+
+/// [`estimate_run_stage_dollars`] with the fitted constants given.
+pub fn estimate_run_stage_dollars_with(
+    fit: &RunFit,
+    repo: &RunRepoInput,
+    mode: &str,
+    models: &RunModels<'_>,
+    flags: RunFlags,
+) -> RunStageDollars {
+    estimate_run_stages_with_regeneration(
+        fit,
+        repo,
+        mode,
+        models,
+        flags,
+        regeneration_expected,
+        true,
+    )
+    .1
+}
+
+#[allow(clippy::too_many_arguments)]
+fn estimate_run_stages_with_regeneration<'a>(
+    fit: &RunFit,
+    repo: &RunRepoInput,
+    mode: &str,
+    models: &RunModels<'a>,
+    flags: RunFlags,
+    regen_of: fn(f64) -> RegenerationEstimate,
+    scale_regen_output: bool,
+) -> (u64, RunStageDollars, usize) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
     const CHARS_PER_TOKEN: f64 = 4.0;
@@ -1158,23 +1370,25 @@ fn estimate_run_with_regeneration(
     };
 
     // ── Scan passes (batch discount applies) and the resolution round (it never does). ──
+    // The pass's own prompt (system prompt, rules block, task) is written to the cache with the
+    // prefix on the CLI backend, at the CLI's write price.
+    let pass_overhead = match flags.backend {
+        ProjectBackend::Cli => PASS_OVERHEAD_TOKENS * CLI_CACHE_WRITE_MULT,
+        ProjectBackend::Api => PASS_OVERHEAD_TOKENS,
+    };
     let scan_in = (prefix_billed(calls_per_chunk)
-        + calls_per_chunk as f64 * (PASS_OVERHEAD_TOKENS + cli_call))
+        + calls_per_chunk as f64 * (pass_overhead + cli_call))
         * chunks as f64;
     let resolution_calls = if selected > 0 { passes } else { 0 };
-    let resolution_in = resolution_calls as f64
-        * (prefix_tokens * CACHE_READ_MULT + PASS_OVERHEAD_TOKENS + cli_call);
+    let resolution_in =
+        resolution_calls as f64 * (prefix_tokens * CACHE_READ_MULT + pass_overhead + cli_call);
     let scan_out = (f64::from(SCAN_OUTPUT_TOKENS_PER_RULE) * selected as f64
         + OUTPUT_PER_CODE_TOKEN * code_tokens * calls_per_chunk as f64)
         * scan_scale;
     let resolution_out = OUT_TOKENS_PER_PASS * resolution_calls as f64 * scan_scale;
 
     // The findings the scan reports, from its output volume (text, before the model's scale).
-    let findings_out = OUT_TOKENS_PER_PASS * passes as f64
-        + OUTPUT_PER_CODE_TOKEN * code_tokens * calls_per_chunk as f64;
-    let findings = (findings_out / REGEN_SCAN_TOKENS_PER_FINDING)
-        .ceil()
-        .max(0.0);
+    let (findings_out, findings) = run_findings(fit, repo, mode);
 
     // ── Calibration: stage 1 is one call per finding (site), each with the cached system prefix
     // and the site's own text; see [`calibration_estimate`]. ──
@@ -1187,7 +1401,7 @@ fn estimate_run_with_regeneration(
     // ── Group review: stage 2 reads each rule group once, in real time, on its own model. ──
     let (gr_in, gr_out, gr_dollars, gr_calls) = match models.group_review {
         Some(m) => {
-            let e = group_review_estimate(sites, repo.selected, flags.backend);
+            let e = group_review_estimate_with(fit, sites, repo.selected, flags.backend);
             let gr_scale = output_scale(m.id);
             let gout = e.output_tokens * gr_scale;
             (
@@ -1204,13 +1418,23 @@ fn estimate_run_with_regeneration(
     // (never cached) with that batch's option sets. ──
     let multi = repo.multi_option_selected;
     let alt_calls = multi.div_ceil(ALTERNATIVES_BATCH_RULES);
-    let alt_in = alt_calls as f64 * (prefix_tokens + cli_call)
-        + if multi > 0 {
-            multi as f64 * ALTERNATIVES_INPUT_TOKENS_PER_RULE + ALTERNATIVES_INPUT_TOKENS_PER_CALL
-        } else {
-            0.0
-        };
-    let alt_out = f64::from(ALTERNATIVES_OUTPUT_TOKENS_PER_RULE) * multi as f64 * scan_scale;
+    let alt_own = if multi > 0 {
+        multi as f64 * ALTERNATIVES_INPUT_TOKENS_PER_RULE + ALTERNATIVES_INPUT_TOKENS_PER_CALL
+    } else {
+        0.0
+    };
+    let alt_in = match flags.backend {
+        // Everything the call sends is written to the CLI's cache, at the CLI's write price.
+        ProjectBackend::Cli => {
+            (alt_calls as f64 * (prefix_tokens + CLI_CALL_OVERHEAD_TOKENS) + alt_own)
+                * CLI_CACHE_WRITE_MULT
+        }
+        ProjectBackend::Api => alt_calls as f64 * prefix_tokens + alt_own,
+    };
+    // Not scaled by the model: the reply fills its per-rule allowance (6,800 output tokens a call
+    // for 17 rules in the lumen run, 4,300 in the supabase-portal fixture's), where the model
+    // scale was measured on the scan's replies.
+    let alt_out = f64::from(ALTERNATIVES_OUTPUT_TOKENS_PER_RULE) * multi as f64;
 
     // ── Detail regeneration (terse_output): audit model, no batch discount. ──
     let regen = if flags.terse_output {
@@ -1225,19 +1449,52 @@ fn estimate_run_with_regeneration(
     };
     // The expected figure is the usual run's text; the model's scale applies to it. The ceiling
     // (every repeat round at the request cap) is already an upper bound and is not scaled.
-    let regen_in = regen.input_tokens + regen.calls as f64 * cli_call;
+    let regen_in = match flags.backend {
+        ProjectBackend::Cli => {
+            (regen.input_tokens + regen.calls as f64 * CLI_CALL_OVERHEAD_TOKENS)
+                * CLI_CACHE_WRITE_MULT
+        }
+        ProjectBackend::Api => regen.input_tokens,
+    };
     let regen_out = if scale_regen_output {
         regen.output_tokens * scan_scale
     } else {
         regen.output_tokens
     };
 
+    // The rates the fix stage and the clone judge are billed at: their own model's, except on the
+    // CLI backend, where the fast model was billed at the calibration model's rates in every run
+    // measured ([`CLI_FAST_MODEL_BILLED_AS_CALIBRATION`]).
+    let billed_as = |m: PricedModel<'a>| -> PricedModel<'a> {
+        if flags.backend == ProjectBackend::Cli
+            && CLI_FAST_MODEL_BILLED_AS_CALIBRATION
+            && m.id.contains("haiku")
+        {
+            PricedModel {
+                id: m.id,
+                price_in: models.calibration.price_in,
+                price_out: models.calibration.price_out,
+            }
+        } else {
+            m
+        }
+    };
     // ── Fix stage: one sentence per finding on the fix model. ──
-    let (fix_in, fix_out, fix_dollars, fix_calls) = match models.fix {
+    let (fix_in, fix_out, fix_dollars, fix_calls) = match models.fix.map(billed_as) {
         Some(m) if findings > 0.0 => {
-            let fin = findings * FIX_INPUT_TOKENS_PER_FINDING
-                + (findings as usize).div_ceil(FIX_BATCH_FINDINGS) as f64 * cli_call;
-            let fout = findings * FIX_OUTPUT_TOKENS_PER_FINDING;
+            let batches = (findings as usize).div_ceil(FIX_BATCH_FINDINGS) as f64;
+            let (fin, fout) = match flags.backend {
+                ProjectBackend::Cli => (
+                    (findings * fit.fix_cli_input_tokens_per_site
+                        + batches * CLI_CALL_OVERHEAD_TOKENS)
+                        * CLI_CACHE_WRITE_MULT,
+                    findings * fit.fix_cli_output_tokens_per_site,
+                ),
+                ProjectBackend::Api => (
+                    findings * FIX_INPUT_TOKENS_PER_FINDING + batches * cli_call,
+                    findings * FIX_OUTPUT_TOKENS_PER_FINDING,
+                ),
+            };
             (
                 fin,
                 fout,
@@ -1249,9 +1506,16 @@ fn estimate_run_with_regeneration(
     };
 
     // ── Clone judge: two small calls. ──
-    let (judge_tokens, judge_dollars, judge_calls) = match models.clone_judge {
+    let (judge_tokens, judge_dollars, judge_calls) = match models.clone_judge.map(billed_as) {
         Some(m) => {
-            let tin = CLONE_JUDGE_CALLS * CLONE_JUDGE_INPUT_TOKENS;
+            let tin = match flags.backend {
+                ProjectBackend::Cli => {
+                    CLONE_JUDGE_CALLS
+                        * (CLONE_JUDGE_INPUT_TOKENS + CLI_CALL_OVERHEAD_TOKENS)
+                        * CLI_CACHE_WRITE_MULT
+                }
+                ProjectBackend::Api => CLONE_JUDGE_CALLS * CLONE_JUDGE_INPUT_TOKENS,
+            };
             let tout = CLONE_JUDGE_CALLS * CLONE_JUDGE_OUTPUT_TOKENS;
             (
                 tin + tout,
@@ -1272,16 +1536,21 @@ fn estimate_run_with_regeneration(
         (0.0, 0.0)
     };
 
-    let dollars = ((scan_in * scan_in_price + scan_out * scan_out_price) * batch_discount
-        + (resolution_in * scan_in_price + resolution_out * scan_out_price)
-        + (cal_in * cal_in_price + cal_out * cal_out_price)
-        + (alt_in * scan_in_price + alt_out * scan_out_price)
-        + (deep_in * scan_in_price + deep_out * scan_out_price)
-        + (regen_in * scan_in_price + regen_out * scan_out_price))
-        / 1_000_000.0
-        + gr_dollars
-        + fix_dollars
-        + judge_dollars;
+    // The dollars of each stage, in the stage names the run's telemetry table uses (the
+    // resolution round is part of the scan row there), so a saved run's table can be set beside
+    // them stage by stage.
+    let stages = RunStageDollars {
+        scan: ((scan_in * scan_in_price + scan_out * scan_out_price) * batch_discount
+            + (resolution_in * scan_in_price + resolution_out * scan_out_price))
+            / 1_000_000.0,
+        alternatives: (alt_in * scan_in_price + alt_out * scan_out_price) / 1_000_000.0,
+        detail: (regen_in * scan_in_price + regen_out * scan_out_price) / 1_000_000.0,
+        calibration: (cal_in * cal_in_price + cal_out * cal_out_price) / 1_000_000.0,
+        group_review: gr_dollars,
+        fix: fix_dollars,
+        deep: (deep_in * scan_in_price + deep_out * scan_out_price) / 1_000_000.0,
+        clone_judge: judge_dollars,
+    };
     let total_tokens = (scan_in
         + scan_out
         + resolution_in
@@ -1307,7 +1576,7 @@ fn estimate_run_with_regeneration(
         + fix_calls
         + judge_calls
         + calibration.calls;
-    (total_tokens, dollars, total_passes)
+    (total_tokens, stages, total_passes)
 }
 
 /// One repo's line under the pre-audit estimate:
@@ -1342,6 +1611,144 @@ pub fn unknown_rules_repo_line(repo: &str) -> String {
 pub fn unreadable_repo_line(repo: &str, why: &str) -> String {
     format!("{repo}: could not be read ({why}). It is not in this estimate.")
 }
+
+// ── The agent finder's estimate (design section 7) ─────────────────────────────────────────────
+//
+// STARTING GUESSES taken from the raw runs, to be REFIT from the recorded fixture runs (which
+// keep every turn's tokens) before any larger run. They live here and nowhere else: the
+// command line estimate, the cockpit and the tests all read these names.
+
+/// Dollars for each 1,000 lines of code in a piece.
+pub const AGENT_FINDER_USD_PER_1000_LINES: f64 = 1.00;
+/// Dollars of fixed cost for each piece (the checklist, the context, the opening turns).
+pub const AGENT_FINDER_USD_PER_PIECE: f64 = 0.80;
+/// Dollars for each joints call (one for a repository that was cut into two or more pieces).
+pub const AGENT_FINDER_USD_PER_JOINTS_CALL: f64 = 1.50;
+/// The low end of the shown range, as a multiple of the expected figure.
+pub const AGENT_FINDER_LOW_FACTOR: f64 = 0.6;
+/// The high end of the shown range, as a multiple of the expected figure.
+pub const AGENT_FINDER_HIGH_FACTOR: f64 = 1.8;
+
+/// One piece as the estimate needs it: its unit, how many files and how many lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentFinderPieceSize {
+    pub unit: String,
+    pub files: usize,
+    pub lines: usize,
+}
+
+/// One row of the pieces table: a unit with its pieces, files and lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentFinderUnitRow {
+    pub unit: String,
+    pub pieces: usize,
+    pub files: usize,
+    pub lines: usize,
+}
+
+/// The agent finder's pre-flight figures for one repository.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentFinderEstimate {
+    /// One row for each unit, in the order the units first appear.
+    pub rows: Vec<AgentFinderUnitRow>,
+    pub pieces: usize,
+    /// 1 when the repository is cut into two or more pieces, else 0.
+    pub joints_calls: usize,
+    pub expected_usd: f64,
+    pub low_usd: f64,
+    pub high_usd: f64,
+}
+
+/// The agent finder's estimate for the pieces of ONE repository: for each 1,000 lines, for each
+/// piece, and for the joints call a repository cut into two or more pieces needs.
+pub fn estimate_agent_finder(pieces: &[AgentFinderPieceSize]) -> AgentFinderEstimate {
+    let mut rows: Vec<AgentFinderUnitRow> = Vec::new();
+    for p in pieces {
+        match rows.iter_mut().find(|r| r.unit == p.unit) {
+            Some(row) => {
+                row.pieces += 1;
+                row.files += p.files;
+                row.lines += p.lines;
+            }
+            None => rows.push(AgentFinderUnitRow {
+                unit: p.unit.clone(),
+                pieces: 1,
+                files: p.files,
+                lines: p.lines,
+            }),
+        }
+    }
+    let lines: usize = pieces.iter().map(|p| p.lines).sum();
+    let joints_calls = usize::from(pieces.len() >= 2);
+    let expected_usd = lines as f64 / 1_000.0 * AGENT_FINDER_USD_PER_1000_LINES
+        + pieces.len() as f64 * AGENT_FINDER_USD_PER_PIECE
+        + joints_calls as f64 * AGENT_FINDER_USD_PER_JOINTS_CALL;
+    AgentFinderEstimate {
+        rows,
+        pieces: pieces.len(),
+        joints_calls,
+        expected_usd,
+        low_usd: expected_usd * AGENT_FINDER_LOW_FACTOR,
+        high_usd: expected_usd * AGENT_FINDER_HIGH_FACTOR,
+    }
+}
+
+/// The sum of several repositories' estimates (rows are kept apart; the figures add).
+pub fn sum_agent_finder(parts: &[AgentFinderEstimate]) -> AgentFinderEstimate {
+    AgentFinderEstimate {
+        rows: parts.iter().flat_map(|p| p.rows.clone()).collect(),
+        pieces: parts.iter().map(|p| p.pieces).sum(),
+        joints_calls: parts.iter().map(|p| p.joints_calls).sum(),
+        expected_usd: parts.iter().map(|p| p.expected_usd).sum(),
+        low_usd: parts.iter().map(|p| p.low_usd).sum(),
+        high_usd: parts.iter().map(|p| p.high_usd).sum(),
+    }
+}
+
+/// The finder stage's line under the pre-audit estimate when the project's finder is the agent:
+/// `acme/api: finder stage about $4.20 (range $2.52 to $7.56), 3 piece(s)`. The figures are the
+/// ones [`estimate_agent_finder`] produced (the server sends them per repo); there is no second
+/// estimate.
+pub fn agent_finder_repo_line(
+    repo: &str,
+    pieces: usize,
+    expected_usd: f64,
+    low_usd: f64,
+    high_usd: f64,
+) -> String {
+    format!(
+        "{repo}: finder stage about ${expected_usd:.2} (range ${low_usd:.2} to ${high_usd:.2}), \
+         {pieces} piece(s)"
+    )
+}
+
+/// The pieces table as lines of text: a heading, then one line for each unit.
+pub fn agent_finder_table_lines(estimate: &AgentFinderEstimate) -> Vec<String> {
+    let width = estimate
+        .rows
+        .iter()
+        .map(|r| r.unit.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("unit".len());
+    let mut lines = vec![format!(
+        "{:<width$}  {:>6}  {:>6}  {:>8}",
+        "unit", "pieces", "files", "lines"
+    )];
+    for r in &estimate.rows {
+        lines.push(format!(
+            "{:<width$}  {:>6}  {:>6}  {:>8}",
+            r.unit, r.pieces, r.files, r.lines
+        ));
+    }
+    lines
+}
+
+#[cfg(test)]
+mod saved_runs_tests;
+
+#[cfg(test)]
+mod agent_finder_estimate_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3149,6 +3556,7 @@ mod tests {
         RunRepoInput {
             repo: "supabase-portal-fixture".into(),
             code_chars: 26_544,
+            files: 0,
             selected: 152,
             multi_option_selected: 34,
             routing_groups: 4,
@@ -3205,15 +3613,22 @@ mod tests {
         assert_eq!(group_review_estimate(3_000.0, 152, api).calls, 152);
         // And a group over 150 sites is read in more than one call.
         assert_eq!(group_review_estimate(3_000.0, 5, api).calls, 20);
-        // On the CLI every call also carries the CLI's own prompt, written at twice the price.
+        // On the CLI the system prompt is written once and read by the other 68 calls; each call
+        // writes its rule text and the CLI's framing (1,180 tokens in the four runs fitted to,
+        // where the 2,100 it was thought to write was 80 percent over) and its site lines, at
+        // twice the price.
         let cli = group_review_estimate(78.0, 152, ProjectBackend::Cli);
-        let want_cli = (expected_in + 69.0 * CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT;
+        let own = 69.0 * RUN_FIT.group_review_cli_tokens_per_call
+            + 78.0 * GROUP_REVIEW_INPUT_TOKENS_PER_SITE;
+        let want_cli = own * CLI_CACHE_WRITE_MULT
+            + GROUP_REVIEW_SYSTEM_TOKENS * CLI_CACHE_WRITE_MULT
+            + GROUP_REVIEW_SYSTEM_TOKENS * 0.10 * 68.0;
         assert!((cli.input_tokens - want_cli).abs() < 1e-6, "{cli:?}");
     }
 
     #[test]
     fn the_run_estimate_prices_stage_2_at_its_own_model_and_leaves_it_out_when_unpriced() {
-        let sites = estimated_sites(&fixture(), "parallel");
+        let sites = estimated_sites(&fixture(), "parallel", ProjectBackend::Api);
         let free = PricedModel {
             id: "unmeasured-model",
             price_in: 0.0,
@@ -3262,12 +3677,14 @@ mod tests {
             + CALIBRATION_PREFIX_TOKENS * 1.25
             + CALIBRATION_PREFIX_TOKENS * 0.10 * 99.0;
         assert!((api.input_tokens - expected_api).abs() < 1e-6, "{api:?}");
-        // A CLI call is a fresh subprocess: every call pays the cache write, for the CLI's own
-        // prompt as well, at the one-hour write price.
+        // On the CLI the shared prefix is written once (at the one-hour write price) and read 99
+        // times, as on the API; each call also writes its own site text and the CLI's overhead,
+        // at the write price.
         let cli = calibration_estimate(100.0, ProjectBackend::Cli);
         let expected_cli = 100.0
-            * (CALIBRATION_SITE_INPUT_TOKENS
-                + (CALIBRATION_PREFIX_TOKENS + CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT);
+            * ((CALIBRATION_SITE_INPUT_TOKENS + CLI_CALL_OVERHEAD_TOKENS) * CLI_CACHE_WRITE_MULT)
+            + CALIBRATION_PREFIX_TOKENS * CLI_CACHE_WRITE_MULT
+            + CALIBRATION_PREFIX_TOKENS * 0.10 * 99.0;
         assert!((cli.input_tokens - expected_cli).abs() < 1e-6, "{cli:?}");
         assert!(cli.input_tokens > api.input_tokens);
         // No sites, no calls, no cost.
@@ -3288,7 +3705,7 @@ mod tests {
     /// many sites, and the calls include them.
     #[test]
     fn the_run_estimate_prices_one_calibration_call_per_estimated_site() {
-        let sites = estimated_sites(&fixture(), "parallel");
+        let sites = estimated_sites(&fixture(), "parallel", ProjectBackend::Api);
         assert!(sites > 10, "the fixture reports findings: {sites}");
         let free = PricedModel {
             id: "unmeasured-model",
@@ -3324,6 +3741,7 @@ mod tests {
         let small = RunRepoInput {
             repo: "small".into(),
             code_chars: 2_000,
+            files: 0,
             selected: 1,
             multi_option_selected: 0,
             routing_groups: 1,
@@ -3332,7 +3750,7 @@ mod tests {
             terse_output: false,
             ..flags()
         };
-        let small_sites = estimated_sites(&small, "parallel");
+        let small_sites = estimated_sites(&small, "parallel", ProjectBackend::Api);
         assert!(small_sites > 0);
         let small_run = estimate_run_cost_bounds(&small, "parallel", &models(cal), no_regen);
         assert_eq!(small_run.expected.2, 2 + small_sites);
@@ -3394,7 +3812,7 @@ mod tests {
         // 30 detail, 60 fix, 2 judge), most of them the repeats retry fixes F1 removed; a clean
         // run makes far fewer, and the estimate counts the stages, not the repeats.
         // One stage 1 call per site replaces the 3 calibration calls of the recorded run.
-        let sites = estimated_sites(&fixture(), "parallel");
+        let sites = estimated_sites(&fixture(), "parallel", ProjectBackend::Api);
         assert!(
             sonnet_calls > 30 && sonnet_calls < 119 - 3 + sites,
             "{sonnet_calls}"
@@ -3468,7 +3886,9 @@ mod tests {
     fn each_model_has_its_own_measured_output_scale() {
         assert_eq!(output_scale("claude-sonnet-5-5"), 0.35);
         assert_eq!(output_scale("claude-haiku-5-5"), 2.2);
-        assert_eq!(output_scale("claude-opus-5-5"), 1.0);
+        // Opus 5.5's calibration verdicts: 186 and 187 output tokens a site in the two complete
+        // cli runs against the 150 the constant describes.
+        assert_eq!(output_scale("claude-opus-5-5"), 1.25);
         assert_eq!(output_scale("anything-else"), 1.0);
         // Same prices, different model: the scale alone moves the estimate.
         let priced = |id: &'static str| PricedModel {
@@ -3591,6 +4011,7 @@ mod tests {
         let b = RunRepoInput {
             repo: "acme/api".into(),
             code_chars: 400_000,
+            files: 0,
             selected: 30,
             multi_option_selected: 0,
             routing_groups: 2,
@@ -3620,11 +4041,16 @@ mod tests {
     /// 152 rules (34 with alternatives) in 4 routing groups; audit Sonnet 5.5, stage 1 Opus 5.5,
     /// stage 2 Fable 5.1, fix Haiku 5.5. The pre-flight said about $4.53 over 168 calls and the
     /// run modeled $40.77 over 249: scan $2.13 (22 calls), stage 1 $10.79 (116), alternatives
-    /// $0.46 (2), detail $1.09 (13), fix $2.68 (6), stage 2 $23.62 (90).
+    /// $0.46 (2), detail $1.09 (13), fix $2.68 (6), stage 2 $23.62 (90). The CALLS of this run
+    /// are still the measure of how many calls the estimate counts; its DOLLARS are not the
+    /// measure of what a run costs now (the calls of that engine wrote about 11,000 tokens each
+    /// for stage 1 where today's write about 2,000: see `CLI_CALL_OVERHEAD_TOKENS` and
+    /// `saved_runs_tests`), so the dollar checks of this run moved there.
     fn faktura() -> RunRepoInput {
         RunRepoInput {
             repo: "faktura".into(),
             code_chars: 25_871,
+            files: 0,
             selected: 152,
             multi_option_selected: 34,
             routing_groups: 4,
@@ -3639,11 +4065,10 @@ mod tests {
         }
     }
 
-    const FAKTURA_MODELED_USD: f64 = 40.77;
     const FAKTURA_MODELED_CALLS: f64 = 249.0;
 
     #[test]
-    fn the_faktura_estimate_is_within_a_third_of_what_the_run_modeled() {
+    fn the_faktura_estimate_counts_about_the_calls_the_run_made() {
         let models = RunModels {
             scan: SONNET,
             calibration: OPUS,
@@ -3653,10 +4078,6 @@ mod tests {
         };
         let bounds = estimate_run_cost_bounds(&faktura(), "parallel", &models, cli_flags());
         let (_, dollars, calls) = bounds.expected;
-        assert!(
-            (FAKTURA_MODELED_USD * 0.67..=FAKTURA_MODELED_USD * 1.33).contains(&dollars),
-            "estimated ${dollars:.2} against ${FAKTURA_MODELED_USD} modeled"
-        );
         assert!(
             (FAKTURA_MODELED_CALLS * 0.8..=FAKTURA_MODELED_CALLS * 1.2).contains(&(calls as f64)),
             "estimated {calls} calls against {FAKTURA_MODELED_CALLS} modeled"
@@ -3668,8 +4089,10 @@ mod tests {
             ..models
         };
         let lacking = estimate_run_cost_bounds(&faktura(), "parallel", &without, cli_flags());
+        // Stage 2 is about $8.60 of this run's estimate now (it was $23 when its calls wrote
+        // 10,000 tokens each).
         assert!(
-            bounds.ceiling_usd - lacking.ceiling_usd > 10.0,
+            bounds.ceiling_usd - lacking.ceiling_usd > 5.0,
             "stage 2 is in the ceiling: {} vs {}",
             bounds.ceiling_usd,
             lacking.ceiling_usd
@@ -3677,26 +4100,13 @@ mod tests {
     }
 
     #[test]
-    fn the_faktura_stages_are_each_near_what_the_run_modeled() {
-        let sites = estimated_sites(&faktura(), "parallel") as f64;
+    fn the_faktura_sites_and_rule_groups_are_near_what_the_run_found() {
+        let sites = estimated_sites(&faktura(), "parallel", ProjectBackend::Cli) as f64;
         assert!(
             (100.0..=130.0).contains(&sites),
             "116 sites were found: {sites}"
         );
-        let cal = calibration_estimate(sites, ProjectBackend::Cli);
-        let cal_usd =
-            (cal.input_tokens * OPUS.price_in + cal.output_tokens * OPUS.price_out) / 1_000_000.0;
-        assert!(
-            (10.79 * 0.75..=10.79 * 1.25).contains(&cal_usd),
-            "stage 1 ${cal_usd:.2} against $10.79"
-        );
         let gr = group_review_estimate(sites, faktura().selected, ProjectBackend::Cli);
-        let gr_usd =
-            (gr.input_tokens * FABLE.price_in + gr.output_tokens * FABLE.price_out) / 1_000_000.0;
-        assert!(
-            (23.62 * 0.75..=23.62 * 1.25).contains(&gr_usd),
-            "stage 2 ${gr_usd:.2} against $23.62"
-        );
         assert!(
             (70..=110).contains(&gr.calls),
             "90 rule groups were read: {}",

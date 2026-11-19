@@ -18,13 +18,16 @@
 pub mod batch;
 pub mod export;
 pub mod keys;
+pub mod place;
 pub mod shell;
 pub mod state;
 
 use camerata_api_types::audit::FindingKind;
 use camerata_api_types::decisions::DecisionState;
-use camerata_api_types::review::{EscalationReason, EscalationState, OutlierReason};
-use camerata_api_types::review_view::{Marker, NodeCountsView, SiteRow, TreeLevel};
+use camerata_api_types::review::{
+    EscalationReason, EscalationState, OutlierReason, PossibleFalsePositive,
+};
+use camerata_api_types::review_view::{Marker, NodeCountsView, SamePlaceView, SiteRow, TreeLevel};
 
 // ── What a screen is showing ──────────────────────────────────────────────────────────────
 
@@ -241,7 +244,7 @@ pub fn decision_label(state: &DecisionState) -> &'static str {
     }
 }
 
-fn base_name(path: &str) -> &str {
+pub(crate) fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
@@ -342,15 +345,25 @@ pub fn marker_chips(row: &SiteRow) -> Vec<Chip> {
                     .map_or_else(|| "moved".to_string(), |l| format!("moved, was line {l}")),
                 tip: "The code moved; the row has a new key.".to_string(),
             },
-            Marker::PossibleDuplicate => {
-                let dup = row.possible_duplicate_of.as_ref();
+            Marker::PossibleDuplicate => Chip {
+                class: "mark-dup",
+                label: SamePlaceView::TERM.to_string(),
+                tip: possible_duplicate_tip(row),
+            },
+            Marker::PossibleFalsePositive => Chip {
+                class: "mark-fp",
+                label: PossibleFalsePositive::TERM.to_string(),
+                tip: possible_false_positive_tip(row),
+            },
+            Marker::Carried => {
+                let by = row.carried_by.as_ref();
                 Chip {
-                    class: "mark-dup",
-                    label: dup.map_or_else(
-                        || "dup?".to_string(),
-                        |d| format!("dup? {} at {}:{}", d.rule_id, base_name(&d.path), d.line),
+                    class: "mark-carried",
+                    label: by.map_or_else(
+                        || "carried".to_string(),
+                        |b| format!("carried by {} at {}:{}", b.rule_id, base_name(&b.path), b.line),
                     ),
-                    tip: dup.map_or_else(String::new, |d| d.hint.clone()),
+                    tip: "Another row at this place carries this rule. It is decided there unless you decide this rule alone.".to_string(),
                 }
             }
             Marker::Edited => Chip {
@@ -362,6 +375,46 @@ pub fn marker_chips(row: &SiteRow) -> Vec<Chip> {
         chips.push(chip);
     }
     chips
+}
+
+/// The hover text of the Possible false positive chip: every reason the engine has, as its
+/// sentence, and what the flag does not do.
+pub fn possible_false_positive_tip(row: &SiteRow) -> String {
+    let mut parts = vec!["The engine has reasons to doubt this row.".to_string()];
+    parts.extend(
+        row.possible_false_positive
+            .as_ref()
+            .map(PossibleFalsePositive::sentences),
+    );
+    parts.push("It stays a problem until you rule it out.".to_string());
+    parts.join(" ")
+}
+
+/// The hover text of the Possible duplicate chip: the engine's link, the other causes at this
+/// place, and what the hint does not do.
+pub fn possible_duplicate_tip(row: &SiteRow) -> String {
+    let mut parts = Vec::new();
+    if let Some(d) = row.possible_duplicate_of.as_ref() {
+        parts.push(format!(
+            "The engine linked it to {} at {}:{}. {}",
+            d.rule_id, d.path, d.line, d.hint
+        ));
+    }
+    if !row.same_place_as.is_empty() {
+        parts.push(format!(
+            "Another cause has a row at the same place ({}).",
+            row.same_place_as
+                .iter()
+                .map(|o| o.title.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    parts.push(
+        "It may be the same problem found twice. It stays a problem until you rule on it."
+            .to_string(),
+    );
+    parts.join(" ")
 }
 
 fn escalation_tip(row: &SiteRow, over: bool) -> String {
@@ -499,6 +552,8 @@ pub struct DecisionCell {
     pub tone: DecisionTone,
     /// The decision came from a node and not from the reviewer looking at this site.
     pub inherited: bool,
+    /// A carried row with no decision yet: where it will be decided.
+    pub note: Option<String>,
 }
 
 /// The Decision column: the state label (green when decided, `Unresolved` gray), `inherited`
@@ -514,12 +569,14 @@ pub fn decision_cell(row: &SiteRow) -> DecisionCell {
                 label,
                 tone: DecisionTone::Decided,
                 inherited: d.inherited_from.is_some(),
+                note: None,
             }
         }
         None => DecisionCell {
             label: "Unresolved".to_string(),
             tone: DecisionTone::Unresolved,
             inherited: false,
+            note: place::carried_decision_note(row),
         },
     }
 }

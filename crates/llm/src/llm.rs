@@ -156,7 +156,12 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     // The model-input chokepoint: the prompt and the system prompt go out redacted.
     let req = crate::model_input::guarded(req);
     let req = &*req;
-    let mut cmd = tokio::process::Command::new("claude");
+    // The finder's clean room may name its own `claude`; otherwise the shared lookup (the
+    // `CAMERATA_CLAUDE_PROGRAM` override, then `claude` on `PATH`).
+    let mut cmd = match req.room_output.as_ref().and_then(|r| r.program.as_ref()) {
+        Some(program) => tokio::process::Command::new(program),
+        None => tokio::process::Command::new(camerata_api_types::claude_cli::claude_program()),
+    };
     // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
     // leaving a stalled `claude` running in the background.
     // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
@@ -186,7 +191,27 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     cmd
 }
 
+/// The directory a `claude -p` call runs in (and whose Claude Code session folder holds its
+/// session file).
+fn spawn_dir(req: &LlmRequest) -> std::path::PathBuf {
+    match &req.repo_read_dir {
+        Some(dir) => dir.clone(),
+        None => camerata_api_types::claude_cli::engine_empty_cwd(),
+    }
+}
+
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
+    // Isolation first: the working directory (the repo, or an empty engine-owned one, never the
+    // launcher's) and the flags that keep project settings and the operator's memory out.
+    match (&req.room_output, &req.repo_read_dir) {
+        (Some(_), Some(dir)) => {
+            camerata_api_types::claude_cli::isolate_room_call(cmd.as_std_mut(), dir);
+        }
+        _ => camerata_api_types::claude_cli::isolate_claude_call(
+            cmd.as_std_mut(),
+            req.repo_read_dir.as_deref(),
+        ),
+    }
     cmd.arg("--strict-mcp-config")
         .arg("--disable-slash-commands")
         .arg("--permission-mode")
@@ -197,16 +222,35 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
         // `--add-dir`. Still non-agentic: slash-commands off, NO write/exec tool offered, so
         // this grants READ only — it cannot mutate the repo, spawn, or run shell.
         Some(dir) => {
-            cmd.arg("--allowedTools")
-                .arg(READ_ONLY_TOOLS.join(" "))
-                .arg("--add-dir")
-                .arg(dir)
-                .current_dir(dir);
+            if let Some(room) = &req.room_output {
+                // A clean room reads only inside the room: each read tool is its own value of
+                // the allow list (so a room path with a space stays whole), scoped to the room.
+                // Under `dontAsk` a read of any other path is refused. Then the clean-room write:
+                // the room's out folder and nothing wider.
+                cmd.arg("--allowedTools");
+                for tool in READ_ONLY_TOOLS {
+                    cmd.arg(room_read_rule(tool, &room.room_dir));
+                }
+                cmd.arg(room_output_rule(&room.room_dir));
+            } else {
+                cmd.arg("--allowedTools").arg(READ_ONLY_TOOLS.join(" "));
+            }
+            cmd.arg("--add-dir").arg(dir);
+            if req.room_output.is_some() {
+                // The set of tools a room call has is closed: these and no others, so a tool
+                // the program adds later is not offered either.
+                cmd.arg("--tools").arg(ROOM_TOOLS.join(","));
+            }
             // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
             // added as its own read-only `--add-dir` so a project-level model can scan across
             // all of them. READ-only — no write/exec tool is offered either way. Skip any that
             // duplicate the cwd dir.
-            for extra in &req.repo_read_extra_dirs {
+            // A room call never takes an extra folder: it reads the room and nothing else.
+            for extra in req
+                .repo_read_extra_dirs
+                .iter()
+                .filter(|_| req.room_output.is_none())
+            {
                 if extra != dir {
                     cmd.arg("--add-dir").arg(extra);
                 }
@@ -222,6 +266,65 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
     if let Some(system) = &req.system {
         cmd.arg("--system-prompt").arg(nul_safe(system));
     }
+    // A clean-room call (see [`RoomOutput`]): no instruction file is read, and the tools that
+    // could run code, reach the web or hand the work to another agent are denied by name. The
+    // bare names `Edit` and `Write` are never denied here: a deny wins over the allow rule above.
+    if req.repo_read_dir.is_some() && req.room_output.is_some() {
+        cmd.env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1");
+        cmd.arg("--disallowedTools").args(ROOM_DENIED_TOOLS);
+        // The run is bounded in turns, and keeps no session file: the transport reads its trace
+        // from stdout, and a client's code is not left in the operator's session folder.
+        if let Some(turns) = req.room_output.as_ref().and_then(|r| r.max_turns) {
+            cmd.arg("--max-turns").arg(turns.to_string());
+        }
+        cmd.arg("--no-session-persistence");
+    }
+}
+
+/// The only tools a clean-room call is offered (`--tools`). The transport fails a piece whose
+/// stream shows a successful call to any other tool (see `TodoWrite` there, which writes
+/// nothing to disk).
+pub const ROOM_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS", "Write", "Edit"];
+
+/// Tools a clean-room call never has: a shell, the web, and anything that starts another agent.
+const ROOM_DENIED_TOOLS: &[&str] = &["Bash", "WebFetch", "WebSearch", "Task", "Agent"];
+
+/// The room folder a clean-room call may write into, below the room.
+const OUT_FOLDER: &str = "_camerata/out";
+
+/// The allow rule that lets the Write tool create files under `<room_dir>/_camerata/out/`.
+///
+/// Claude Code checks file edits against `Edit(path)` rules, and its Write tool is one of the
+/// tools they cover; a rule written `Write(path)` with a path is accepted and then never
+/// matches. The path is anchored with `//` (an absolute path from the filesystem root), so the
+/// rule means exactly this folder whatever the working directory is, and gitignore pattern
+/// characters in the room's own path are escaped so they match themselves. With the permission
+/// mode `dontAsk`, anything no rule allows is refused, so a write anywhere else (the room's
+/// other files, the repository, the home folder) is denied.
+pub fn room_output_rule(room_dir: &std::path::Path) -> String {
+    format!("Edit(/{}/{OUT_FOLDER}/**)", escaped_room_path(room_dir))
+}
+
+/// The room's path with gitignore pattern characters escaped so they match themselves, and no
+/// trailing slash.
+fn escaped_room_path(room_dir: &std::path::Path) -> String {
+    let mut path = String::new();
+    for c in room_dir.to_string_lossy().chars() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']') {
+            path.push('\\');
+        }
+        path.push(c);
+    }
+    path.trim_end_matches('/').to_string()
+}
+
+/// The allow rule that lets `tool` (Read, Glob, Grep or LS) work on files under `room_dir` only.
+///
+/// Anchored with `//` (an absolute path from the filesystem root) like the write rule, with the
+/// room path escaped the same way. Under the permission mode `dontAsk`, a call on any path no
+/// rule allows is refused.
+pub fn room_read_rule(tool: &str, room_dir: &std::path::Path) -> String {
+    format!("{tool}(/{}/**)", escaped_room_path(room_dir))
 }
 
 /// The read-only built-in tools granted on the CLI backend when a request opts into
@@ -480,12 +583,28 @@ fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
 ///
 /// Standalone from any `claude`-specific spawn setup so it is exercisable in a unit test
 /// against ANY child process that writes stream-json lines, not just a live `claude` CLI.
+#[cfg(test)]
 async fn read_cli_stream(
+    child: tokio::process::Child,
+    model: &str,
+    idle: std::time::Duration,
+    overall_timeout: std::time::Duration,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<LlmResponse> {
+    read_cli_stream_capturing(child, model, idle, overall_timeout, on_delta, None).await
+}
+
+/// [`read_cli_stream`] that also hands every record of the stream except the partial-message
+/// events (the assistant and user records with their tool calls and results, the system records
+/// and the final result) to `capture`, as the raw line, in order. The record is handed over as it
+/// arrives, so a call that is later killed or abandoned has still left what it printed.
+async fn read_cli_stream_capturing(
     mut child: tokio::process::Child,
     model: &str,
     idle: std::time::Duration,
     overall_timeout: std::time::Duration,
     on_delta: &mut (dyn FnMut(&str) + Send),
+    mut capture: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> anyhow::Result<LlmResponse> {
     use tokio::io::AsyncBufReadExt;
     let stdout = child
@@ -516,6 +635,10 @@ async fn read_cli_stream(
     let mut usage_out = None;
     let mut usage_cache_read = 0u64;
     let mut usage_cache_creation = 0u64;
+    // The part of the cache writes billed at the 1-hour rate, when the result splits them.
+    let mut usage_cache_creation_1h: Option<u64> = None;
+    // The model the CLI says answered (see [`LlmResponse::reported_model`]).
+    let mut reported_model: Option<String> = None;
     // An in-band failure reported by the final `result` event, paired with whether it is
     // UNCONDITIONALLY fatal. See the `result` arm and the post-loop check below.
     let mut result_failure: Option<(anyhow::Error, bool)> = None;
@@ -561,6 +684,11 @@ async fn read_cli_stream(
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
+                if v["type"].as_str() != Some("stream_event") {
+                    if let Some(capture) = capture.as_deref_mut() {
+                        capture(&line);
+                    }
+                }
                 // Real model progress extends the deadline; status/keepalive lines do not.
                 let mut progressed = false;
                 match v["type"].as_str() {
@@ -579,6 +707,12 @@ async fn read_cli_stream(
                         ) {
                             progressed = true;
                         }
+                        if ev["type"] == "message_start" {
+                            note_reported_model(
+                                &mut reported_model,
+                                ev["message"]["model"].as_str(),
+                            );
+                        }
                         if ev["type"] == "content_block_delta"
                             && ev["delta"]["type"] == "text_delta"
                         {
@@ -588,7 +722,10 @@ async fn read_cli_stream(
                             }
                         }
                     }
-                    Some("assistant") => progressed = true,
+                    Some("assistant") => {
+                        progressed = true;
+                        note_reported_model(&mut reported_model, v["message"]["model"].as_str());
+                    }
                     Some("result") => {
                         progressed = true;
                         // Apply the SAME in-band failure policy the non-streaming CLI
@@ -620,6 +757,15 @@ async fn read_cli_stream(
                             }
                         }
                         cost = v["total_cost_usd"].as_f64();
+                        // The result keys its usage by the model that ran: the fallback when no
+                        // message event named one.
+                        if reported_model.is_none() {
+                            if let Some(usage) = v["modelUsage"].as_object() {
+                                let mut ids: Vec<&str> = usage.keys().map(String::as_str).collect();
+                                ids.sort_unstable();
+                                note_reported_model(&mut reported_model, Some(&ids.join(", ")));
+                            }
+                        }
                         let (i, o, cr, cc) = usage_tokens(&v["usage"]);
                         usage_in = i.or(usage_in);
                         usage_out = o.or(usage_out);
@@ -627,6 +773,10 @@ async fn read_cli_stream(
                         // stream events; take the max to avoid double-counting).
                         usage_cache_read = usage_cache_read.max(cr);
                         usage_cache_creation = usage_cache_creation.max(cc);
+                        usage_cache_creation_1h = v["usage"]["cache_creation"]
+                            ["ephemeral_1h_input_tokens"]
+                            .as_u64()
+                            .or(usage_cache_creation_1h);
                     }
                     _ => {}
                 }
@@ -687,11 +837,26 @@ async fn read_cli_stream(
             &stderr_text,
         ));
     }
+    let modeled_cost = modeled_cli_cost(
+        model,
+        reported_model.as_deref(),
+        &CallUsage {
+            input: usage_in,
+            output: usage_out,
+            cache_read: usage_cache_read,
+            cache_creation: usage_cache_creation,
+            cache_creation_1h: usage_cache_creation_1h,
+        },
+    );
     Ok(LlmResponse {
+        reported_model,
+        cli_cost_usd: cost,
         text: full,
         model: model.to_string(),
         backend: "cli".to_string(),
-        cost_usd: cost,
+        // Priced by the engine from the tokens; the CLI's own figure is the fallback only when
+        // the call cannot be priced (see `modeled_cli_cost`).
+        cost_usd: modeled_cost.or(cost),
         input_tokens: usage_in,
         output_tokens: usage_out,
         cache_read_input_tokens: usage_cache_read,
@@ -699,6 +864,33 @@ async fn read_cli_stream(
         or_cache_discount: None,
         truncated: false,
     })
+}
+
+/// The cost of a CLI call from its token counts, at the engine's own list prices.
+///
+/// The CLI's `total_cost_usd` prices a model id it does not know at a default (Opus-class) rate,
+/// so a Haiku 5.5 call looked like Opus. The rate here is the model that answered (`reported`,
+/// when it names exactly one priced model), else the one that was requested. `None` when neither
+/// is priced or a token count is missing; the caller then keeps the CLI's figure rather than
+/// leave the call without a cost (a spend limit that cannot cost a call admits nothing more).
+fn modeled_cli_cost(requested: &str, reported: Option<&str>, usage: &CallUsage) -> Option<f64> {
+    // Real-time subscription calls write the 5-minute cache unless the result says otherwise.
+    let basis = PriceBasis {
+        batch: false,
+        cache_ttl: CacheTtl::FiveMinutes,
+    };
+    reported
+        .and_then(|id| usage_cost_usd(id, usage, basis))
+        .or_else(|| usage_cost_usd(requested, usage, basis))
+}
+
+/// Keep the first model id the CLI names (later events repeat it); blank names are ignored.
+fn note_reported_model(slot: &mut Option<String>, id: Option<&str>) {
+    if slot.is_none() {
+        if let Some(id) = id.map(str::trim).filter(|id| !id.is_empty()) {
+            *slot = Some(id.to_string());
+        }
+    }
 }
 
 /// The minimal completion seam the audit depends on.
@@ -760,6 +952,13 @@ pub trait LlmPort: Send + Sync {
     /// asks again; a reply with an accepted entry in it stays good, so a resume replays what was
     /// accepted instead of paying for it twice. Every other completer ignores it.
     fn note_rejected_reply(&self, _request_key: &str, _reason: &str, _whole: bool) {}
+
+    /// True when this completer will answer `req` from what a saved run already holds, so
+    /// sending it costs nothing new and a spend limit has nothing to refuse. The run store's
+    /// journal answers it from its stored replies; every other completer sends for real.
+    fn replays(&self, _req: &LlmRequest) -> bool {
+        false
+    }
 
     /// Downcast hook for the concrete-only batch path. See the trait doc.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -894,6 +1093,23 @@ pub struct LlmRequest {
     /// and the API caches a prompt per schema, so a stage that wants a cached prefix reused
     /// across requests keeps one schema for all of them.
     pub response_schema: Option<serde_json::Value>,
+    /// A clean review room the CLI backend may also WRITE into, and only there (see
+    /// [`RoomOutput`] and [`LlmRequest::with_room_output`]). `None` = today's read-only grant,
+    /// byte for byte. Ignored by the API backend and by a request with no repo-read folder.
+    pub room_output: Option<RoomOutput>,
+}
+
+/// The one write a clean-room call may make: files under `<room_dir>/_camerata/out/`, nowhere
+/// else. Used by the agent finder's command line transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomOutput {
+    /// The room folder (absolute and resolved: a symlink in it would not match the rule).
+    pub room_dir: std::path::PathBuf,
+    /// The `claude` program to run instead of the one found on `PATH` (the desktop app ships a
+    /// newer one than a terminal install). `None` = `claude` from `PATH`.
+    pub program: Option<std::path::PathBuf>,
+    /// The most turns the run may take (`--max-turns`). `None` = no turn limit is passed.
+    pub max_turns: Option<usize>,
 }
 
 impl LlmRequest {
@@ -910,7 +1126,35 @@ impl LlmRequest {
             effort: None,
             temperature: None,
             response_schema: None,
+            room_output: None,
         }
+    }
+
+    /// Let the CLI-backend model write into `room_dir/_camerata/out/` and nowhere else, run
+    /// `program` (when given) in place of `claude` from `PATH`, and run as a clean room: no
+    /// instruction file is read, and no shell, web, task or agent tool is available. Needs
+    /// repo read on `room_dir` ([`Self::with_repo_read`]); without it the option does nothing.
+    /// The API backend ignores it.
+    pub fn with_room_output(
+        mut self,
+        room_dir: impl Into<std::path::PathBuf>,
+        program: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.room_output = Some(RoomOutput {
+            room_dir: room_dir.into(),
+            program,
+            max_turns: None,
+        });
+        self
+    }
+
+    /// Bound a clean-room call to `turns` turns (`--max-turns`). Does nothing on a request with
+    /// no [`Self::with_room_output`].
+    pub fn with_room_max_turns(mut self, turns: usize) -> Self {
+        if let Some(room) = self.room_output.as_mut() {
+            room.max_turns = Some(turns);
+        }
+        self
     }
 
     /// Ask for a reply that satisfies `schema` (see [`LlmRequest::response_schema`]).
@@ -1088,6 +1332,8 @@ fn messages_response(
         basis,
     );
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text,
         model: model.to_string(),
         backend: backend.to_string(),
@@ -1844,7 +2090,7 @@ impl Llm {
     fn sleeper(&self) -> &dyn crate::retry::Sleeper {
         match &self.sleeper {
             Some(s) => s.as_ref(),
-            None => &crate::retry::TokioSleeper,
+            None => &crate::retry::ProcessSleeper,
         }
     }
 
@@ -2060,10 +2306,7 @@ impl Llm {
         // client's source" must be able to find it. Every attempt is its own session.
         let session_id = new_session_id();
         if let Some(sink) = &self.sessions {
-            let cwd = match &req.repo_read_dir {
-                Some(dir) => dir.clone(),
-                None => std::env::current_dir().unwrap_or_default(),
-            };
+            let cwd = spawn_dir(req);
             sink.record(ModelSession {
                 session_id: session_id.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
@@ -2107,7 +2350,22 @@ impl Llm {
         // long-but-live call is never killed merely for running past this window.
         let overall_timeout = cli_overall_timeout();
 
-        match read_cli_stream(child, model, idle, overall_timeout, on_delta).await {
+        // A sink that keeps the stream gets each record as it arrives (see
+        // [`SessionSink::with_stream_capture`]); everyone else reads exactly as before.
+        let capture_sink = self.sessions.as_ref().filter(|s| s.captures_streams());
+        let mut keep = |line: &str| {
+            if let Some(sink) = capture_sink {
+                sink.record_stream_line(&session_id, line);
+            }
+        };
+        let capture: Option<&mut (dyn FnMut(&str) + Send)> = if capture_sink.is_some() {
+            Some(&mut keep)
+        } else {
+            None
+        };
+        match read_cli_stream_capturing(child, model, idle, overall_timeout, on_delta, capture)
+            .await
+        {
             Ok(resp) => Step::Done(resp),
             Err(e) => {
                 let Some(failure) = crate::failure::call_failure_of(&e) else {
@@ -3158,7 +3416,7 @@ impl OpenRouterCompleter {
 
         let body = build_openrouter_chat_body(model, req, &self.session_id, provider_constraint);
 
-        let mut builder = reqwest::Client::new()
+        let mut builder = shared_http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -3172,14 +3430,7 @@ impl OpenRouterCompleter {
             builder = builder.header("X-OpenRouter-Cache-Clear", "true");
         }
 
-        let resp = builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("OpenRouter API request failed: {e}"))?;
-
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let (status, text) = send_openrouter(builder.json(&body)).await?;
         if !status.is_success() {
             anyhow::bail!("OpenRouter API HTTP {status}: {text}");
         }
@@ -3218,6 +3469,8 @@ impl OpenRouterCompleter {
             .and_then(|choices| choices.first())
             .is_some_and(|choice| choice["finish_reason"].as_str() == Some("length"));
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: output,
             model: model_returned,
             backend: "openrouter/api".to_string(),
@@ -3415,6 +3668,22 @@ pub fn build_completer(
 //   - "tool use not supported" → try a tool-capable model
 //   - Generic / other 400 → surface immediately (would fail identically on every model)
 
+/// Sends one OpenRouter request and reads the whole body.
+async fn send_openrouter(
+    builder: reqwest::RequestBuilder,
+) -> anyhow::Result<(reqwest::StatusCode, String)> {
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("OpenRouter API request failed"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("OpenRouter API response body failed"))?;
+    Ok((status, text))
+}
+
 /// Classify an error string to decide whether to advance the fallback chain.
 ///
 /// Returns `true` when the next model should be tried; `false` when the error
@@ -3508,7 +3777,9 @@ pub async fn call_with_fallback(
         match completer.complete(req).await {
             Ok(resp) => return Ok(resp),
             Err(e) => {
-                let msg = e.to_string();
+                // The whole chain: a typed transport error's cause ("operation timed out") is
+                // in its source, not in the outer context.
+                let msg = format!("{e:#}");
                 if is_retryable_for_chain(&msg) {
                     last_err = anyhow::anyhow!(
                         "model `{model_id}` retryable error (advancing chain): {msg}"
@@ -3531,7 +3802,13 @@ mod temperature_tests;
 
 // The model-input chokepoint: every wire builder redacts what it is about to send.
 #[cfg(test)]
+mod cli_isolation_tests;
+#[cfg(test)]
+mod cli_pricing_tests;
+#[cfg(test)]
 mod model_input_tests;
+#[cfg(test)]
+mod room_output_tests;
 
 // The streamed API leg against a local mock server: SSE folding, salvage, cut-off at the cap.
 #[cfg(test)]
@@ -4073,6 +4350,31 @@ mod tests {
         );
     }
 
+    /// Fable 5.2 reads cache at $0.20/M (0.025x of $8).
+    #[test]
+    fn fable_5_2_cache_reads_bill_at_its_own_rate() {
+        let c = usd(
+            "claude-fable-5-2",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            rt(),
+        );
+        assert!((c - 0.20).abs() < 1e-9, "got {c}");
+    }
+
+    /// The 5.2 batch row: $0.20 cache read, then the 0.5x batch discount.
+    #[test]
+    fn a_fable_5_2_batch_row_prices_cache_reads_then_halves() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-fable-5-2","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":0,"cache_read_input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let cost = rows[0].response.as_ref().unwrap().cost_usd.unwrap();
+        assert!((cost - 0.10).abs() < 1e-9, "$0.20 x 0.5, got {cost}");
+    }
+
     /// A batch RESULT row (the JSONL the batch path really parses) for Fable 5.1 with cache
     /// reads: per-model cache-read rate, then the 0.5x batch discount.
     #[test]
@@ -4132,6 +4434,8 @@ mod tests {
     fn the_ledger_fallback_prices_through_the_same_function() {
         let ledger = crate::usage_ledger::UsageLedger::new();
         let resp = LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: String::new(),
             model: "claude-haiku-5-5".to_string(),
             backend: "api".to_string(),
@@ -4649,6 +4953,8 @@ malformed line, not json
             BatchResultRow {
                 custom_id: "c0-b0".to_string(),
                 response: Some(LlmResponse {
+                    reported_model: None,
+                    cli_cost_usd: None,
                     text: "text A".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -4672,6 +4978,8 @@ malformed line, not json
             BatchResultRow {
                 custom_id: "c0-b1".to_string(),
                 response: Some(LlmResponse {
+                    reported_model: None,
+                    cli_cost_usd: None,
                     text: "text B".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -5280,6 +5588,72 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","usage":{"inpu
         );
     }
 
+    /// The model the CLI says answered is kept beside the one that was asked for. The shapes are
+    /// the events `claude -p --output-format stream-json` prints: `message_start` inside a
+    /// `stream_event`, the `assistant` message, and the `result` event's `modelUsage` map keyed by
+    /// model. A request for the fast model that the CLI ran on another is what a bill at the other
+    /// model's rates looks like; this is how the next run can tell.
+    #[tokio::test]
+    async fn read_cli_stream_records_the_model_the_cli_reports_beside_the_requested_one() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"system","subtype":"init","model":"claude-opus-5-5"}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5","id":"msg_01","role":"assistant","content":[]}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}}'
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"x"}]}}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","total_cost_usd":0.07,"usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"claude-opus-5-5":{"inputTokens":5,"outputTokens":2,"costUSD":0.07}}}'
+"#,
+        );
+        let resp = read_cli_stream(
+            child,
+            "claude-haiku-5-5",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect("a healthy scripted call");
+        assert_eq!(resp.model, "claude-haiku-5-5", "the requested id is kept");
+        assert_eq!(
+            resp.reported_model.as_deref(),
+            Some("claude-opus-5-5"),
+            "the id the CLI reported is kept beside it"
+        );
+    }
+
+    /// With no `assistant` or `message_start` event the result's `modelUsage` still names the
+    /// model; with neither, nothing is invented.
+    #[tokio::test]
+    async fn read_cli_stream_falls_back_to_model_usage_and_invents_nothing() {
+        let usage_only = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","modelUsage":{"claude-sonnet-5-5":{"inputTokens":5}}}'
+"#,
+        );
+        let a = read_cli_stream(
+            usage_only,
+            "claude-sonnet-5-5",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(a.reported_model.as_deref(), Some("claude-sonnet-5-5"));
+        let silent = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL"}'
+"#,
+        );
+        let b = read_cli_stream(
+            silent,
+            "claude-sonnet-5-5",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(b.reported_model, None);
+    }
+
     /// HALF 2, at the reader level — a totally silent child must be declared Silent, killed
     /// (not leaked), and reported with the actionable message. This is the coverage the
     /// deleted `wait_with_timeout_kills_child_and_returns_actionable_error` provided.
@@ -5845,9 +6219,42 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         assert_eq!(lines[at + 1], recorded[0].session_id);
         assert_eq!(
             recorded[0].cwd,
-            std::env::current_dir().expect("cwd").to_string_lossy()
+            camerata_api_types::claude_cli::engine_empty_cwd().to_string_lossy()
         );
         assert!(!recorded[0].created_at.is_empty());
+    }
+
+    /// A sink built to capture keeps the records the call printed on stdout (not the partial
+    /// message events), under the call's session id; a plain sink keeps nothing.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_capturing_sink_keeps_the_stdout_records_of_each_call() {
+        let fake = FakeClaude::new(
+            "capture-ok",
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init"}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}'
+printf '%s\n' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}}]}}'
+printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sink = SessionSink::with_stream_capture();
+        let plain = SessionSink::new();
+        for s in [&sink, &plain] {
+            cli_llm()
+                .with_session_sink(s.clone())
+                .complete(LlmRequest::new("p").with_model("claude-sonnet-5-5"))
+                .await
+                .expect("fake claude answers");
+        }
+        let id = sink.snapshot()[0].session_id.clone();
+        let lines = sink.stream_lines(&id).expect("the stream was kept");
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("init") && lines[1].contains("tool_use"));
+        assert!(lines[2].contains("\"type\":\"result\""));
+        assert!(!lines.iter().any(|l| l.contains("stream_event")));
+        assert_eq!(plain.stream_lines(&plain.snapshot()[0].session_id), None);
     }
 
     /// A call that fails still wrote (part of) a session file, so it is still recorded.
@@ -5973,7 +6380,20 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
         );
         // Usage/cost accounting must survive the change too — the ledger chokepoint and the
         // cockpit meter read these off every completion.
-        assert_eq!(resp.cost_usd, Some(0.25));
+        // The cost is the engine's own price for the tokens; the CLI's figure rides beside it.
+        let modeled = usage_cost_usd(
+            "claude-sonnet-5-5",
+            &CallUsage {
+                input: Some(11),
+                output: Some(7),
+                cache_read: 0,
+                cache_creation: 0,
+                cache_creation_1h: None,
+            },
+            PriceBasis::realtime(),
+        );
+        assert_eq!(resp.cost_usd, modeled);
+        assert_eq!(resp.cli_cost_usd, Some(0.25));
         assert_eq!(resp.input_tokens, Some(11));
         assert_eq!(resp.output_tokens, Some(7));
     }
@@ -6462,5 +6882,43 @@ exit 1"#,
             "its reason is kept and names the refusal"
         );
         assert!(results.responses.contains_key("c0-b1"));
+    }
+}
+
+/// The OpenRouter post keeps the typed `reqwest` timeout, so a stalled provider classifies as a
+/// retryable transport failure (reqwest's `Display` omits its source, so flattening to text
+/// loses the "timed out").
+#[cfg(test)]
+mod openrouter_timeout_tests {
+    use super::*;
+
+    async fn stalled_listener() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_stalled_openrouter_post_reads_as_a_retryable_transport_failure() {
+        let addr = stalled_listener().await;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(400))
+            .build()
+            .unwrap();
+        let err = send_openrouter(client.post(format!("http://{addr}/chat")))
+            .await
+            .expect_err("the provider never answers");
+        assert_eq!(
+            crate::failure::classify_error(&err),
+            crate::failure::FailureClass::Transport,
+            "{err:#}"
+        );
+        assert!(is_retryable_for_chain(&format!("{err:#}")), "{err:#}");
     }
 }

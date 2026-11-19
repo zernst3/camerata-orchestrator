@@ -18,13 +18,20 @@
 
 mod archive;
 mod consistency;
+#[allow(
+    dead_code,
+    reason = "built but not yet enforced: work order C wires the counts check into gate_report"
+)]
+mod counts_check;
 pub mod engine_check;
 pub mod evidence;
 pub mod held;
 pub mod holds;
 pub mod junk;
+mod operator_only;
 mod report;
 mod secrets;
+mod text_style;
 pub mod tool_claim;
 pub mod unsynced;
 
@@ -37,10 +44,12 @@ pub use archive::{
     xlsx_strings, XlsxCell, XlsxHeaderFooter,
 };
 pub use consistency::{
-    compare_csv_to_json, count_reconciliation_problems, dataset_parity_problems,
-    dataset_set_problems, marking_problems, package_stem, parse_readme_provenance,
-    patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems, row_parity,
-    verify_manifest, verify_readme_provenance, ReadmeProvenance,
+    client_readme_problems, compare_csv_to_json, count_reconciliation_problems, counts_problems,
+    dataset_parity_problems, dataset_set_problems, fix_archive_problems, fix_report_problems,
+    marking_problems, package_stem, parse_readme_provenance, patterns_clean_cell_problems,
+    patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems,
+    place_archive_problems, row_parity, verify_manifest, verify_readme_provenance,
+    ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
@@ -77,6 +86,9 @@ pub struct ProductPackage {
     /// Findings the reviewer restored after the engine threw them out that carry no decision
     /// since, one problem each (A12 item 2).
     pub restored_without_decision: Vec<Problem>,
+    /// Problems split out of one the reviewer ruled out that carry no decision of their own, one
+    /// problem each.
+    pub split_out_without_decision: Vec<Problem>,
     /// Sites the Engine Check said No to that carry no correction, one problem each, and one
     /// problem when the Engine Check file cannot be read (design A2b).
     pub engine_check_no_without_correction: Vec<Problem>,
@@ -130,7 +142,10 @@ pub async fn build_product_package_with_stem(
     crate::report_export::require_all_repos(report, options)?;
     // And no client package for a run that did not run to completion.
     crate::report_export::require_complete_run(report, options)?;
-    let report_json = crate::report_export::build_report_json(reviewed, corpus, options);
+    // The counts are worked out ONCE here and handed to the report builder by reference.
+    let counts = crate::report_export::report_counts(reviewed, corpus, options);
+    let report_json =
+        crate::report_export::build_report_json_with_counts(reviewed, corpus, options, &counts);
     let data_json = crate::report_export::render_data_json(&report_json)?;
     // Everything but the PDF, then every check that needs no Typst (the secrets in every file,
     // the held rows, the counts, the marking, the row parity), then the compile. The refusal is
@@ -183,8 +198,13 @@ pub(crate) fn assemble_package(
     (report_json, data_json, pdf): (AuditReportJson, String, Vec<u8>),
 ) -> anyhow::Result<ProductPackage> {
     let report = reviewed.report();
-    let xlsx = crate::xlsx_export::build_workbook(reviewed, corpus, options)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let xlsx = crate::xlsx_export::build_workbook_with_counts(
+        reviewed,
+        corpus,
+        options,
+        &report_json.counts,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // `findings.json`: the machine-readable sibling of the workbook's "All Findings" sheet,
     // built from the SAME reviewed report/corpus pass (and `report_json`'s cover and
@@ -195,7 +215,7 @@ pub(crate) fn assemble_package(
         &report_json,
         &options.chosen_options,
     );
-    let findings_json = serde_json::to_vec_pretty(&findings_export)
+    let mut findings_json = serde_json::to_vec_pretty(&findings_export)
         .map_err(|e| anyhow::anyhow!("could not serialize findings.json: {e}"))?;
 
     // The per-dataset machine-readable tables: the SAME `partition_rows` pass as the workbook
@@ -206,6 +226,10 @@ pub(crate) fn assemble_package(
         .map_err(|e| anyhow::anyhow!("could not build the machine-readable exports: {e}"))?;
     let mut datasets = csv;
     datasets.extend(json);
+    // The list and number fields beside the prose ones, and a header on every empty CSV. One pass
+    // over findings.json and the datasets, so they stay equal to each other.
+    crate::machine_files::finish(&mut findings_json, &mut datasets)
+        .map_err(|e| anyhow::anyhow!("could not finish the machine-readable exports: {e}"))?;
     // The decisions the report was reviewed with. The gate reads this file, not the records the
     // package was built from, to check that a merge has its decision (design 5.3).
     datasets.push((
@@ -224,15 +248,17 @@ pub(crate) fn assemble_package(
         .map(|m| m.with_models_from(&report.provenance));
     let client = crate::report_export::clean_client_name(&options.client_name);
     provenance.client_name = (!client.is_empty()).then_some(client);
-    let mut readme = crate::product_export_readme(stem, &provenance);
+    let mut readme = crate::product_export_readme(stem, &provenance, options.internal);
     // The tickets file of a report with no review tree is its header alone; the README says why.
     if !crate::xlsx_export::no_tree_note(reviewed).is_empty() {
-        const TICKETS_PARAGRAPH_END: &str = " Sites sheet on.\n";
-        const NO_TREE_SENTENCE: &str =
+        let paragraph_end = crate::tickets_paragraph_end();
+        let no_tree_sentence = format!(
             "  This report has no review tree, so the file has its header and no tickets;\n  \
-             every site is on the Sites sheet.\n";
-        if let Some(at) = readme.find(TICKETS_PARAGRAPH_END) {
-            readme.insert_str(at + TICKETS_PARAGRAPH_END.len(), NO_TREE_SENTENCE);
+             every place is on the {} sheet.\n",
+            crate::xlsx_export::vocabulary::ALL_PROBLEMS
+        );
+        if let Some(at) = readme.find(&paragraph_end) {
+            readme.insert_str(at + paragraph_end.len(), &no_tree_sentence);
         }
     }
 
@@ -255,6 +281,7 @@ pub(crate) fn assemble_package(
         ),
         unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
         restored_without_decision: held::restored_without_decision(&report.findings, reviewed),
+        split_out_without_decision: held::split_out_without_decision(&report.findings, reviewed),
         engine_check_no_without_correction: engine_check::problems(
             &report.findings,
             &report.discarded,
@@ -369,9 +396,38 @@ fn audit_zip_with(
         CheckId::Secrets,
         archive_secret_problems(&entries, pdf_text),
     );
+    // The PDF's text, read once for the two checks that read it, when the caller has not.
+    let pdf_pages: std::collections::BTreeMap<String, text_style::PdfText> = if pdf_text.is_some() {
+        std::collections::BTreeMap::new()
+    } else {
+        entries
+            .iter()
+            .filter(|(name, _)| name.ends_with(".pdf"))
+            .map(|(name, bytes)| (name.clone(), text_style::pdf_text(bytes)))
+            .collect()
+    };
+    // The operator's own review package (internal) carries engine notes, discarded rows and review
+    // flags; it is not a client file, so the text-style check is a client-package check.
+    report.record(
+        CheckId::ClientTextStyle,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            text_style::archive_problems(&entries, pdf_text, &pdf_pages)
+        },
+    );
+    // The rewrite advisory is never in any zip, internal included, so this check holds both.
+    report.record(
+        CheckId::InternalNotes,
+        operator_only::archive_problems(&entries, pdf_text, &pdf_pages),
+    );
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
     report.record(CheckId::Counts, count_reconciliation_problems(&entries));
+    // One fix per row, and one row per place: the same check, so the README's list is unchanged.
+    let mut fix_and_place = fix_archive_problems(&entries);
+    fix_and_place.extend(place_archive_problems(&entries));
+    report.record(CheckId::FixParity, fix_and_place);
     report.record(
         CheckId::Content,
         if archive_content {
@@ -386,7 +442,10 @@ fn audit_zip_with(
         manifest_problems.extend(incomplete_run_problems(&entries));
     }
     report.record(CheckId::Manifest, manifest_problems);
-    report.record(CheckId::Provenance, provenance_problems(&entries));
+    report.record(
+        CheckId::Provenance,
+        provenance_problems(&entries, allow_incomplete),
+    );
     // A merge with no decision behind it, or a group decision missing a site's record, is a
     // structural defect whoever receives the package, so it is checked for an internal package
     // too. Read from the package's own decisions.json.
@@ -523,14 +582,23 @@ fn content_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Ve
         .unwrap_or_default()
 }
 
-fn provenance_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
+/// The README against the manifest. An INTERNAL package's README carries the provenance lines and
+/// they must equal the manifest's; a CLIENT package's README carries none of them (the models, the
+/// corpus hash, the engine commit and the release checks are the operator's, in `manifest.json`).
+fn provenance_problems(
+    entries: &std::collections::BTreeMap<String, Vec<u8>>,
+    internal: bool,
+) -> Vec<Problem> {
     let (Some(readme), Some(manifest)) = (entries.get("README.txt"), entries.get("manifest.json"))
     else {
         // The dataset-set check reports the missing file.
         return Vec::new();
     };
     match serde_json::from_slice::<serde_json::Value>(manifest) {
-        Ok(manifest) => verify_readme_provenance(&String::from_utf8_lossy(readme), &manifest),
+        Ok(manifest) if internal => {
+            verify_readme_provenance(&String::from_utf8_lossy(readme), &manifest)
+        }
+        Ok(_) => client_readme_problems(&String::from_utf8_lossy(readme)),
         Err(_) => vec![Problem::new(
             "manifest.json",
             "manifest",
@@ -611,6 +679,22 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
     }
     report.record(CheckId::Content, package.tool_claim_problems.clone());
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
+    // The PDF's data, for every package: the advisory is never in any zip, internal included.
+    report.record(
+        CheckId::InternalNotes,
+        operator_only::text_problems("PDF data (data.json)", "data.json", &package.data_json),
+    );
+    // The PDF's text is whatever its data and its template make of it; a banned character in the
+    // data is caught here before Typst is given anything, and the compiled PDF's own text is read
+    // by the archive pass above.
+    report.record(
+        CheckId::ClientTextStyle,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            text_style::json_bytes_problems("PDF data (data.json)", package.data_json.as_bytes())
+        },
+    );
     // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
     // footers to each other; this pass also holds the PDF's rows, cover summary and
     // confidentiality line to them.
@@ -618,6 +702,12 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
         report.record(
             CheckId::Counts,
             pdf_count_reconciliation_problems(&entries, &package.report_json),
+        );
+        // Every printed number held to an independent recount of the files in the package
+        // (single counts, design 5.7): a package whose numbers differ is refused.
+        report.record(
+            CheckId::Counts,
+            counts_problems(&entries, &package.report_json),
         );
         report.record(
             CheckId::Marking,
@@ -627,6 +717,10 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
     report.record(
         CheckId::RowParity,
         row_parity(&package.report_json, &package.findings_export),
+    );
+    report.record(
+        CheckId::FixParity,
+        fix_report_problems(&package.report_json, &package.findings_export),
     );
     report.record(
         CheckId::EvidenceUnverified,
@@ -642,6 +736,14 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
             Vec::new()
         } else {
             package.restored_without_decision.clone()
+        },
+    );
+    report.record(
+        CheckId::SplitOutWithoutDecision,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.split_out_without_decision.clone()
         },
     );
     report.record(
@@ -664,6 +766,14 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
 pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
     let mut report = GateReport::default();
     report.record(CheckId::Secrets, pdf_data_problems(data_json));
+    report.record(
+        CheckId::ClientTextStyle,
+        text_style::json_bytes_problems("PDF data (data.json)", data_json.as_bytes()),
+    );
+    report.record(
+        CheckId::InternalNotes,
+        operator_only::text_problems("PDF data (data.json)", "data.json", data_json),
+    );
     if report.is_clean() {
         Ok(())
     } else {
@@ -702,7 +812,22 @@ pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
 }
 
 #[cfg(test)]
+mod counts_tests;
+
+#[cfg(test)]
 mod patterns_tests;
+
+#[cfg(test)]
+mod text_style_tests;
+
+#[cfg(test)]
+mod readme_tests;
+
+#[cfg(test)]
+mod machine_files_tests;
+
+#[cfg(test)]
+mod pdf_unreadable_tests;
 
 #[cfg(test)]
 mod merged_site_tests;
@@ -731,3 +856,6 @@ mod discarded_tests;
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]
 mod internal_only_tests;
+
+#[cfg(test)]
+mod operator_only_tests;

@@ -272,7 +272,7 @@ fn dedup_uses_the_rule_files_linter_mapping() {
         vec![tool_preview("src/a.ts", 3, tool, "eslint", "medium")],
     );
     assert_eq!(kept.len(), 1);
-    let out = dedup_scan_previews_with(&mut existing, previews, Some(&selectors));
+    let out = dedup_scan_previews_with(&mut existing, previews, Some(&selectors), None);
     assert!(out.is_empty(), "{out:?}");
     assert_eq!(existing[0].also_matches, vec![tool.to_string()]);
     assert_eq!(existing[0].severity, "medium");
@@ -309,6 +309,7 @@ async fn native_tool_selectors_come_from_the_corpus_sources() {
             "medium",
         )],
         Some(&selectors),
+        None,
     );
     assert!(out.is_empty());
 }

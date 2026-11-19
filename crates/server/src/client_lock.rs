@@ -82,35 +82,47 @@ pub fn refusal(
     ))
 }
 
-/// Every model a scan may use, by role, for the lock to check BEFORE the scan starts: the scan,
-/// calibration (stage 1), group review (stage 2) and fix generation passes, the deep tier when it is on, and the clone judge
-/// (always included, because which rules are selected is only known once files have been read,
-/// and the lock must decide before that). Each is resolved exactly as the run resolves it,
-/// `fix_model` is the explicit fix-stage model (the project's fix
-/// step model or `--fix-model`), a model the run calls and so checked like the rest.
+/// The reason a client engagement must not run with `backend` and the models `controls` hold
+/// RIGHT NOW, or `None`. [`models_a_scan_may_use`] checks the picks before the run opens; a
+/// resume swaps in the models the saved run started on after that check, so it asks this
+/// once more on the controls it will actually run with, before any model call.
+pub fn refusal_for_run_models(
+    client_engagement: bool,
+    backend: ProjectBackend,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    deep: bool,
+    selected_rule_ids: &[&str],
+    controls: &crate::cost_cap::RunControls,
+) -> Option<String> {
+    let models = crate::cost_cap::models_the_run_will_use(
+        model,
+        calibration_model,
+        deep,
+        selected_rule_ids,
+        controls,
+    );
+    refusal(client_engagement, backend, &models)
+}
+
+/// Every model a scan may use, by role, for the lock to check BEFORE the scan starts: the
+/// models the run's own `controls` will call (the scan, calibration, group review, fix, duplicate
+/// check, the finder when it is the agent finder, and the deep tier when it is on), plus the
+/// clone judge (always included, because which rules are selected is only known once files have
+/// been read, and the lock must decide before that). They come from `models_the_run_will_use`,
+/// so the models checked are the models called.
 pub fn models_a_scan_may_use(
     model: Option<&str>,
     calibration_model: Option<&str>,
     deep: bool,
-    fix_model: Option<&str>,
-    clone_judge_model: Option<&str>,
-    group_review_model: Option<&str>,
+    controls: &crate::cost_cap::RunControls,
 ) -> Vec<(String, String)> {
-    let controls = crate::cost_cap::RunControls {
-        fix_model: fix_model.map(str::to_string),
-        clone_judge_model: clone_judge_model.map(str::to_string),
-        review: camerata_api_types::project::ReviewSettings {
-            group_review_model: group_review_model.unwrap_or_default().to_string(),
-            ..Default::default()
-        },
-        ..crate::cost_cap::RunControls::from_env()
-    };
     crate::cost_cap::models_the_run_will_use(
         model,
         calibration_model,
         deep,
         camerata_checks::clone_rules::RULE_IDS,
-        &controls,
+        controls,
     )
 }
 

@@ -11,6 +11,10 @@ pub struct UsageMeter {
     input_tokens: AtomicU64,
     output_tokens: AtomicU64,
     cost_micro_usd: AtomicU64,
+    /// The part of `cost_micro_usd` that came from replies a checkpoint held from an earlier
+    /// attempt ([`Self::record_resumed`]). The spend limit adds the run's whole stored spend up
+    /// front ([`RunControls::stored_spend_usd`]), so this share is taken off again.
+    resumed_micro_usd: AtomicU64,
     calls: AtomicU64,
     cost_calls: AtomicU64,
     /// Tokens served from the prompt cache (billed at ~0.1× input rate). Populated only
@@ -40,7 +44,13 @@ pub struct UsageMeter {
     /// The outage stop: a run-wide counter of consecutive transport failures. Once it trips,
     /// admission refuses every new part. See [`crate::run_health`].
     health: crate::run_health::RunHealth,
+    /// The cost checkpoint's tally and stop (see [`crate::cost_checkpoint`]).
+    checkpoint: std::sync::Mutex<crate::cost_checkpoint::CheckpointState>,
+    /// Where the cockpit's job state hears of each checkpoint.
+    job_sink: std::sync::Mutex<crate::cost_checkpoint::CheckpointSink>,
 }
+
+mod checkpoint;
 
 /// Why a pass was not admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +91,13 @@ impl UsageMeter {
         }
     }
 
+    /// TEST SUPPORT: this meter with `health` as its outage counter (one on an injected clock).
+    #[cfg(test)]
+    pub(crate) fn with_health(mut self, health: crate::run_health::RunHealth) -> Self {
+        self.health = health;
+        self
+    }
+
     /// A meter for a stage that runs after the scan's own meter was closed (the group reviewer
     /// reads the final report): it starts from the usage the scan already made, so a spend limit
     /// counts the whole run and not only this stage.
@@ -100,6 +117,10 @@ impl UsageMeter {
             .store(prior.cache_creation_input_tokens, Ordering::Relaxed);
         meter.cost_micro_usd.store(
             (prior.cost_usd.max(0.0) * 1_000_000.0).round() as u64,
+            Ordering::Relaxed,
+        );
+        meter.resumed_micro_usd.store(
+            (prior.resumed_cost_usd.max(0.0) * 1_000_000.0).round() as u64,
             Ordering::Relaxed,
         );
         meter.calls.store(prior.calls, Ordering::Relaxed);
@@ -146,11 +167,20 @@ impl UsageMeter {
         self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0
     }
 
-    /// True once actual spend has reached the cap. Always false with no cap.
+    /// What the spend limit is checked against: this attempt's spend plus, on a resumed run, what
+    /// the stored replies cost that this meter does not see again
+    /// ([`crate::cost_cap::RunControls::stored_spend_usd`]). The limit counts the whole run. The
+    /// usage figures and the telemetry stay what this attempt paid ([`Self::spent_usd`]).
+    pub fn limit_spend_usd(&self) -> f64 {
+        let resumed = self.resumed_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        (self.spent_usd() + self.controls.stored_spend_usd.max(0.0) - resumed).max(0.0)
+    }
+
+    /// True once the run's spend has reached the cap. Always false with no cap.
     pub fn cap_reached(&self) -> bool {
         self.controls
             .max_cost_usd
-            .is_some_and(|cap| self.spent_usd() >= cap)
+            .is_some_and(|cap| self.limit_spend_usd() >= cap)
     }
 
     /// True when one MORE call from a pass that already holds its permit would go past the
@@ -171,7 +201,7 @@ impl UsageMeter {
             return true;
         }
         let reserve = self.reserve_micro_usd() as f64 / 1_000_000.0;
-        self.spent_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
+        self.limit_spend_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
     }
 
     /// What one pass is assumed to cost while it is in flight, in micro-dollars: the larger of
@@ -222,6 +252,10 @@ impl UsageMeter {
         if self.health.is_stopped() {
             return Admission::CapReached;
         }
+        // The cost checkpoint stopped the run: nothing more is sent.
+        if self.checkpoint_stopped() {
+            return Admission::CapReached;
+        }
         let mut budget = self.budget();
         if let Some(cap) = self.controls.max_cost_usd {
             // A call's cost was unknowable, so the cap cannot be enforced: admit nothing more.
@@ -233,7 +267,7 @@ impl UsageMeter {
             // The reserve includes what a request in flight MAY cost ([`Self::note_request`]), so
             // a pass whose request alone reaches the limit closes admission at once, whether or
             // not any call has reported a cost yet.
-            if self.spent_usd() + budget.in_flight as f64 * reserve >= cap {
+            if self.limit_spend_usd() + budget.in_flight as f64 * reserve >= cap {
                 return Admission::CapReached;
             }
             // Until one call has reported a cost the run has not seen what a call really costs
@@ -309,6 +343,25 @@ impl UsageMeter {
     /// A stage is blocked once spend has reached the cap, AND once the cap has already stopped
     /// anything (a refused scan pass, or an earlier stage): after the cap has bitten, nothing
     /// later may start, which is what keeps the overshoot bounded.
+    /// [`Self::stage_blocked`] for a stage that has stored work to replay: `stored_work` is true
+    /// when its checkpoint holds absorbed replies from an earlier attempt, or (for a stage with
+    /// no checkpoint, whose replies the journal answers) when the run is a resume. Such a stage
+    /// STARTS whatever the run's spend, because replaying what was paid for costs nothing; each
+    /// fresh send inside it is still admitted one by one and refused past the limit, so the
+    /// limit stops only fresh sends. An outage stop still blocks it.
+    pub fn stage_blocked_unless_stored(&self, repo: &str, stage: &str, stored_work: bool) -> bool {
+        if stored_work && !self.health.is_stopped() && !self.cost_unknown() {
+            return false;
+        }
+        self.stage_blocked(repo, stage)
+    }
+
+    /// True when this run is a resume that carries stored spend: the journal and the stages'
+    /// checkpoints may hold replies for work that would otherwise be refused.
+    pub fn is_resume(&self) -> bool {
+        self.controls.stored_spend_usd > 0.0
+    }
+
     pub fn stage_blocked(&self, repo: &str, stage: &str) -> bool {
         if self.health.is_stopped() {
             self.record_stage_not_run(repo, stage, false);
@@ -324,7 +377,8 @@ impl UsageMeter {
                 || budget.cost_unknown
         };
         if !self.cap_reached() && !already_stopped {
-            return false;
+            // Under the limit: the projection for the stages still to come may not be.
+            return self.projection_stops_stage(repo, stage);
         }
         self.record_stage_not_run(repo, stage, false);
         true
@@ -335,6 +389,11 @@ impl UsageMeter {
     /// without reading its files into digests first. The repo's own token-free checks are not
     /// affected; the caller still runs them. A run with no cap never blocks a repo.
     pub fn repo_blocked(&self, repo: &str) -> bool {
+        // A resume reads the repo whatever its spend: the stored passes replay at no cost and each
+        // fresh pass is admitted on its own.
+        if self.is_resume() && !self.health.is_stopped() && !self.cost_unknown() {
+            return false;
+        }
         if self.health.is_stopped() {
             let mut budget = self.budget();
             if !budget.outage_repos.iter().any(|r| r == repo) {
@@ -375,7 +434,7 @@ impl UsageMeter {
     /// spend, floored at zero) is counted against each submission.
     pub fn batch_refusal_reason(&self, projected_usd: Option<f64>) -> Option<String> {
         let cap = self.controls.max_cost_usd?;
-        let spent = self.spent_usd();
+        let spent = self.limit_spend_usd();
         let remaining_estimate = self
             .controls
             .estimate_hint_usd
@@ -417,7 +476,7 @@ impl UsageMeter {
         let budget = self.budget();
         Some(crate::cost_cap::CostCapRecord {
             cap_usd,
-            spent_usd: self.spent_usd(),
+            spent_usd: self.limit_spend_usd(),
             // Only what the spend limit stopped: an outage stop has its own record.
             not_run_passes: budget
                 .not_run_passes
@@ -434,6 +493,8 @@ impl UsageMeter {
             notes: budget.notes.clone(),
             repos_not_finished: budget.repos_not_finished.clone(),
             cost_unknown: budget.cost_unknown,
+            // The pause when there is one: a later checkpoint never replaces it.
+            checkpoint: self.checkpoint_stop().or_else(|| self.latest_checkpoint()),
         })
     }
 
@@ -536,6 +597,8 @@ pub const STAGE_DETAIL: &str = "detail regeneration";
 pub const STAGE_FIX: &str = "fix-specific generation";
 pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
 pub const STAGE_DEEP: &str = "deep compliance tier";
+pub const STAGE_FINDER: &str = "agent finder";
+pub const STAGE_GROUP_REVIEW: &str = "group review";
 
 /// The run estimate's whole-run dollars for a batch scan over `chunks` and `batches`, priced at
 /// `model` (scan and calibration alike; `camerata_ui_core::scan::estimate_run_cost_bounds`, the
@@ -568,6 +631,7 @@ pub(super) fn batch_estimate_usd(
         &RunRepoInput {
             repo: "batch".to_string(),
             code_chars,
+            files: chunks.iter().map(|c| c.len()).sum(),
             selected: rules,
             multi_option_selected: 0,
             routing_groups: 1,
@@ -620,6 +684,25 @@ impl UsageMeter {
         self.record(stage, r);
         // A reply came back: the provider is reachable, so the outage streak starts over.
         self.health.note_success();
+    }
+
+    /// Count a call that got no answer but may have been billed (it timed out): `r` carries the
+    /// cost it counts at. Unlike [`Self::record_stage`] it proves nothing about the provider
+    /// being reachable, so the outage streak is left alone.
+    pub fn record_unanswered(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+        self.stages.record(stage, r);
+        self.record(stage, r);
+    }
+
+    /// [`Self::record_stage`] for a reply a checkpoint holds from an earlier attempt of this run:
+    /// its usage joins the meter like any call's, and its cost is also counted as RESUMED, so the
+    /// spend limit (which adds the whole stored spend up front) does not count it twice.
+    pub fn record_resumed(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+        self.stages.record(stage, r);
+        let micro = self.record(stage, r);
+        self.resumed_micro_usd.fetch_add(micro, Ordering::Relaxed);
+        // No `note_success`: a stored reply came off disk, not from the provider, so it proves
+        // nothing about the provider being reachable.
     }
 
     /// Mark a completion already passed to [`Self::record_stage`] as one whose output was
@@ -700,7 +783,8 @@ impl UsageMeter {
     /// Fold one completion's reported usage into the aggregate. Missing fields are simply not
     /// counted. Private: callers go through [`Self::record_stage`]. `stage` names the call in
     /// the note written when its cost cannot be determined.
-    fn record(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+    fn record(&self, stage: Stage, r: &crate::llm::LlmResponse) -> u64 {
+        let mut counted_micro = 0u64;
         if let Some(i) = r.input_tokens {
             self.input_tokens.fetch_add(i, Ordering::Relaxed);
         }
@@ -735,6 +819,7 @@ impl UsageMeter {
             // Rounded UP: this feeds the cap, and flooring could read a run that is over the
             // limit by a fraction of a micro-dollar as under it.
             let micro = crate::llm::usd_to_micro_ceil(c);
+            counted_micro = micro;
             self.cost_micro_usd.fetch_add(micro, Ordering::Relaxed);
             let before = self.max_call_micro_usd.fetch_max(micro, Ordering::Relaxed);
             if before == 0 && micro > 0 {
@@ -749,6 +834,7 @@ impl UsageMeter {
         self.cache_creation_input_tokens
             .fetch_add(r.cache_creation_input_tokens, Ordering::Relaxed);
         self.calls.fetch_add(1, Ordering::Relaxed);
+        counted_micro
     }
 
     /// A call's cost could not be determined while a cap is set: remember that the cap is no
@@ -804,6 +890,7 @@ impl UsageMeter {
             cost_complete: calls > 0 && cost_calls == calls,
             cache_read_input_tokens: self.cache_read_input_tokens.load(Ordering::Relaxed),
             cache_creation_input_tokens: self.cache_creation_input_tokens.load(Ordering::Relaxed),
+            resumed_cost_usd: self.resumed_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0,
         }
     }
 }
@@ -886,4 +973,8 @@ pub struct ActualUsage {
     /// disabled.
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
+    /// The part of `cost_usd` that came from replies stored by an earlier attempt of the run
+    /// (a resumed stage's checkpoint). The spend limit uses it to count a stored dollar once.
+    #[serde(default)]
+    pub resumed_cost_usd: f64,
 }

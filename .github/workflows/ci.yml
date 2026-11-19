@@ -93,7 +93,7 @@ jobs:
 
       # Gate 4: the test suite must pass. The macOS pixel baselines run in the local release gate through scripts/visual-check.sh.
       - name: Test gate
-        run: ./scripts/ci-gate.sh "Test gate" cargo test --workspace --locked
+        run: ./scripts/ci-gate.sh "Test gate" cargo test --workspace --locked --no-fail-fast
 
   # Supply chain: known advisories (vulnerable, unsound, unmaintained or yanked crates),
   # dependency licenses and dependency sources, all checked against deny.toml. Blocking. An

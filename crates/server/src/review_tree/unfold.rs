@@ -14,14 +14,70 @@ use super::types::GroupRole;
 /// The row an absorbed site becomes: the site's own place, rule, snippet and (when it recorded
 /// them) severity and headline, with everything else taken from the survivor it was folded into.
 fn promote(primary: &Finding, site: &MergedLocation) -> Finding {
+    copy_to_site(
+        primary,
+        Place {
+            repo: &site.repo,
+            path: &site.path,
+            line: site.line,
+            rule_id: &site.rule_id,
+            snippet: &site.snippet,
+            severity: &site.severity,
+            headline: &site.headline,
+            consequence: site.consequence,
+        },
+    )
+}
+
+/// A sibling row of `primary` at another place of the same problem, written by a producer that
+/// found one thing in several places: a copy of the problem with its own repo, path, line and
+/// snippet, built the way [`promote`] builds the row of an absorbed site. It carries the
+/// problem's finder captures, and grouping reads them (`cluster_rows`) to put the rows of one
+/// problem in one sub-group, so the places share one fix; the copy has no sub-group of its own
+/// until then.
+pub fn sibling_row(
+    primary: &Finding,
+    repo: &str,
+    path: &str,
+    line: usize,
+    snippet: &str,
+) -> Finding {
+    copy_to_site(
+        primary,
+        Place {
+            repo,
+            path,
+            line,
+            rule_id: &primary.rule_id,
+            snippet,
+            severity: "",
+            headline: "",
+            consequence: false,
+        },
+    )
+}
+
+/// The place a copied row takes.
+struct Place<'a> {
+    repo: &'a str,
+    path: &'a str,
+    line: usize,
+    rule_id: &'a str,
+    snippet: &'a str,
+    severity: &'a str,
+    headline: &'a str,
+    consequence: bool,
+}
+
+fn copy_to_site(primary: &Finding, site: Place<'_>) -> Finding {
     let mut row = primary.clone();
-    row.repo.clone_from(&site.repo);
-    row.path.clone_from(&site.path);
+    row.repo = site.repo.to_string();
+    row.path = site.path.to_string();
     row.line = site.line;
-    row.rule_id.clone_from(&site.rule_id);
-    row.snippet.clone_from(&site.snippet);
+    row.rule_id = site.rule_id.to_string();
+    row.snippet = site.snippet.to_string();
     if !site.severity.is_empty() {
-        row.severity.clone_from(&site.severity);
+        row.severity = site.severity.to_string();
     }
     // The site's own title leads, so the headline the row shows is the one it carried when it
     // was absorbed; the survivor's explanation follows.
@@ -35,6 +91,11 @@ fn promote(primary: &Finding, site: &MergedLocation) -> Finding {
     row.possible_duplicate_of = None;
     row.site_key = String::new();
     row.group_role = GroupRole::Member;
+    // The copy carries the host's stage 1 record, so any doubt it shows was never about this
+    // site; the site's own source is not known to be doubted. The row counts as undoubted for
+    // severity (its rating and the rule's minimum apply) and, if it shows a doubt, is held.
+    crate::follow_reviewers::mark_undoubted_source_folded(&mut row);
+    crate::follow_reviewers::hold_partly_doubted(&mut row);
     row
 }
 
@@ -125,6 +186,10 @@ pub fn unfold_also_locations(findings: &mut Vec<Finding>) -> usize {
                 ),
             );
             row.severity.clone_from(&site.severity);
+            // The raise came from a site that was absorbed, not from a doubted source: the
+            // row counts as undoubted for severity, so no pass writes the raise back.
+            crate::follow_reviewers::mark_undoubted_source_folded(row);
+            crate::follow_reviewers::hold_partly_doubted(row);
         }
     }
     let mut result: Vec<Finding> = Vec::with_capacity(originals.len() + added);

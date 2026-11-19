@@ -38,6 +38,25 @@ pub use camerata_api_types::model_registry::{
 
 // ── Static Claude catalog ────────────────────────────────────────────────────
 
+/// The oldest Claude Code that accepts a model on the cli backend, as (major, minor, patch).
+/// Claude Code refuses a model it predates ("does not support this model; version X or newer is
+/// required"), so the cli pre-flight ([`crate::claude_version`]) checks this table before any
+/// model call. A model not listed has no known minimum. Add a line when a model ships that needs
+/// a newer Claude Code.
+pub const CLAUDE_CODE_MIN_VERSIONS: &[(&str, (u32, u32, u32))] =
+    &[("claude-fable-5-2", (2, 1, 290))];
+
+/// The minimum Claude Code version for `model` on the cli backend, when one is known.
+pub fn min_claude_code_version(model: &str) -> Option<(u32, u32, u32)> {
+    let model = model.trim();
+    // The same resolution as the catalog lookup, so a dated snapshot id names its base model.
+    let base = registry_entry_for(model).map_or(model, |e| e.id);
+    CLAUDE_CODE_MIN_VERSIONS
+        .iter()
+        .find(|(id, _)| *id == base)
+        .map(|(_, v)| *v)
+}
+
 /// The curated static list of Claude (subscription-CLI) models.
 ///
 /// No list-models API exists for the Claude Code CLI, so this is data. Trivial to update
@@ -53,6 +72,27 @@ pub use camerata_api_types::model_registry::{
 /// ([`RequestShapeSpec`], consumed by [`conform_messages_body`]) and the per-model cache-read
 /// price / long-prompt tier (consumed via [`rates_for`]).
 pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
+    RegistryEntryStatic {
+        display: "Fable 5.2",
+        id: "claude-fable-5-2",
+        context: 1_000_000,
+        max_output: 128_000,
+        // 5.1's 15 scaled by list price ($8 against $10), as the doc above describes.
+        weight: 12,
+        price_in: 8.0,
+        price_out: 40.0,
+        // 0.025x input, as on 5.1.
+        cache_read_price: Some(0.20),
+        long_prompt: None,
+        // Same request shape as Fable 5.1: rejects thinking, sampling params, prefill AND
+        // forced tool_choice; the effort default is already the high we want.
+        shape: RequestShapeSpec {
+            strict_params: true,
+            disabled_thinking: DisabledThinking::Rejected,
+            no_forced_tool_choice: true,
+            effort: EffortPolicy::Omit,
+        },
+    },
     RegistryEntryStatic {
         display: "Fable 5.1",
         id: "claude-fable-5-1",
@@ -962,7 +1002,7 @@ impl ModelRegistry {
 
 /// Fetch and parse the OpenRouter `/api/v1/models` endpoint.
 async fn fetch_openrouter_models(api_key: &str) -> anyhow::Result<Vec<RegistryEntry>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let resp = client
         .get("https://openrouter.ai/api/v1/models")
         .header("Authorization", format!("Bearer {api_key}"))
@@ -1334,7 +1374,7 @@ pub fn compute_safe_providers(endpoints: &[ProviderEndpointInfo]) -> Vec<String>
 async fn fetch_provider_policies(
     api_key: Option<&str>,
 ) -> anyhow::Result<HashMap<String, ProviderPolicyRecord>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let mut req = client
         .get("https://openrouter.ai/api/frontend/v1/all-providers")
         .header("HTTP-Referer", "https://camerata.ai")
@@ -1374,7 +1414,7 @@ async fn fetch_model_endpoints(
     api_key: Option<&str>,
     model_id: &str,
 ) -> anyhow::Result<Vec<OpenRouterEndpointRaw>> {
-    let client = reqwest::Client::new();
+    let client = bounded_client();
     let mut req = client
         .get(format!(
             "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
@@ -1397,23 +1437,89 @@ async fn fetch_model_endpoints(
     Ok(body.data.endpoints)
 }
 
+/// A client for the registry lookups: bounded, so a stalled connection fails (a retryable
+/// network error to the caller) instead of hanging the run.
+fn bounded_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            bounded_client_with(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(10),
+            )
+        })
+        .clone()
+}
+
+fn bounded_client_with(
+    total: std::time::Duration,
+    connect: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(total)
+        .connect_timeout(connect)
+        .build()
+        .expect("building a reqwest client with only timeouts set cannot fail")
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A peer that accepts the connection and never answers: a client with no timeout waits
+    /// forever, the bounded one returns a timeout error that the chain treats as retryable.
+    #[tokio::test]
+    async fn a_stalled_peer_hangs_an_unbounded_client_and_fails_a_bounded_one() {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+
+            // Deliberately unbounded: the test shows what a client with no timeout does.
+            #[allow(clippy::disallowed_methods)]
+            let unbounded = reqwest::Client::new().get(&url).send();
+            let hung = tokio::time::timeout(std::time::Duration::from_secs(3), unbounded).await;
+            assert!(
+                hung.is_err(),
+                "a client with no timeout must still be waiting"
+            );
+
+            let bounded = bounded_client_with(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            );
+            let err = bounded.get(&url).send().await.expect_err("must time out");
+            assert!(err.is_timeout(), "{err:?}");
+            let text = format!("{:#}", anyhow::Error::from(err));
+            assert!(crate::llm::is_retryable_for_chain(&text), "{text}");
+            drop(listener);
+        })
+        .await
+        .expect("the test itself must finish inside 60 s");
+    }
+
     // ── Claude static catalog ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_minimum_claude_code_version_resolves_dated_and_untrimmed_ids() {
+        let min = Some((2, 1, 290));
+        assert_eq!(min_claude_code_version("claude-fable-5-2"), min);
+        assert_eq!(min_claude_code_version("claude-fable-5-2-20261101"), min);
+        assert_eq!(min_claude_code_version(" claude-fable-5-2 "), min);
+        assert_eq!(min_claude_code_version("claude-opus-5-5"), None);
+    }
 
     #[test]
     fn claude_entries_has_all_four_tiers() {
         let entries = claude_entries();
         assert_eq!(
             entries.len(),
-            8,
-            "expect the 4 tiers plus the 4 newer models"
+            9,
+            "expect the 4 tiers plus the 5 newer models"
         );
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
@@ -2452,6 +2558,7 @@ mod tests {
     #[test]
     fn price_join_for_claude_id_finds_every_static_model() {
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-fable-5",
             "claude-opus-5-5",
@@ -2636,6 +2743,7 @@ mod tests {
     fn newer_models_carry_the_verified_prices_context_and_output_limits() {
         // (id, in, out, context, max_output)
         for (id, pin, pout, ctx, max_out) in [
+            ("claude-fable-5-2", 8.0, 40.0, 1_000_000, 128_000),
             ("claude-fable-5-1", 10.0, 50.0, 1_000_000, 128_000),
             ("claude-opus-5-5", 4.0, 20.0, 1_000_000, 128_000),
             ("claude-sonnet-5-5", 2.0, 10.0, 1_000_000, 128_000),
@@ -2648,11 +2756,51 @@ mod tests {
         }
     }
 
+    /// Fable 5.2 is its own entry beside 5.1 (saved runs and explicit choices still name 5.1),
+    /// with 5.1's behaviour flags and its own prices.
+    #[test]
+    fn fable_5_2_is_listed_with_its_own_prices_and_5_1s_request_shape() {
+        let e = registry_entry_for("claude-fable-5-2").expect("5.2 listed");
+        assert_eq!(e.display, "Fable 5.2");
+        assert!(close(e.price_in, 8.0) && close(e.price_out, 40.0));
+        assert_eq!(e.cache_read_price, Some(0.20));
+        assert_eq!(
+            e.shape,
+            registry_entry_for("claude-fable-5-1").unwrap().shape
+        );
+        assert!(e.shape.no_forced_tool_choice && e.shape.strict_params);
+        // The older entry is kept at its own list price.
+        assert!(close(
+            registry_entry_for("claude-fable-5-1").unwrap().price_in,
+            10.0
+        ));
+    }
+
+    /// 5.2 bills 5-minute writes at $10, 1-hour writes at $16 (1.25x and 2x of $8).
+    #[test]
+    fn fable_5_2_cache_write_rates() {
+        let r = rates_for("claude-fable-5-2", 1000).unwrap();
+        assert!(close(r.cache_write_5m * 1e6, 10.0));
+        assert!(close(r.cache_write_1h * 1e6, 16.0));
+    }
+
+    /// 5.2 rejects a forced tool_choice and sampling params, like 5.1.
+    #[test]
+    fn fable_5_2_conform_strips_forced_tool_choice_and_sampling() {
+        let mut b = hostile_body();
+        conform_messages_body("claude-fable-5-2", &mut b);
+        assert_eq!(b["tool_choice"], serde_json::json!({"type": "auto"}));
+        for k in ["temperature", "top_p", "top_k"] {
+            assert!(b.get(k).is_none(), "{k}");
+        }
+    }
+
     /// A stage sizes its runaway guard from the model's own output limit, and sends an effort
     /// only where the model takes one.
     #[test]
     fn the_registry_answers_what_a_model_can_write_and_whether_it_takes_an_effort() {
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
@@ -2687,6 +2835,9 @@ mod tests {
     #[test]
     fn weights_follow_the_tier_and_price_ordering() {
         let w = |id: &str| registry_entry_for(id).unwrap().weight;
+        // 5.2 lists at $8 / $40 against 5.1's $10 / $50, so it weighs less, still above Opus.
+        assert!(w("claude-fable-5-2") <= w("claude-fable-5-1"));
+        assert!(w("claude-fable-5-2") > w("claude-opus-5-5"));
         assert!(w("claude-fable-5-1") >= w("claude-fable-5"));
         assert!(w("claude-opus-5-5") <= w("claude-opus-5"));
         assert!(w("claude-opus-5-5") > w("claude-sonnet-5-5"));
@@ -2698,6 +2849,7 @@ mod tests {
     #[test]
     fn cache_read_is_per_model_falling_back_to_a_tenth_of_input() {
         let per_m = |id: &str, toks: u64| rates_for(id, toks).unwrap().cache_read * 1_000_000.0;
+        assert!(close(per_m("claude-fable-5-2", 1000), 0.20), "0.025x of $8");
         assert!(
             close(per_m("claude-fable-5-1", 1000), 0.25),
             "0.025x of $10"
@@ -2783,6 +2935,7 @@ mod tests {
     #[test]
     fn conform_strips_everything_the_strict_models_reject() {
         for id in [
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
@@ -2916,7 +3069,12 @@ mod tests {
     /// The other three newest models reject disabled thinking at any effort.
     #[test]
     fn newest_models_reject_disabled_thinking_outright() {
-        for id in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] {
+        for id in [
+            "claude-fable-5-2",
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+        ] {
             let mut d = with_thinking(disabled(), Some("low"));
             conform_messages_body(id, &mut d);
             assert!(d.get("thinking").is_none(), "{id}");
@@ -2977,6 +3135,7 @@ mod tests {
             ("claude-opus-5-5", true),
             ("claude-haiku-5-5", true),
             ("claude-sonnet-5-5", false),
+            ("claude-fable-5-2", false),
             ("claude-fable-5-1", false),
         ] {
             let mut b = serde_json::json!({"messages": [{"role": "user", "content": "q"}]});

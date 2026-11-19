@@ -52,8 +52,11 @@ pub use self_ref::{
 
 // Pull private/crate-internal helpers into scope for the orchestration functions and
 // test module (via `use super::*`).
+#[cfg(test)]
+pub(crate) use audit::classify_repo_findings;
 pub(crate) use audit::{
-    build_rule_alternatives, classify_repo_findings, is_ci_tier_rule, is_semantic_multi_option_rule,
+    build_rule_alternatives, is_ci_tier_rule, is_semantic_multi_option_rule,
+    record_first_inspection,
 };
 // Re-export camerata_gateway test-scope primitives so the test module's `use super::*`
 // can reach them directly (they're used in inline test assertions).
@@ -155,6 +158,14 @@ impl BookkeepingCaptures {
                 {
                     continue;
                 }
+                // Which problem of which part a row is of stays too: grouping reads it, so the
+                // rows of one problem reported at several places are one cause. Neither names
+                // an object (both are bookkeeping keys), so they cannot fuse two rows.
+                if *key == crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE
+                    || *key == crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE
+                {
+                    continue;
+                }
 
                 if let Some(value) = f.captures.remove(*key) {
                     taken.push(((*key).to_string(), value));
@@ -210,9 +221,10 @@ pub struct Finding {
     pub snippet: String,
     /// The gate's own explanation of the violation.
     pub detail: String,
-    /// Suppression status: `active` (NEW/changed — the gate enforces), `suppressed-inline`
-    /// (waived by a `camerata:allow` comment), or `suppressed-baseline` (accepted
-    /// pre-existing debt / policy). Report shows all; enforcement is on `active` only.
+    /// Status: `active` (open; a row from a tool in preview is `active` with `preview` set),
+    /// `waived-inline` (a `camerata:allow` comment) or `carried-baseline` (a baseline record
+    /// Cantus wrote). See [`crate::finding_status`]; sealed reports with the old
+    /// `suppressed-*` words are mapped on read.
     #[serde(default = "default_status")]
     pub status: String,
     /// Other rule ids this SAME code location also violates, demoted here when several
@@ -1014,6 +1026,7 @@ pub struct ScanReport {
     #[serde(default)]
     pub excluded_mechanical_rules: Vec<String>,
     /// Every violation found, across all repos (each tagged with its repo).
+    #[serde(deserialize_with = "crate::finding_status::de_findings")]
     pub findings: Vec<Finding>,
     /// The proposed starter ruleset (aggregated over all repos).
     pub proposed_rules: Vec<ProposedRule>,
@@ -1509,6 +1522,11 @@ impl ScanReport {
             &crate::review_tree::ToolMap::builtin(),
             &run_id,
         ));
+        if let Some(tree) = self.tree.as_ref() {
+            self.ledger.record_fix_merge(tree.fix_merge_block());
+            self.ledger
+                .record_place_merge(tree.place_merge_block(&self.findings));
+        }
     }
 
     /// Rebuild [`Self::patterns_across_services`] from the ledger and the findings. Called by
@@ -2405,7 +2423,14 @@ pub async fn audit_repos_with_llm_controlled(
     let fix_model: Option<String> = Some(crate::ai_audit::resolve_audit_model(
         controls.fix_model_for(model, calibration_model),
     ));
-    let meter = crate::ai_audit::UsageMeter::with_controls(controls.clone());
+    let meter = std::sync::Arc::new(crate::ai_audit::UsageMeter::with_controls(controls.clone()));
+    // The cost checkpoint reaches the job state the UI polls.
+    if let Some((jobs, id)) = job {
+        let (jobs, id) = (jobs.clone(), id.to_string());
+        meter.set_job_sink(crate::cost_checkpoint::CheckpointSink::new(move |cp| {
+            jobs.set_cost_checkpoint(&id, cp.clone());
+        }));
+    }
     // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
     // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
     // question, so a changed rule set or an AI-off prior scan does not invalidate them); a
@@ -2863,12 +2888,13 @@ pub async fn audit_repos_with_llm_controlled(
                         // SPEND CAP: the judge is a stage like any other; past the cap it does not
                         // start and is recorded as NOT RUN.
                         let clone_blocked = run_ai_review
-                            && meter.stage_blocked(spec, crate::ai_audit::STAGE_CLONE_JUDGE);
+                            && meter.stage_blocked_unless_stored(
+                                spec,
+                                crate::ai_audit::STAGE_CLONE_JUDGE,
+                                meter.is_resume(),
+                            );
                         let unavailable = if clone_blocked {
-                            format!(
-                                "{} before the judge ran",
-                                crate::cost_cap::cause_for(meter.cost_unknown())
-                            )
+                            format!("{} before the judge ran", meter.stop_cause())
                         } else {
                             ai_blocked_reason
                                 .clone()
@@ -3029,10 +3055,7 @@ pub async fn audit_repos_with_llm_controlled(
                              provider could not be reached)"
                         )
                     } else {
-                        format!(
-                            "{spec}: AI review not run ({})",
-                            crate::cost_cap::cause_for(meter.cost_unknown())
-                        )
+                        format!("{spec}: AI review not run ({})", meter.stop_cause())
                     });
                     for (rid, _) in &semantic {
                         pipeline_ledger.record_rule(
@@ -3047,7 +3070,7 @@ pub async fn audit_repos_with_llm_controlled(
                             } else {
                                 format!(
                                     "not run: {} before any pass checked it",
-                                    crate::cost_cap::cause_for(meter.cost_unknown())
+                                    meter.stop_cause()
                                 )
                             }),
                             0,
@@ -3066,7 +3089,7 @@ pub async fn audit_repos_with_llm_controlled(
                             format!(
                                 "NOT RUN: {} before this repository was reviewed. This \
                                  inspection is incomplete.",
-                                crate::cost_cap::cause_for(meter.cost_unknown())
+                                meter.stop_cause()
                             )
                         },
                         files_not_reviewed: files.len(),
@@ -3133,7 +3156,36 @@ pub async fn audit_repos_with_llm_controlled(
                         let no_forced = std::collections::HashMap::new();
                         // H5: with the consensus option on, the whole audit runs three times
                         // and only what two runs agree on comes back (see `crate::consensus`).
-                        let audited =
+                        // `--finder agent` replaces everything inside `audit_repo` with one
+                        // agent for each piece of code; what comes back has the same shape, so
+                        // everything after this call is unchanged. The finder's extras (coverage,
+                        // rules left partial) are recorded with the rules below.
+                        let mut finder_extras: Option<
+                            crate::ai_audit::agent_finder::run::FinderExtras,
+                        > = None;
+                        let audited = if controls.finder
+                            == crate::ai_audit::agent_finder::FinderChoice::Agent
+                        {
+                            match Box::pin(crate::ai_audit::agent_finder::run::find_repo_for_run(
+                                llm,
+                                spec,
+                                &part.changed,
+                                &audit_rules,
+                                corpus,
+                                &controls,
+                                chosen_options,
+                                &backend_resolution,
+                                Some(&meter),
+                            ))
+                            .await
+                            {
+                                Ok((found, rules, recs, failed_parts, samples, extras)) => {
+                                    finder_extras = Some(extras);
+                                    Ok((found, rules, recs, failed_parts, samples))
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
                             crate::consensus::run_audit_passes(spec, controls.consensus, || {
                                 crate::ai_audit::audit_repo(
                                     llm,
@@ -3152,7 +3204,8 @@ pub async fn audit_repos_with_llm_controlled(
                                     Some(&files),
                                 )
                             })
-                            .await;
+                            .await
+                        };
                         match audited {
                             Ok((
                                 mut ai_findings,
@@ -3205,6 +3258,14 @@ pub async fn audit_repos_with_llm_controlled(
                                             rec.rule_id.to_ascii_uppercase(),
                                         );
                                     }
+                                }
+                                // The agent finder: rules every piece found not applicable are
+                                // queued before the rules are recorded, like the ones above.
+                                if let Some(extras) = &finder_extras {
+                                    extras.note_before_rules(&mut pipeline_ledger, spec);
+                                    // A rule a problem was cited to has a problem, even when
+                                    // the merged row of that problem sits under another rule.
+                                    extras.add_rules_with_problems(&mut ai_counts);
                                 }
                                 // SPEND CAP: a rule the cap left unchecked on part of the code
                                 // is NOT recorded as having run, so the integrity ledger cannot
@@ -3287,6 +3348,28 @@ pub async fn audit_repos_with_llm_controlled(
                                         files.len(),
                                         emitted,
                                     );
+                                }
+                                // The agent finder's coverage block, and the rules it could not
+                                // complete (a rule with no answer, a file nobody reviewed): marked
+                                // partial now that their entries exist, so none reads clean.
+                                if let Some(extras) = &finder_extras {
+                                    extras.note_after_rules(&mut pipeline_ledger, spec);
+                                    for note in &extras.notes {
+                                        meter.record_note(format!("{spec}: {note}"));
+                                    }
+                                    // What the model judged not a problem here: the operator's
+                                    // own list, kept even when nothing failed.
+                                    pipeline_ledger.record_not_a_problem_notes(
+                                        extras
+                                            .not_a_problem_notes
+                                            .iter()
+                                            .map(|n| format!("{spec}: {n}"))
+                                            .collect(),
+                                    );
+                                    meter.record_note(format!(
+                                        "{spec}: the agent finder wrote {} problems, {} of them citing no rule",
+                                        extras.problems_total, extras.problems_without_rule
+                                    ));
                                 }
                                 // H10: a rule whose scope held back part of the files says so. The
                                 // routing is recomputed here from the same rules and files the
@@ -3529,7 +3612,10 @@ pub async fn audit_repos_with_llm_controlled(
                     repo_findings.len(),
                     crate::scan_ledger::StageAccounting::default(),
                 );
-                classify_repo_findings(&mut repo_findings, spec, &files);
+                // Zach's ruling: a first inspection does not honour a baseline file or waiver
+                // comments found in the client's repository. The rows stay open and the package
+                // prints how many it found.
+                record_first_inspection(&mut repo_findings, &files, &mut pipeline_ledger);
                 // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
                 // `deviation_ceiling`), applied to the LIVE findings so the triage view shows
                 // the same severity the PDF/xlsx will bill. Before this, the bounds ran only at
@@ -3550,7 +3636,11 @@ pub async fn audit_repos_with_llm_controlled(
                 // invisible to the actual-vs-estimated readout.
                 if run_ai_review
                     && !repo_findings.is_empty()
-                    && !meter.stage_blocked(spec, crate::ai_audit::STAGE_FIX)
+                    && !meter.stage_blocked_unless_stored(
+                        spec,
+                        crate::ai_audit::STAGE_FIX,
+                        crate::checkpoint::stage_has_stored_work(&format!("fix_{spec}")),
+                    )
                 {
                     let (fixed_findings, fix_failed_passes) =
                         crate::ai_audit::generate_fix_specifics_in(
@@ -3619,7 +3709,13 @@ pub async fn audit_repos_with_llm_controlled(
     let deep_report = if run_ai_review && deep && !deep_inputs.is_empty() {
         let mut per_repo = Vec::new();
         for (spec, files) in &deep_inputs {
-            if meter.stage_blocked(spec, crate::ai_audit::STAGE_DEEP) {
+            // A resume starts the deep tier whatever its spend: a lens the run store holds is
+            // replayed, and each fresh lens is admitted (or refused) on its own.
+            if meter.stage_blocked_unless_stored(
+                spec,
+                crate::ai_audit::STAGE_DEEP,
+                meter.is_resume(),
+            ) {
                 continue;
             }
             let dr = crate::ai_audit::run_deep_tier(
@@ -4388,6 +4484,43 @@ mod tests {
                  only tier that can evaluate it: {semantic:?}"
             );
         }
+    }
+
+    /// Which problem of which part a row is of stays on the row through the merge stages, so
+    /// grouping can put the rows of one problem in one sub-group.
+    #[test]
+    fn the_finder_problem_captures_stay_on_the_rows_when_bookkeeping_is_held_aside() {
+        let mut f = Finding::default();
+        for (k, v) in [
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE,
+                "acme/app#1",
+            ),
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE,
+                "3",
+            ),
+            (
+                crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE,
+                "Fix it.",
+            ),
+        ] {
+            f.captures.insert(k.to_string(), v.to_string());
+        }
+        let mut rows = vec![f];
+        BookkeepingCaptures::default().take(&mut rows);
+        assert!(rows[0]
+            .captures
+            .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE));
+        assert!(rows[0]
+            .captures
+            .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE));
+        assert!(
+            !rows[0]
+                .captures
+                .contains_key(crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE),
+            "the others are still held aside"
+        );
     }
 
     /// A capture that records bookkeeping (a severity-adjustment sentence, a history status, the
@@ -5563,8 +5696,8 @@ mod tests {
             mk("b.rs", 1, "SEC-NO-HARDCODED-SECRETS-1", "danger()"), // inline-waived
         ];
         classify_repo_findings(&mut findings, "me/api", &files);
-        assert_eq!(findings[0].status, "suppressed-baseline");
-        assert_eq!(findings[1].status, "suppressed-inline");
+        assert_eq!(findings[0].status, "carried-baseline");
+        assert_eq!(findings[1].status, "waived-inline");
         // The reason-less waiver on b.rs:2 surfaced as its own violation.
         assert!(findings
             .iter()

@@ -34,6 +34,8 @@ impl LlmPort for Recorder {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.requested.lock().unwrap().push(req.model.clone());
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
@@ -102,6 +104,7 @@ fn args(
         fix_model: fix_model.map(str::to_string),
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,
@@ -112,6 +115,7 @@ fn args(
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     }
 }
 
@@ -174,7 +178,7 @@ async fn with_no_flags_the_built_in_default_runs_and_the_environment_is_ignored(
     };
     assert!(!requested.is_empty(), "the scan called the scripted model");
     // The scan, the fix stage and the clone judge keep their defaults; the two reviewers have
-    // defaults of their own (stage 1 on Opus 5.5, stage 2 on Fable 5.1).
+    // defaults of their own (stage 1 on Opus 5.5, stage 2 on Fable 5.2).
     let allowed = [
         camerata_server::llm::DEFAULT_MODEL.to_string(),
         camerata_api_types::project::FIX_STAGE_HAIKU_MODEL.to_string(),

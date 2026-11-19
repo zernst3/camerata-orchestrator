@@ -14,14 +14,24 @@
 //!   asks [`crate::ai_audit::UsageMeter::admit`]. A pass that was admitted always finishes, its
 //!   truncation retry included. A pass that was refused is recorded as [`NotRunPass`] and
 //!   reported as NOT RUN.
-//! * **Later stages** (alternative recommendation, calibration, fix generation, the clone judge,
-//!   the deep tier) check the cap before they start
+//! * **Later stages** (alternative recommendation, detail regeneration, calibration, the group
+//!   reviewer, fix generation, the clone judge, the deep tier) check the cap before they start
 //!   ([`crate::ai_audit::UsageMeter::stage_blocked`]) and are recorded as [`NotRunStage`]. A
 //!   stage is blocked once spend reaches the cap AND once the cap has already stopped anything,
 //!   so nothing starts after the cap has bitten. Inside calibration, fix generation and the
 //!   deep tier each batch or call is admitted separately
 //!   ([`crate::ai_audit::UsageMeter::admit_for_stage`]); the remainder of a stage that is
-//!   stopped part way is recorded as `partial`, and its findings pass through unchanged.
+//!   stopped part way is recorded as `partial`, and its findings pass through unchanged. Every
+//!   stage that sends a model call admits it that way (the group reviewer and the clone judge
+//!   included); `ai_audit::spend_limit_stages_tests` runs all eight on a meter already past its
+//!   limit and counts the calls.
+//! * **A resume counts the whole run, and refuses only fresh sends.** The limit is checked
+//!   against `fresh spend + stored spend - replayed` ([`RunControls::stored_spend_usd`], the
+//!   meter's resumed counter), the same figure [`resume_limit_line`] prints. A reply the run
+//!   already holds is never refused: the journal's replay ([`camerata_llm::LlmPort::replays`])
+//!   is asked before admission, and a stage with stored work starts and replays it whatever the
+//!   spend. A resume whose stored replies already pass the limit replays them all and sends
+//!   nothing.
 //! * **Message Batches** cannot be cancelled cheaply once submitted, so the cap is checked
 //!   BEFORE a submission, against a projection (see
 //!   [`crate::ai_audit::UsageMeter::refuse_batch_submission`]). A batch that was submitted runs
@@ -79,6 +89,12 @@ pub struct RunControls {
     pub efficiency: EfficiencyConfig,
     /// `--max-cost-usd`. `None` = no cap.
     pub max_cost_usd: Option<f64>,
+    /// On a resumed run: everything the run's stored replies cost. The spend limit counts it
+    /// from the first moment, so a resume is held to the whole run's spend at every stage, and
+    /// the meter takes off the share a checkpoint replays onto it
+    /// ([`crate::ai_audit::UsageMeter::record_resumed`]) so a stored dollar is counted once. It is
+    /// the figure [`resume_limit_line`] prints. Zero for a run that is not resumed.
+    pub stored_spend_usd: f64,
     /// The pre-flight estimate of the whole run, when the caller computed one. Used ONLY to
     /// decide whether a non-cancellable batch may be submitted (a real-time run is capped on
     /// actual spend alone).
@@ -99,6 +115,17 @@ pub struct RunControls {
     /// `camerata inspect --group-review-model`, `--escalation-rate` and `--escalation-floor`).
     /// A blank `group_review_model` means the built-in default. Never the environment.
     pub review: camerata_api_types::project::ReviewSettings,
+    /// `--finder agent|engine`: which finder the run uses. `Engine` (the existing scan passes) is
+    /// the default until the graded comparison decides.
+    pub finder: crate::ai_audit::agent_finder::FinderChoice,
+    /// `--finder-model`: the agent finder's model. `None` or blank = the built-in default
+    /// ([`crate::ai_audit::agent_finder::DEFAULT_FINDER_MODEL`]). Never the environment.
+    pub finder_model: Option<String>,
+    /// `--finder-force-pieces K` (internal runs only): split every unit into at least K pieces.
+    pub finder_force_pieces: Option<usize>,
+    /// The cost checkpoint's settings: the pre-flight figures it projects from, the run folder
+    /// it records into and the sink that prints it. The approved amount is `max_cost_usd`.
+    pub checkpoint: crate::cost_checkpoint::CheckpointSettings,
 }
 
 impl RunControls {
@@ -123,12 +150,56 @@ impl RunControls {
         }
     }
 
+    /// Fill every model the project sets that this run was not already given: the group reviewer,
+    /// the duplicate check, the agent finder and the clone judge. A model the run already carries
+    /// (a command line flag) wins over the project's; a blank project field leaves the run on the
+    /// built-in default. Never the environment.
+    pub fn fill_models_from_project(
+        &mut self,
+        project: &camerata_api_types::project::ReviewSettings,
+    ) {
+        let blank = |m: &str| m.trim().is_empty();
+        if blank(&self.review.group_review_model) {
+            self.review.group_review_model = project.group_review_model.clone();
+        }
+        if blank(&self.review.dup_check_model) {
+            self.review.dup_check_model = project.dup_check_model.clone();
+        }
+        if self.finder_model.as_deref().is_none_or(blank) && !blank(&project.finder_model) {
+            self.finder_model = Some(project.finder_model.trim().to_string());
+        }
+        if self.clone_judge_model.as_deref().is_none_or(blank) && !blank(&project.clone_judge_model)
+        {
+            self.clone_judge_model = Some(project.clone_judge_model.trim().to_string());
+        }
+    }
+
     /// The model this run's group reviewer (stage 2) calls: the explicit pick, else the built-in
     /// stage 2 default ([`crate::ai_audit::group_review::resolve_group_review_model`]).
     pub fn group_review_model_for(&self) -> String {
         crate::ai_audit::group_review::resolve_group_review_model(Some(
             self.review.group_review_model.as_str(),
         ))
+    }
+
+    /// The model this run's possible-duplicate check calls: the project setting or the
+    /// `--dup-check-model` flag, else Sonnet 5.5. Never the environment.
+    pub fn dup_check_model_for(&self) -> String {
+        crate::possible_duplicate::check::resolve_dup_check_model(Some(
+            self.review.dup_check_model.as_str(),
+        ))
+    }
+
+    /// The model this run's agent finder calls: the explicit pick, else the built-in default.
+    pub fn finder_model_for(&self) -> String {
+        self.finder_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or_else(
+                || crate::ai_audit::agent_finder::DEFAULT_FINDER_MODEL.to_string(),
+                str::to_string,
+            )
     }
 
     /// The model this run's clone judge calls: the explicit pick, else the built-in fast default.
@@ -172,12 +243,24 @@ pub fn models_the_run_will_use(
     let calibration = crate::ai_audit::resolve_calibration_model(calibration_model, &scan);
     let fix =
         crate::ai_audit::resolve_audit_model(controls.fix_model_for(model, calibration_model));
-    let mut roles: Vec<(&str, String)> = vec![
-        ("the scan", scan.clone()),
-        ("calibration", calibration),
-        ("group review", controls.group_review_model_for()),
-        ("fix generation", fix),
-    ];
+    let agent_finder = controls.finder == crate::ai_audit::agent_finder::FinderChoice::Agent;
+    // The agent finder replaces the scan passes, the alternatives stage and calibration, so those
+    // roles are not listed (and not price-checked) when it is on; the finder is.
+    let mut roles: Vec<(&str, String)> = if agent_finder {
+        vec![
+            ("the finder", controls.finder_model_for()),
+            ("group review", controls.group_review_model_for()),
+            ("fix generation", fix),
+        ]
+    } else {
+        vec![
+            ("the scan", scan.clone()),
+            ("calibration", calibration),
+            ("group review", controls.group_review_model_for()),
+            ("fix generation", fix),
+        ]
+    };
+    roles.push(("the duplicate check", controls.dup_check_model_for()));
     if deep {
         roles.push(("the deep tier", scan));
     }
@@ -222,6 +305,24 @@ impl RunControls {
             unpriced.join(" and "),
             if unpriced.len() == 1 { "has" } else { "have" }
         ))
+    }
+}
+
+/// The line a resume prints beside the spend limit, before any call: the limit counts the whole
+/// run, the stored replies included.
+pub fn resume_limit_line(cap_usd: f64, stored_usd: f64) -> String {
+    if stored_usd >= cap_usd {
+        format!(
+            "  spend limit: ${cap_usd:.2}. The limit counts the whole run, stored replies \
+             included, and the stored replies already cost ${stored_usd:.2}: no further call will \
+             be sent. Raise the limit by what you are willing to spend on what remains."
+        )
+    } else {
+        format!(
+            "  spend limit: ${cap_usd:.2}. The limit counts the whole run, stored replies \
+             included: ${stored_usd:.2} is already spent, so ${:.2} remain for what is left to do.",
+            cap_usd - stored_usd
+        )
     }
 }
 
@@ -382,6 +483,10 @@ pub struct CostCapRecord {
     /// run says which of the two happened (see [`Self::cause`]).
     #[serde(default)]
     pub cost_unknown: bool,
+    /// The latest cost checkpoint (see [`crate::cost_checkpoint`]); when it stopped the run, the
+    /// cause is [`crate::cost_checkpoint::CAUSE_PROJECTED`].
+    #[serde(default)]
+    pub checkpoint: Option<crate::cost_checkpoint::CostCheckpoint>,
 }
 
 /// The cause the spend limit's disclosures name when a call's cost was unknown. No dollar
@@ -410,6 +515,8 @@ impl CostCapRecord {
     pub fn cause(&self) -> &'static str {
         if self.cost_unknown {
             CAUSE_COST_UNKNOWN
+        } else if self.checkpoint.as_ref().is_some_and(|c| c.stopped) {
+            crate::cost_checkpoint::CAUSE_PROJECTED
         } else {
             CAUSE_LIMIT_REACHED
         }
@@ -457,6 +564,9 @@ impl CostCapRecord {
             }
         }
         self.cost_unknown |= later.cost_unknown;
+        if self.checkpoint.as_ref().is_none_or(|c| !c.stopped) && later.checkpoint.is_some() {
+            self.checkpoint = later.checkpoint;
+        }
     }
 
     pub fn failed_passes(&self) -> Vec<crate::ai_audit::FailedPass> {
@@ -581,17 +691,19 @@ mod tests {
     fn the_models_a_run_uses_are_listed_by_role_and_deduplicated() {
         let off = fix_follows_calibration();
         let all = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &["ARCH-1"], &off);
-        // A13: stage 1 and stage 2 have defaults of their own now (Opus 5.5 and Fable 5.1), so
+        // A13: stage 1 and stage 2 have defaults of their own now (Opus 5.5 and Fable 5.2), so
         // the scan and the fix pass share a model and the two reviewers each have theirs.
         let by_model: std::collections::BTreeMap<&str, &str> = all
             .iter()
             .map(|(roles, model)| (model.as_str(), roles.as_str()))
             .collect();
-        assert_eq!(all.len(), 3, "three models fill the roles: {all:?}");
+        // The duplicate check's own default, Sonnet 5.5, is a fourth.
+        assert_eq!(all.len(), 4, "four models fill the roles: {all:?}");
+        assert_eq!(by_model["claude-sonnet-5-5"], "the duplicate check");
         assert!(by_model["claude-sonnet-5"].contains("the scan"));
         assert!(by_model["claude-sonnet-5"].contains("fix generation"));
         assert_eq!(by_model["claude-opus-5-5"], "calibration");
-        assert_eq!(by_model["claude-fable-5-1"], "group review");
+        assert_eq!(by_model["claude-fable-5-2"], "group review");
         assert!(!all
             .iter()
             .any(|(roles, _)| roles.contains("clone judge") || roles.contains("deep")));
@@ -613,6 +725,92 @@ mod tests {
             text.contains("the deep tier") && text.contains("the clone judge"),
             "{text}"
         );
+    }
+
+    /// The duplicate check's model: the project setting or `--dup-check-model`, else Sonnet 5.5,
+    /// and never the environment (a variable of the likeliest names changes nothing).
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_duplicate_check_model_defaults_to_sonnet_5_5_and_is_never_read_from_the_environment() {
+        let _a = camerata_test_env::EnvGuard::set("CAMERATA_DUP_CHECK_MODEL", "env-model");
+        let _b = camerata_test_env::EnvGuard::set("CAMERATA_DUPLICATE_CHECK_MODEL", "env-model");
+        let mut controls = RunControls::default();
+        assert_eq!(controls.dup_check_model_for(), "claude-sonnet-5-5");
+        controls.review.dup_check_model = "  ".to_string();
+        assert_eq!(controls.dup_check_model_for(), "claude-sonnet-5-5");
+        controls.review.dup_check_model = " claude-opus-5-5 ".to_string();
+        assert_eq!(controls.dup_check_model_for(), "claude-opus-5-5");
+    }
+
+    /// A project's finder, duplicate check and clone judge models reach the run's controls; a
+    /// blank project field leaves the built-in default; a model the run already carries (the
+    /// command line flag) wins over the project's. The group reviewer follows the same rule.
+    #[test]
+    fn the_projects_models_fill_the_controls_and_a_flag_wins_over_them() {
+        use camerata_api_types::project::ReviewSettings;
+        let project = ReviewSettings {
+            finder_model: "claude-opus-5-5".to_string(),
+            dup_check_model: "claude-haiku-5-5".to_string(),
+            clone_judge_model: "claude-haiku-4-5-20251001".to_string(),
+            group_review_model: "claude-opus-5-5".to_string(),
+            ..ReviewSettings::default()
+        };
+        // Nothing given on the command line: the project's models are the run's.
+        let mut controls = RunControls::default();
+        controls.fill_models_from_project(&project);
+        assert_eq!(controls.finder_model_for(), "claude-opus-5-5");
+        assert_eq!(controls.dup_check_model_for(), "claude-haiku-5-5");
+        assert_eq!(
+            controls.clone_judge_model_for(),
+            "claude-haiku-4-5-20251001"
+        );
+        assert_eq!(controls.group_review_model_for(), "claude-opus-5-5");
+        // A blank project: the built-in defaults.
+        let mut blank = RunControls::default();
+        blank.fill_models_from_project(&ReviewSettings::default());
+        assert_eq!(blank.finder_model_for(), "claude-fable-5-2");
+        assert_eq!(blank.dup_check_model_for(), "claude-sonnet-5-5");
+        assert_eq!(blank.clone_judge_model_for(), "claude-haiku-5-5");
+        // A flag wins over the project, for every role.
+        let mut flagged = RunControls {
+            finder_model: Some("flag-finder".to_string()),
+            clone_judge_model: Some("flag-judge".to_string()),
+            review: ReviewSettings {
+                dup_check_model: "flag-dup".to_string(),
+                group_review_model: "flag-group".to_string(),
+                ..ReviewSettings::default()
+            },
+            ..RunControls::default()
+        };
+        flagged.fill_models_from_project(&project);
+        assert_eq!(flagged.finder_model_for(), "flag-finder");
+        assert_eq!(flagged.dup_check_model_for(), "flag-dup");
+        assert_eq!(flagged.clone_judge_model_for(), "flag-judge");
+        assert_eq!(flagged.group_review_model_for(), "flag-group");
+        // The pre-flight list names the chosen models.
+        let listed = models_the_run_will_use(
+            Some("claude-sonnet-5-5"),
+            None,
+            false,
+            &[camerata_checks::clone_rules::RULE_SINGLE_SOURCE],
+            &{
+                let mut c = RunControls {
+                    finder: crate::ai_audit::agent_finder::FinderChoice::Agent,
+                    ..RunControls::default()
+                };
+                c.fill_models_from_project(&project);
+                c
+            },
+        );
+        let model_of = |role: &str| {
+            listed
+                .iter()
+                .find(|(roles, _)| roles.contains(role))
+                .map(|(_, m)| m.clone())
+                .unwrap()
+        };
+        assert_eq!(model_of("the finder"), "claude-opus-5-5");
+        assert_eq!(model_of("the clone judge"), "claude-haiku-4-5-20251001");
     }
 
     /// The clone judge is listed (and so priced and lock-checked) on the model the run will call:
@@ -719,6 +917,7 @@ mod tests {
                 class: camerata_llm::failure::FailureClass::SpendLimit,
             }],
             notes: vec![],
+            checkpoint: None,
         };
         let failed = record.failed_passes();
         assert_eq!(failed.len(), 3, "2 chunks + 1 stage: {failed:?}");
@@ -824,6 +1023,7 @@ mod tests {
             notes: Vec::new(),
             repos_not_finished: Vec::new(),
             cost_unknown: true,
+            checkpoint: None,
         };
         assert!(record.stopped_the_run());
         let failed = record.failed_passes();
@@ -858,5 +1058,28 @@ mod tests {
         };
         assert!(!record.stopped_the_run());
         assert!(record.failed_passes().is_empty());
+    }
+
+    #[test]
+    fn a_resume_prints_the_stored_spend_beside_the_limit_before_any_call() {
+        let over = resume_limit_line(25.0, 43.51);
+        assert!(
+            over.contains("$25.00") && over.contains("$43.51"),
+            "both figures: {over}"
+        );
+        assert!(
+            over.contains("counts") && over.contains("stored"),
+            "it says the limit counts the stored spend: {over}"
+        );
+        assert!(
+            over.contains("no further call will be sent"),
+            "past the limit nothing more is sent: {over}"
+        );
+        let under = resume_limit_line(25.0, 10.0);
+        assert!(
+            under.contains("$15.00 remain"),
+            "what is left under the limit: {under}"
+        );
+        assert!(!under.contains("no further call"), "{under}");
     }
 }

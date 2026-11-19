@@ -713,7 +713,7 @@ fn a_summary_edit_goes_stale_when_the_model_summary_changes() {
 }
 
 #[test]
-fn a_summary_edit_reaches_the_client_tree_summary_and_the_internal_source() {
+fn a_summary_edit_reaches_the_internal_tree_only_and_never_the_client_tree() {
     let sealed = three_with_summaries("The model says");
     let edit = summary_edit_of(
         1,
@@ -725,9 +725,11 @@ fn a_summary_edit_reaches_the_client_tree_summary_and_the_internal_source() {
 
     let client = crate::report_export::tree_view::tree_view(&reviewed, false);
     let node = client.iter().find(|n| n.id == "rule:SEC-1").unwrap();
-    assert_eq!(node.summary, edit.new);
+    // The summary is what the reviewer reads: a client tree carries none, edited or not.
+    assert_eq!(node.summary, "");
     let internal = crate::report_export::tree_view::tree_view(&reviewed, true);
     let node = internal.iter().find(|n| n.id == "rule:SEC-1").unwrap();
+    assert_eq!(node.summary, edit.new);
     assert_eq!(
         node.internal.as_ref().unwrap().summary_source,
         "reviewer",

@@ -156,17 +156,20 @@ fn req_w17_layer_is_untouched_on_every_corpus_rule() {
     }
     let expected: BTreeMap<String, usize> = [
         ("architecture", 7usize),
-        ("framework", 114),
-        // 91 plus STYLE-NEEDLESS-COMPLEXITY-1 (W29 Wave D).
-        ("language", 92),
+        // 114 plus JAVASCRIPT-REACT-EFFECT-CLEANUP-1 (a new rule, not a re-labelled one).
+        ("framework", 115),
+        // 91 plus STYLE-NEEDLESS-COMPLEXITY-1 (W29 Wave D) and JAVASCRIPT-ASYNC-REJECTION-HANDLED-1
+        // (a new rule, not a re-labelled one).
+        ("language", 93),
         ("library", 34),
         // 35 plus the 13 Firebase rules (MASTER-SEQUENCE item 24), all `platform`.
         ("platform", 48),
         ("testing", 7),
         // 136 plus UI-STATE-SHAPE-1 (W29 Wave D), TESTING-MEANINGFUL-ASSERTION-1 (22e) and
         // SEC-NO-AI-REVIEWER-INSTRUCTIONS-1 (prompt-injection defense), SEC-NO-END-OF-LIFE-RUNTIME-1
-        // and SEC-NO-KNOWN-VULNERABLE-RUNTIME-1 (runtime end of life and runtime vulnerabilities).
-        ("universal", 141),
+        // and SEC-NO-KNOWN-VULNERABLE-RUNTIME-1 (runtime end of life and runtime vulnerabilities),
+        // and ARCH-BOUNDED-LIST-READS-1 (unbounded list reads, a new rule, not a re-labelled one).
+        ("universal", 142),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))

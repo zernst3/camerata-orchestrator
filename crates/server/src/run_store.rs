@@ -233,6 +233,27 @@ pub struct ModelsRecord {
     /// saved before they did.
     #[serde(default)]
     pub resolved: bool,
+    /// The group reviewer's resolved id, so a resume keeps the model the run started on (no mixed
+    /// models in one run's group review) even after the built-in default moves. Empty for a run
+    /// saved before it was recorded; such a resume uses the current pick. Not part of
+    /// [`Self::matches_for_resume`]: [`Self::hold_group_review_model`] keeps it when the resume
+    /// names no model, and refuses a resume that names a different one.
+    #[serde(default)]
+    pub group_review: String,
+    /// The finder the run started with, `agent` or `engine`, so a resume keeps it (a run keeps its
+    /// finder for life) even after the project's setting changes. Empty for a run saved before it
+    /// was recorded, which ran the engine finder. Not part of [`Self::matches_for_resume`], so
+    /// older runs still resume: [`Self::hold_finder`] keeps it.
+    #[serde(default)]
+    pub finder: String,
+}
+
+/// The word a finder is recorded as.
+fn finder_word(finder: crate::ai_audit::agent_finder::FinderChoice) -> &'static str {
+    match finder {
+        crate::ai_audit::agent_finder::FinderChoice::Agent => "agent",
+        crate::ai_audit::agent_finder::FinderChoice::Engine => "engine",
+    }
 }
 
 impl ModelsRecord {
@@ -258,16 +279,81 @@ impl ModelsRecord {
             backend: backend.to_string(),
             mode: mode.to_string(),
             resolved: true,
+            group_review: controls.group_review_model_for(),
+            finder: finder_word(controls.finder).to_string(),
         }
     }
 
+    /// Hold a resumed run to the finder it started with, and return the run note when that
+    /// differs from what the controls chose (the project's setting now). `agent` recorded gives
+    /// the agent finder; anything else, the empty record of an older run included, gives the
+    /// engine.
+    pub fn hold_finder(&self, controls: &mut crate::cost_cap::RunControls) -> Option<String> {
+        let recorded = if self.finder.trim() == "agent" {
+            crate::ai_audit::agent_finder::FinderChoice::Agent
+        } else {
+            crate::ai_audit::agent_finder::FinderChoice::Engine
+        };
+        let differs = controls.finder != recorded;
+        controls.finder = recorded;
+        differs.then(|| {
+            format!(
+                "The finder stays on {}, the one this run started with.",
+                finder_word(recorded)
+            )
+        })
+    }
+
+    /// Hold a resumed run to the group review model it started with, and return the one line the
+    /// resume pre-flight prints about it.
+    ///
+    /// `explicit` is the group review model the resume was explicitly given (the command line's
+    /// `--group-review-model`, or a project setting that is not just the built-in default), if
+    /// any. With none, the recorded model is kept whatever the default is now (no mixed models in
+    /// one run's group review). With one that differs from the recorded model the resume is
+    /// refused, exactly as a different scan, calibration or fix model is: the stored replies came
+    /// from the recorded model.
+    pub fn hold_group_review_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+        explicit: Option<&str>,
+    ) -> Result<String, String> {
+        let recorded = self.group_review.trim();
+        if recorded.is_empty() {
+            return Ok(format!(
+                "Group review runs on {}: this run did not record a group review model.",
+                controls.group_review_model_for()
+            ));
+        }
+        if let Some(pick) = explicit.map(str::trim).filter(|m| !m.is_empty()) {
+            if pick != recorded {
+                return Err(format!(
+                    "this run's group review is on {recorded}, and this resume asks for {pick}. \
+                     The stored group review replies came from {recorded}, so resume it with \
+                     the same model, or start a new run"
+                ));
+            }
+        }
+        controls.review.group_review_model = recorded.to_string();
+        Ok(format!(
+            "Group review stays on {recorded}, the model this run started with."
+        ))
+    }
+
     /// Whether a resume with `now` may reuse a run saved with `self`. A resolved record must be
-    /// equal. A record from before ids were resolved is compared on the audit model, the backend
-    /// and the mode it recorded, and on a calibration or fix pick only when it recorded one (an
-    /// empty raw pick said nothing about what ran).
+    /// equal to `now` in its audit, calibration and fix models, its backend and its mode; the
+    /// group review model is not compared here ([`Self::hold_group_review_model`] keeps it, and
+    /// refuses an explicit different one). A record from before ids were resolved is compared on
+    /// the audit model, the backend and the mode it recorded, and on a calibration or fix pick
+    /// only when it recorded one (an empty raw pick said nothing about what ran).
     pub fn matches_for_resume(&self, now: &ModelsRecord) -> bool {
         if self.resolved {
-            return self == now;
+            // The group review model is kept on resume, not compared (see `group_review`).
+            return self.audit == now.audit
+                && self.calibration == now.calibration
+                && self.fix == now.fix
+                && self.backend == now.backend
+                && self.mode == now.mode;
         }
         let same_or_unrecorded = |saved: &str, now: &str| saved.is_empty() || saved == now;
         self.audit == now.audit
@@ -907,6 +993,12 @@ impl RunStore {
         read_json(&self.dir.join("prior_manifest.json"))
     }
 
+    /// What every stored call of this run cost: the figure a spend limit counts up front on a
+    /// resume ([`crate::cost_cap::RunControls::stored_spend_usd`]).
+    pub fn stored_usd(&self) -> f64 {
+        journal::stored_spend(&self.dir)
+    }
+
     pub fn run_id(&self) -> String {
         self.lock_state().record.run_id.clone()
     }
@@ -914,6 +1006,28 @@ impl RunStore {
     /// The record as it stands.
     pub fn record(&self) -> RunRecord {
         self.lock_state().record.clone()
+    }
+
+    /// [`ModelsRecord::hold_group_review_model`] for this run. A run saved before the group review
+    /// model was recorded takes it from the group review replies it stored, so the resume reuses
+    /// them; with none stored the current pick stands.
+    pub fn hold_group_review_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+        explicit: Option<&str>,
+    ) -> Result<String, String> {
+        let mut models = self.record().models;
+        if models.group_review.trim().is_empty() {
+            if let Some(stored) = journal::stored_group_review_model(&self.dir) {
+                models.group_review = stored;
+            }
+        }
+        models.hold_group_review_model(controls, explicit)
+    }
+
+    /// [`ModelsRecord::hold_finder`] for this run.
+    pub fn hold_finder(&self, controls: &mut crate::cost_cap::RunControls) -> Option<String> {
+        self.record().models.hold_finder(controls)
     }
 
     /// The secret the prompt tokens of this run are drawn from.
@@ -1445,6 +1559,8 @@ pub struct ResumeEstimate {
     pub calls_to_send_again: usize,
     /// The upper estimate in US dollars of the work that remains.
     pub usd: f64,
+    /// What the stored calls cost when they were made, in US dollars.
+    pub stored_usd: f64,
     /// How the figure was reached, in one sentence.
     pub basis: String,
 }
@@ -1466,6 +1582,10 @@ impl ResumeEstimate {
         out.push_str(&format!(
             "  estimated cost of the remaining work: up to ${:.2} ({})\n",
             self.usd, self.basis
+        ));
+        out.push_str(&format!(
+            "  the stored calls cost ${:.2} when they were made; a spend limit counts it\n",
+            self.stored_usd
         ));
         out
     }

@@ -25,13 +25,15 @@
 //! "Show below the line" is then a flag on the view state: it sends no request and writes
 //! nothing. Only "Show 100 more candidates" reads another page.
 
+use camerata_api_types::review::PossibleFalsePositive;
 use camerata_api_types::review_view::{EscalationBudgetOutcome, QueueRow, QueueView, SiteRow};
 use camerata_ui::review_io::ReviewApi;
 use camerata_ui_core::edits::DetailContext;
 use camerata_ui_core::queue::{
-    band_of, budget_line, counts_line, decision_text, detail_context, empty_text,
-    has_needed_me_box, keys_hint, layout, needed_me_checked, needed_me_enabled, needed_me_line,
-    needed_me_write, node_cell, node_door, node_title, queue_command, queue_keys_armed,
+    band_of, budget_line, counts_line, decision_text, detail_context, dup_together_label,
+    empty_text, fp_first_label, has_needed_me_box, keys_hint, layout, needed_me_checked,
+    needed_me_enabled, needed_me_line, needed_me_write, node_cell, node_door, node_title,
+    possible_duplicate_count, possible_false_positive_count, queue_command, queue_keys_armed,
     rate_changed_text, reason_cell, site_door, Band, Entry, Layout, QueueCommand, QueueState,
     NEEDED_ME_HINT, ROWS_PER_PAGE,
 };
@@ -81,6 +83,9 @@ pub(crate) struct QueuePrompt {
     pub state: TriageState,
     pub reason: String,
     pub error: Option<String>,
+    /// A decision on a place that carries other rules (D2): what it writes and leaves out. The
+    /// reason is required and the sentence names every rule.
+    pub plan: Option<camerata_ui_core::tree::batch::BatchPlan>,
 }
 
 /// Rows drawn for the loading state.
@@ -107,6 +112,12 @@ pub(crate) fn QueueScreen(
     #[props(default)] on_focus: Callback<PaneFocus>,
     #[props(default)] on_focus_row: Callback<String>,
     #[props(default)] on_toggle_below: Callback<()>,
+    /// "Possible false positives first": a look only, like "Show below the line".
+    #[props(default)]
+    on_toggle_fp_first: Callback<()>,
+    /// "Possible duplicates together": a look only, like "Show below the line".
+    #[props(default)]
+    on_toggle_dup_together: Callback<()>,
     #[props(default)] on_more: Callback<()>,
     #[props(default)] on_more_below: Callback<()>,
     #[props(default)] on_needed_me: Callback<String>,
@@ -126,6 +137,9 @@ pub(crate) fn QueueScreen(
     /// Something the reviewer did in the site detail.
     #[props(default)]
     on_detail: Callback<DetailEvent>,
+    /// The carried rules the reviewer unticked out of the next place decision.
+    #[props(default)]
+    unticked: std::collections::BTreeSet<String>,
 ) -> Element {
     let armed = queue_keys_armed(focus);
     let prompt_open = prompt.is_some();
@@ -176,7 +190,14 @@ pub(crate) fn QueueScreen(
                     }
                 }
                 if let Some(v) = view.as_ref() {
-                    QueueHead { view: v.clone(), on_settings }
+                    QueueHead {
+                        view: v.clone(),
+                        fp_first: state.fp_first,
+                        dup_together: state.dup_together,
+                        on_settings,
+                        on_toggle_fp_first,
+                        on_toggle_dup_together,
+                    }
                     if empty {
                         p { class: "pane-empty review-queue-empty", "{empty_text(v)}" }
                     }
@@ -241,6 +262,7 @@ pub(crate) fn QueueScreen(
                         row,
                         prompt: prompt.clone(),
                         detail: detail.clone(),
+                        unticked: unticked.clone(),
                         on_detail,
                         on_needed_me,
                         on_open_site,
@@ -277,9 +299,19 @@ fn entry_owned(e: &Entry<'_>) -> OwnedEntry {
 
 // ── The head ──────────────────────────────────────────────────────────────────────────────
 
-/// The title, the budget sentence, the counts and Needed me.
+/// The title, the budget sentence, the counts, Needed me and the "Possible false positives
+/// first" look (only when a loaded row is flagged).
 #[component]
-fn QueueHead(view: QueueView, on_settings: Callback<()>) -> Element {
+fn QueueHead(
+    view: QueueView,
+    fp_first: bool,
+    dup_together: bool,
+    on_settings: Callback<()>,
+    on_toggle_fp_first: Callback<()>,
+    on_toggle_dup_together: Callback<()>,
+) -> Element {
+    let flagged = possible_false_positive_count(&view);
+    let paired = possible_duplicate_count(&view);
     rsx! {
         div { class: "review-queue-head",
             div { class: "review-queue-title",
@@ -294,6 +326,28 @@ fn QueueHead(view: QueueView, on_settings: Callback<()>) -> Element {
             }
             p { class: "review-queue-counts", "{counts_line(&view)}" }
             p { class: "review-queue-needed", "{needed_me_line(&view.needed_me)}" }
+            if flagged > 0 {
+                div { class: "review-queue-fp",
+                    button {
+                        class: "btn-edit-sm review-queue-fp-first",
+                        "aria-pressed": if fp_first { "true" } else { "false" },
+                        title: "A look only. It lists the rows the engine has reasons to doubt first inside each band. Every row stays, and nothing is sent or written.",
+                        onclick: move |_| on_toggle_fp_first.call(()),
+                        "{fp_first_label(&view, fp_first)}"
+                    }
+                }
+            }
+            if paired > 0 {
+                div { class: "review-queue-fp",
+                    button {
+                        class: "btn-edit-sm review-queue-dup-together",
+                        "aria-pressed": if dup_together { "true" } else { "false" },
+                        title: "A look only. It lists rows of causes at the same place side by side inside each band. Every row stays, and nothing is sent or written.",
+                        onclick: move |_| on_toggle_dup_together.call(()),
+                        "{dup_together_label(&view, dup_together)}"
+                    }
+                }
+            }
         }
     }
 }
@@ -425,6 +479,26 @@ fn QueueRowView(
                     " "
                 }
                 "{reason_cell(&row)}"
+                if site.possible_false_positive.is_some() {
+                    " "
+                    span {
+                        class: "mark-fp",
+                        title: "{camerata_ui_core::tree::possible_false_positive_tip(site)}",
+                        "{PossibleFalsePositive::TERM}"
+                    }
+                }
+                if site.possible_duplicate_of.is_some() || !site.same_place_as.is_empty() {
+                    " "
+                    span {
+                        class: "mark-dup",
+                        title: "{camerata_ui_core::tree::possible_duplicate_tip(site)}",
+                        "{camerata_api_types::review_view::SamePlaceView::TERM}"
+                    }
+                }
+                if let Some(chip) = camerata_ui_core::tree::place::also_match_chip(site) {
+                    " "
+                    span { class: "{chip.class}", title: "{chip.tip}", "{chip.label}" }
+                }
             }
             td { class: "col-sev",
                 span { class: "tree-badge tree-badge-{severity_badge(&site.severity)}", "{severity_label(&site.severity)}" }
@@ -551,6 +625,7 @@ fn QueueSide(
     ctx: DetailContext,
     prompt: Option<QueuePrompt>,
     detail: DetailPanel,
+    unticked: std::collections::BTreeSet<String>,
     on_detail: Callback<DetailEvent>,
     on_needed_me: Callback<String>,
     on_open_site: Callback<String>,
@@ -607,6 +682,7 @@ fn QueueSide(
             ticked: false,
             batch_tick: false,
             stack: false,
+            unticked,
             panel: detail,
             ctx,
             row: row.site.clone(),
@@ -632,10 +708,22 @@ fn QueuePromptView(
     on_cancel: Callback<()>,
 ) -> Element {
     let p = prompt;
+    let sentence = p
+        .plan
+        .as_ref()
+        .map(camerata_ui_core::tree::batch::plan_sentence);
+    let target = if p.plan.is_some() {
+        "this place"
+    } else {
+        "this site"
+    };
     rsx! {
         div { class: "queue-reason-prompt",
             label { class: "rule-modal-label",
-                "Reason for \u{201c}{p.state.label()}\u{201d} on this site (required)"
+                "Reason for \u{201c}{p.state.label()}\u{201d} on {target} (required)"
+            }
+            if let Some(sentence) = sentence {
+                p { class: "batch-sentence", "{sentence}" }
             }
             textarea {
                 class: "addressee-input queue-reason-input",
@@ -735,6 +823,7 @@ pub(crate) fn QueueHost(
     let mut focus = use_signal(|| PaneFocus::Elsewhere);
     let mut prompt = use_signal(|| Option::<QueuePrompt>::None);
     let mut undo = use_signal(|| Option::<TreeUndo>::None);
+    let mut place_unticked = use_signal(std::collections::BTreeSet::<String>::new);
     let mut now_ms = use_signal(|| 0u64);
 
     let toast = use_callback(move |(kind, message): (crate::toast::ToastKind, String)| {
@@ -854,6 +943,11 @@ pub(crate) fn QueueHost(
             });
             let run = run_id();
             let api = api.clone();
+            // The queue row shows the row that heads its place; the decision is made on it, not
+            // on whichever candidate at the place ranked best.
+            let key = row
+                .as_ref()
+                .map_or_else(|| key.clone(), |r| r.site_key.clone());
             spawn(async move {
                 match super::site_detail::post_ruling(
                     &*api.writes,
@@ -907,12 +1001,38 @@ pub(crate) fn QueueHost(
             ));
             return;
         }
+        // A row that carries other rules at its place is decided as the place: the plan names
+        // every rule it writes and leaves out, and the reason is required.
+        let carrier = view.peek().as_ref().and_then(|v| {
+            v.escalated
+                .iter()
+                .chain(&v.below)
+                .find(|r| r.candidate.key == key)
+                .map(|r| r.site.clone())
+                .filter(|s| !s.carries.is_empty() && !s.place_id.is_empty())
+        });
+        if let (Some(site), Some(decision)) = (
+            carrier,
+            camerata_ui_core::tree::batch::decision_state_for(st),
+        ) {
+            let plan =
+                camerata_ui_core::tree::place::place_plan(&site, &decision, &place_unticked.peek());
+            prompt.set(Some(QueuePrompt {
+                key,
+                state: st,
+                reason: String::new(),
+                error: None,
+                plan: Some(plan),
+            }));
+            return;
+        }
         match PaneCommand::decide(st) {
             PaneCommand::PromptFor(st) => prompt.set(Some(QueuePrompt {
                 key,
                 state: st,
                 reason: String::new(),
                 error: None,
+                plan: None,
             })),
             _ => decide.call((key, st, String::new())),
         }
@@ -952,20 +1072,51 @@ pub(crate) fn QueueHost(
         QUEUE_REGION_ID,
     );
 
-    let commit = use_callback(move |()| {
-        let Some(p) = prompt.peek().clone() else {
-            return;
-        };
-        if p.reason.trim().is_empty() {
-            prompt.set(Some(QueuePrompt {
-                error: Some(format!(
-                    "A reason is required to move 1 site to \u{201c}{}\u{201d}.",
-                    p.state.label()
-                )),
-                ..p
-            }));
-        } else {
-            decide.call((p.key, p.state, p.reason));
+    let commit = use_callback({
+        let api = api.clone();
+        move |()| {
+            let Some(p) = prompt.peek().clone() else {
+                return;
+            };
+            if p.reason.trim().is_empty() {
+                prompt.set(Some(QueuePrompt {
+                    error: Some(format!(
+                        "A reason is required to move {} to \u{201c}{}\u{201d}.",
+                        if p.plan.is_some() {
+                            "this place"
+                        } else {
+                            "1 site"
+                        },
+                        p.state.label()
+                    )),
+                    ..p
+                }));
+            } else if let Some(plan) = p.plan.clone() {
+                let api = api.clone();
+                let run = run_id();
+                spawn(async move {
+                    match super::tree::commit_batch(&*api.writes, &plan, &p.reason, &run).await {
+                        Ok(decision_id) => {
+                            undo.set(Some(TreeUndo::for_batch(
+                                &decision_id,
+                                plan.keys.len(),
+                                p.state,
+                                epoch.elapsed().as_millis() as u64,
+                            )));
+                            prompt.set(None);
+                            super::viewer::focus_element(QUEUE_REGION_ID);
+                            after_write.call(());
+                        }
+                        Err(message) => {
+                            if let Some(open) = prompt.write().as_mut() {
+                                open.error = Some(message);
+                            }
+                        }
+                    }
+                });
+            } else {
+                decide.call((p.key, p.state, p.reason));
+            }
         }
     });
 
@@ -1162,6 +1313,8 @@ pub(crate) fn QueueHost(
             },
             on_focus_row: move |key: String| state.write().focus(&key),
             on_toggle_below: move |()| state.write().toggle_below(),
+            on_toggle_fp_first: move |()| state.write().toggle_fp_first(),
+            on_toggle_dup_together: move |()| state.write().toggle_dup_together(),
             on_more: move |()| state.write().show_more(),
             on_more_below: more_below,
             on_needed_me: needed_me,
@@ -1191,6 +1344,7 @@ pub(crate) fn QueueHost(
             },
             on_retry: move |()| reload.call(()),
             detail: detail.panel(),
+            unticked: place_unticked.read().clone(),
             on_detail: move |event: DetailEvent| match event {
                 // The lane's own: a decision and the code viewer.
                 DetailEvent::Decide(st) => decide_cursor.call(st),
@@ -1207,6 +1361,21 @@ pub(crate) fn QueueHost(
                 }
                 // There is no batch in the queue to tick an outlier into.
                 DetailEvent::Tick => {}
+                DetailEvent::TickCarried(carried_key) => {
+                    if let Some((row, _)) = cursor_site() {
+                        if let Some(rule) = row.carries.iter().find(|c| c.site_key == carried_key) {
+                            let mut ticks = camerata_ui_core::tree::place::PlaceTicks {
+                                unticked: place_unticked.peek().clone(),
+                            };
+                            if ticks.toggle(rule) {
+                                place_unticked.set(ticks.unticked);
+                            }
+                        }
+                    }
+                }
+                DetailEvent::GoTo(key, rule_id, node_id) => {
+                    open_door.call(Door::Site { key, rule_id, node_id });
+                }
                 other => {
                     if let Some((row, ctx)) = cursor_site() {
                         detail.handle(other, &row, &ctx, &run_id());

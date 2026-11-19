@@ -155,9 +155,9 @@ pub(crate) fn render_scan_results_for_chat(
 
     for f in findings {
         *by_severity.entry(f.severity.as_str()).or_insert(0) += 1;
-        if f.status == "active" {
+        if f.status == "active" && !f.preview {
             active_count += 1;
-        } else if f.status.starts_with("suppressed") {
+        } else if f.preview || crate::finding_status::is_suppressed(&f.status) {
             suppressed_count += 1;
         }
         if f.preview {
@@ -211,8 +211,8 @@ pub(crate) fn render_scan_results_for_chat(
     let mut sorted: Vec<&crate::onboard::Finding> = findings.iter().collect();
     sorted.sort_by(|a, b| {
         // Active before suppressed
-        let a_active = a.status == "active";
-        let b_active = b.status == "active";
+        let a_active = a.status == "active" && !a.preview;
+        let b_active = b.status == "active" && !b.preview;
         b_active
             .cmp(&a_active)
             .then_with(|| sev_rank(&a.severity).cmp(&sev_rank(&b.severity)))

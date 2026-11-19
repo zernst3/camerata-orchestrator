@@ -43,6 +43,7 @@ pub mod clarify_resume;
 pub mod client_lock;
 pub mod client_provenance;
 pub mod client_source;
+pub mod client_text;
 pub mod connections;
 /// H5: the three-pass consensus option (off by default).
 pub mod consensus;
@@ -62,7 +63,9 @@ pub mod escalation;
 pub mod eval;
 pub mod evidence;
 pub mod feature_flags;
+pub mod finding_status;
 pub mod fix;
+pub mod follow_reviewers;
 pub mod github_issues;
 mod governed_rules;
 pub mod grounding;
@@ -74,13 +77,18 @@ pub mod jobs;
 // sites (uow, lib) are unchanged.
 pub use camerata_app_core::lifecycle;
 pub mod cost_cap;
+pub mod cost_checkpoint;
 pub mod failure_report;
+pub mod rewrite_advisory;
+/// The cli backend's Claude Code version pre-flight, for callers of the server.
+pub use camerata_llm::claude_version;
 /// The failure classes and typed transport failure, re-exported for callers of the server.
 pub use camerata_llm::failure;
 pub mod dev_implement_run;
 pub mod efficiency;
 pub mod live_fleet;
 pub mod llm;
+pub mod machine_files;
 mod native_units;
 pub mod notify;
 pub mod onboard;
@@ -118,6 +126,7 @@ pub mod run_store;
 mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;
+mod scan_cli_version;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
@@ -157,11 +166,13 @@ mod mechanical_gate;
 pub mod model_profile_cascade;
 pub mod model_registry;
 pub mod model_tier;
+/// M4: wording problems recorded as review flags on the row (one list in one capture), never as a
+/// failure that locks a run or an export. See the module doc comment.
+pub mod possible_duplicate;
+pub mod possible_false_positive;
 pub mod provider_policy;
 pub mod rate_limit;
 pub mod release_gate;
-/// M4: wording problems recorded as review flags on the row (one list in one capture), never as a
-/// failure that locks a run or an export. See the module doc comment.
 pub mod review_flags;
 /// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
 /// per-stage row-accounting, so a rule that never ran can never be reported as
@@ -177,6 +188,8 @@ pub mod terminal;
 pub mod test_git;
 pub mod test_tamper;
 pub mod tool_provisioning;
+mod tool_row_groups;
+pub use tool_row_groups::settle_tool_causes;
 pub mod transcript;
 pub mod uow;
 pub mod update_branch_run;
@@ -1434,6 +1447,10 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/client-engagement",
             post(set_client_engagement_handler),
         )
+        .route(
+            "/api/projects/:id/dev-run-spend-limit",
+            post(set_dev_run_spend_limit_handler),
+        )
         // Stall-detection thresholds: per-project idle timeout config.
         .route(
             "/api/projects/:id/stall-thresholds",
@@ -1891,6 +1908,8 @@ pub fn router(state: AppState) -> Router {
         // that creates a phantom unit.
         // The review read model (WO9c): the routes live in `routes/review_routes.rs`.
         .merge(crate::routes::review_routes())
+        // The operator's rewrite advisory (internal only): `routes/rewrite_advisory_route.rs`.
+        .merge(crate::routes::rewrite_advisory_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::native_units::unknown_native_unit_gate,
@@ -2267,7 +2286,7 @@ async fn onboard_audit(
             req.calibration_model.as_deref(),
         )),
         req.deep,
-        fix_step_model(&state).as_deref(),
+        &run_controls,
     ) {
         return Json(client_lock_blocked_report(&repos, why));
     }
@@ -2352,6 +2371,20 @@ async fn onboard_audit(
     // This request has no job to record a batch id on, and a batch can run for hours: a dropped
     // connection would orphan a running, billed batch. Batch runs on the job path only.
     let mode = synchronous_scan_mode(mode, &mut notes);
+    // The cli backend launches the local Claude Code, which refuses a model it predates: check
+    // every model the run will call now, before any call. Same refusal shape as the lock above.
+    if let Some(why) = crate::scan_cli_version::cli_version_refusal_for_scan(
+        matches!(backend_resolution, crate::llm::BackendResolution::Cli),
+        run_ai_review,
+        model.as_deref(),
+        calibration_model.as_deref(),
+        req.deep,
+        &selected,
+        &run_controls,
+        crate::claude_version::check_run_models,
+    ) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
 
     // PANIC GUARD: this handler has no background job to fail into (unlike
     // `onboard_audit_start`'s spawned task) — a bare panic anywhere in the pipeline below
@@ -2376,8 +2409,31 @@ async fn onboard_audit(
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
         _ => crate::llm::Backend::Cli,
     };
+    // The agent finder's setup, built by the one function the command line uses (this request has
+    // no run folder of its own, so the rooms go under the per-user state folder).
+    let finder_setup = match crate::ai_audit::agent_finder::run::finder_setup_for_run(
+        &run_controls,
+        ai_review_blocked,
+        review_backend,
+        state.credential_store.as_ref(),
+        None,
+        active_project.as_ref().is_none_or(|p| p.client_engagement),
+    ) {
+        Ok(setup) => setup,
+        Err(why) => {
+            let mut r = crate::onboard::ScanReport::gated(&repos);
+            r.gated = false;
+            r.ai_error = Some(why.clone());
+            r.message = Some(why);
+            return Json(r);
+        }
+    };
     let outcome = std::panic::AssertUnwindSafe(async move {
-        let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
+        let chosen_options = active_project
+            .as_ref()
+            .map(project_chosen_options)
+            .unwrap_or_default();
+        let audit = Box::pin(crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
             &sources,
             &selected,
@@ -2396,13 +2452,12 @@ async fn onboard_audit(
             Some(state.usage_ledger.clone()),
             backend_resolution,
             corpus.as_ref(),
-            &active_project
-                .as_ref()
-                .map(project_chosen_options)
-                .unwrap_or_default(),
+            &chosen_options,
             run_controls,
-        )
-        .await;
+        ));
+        let (mut report, mut manifest) =
+            crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
+                .await;
         // A repo that could not be read is on the report as not inspected, never just absent,
         // and the manifest is corrected for it before it is stored.
         record_unresolved_repos_before_storing(
@@ -2538,9 +2593,21 @@ async fn onboard_audit(
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                corpus.as_ref(),
+            )
+            .await;
+            // The possible-duplicate check reads the Fix ids the group reviewer just made.
+            crate::possible_duplicate::check::check_possible_duplicates(
+                &mut report,
+                &llm,
+                &review_controls,
+                review_backend == crate::llm::Backend::Cli,
+                None,
             )
             .await;
         }
+        // The tool causes are decided after the group reviewer, which re-sorts the rows of a rule.
+        settle_tool_causes(&mut report, corpus.as_ref());
 
         // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
         // After a scan completes, write one floor/catch record for each ACTIVE floor
@@ -2594,7 +2661,15 @@ pub(crate) async fn start_audit_job(
     options: AuditJobOptions,
 ) -> String {
     let state = state.clone();
-    let run_controls = req.run_controls_for(&state);
+    // The job's own project (the named one, else the active one): every model the run calls is
+    // read from it, so a job for a project that is not the active one runs (and is lock-checked)
+    // on its own project's models.
+    let active_project = options
+        .project_id
+        .as_deref()
+        .and_then(|id| state.projects.get(id))
+        .or_else(|| state.projects.active());
+    let mut run_controls = req.run_controls_for_project(active_project.as_ref());
     // What the run was asked, saved with the run so it can be resumed with the same request.
     let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
     let resume_run = options.resume_run.clone();
@@ -2627,13 +2702,13 @@ pub(crate) async fn start_audit_job(
     // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
     // no active project). Each is resolved to a concrete id (never `None`) so there is no
     // downstream env/const fallback once a project exists.
-    let model = Some(step_model_or(
-        &state,
+    let model = Some(project_step_model_or(
+        active_project.as_ref(),
         crate::project::StepKind::Audit,
         req.model.as_deref(),
     ));
-    let calibration_model = Some(step_model_or(
-        &state,
+    let calibration_model = Some(project_step_model_or(
+        active_project.as_ref(),
         crate::project::StepKind::Calibration,
         req.calibration_model.as_deref(),
     ));
@@ -2644,14 +2719,8 @@ pub(crate) async fn start_audit_job(
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
 
-    // Capture the project up front (the named one, else the active one): the job is stamped
-    // with it (ROUTES-5, so a project's deep-report export finds ITS OWN latest deep report)
-    // AND it seeds the incremental-scan manifest lookup below.
-    let active_project = options
-        .project_id
-        .as_deref()
-        .and_then(|id| state.projects.get(id))
-        .or_else(|| state.projects.active());
+    // The job is stamped with its project (ROUTES-5, so a project's deep-report export finds ITS
+    // OWN latest deep report) AND it seeds the incremental-scan manifest lookup below.
     let project_id = active_project.as_ref().map(|p| p.id.clone());
     // The client-engagement lock, before any repository is located or read: the job fails at
     // once with the reason, and nothing is spawned.
@@ -2660,7 +2729,7 @@ pub(crate) async fn start_audit_job(
         model.as_deref(),
         calibration_model.as_deref(),
         deep,
-        fix_step_model(&state).as_deref(),
+        &run_controls,
     ) {
         let job_id = state.jobs.create("audit", project_id);
         state.jobs.fail(&job_id, why);
@@ -2864,12 +2933,90 @@ pub(crate) async fn start_audit_job(
                 },
                 &format!("{mode:?}").to_ascii_lowercase(),
             );
+            // The cli backend launches the local Claude Code, which refuses a model it predates:
+            // check every model a new run will call before it is saved or called. A resumed run is
+            // checked below, once the group review model it keeps is known.
+            if resume_run.is_none() {
+                if let Some(why) = crate::scan_cli_version::cli_version_refusal_for_scan(
+                    matches!(backend_resolution, crate::llm::BackendResolution::Cli),
+                    run_ai_review,
+                    model.as_deref(),
+                    calibration_model.as_deref(),
+                    deep,
+                    &selected,
+                    &run_controls,
+                    crate::claude_version::check_run_models,
+                ) {
+                    body_jobs.fail(&body_jid, why);
+                    return;
+                }
+            }
             let mut prior = prior;
             let run_store = match &resume_run {
                 Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {
                     Ok((store, _estimate)) => {
                         // The baseline the run started from, not one an attempt since replaced.
                         prior = store.load_prior_manifest();
+                        // The spend limit counts the whole run: the stored replies' cost joins it.
+                        run_controls.stored_spend_usd = store.stored_usd();
+                        // The run keeps the finder it started with, whatever the project's
+                        // setting is now (a mid-run switch would mix two finders' work).
+                        if let Some(notice) = store.hold_finder(&mut run_controls) {
+                            store.add_note(&notice);
+                        }
+                        // The group reviewer stays on the model the run started with.
+                        // A project setting that is only the built-in default is no pick of
+                        // its own (every new project is seeded with it).
+                        let explicit =
+                            Some(run_controls.review.group_review_model.clone()).filter(|m| {
+                                m.trim() != camerata_api_types::project::STAGE2_DEFAULT_MODEL
+                            });
+                        match store.hold_group_review_model(&mut run_controls, explicit.as_deref())
+                        {
+                            Ok(notice) => {
+                                store.add_note(&notice);
+                            }
+                            Err(why) => {
+                                body_jobs.fail(&body_jid, why);
+                                return;
+                            }
+                        }
+                        // The kept model was not part of the pick the lock checked before the
+                        // job started: check every model the resumed run will call, before any
+                        // call.
+                        let (client_engagement, lock_backend) = engagement_project
+                            .as_ref()
+                            .map_or((true, crate::project::ProjectBackend::Cli), |p| {
+                                (p.client_engagement, p.backend)
+                            });
+                        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+                        if let Some(why) = crate::client_lock::refusal_for_run_models(
+                            client_engagement,
+                            lock_backend,
+                            model.as_deref(),
+                            calibration_model.as_deref(),
+                            deep,
+                            &ids,
+                            &run_controls,
+                        ) {
+                            body_jobs.fail(&body_jid, format!("{why} {APP_CLIENT_LOCK_FIX}"));
+                            return;
+                        }
+                        // The version check, on the models the resumed run will call (the kept
+                        // group review model included).
+                        if let Some(why) = crate::scan_cli_version::cli_version_refusal_for_scan(
+                            matches!(backend_resolution, crate::llm::BackendResolution::Cli),
+                            run_ai_review,
+                            model.as_deref(),
+                            calibration_model.as_deref(),
+                            deep,
+                            &selected,
+                            &run_controls,
+                            crate::claude_version::check_run_models,
+                        ) {
+                            body_jobs.fail(&body_jid, why);
+                            return;
+                        }
                         Some(store)
                     }
                     Err(e) => {
@@ -2931,7 +3078,26 @@ pub(crate) async fn start_audit_job(
                 &backend_resolution,
                 crate::llm::BackendResolution::Blocked { .. }
             );
-            let (mut report, mut manifest) = crate::checkpoint::with_run_checkpoints(
+            // The agent finder's setup, built by the one function the command line uses: the
+            // rooms folder inside the run's own folder, the saved key, the project's engagement
+            // kind. A missing key stops the run before the first call.
+            let finder_setup = match crate::ai_audit::agent_finder::run::finder_setup_for_run(
+                &run_controls,
+                ai_review_blocked,
+                llm_backend,
+                state.credential_store.as_ref(),
+                run_store.as_ref().map(|s| s.dir()),
+                engagement_project
+                    .as_ref()
+                    .is_none_or(|p| p.client_engagement),
+            ) {
+                Ok(setup) => setup,
+                Err(why) => {
+                    body_jobs.fail(&body_jid, why);
+                    return;
+                }
+            };
+            let audit = Box::pin(crate::checkpoint::with_run_checkpoints(
                 run_store.as_ref().map(|s| s.checkpoint_dir()),
                 crate::prompt_frame::with_seed(
                     token_seed,
@@ -2957,8 +3123,10 @@ pub(crate) async fn start_audit_job(
                         run_controls,
                     ),
                 ),
-            )
-            .await;
+            ));
+            let (mut report, mut manifest) =
+                crate::ai_audit::agent_finder::run::with_optional_finder_setup(finder_setup, audit)
+                    .await;
             report.provenance.model_sessions = sessions.snapshot();
             // A repo that could not be read is on the report as not inspected, never just
             // absent, and the manifest is corrected for it before it is stored.
@@ -3104,8 +3272,7 @@ pub(crate) async fn start_audit_job(
                 // run asks the group reviewer the same questions and its stored replies match.
                 crate::checkpoint::with_run_checkpoints(
                     run_store.as_ref().map(|s| s.checkpoint_dir()),
-                    crate::prompt_frame::with_seed(
-                        token_seed,
+                    crate::prompt_frame::with_seed(token_seed, async {
                         crate::ai_audit::group_review::review_scan_report(
                             &mut report,
                             model_seam,
@@ -3113,11 +3280,26 @@ pub(crate) async fn start_audit_job(
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
-                        ),
-                    ),
+                            corpus.as_ref(),
+                        )
+                        .await;
+                        // The possible-duplicate check reads the Fix ids the group reviewer
+                        // just made; a failure of it is a note, never a failed part.
+                        crate::possible_duplicate::check::check_possible_duplicates(
+                            &mut report,
+                            model_seam,
+                            &review_controls,
+                            llm_backend == crate::llm::Backend::Cli,
+                            Some((&body_jobs, &body_jid)),
+                        )
+                        .await;
+                    }),
                 )
                 .await;
             }
+            // The tool causes are decided after the group reviewer, which re-sorts the rows of a
+            // rule.
+            settle_tool_causes(&mut report, corpus.as_ref());
 
             // The run is complete when no part failed or was left out; a scan that is not can be
             // resumed with "Run what remains". The export is the operator's own later step.
@@ -3909,89 +4091,142 @@ fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Respo
         .into_response()
 }
 
-/// The README.txt manifest bundled inside the product-export zip: what each file is, who
-/// it's for, the provenance lines, and the advisory disclaimer (verbatim, reused from
-/// `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
-/// paragraph).
+/// How the README's tickets paragraph ends: the sheet it tells the reader to filter. The release
+/// gate looks for this text to add its sentence about a report with no review tree, so the two
+/// cannot disagree.
+pub(crate) fn tickets_paragraph_end() -> String {
+    format!(" {} sheet on.\n", xlsx_export::vocabulary::ALL_PROBLEMS)
+}
+
+/// The README.txt bundled inside the product-export zip.
 ///
-/// The provenance lines (repos, generated-at, commit, engine version, corpus version, rules
-/// last reviewed) come from [`ManifestProvenance::readme_lines`], the human rendering of the
-/// SAME struct `manifest.json`'s `inspection` block is rendered from
-/// ([`ManifestProvenance::inspection_json`]), so the two cannot drift. Pass the same value to
-/// [`build_product_zip`].
+/// A CLIENT README says what each file is and how to import the tickets, and nothing else: no
+/// model role or model name, no corpus hash, no engine commit, no release-check list, no
+/// disclaimer (the PDF carries it). Those live in `manifest.json` and are the operator's.
+///
+/// An INTERNAL README (`internal`, the operator's own review package) is the same text followed
+/// by the provenance lines and the advisory disclaimer. The provenance lines (repos,
+/// generated-at, commit, engine version, corpus version, rules last reviewed, models, release
+/// checks) come from [`ManifestProvenance::readme_lines`], the human rendering of the SAME struct
+/// `manifest.json`'s `inspection` block is rendered from ([`ManifestProvenance::inspection_json`]),
+/// so the two cannot drift. The disclaimer is `report_export::AUDIT_REPORT_DISCLAIMER`, never a
+/// second, drifting copy of that paragraph.
 ///
 /// `pub`: reused verbatim by `camerata inspect` (see [`report_filename_stem`]'s doc comment)
 /// so the headless export's README text can never diverge from the HTTP product-export's.
-pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> String {
+pub fn product_export_readme(
+    stem: &str,
+    provenance: &ManifestProvenance,
+    internal: bool,
+) -> String {
+    use xlsx_export::tickets::{INLINE_SITES, TICKET_HEADERS};
+    use xlsx_export::vocabulary as v;
+
+    // Every sheet the README names is spelled from the vocabulary, so a renamed sheet renames
+    // the README with it.
+    let [title, description, priority, labels, estimate, group_id, places, place_list] =
+        TICKET_HEADERS;
     // A project of several repos gets one more paragraph: where the services differ on a rule.
     let patterns = if provenance.repos.len() > 1 {
-        "Patterns across services\n\
-         \x20 Where the services of this project differ on a rule: a sheet of that name in the\n\
-         \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
-         \x20 An observation, not a finding: it has no severity and is in no count.\n\
-         \n"
+        format!(
+            "{services}\n\
+             \x20 Where the services of this project differ on a rule: the {services} sheet of the\n\
+             \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
+             \x20 An observation, not a problem: it has no severity and is in no count.\n\
+             \n",
+            services = v::PATTERNS_ACROSS_SERVICES,
+        )
     } else {
-        ""
+        String::new()
     };
-    format!(
+    let tickets_end = tickets_paragraph_end();
+    let files = format!(
         "Codebase Inspection - Product Export\n\
          =====================================\n\
          \n\
-         This ZIP contains the artifacts below, all derived from the SAME inspection scan:\n\
+         This ZIP holds the files below. All of them come from the same inspection.\n\
          \n\
          {stem}.pdf\n\
-         \x20 The curated NARRATIVE report: cover, executive summary, category scorecard,\n\
-         \x20 severity x effort matrix, curated findings with citations and recommended\n\
-         \x20 fixes, what's healthy, dependency snapshot, and methodology. Intended for a\n\
-         \x20 board / buyer / decision-maker. False positives are excluded throughout and\n\
-         \x20 counted once, in the methodology section.\n\
+         \x20 The report to read first. It has the cover, the executive summary, the scorecard by\n\
+         \x20 area, the severity by effort matrix, the problems with their citations and fixes,\n\
+         \x20 what is healthy, the dependency snapshot and how the inspection was done. It is\n\
+         \x20 written for a board, a buyer or a decision maker. Problems ruled out are left out\n\
+         \x20 and counted once, in the methodology section.\n\
          \n\
          {stem}-findings.xlsx\n\
-         \x20 The COMPLETE working dataset: every finding as its own row, sortable and\n\
-         \x20 filterable, with a per-category sheet, a Dependencies sheet, a Coverage sheet\n\
-         \x20 (every rule inspected this run, found or not), and a False Positives sheet\n\
-         \x20 (with the reviewer's exclusion reasons, nothing is silently dropped). Intended\n\
-         \x20 for the engineers doing remediation. The Remediation plan sheet comes first: one\n\
-         \x20 row for each sub-group, in the order to fix them. The Sites sheet lists every\n\
-         \x20 site, and the Tree sheet shows how the sites are grouped.\n\
+         \x20 The complete working list for the engineers doing the fixes. Open the {start} sheet\n\
+         \x20 first: it lists the sheets and says what each one holds, and the {glossary} sheet says\n\
+         \x20 what every word and column means. The {fix_plan} sheet has one row for each fix, in the\n\
+         \x20 order to do them. The {all_problems} sheet has every problem once, as a row to\n\
+         \x20 sort and filter, with the place it was seen and what to do there. The {needs} sheet\n\
+         \x20 holds the problems a reviewer must rule on before anyone acts on them. {conventions},\n\
+         \x20 {departures} and {dependencies} say what the code already does consistently,\n\
+         \x20 where it departs from that and which packages it depends on are vulnerable. The\n\
+         \x20 {rules_checked} sheet lists every rule we checked, whether it found anything or not,\n\
+         \x20 the {ruled_out} sheet gives the reason each problem was ruled out and the\n\
+         \x20 {not_checked} sheet lists what we could not or did not check, so nothing is dropped\n\
+         \x20 silently. The last sheets are for reviewers: {source_rows}, {decisions} and\n\
+         \x20 {grouped}.\n\
          \n\
          findings.json\n\
-         \x20 The MACHINE-READABLE version of the xlsx's \"All Findings\" data: the same\n\
-         \x20 rows (severity, category, repo/path/line, snippet, detail, recommended fix,\n\
-         \x20 disposition, effort, confidence, citation, ...), wrapped with the report's\n\
-         \x20 provenance and summary counts. Intended for scripting / CI ingestion / a\n\
-         \x20 client's own tooling. Never disagrees with the xlsx, since both are built\n\
-         \x20 from the same pass over the scan.\n\
+         \x20 Every row that was not ruled out, of every kind: the rows behind {all_problems},\n\
+         \x20 {conventions} and {not_checked} together, before the {all_problems} sheet shows each\n\
+         \x20 problem once. For scripts, CI and other tools: severity, area, repo, path and line,\n\
+         \x20 the code seen, the explanation, the fix, the decision so far, effort, confidence,\n\
+         \x20 citation and more, wrapped with the report's summary counts.\n\
          \n\
          decisions.json\n\
-         \x20 Every decision record the report was reviewed with: what was ruled on which\n\
-         \x20 site or group of sites, and whether a reason was recorded. The Decisions sheet\n\
-         \x20 of the workbook is the same list.\n\
+         \x20 Every decision record the report was reviewed with: what was ruled on which place or\n\
+         \x20 group of places, and whether a reason was recorded. The {decisions} sheet of the\n\
+         \x20 workbook is the same list.\n\
+         \n\
+         csv/ and json/\n\
+         \x20 One file for each table of the workbook, as CSV and as JSON, for tools that do not\n\
+         \x20 read Excel. The all-findings files are the exception: they hold the same rows as\n\
+         \x20 findings.json, as one flat table.\n\
+         \n\
+         manifest.json\n\
+         \x20 The list of the files in this ZIP with a checksum for each.\n\
          \n\
          csv/tickets.csv\n\
-         \x20 One ticket for each sub-group (one kind of violation with one cause) that still\n\
-         \x20 has sites to fix. A site marked a false positive or accepted as a risk is on no\n\
-         \x20 ticket. Columns: Title, Description, Priority, Labels, Estimate, Group id, Site\n\
-         \x20 count and Sites (the first 50 sites, then a pointer to the Sites sheet filtered\n\
-         \x20 on the Group id). To import the file:\n\
-         \x20 - Jira: map Title to Summary, Description to Description, Priority to Priority\n\
-         \x20   (Highest, High, Medium or Low), Labels to Labels (split on commas) and Sites to\n\
-         \x20   a text field of your choice. Estimate is text, not a duration.\n\
-         \x20 - Linear: Title, Description and Labels map to the fields of the same name.\n\
-         \x20   Priority maps as Highest to Urgent, High to High, Medium to Medium and Low to\n\
+         \x20 One ticket for each fix (one kind of problem with one cause) that still has places to\n\
+         \x20 change. A place ruled out or accepted as a risk is on no ticket.\n\
+         \x20 Columns: {title}, {description}, {priority}, {labels}, {estimate}, {group_id}, {places}\n\
+         \x20 and {place_list}. {places} counts the places of the ticket and {place_list} names the\n\
+         \x20 first {INLINE_SITES}, then points to the {all_problems} sheet. {group_id} is the {fix_id}\n\
+         \x20 of the {all_problems} sheet. To import the file:\n\
+         \x20 - Jira: map {title} to Summary, {description} to Description, {priority} to Priority\n\
+         \x20   (Highest, High, Medium or Low), {labels} to Labels (split on commas) and {place_list} to\n\
+         \x20   any text field. {estimate} is text, not a duration.\n\
+         \x20 - Linear: {title}, {description} and {labels} map to the fields of the same name.\n\
+         \x20   {priority} maps as Highest to Urgent, High to High, Medium to Medium and Low to\n\
          \x20   Low.\n\
-         \x20 - GitHub Issues: map Title to Title, Description to Body and Labels to Labels\n\
-         \x20   (comma separated). Priority and Estimate have no field there, so put them in\n\
+         \x20 - GitHub Issues: map {title} to Title, {description} to Body and {labels} to Labels\n\
+         \x20   (comma separated). {priority} and {estimate} have no field there, so put them in\n\
          \x20   the body or drop them.\n\
-         \x20 Keep Group id in a custom field or in the body: it is the value to filter the\n\
-         \x20 Sites sheet on.\n\
-         \n\
-         \n\
-         {}\
-         {}\
-         \n\
-         {}\n",
-        patterns,
+         \x20 Keep {group_id} in a custom field or in the body: it is the {fix_id} to filter the\n\
+         \x20{tickets_end}\n",
+        start = v::START_HERE,
+        glossary = v::GLOSSARY,
+        fix_plan = v::FIX_PLAN,
+        all_problems = v::ALL_PROBLEMS,
+        needs = v::NEEDS_A_DECISION,
+        conventions = v::YOUR_CONVENTIONS,
+        departures = v::DEPARTURES,
+        dependencies = v::DEPENDENCIES,
+        rules_checked = v::RULES_CHECKED,
+        ruled_out = v::RULED_OUT,
+        not_checked = v::NOT_CHECKED,
+        source_rows = v::ALL_SOURCE_ROWS,
+        decisions = v::REVIEWER_DECISIONS,
+        grouped = v::HOW_PROBLEMS_WERE_GROUPED,
+        fix_id = v::H_FIX_ID,
+    );
+    if !internal {
+        return format!("{}\n", format!("{files}{patterns}").trim_end());
+    }
+    format!(
+        "{files}\n{patterns}{}\n{}\n",
         provenance.readme_lines(),
         crate::report_export::audit_report_disclaimer(provenance.repos.len()),
     )
@@ -4373,23 +4608,27 @@ pub const COST_CAP_UNENFORCED_README_LINE: &str = "Spend limit: could not be enf
 fn manifest_file_facts(path: &str) -> (String, Option<String>) {
     let base = path.rsplit('/').next().unwrap_or(path);
     let purpose = if path.ends_with(".pdf") {
-        "Curated narrative report for a decision-maker."
+        "The report for a decision maker: the problems, their fixes and how the inspection was done."
     } else if path.ends_with(".xlsx") {
-        "Complete working dataset across sheets, for engineers."
+        "The complete working list, sheet by sheet, for the engineers doing the fixes."
     } else if path == "findings.json" {
-        "All-Findings rows wrapped with provenance and summary counts, for tooling."
+        "Every row that was not ruled out, wrapped with the facts of the inspection and the summary counts, for tools."
     } else if path == "README.txt" {
-        "Plain-text manifest of what each file is."
+        "A plain-text guide to what each file is."
     } else if path == "decisions.json" {
-        "Every decision record the report was reviewed with, for tooling."
+        "Every decision record the report was reviewed with, for tools."
     } else if path == "csv/tickets.csv" {
-        "One ticket for each sub-group, for a Jira, Linear or GitHub Issues importer."
+        "One ticket for each fix, for a Jira, Linear or GitHub Issues importer."
+    } else if path == "csv/all-findings.csv" {
+        "Every row that was not ruled out, the same rows as findings.json, as one CSV table for tools that do not read Excel."
+    } else if path == "json/all-findings.json" {
+        "Every row that was not ruled out, the same rows as findings.json, as one flat JSON list for tools."
     } else if path.starts_with("csv/") {
-        "One xlsx data table as RFC 4180 CSV, for tooling that does not read Excel."
+        "One table of the workbook as a CSV file, for tools that do not read Excel."
     } else if path.starts_with("json/") {
-        "One xlsx data table as a flat JSON array, for structured ingestion."
+        "One table of the workbook as a flat JSON list, for tools."
     } else {
-        "Product-export artifact."
+        "A file of the inspection package."
     };
     // A data-contract schema id for the machine files; versioned per dataset, bumped on a
     // breaking column/key change.
@@ -4618,6 +4857,9 @@ mod preview_evidence_tests;
 
 #[cfg(test)]
 mod cockpit_resume_tests;
+
+#[cfg(test)]
+mod greenfield_lock_tests;
 
 #[cfg(test)]
 mod model_input_chat_tests;

@@ -2218,3 +2218,44 @@ async fn req_c1_final_row_count_equals_last_ledger_stage_rows_out_additions_are_
         sealed.ledger.stages()
     );
 }
+
+// A rule the finder's agent answered only "not a problem here" was looked at and judged harmless;
+// that is not "checked and compliant", so What's healthy never lists it. A rule answered clean in
+// one piece and "not a problem here" in another is not marked, and stays healthy.
+#[tokio::test]
+async fn a_rule_judged_only_not_a_problem_here_is_never_in_whats_healthy() {
+    let mut report = report_with(vec![], vec![]);
+    let mut ledger = crate::scan_ledger::ScanLedger::new();
+    ledger.note_not_a_problem_rule("", "SEC-NO-HARDCODED-SECRETS-1");
+    for rule in ["SEC-NO-HARDCODED-SECRETS-1", "ARCH-STRICT-LAYERING-1"] {
+        ledger.record_rule(
+            "",
+            rule,
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            40,
+            0,
+        );
+    }
+    report.ledger = ledger;
+    let corpus_path = camerata_rules::corpus_path();
+    let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
+        Some(&corpus),
+        &empty_opts(),
+    );
+    let healthy: Vec<&str> = json
+        .whats_healthy
+        .rules
+        .iter()
+        .map(|r| r.rule_id.as_str())
+        .collect();
+    assert!(
+        !healthy.contains(&"SEC-NO-HARDCODED-SECRETS-1"),
+        "{healthy:?}"
+    );
+    assert!(healthy.contains(&"ARCH-STRICT-LAYERING-1"), "{healthy:?}");
+}

@@ -18,6 +18,63 @@ pub(crate) fn severity_for(_rule_id: &str) -> &'static str {
     "critical"
 }
 
+/// The note appended to a floor row held as a sample value in an API description file.
+const API_DESCRIPTION_NOTE: &str =
+    " (possibly a sample value in an API description file; a reviewer should confirm)";
+
+/// The note appended to a floor row held because a UUID sits on an id field of a credential word.
+const ENTITY_ID_NOTE: &str =
+    " (a UUID on an id field, possibly an entity id and not a credential; a reviewer should confirm)";
+
+/// Whether `content` is an API description (an OpenAPI or Swagger document, or a request
+/// collection): a top-level `openapi` or `swagger` key WITH a version value, or a request
+/// collection marker. A bare `swagger:` section (Spring configuration) is not one.
+fn is_api_description(content: &str) -> bool {
+    static VERSIONED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let versioned = VERSIONED.get_or_init(|| {
+        regex::Regex::new(r#"^\{?\s*["']?(?:openapi|swagger)["']?\s*:\s*["']?[0-9]"#)
+            .expect("api description version regex must compile")
+    });
+    content.lines().any(|line| {
+        let line = line.trim_end();
+        (versioned.is_match(line) && !line.starts_with([' ', '\t']))
+            || line.contains("schema.getpostman.com")
+            || line.contains("\"_postman_id\"")
+    })
+}
+
+/// Whether `line` assigns a canonical UUID to a field named exactly `token` (not `api_token`,
+/// not `access-token`, not `refresh.token`, not `token_id`).
+fn is_bare_token_uuid(line: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)(?:^|[^A-Za-z0-9_.-])token["']?\s*[:=]\s*["']?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}["']?\s*,?\s*$"#,
+        )
+        .expect("bare token uuid regex must compile")
+    })
+    .is_match(line)
+}
+
+/// Whether `line` assigns a canonical UUID to an id field of a credential word (`token_id`,
+/// `apiKeyId`). Only key and token: a `secret_id` (a Vault AppRole one) IS the credential.
+fn is_credential_id_uuid(line: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"([A-Za-z0-9_.-]*(?i:key|token)[A-Za-z0-9_.-]*(?:[_.-][iI][dD]|Id))["']?\s*[:=]\s*["']?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']?\s*,?\s*$"#,
+        )
+        .expect("credential id uuid regex must compile")
+    });
+    // A name that also holds a password-like word (`key_secret_id`) names the credential itself.
+    re.captures(line).is_some_and(|c| {
+        let name = c[1].to_ascii_lowercase();
+        !["secret", "password", "passwd", "pwd"]
+            .iter()
+            .any(|w| name.contains(w))
+    })
+}
+
 /// The gate's description for a rule id, or the id if unknown.
 ///
 /// This is INTERNAL/enforcement prose (the same directive text the agent reads when the gate
@@ -221,12 +278,13 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let in_test_path = is_test_or_fixture_path(path);
+    let api_description = is_api_description(content);
     let test_ranges = test_scope_line_ranges(path, content);
     // Whole-content matching (not line-by-line) so MULTI-LINE constructs are caught —
     // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
     // match is attributed to the line where it starts.
     for rule_id in AUDIT_RULES {
-        let content_lines = camerata_gateway::content_match_lines(rule_id, content);
+        let content_lines = camerata_gateway::content_match_lines_in_file(rule_id, path, content);
         if content_lines.is_empty() {
             // Path-based rule: fire the arm with the real path and empty content to
             // check whether this file's PATH marks it as secret-bearing. A path-based
@@ -297,7 +355,34 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
             // This is per-finding-by-line: a production secret in a file that also has a
             // test block stays Critical; only findings inside a test scope are downgraded.
             let is_test = in_test_path || is_in_test_scope(line_no, &test_ranges);
-            let (severity, detail, in_test, needs_review) = if is_test {
+            // A bare `token` holding a UUID in an API description is most often a sample value.
+            // The row stays, held at low for a reviewer, the way a test path's row is.
+            let held_sample = !is_test
+                && api_description
+                && *rule_id == "SEC-NO-HARDCODED-SECRETS-1"
+                && lines
+                    .get(line_no.saturating_sub(1))
+                    .is_some_and(|l| is_bare_token_uuid(l));
+            let held_entity_id = !is_test
+                && *rule_id == "SEC-NO-HARDCODED-SECRETS-1"
+                && lines
+                    .get(line_no.saturating_sub(1))
+                    .is_some_and(|l| is_credential_id_uuid(l));
+            let (severity, detail, in_test, needs_review) = if held_entity_id {
+                (
+                    TEST_PATH_SEVERITY.to_string(),
+                    format!("{}{}", title_for(rule_id), ENTITY_ID_NOTE),
+                    false,
+                    true,
+                )
+            } else if held_sample {
+                (
+                    TEST_PATH_SEVERITY.to_string(),
+                    format!("{}{}", title_for(rule_id), API_DESCRIPTION_NOTE),
+                    false,
+                    true,
+                )
+            } else if is_test {
                 (
                     TEST_PATH_SEVERITY.to_string(),
                     format!("{}{}", title_for(rule_id), TEST_PATH_NOTE),
@@ -506,11 +591,69 @@ pub(crate) fn build_rule_alternatives<'a>(
     out
 }
 
+/// What a client repository held that a first inspection does not honour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ClientSuppressions {
+    /// Inline `camerata:allow` waiver comments.
+    pub waivers: usize,
+    /// Entries of `.camerata/baseline.json`.
+    pub baseline_entries: usize,
+}
+
+impl ClientSuppressions {
+    /// Waivers plus baseline entries: the one number the package prints.
+    pub(crate) fn total(self) -> usize {
+        self.waivers + self.baseline_entries
+    }
+}
+
+/// A first inspection of a client repository. The baseline file and the waiver comments in that
+/// repository were written by someone else, so nothing in them closes a problem here: every row
+/// stays open (`active`) and the waivers and baseline entries are only counted, for the package
+/// to print. A baseline is honoured only on a re-inspection, and only one Cantus wrote; the
+/// engine puts no mark on a baseline it wrote (`suppression::baseline_entry` stamps the same
+/// fields a person's file has), so no baseline is honoured today. A waiver without a reason is
+/// not reported as a problem of its own: no waiver is read as one.
+pub(crate) fn open_every_row_on_first_inspection(
+    findings: &mut [Finding],
+    files: &[(String, String)],
+) -> ClientSuppressions {
+    use crate::suppression::{parse_inline_waivers, Baseline};
+    let waivers: usize = files
+        .iter()
+        .map(|(path, content)| parse_inline_waivers(path, content).len())
+        .sum();
+    let baseline_entries = files
+        .iter()
+        .find(|(p, _)| p == ".camerata/baseline.json")
+        .and_then(|(_, c)| serde_json::from_str::<Baseline>(c).ok())
+        .map_or(0, |b| b.entries.len());
+    for f in findings.iter_mut() {
+        f.status = crate::finding_status::ACTIVE.to_string();
+    }
+    ClientSuppressions {
+        waivers,
+        baseline_entries,
+    }
+}
+
+/// The first inspection of one repository: [`open_every_row_on_first_inspection`], and the count
+/// of what it found written to the scan ledger, which the package prints.
+pub(crate) fn record_first_inspection(
+    findings: &mut [Finding],
+    files: &[(String, String)],
+    ledger: &mut crate::scan_ledger::ScanLedger,
+) {
+    let found = open_every_row_on_first_inspection(findings, files);
+    ledger.add_client_suppressions(found.total());
+}
+
 /// Classify a repo's findings against its suppressions (inline `camerata:allow` waivers
 /// parsed from the files + the committed `.camerata/baseline.json`), setting each
 /// finding's `status`. Also appends a `CAM-WAIVER-NEEDS-REASON` finding for every
 /// reason-less waiver (the require-reason invariant). REPORT everything; the `status`
 /// is what lets enforcement act on the delta only.
+#[cfg(test)]
 pub(crate) fn classify_repo_findings(
     findings: &mut Vec<Finding>,
     repo: &str,
@@ -559,8 +702,8 @@ pub(crate) fn classify_repo_findings(
         }
         f.status = match status {
             Status::Active => "active",
-            Status::SuppressedInline => "suppressed-inline",
-            Status::SuppressedBaseline => "suppressed-baseline",
+            Status::SuppressedInline => crate::finding_status::WAIVED_INLINE,
+            Status::SuppressedBaseline => crate::finding_status::CARRIED_BASELINE,
         }
         .to_string();
     }
@@ -606,6 +749,68 @@ pub(crate) fn classify_repo_findings(
 }
 
 #[cfg(test)]
+mod api_description_tests {
+    use super::*;
+    use camerata_secrets::fixtures::body;
+
+    fn uuid() -> String {
+        [
+            body(8, "0123456789abcdef", 31),
+            body(4, "0123456789abcdef", 32),
+            body(4, "0123456789abcdef", 33),
+            body(4, "0123456789abcdef", 34),
+            body(12, "0123456789abcdef", 35),
+        ]
+        .join("-")
+    }
+
+    fn secret_row(rows: &[Finding]) -> &Finding {
+        rows.iter()
+            .find(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("still a row")
+    }
+
+    #[test]
+    fn a_uuid_token_in_an_api_description_is_held_not_urgent() {
+        let id = uuid();
+        let spec = format!(
+            "openapi: 3.0.0\ncomponents:\n  examples:\n    transfer:\n      value:\n        token: {id}\n"
+        );
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        let row = secret_row(&rows);
+        assert_eq!(row.severity, "low");
+        assert!(row.needs_review);
+        let rows = audit_content(
+            "r",
+            "config/service.yaml",
+            &format!("service:\n  token: {id}\n"),
+        );
+        assert_eq!(secret_row(&rows).severity, "critical");
+        // Only a bare `token` is held: another name in the same description stays urgent.
+        let spec = format!("openapi: 3.0.0\nexample:\n  api_token: {id}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_row(&rows).severity, "critical");
+        // A dash or dot before `token` is a different field name.
+        let spec =
+            format!("openapi: 3.0.0\nexample:\n  access-token: {id}\n  refresh.token: {id}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert!(rows
+            .iter()
+            .filter(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .all(|f| f.severity == "critical"));
+        // An opaque value on `token` in an API description is not a sample UUID.
+        let opaque = body(
+            36,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            36,
+        );
+        let spec = format!("openapi: 3.0.0\nexample:\n  token: {opaque}\n");
+        let rows = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_row(&rows).severity, "critical");
+    }
+}
+
+#[cfg(test)]
 mod classify_tests {
     use super::*;
 
@@ -632,7 +837,7 @@ mod classify_tests {
         let mut findings = vec![finding("R-PRIMARY", "src/a.rs", 1, &["R-SIBLING"])];
         classify_repo_findings(&mut findings, "o/r", &files);
         assert_eq!(
-            findings[0].status, "suppressed-inline",
+            findings[0].status, "waived-inline",
             "waiver on a demoted sibling rule id must suppress the merged finding"
         );
     }
@@ -656,7 +861,49 @@ mod classify_tests {
         )];
         let mut findings = vec![finding("R-PRIMARY", "src/a.rs", 1, &[])];
         classify_repo_findings(&mut findings, "o/r", &files);
-        assert_eq!(findings[0].status, "suppressed-inline");
+        assert_eq!(findings[0].status, "waived-inline");
+    }
+
+    #[test]
+    fn a_first_inspection_keeps_client_baseline_and_waiver_rows_open_and_counts_them() {
+        let baseline = r#"{"entries":[{"rule_id":"R-ONE","path":"a.rs","fingerprint":"x","reason":"old","accepted_by":"someone","accepted_at":"2020-01-01","kind":"baseline"}]}"#;
+        let files = vec![
+            (".camerata/baseline.json".to_string(), baseline.to_string()),
+            (
+                "a.rs".to_string(),
+                "// camerata:allow R-TWO -- we know\nlet x = 1;\n".to_string(),
+            ),
+        ];
+        let mut rows = vec![
+            finding("R-ONE", "a.rs", 1, &[]),
+            finding("R-TWO", "a.rs", 2, &[]),
+        ];
+        // Anti-vacuity: the rows start closed by the client's files, so the assertion below can
+        // only pass when the function itself reopens them.
+        rows[0].status = crate::finding_status::CARRIED_BASELINE.to_string();
+        rows[1].status = crate::finding_status::WAIVED_INLINE.to_string();
+        let found = open_every_row_on_first_inspection(&mut rows, &files);
+        assert_eq!(found.waivers, 1, "anti-vacuity: the waiver was parsed");
+        assert_eq!(found.baseline_entries, 1);
+        assert_eq!(found.total(), 2);
+        assert!(
+            rows.iter().all(|r| r.status == "active"),
+            "no client file closes a row on a first inspection: {rows:?}"
+        );
+        assert_eq!(rows.len(), 2, "no problem of its own is added");
+    }
+
+    #[test]
+    fn the_ledger_carries_the_count_of_client_suppressions_found() {
+        let files = vec![(
+            "a.rs".to_string(),
+            "// camerata:allow R-TWO -- we know\nlet x = 1;\n".to_string(),
+        )];
+        let mut rows = vec![finding("R-TWO", "a.rs", 2, &[])];
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        assert_eq!(ledger.client_suppressions_found(), 0);
+        record_first_inspection(&mut rows, &files, &mut ledger);
+        assert_eq!(ledger.client_suppressions_found(), 1);
     }
 }
 
@@ -908,5 +1155,84 @@ mod p4_context_tests {
             .find(|f| f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
             .expect("a bare Google key is still a floor finding");
         assert_eq!(hit.severity, "critical");
+    }
+}
+
+#[cfg(test)]
+mod hold_scope_tests {
+    use super::*;
+    use camerata_secrets::fixtures::body;
+
+    fn uuid() -> String {
+        [
+            body(8, "0123456789abcdef", 41),
+            body(4, "0123456789abcdef", 42),
+            body(4, "0123456789abcdef", 43),
+            body(4, "0123456789abcdef", 44),
+            body(12, "0123456789abcdef", 45),
+        ]
+        .join("-")
+    }
+
+    fn secret_rows(rows: &[Finding]) -> Vec<&Finding> {
+        rows.iter()
+            .filter(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .collect()
+    }
+
+    #[test]
+    fn a_spring_swagger_section_is_not_an_api_description() {
+        let id = uuid();
+        let yml = format!("swagger:\n  enabled: true\nservice:\n  token: {id}\n");
+        let rows = audit_content("r", "src/main/resources/application.yml", &yml);
+        let rows = secret_rows(&rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, "critical");
+        // A versioned key does make it one.
+        let spec = format!("swagger: \"2.0\"\nexample:\n  token: {id}\n");
+        let found = audit_content("r", "docs/api/spec.yaml", &spec);
+        assert_eq!(secret_rows(&found)[0].severity, "low");
+    }
+
+    #[test]
+    fn a_uuid_on_a_token_id_field_is_held_at_low_not_removed() {
+        let id = uuid();
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        let rows = secret_rows(&rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, "low");
+        assert!(rows[0].needs_review);
+        // The name without `_id` stays urgent.
+        let rows = audit_content("r", "config/service.yaml", &format!("token: {id}\n"));
+        assert_eq!(secret_rows(&rows)[0].severity, "critical");
+    }
+
+    #[test]
+    fn a_secret_word_in_a_key_id_name_keeps_it_critical() {
+        let id = uuid();
+        for name in ["key_secret_id", "api_key_secret_id"] {
+            let rows = audit_content("r", "config/service.yaml", &format!("{name}: {id}\n"));
+            let rows = secret_rows(&rows);
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!(rows[0].severity, "critical", "{name}");
+            assert!(!rows[0].needs_review, "{name}");
+        }
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        let rows = secret_rows(&rows);
+        assert_eq!(rows[0].severity, "low");
+        assert!(rows[0].needs_review);
+    }
+
+    #[test]
+    fn a_uuid_on_a_secret_id_field_stays_critical() {
+        let id = uuid();
+        for name in ["secret_id", "client_secret_id"] {
+            let rows = audit_content("r", "config/service.yaml", &format!("{name}: {id}\n"));
+            let rows = secret_rows(&rows);
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!(rows[0].severity, "critical", "{name}");
+        }
+        let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
+        assert_eq!(secret_rows(&rows)[0].severity, "low");
     }
 }

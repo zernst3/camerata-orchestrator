@@ -597,6 +597,13 @@ pub(super) fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
         match entry.iter().find(|(s, _)| same_snippet(s, &snip)) {
             Some(&(_, at)) => {
                 if severity_rank(&f.severity) > severity_rank(&kept[at].severity) {
+                    let from = kept[at].severity.clone();
+                    record_severity_adjustment(
+                        &mut kept[at],
+                        &from,
+                        &f.severity,
+                        "a repeat of this finding at the same place was rated higher",
+                    );
                     kept[at].severity = f.severity;
                 }
             }
@@ -950,6 +957,10 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     // it inside `audit_repo`, before the cross-family merge; the same sentence on two findings
     // says the same bound applied, not that they are about the same object.
     crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+    // Why a severity is held for a decision (operator only), and the marker that a source nobody
+    // doubted was folded into a row. Bookkeeping on the row, not objects it names.
+    crate::follow_reviewers::SEVERITY_HOLD_DETAIL_CAPTURE,
+    crate::follow_reviewers::UNDOUBTED_SOURCE_CAPTURE,
     // What stage 1 left on the row for the group reviewer and the tree: its verdict (`real` and
     // the one-line reason) and the outlier reasons it recorded (`severity_raise_held`). They say
     // the same thing about every row they sit on; they name no object.
@@ -995,6 +1006,22 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::report_export::overlay::PROVENANCE_CAPTURE,
     crate::report_export::overlay::MERGED_INTO_CAPTURE,
     crate::report_export::overlay::MERGED_LABEL_CAPTURE,
+    // The agent finder's operator-only marks on a problem: the piece it came from, its own
+    // sureness and effort, its fix text, its problem number, its end line and every rule it was
+    // cited to. None of them names an object, and the same value on two problems (the same
+    // piece, `yes`, `low`) says only that they came from one run, never that they are one cause.
+    crate::ai_audit::agent_finder::reply::FINDER_PIECE_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_SURE_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_EFFORT_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_FIX_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_BUSINESS_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_WHY_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_UNSURE_WHY_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_END_LINE_CAPTURE,
+    crate::ai_audit::agent_finder::reply::FINDER_RULES_CAPTURE,
+    // The note on a place unfolded from a ruled-out row: it names the host row's key.
+    crate::report_export::unfold::UNFOLDED_FROM_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.
@@ -1688,6 +1715,8 @@ pub(crate) fn same_cause_signal(
 /// sub-group is labelled with and the hint a possible-duplicate link carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CauseSignal {
+    /// One problem the model reported at several places: its rows are one cause by construction.
+    SameProblem,
     /// The two rows name the same captured object.
     SharedObject,
     /// The same rule fired twice in one file, nearby or at one severity.
@@ -1704,6 +1733,7 @@ impl CauseSignal {
     /// The sub-group cause text.
     pub(crate) fn cause(self) -> &'static str {
         match self {
+            Self::SameProblem => "one problem reported at several places",
             Self::SharedObject => "the same captured object",
             Self::SameRule => "the same rule repeated in one file",
             Self::SameConstruct => "the same function or block",
@@ -1715,6 +1745,7 @@ impl CauseSignal {
     /// The test name a possible-duplicate link records.
     pub(crate) fn hint(self) -> &'static str {
         match self {
+            Self::SameProblem => "same_cause:same_problem",
             Self::SharedObject => "same_cause:shared_object",
             Self::SameRule => "same_cause:same_rule",
             Self::SameConstruct => "same_cause:same_construct",

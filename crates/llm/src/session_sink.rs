@@ -40,12 +40,52 @@ pub struct ModelSession {
 #[derive(Debug, Clone, Default)]
 pub struct SessionSink {
     inner: Arc<Mutex<Vec<ModelSession>>>,
+    /// Whether the CLI reader keeps the records of each call's stdout stream here.
+    capture_streams: bool,
+    /// The records kept, by session id, in the order they were printed.
+    streams: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
 }
 
 impl SessionSink {
     /// An empty sink.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A sink that also keeps the stream-json records each call prints on stdout (every record
+    /// but the partial-message events). For a caller that needs the tool trace of a call run with
+    /// `--no-session-persistence`: the stream is the only place the trace exists.
+    #[must_use]
+    pub fn with_stream_capture() -> Self {
+        Self {
+            capture_streams: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this sink keeps the stdout stream of each call.
+    pub fn captures_streams(&self) -> bool {
+        self.capture_streams
+    }
+
+    /// Keep one stream record (a raw line) of the call `session_id`.
+    pub fn record_stream_line(&self, session_id: &str, line: &str) {
+        self.streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.to_string())
+            .or_default()
+            .push(line.to_string());
+    }
+
+    /// The records kept for the call `session_id`, oldest first. `None` when none were kept
+    /// (the sink does not capture, or the call printed no record).
+    pub fn stream_lines(&self, session_id: &str) -> Option<Vec<String>> {
+        self.streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
     }
 
     /// Record one spawned session. A poisoned lock is recovered, never dropped: losing an id

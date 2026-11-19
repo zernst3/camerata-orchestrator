@@ -484,11 +484,11 @@ async fn regenerate_sample_report() {
                 .expect("xl/workbook.xml must be readable UTF-8");
         }
         for expected in [
-            "name=\"Index\"",
-            "name=\"All Findings\"",
+            "name=\"Start here\"",
+            "name=\"All problems\"",
             "name=\"Dependencies\"",
-            "name=\"False Positives\"",
-            "name=\"Coverage\"",
+            "name=\"Ruled out\"",
+            "name=\"Rules checked\"",
         ] {
             assert!(
                 workbook_xml.contains(expected),

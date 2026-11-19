@@ -42,6 +42,7 @@ pub fn error_label(e: EngineCheckError) -> &'static str {
             "Group summary does not describe this finding"
         }
         EngineCheckError::ThrownOutRealProblem => "Thrown out, but a real problem",
+        EngineCheckError::RuledOutRealProblem => "Ruled out, but a real problem",
     }
 }
 
@@ -113,6 +114,15 @@ fn strictly_later(later: &str, earlier: &str) -> bool {
 /// Whether something corrected the No: the verdict names a correction, or a decision or an edit
 /// was made on the row after the verdict (the gate's own test, see `uncorrected_keys`).
 fn corrected_since(card: &EngineCheckCard, v: &EngineCheckVerdict) -> bool {
+    // A No on a row ruled out while flagged is answered only by un-ruling the row, the gate's own
+    // test: another rule-out, an edit or a named correction does not.
+    if v.wrong == Some(EngineCheckError::RuledOutRealProblem) {
+        return !card
+            .site
+            .decision
+            .as_ref()
+            .is_some_and(|d| d.state == DecisionState::FalsePositive);
+    }
     v.correction.is_some()
         || card
             .site
@@ -120,6 +130,17 @@ fn corrected_since(card: &EngineCheckCard, v: &EngineCheckVerdict) -> bool {
             .as_ref()
             .is_some_and(|d| strictly_later(&d.decided_at, &v.at))
         || card.site.edits.iter().any(|e| strictly_later(&e.at, &v.at))
+}
+
+/// The one answer a No has on a card that takes only one: a thrown-out card ("thrown out, but a
+/// real problem") and a second-look card ("ruled out, but a real problem"). `None` on a kept
+/// card, which offers the closed list of what was wrong.
+pub fn no_answer(card: &EngineCheckCard) -> Option<EngineCheckError> {
+    match card.stratum {
+        SampleStratum::ThrownOut => Some(EngineCheckError::ThrownOutRealProblem),
+        SampleStratum::RuledOutFlagged => Some(EngineCheckError::RuledOutRealProblem),
+        SampleStratum::Kept => None,
+    }
 }
 
 /// The state of a card, read from the verdict, from whether the gate holds the row and from
@@ -400,6 +421,7 @@ pub fn stratum_label(stratum: SampleStratum) -> Option<&'static str> {
     match stratum {
         SampleStratum::Kept => None,
         SampleStratum::ThrownOut => Some("thrown out by the engine"),
+        SampleStratum::RuledOutFlagged => Some("ruled out while flagged"),
     }
 }
 
@@ -408,6 +430,7 @@ pub fn question(card: &EngineCheckCard) -> &'static str {
     match card.stratum {
         SampleStratum::Kept => "Did the engine get this right?",
         SampleStratum::ThrownOut => "Was the engine right to throw this out?",
+        SampleStratum::RuledOutFlagged => "Was it right to rule this out?",
     }
 }
 
@@ -471,6 +494,18 @@ pub fn allocation_note(lane: &EngineCheckLane) -> Option<String> {
             "{} of the {} rows the engine threw out are in the sample",
             thousands(thrown),
             thousands(lane.thrown_out_total)
+        ));
+    }
+    let second_look = lane
+        .cards
+        .iter()
+        .filter(|c| c.stratum == SampleStratum::RuledOutFlagged)
+        .count();
+    if second_look > 0 {
+        parts.push(format!(
+            "{} of the {} rows you ruled out while the engine flagged them are in a second look",
+            thousands(second_look),
+            thousands(lane.ruled_out_flagged_total)
         ));
     }
     (!parts.is_empty()).then(|| parts.join(". "))
@@ -563,6 +598,9 @@ pub fn rate_lines(lane: &EngineCheckLane) -> Vec<RateLine> {
             label: match s.stratum {
                 SampleStratum::Kept => "Error rate among reported findings",
                 SampleStratum::ThrownOut => "Real problems among thrown-out findings",
+                SampleStratum::RuledOutFlagged => {
+                    "Real problems among rows ruled out while flagged"
+                }
             },
             text: stratum_rate_text(s),
         })
@@ -600,6 +638,8 @@ pub enum CorrectionKind {
     /// Confirm the throw-out was right (reason): the row stays out of the client package and the
     /// Engine Check's hold on it clears.
     ConfirmThrownOut,
+    /// Un-rule a row ruled out while flagged: keep it as a problem (reason).
+    KeepAsProblem,
 }
 
 /// The correction a choice opens.
@@ -614,6 +654,7 @@ pub fn kind_of(e: EngineCheckError) -> CorrectionKind {
         EngineCheckError::WordingOrFixWrong => CorrectionKind::Text,
         EngineCheckError::GroupSummaryDoesNotDescribe => CorrectionKind::Summary,
         EngineCheckError::ThrownOutRealProblem => CorrectionKind::Restore,
+        EngineCheckError::RuledOutRealProblem => CorrectionKind::KeepAsProblem,
     }
 }
 
@@ -654,6 +695,7 @@ impl Correction {
             | CorrectionKind::Escalate
             | CorrectionKind::Deescalate
             | CorrectionKind::Restore
+            | CorrectionKind::KeepAsProblem
             | CorrectionKind::ConfirmThrownOut => String::new(),
         };
         Self {
@@ -700,6 +742,7 @@ impl Correction {
             CorrectionKind::Text => "Edit its wording",
             CorrectionKind::Summary => "Edit the group summary",
             CorrectionKind::Restore => "Put it back into review",
+            CorrectionKind::KeepAsProblem => "Keep it as a problem",
             CorrectionKind::ConfirmThrownOut => "Confirm it was rightly thrown out",
         }
     }
@@ -732,6 +775,9 @@ pub fn field_label(field: EditField) -> &'static str {
         EditField::Severity => "Severity",
         EditField::Subgroup => "Sub-group",
         EditField::Summary => "Summary",
+        EditField::WhyBusiness => "Why it matters to the business",
+        EditField::WhyTechnical => "Why it matters technically",
+        EditField::Business => "Why it matters to the business (this place)",
         EditField::FixType => "Fix type",
         EditField::RuleId => "Rule id",
         EditField::Kind => "Kind",
@@ -791,6 +837,12 @@ pub fn correction_request(
         CorrectionKind::FalsePositive => {
             need_reason("call this row a false positive")?;
             Ok(decision(DecisionState::FalsePositive, None, reason))
+        }
+        // Ruling it out was wrong: a Confirmed ruling replaces the rule-out, so the row is a
+        // problem again. (A put-back is for rows the engine threw out; this row was kept.)
+        CorrectionKind::KeepAsProblem => {
+            need_reason("keep a row you ruled out as a problem")?;
+            Ok(decision(DecisionState::Confirmed, None, reason))
         }
         CorrectionKind::Restore => {
             need_reason("put back a finding the engine threw out")?;

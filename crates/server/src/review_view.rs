@@ -47,13 +47,16 @@ use crate::decisions::{apply_to, AppliedDecisions};
 use crate::onboard::{Finding, ScanReport};
 use crate::report_export::overlay::StaleEditNote;
 use crate::report_export::ReviewedReport;
-use crate::review_tree::{KeyLink, LinkHow, ReviewTree};
+use crate::review_tree::{KeyLink, LinkHow, PlaceNode, ReviewTree};
 
 mod lane;
 mod queue;
 mod rows;
+mod severity_bounds;
 mod tree;
 
+#[cfg(test)]
+mod severity_bounds_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -83,6 +86,11 @@ pub struct ReviewInputs<'a> {
     pub moved: &'a HashMap<String, MovedFromView>,
     /// The same moves as key links, for the stale-decision standing.
     pub links: &'a [KeyLink],
+    /// The rows the second look at rows ruled out while flagged has drawn on this run, kept in
+    /// the Engine Check store. A drawn row stays drawn.
+    pub second_look_drawn: &'a [String],
+    /// The rule corpus, for the rule's severity bounds on a row. `None` shows no bounds.
+    pub corpus: Option<&'a camerata_rules::RuleSet>,
 }
 
 /// The composer: indexes built once from [`ReviewInputs`], then one method per view.
@@ -106,6 +114,9 @@ pub struct ReviewComposer<'a> {
     candidate_at: HashMap<String, usize>,
     /// Sites any node lists as an outlier.
     outliers: HashSet<&'a str>,
+    /// Site key to its position in the tree's stored places (a place with two or more problem
+    /// rows): the row that carries and the rows it carries.
+    place_at: HashMap<&'a str, usize>,
     /// Edits by site key.
     edits_by_key: HashMap<&'a str, Vec<&'a Edit>>,
     /// Edits the overlay did not apply, by edit id.
@@ -114,6 +125,12 @@ pub struct ReviewComposer<'a> {
     gate: ExportGateView,
     held: HashMap<String, HoldReason>,
     verdicts: HashMap<&'a str, &'a EngineCheckVerdict>,
+    /// The engine's reasons to doubt each kept row, worked out once for the report.
+    fp: crate::possible_false_positive::FpIndex,
+    /// The other causes with a row at the same place as each kept row, worked out once.
+    dup: crate::possible_duplicate::DupIndex,
+    /// The second look at rows ruled out while flagged, worked out once on first use.
+    second_look: std::cell::OnceCell<lane::SecondLook>,
 }
 
 impl<'a> ReviewComposer<'a> {
@@ -137,6 +154,13 @@ impl<'a> ReviewComposer<'a> {
                     children.entry(p).or_default().push(i);
                 }
                 outliers.extend(n.outliers.iter().map(|o| o.key.as_str()));
+            }
+        }
+
+        let mut place_at: HashMap<&str, usize> = HashMap::new();
+        if let Some(t) = tree {
+            for (i, p) in t.places.iter().enumerate() {
+                place_at.extend(p.members.iter().map(|m| (m.as_str(), i)));
             }
         }
 
@@ -227,17 +251,31 @@ impl<'a> ReviewComposer<'a> {
             budget,
             candidate_at,
             outliers,
+            place_at,
             edits_by_key,
             stale_edits,
             gate,
             held,
             verdicts,
+            fp: crate::possible_false_positive::FpIndex::new(&report.findings),
+            dup: crate::possible_duplicate::DupIndex::new(
+                tree,
+                &report.findings,
+                report.ledger.duplicate_checks(),
+            ),
+            second_look: std::cell::OnceCell::new(),
         }
     }
 
     /// The row with site key `key`, kept or thrown out.
     fn row(&self, key: &str) -> Option<&'a Finding> {
         self.rows.get(key).copied()
+    }
+
+    /// The place a site is a member of, when it shares its place with another problem row.
+    fn place_of(&self, key: &str) -> Option<&'a PlaceNode> {
+        let tree = self.tree?;
+        self.place_at.get(key).map(|i| &tree.places[*i])
     }
 
     /// The escalation line as it stands under the project's current settings.
@@ -310,6 +348,7 @@ impl<'a> ReviewComposer<'a> {
         counts.held = self.gate.rows_needing_a_decision();
 
         let sample = self.sample();
+        let second_look = self.second_look();
         ReviewShellView {
             run_id: self.inputs.run_id.to_string(),
             engine_version: self.inputs.engine_version.to_string(),
@@ -317,9 +356,10 @@ impl<'a> ReviewComposer<'a> {
             budget: self.budget,
             lanes: LaneCounts {
                 tree_undecided: counts.unresolved,
-                escalations: self.candidates.iter().filter(|c| c.escalated).count(),
-                engine_check: sample.drawn(),
-                engine_check_off: self.inputs.settings.sample_size_per_run == 0,
+                escalations: self.queue_groups().iter().filter(|g| g.escalated).count(),
+                engine_check: sample.drawn() + second_look.cards.len(),
+                engine_check_off: self.inputs.settings.sample_size_per_run == 0
+                    && second_look.cards.is_empty(),
                 flat_rows: counts.total,
             },
             export_gate: self.gate.clone(),
@@ -357,6 +397,10 @@ impl<'a> ReviewComposer<'a> {
                 calibration: self.inputs.calibration_model.to_string(),
                 group_review,
                 fix: self.inputs.fix_model.to_string(),
+                finder_model: s.finder_model.clone(),
+                duplicate_check: s.dup_check_model.clone(),
+                clone_judge: s.clone_judge_model.clone(),
+                finder: s.finder.as_str().to_string(),
             },
             escalation: EscalationSettingsView {
                 rate_per_kloc: s.escalation_rate_per_kloc,

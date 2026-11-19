@@ -558,6 +558,179 @@ impl SiteReview {
     }
 }
 
+// ── Possible false positive (an operator review aid) ──────────────────────────────────────
+
+/// Why the engine itself doubts a row. A closed set: the server works each reason out from data
+/// the run already holds, with no model call, and the review UI and the internal exports read the
+/// enum, never text.
+///
+/// A reason is a flag for the operator and nothing else. It never hides, drops, merges or lowers
+/// a row, and it changes no severity, kind, escalation or decision: a flagged row stays a problem
+/// until the operator rules it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FpReason {
+    /// The group reviewer marked the row an outlier for being a different object or an intended
+    /// pattern, or disagreed with it downward (a lower severity, or not real).
+    GroupReviewerDoubt,
+    /// Calibration left the row waiting for a reviewer, or its confidence is not high.
+    CalibrationDoubt,
+    /// The row is in test code only, and its rule is not a secret rule (a real secret committed in
+    /// a test is still a real secret).
+    TestCodeOnly,
+    /// A style or convention rule, not a security rule, rated the row medium or higher.
+    ConventionRuleAtMediumOrHigher,
+    /// The quoted code was not found near the cited line of the file.
+    EvidenceNotFound,
+    /// The severity comes only from the rule's minimum, above what both reviewers rated.
+    SeverityFromRuleMinimum,
+    /// Only the model reported the row, no deterministic row is at the same place, and its
+    /// confidence is not high.
+    ModelOnly,
+    /// The agent finder that reported the row marked it unsure: the model's own doubt.
+    FinderUnsure,
+}
+
+impl FpReason {
+    /// Every reason, in the order a row lists them.
+    pub const ALL: [FpReason; 8] = [
+        Self::GroupReviewerDoubt,
+        Self::CalibrationDoubt,
+        Self::TestCodeOnly,
+        Self::ConventionRuleAtMediumOrHigher,
+        Self::EvidenceNotFound,
+        Self::SeverityFromRuleMinimum,
+        Self::ModelOnly,
+        Self::FinderUnsure,
+    ];
+
+    /// The wire name (`group_reviewer_doubt`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GroupReviewerDoubt => "group_reviewer_doubt",
+            Self::CalibrationDoubt => "calibration_doubt",
+            Self::TestCodeOnly => "test_code_only",
+            Self::ConventionRuleAtMediumOrHigher => "convention_rule_at_medium_or_higher",
+            Self::EvidenceNotFound => "evidence_not_found",
+            Self::SeverityFromRuleMinimum => "severity_from_rule_minimum",
+            Self::ModelOnly => "model_only",
+            Self::FinderUnsure => "finder_unsure",
+        }
+    }
+
+    /// The reason named `name`, when it is one of the closed list.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.as_str() == name.trim())
+    }
+
+    /// The reason's short name: its Glossary term, and its label in the review UI.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::GroupReviewerDoubt => "Group reviewer doubts it",
+            Self::CalibrationDoubt => "Calibration unsure",
+            Self::TestCodeOnly => "Test code only",
+            Self::ConventionRuleAtMediumOrHigher => "Convention rule at medium or higher",
+            Self::EvidenceNotFound => "Evidence not found",
+            Self::SeverityFromRuleMinimum => "Severity from the rule minimum",
+            Self::ModelOnly => "Model only",
+            Self::FinderUnsure => "Finder unsure",
+        }
+    }
+
+    /// The reason as one plain sentence: its Glossary meaning, and the review UI's hover text.
+    pub const fn sentence(self) -> &'static str {
+        match self {
+            Self::GroupReviewerDoubt => {
+                "The group reviewer marked it a different object or an intended pattern, or \
+                 rated it lower than the row shows."
+            }
+            Self::CalibrationDoubt => {
+                "Calibration was not sure it is real: it left the row waiting for a reviewer or \
+                 gave it low confidence."
+            }
+            Self::TestCodeOnly => {
+                "It is in test code only. A secret committed in a test is never flagged for this."
+            }
+            Self::ConventionRuleAtMediumOrHigher => {
+                "A style or convention rule, not a security rule, rated it medium or higher."
+            }
+            Self::EvidenceNotFound => {
+                "The quoted code could not be found near the cited line of the file."
+            }
+            Self::SeverityFromRuleMinimum => {
+                "Its severity comes only from the rule's minimum, above what both reviewers rated."
+            }
+            Self::ModelOnly => {
+                "Only the model reported it and no deterministic check found the same place. Its \
+                 confidence is low."
+            }
+            Self::FinderUnsure => {
+                "The model that found it said it was not sure the problem is real."
+            }
+        }
+    }
+}
+
+/// The engine's reasons to doubt one row, for the operator to look at first. Present on a row
+/// only when it has at least one reason; the reasons are sorted and without repeats, so the same
+/// row always carries the same value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PossibleFalsePositive {
+    pub reasons: Vec<FpReason>,
+    /// The row's own sentence for a reason, where one exists (the finder's `unsure_why`, the
+    /// group reviewer's own `why`). Operator only, like the flag. Empty for a row with none.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub specifics: std::collections::BTreeMap<FpReason, String>,
+}
+
+impl PossibleFalsePositive {
+    /// The flag's name, everywhere a person reads it.
+    pub const TERM: &'static str = "Possible false positive";
+
+    /// The flag for `reasons`, or `None` when there are none.
+    pub fn from_reasons(mut reasons: Vec<FpReason>) -> Option<Self> {
+        reasons.sort();
+        reasons.dedup();
+        (!reasons.is_empty()).then_some(Self {
+            reasons,
+            specifics: std::collections::BTreeMap::new(),
+        })
+    }
+
+    /// The flag with the row's own sentences; a blank one is left out.
+    #[must_use]
+    pub fn with_specifics(
+        mut self,
+        specifics: impl IntoIterator<Item = (FpReason, String)>,
+    ) -> Self {
+        for (reason, text) in specifics {
+            let text = text.trim();
+            if !text.is_empty() && self.reasons.contains(&reason) {
+                self.specifics.insert(reason, text.to_string());
+            }
+        }
+        self
+    }
+
+    /// A reason's standard sentence, then the row's own sentence when it has one.
+    pub fn sentence_of(&self, reason: FpReason) -> String {
+        match self.specifics.get(&reason) {
+            Some(own) => format!("{} {own}", reason.sentence()),
+            None => reason.sentence().to_string(),
+        }
+    }
+
+    /// Every reason as its sentence, one after another.
+    pub fn sentences(&self) -> String {
+        self.reasons
+            .iter()
+            .map(|r| self.sentence_of(*r))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 // ── How a row was reviewed (design 3B item 3) ─────────────────────────────────────────────
 
 /// How closely a row was reviewed. A closed set, written on every row of every export, so the
@@ -655,6 +828,72 @@ mod tests {
         assert_eq!(EscalationBudget::compute(2.5, 20, 100_000).budget, 250);
         // The floor wins over a rate of zero.
         assert_eq!(EscalationBudget::compute(0.0, 7, 100_000).budget, 7);
+    }
+
+    #[test]
+    fn the_false_positive_reasons_are_closed_and_round_trip() {
+        let mut names = std::collections::HashSet::new();
+        for r in FpReason::ALL {
+            assert_eq!(FpReason::parse(r.as_str()), Some(r));
+            let wire = serde_json::to_value(r).expect("serialises");
+            assert_eq!(wire, serde_json::Value::String(r.as_str().to_string()));
+            assert!(names.insert(r.as_str()), "{r:?} shares a wire name");
+        }
+        assert_eq!(FpReason::parse("outlier"), None);
+        // ALL is in the derived order, so a sorted flag lists reasons in ALL's order.
+        let mut sorted = FpReason::ALL;
+        sorted.sort();
+        assert_eq!(sorted, FpReason::ALL);
+    }
+
+    #[test]
+    fn every_false_positive_reason_has_a_plain_label_and_sentence() {
+        let mut labels = std::collections::HashSet::new();
+        for r in FpReason::ALL {
+            let (label, sentence) = (r.label(), r.sentence());
+            assert!(labels.insert(label), "{label:?} is used twice");
+            assert!(sentence.ends_with('.'), "{sentence:?}");
+            for text in [label, sentence] {
+                assert!(
+                    !text.contains(['\u{2014}', '\u{2013}']),
+                    "{text:?} carries a dash"
+                );
+                // A serial comma: a list of three or more whose last item follows ", and" or
+                // ", or", so another comma comes earlier in the same clause.
+                for clause in text.split(['.', ':']) {
+                    for joint in [", and ", ", or "] {
+                        if let Some(at) = clause.find(joint) {
+                            assert!(!clause[..at].contains(','), "{text:?} has a serial comma");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_flag_needs_a_reason_and_keeps_each_once_in_order() {
+        assert_eq!(PossibleFalsePositive::from_reasons(Vec::new()), None);
+        let flag = PossibleFalsePositive::from_reasons(vec![
+            FpReason::ModelOnly,
+            FpReason::GroupReviewerDoubt,
+            FpReason::ModelOnly,
+        ])
+        .expect("a flag");
+        assert_eq!(
+            flag.reasons,
+            vec![FpReason::GroupReviewerDoubt, FpReason::ModelOnly]
+        );
+        let wire = serde_json::to_string(&flag).expect("serialises");
+        assert_eq!(wire, r#"{"reasons":["group_reviewer_doubt","model_only"]}"#);
+        assert_eq!(
+            flag.sentences(),
+            format!(
+                "{} {}",
+                FpReason::GroupReviewerDoubt.sentence(),
+                FpReason::ModelOnly.sentence()
+            )
+        );
     }
 
     #[test]

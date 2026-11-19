@@ -165,3 +165,38 @@ fn the_hardcoded_arm_keeps_its_precision_guards() {
             .is_ok()
     );
 }
+
+#[test]
+fn a_terraform_reference_is_quiet_through_the_file_entry_and_loud_in_a_dotenv_file() {
+    let line = "password = random_password.reader_login.result\n";
+    let rule = "SEC-NO-HARDCODED-SECRETS-1";
+    assert!(content_match_lines_in_file(rule, "grants/main.tf", line).is_empty());
+    assert_eq!(
+        content_match_lines_in_file(rule, "config/service.env", line),
+        vec![1]
+    );
+}
+
+#[test]
+fn ui_and_end_to_end_test_paths_are_test_paths() {
+    for p in [
+        "apps/web/cypress/support/commands.ts",
+        "src/login.cy.tsx",
+        "src/flow.e2e.ts",
+    ] {
+        assert!(is_test_or_fixture_path(p), "{p}");
+    }
+    for p in [
+        "src/services/cypress_client.ts",
+        "src/e2eReport.ts",
+        "src/crypto/e2e/session.ts",
+    ] {
+        assert!(!is_test_or_fixture_path(p), "{p}");
+    }
+}
+
+#[test]
+fn a_bare_e2e_folder_is_production_code_for_the_sql_arm() {
+    let content = "const q = \"SELECT * FROM users WHERE name = '\" + name + \"'\";";
+    assert!(arm_sec_no_raw_sql_concat_1("src/crypto/e2e/session.ts", content).is_err());
+}

@@ -103,7 +103,7 @@ fn a_scan_with_no_model_recorded_counts_every_repo_as_not_reviewed_by_the_model(
     );
     let note = &json.methodology.ai_tier_note;
     assert!(
-        note.contains("did not run for 1 repo; see Coverage."),
+        note.contains("did not run for 1 repo; see the Not checked sheet."),
         "{note}"
     );
     assert!(!note.contains("calibrated language-model review"), "{note}");

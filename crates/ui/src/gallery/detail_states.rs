@@ -178,6 +178,8 @@ states! {
     over_budget => "detail/over-budget",
     viewer_commit => "detail/viewer-commit",
     thrown_out => "detail/thrown-out",
+    carrier => "detail/carrier",
+    carried => "detail/carried",
 }
 
 #[cfg(test)]

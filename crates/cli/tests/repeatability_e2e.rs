@@ -44,6 +44,8 @@ impl LlmPort for Drifting {
             r#"{{"findings":[{{"rule":"SHARED-ACROSS-RUNS-1","severity":"medium","path":"src/db.rs","line":8,"code":"pub fn find_user_query(user_id: &str) -> String {{","title":"shared","detail":"reported by both runs"}},{drift}],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}}"#
         );
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),
@@ -307,4 +309,41 @@ async fn a_run_whose_scan_passes_failed_is_flagged_incomplete_and_exits_non_zero
         "{}",
         outcome.render_text()
     );
+}
+
+/// A real cli run (no scripted model) checks the local Claude Code's version before any model
+/// call, as `camerata inspect` does: a Claude Code that cannot be read refuses the run, and the
+/// refusal names the role the model plays.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_real_cli_run_checks_the_claude_code_version_before_any_model_call() {
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_CLAUDE_PROGRAM", "/nonexistent/claude");
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let result = run_repeatability_with(
+        RepeatabilityArgs {
+            repo: repo.path().to_path_buf(),
+            backend: ProjectBackend::Cli,
+            model: Some("claude-fable-5-2".to_string()),
+            calibration_model: None,
+            max_cost_usd: Some(100.0),
+            client_engagement: false,
+            efficiency: vec![
+                "warm_schedule=off".to_string(),
+                "terse_output=off".to_string(),
+            ],
+            format: OutputFormat::Text,
+        },
+        false,
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+        Seams {
+            llm: None,
+            preflight_sink: &|_| {},
+            on_run_start: &|n| panic!("run {n} started before the version check refused"),
+        },
+    )
+    .await;
+    let err = result.expect_err("an unreadable Claude Code must refuse the run");
+    assert!(err.contains("could not be read"), "{err}");
+    assert!(err.contains("claude-fable-5-2"), "{err}");
 }

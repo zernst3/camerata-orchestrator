@@ -416,6 +416,16 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
 /// line-by-line scan misses). Path-based rules return empty. The brownfield audit uses
 /// this for per-line findings; the write-time gate still uses the boolean arm.
 pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
+    content_match_lines_in(rule_id, None, content)
+}
+
+/// [`content_match_lines`] for the file at `path`: the path tells the secret detector which
+/// language the text is (an unquoted right side in a Terraform file is an expression, not a value).
+pub fn content_match_lines_in_file(rule_id: &str, path: &str, content: &str) -> Vec<usize> {
+    content_match_lines_in(rule_id, Some(path), content)
+}
+
+fn content_match_lines_in(rule_id: &str, path: Option<&str>, content: &str) -> Vec<usize> {
     // SEC-NO-UNSAFE-DESERIALIZATION-1 requires the SafeLoader/FullLoader carve-out:
     // matches on `yaml.load(` where the SAME LINE also contains SafeLoader or FullLoader
     // must be suppressed. The carve-out is applied here (not just in the arm) so the
@@ -445,11 +455,24 @@ pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
     // for the gate, the scan floor and the export release gate). Twins still count as rows: a
     // committed placeholder key is worth a finding; the redactor, not the floor, keeps it readable.
     if SHAPE_DRIVEN_SECRET_RULES.contains(&rule_id) {
-        return camerata_secrets::match_lines_for_rule(content, rule_id, true);
+        return match path {
+            Some(path) => {
+                camerata_secrets::match_lines_for_rule_in_file(content, rule_id, path, true)
+            }
+            None => camerata_secrets::match_lines_for_rule(content, rule_id, true),
+        };
+    }
+
+    if rule_id == "SEC-NO-RAW-SQL-CONCAT-1" {
+        let mut lines: Vec<usize> = sql_concat_offsets(path, content)
+            .into_iter()
+            .map(|at| content[..at].bytes().filter(|&b| b == b'\n').count() + 1)
+            .collect();
+        lines.dedup();
+        return lines;
     }
 
     let re = match rule_id {
-        "SEC-NO-RAW-SQL-CONCAT-1" => sec_sql_concat_regex(),
         "ARCH-NO-SECRETS-IN-URL-1" => arch_url_secret_regex(),
         "SEC-NO-DISABLED-TLS-1" => sec_disabled_tls_regex(),
         _ => return Vec::new(),
@@ -561,10 +584,11 @@ fn is_write_tool(tool: &str) -> bool {
 ///
 /// Matching rules (all comparisons are case-insensitive):
 /// - Any **path segment** (directory component) equals one of:
-///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `benches`
+///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `benches`, `cypress`
 ///   (`examples` is intentionally excluded — see GATE-F7 note in the body).
 /// - The **filename** (last segment) matches one of:
-///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `test_*.py`, `conftest.py`
+///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `*.cy.<ext>`, `*.e2e.<ext>`, `test_*.py`,
+///   `conftest.py`
 ///
 /// Production paths are unchanged — only test/fixture paths are down-ranked.
 pub fn is_test_or_fixture_path(path: &str) -> bool {
@@ -591,7 +615,7 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
             // test artefact. Treating an examples path as test scope let an
             // agent disable floor rules by filename. Examples now get full
             // production enforcement.
-            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "benches" => {
+            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "benches" | "cypress" => {
                 return true;
             }
             _ => {}
@@ -616,7 +640,12 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
         // the stem ends with "_test", ".test", or ".spec".
         if let Some(dot_pos) = filename.rfind('.') {
             let stem = &filename[..dot_pos];
-            if stem.ends_with("_test") || stem.ends_with(".test") || stem.ends_with(".spec") {
+            if stem.ends_with("_test")
+                || stem.ends_with(".test")
+                || stem.ends_with(".spec")
+                || stem.ends_with(".cy")
+                || stem.ends_with(".e2e")
+            {
                 return true;
             }
         }
@@ -957,9 +986,9 @@ fn deny_on_secret_shape(
     content: &str,
     message: impl FnOnce(&camerata_secrets::SecretMatch) -> String,
 ) -> Result<(), String> {
-    let Some(m) = camerata_secrets::detect_for_rule(content, rule_id)
+    let Some(m) = camerata_secrets::detect_for_rule_in_file(content, rule_id, path)
         .into_iter()
-        .find(camerata_secrets::SecretMatch::counts_as_finding)
+        .find(|m| m.counts_as_finding_in(content))
     else {
         return Ok(());
     };
@@ -1031,6 +1060,15 @@ fn arm_sec_no_hardcoded_secrets_1(path: &str, content: &str) -> Result<(), Strin
 ///   this rule complements, not replaces, a parameterised-query lint.
 /// - Raw string literals (`r#"..."#`) are not matched by the opening `"` anchor; raw-SQL in
 ///   raw strings is a known gap.
+/// - A match that spans lines counts only when its first quote OPENS a string (an even number of
+///   unescaped quotes before it on its line) or a SQL verb follows it on that line. Started at a
+///   closing quote, the pattern would run through code and prose until it met a verb, a clause
+///   word and a `{name}` (the `${name}` of a template literal supplies one). A rejected start is
+///   skipped and the search resumes one character later. Residual gap: a multi-line
+///   double-quoted query whose opening line has an odd number of quotes before it and no verb
+///   after it.
+/// - A template literal (backticks) has its own pattern, [`sec_sql_template_regex`]: a verb, a
+///   clause word, then `${` inside one backtick literal, reported on the line of the `${`.
 /// - Intentional raw SQL in test fixtures / migrations triggers it; exclude those via the
 ///   rule-subset config.
 static SEC_SQL_CONCAT_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -1078,11 +1116,160 @@ fn sec_sql_concat_regex() -> &'static Regex {
     })
 }
 
+static SEC_SQL_TEMPLATE_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The template-literal form: inside ONE backtick literal, a DML word, a clause word, then `${`.
+fn sec_sql_template_regex() -> &'static Regex {
+    SEC_SQL_TEMPLATE_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            `
+            (?:[^`\\]|\\[\s\S])*?
+            \b(?:SELECT|INSERT|UPDATE|DELETE)\b
+            (?:[^`\\]|\\[\s\S])*?
+            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b
+            (?:[^`\\]|\\[\s\S])*?
+            \$\{
+            "#,
+        )
+        .expect("SEC-NO-RAW-SQL-CONCAT-1 template regex must compile")
+    })
+}
+
+static SEC_SQL_SINGLE_QUOTE_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The single-quoted form (a Python f-string or `.format`, a `'...' + x` concatenation): inside
+/// ONE `'...'` literal (one line: a single-quoted string does not span lines), a DML word, a clause word, then `{name}` or the closing quote and `+`.
+fn sec_sql_single_quote_regex() -> &'static Regex {
+    SEC_SQL_SINGLE_QUOTE_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            '
+            (?:[^'\\\n]|\\[\s\S])*?
+            \b(?:SELECT|INSERT|UPDATE|DELETE)\b
+            (?:[^'\\\n]|\\[\s\S])*?
+            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b
+            (?:[^'\\\n]|\\[\s\S])*?
+            (?: \{\w*\} | '\s*\+ )
+            "#,
+        )
+        .expect("SEC-NO-RAW-SQL-CONCAT-1 single-quote regex must compile")
+    })
+}
+
+static SEC_SQL_TRIPLE_SINGLE_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The triple-single-quoted form (a Python `'''...'''` f-string): a DML word, a clause word, then
+/// `{name}`, with no `'''` between the opening quotes and the interpolation. It spans lines.
+fn sec_sql_triple_single_regex() -> &'static Regex {
+    SEC_SQL_TRIPLE_SINGLE_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            '''
+            (?:[^'\\]|\\[\s\S]|'[^']|''[^'])*?
+            \b(?:SELECT|INSERT|UPDATE|DELETE)\b
+            (?:[^'\\]|\\[\s\S]|'[^']|''[^'])*?
+            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b
+            (?:[^'\\]|\\[\s\S]|'[^']|''[^'])*?
+            '{0,2} \{\w*\}
+            "#,
+        )
+        .expect("SEC-NO-RAW-SQL-CONCAT-1 triple-single-quote regex must compile")
+    })
+}
+
+/// Whether the quote at `at` opens a string: an even number of unescaped `quote` characters
+/// precede it on its line.
+fn quote_opens_a_string(content: &str, at: usize, quote: char) -> bool {
+    let line_start = content[..at].rfind('\n').map_or(0, |i| i + 1);
+    let mut count = 0;
+    let mut escaped = false;
+    for c in content[line_start..at].chars() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            count += 1;
+        }
+    }
+    count % 2 == 0
+}
+
+/// Whether a SQL verb follows the quote at `at` on the same line.
+fn verb_follows_on_line(content: &str, at: usize) -> bool {
+    static VERB: OnceLock<Regex> = OnceLock::new();
+    let line_end = content[at..].find('\n').map_or(content.len(), |i| at + i);
+    VERB.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:SELECT|INSERT|UPDATE|DELETE)\b").expect("verb regex must compile")
+    })
+    .is_match(&content[at + 1..line_end])
+}
+
+/// Every accepted match of one quote form, as the byte offset to report. `report_at` maps the
+/// match to that offset. A one-line match is always kept; a match across lines is kept only when
+/// its first quote opens a string or a verb follows it on its line. After a rejection the search
+/// resumes one character past the match start.
+fn sql_concat_hits(
+    content: &str,
+    re: &Regex,
+    quote: char,
+    report_at: impl Fn(&regex::Match<'_>) -> usize,
+) -> Vec<usize> {
+    let mut hits = Vec::new();
+    let mut pos = 0;
+    while pos <= content.len() {
+        let Some(m) = re.find_at(content, pos) else {
+            break;
+        };
+        let one_line = !m.as_str().contains('\n');
+        if one_line
+            || quote_opens_a_string(content, m.start(), quote)
+            || verb_follows_on_line(content, m.start())
+        {
+            hits.push(report_at(&m));
+            pos = m.end().max(m.start() + 1);
+        } else {
+            pos = m.start() + 1;
+        }
+    }
+    hits
+}
+
+/// Offsets of every raw-SQL concatenation hit in `content`, sorted: the double- and single-quoted
+/// forms at the match start, the template-literal form at its `${`.
+fn sql_concat_offsets(path: Option<&str>, content: &str) -> Vec<usize> {
+    let mut hits = sql_concat_hits(content, sec_sql_concat_regex(), '"', |m| m.start());
+    hits.extend(sql_concat_hits(
+        content,
+        sec_sql_template_regex(),
+        '`',
+        |m| m.end() - 2,
+    ));
+    // A Rust file has lifetimes and char literals, never a single-quoted string: skip the form.
+    if !path.is_some_and(|p| p.to_ascii_lowercase().ends_with(".rs")) {
+        hits.extend(sql_concat_hits(
+            content,
+            sec_sql_single_quote_regex(),
+            '\'',
+            |m| m.start(),
+        ));
+        // Every triple-quoted match is kept: a `'''` opens a string wherever it sits.
+        hits.extend(
+            sec_sql_triple_single_regex()
+                .find_iter(content)
+                .map(|m| m.start()),
+        );
+    }
+    hits.sort_unstable();
+    hits
+}
+
 /// SEC-NO-RAW-SQL-CONCAT-1: deny content that builds SQL by string
 /// concatenation or format-string interpolation.
 fn arm_sec_no_raw_sql_concat_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(m) = sec_sql_concat_regex().find(content) {
-        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+    if let Some(&start) = sql_concat_offsets(Some(path), content).first() {
+        let match_line = content[..start].bytes().filter(|&b| b == b'\n').count() + 1;
         let in_test = is_test_or_fixture_path(path)
             || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
         if in_test {
@@ -1568,6 +1755,8 @@ impl GovernanceGateway for GovernedGateway {
 
 #[cfg(test)]
 mod secret_arm_tests;
+#[cfg(test)]
+mod sql_concat_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1632,6 +1821,26 @@ mod tests {
         assert!(
             d.is_err(),
             "a long opaque literal on a *_KEY const must be flagged"
+        );
+    }
+
+    #[test]
+    fn sql_concat_catches_triple_single_quoted_fstring() {
+        let text = "log(\"ready\")\nq = f'''\nSELECT id FROM users\nWHERE name = '{name}'\n'''\n";
+        assert_eq!(
+            content_match_lines_in_file("SEC-NO-RAW-SQL-CONCAT-1", "app/db.py", text),
+            vec![2]
+        );
+        // A parameterised triple-quoted query stays quiet.
+        assert!(content_match_lines_in_file(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "app/db.py",
+            "'''SELECT id FROM users WHERE id = %s'''"
+        )
+        .is_empty());
+        // A Rust file has no triple-quoted string: the form is skipped.
+        assert!(
+            content_match_lines_in_file("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", text).is_empty()
         );
     }
 

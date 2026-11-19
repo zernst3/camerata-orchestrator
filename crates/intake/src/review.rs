@@ -328,7 +328,8 @@ impl ClaudeRefinementReviewer {
         // built-ins (Read/Grep/Glob/LS) enabled, so the reviewer can scan ANY file in the
         // real codebase while reviewing, not just the inlined digest. No write path is added
         // (no write/exec tool is offered).
-        let mut cmd = tokio::process::Command::new("claude");
+        let program = camerata_api_types::claude_cli::claude_program();
+        let mut cmd = tokio::process::Command::new(program);
         // The subscription CLI must never inherit an API key from the parent's `.env`.
         camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a model
@@ -343,8 +344,14 @@ impl ClaudeRefinementReviewer {
             .arg("--output-format")
             .arg("json")
             .kill_on_drop(true);
+        // Isolation: the repo as cwd when bound, else an empty engine-owned directory; never the
+        // launcher's directory, and no project settings or operator memory.
+        camerata_api_types::claude_cli::isolate_claude_call(
+            cmd.as_std_mut(),
+            self.repo_dir.as_deref(),
+        );
         if let Some(dir) = &self.repo_dir {
-            cmd.current_dir(dir).arg("--add-dir").arg(dir);
+            cmd.arg("--add-dir").arg(dir);
             // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
             // `--add-dir` so the reviewer can scan across all the project's repos. READ-only
             // — no write tool is offered. Skip any that duplicate the cwd.
@@ -688,6 +695,35 @@ mod tests {
 
     /// Nothing sent to a model contains a raw secret: the prompt reaches `claude -p` as an
     /// argument, so it is redacted on its way into the argv.
+    #[test]
+    fn the_review_call_is_isolated_from_the_launcher() {
+        let bare = ClaudeRefinementReviewer::new().build_command("review");
+        assert_eq!(
+            bare.as_std().get_current_dir(),
+            Some(camerata_api_types::claude_cli::engine_empty_cwd().as_path())
+        );
+        let bound = ClaudeRefinementReviewer::new()
+            .with_repo_dir("/Users/auditor/clients/acme")
+            .build_command("review");
+        assert_eq!(
+            bound.as_std().get_current_dir(),
+            Some(std::path::Path::new("/Users/auditor/clients/acme"))
+        );
+        for cmd in [&bare, &bound] {
+            let args: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let at = args.iter().position(|a| a == "--setting-sources");
+            assert_eq!(at.map(|i| args[i + 1].as_str()), Some("user"), "{args:?}");
+            assert!(cmd
+                .as_std()
+                .get_envs()
+                .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && v.is_some()));
+        }
+    }
+
     #[test]
     fn the_prompt_handed_to_claude_carries_no_raw_secret() {
         let planted =

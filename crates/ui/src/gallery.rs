@@ -94,6 +94,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "node-decided",
             "not-group-reviewed",
             "narrow",
+            "place",
         ],
     ),
     (
@@ -110,6 +111,10 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "30k",
             "detail-form-open",
             "merge-picker-empty-pool",
+            "place",
+            "possible-false-positive",
+            "possible-false-positive-specific",
+            "possible-duplicate",
         ],
     ),
     (
@@ -126,6 +131,7 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "small-category",
             "thrown-out-held",
             "thrown-out-confirmed",
+            "second-look-held",
             "floor-binds",
         ],
     ),
@@ -157,6 +163,8 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "over-budget",
             "viewer-commit",
             "thrown-out",
+            "carrier",
+            "carried",
         ],
     ),
     (

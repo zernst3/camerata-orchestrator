@@ -193,6 +193,14 @@ pub mod react_hooks_lint_checker;
 /// semantic pass. See `crates/rules/principles/ui/ui-state-shape-1.toml`.
 pub mod state_shape_checker;
 
+/// `JAVASCRIPT-REACT-EFFECT-CLEANUP-1`: a React effect that starts an interval, a listener, a
+/// subscription or a connection in its own body and returns no cleanup function. Proves that one
+/// shape deterministically, stays quiet on every look-alike it cannot prove (any returned value,
+/// a matching stop call, work started in a nested callback, `setTimeout`) and leaves the rest of
+/// the rule to the semantic pass. See
+/// `crates/rules/principles/javascript/react/javascript-react-effect-cleanup-1.toml`.
+pub mod effect_cleanup_checker;
+
 /// `STYLE-NEEDLESS-COMPLEXITY-1` (W29 Wave D, `docs/design/2026-10-21_w29-detector-implementation.md`):
 /// a negated conditional (`!x ? a : b`, which is `x ? b : a` written backwards), and a TSX
 /// component prop declared optional that every call site passes with a defined value. Call

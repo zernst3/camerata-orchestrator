@@ -19,16 +19,18 @@
 
 use camerata_api_types::decisions::Decision;
 use camerata_api_types::edits::{Edit, EditField, FindingAdded};
+use camerata_api_types::review::PossibleFalsePositive;
 use camerata_api_types::review_view::SiteRow;
 use camerata_ui_core::edits::{
     ack_detail, ack_line, ack_state, added_message, added_outcome, chord_hint, chord_letter,
-    commit, control_for, decision_line, duplicate_line, edit_tip, field_label, field_state,
+    commit, control_for, decision_line, duplicate_entries, edit_tip, field_label, field_state,
     flagged_by_line, head_chips, held_line, is_thrown_out, merge_candidate_total, merge_candidates,
-    merge_shown_line, reapply_decision_request, reapply_done_message, reduce, review_level_text,
-    severity_note, snippet_at_line, split_choice_from_value, split_option_value, stage1_line,
-    stage2_line, stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome,
-    Control, DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState,
-    LineAction, LineTone, Snippet, SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
+    merge_shown_line, possible_false_positive_lines, reapply_decision_request,
+    reapply_done_message, reduce, review_level_text, severity_bounds_note, severity_note,
+    snippet_at_line, split_choice_from_value, split_option_value, stage1_line, stage2_line,
+    stale_edit_line, stale_edit_tip, AckState, AddDraft, AddField, AddedOutcome, Control,
+    DetailAction, DetailContext, DetailMode, DetailUndo, DetailWrite, FieldState, LineAction,
+    LineTone, Snippet, SplitChoice, ThrowOutChoice, UndoAction, SPLIT_NEW_VALUE,
 };
 use camerata_ui_core::tree::{file_line, is_outlier, kind_tag_of, severity_badge, severity_label};
 use camerata_ui_core::triage::TriageState;
@@ -66,6 +68,12 @@ pub(crate) enum DetailEvent {
     OpenCode,
     /// The Stack button (`B`): the lane opens the stacked view.
     OpenStack,
+    /// The include tick of a rule the open row carries, by the carried row's site key: the lane
+    /// ticks or unticks it into the next place decision.
+    TickCarried(String),
+    /// Go to another row at this place (a carried rule's id or Decide alone, or Go to carrier):
+    /// the site key, its rule id and its sub-group. The lane opens it.
+    GoTo(String, String, String),
     /// The add form's "Load code" button.
     LoadSnippet,
 }
@@ -127,6 +135,9 @@ pub(crate) fn SiteDetailView(
     #[props(default = true)]
     stack: bool,
     #[props(default)] on_event: Callback<DetailEvent>,
+    /// The carried rules the reviewer unticked out of the next place decision.
+    #[props(default)]
+    unticked: std::collections::BTreeSet<String>,
     /// The lane's reason prompt for a site decision, drawn above the buttons.
     children: Element,
 ) -> Element {
@@ -143,8 +154,10 @@ pub(crate) fn SiteDetailView(
     let stage1 = stage1_line(&row);
     let stage2 = stage2_line(&row);
     let flagged = flagged_by_line(&row);
-    let duplicate = duplicate_line(&row);
+    let duplicates = duplicate_entries(&row);
+    let fp_lines = possible_false_positive_lines(&row);
     let sev_note = severity_note(&row);
+    let sev_bounds = severity_bounds_note(&row);
     let mode = panel.mode.clone();
     let picking = mode == DetailMode::PickField;
     let editing = |field: EditField| matches!(&mode, DetailMode::Edit(d) if d.field == field);
@@ -153,6 +166,7 @@ pub(crate) fn SiteDetailView(
     let detail = field_state(&row, EditField::Detail, &ctx);
     let fix = field_state(&row, EditField::Fix, &ctx);
     let fix_type = field_state(&row, EditField::FixType, &ctx);
+    let business = field_state(&row, EditField::Business, &ctx);
     let meta: Vec<FieldState> = [
         EditField::RuleId,
         EditField::Kind,
@@ -230,7 +244,7 @@ pub(crate) fn SiteDetailView(
             if has_form(EditField::Headline) {
                 EditFormFor { field: EditField::Headline, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
-            FieldRow { state: severity, note: sev_note, badge: Some(row.severity.clone()), editable: !thrown_out, on_event }
+            FieldRow { state: severity, note: sev_note, bounds: sev_bounds, badge: Some(row.severity.clone()), editable: !thrown_out, on_event }
             if has_form(EditField::Severity) {
                 EditFormFor { field: EditField::Severity, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
@@ -245,6 +259,10 @@ pub(crate) fn SiteDetailView(
             FieldRow { state: fix_type, editable: !thrown_out, on_event }
             if has_form(EditField::FixType) {
                 EditFormFor { field: EditField::FixType, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
+            }
+            FieldRow { state: business, multiline: true, editable: !thrown_out, on_event }
+            if has_form(EditField::Business) {
+                EditFormFor { field: EditField::Business, row: row.clone(), ctx: ctx.clone(), mode: mode.clone(), on_event }
             }
             div { class: "site-detail-meta",
                 for state in meta {
@@ -285,17 +303,85 @@ pub(crate) fn SiteDetailView(
                     span { class: "site-detail-value", "{text}" }
                 }
             }
-            if let Some((place, hint)) = duplicate {
-                p { class: "site-detail-line site-detail-dup",
+            if !duplicates.is_empty() {
+                div { class: "site-detail-line site-detail-dup",
                     span { class: "site-detail-label", "Possible duplicate of" }
-                    span { class: "site-detail-value", title: "{hint}", "{place}" }
-                    if !thrown_out {
-                    button {
-                        class: "btn-edit-sm",
-                        title: "Merge this row into the possible duplicate (M)",
-                        onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginMerge)),
-                        "merge into"
+                    div { class: "site-detail-value",
+                        for entry in duplicates {
+                            span { key: "{entry.key}", class: "site-detail-same-place-item",
+                                if let Some((key, rule, node)) = entry.goto.clone() {
+                                    button {
+                                        class: "btn-edit-sm site-detail-same-place-link",
+                                        title: "Open the other cause. It may be the same problem found twice, and it stays a problem until you rule on it.",
+                                        onclick: move |_| on_event.call(DetailEvent::GoTo(key.clone(), rule.clone(), node.clone())),
+                                        "{entry.label}"
+                                    }
+                                    " "
+                                    span { title: "{entry.hint}", "{entry.hint}" }
+                                } else {
+                                    span { title: "{entry.hint}", "{entry.label}" }
+                                }
+                            }
+                        }
+                        if !thrown_out {
+                            button {
+                                class: "btn-edit-sm",
+                                title: "Merge this row into the possible duplicate (M). You give the reason.",
+                                onclick: move |_| on_event.call(DetailEvent::Form(DetailAction::BeginMerge)),
+                                "merge into"
+                            }
+                        }
                     }
+                }
+            }
+            if !row.carries.is_empty() {
+                div { class: "site-detail-carries",
+                    p { class: "site-detail-line",
+                        span { class: "site-detail-label", "{ALSO_MATCHES_HEADING}" }
+                        span { class: "site-detail-value",
+                            "Deciding this row decides every ticked rule below at once. A held rule is left out."
+                        }
+                    }
+                    for rule in row.carries.iter().cloned() {
+                        CarriedRuleItem {
+                            key: "{rule.site_key}",
+                            ticked: !unticked.contains(&rule.site_key),
+                            rule,
+                            on_event,
+                        }
+                    }
+                }
+            }
+            if let Some(by) = row.carried_by.clone() {
+                p { class: "site-detail-line site-detail-carried-by",
+                    span { class: "site-detail-label", "Carried by" }
+                    span { class: "site-detail-value",
+                        title: "{by.path}",
+                        "{by.rule_id} at {by.path}:{by.line}; decided there unless you decide this rule alone"
+                    }
+                    button {
+                        class: "btn-edit-sm site-detail-goto-carrier",
+                        title: "Open the row that carries this rule",
+                        onclick: {
+                            let (key, rule, node) = (by.site_key.clone(), by.rule_id.clone(), by.node_id.clone());
+                            move |_| on_event.call(DetailEvent::GoTo(key.clone(), rule.clone(), node.clone()))
+                        },
+                        "Go to carrier"
+                    }
+                }
+            }
+            if !fp_lines.is_empty() {
+                div { class: "site-detail-line site-detail-fp",
+                    span { class: "site-detail-label", "{PossibleFalsePositive::TERM}" }
+                    div { class: "site-detail-value",
+                        ul { class: "site-detail-fp-reasons",
+                            for (label, sentence) in fp_lines {
+                                li { key: "{label}",
+                                    span { class: "site-detail-fp-label", "{label}." }
+                                    " {sentence}"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -424,6 +510,71 @@ pub(crate) fn SiteDetailView(
     }
 }
 
+/// The heading of the carrier's list of the rules it carries (the vocabulary's term "Also
+/// matches").
+const ALSO_MATCHES_HEADING: &str = "Also matches at this place";
+
+/// One rule the open row carries: its id (a jump to its node), severity, kind, hold, stage 1,
+/// escalation, its own decision, a Decide alone control and the include tick.
+#[component]
+fn CarriedRuleItem(
+    rule: camerata_api_types::review_view::CarriedRuleView,
+    ticked: bool,
+    on_event: Callback<DetailEvent>,
+) -> Element {
+    let line = camerata_ui_core::tree::place::carried_line(&rule);
+    let (kind_class, kind_label, kind_tip) = kind_chip_parts(
+        camerata_api_types::audit::FindingKind::tag_or_unspecified(rule.kind.as_ref()),
+    );
+    let locked = rule.held.is_some();
+    let key_tick = rule.site_key.clone();
+    let (key, id, node) = (
+        rule.site_key.clone(),
+        rule.rule_id.clone(),
+        rule.node_id.clone(),
+    );
+    let (key_alone, id_alone, node_alone) = (key.clone(), id.clone(), node.clone());
+    rsx! {
+        div { class: "site-detail-carried-rule", "data-carried": "{rule.rule_id}",
+            input {
+                r#type: "checkbox",
+                class: "carried-tick",
+                checked: ticked && !locked,
+                disabled: locked,
+                title: if locked { "Held rows are never covered by a group decision: rule on this one by name." } else { "Include this rule in the place decision" },
+                "aria-label": "Include this rule in the place decision",
+                onchange: move |_| on_event.call(DetailEvent::TickCarried(key_tick.clone())),
+            }
+            button {
+                class: "btn-edit-sm carried-rule-id",
+                title: "Open this rule's node",
+                onclick: move |_| on_event.call(DetailEvent::GoTo(key.clone(), id.clone(), node.clone())),
+                "{rule.rule_id}"
+            }
+            span { class: "tree-badge tree-badge-{severity_badge(&rule.severity)}", "{severity_label(&rule.severity)}" }
+            span { class: "{kind_class}", title: "{kind_tip}", "{kind_label}" }
+            if let Some(hold) = line.hold.clone() {
+                span { class: "mark-held", "held: {hold}" }
+            }
+            span { class: "carried-stage1", title: "Stage 1", "Stage 1 {line.stage1}" }
+            if let Some(esc) = line.escalation.clone() {
+                span { class: "carried-escalation", "{esc}" }
+            }
+            span {
+                class: if rule.decision.is_some() { "dec-decided" } else { "dec-unresolved" },
+                "{line.decision}"
+            }
+            if line.inherited { span { class: "dec-inherited", "inherited" } }
+            button {
+                class: "btn-edit-sm carried-decide-alone",
+                title: "Open this rule's own row to decide it alone. A decision there wins over the place's.",
+                onclick: move |_| on_event.call(DetailEvent::GoTo(key_alone.clone(), id_alone.clone(), node_alone.clone())),
+                "Decide alone"
+            }
+        }
+    }
+}
+
 /// A field line: the label, the value with its marks, and the edit button. A stale edit of the
 /// field is a second line under it with Reapply and Discard.
 #[component]
@@ -432,6 +583,9 @@ fn FieldRow(
     /// Words after the value (the severity's stage disagreement).
     #[props(default)]
     note: Option<String>,
+    /// What the rule's own bounds did to the severity, or say about it (plain words).
+    #[props(default)]
+    bounds: Option<String>,
     /// A severity badge to draw in front of the value.
     #[props(default)]
     badge: Option<String>,
@@ -469,6 +623,9 @@ fn FieldRow(
                 }
                 if let Some(note) = note {
                     span { class: "site-detail-note", " ({note})" }
+                }
+                if let Some(bounds) = bounds {
+                    span { class: "site-detail-note site-detail-bounds", " {bounds}" }
                 }
             }
             if let Some(edit) = applied {
@@ -1182,7 +1339,9 @@ impl DetailCtl {
             DetailEvent::Decide(_)
             | DetailEvent::Tick
             | DetailEvent::OpenCode
-            | DetailEvent::OpenStack => {}
+            | DetailEvent::OpenStack
+            | DetailEvent::TickCarried(_)
+            | DetailEvent::GoTo(..) => {}
         }
     }
 

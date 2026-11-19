@@ -221,11 +221,11 @@ enum Tamper {
     Rename,
 }
 
-/// The workbook's All Findings sheet carries the same label beside each fix.
+/// The workbook's All problems sheet carries the same label beside each fix.
 #[test]
 fn the_workbook_labels_each_fix_beside_the_fix() {
     let package = package_for(report("Raw SQL built by string formatting."));
-    let grid = xlsx_sheet_grid(&package.xlsx, "All Findings").expect("the sheet");
+    let grid = xlsx_sheet_grid(&package.xlsx, "All problems").expect("the sheet");
     let header = &grid[0];
     let col = |name: &str| {
         header
@@ -233,7 +233,7 @@ fn the_workbook_labels_each_fix_beside_the_fix() {
             .position(|h| h == name)
             .unwrap_or_else(|| panic!("no column {name:?} in {header:?}"))
     };
-    let (fix_col, type_col) = (col("Fix (specific to this finding)"), col("Fix type"));
+    let (fix_col, type_col) = (col("What to do here"), col("Fix type"));
     let mut seen = BTreeMap::new();
     for row in &grid[1..] {
         seen.insert(row[fix_col].clone(), row[type_col].clone());
@@ -249,10 +249,10 @@ fn the_workbook_labels_each_fix_beside_the_fix() {
     assert_eq!(seen[""], "");
 }
 
-/// The PDF prints the same label in front of each fix. The curated sites of the PDF's data carry
-/// it in `fix_type`, and the compiled PDF (when Typst is installed) shows it.
+/// The curated sites of the report data carry the label in `fix_type`, the same one the workbook
+/// prints. (The PDF prints no per-place fix.)
 #[tokio::test]
-async fn the_pdf_labels_each_fix_in_its_data_and_in_the_rendered_page() {
+async fn the_report_data_labels_each_fix() {
     let sealed = report("Raw SQL built by string formatting.").seal();
     let json = build_report_json(
         &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
@@ -269,21 +269,6 @@ async fn the_pdf_labels_each_fix_in_its_data_and_in_the_rendered_page() {
     assert_eq!(labels[&10], TAILORED_FIX_LABEL, "{labels:?}");
     assert_eq!(labels[&20], STANDARD_FIX_LABEL, "{labels:?}");
     assert_eq!(labels[&30], "", "{labels:?}");
-
-    if std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("skipping the rendered-page leg: typst is not on PATH");
-        return;
-    }
-    let pdf = crate::report_export::compile_pdf(&json)
-        .await
-        .expect("the PDF compiles");
-    let text = pdf_extract::extract_text_from_mem(&pdf).expect("the PDF text");
-    assert!(text.contains("Tailored fix:"), "{text:?}");
-    assert!(text.contains("Standard fix:"), "{text:?}");
 }
 
 /// D8 review 4: an old saved run, an old scan cache or a carried-forward row has no mark, so an
@@ -337,7 +322,7 @@ async fn an_unmarked_fix_equal_to_the_authored_text_is_a_standard_fix_in_every_f
     let record = reader.records().next().unwrap().unwrap();
     assert_eq!(&record[col], STANDARD_FIX_LABEL);
 
-    let grid = xlsx_sheet_grid(&package.xlsx, "All Findings").expect("the sheet");
+    let grid = xlsx_sheet_grid(&package.xlsx, "All problems").expect("the sheet");
     let col = grid[0].iter().position(|h| h == "Fix type").unwrap();
     assert_eq!(grid[1][col], STANDARD_FIX_LABEL);
 

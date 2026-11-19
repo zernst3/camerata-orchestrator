@@ -38,6 +38,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod finder;
 pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
@@ -99,10 +100,15 @@ pub struct InspectArgs {
     /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
     pub fix_model: Option<String>,
     /// `--group-review-model`: the group reviewer's (stage 2) model. `None`/blank = the built-in
-    /// default, Fable 5.1 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
+    /// default, Fable 5.2 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
     /// Never the environment.
     #[serde(default)]
     pub group_review_model: Option<String>,
+    /// `--dup-check-model`: the possible-duplicate check's model. `None`/blank = the built-in
+    /// default, Sonnet 5.5 (`camerata_server::possible_duplicate::check::resolve_dup_check_model`).
+    /// Never the environment.
+    #[serde(default)]
+    pub dup_check_model: Option<String>,
     /// `--escalation-rate`: escalations per 1,000 counted lines. `None` = 1.0.
     #[serde(default)]
     pub escalation_rate: Option<f32>,
@@ -143,6 +149,10 @@ pub struct InspectArgs {
     /// `--consensus`: run the AI audit three times and keep what two runs agree on (see
     /// [`camerata_server::consensus`]). Off by default.
     pub consensus: bool,
+    /// `--finder`, `--finder-model`, `--finder-force-pieces` and `--compare-with`. The default is
+    /// the scan passes (`engine`); a run saved before the flags existed loads with the default.
+    #[serde(default)]
+    pub finder: finder::FinderArgs,
 }
 
 impl InspectArgs {
@@ -270,12 +280,17 @@ impl InspectArgs {
             }
         };
         Ok(camerata_server::cost_cap::RunControls {
+            stored_spend_usd: 0.0,
             review: camerata_api_types::project::ReviewSettings {
                 escalation_rate_per_kloc,
                 escalation_floor: self.escalation_floor.unwrap_or(defaults.escalation_floor),
                 over_budget_reasons: defaults.over_budget_reasons,
                 group_review_model: self.group_review_model.clone().unwrap_or_default(),
+                dup_check_model: self.dup_check_model.clone().unwrap_or_default(),
+                finder_model: String::new(),
+                clone_judge_model: String::new(),
                 sample_size_per_run: defaults.sample_size_per_run,
+                finder: defaults.finder,
             },
             efficiency,
             max_cost_usd,
@@ -283,6 +298,10 @@ impl InspectArgs {
             fix_model: self.fix_model.clone(),
             clone_judge_model: self.clone_judge_model.clone(),
             consensus: self.consensus,
+            finder: self.finder.finder,
+            finder_model: self.finder.model.clone(),
+            finder_force_pieces: self.finder.force_pieces,
+            checkpoint: camerata_server::cost_checkpoint::CheckpointSettings::default(),
         })
     }
 }
@@ -498,7 +517,14 @@ impl From<String> for InspectError {
 /// production caller, and it passes the presence the shared resolver finds (the key saved in
 /// the app first, `ANTHROPIC_API_KEY` as the fallback; see [`api_key_present`]).
 pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String> {
-    args.run_controls()?;
+    let controls = args.run_controls()?;
+    // The finder settings that cannot go together are refused here, before anything is read or
+    // spent. A re-inspection of only what changed is checked once the run's baseline is known.
+    camerata_server::ai_audit::agent_finder::run::refuse_unsupported_finder_settings(
+        &controls,
+        false,
+        !args.client_engagement,
+    )?;
     require_client_lock(args)?;
     let probe = ReportOptions {
         client_name: args.client.clone(),
@@ -543,13 +569,12 @@ pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String
 /// environment overrides included). Pure apart from those environment reads; runs before any
 /// file is read.
 pub fn require_client_lock(args: &InspectArgs) -> Result<(), String> {
+    let controls = args.run_controls()?;
     let models = camerata_server::client_lock::models_a_scan_may_use(
         args.model.as_deref(),
         args.calibration_model.as_deref(),
         false,
-        args.fix_model.as_deref(),
-        args.clone_judge_model.as_deref(),
-        args.group_review_model.as_deref(),
+        &controls,
     );
     match camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models) {
         None => Ok(()),
@@ -1006,12 +1031,51 @@ pub async fn run_inspect_pipeline_with(
         )?),
         None => None,
     };
+    // A resumed run is held to the whole run's spend: what its stored replies cost counts toward
+    // `--max-cost-usd`, every stored dollar of it. The meter takes off again whatever a
+    // checkpoint replays onto it, so a stored dollar is counted once, at every moment.
+    let mut group_review_notice: Option<String> = None;
+    if let Some((store, _)) = &resumed {
+        controls.stored_spend_usd = store.stored_usd();
+        // The group reviewer stays on the model the run started with, whatever the default is now.
+        let notice = store
+            .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
+            .map_err(InspectError::Failed)?;
+        group_review_notice = Some(notice);
+        // The kept model was not part of the pick the client lock checked at the top of this
+        // run, so it is checked here, on every model the resumed run will call, before any call.
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        if let Some(why) = camerata_server::client_lock::refusal_for_run_models(
+            args.client_engagement,
+            args.backend,
+            model,
+            calibration_model,
+            false,
+            &ids,
+            &controls,
+        ) {
+            return Err(InspectError::Failed(format!(
+                "{why} The run being resumed keeps the group review model it started on. Start \
+                 a new run with `--backend api` and Anthropic models, or pass `--internal` if \
+                 this is your own development and not client work."
+            )));
+        }
+    }
     let incremental_prior = match &resumed {
         // The baseline the run started from, not the one an attempt since may have replaced.
         Some((store, _)) => store.load_prior_manifest(),
         None if args.full => None,
         None => load_prior_manifest(&manifest_path),
     };
+
+    // The agent finder reviews every file; it does not build on an earlier inspection. Refused
+    // before the estimate, so before anything is spent.
+    camerata_server::ai_audit::agent_finder::run::refuse_unsupported_finder_settings(
+        &controls,
+        incremental_prior.is_some(),
+        !args.client_engagement,
+    )
+    .map_err(InspectError::Failed)?;
 
     // A spend limit needs every model priced; refuse before the estimate, before any model call.
     if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
@@ -1026,15 +1090,39 @@ pub async fn run_inspect_pipeline_with(
         if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
             return Err(InspectError::Failed(why));
         }
+        // The cli backend launches the local Claude Code, which refuses a model it predates.
+        // Check every model the run will call against its version now, not after a round of
+        // failed calls. A scripted model (tests) launches no program, so nothing to check.
+        if let Some(why) = cli_version_refusal(
+            matches!(backend_resolution, BackendResolution::Cli),
+            seams.llm.is_some(),
+            &models,
+            camerata_server::claude_version::check_run_models,
+        ) {
+            return Err(InspectError::Failed(why));
+        }
     }
 
     // ── Pre-flight: the estimate, printed BEFORE the first model call ──────────────────────
     // Skipped when no model call will be made (the compliance gate blocked the AI review).
     let mut preflight_text: Option<String> = None;
-    if let Some((_, estimate_text)) = &resumed {
-        // A resume prices only what remains.
-        (seams.preflight_sink)(estimate_text);
-        preflight_text = Some(estimate_text.clone());
+    if let Some((store, estimate_text)) = &resumed {
+        // A resume prices only what remains, and says beside the limit what the stored replies
+        // already count against it, before any call.
+        let mut text = estimate_text.clone();
+        if let Some(notice) = &group_review_notice {
+            text.push_str(notice);
+            text.push('\n');
+        }
+        if let Some(cap) = controls.max_cost_usd {
+            text.push_str(&camerata_server::cost_cap::resume_limit_line(
+                cap,
+                store.stored_usd(),
+            ));
+            text.push('\n');
+        }
+        (seams.preflight_sink)(&text);
+        preflight_text = Some(text);
     } else if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
         let facts =
             camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
@@ -1101,6 +1189,31 @@ pub async fn run_inspect_pipeline_with(
         });
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
+        // The cost checkpoint's pre-flight figures for the agent finder: the cost of one piece,
+        // from the finder's own estimate, and the joints call that follows the pieces. The estimate
+        // prices the finder stage only, so the later stages (group review, fix) have no figure yet.
+        if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent {
+            let parts: Vec<_> = facts
+                .iter()
+                .map(|r| {
+                    camerata_server::preflight::agent_finder_estimate(
+                        r,
+                        controls.finder_force_pieces,
+                    )
+                })
+                .collect();
+            let total = camerata_ui_core::scan::sum_agent_finder(&parts);
+            if total.pieces > 0 {
+                let joints = total.joints_calls as f64
+                    * camerata_ui_core::scan::AGENT_FINDER_USD_PER_JOINTS_CALL;
+                controls.checkpoint.plan = Some(camerata_server::cost_checkpoint::CheckpointPlan {
+                    pieces: total.pieces,
+                    per_piece_usd: ((total.expected_usd - joints) / total.pieces as f64).max(0.0),
+                    joints_usd: joints,
+                    ..camerata_server::cost_checkpoint::CheckpointPlan::default()
+                });
+            }
+        }
         preflight_text = Some(pf.text);
     }
 
@@ -1146,6 +1259,18 @@ pub async fn run_inspect_pipeline_with(
             }
         }
     };
+    // The cost checkpoint records into the run's folder and prints each line as the run goes.
+    if let Some(s) = &store {
+        // A resume has no pre-flight estimate: it starts from what the earlier attempt recorded.
+        if controls.checkpoint.plan.is_none() {
+            controls.checkpoint.plan =
+                camerata_server::cost_checkpoint::CheckpointPlan::from_stored(s.dir());
+        }
+        controls.checkpoint.run_folder = Some(s.dir().to_path_buf());
+    }
+    controls.checkpoint.sink = camerata_server::cost_checkpoint::CheckpointSink::new(|cp| {
+        println!("{}", cp.operator_text());
+    });
     // Delimiter tokens drawn from the run's own seed, so a resumed run asks the model the same
     // questions as the run it resumes and a stored reply still matches its prompt.
     let token_seed = store.as_ref().map(|s| s.nonce_seed());
@@ -1186,8 +1311,21 @@ pub async fn run_inspect_pipeline_with(
         Some(j) => j.as_ref(),
         None => base,
     };
+    // The agent finder's setup: one value, built once here and carried into the audit. The run
+    // builds the agent from it on its own shared meter. A test that already stands an agent in
+    // (`with_agent_override`) keeps its own. A missing key stops the run before the first call.
+    let finder_setup = camerata_server::ai_audit::agent_finder::run::finder_setup_for_run(
+        &controls,
+        ai_review_blocked,
+        llm_backend,
+        creds,
+        store.as_ref().map(|s| s.dir()),
+        args.client_engagement,
+    )
+    .map_err(InspectError::Failed)?;
+    let no_chosen_options: HashMap<String, String> = HashMap::new();
     let (mut report, manifest) = {
-        let (mut report, manifest) = camerata_server::checkpoint::with_run_checkpoints(
+        let audit = Box::pin(camerata_server::checkpoint::with_run_checkpoints(
             store.as_ref().map(|s| s.checkpoint_dir()),
             camerata_server::prompt_frame::with_seed(
                 token_seed,
@@ -1209,12 +1347,17 @@ pub async fn run_inspect_pipeline_with(
                     true,  // run_deterministic
                     backend_resolution,
                     corpus.as_ref(),
-                    &HashMap::new(),
+                    &no_chosen_options,
                     controls.clone(),
                 ),
             ),
-        )
-        .await;
+        ));
+        let (mut report, manifest) =
+            camerata_server::ai_audit::agent_finder::run::with_optional_finder_setup(
+                finder_setup,
+                audit,
+            )
+            .await;
         if seams.llm.is_none() {
             report.provenance.model_sessions = sessions.snapshot();
         }
@@ -1301,8 +1444,7 @@ pub async fn run_inspect_pipeline_with(
             .collect();
         camerata_server::checkpoint::with_run_checkpoints(
             store.as_ref().map(|s| s.checkpoint_dir()),
-            camerata_server::prompt_frame::with_seed(
-                token_seed,
+            camerata_server::prompt_frame::with_seed(token_seed, async {
                 camerata_server::ai_audit::group_review::review_scan_report(
                     &mut report,
                     model_seam,
@@ -1310,16 +1452,34 @@ pub async fn run_inspect_pipeline_with(
                     &rules,
                     llm_backend == camerata_server::llm::Backend::Cli,
                     None,
-                ),
-            ),
+                    corpus.as_ref(),
+                )
+                .await;
+                // The possible-duplicate check reads the Fix ids the group reviewer just
+                // made; a failure of it is a note, never a failed part.
+                camerata_server::possible_duplicate::check::check_possible_duplicates(
+                    &mut report,
+                    model_seam,
+                    &controls,
+                    llm_backend == camerata_server::llm::Backend::Cli,
+                    None,
+                )
+                .await;
+            }),
         )
         .await;
     }
+    // The tool causes are decided after the group reviewer, which re-sorts the rows of a rule.
+    camerata_server::settle_tool_causes(&mut report, corpus.as_ref());
 
     // The incremental baseline becomes reusable only when the scan is complete: a run with a
     // failed or unrun part leaves the previous baseline in place, and its own stored replies are
     // what a resume uses.
-    if report.incomplete_reasons().is_empty() {
+    // The agent finder's problems are not an incremental baseline for the other finder; they are
+    // recorded for `--compare-with` instead (below, beside the ledger).
+    if report.incomplete_reasons().is_empty()
+        && controls.finder != camerata_server::ai_audit::agent_finder::FinderChoice::Agent
+    {
         save_manifest(&manifest_path, &manifest);
     }
     // The scan's own tools (a build) can leave files in the checkout. Record the tree as it stands
@@ -1383,6 +1543,56 @@ pub async fn run_inspect_pipeline_with(
     // establishes).
     report.run_id.clone_from(&run_id);
     let report = report.seal();
+
+    // The operator's rewrite advisory, beside the failure report in the state directory and never
+    // in any zip (owner ruling: fix or rewrite is the architect's call alone). Computed from the
+    // sealed report, whose review tree holds the Fixes, and written before the export so a run the
+    // gate refuses still leaves its note. A failed write is said and never stops the run.
+    let advisory = camerata_server::rewrite_advisory::compute(&report, corpus.as_ref());
+    let ledger_summary = match camerata_server::rewrite_advisory::write(&ledger_file, &advisory) {
+        Ok((_json, md)) => format!(
+            "{ledger_summary}\noperator note (never exported): {}",
+            md.display()
+        ),
+        Err(e) => {
+            eprintln!("camerata inspect: could not write the operator note: {e}");
+            ledger_summary
+        }
+    };
+
+    // The agent finder's problems, recorded beside the ledger for a later `--compare-with`, and
+    // the comparison with the earlier run the operator named. Operator side only: neither is in
+    // any file the client reads.
+    let ledger_summary =
+        if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent {
+            let mut summary = ledger_summary;
+            if let Err(e) =
+                finder::write_finder_run(&finder::finder_run_path(&ledger_file), &report.findings)
+            {
+                eprintln!("camerata inspect: could not record the run for a later comparison: {e}");
+            }
+            if let Some(folder) = &args.finder.compare_with {
+                match finder::compare_with_earlier_run(folder, &report.findings) {
+                    Ok(note) => {
+                        let path = finder::comparison_note_path(&ledger_file);
+                        match std::fs::write(&path, &note) {
+                            Ok(()) => summary.push_str(&format!(
+                                "\ncomparison with {} (never exported): {}",
+                                folder.display(),
+                                path.display()
+                            )),
+                            Err(e) => eprintln!(
+                                "camerata inspect: could not write the comparison note: {e}"
+                            ),
+                        }
+                    }
+                    Err(e) => eprintln!("camerata inspect: {e}"),
+                }
+            }
+            summary
+        } else {
+            ledger_summary
+        };
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
@@ -1630,10 +1840,21 @@ pub fn render_ledger_summary(
     if let Some(block) = ledger.escalation() {
         writeln!(out, "\n== ESCALATION ==").ok();
         writeln!(out, "  {}", block.sentence()).ok();
+        // Sites are the unit of the budget; the rows behind them are stated beside, when known.
+        let rows = |n: usize| {
+            if n == 0 {
+                String::new()
+            } else {
+                format!(" ({n} rows)")
+            }
+        };
         writeln!(
             out,
-            "  {} candidate(s) in all, {} below the line; group review model {}",
+            "  Escalated {} sites{}; {} candidate sites{}, {} below the line; group review model {}",
+            block.escalated,
+            rows(block.escalated_rows),
             block.candidates,
+            rows(block.candidate_rows),
             block.candidates.saturating_sub(block.escalated),
             block.model.as_deref().unwrap_or("(none recorded)")
         )
@@ -1761,6 +1982,20 @@ pub fn render_ledger_summary(
         )
         .ok();
         for note in ledger.runner_notes() {
+            writeln!(out, "  {note}").ok();
+        }
+    }
+
+    // What the model judged not a problem here: always listed when there is any, so the reviewer
+    // reads it with the run, failures or none.
+    if !ledger.not_a_problem_notes().is_empty() {
+        writeln!(
+            out,
+            "\n== JUDGED NOT A PROBLEM HERE ({}) ==",
+            ledger.not_a_problem_notes().len()
+        )
+        .ok();
+        for note in ledger.not_a_problem_notes() {
             writeln!(out, "  {note}").ok();
         }
     }
@@ -1901,6 +2136,10 @@ fn render_outage(outage: &camerata_server::run_health::OutageRecord) -> String {
     )
 }
 
+/// How every pause message starts: a pause note older than the record (a late piece refreshes
+/// the stop) is not printed a second time.
+const PAUSE_NOTE_START: &str = "Paused before going over the approved amount";
+
 /// The spend-limit block of the final report: what was set, what was spent, and, when the limit
 /// stopped the run, that the export is incomplete and what was not run. Operator-only (dollar
 /// figures live here, never in the export).
@@ -1909,7 +2148,23 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
         "spend limit: ${:.2}, spent ${:.2}",
         cap.cap_usd, cap.spent_usd
     );
-    if cap.stopped_the_run() {
+    let pause = cap
+        .checkpoint
+        .as_ref()
+        .filter(|c| c.stopped)
+        .map(camerata_server::cost_checkpoint::CostCheckpoint::pause_message);
+    if let Some(message) = &pause {
+        // The cost checkpoint paused the run before it went over the approved amount: not the
+        // limit reached, and nothing was spent past it.
+        write!(
+            out,
+            ". {message} This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) were NOT \
+             RUN (listed under FAILED PASSES).",
+            cap.not_run_passes.len(),
+            cap.not_run_stages.len()
+        )
+        .ok();
+    } else if cap.stopped_the_run() {
         // The limit was reached, or it could not be enforced because a call's cost could not be
         // determined: two different things, and the operator is told which (the note that
         // follows names the model and the call).
@@ -1928,10 +2183,18 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
             cap.not_run_stages.len()
         )
         .ok();
+    } else if cap.spent_usd >= cap.cap_usd {
+        // The run's spend is at or past the limit and nothing was refused: the stored replies of
+        // a resume, or a last call that crossed the line with nothing left to send.
+        out.push_str(" -- reached; nothing was left to send, so the inspection is complete");
     } else {
         out.push_str(" (not reached)");
     }
-    for note in &cap.notes {
+    for note in cap
+        .notes
+        .iter()
+        .filter(|n| pause.is_none() || !n.starts_with(PAUSE_NOTE_START))
+    {
         write!(out, "\n  {note}").ok();
     }
     out.push('\n');
@@ -1943,6 +2206,23 @@ mod redaction_tests;
 
 #[cfg(test)]
 mod exit_code_tests;
+
+/// The refusal message when the run is on the cli backend with a real Claude Code that is too
+/// old (or unreadable) for a model the run will call; `None` when nothing needs refusing.
+pub(crate) fn cli_version_refusal(
+    on_cli: bool,
+    scripted: bool,
+    models: &[(String, String)],
+    check: impl FnOnce(&[(String, String)]) -> Result<(), String>,
+) -> Option<String> {
+    if !on_cli || scripted {
+        return None;
+    }
+    check(models).err()
+}
+
+#[cfg(test)]
+mod finder_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1963,6 +2243,7 @@ mod tests {
             fix_model: None,
             clone_judge_model: None,
             group_review_model: None,
+            dup_check_model: None,
             escalation_rate: None,
             escalation_floor: None,
             full: false,
@@ -1974,6 +2255,7 @@ mod tests {
             client_engagement: false,
             run_client_tooling: false,
             consensus: false,
+            finder: Default::default(),
         }
     }
 
@@ -2057,6 +2339,18 @@ mod tests {
             refusal.contains("the clone judge") && refusal.contains("other-vendor/judge"),
             "{refusal}"
         );
+        // The agent finder's model is checked too: a client engagement (no --internal) with the
+        // agent finder on another vendor's model is refused before anything is read.
+        args.clone_judge_model = None;
+        args.finder.finder = camerata_server::ai_audit::agent_finder::FinderChoice::Agent;
+        args.finder.model = Some("other-vendor/x".to_string());
+        let refusal = validate_args(&args, true).unwrap_err();
+        assert!(
+            refusal.contains("the finder") && refusal.contains("other-vendor/x"),
+            "{refusal}"
+        );
+        args.finder.model = Some("claude-opus-5-5".to_string());
+        assert!(require_client_lock(&args).is_ok());
     }
 
     #[test]
@@ -2081,6 +2375,7 @@ mod tests {
             cost_cap: Some(CostCapRecord {
                 repos_not_finished: Vec::new(),
                 cost_unknown: false,
+                checkpoint: None,
                 cap_usd: 5.0,
                 spent_usd: 5.4,
                 not_run_passes: vec![NotRunPass {
@@ -2122,6 +2417,13 @@ mod tests {
             !outcome.cost_capped(),
             "a cap that stopped nothing is not a capped run"
         );
+        // Spend of $5.40 against $5.00 with nothing refused (the last call crossed the line, or a
+        // resume's stored replies did): reached, and nothing was left to send. "(not reached)"
+        // beside a spend over the limit was the old, wrong line.
+        let past = format_outcome_report(&outcome);
+        assert!(!past.contains("(not reached)"), "{past}");
+        assert!(past.contains("nothing was left to send"), "{past}");
+        outcome.cost_cap.as_mut().unwrap().spent_usd = 3.0;
         assert!(format_outcome_report(&outcome).contains("(not reached)"));
     }
 
@@ -2134,6 +2436,7 @@ mod tests {
         let record = CostCapRecord {
             repos_not_finished: Vec::new(),
             cost_unknown: true,
+            checkpoint: None,
             cap_usd: 10.0,
             spent_usd: 0.0095,
             not_run_passes: vec![NotRunPass {
@@ -2174,6 +2477,99 @@ mod tests {
             ..record
         };
         assert!(render_cost_cap(&reached).contains("-- REACHED."));
+    }
+
+    /// A run the cost checkpoint paused is reported as a pause, never as the limit reached.
+    #[test]
+    fn a_paused_run_renders_the_pause_message_not_reached() {
+        use camerata_server::cost_cap::CostCapRecord;
+        // A run the cost checkpoint paused is not a limit reached.
+        let paused = CostCapRecord {
+            checkpoint: Some(camerata_server::cost_checkpoint::CostCheckpoint {
+                approved_usd: 5.0,
+                spent_usd: 3.0,
+                projected_usd: 6.0,
+                pieces_done: 1,
+                pieces_left: 1,
+                stopped: true,
+                new_estimate_usd: Some(6.0),
+                difference_usd: Some(1.0),
+                stopped_before: "agent finder".into(),
+                reserve_usd: 0.0,
+            }),
+            cap_usd: 5.0,
+            spent_usd: 3.0,
+            ..CostCapRecord::default()
+        };
+        let text = render_cost_cap(&paused);
+        assert!(
+            text.contains("Paused before going over the approved amount"),
+            "{text}"
+        );
+        assert!(!text.contains("REACHED"), "{text}");
+        assert!(!text.contains(" -- "), "{text}");
+    }
+
+    /// A late piece refreshes the stop, so the note stored at the first pause is older than the
+    /// record: the report says the pause once.
+    #[test]
+    fn a_pause_is_rendered_once_whatever_older_pause_notes_were_stored() {
+        use camerata_server::cost_cap::CostCapRecord;
+        use camerata_server::cost_checkpoint::CostCheckpoint;
+        let stop = |spent: f64| CostCheckpoint {
+            approved_usd: 5.0,
+            spent_usd: spent,
+            projected_usd: 8.0,
+            pieces_done: 1,
+            pieces_left: 1,
+            stopped: true,
+            new_estimate_usd: Some(8.0),
+            difference_usd: Some(3.0),
+            stopped_before: "agent finder".into(),
+            reserve_usd: 0.0,
+        };
+        let record = CostCapRecord {
+            cap_usd: 5.0,
+            spent_usd: 6.0,
+            checkpoint: Some(stop(6.0)),
+            notes: vec![stop(3.0).pause_message(), "another note".into()],
+            ..CostCapRecord::default()
+        };
+        let text = render_cost_cap(&record);
+        assert_eq!(text.matches("Paused before").count(), 1, "{text}");
+        assert!(text.contains("spent $6.00, 1 piece left"), "{text}");
+        assert!(text.contains("another note"), "{text}");
+    }
+
+    /// A resume whose stored replies already cost more than the limit (tutorly, 2026-11-06:
+    /// $43.51 stored against $25) sent nothing and finished, so the report said "(not reached)"
+    /// beside a spend over the limit. It says the limit was reached and that nothing was left
+    /// to send, which is not the same as the inspection being cut short.
+    #[test]
+    fn a_limit_passed_with_nothing_refused_is_not_reported_as_not_reached() {
+        use camerata_server::cost_cap::CostCapRecord;
+        let record = CostCapRecord {
+            cap_usd: 25.0,
+            spent_usd: 43.51,
+            ..CostCapRecord::default()
+        };
+        let text = render_cost_cap(&record);
+        assert!(text.contains("spend limit: $25.00, spent $43.51"), "{text}");
+        assert!(!text.contains("not reached"), "{text}");
+        assert!(
+            text.contains("reached") && text.contains("nothing was left to send"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("INCOMPLETE"),
+            "nothing was refused, so the inspection is complete: {text}"
+        );
+        // Under the limit the line is unchanged.
+        let under = CostCapRecord {
+            spent_usd: 3.0,
+            ..record
+        };
+        assert!(render_cost_cap(&under).contains("(not reached)"));
     }
 
     // ── validate_args ────────────────────────────────────────────────────────────────
@@ -2609,6 +3005,7 @@ mod tests {
             cost_complete: true,
             cache_read_input_tokens: 50_000,
             cache_creation_input_tokens: 1_000,
+            resumed_cost_usd: 0.0,
         }
     }
 
@@ -2800,6 +3197,8 @@ mod tests {
         meter.record(
             camerata_server::stage_telemetry::Stage::ScanPass,
             &camerata_server::llm::LlmResponse {
+                reported_model: None,
+                cli_cost_usd: None,
                 text: String::new(),
                 model: "m".to_string(),
                 backend: "api".to_string(),
@@ -2851,7 +3250,15 @@ mod tests {
         let defaults = args.run_controls().unwrap();
         assert!((defaults.review.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
         assert_eq!(defaults.review.escalation_floor, 20);
-        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-1");
+        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-2");
+        assert_eq!(defaults.dup_check_model_for(), "claude-sonnet-5-5");
+        args.dup_check_model = Some("claude-opus-5-5".to_string());
+        assert_eq!(
+            args.run_controls().unwrap().dup_check_model_for(),
+            "claude-opus-5-5",
+            "the flag wins"
+        );
+        args.dup_check_model = None;
         // The flags win.
         args.group_review_model = Some("claude-opus-5-5".to_string());
         args.escalation_rate = Some(0.5);
@@ -2864,7 +3271,7 @@ mod tests {
         args.group_review_model = Some("  ".to_string());
         assert_eq!(
             args.run_controls().unwrap().group_review_model_for(),
-            "claude-fable-5-1"
+            "claude-fable-5-2"
         );
     }
 
@@ -3160,6 +3567,20 @@ mod tests {
         assert!(text.contains("semgrep absent"), "{text}");
     }
 
+    /// What the model judged not a problem here is listed in the closing report with no failure
+    /// present, and the section is absent when there is nothing to list.
+    #[test]
+    fn render_ledger_summary_lists_what_was_judged_not_a_problem_here() {
+        let mut ledger = ScanLedger::new();
+        assert!(!render_ledger_summary(&ledger, &[], false).contains("JUDGED NOT A PROBLEM HERE"));
+        ledger.record_not_a_problem_notes(vec![
+            "acme/w: piece-1: ARCH-X-1 at src/a.rs:2: The input is checked first.".to_string(),
+        ]);
+        let text = render_ledger_summary(&ledger, &[], false);
+        assert!(text.contains("JUDGED NOT A PROBLEM HERE (1)"), "{text}");
+        assert!(text.contains("The input is checked first."), "{text}");
+    }
+
     /// What the batch runner told the operator about spend the ledger cannot count (a lost or
     /// orphaned batch) is printed in the summary, whether or not a spend limit was set.
     #[test]
@@ -3203,5 +3624,24 @@ mod tests {
         assert!(verbose.contains("PER-RULE DETAIL"), "{verbose}");
         assert!(verbose.contains("SEC-NO-HARDCODED-SECRETS-1"), "{verbose}");
         assert!(verbose.contains("files_evaluated=10"), "{verbose}");
+    }
+    #[test]
+    fn the_cli_version_check_runs_only_for_a_real_cli_run() {
+        let missing = std::ffi::OsString::from("/nonexistent/claude");
+        let check =
+            |m: &[(String, String)]| camerata_server::claude_version::check_models(&missing, m);
+        let models = vec![(
+            "the group reviewer".to_string(),
+            "claude-fable-5-2".to_string(),
+        )];
+        // A real cli run with an unreadable Claude Code is refused (fail closed).
+        let why = cli_version_refusal(true, false, &models, check).expect("refused");
+        assert!(why.contains("could not be read"), "{why}");
+        // The api backend and a scripted model launch no program: nothing to check.
+        assert!(cli_version_refusal(false, false, &models, check).is_none());
+        assert!(cli_version_refusal(true, true, &models, check).is_none());
+        // A run with no model that needs a minimum is not refused.
+        let other = vec![("the scan".to_string(), "claude-opus-5-5".to_string())];
+        assert!(cli_version_refusal(true, false, &other, check).is_none());
     }
 }

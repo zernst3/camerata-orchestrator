@@ -1312,7 +1312,10 @@ fn the_survivor_of_a_collapse_carries_the_stage_1_verdict_of_a_collapsed_row() {
     );
     model.captures.insert(
         STAGE1_CAPTURE.to_string(),
-        serde_json::json!({"real": "yes", "reason": "definer with no caller test"}).to_string(),
+        serde_json::json!({
+            "real": "yes", "reason": "definer with no caller test", "severity": "medium"
+        })
+        .to_string(),
     );
     model.captures.insert(
         OUTLIER_REASONS_CAPTURE.to_string(),
@@ -1328,6 +1331,11 @@ fn the_survivor_of_a_collapse_carries_the_stage_1_verdict_of_a_collapsed_row() {
     let stage1 = stage1_of(survivor).expect("stage 1's verdict reaches the survivor");
     assert_eq!(stage1.real.as_str(), "yes");
     assert_eq!(stage1.reason, "definer with no caller test");
+    assert_eq!(
+        stage1.severity.as_deref(),
+        Some("medium"),
+        "stage 1's severity rides with the verdict"
+    );
     assert_eq!(outlier_reasons_of(survivor).len(), 1);
 }
 

@@ -135,6 +135,13 @@ pub struct TreeNode {
     pub summary: Option<String>,
     #[serde(default)]
     pub summary_source: TextSource,
+    /// Why the sub-group matters to the client's business, written for the client (never the
+    /// reviewer's `summary`). Sub-group only; `None` when the group reviewer wrote none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_business: Option<String>,
+    /// Why the sub-group matters technically, written for the client. Sub-group only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_technical: Option<String>,
     /// The sites the group reviewer wants escalated, from this node's stage 2 call. Rule nodes
     /// only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -179,6 +186,17 @@ pub struct ReviewTree {
     /// tree that no group reviewer has seen.
     #[serde(default)]
     pub group_reviewed: bool,
+    /// The Fixes: the sub-groups whose places are one change ([`super::merge_fixes`]). Worked out
+    /// from the rows and the tree alone, never from a decision, and stored with the tree. A tree
+    /// stored before Fixes existed has none; an export works them out from the rows then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<super::FixNode>,
+    /// The places with two or more problem rows ([`super::merge_places`]): the row that heads
+    /// each and the rules it carries. Worked out from the rows and the tree alone, never from a
+    /// decision, and stored with the tree. A tree stored before places existed has none; an
+    /// export works them out from the rows then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<super::PlaceNode>,
 }
 
 impl ReviewTree {
@@ -281,6 +299,28 @@ impl ReviewTree {
     /// every node below it, sorted, each once. A possible-duplicate link is never followed, so a
     /// batch decision on a node can never reach a row outside the node.
     pub fn batch_members(&self, node_id: &str) -> Vec<String> {
+        // A Fix covers the members of every sub-group in it.
+        if node_id.starts_with(super::FIX_PREFIX) {
+            let mut keys: Vec<String> = self
+                .fix(node_id)
+                .into_iter()
+                .flat_map(|fx| fx.members.iter())
+                .flat_map(|sub| self.batch_members(sub))
+                .collect();
+            keys.sort();
+            keys.dedup();
+            return keys;
+        }
+        // A place covers the rows at it.
+        if node_id.starts_with(super::PLACE_PREFIX) {
+            let mut keys: Vec<String> = self
+                .place(node_id)
+                .map(|p| p.members.clone())
+                .unwrap_or_default();
+            keys.sort();
+            keys.dedup();
+            return keys;
+        }
         let mut keys: Vec<String> = Vec::new();
         let mut stack: Vec<&str> = vec![node_id];
         while let Some(id) = stack.pop() {

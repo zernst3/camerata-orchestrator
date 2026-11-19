@@ -22,14 +22,14 @@ pub struct PatternCellView {
 }
 
 impl PatternCellView {
-    /// The cell as the cockpit prints it: "Violated, 3 sites", "Clean", "Not applicable: reason"
+    /// The cell as the cockpit prints it: "3 places", "Clean", "Not applicable: reason"
     /// or "Not reviewed: reason". An unknown state prints as not reviewed, never as clean.
     pub fn label(&self) -> String {
         let reason = self.reason.as_deref().unwrap_or("no reason recorded");
         match self.state.as_str() {
             "violated" => {
                 let n = self.sites.unwrap_or(0);
-                format!("Violated, {n} {}", if n == 1 { "site" } else { "sites" })
+                format!("{n} {}", if n == 1 { "place" } else { "places" })
             }
             "clean" => "Clean".to_string(),
             "not_applicable" => format!("Not applicable: {reason}"),
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "Violated, 2 sites",
+                "2 places",
                 "Clean",
                 "Not applicable: no files",
                 "Not reviewed: spend limit"
@@ -220,7 +220,7 @@ mod tests {
             sites: Some(1),
             reason: None,
         };
-        assert_eq!(cell.label(), "Violated, 1 site");
+        assert_eq!(cell.label(), "1 place");
     }
 
     #[test]

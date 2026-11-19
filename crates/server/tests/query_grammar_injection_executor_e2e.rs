@@ -295,12 +295,12 @@ async fn grammar_injection_finding_reaches_curated_findings_high_and_not_rls_hed
          finding's severity — it stands on its own as an injection class: {site:?}"
     );
     assert!(site.detail.contains("Row Level Security"));
-    // M4: an uncalibrated high-severity finding recommends "Do next" (never buried as
+    // M4: an uncalibrated high-severity finding recommends First (owner ruling 2026-11-16: a high problem with no estimate is First; never buried as
     // informational — `is_informational` hard-exempts critical/high regardless of family, and
     // never held for review by the P3 citation gate, which only ever applies to AI-tier
     // findings — see `report_export::is_ai_tier`/`is_uncited_ai_finding`).
     assert_eq!(
-        site.disposition, "Open (recommended: Do next)",
+        site.disposition, "Open (recommended: First)",
         "no disposition was supplied -> stays Open, recommending its computed matrix bucket; \
          NOT held as needs-review"
     );

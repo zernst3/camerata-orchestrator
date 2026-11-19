@@ -25,6 +25,8 @@ impl LlmPort for Recorder {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.prompts.lock().unwrap().push(req.prompt.clone());
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),
@@ -98,6 +100,10 @@ fn efficiency(applies_to_routing: bool) -> EfficiencyConfig {
 
 fn meter(applies_to_routing: bool) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: efficiency(applies_to_routing),
         max_cost_usd: None,
@@ -105,6 +111,7 @@ fn meter(applies_to_routing: bool) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 
@@ -673,6 +680,10 @@ async fn run_routed_batch_default_off(
     let mut config = efficiency(applies_to_routing);
     config.batch_default = false;
     let m = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: config,
         max_cost_usd: None,
@@ -680,6 +691,7 @@ async fn run_routed_batch_default_off(
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let rules = three_group_rules();
     let plan = plan_routes(&rules, &files(), applies_to_routing);

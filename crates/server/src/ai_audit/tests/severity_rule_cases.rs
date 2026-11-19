@@ -1297,3 +1297,133 @@ fn a_real_unauthenticated_bump_is_still_caught_for_a_security_rule_a_category_an
     );
     assert_eq!(apply_severity_calibration_rule(f).severity, "critical");
 }
+
+// ── A1 item 2: test-only code does not ship ───────────────────────────────
+
+/// A row whose place is a test file takes the test-scope severity (it does not ship) and is
+/// marked in-test, so it neither escalates ahead of production code nor reads as a live
+/// exposure. The same row in a production path keeps its severity.
+#[test]
+fn a1_test_file_row_is_capped_to_low_and_marked_in_test_but_production_keeps_severity() {
+    let tls = "TLS certificate verification is disabled for the test HTTPS client.";
+    let mut in_tests = finding_with_detail("AI-TLS-VERIFICATION-DISABLED", "critical", tls);
+    in_tests.path = "tests/integration.test.ts".to_string();
+    let out = apply_severity_ceiling_rule(in_tests);
+    assert_eq!(out.severity, "low", "test-only code does not ship");
+    assert!(out.in_test, "the row must be marked as test scope");
+    assert!(
+        out.needs_review,
+        "a capped test row is held for a reviewer, never buried"
+    );
+    assert!(
+        out.calibration_rationale
+            .as_deref()
+            .is_some_and(|r| r.contains("test")),
+        "the reason is recorded: {:?}",
+        out.calibration_rationale
+    );
+
+    let mut in_prod = finding_with_detail("AI-TLS-VERIFICATION-DISABLED", "critical", tls);
+    in_prod.path = "src/http/client.ts".to_string();
+    let out = apply_severity_ceiling_rule(in_prod);
+    assert_eq!(out.severity, "critical");
+    assert!(!out.in_test);
+}
+
+/// A real committed secret in a test file still matters: the secret class keeps its severity
+/// and is not marked as test scope.
+#[test]
+fn a1_secret_in_a_test_file_keeps_its_severity() {
+    let mut secret = finding_with_detail(
+        "AI-HARDCODED-API-KEY",
+        "high",
+        "A live API key is committed in the test setup.",
+    );
+    secret.path = "tests/setup.ts".to_string();
+    let out = apply_severity_ceiling_rule(secret);
+    assert_eq!(out.severity, "high");
+    assert!(!out.in_test);
+}
+
+/// The secret exemption covers every shape of credential rule id, not only the obvious words:
+/// a vendor token rule, a service-key rule and an invented id naming a key all keep severity.
+#[test]
+fn a1_secret_shaped_rule_ids_in_a_test_file_keep_their_severity() {
+    for rule in [
+        "SEC-NO-VENDOR-TOKEN-1",
+        "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+        "AI-STRIPE-KEY-EXPOSED",
+    ] {
+        let mut secret = finding_with_detail(rule, "high", "A live credential is committed.");
+        secret.path = "tests/setup.ts".to_string();
+        let out = apply_severity_ceiling_rule(secret);
+        assert_eq!(out.severity, "high", "{rule} keeps its severity");
+        assert!(!out.in_test, "{rule} is not marked as test scope");
+    }
+}
+
+// ── Round 2: a rule's minimum is guidance for an agent row; R-8 is the one raise kept ─────────
+
+fn agent_row(rule: &str, sev: &str, detail: &str) -> Finding {
+    let mut f = finding_with_detail(rule, sev, detail);
+    f.captures
+        .insert("finder-problem".to_string(), "1".to_string());
+    f
+}
+
+/// The wording floor for a cross-tenant read raised a medium agent row to critical. The model's
+/// rating stands now.
+#[test]
+fn an_agent_row_keeps_the_models_rating_under_a_wording_floor() {
+    let f = agent_row(
+        "AI-CROSS-TENANT-READ",
+        "medium",
+        "An authenticated user can read another tenant's payment records.",
+    );
+    let out = apply_severity_calibration_rule(f);
+    assert_eq!(out.severity, "medium");
+}
+
+/// The speculative-RLS guard no longer lifts an agent row either.
+#[test]
+fn an_agent_row_is_not_lifted_by_the_rls_hedge_guard() {
+    let f = agent_row(
+        "AI-SQL-INJECTION",
+        "medium",
+        "String-built SQL; RLS probably contains it.",
+    );
+    assert_eq!(apply_severity_calibration_rule(f).severity, "medium");
+}
+
+/// R-8 stays: an agent row about unauthenticated access is at least high.
+#[test]
+fn an_agent_unauthenticated_row_rated_medium_becomes_high() {
+    let f = agent_row(
+        "AI-NO-AUTH",
+        "medium",
+        "The endpoint is reachable without authentication.",
+    );
+    assert_eq!(apply_severity_calibration_rule(f).severity, "high");
+}
+
+/// R-8: critical when the wording hits a write.
+#[test]
+fn an_agent_unauthenticated_row_that_writes_becomes_critical() {
+    let f = agent_row(
+        "AI-NO-AUTH",
+        "medium",
+        "Anyone without authentication can delete and write any record.",
+    );
+    assert_eq!(apply_severity_calibration_rule(f).severity, "critical");
+}
+
+/// The engine finder's rows (no agent capture) keep today's floors.
+#[test]
+fn an_engine_finder_row_keeps_todays_floors() {
+    let f = finding_with_detail(
+        "AI-NO-AUTH",
+        "medium",
+        "The endpoint is reachable without authentication.",
+    );
+    assert_eq!(apply_severity_calibration_rule(f).severity, "critical");
+}

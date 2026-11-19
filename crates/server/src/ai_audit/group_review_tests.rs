@@ -114,6 +114,8 @@ impl Reviewer {
 
 fn response(text: &str, model: &str) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: model.to_string(),
         backend: "stub".to_string(),
@@ -478,6 +480,65 @@ async fn stage2_cannot_remove_a_member_and_an_unplaced_index_is_recorded() {
 // ── 4.2: disagreements ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn the_escalation_block_counts_slots_not_rows() {
+    // Three nominated rows of three rules at one site and one nominated row elsewhere: two
+    // candidate sites. A budget of one leaves one of them below the line. The recorded block
+    // states sites beside the escalated count, which is in sites too.
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.code_lines = 1_000;
+    for rule in [SQL, SECRETS, LAYERING] {
+        let mut f = site(rule, 0, "medium");
+        f.path = "src/shared/site.rs".to_string();
+        f.line = 7;
+        report.findings.push(f);
+    }
+    report.findings.push(site(SQL, 1, "medium"));
+    report.assign_site_keys();
+    let llm = Reviewer::new(|call| {
+        let escalations: Vec<(usize, &str, u32, &str)> = call
+            .indices
+            .iter()
+            .map(|&i| (i, "unauthenticated_reach", i as u32 + 1, "Reachable."))
+            .collect();
+        Ok(reply(
+            "All.",
+            &[("All", "one cause", call.indices.clone())],
+            &[],
+            &escalations,
+            &[],
+        ))
+    });
+    let rules: Vec<(String, String)> = Vec::new();
+    let config = GroupReviewConfig {
+        rank: RankSettings {
+            floor: 1,
+            ..RankSettings::default()
+        },
+        ..cfg(&rules)
+    };
+    review_groups(&mut report, &llm, &config, None).await;
+    let block = report.ledger.escalation().expect("block");
+    assert_eq!(
+        tree(&report).candidates.len(),
+        4,
+        "four rows are candidates"
+    );
+    assert_eq!(block.candidates, 2, "two candidate sites");
+    assert_eq!(block.escalated, 1);
+    assert_eq!(block.candidates.saturating_sub(block.escalated), 1);
+
+    // The export's re-derivation from the tree agrees with the scan-time block.
+    let derived = block.derived_from_tree(tree(&report), &report.findings);
+    assert_eq!(derived.candidates, block.candidates);
+    assert_eq!(derived.escalated, block.escalated);
+    assert_eq!(derived.over_budget, block.over_budget);
+    assert_eq!(derived.candidate_rows, block.candidate_rows);
+    assert_eq!(derived.escalated_rows, block.escalated_rows);
+    assert_eq!((block.candidate_rows, block.escalated_rows), (4, 3));
+}
+
+#[tokio::test]
 async fn stage2_disagreement_is_recorded_and_stage1_is_not_overwritten() {
     let mut report = report_of(&[(SQL, 4)]);
     let llm = Reviewer::new(|call| {
@@ -544,6 +605,79 @@ async fn stage2_disagreement_is_recorded_and_stage1_is_not_overwritten() {
     assert_eq!(reason_of(0), Some(EscalationReason::ConflictingVerdicts));
     assert_eq!(reason_of(1), Some(EscalationReason::ConflictingVerdicts));
     assert_eq!(reason_of(2), None);
+}
+
+/// A site whose stage 1 rated `stage1_severity` and whose shown severity was raised afterwards
+/// to `shown` (a rule's declared minimum).
+fn floored_site(i: usize, stage1_severity: &str, shown: &str) -> Finding {
+    let mut f = site(SQL, i, shown);
+    f.captures.insert(
+        STAGE1_CAPTURE.to_string(),
+        serde_json::json!({
+            "real": "yes", "reason": "a hardening gap", "severity": stage1_severity
+        })
+        .to_string(),
+    );
+    f
+}
+
+#[tokio::test]
+async fn a_floored_row_shows_stage1_its_own_severity_and_agreement_is_no_disagreement() {
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.code_lines = 40_000;
+    report.findings.push(floored_site(0, "medium", "high"));
+    report.findings.push(floored_site(1, "medium", "medium"));
+    report.assign_site_keys();
+    let llm = Reviewer::new(|call| {
+        Ok(reply(
+            "Hardening.",
+            &[("All", "one cause", call.indices.clone())],
+            &[],
+            &[],
+            // Stage 2 agrees with stage 1 (medium) on both rows, quoting the shown value.
+            &[
+                (0, "severity", "high", "medium", "a medium hygiene defect"),
+                (1, "severity", "medium", "medium", "agreed"),
+            ],
+        ))
+    });
+    run(&mut report, &llm).await;
+    let rows = sites_of(&report, SQL);
+    assert!(
+        rows[0].review.stage2_disagreement.is_empty(),
+        "stage 2 and stage 1 both said medium: {:?}",
+        rows[0].review.stage2_disagreement
+    );
+    assert_eq!(rows[0].severity, "high", "the shown severity is untouched");
+    let prompt = &llm.calls()[0].prompt;
+    let floored = prompt
+        .lines()
+        .find(|l| l.starts_with("0: "))
+        .expect("member line 0");
+    assert!(
+        floored.contains("high (floor after review; per-site reviewer: medium)"),
+        "{floored}"
+    );
+    let plain = prompt
+        .lines()
+        .find(|l| l.starts_with("1: "))
+        .expect("member line 1");
+    assert!(!plain.contains("floor after review"), "{plain}");
+}
+
+#[test]
+fn a_run_saved_without_stage1_severity_still_loads_and_prints_the_shown_one() {
+    let mut f = site(SQL, 0, "high");
+    f.captures.insert(
+        STAGE1_CAPTURE.to_string(),
+        stage1_capture("yes", "an old record"),
+    );
+    let record = stage1_of(&f).expect("an old record loads");
+    assert_eq!(record.severity, None);
+    let line = member_line(&f, 0, false);
+    assert!(line.contains("| high |"), "{line}");
+    assert!(!line.contains("floor after review"), "{line}");
 }
 
 #[tokio::test]
@@ -974,11 +1108,11 @@ fn the_stage_defaults_move_together_stage1_opus_stage2_fable() {
         "the scan default is kept as it is"
     );
     assert_eq!(resolve_calibration_model(None, &scan), "claude-opus-5-5");
-    assert_eq!(resolve_group_review_model(None), "claude-fable-5-1");
+    assert_eq!(resolve_group_review_model(None), "claude-fable-5-2");
     // The pick wins; a blank pick is none.
     assert_eq!(resolve_calibration_model(Some("picked"), &scan), "picked");
     assert_eq!(resolve_group_review_model(Some("picked")), "picked");
-    assert_eq!(resolve_group_review_model(Some("  ")), "claude-fable-5-1");
+    assert_eq!(resolve_group_review_model(Some("  ")), "claude-fable-5-2");
 }
 
 #[test]
@@ -991,13 +1125,13 @@ fn group_review_model_comes_from_project_setting_or_flag_only() {
         "ANTHROPIC_MODEL",
     ]
     .map(|name| camerata_test_env::EnvGuard::set(name, "env-picked-model"));
-    assert_eq!(resolve_group_review_model(None), "claude-fable-5-1");
+    assert_eq!(resolve_group_review_model(None), "claude-fable-5-2");
     assert_eq!(resolve_group_review_model(Some("flag-model")), "flag-model");
     // The project setting is the pick the cockpit passes; unset means the default.
     let settings = camerata_api_types::project::ReviewSettings::default();
     assert_eq!(
         resolve_group_review_model(Some(settings.group_review_model.as_str())),
-        "claude-fable-5-1"
+        "claude-fable-5-2"
     );
     let set = camerata_api_types::project::ReviewSettings {
         group_review_model: "claude-opus-5-5".to_string(),
@@ -1045,10 +1179,10 @@ async fn each_calibration_stage_records_its_model_in_the_ledger() {
         .map(|s| (s.stage.as_str(), s.model.as_deref()))
         .collect();
     assert_eq!(by_stage["ai-calibration"], Some("claude-opus-5-5"));
-    assert_eq!(by_stage[STAGE_SAMPLE_NAME], Some("claude-fable-5-1"));
+    assert_eq!(by_stage[STAGE_SAMPLE_NAME], Some("claude-fable-5-2"));
     for req in llm.requests() {
         assert_eq!(
-            req.model, "claude-fable-5-1",
+            req.model, "claude-fable-5-2",
             "the model asked is the model recorded"
         );
     }
@@ -1063,7 +1197,7 @@ async fn each_calibration_stage_records_its_model_in_the_ledger() {
     assert!(entry.is_integral());
     assert_eq!(
         report.ledger.escalation().unwrap().model.as_deref(),
-        Some("claude-fable-5-1")
+        Some("claude-fable-5-2")
     );
 }
 
@@ -1689,6 +1823,7 @@ async fn the_spend_limit_counts_what_the_scan_already_spent_and_stops_stage_2() 
         cost_complete: true,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        resumed_cost_usd: 0.0,
     });
     let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
     let rules: Vec<(String, String)> = Vec::new();
@@ -1768,6 +1903,7 @@ async fn the_metered_review_folds_its_usage_into_the_reports_usage_and_telemetry
         cost_complete: true,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        resumed_cost_usd: 0.0,
     });
     struct Priced(Reviewer);
     #[async_trait::async_trait]
@@ -1838,7 +1974,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
         ..crate::cost_cap::RunControls::default()
     };
     let rules = vec![(SQL.to_string(), "Never concatenate SQL.".to_string())];
-    let outcome = review_scan_report(&mut report, &llm, &controls, &rules, false, None)
+    let outcome = review_scan_report(&mut report, &llm, &controls, &rules, false, None, None)
         .await
         .expect("it ran");
     assert_eq!(outcome.rules_reviewed, 1);
@@ -1859,7 +1995,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     empty.gated = false;
     let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
     assert!(
-        review_scan_report(&mut empty, &llm, &controls, &rules, false, None)
+        review_scan_report(&mut empty, &llm, &controls, &rules, false, None, None)
             .await
             .is_none()
     );
@@ -2669,4 +2805,518 @@ async fn a_tool_call_transcript_reply_is_refused_and_never_stored_as_good() {
         None,
         "nothing from the transcript is stored as a summary"
     );
+}
+
+/// Round 2: the tool causes are decided AFTER the group reviewer. The reviewer re-sorts the rows
+/// of a rule node into its own sub-groups; one agent row plus 25 tool rows of a family-mapped
+/// rule, split by the reviewer into three sub-groups apart from the agent's, still end as one
+/// cause (one Fix), with every place its own row and the tree consistent.
+#[tokio::test]
+async fn tool_rows_the_reviewer_split_into_three_sub_groups_end_as_one_cause_with_the_agent_row() {
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.code_lines = 40_000;
+    let mut agent = site("SEC-NO-UNSAFE-DESERIALIZATION-1", 0, "high");
+    agent.path = "src/a_agent.rs".to_string();
+    agent.captures.insert(
+        crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE.to_string(),
+        "1".to_string(),
+    );
+    report.findings.push(agent);
+    for i in 0..25 {
+        let mut f = site("camerata.security.yaml-unsafe-load", i, "high");
+        f.path = format!("src/t{i:02}.js");
+        f.preview = true;
+        f.preview_tool = Some("semgrep".to_string());
+        report.findings.push(f);
+    }
+    report.assign_site_keys();
+    let llm = Reviewer::new(|call| {
+        // Index 0 is the agent row (its path sorts first); the 25 tool rows follow.
+        let tools: Vec<usize> = call.indices.iter().copied().filter(|&i| i != 0).collect();
+        let third = tools.len() / 3;
+        Ok(reply(
+            "One family.",
+            &[
+                ("Agent", "the agent's", vec![0]),
+                ("T1", "first", tools[..third].to_vec()),
+                ("T2", "second", tools[third..2 * third].to_vec()),
+                ("T3", "third", tools[2 * third..].to_vec()),
+            ],
+            &[],
+            &[],
+            &[],
+        ))
+    });
+    let rules = vec![(
+        "SEC-NO-UNSAFE-DESERIALIZATION-1".to_string(),
+        "No unsafe deserialization.".to_string(),
+    )];
+    let controls = crate::cost_cap::RunControls::default();
+    review_scan_report(&mut report, &llm, &controls, &rules, false, None, None).await;
+    let split: BTreeSet<&str> = report
+        .findings
+        .iter()
+        .map(|f| f.group_path[2].as_str())
+        .collect();
+    assert_eq!(split.len(), 4, "the reviewer split the rows: {split:?}");
+
+    crate::tool_row_groups::settle_tool_causes(&mut report, None);
+
+    assert_eq!(report.findings.len(), 26);
+    assert!(report.findings.iter().all(|f| f.also_locations.is_empty()));
+    let index = crate::review_tree::FixIndex::new(report.tree.as_ref(), &report.findings);
+    let fixes: BTreeSet<String> = report.findings.iter().map(|f| index.fix_id_of(f)).collect();
+    assert_eq!(fixes.len(), 1, "one exported fix id: {fixes:?}");
+    assert!(!fixes.iter().next().unwrap().is_empty());
+    // The tree agrees with the rows: every sub-group node lists exactly the keys of the rows
+    // whose path names it, and every row is in exactly one sub-group.
+    let t = tree(&report);
+    let mut seen = 0;
+    for n in t.nodes.iter().filter(|n| n.level == NodeLevel::Subgroup) {
+        let want: BTreeSet<&str> = report
+            .findings
+            .iter()
+            .filter(|f| f.group_path[2] == n.id)
+            .map(|f| f.site_key.as_str())
+            .collect();
+        let have: BTreeSet<&str> = n.members.iter().map(String::as_str).collect();
+        assert_eq!(want, have, "node {}", n.id);
+        seen += have.len();
+    }
+    assert_eq!(seen, 26);
+    assert!(t.fix_merge_block().is_integral());
+}
+
+// ── The cost checkpoint and the group review ───────────────────────────────────────────────
+
+fn paused_checkpoint() -> crate::cost_checkpoint::CostCheckpoint {
+    crate::cost_checkpoint::CostCheckpoint {
+        approved_usd: 100.0,
+        spent_usd: 5.0,
+        projected_usd: 120.0,
+        pieces_done: 1,
+        pieces_left: 3,
+        stopped: true,
+        new_estimate_usd: Some(120.0),
+        difference_usd: Some(20.0),
+        stopped_before: "agent finder".into(),
+        reserve_usd: 0.0,
+    }
+}
+
+fn spent_report(rows: usize) -> ScanReport {
+    let mut report = report_of(&[(SQL, rows)]);
+    report.actual_usage = Some(ActualUsage {
+        input_tokens: 1_000,
+        output_tokens: 100,
+        cost_usd: 5.0,
+        calls: 10,
+        cost_complete: true,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        resumed_cost_usd: 0.0,
+    });
+    report
+}
+
+#[tokio::test]
+async fn a_run_the_checkpoint_paused_sends_no_group_review_call() {
+    let mut report = spent_report(3);
+    report
+        .ledger
+        .record_cost_cap(crate::cost_cap::CostCapRecord {
+            cap_usd: 100.0,
+            spent_usd: 5.0,
+            checkpoint: Some(paused_checkpoint()),
+            ..crate::cost_cap::CostCapRecord::default()
+        });
+    let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
+    let rules: Vec<(String, String)> = Vec::new();
+    let controls = crate::cost_cap::RunControls {
+        max_cost_usd: Some(100.0),
+        ..crate::cost_cap::RunControls::default()
+    };
+    review_groups_metered(&mut report, &llm, &cfg(&rules), &controls).await;
+    assert!(llm.calls().is_empty(), "a paused run sends nothing");
+    assert!((report.actual_usage.as_ref().unwrap().cost_usd - 5.0).abs() < 1e-9);
+    let cap = report.ledger.cost_cap().unwrap();
+    assert!(cap
+        .not_run_stages
+        .iter()
+        .any(|s| s.stage == STAGE_GROUP_REVIEW));
+    let part = report
+        .failed_passes
+        .iter()
+        .find(|f| f.reason.contains(crate::cost_checkpoint::CAUSE_PROJECTED))
+        .unwrap_or_else(|| panic!("{:?}", report.failed_passes));
+    assert_eq!(part.class, FailureClass::SpendLimit);
+}
+
+#[tokio::test]
+async fn a_group_review_priced_over_the_approved_amount_is_not_started() {
+    let rules: Vec<(String, String)> = Vec::new();
+    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false)
+        .expect("the test model is priced");
+    assert!(price > 0.0);
+    let mut report = spent_report(3);
+    // Room for the spend plus half the stage's price: the stage would go over.
+    let controls = crate::cost_cap::RunControls {
+        max_cost_usd: Some(5.0 + price / 2.0),
+        ..crate::cost_cap::RunControls::default()
+    };
+    let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
+    review_groups_metered(&mut report, &llm, &cfg(&rules), &controls).await;
+    assert!(llm.calls().is_empty());
+    let stop = report
+        .ledger
+        .cost_cap()
+        .and_then(|c| c.checkpoint.clone())
+        .expect("the pause is on the record");
+    assert!(stop.stopped);
+    assert!(
+        (stop.new_estimate_usd.unwrap() - (5.0 + price)).abs() < 1e-9,
+        "{stop:?}"
+    );
+}
+
+// ── A reply with a corrected object after a malformed one ───────────────────────────────────────
+
+/// What a real run got from Fable on the CLI backend: an object with a stray `: ""` after an
+/// escalation reason (not valid JSON), then "Correction: ... use this one instead", then the same
+/// object with the entry fixed. The span from the first brace to the last was not one object.
+fn malformed_then_corrected() -> (String, String) {
+    let good = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "needs_more_code", "rank": 1, "why": "w"}],
+    })
+    .to_string();
+    let bad = good.replace(
+        "\"reason\":\"needs_more_code\"",
+        "\"reason\":\"made_up_reason\":\"\"",
+    );
+    assert_ne!(bad, good);
+    let reply = format!(
+        "{bad}\n\nCorrection: the object above contains a malformed entry, so please use this one instead.\n\n{good}"
+    );
+    (reply, bad)
+}
+
+#[test]
+fn a_corrected_object_after_a_malformed_one_is_read() {
+    let (reply, bad) = malformed_then_corrected();
+    let parsed = Stage2Reply::parse(&reply).expect("the corrected object is readable");
+    assert_eq!(parsed.escalations.len(), 1);
+    assert_eq!(parsed.summary, "s");
+    // The rule summary reader does the same.
+    let summary = "{\"summary\": \"a\" \"b\"}\nuse this one instead:\n{\"summary\": \"ok\"}";
+    assert_eq!(parse_rule_summary(summary).unwrap(), "ok");
+    // A malformed object alone cannot be read, and the refusal says where the JSON broke.
+    let why = Stage2Reply::parse(&bad).unwrap_err();
+    assert!(why.contains("not a JSON object"), "{why}");
+    assert!(why.contains("column"), "{why}");
+}
+
+/// Only the final block counts: a valid object, prose, then a malformed "correction" is refused,
+/// never read as the stale first object.
+#[test]
+fn a_malformed_correction_after_a_valid_object_is_refused() {
+    let (reply, bad) = malformed_then_corrected();
+    let good = reply.rsplit_once("\n\n").unwrap().1.to_string();
+    let stale = format!("{good}\n\nCorrection: use this one instead.\n\n{bad}");
+    assert!(Stage2Reply::parse(&stale).is_err());
+}
+
+#[tokio::test]
+async fn a_group_review_pause_reaches_the_job_state_the_ui_polls() {
+    let rules: Vec<(String, String)> = Vec::new();
+    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false)
+        .expect("the test model is priced");
+    let mut report = spent_report(3);
+    let controls = crate::cost_cap::RunControls {
+        max_cost_usd: Some(5.0 + price / 2.0),
+        ..crate::cost_cap::RunControls::default()
+    };
+    let jobs = crate::jobs::JobStore::new();
+    let id = jobs.create("scan", None);
+    let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
+    let mut config = cfg(&rules);
+    config.job = Some((&jobs, id.as_str()));
+    review_groups_metered(&mut report, &llm, &config, &controls).await;
+    assert!(llm.calls().is_empty());
+    let cp = jobs
+        .get(&id)
+        .unwrap()
+        .cost_checkpoint
+        .expect("the pause is on the job");
+    assert!(cp.stopped, "{cp:?}");
+    assert_eq!(cp.stopped_before, STAGE_GROUP_REVIEW);
+}
+
+// ── The two reasons a sub-group matters, for the client ────────────────────────────────────
+
+/// A reply with one sub-group over every index of the call, with the extra fields given.
+fn reply_with_why(call: &Call, extra: serde_json::Value) -> String {
+    let mut sub = serde_json::json!({
+        "label": "Same cause", "cause": "one shared cause",
+        "summary": "REVIEWER-ONLY marker, src/a.rs:3 is an outlier.",
+        "members": call.indices.clone()
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        sub[k] = v.clone();
+    }
+    serde_json::json!({
+        "summary": "Rule level.", "subgroups": [sub],
+        "outliers": [], "escalations": [], "disagreements": []
+    })
+    .to_string()
+}
+
+#[test]
+fn the_prompt_asks_for_the_two_client_reasons_apart_from_the_reviewers_summary() {
+    let prompt = group_review_system_prompt();
+    for needle in [
+        "\"why_business\": \"...\"",
+        "\"why_technical\": \"...\"",
+        "`why_business` and `why_technical` are written for the client, not for the architect",
+        "no `path:line`, no outlier marks, no counts and no mention of the architect",
+        "Pick the one consequence that fits",
+        "Say what can happen, never what will happen",
+        "give no figures, times or costs the code does not show",
+        "`why_technical` says what breaks and under what conditions",
+    ] {
+        assert!(
+            prompt.contains(needle),
+            "the prompt lacks {needle}\n{prompt}"
+        );
+    }
+    assert!(!prompt.contains('\u{2014}') && !prompt.contains('\u{2013}'));
+}
+
+#[test]
+fn a_reply_with_the_two_client_reasons_keeps_them_and_one_without_keeps_none() {
+    let with = serde_json::json!({
+        "summary": "s",
+        "subgroups": [{"label": "l", "cause": "c", "summary": "x", "members": [0],
+            "why_business": "Data can quietly go wrong \u{2014} unseen.",
+            "why_technical": "A write skips the check when the caller is a service."}],
+        "outliers": [], "escalations": [], "disagreements": []
+    });
+    let parsed = Stage2Reply::parse(&with.to_string()).expect("reads");
+    assert!(!parsed.subgroups[0].why_business.contains('\u{2014}'));
+    assert!(parsed.subgroups[0]
+        .why_business
+        .starts_with("Data can quietly"));
+    assert!(parsed.subgroups[0]
+        .why_technical
+        .starts_with("A write skips"));
+    let without = serde_json::json!({
+        "summary": "s",
+        "subgroups": [{"label": "l", "cause": "c", "summary": "x", "members": [0]}],
+        "outliers": [], "escalations": [], "disagreements": []
+    });
+    let parsed =
+        Stage2Reply::parse(&without.to_string()).expect("a missing field is not a failure");
+    assert_eq!(parsed.subgroups[0].why_business, "");
+    assert_eq!(parsed.subgroups[0].why_technical, "");
+}
+
+#[tokio::test]
+async fn the_two_client_reasons_are_stored_on_the_sub_group_beside_its_summary() {
+    let mut report = report_of(&[(SQL, 3)]);
+    let llm = Reviewer::new(|call| {
+        Ok(reply_with_why(
+            call,
+            serde_json::json!({
+                "why_business": "BUSINESS marker.",
+                "why_technical": "TECHNICAL marker."
+            }),
+        ))
+    });
+    run(&mut report, &llm).await;
+    let rule = rule_node(&report, SQL);
+    let sub = subgroups_of(&report, &rule).remove(0);
+    assert_eq!(sub.why_business.as_deref(), Some("BUSINESS marker."));
+    assert_eq!(sub.why_technical.as_deref(), Some("TECHNICAL marker."));
+    assert!(sub.summary.as_deref().unwrap().contains("REVIEWER-ONLY"));
+
+    let mut bare = report_of(&[(SQL, 3)]);
+    let llm = Reviewer::new(|call| Ok(reply_with_why(call, serde_json::json!({}))));
+    let outcome = run(&mut bare, &llm).await;
+    let rule = rule_node(&bare, SQL);
+    let sub = subgroups_of(&bare, &rule).remove(0);
+    assert_eq!(sub.why_business, None);
+    assert_eq!(sub.why_technical, None);
+    assert_eq!(outcome.rules_failed, 0, "no part failed");
+}
+
+fn reply_with_escalation_entry(entry: &str) -> String {
+    format!(
+        "{{\"summary\": \"s\", \"subgroups\": [], \"outliers\": [], \"disagreements\": [], \"escalations\": [{entry}]}}"
+    )
+}
+
+/// The model sometimes writes a colon (and maybe an empty string) after a reason value.
+#[test]
+fn a_stray_colon_after_a_known_reason_is_repaired() {
+    for entry in [
+        r#"{"index": 0, "reason": "needs_more_code": "", "rank": 2, "why": "w"}"#,
+        r#"{"index":0,"reason":"needs_more_code":"rank":2,"why":"placeholder"}"#,
+    ] {
+        let parsed = Stage2Reply::parse(&reply_with_escalation_entry(entry))
+            .unwrap_or_else(|e| panic!("{entry}: {e}"));
+        assert_eq!(parsed.escalations.len(), 1);
+        assert_eq!(parsed.escalations[0].reason.as_str(), "needs_more_code");
+        assert_eq!(parsed.escalations[0].rank, 2);
+    }
+}
+
+#[test]
+fn a_stray_colon_after_an_outlier_reason_is_repaired() {
+    let reason = OutlierReason::ALL[0].as_str();
+    let reply = format!(
+        "{{\"summary\": \"s\", \"subgroups\": [], \"escalations\": [], \"disagreements\": [], \"outliers\": [{{\"index\": 1, \"reason\": \"{reason}\": \"\", \"why\": \"w\"}}]}}"
+    );
+    let parsed = Stage2Reply::parse(&reply).expect("repaired");
+    assert_eq!(parsed.outliers.len(), 1);
+    assert_eq!(parsed.outliers[0].reason.as_str(), reason);
+}
+
+#[test]
+fn a_stray_colon_after_an_unknown_reason_is_still_refused() {
+    let entry = r#"{"index": 0, "reason": "made_up_reason": "", "rank": 2, "why": "w"}"#;
+    let why = Stage2Reply::parse(&reply_with_escalation_entry(entry)).unwrap_err();
+    assert!(why.contains("not a JSON object"), "{why}");
+    assert!(why.contains("column"), "{why}");
+}
+
+#[test]
+fn a_valid_reply_is_never_passed_through_the_repair() {
+    let why = r#"the model wrote "reason": "needs_more_code": "" here"#;
+    let reply = serde_json::json!({
+        "summary": "s", "subgroups": [], "outliers": [], "disagreements": [],
+        "escalations": [{"index": 0, "reason": "needs_more_code", "rank": 1, "why": why}],
+    })
+    .to_string();
+    let parsed = Stage2Reply::parse(&reply).expect("valid");
+    assert_eq!(parsed.escalations[0].why, why);
+}
+
+fn subgroup_json(with_members: bool) -> serde_json::Value {
+    let mut sg = serde_json::json!({
+        "label": "l", "cause": "c", "summary": "x",
+        "why_business": "b", "why_technical": "t"
+    });
+    if with_members {
+        sg["members"] = serde_json::json!([0]);
+    }
+    sg
+}
+
+fn reply_with_subgroups(sgs: Vec<serde_json::Value>) -> String {
+    serde_json::json!({
+        "summary": "s", "subgroups": sgs,
+        "outliers": [], "escalations": [], "disagreements": []
+    })
+    .to_string()
+}
+
+#[test]
+fn one_sub_group_with_no_members_holds_every_index_of_the_part() {
+    let mut parsed = Stage2Reply::parse(&reply_with_subgroups(vec![subgroup_json(false)]))
+        .expect("a lone sub-group may leave members out");
+    assert!(parsed.subgroups[0].members_omitted);
+    // A chunked group: only this chunk's indexes.
+    parsed.fill_omitted_members(&[150, 151, 152]);
+    assert_eq!(parsed.subgroups[0].members, vec![150, 151, 152]);
+    // A reply that wrote members is never touched.
+    let mut written = Stage2Reply::parse(&reply_with_subgroups(vec![subgroup_json(true)])).unwrap();
+    assert!(!written.subgroups[0].members_omitted);
+    written.fill_omitted_members(&[5, 6]);
+    assert_eq!(written.subgroups[0].members, vec![0]);
+}
+
+#[test]
+fn two_sub_groups_with_one_missing_members_is_still_refused() {
+    let why = Stage2Reply::parse(&reply_with_subgroups(vec![
+        subgroup_json(true),
+        subgroup_json(false),
+    ]))
+    .unwrap_err();
+    assert!(why.contains("missing the field `members`"), "{why}");
+}
+
+#[test]
+fn a_members_value_of_the_wrong_kind_is_still_refused() {
+    let mut wrong = subgroup_json(false);
+    wrong["members"] = serde_json::json!("all");
+    assert!(Stage2Reply::parse(&reply_with_subgroups(vec![wrong])).is_err());
+}
+
+/// An empty `members` is a written value, not an omitted one: it parses, is never filled, and
+/// its sites go unplaced exactly as before.
+#[test]
+fn a_lone_sub_group_with_empty_members_is_not_filled() {
+    let mut empty = subgroup_json(false);
+    empty["members"] = serde_json::json!([]);
+    let mut parsed = Stage2Reply::parse(&reply_with_subgroups(vec![empty])).expect("parses");
+    assert!(!parsed.subgroups[0].members_omitted);
+    parsed.fill_omitted_members(&[1, 2, 3]);
+    assert!(parsed.subgroups[0].members.is_empty());
+}
+
+#[tokio::test]
+async fn a_chunk_whose_lone_sub_group_has_no_members_places_all_of_that_chunks_sites() {
+    let mut report = report_of(&[(SQL, 330)]);
+    let llm = Reviewer::new(|call| {
+        if call.summary_call {
+            Ok(summary_reply("The whole rule."))
+        } else if call.indices.contains(&0) {
+            Ok(serde_json::json!({
+                "summary": "Lone chunk.",
+                "subgroups": [{"label": "Lone", "cause": "one cause", "summary": "All of it."}],
+                "outliers": [], "escalations": [], "disagreements": []
+            })
+            .to_string())
+        } else {
+            Ok(one_group(call, "Other chunk."))
+        }
+    });
+    let outcome = run(&mut report, &llm).await;
+    let calls = llm.calls();
+    let lone_call = calls
+        .iter()
+        .find(|c| !c.summary_call && c.indices.contains(&0))
+        .expect("the chunk with site 0");
+    assert!(
+        outcome.unplaced.is_empty(),
+        "{} sites unplaced",
+        outcome.unplaced.len()
+    );
+    assert_eq!(outcome.stray_indexes, 0);
+    let rule = rule_node(&report, SQL);
+    let subs = subgroups_of(&report, &rule);
+    assert_eq!(subs.len(), 3, "the other chunks are unchanged");
+    let lone: Vec<_> = subs
+        .iter()
+        .filter(|n| n.members.len() == lone_call.indices.len())
+        .collect();
+    assert!(!lone.is_empty());
+    // The sub-group the lone chunk made holds exactly that chunk's sites.
+    let lone_paths: BTreeSet<String> = lone_call
+        .indices
+        .iter()
+        .map(|&i| format!("src/{}/f{i:04}.rs", SQL.to_ascii_lowercase()))
+        .collect();
+    let holds_lone_chunk = subs.iter().any(|n| {
+        n.members.len() == lone_paths.len()
+            && n.members
+                .iter()
+                .all(|k| lone_paths.iter().any(|p| k.contains(p.as_str())))
+    });
+    assert!(
+        holds_lone_chunk,
+        "one sub-group holds exactly the lone chunk's sites"
+    );
+    assert_every_row_in_one_subgroup(&report);
 }

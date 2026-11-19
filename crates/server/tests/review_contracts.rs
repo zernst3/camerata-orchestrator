@@ -1605,7 +1605,10 @@ async fn every_editable_field_round_trips_from_the_details_request_into_every_ex
             EditField::Category => "authorization",
             EditField::Subgroup => "Reviewer's own sub-group",
             EditField::Kind => continue,
-            EditField::Summary => unreachable!("not a site field"),
+            EditField::Business => "A business reason the reviewer wrote.",
+            EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical => {
+                unreachable!("not a site field")
+            }
         };
         let req = edit_request(&row, field, new, "the engine was wrong", &ctx, &page.run_id)
             .unwrap_or_else(|e| panic!("{field:?}: {}", e.message()));

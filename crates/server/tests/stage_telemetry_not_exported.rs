@@ -91,6 +91,8 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
     meter.record(
         Stage::ScanPass,
         &camerata_server::llm::LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: String::new(),
             model: "m".to_string(),
             backend: "api".to_string(),
@@ -154,6 +156,7 @@ fn recording_the_efficiency_set_and_a_cost_cap_changes_nothing_in_the_client_exp
     capped.record_cost_cap(camerata_server::cost_cap::CostCapRecord {
         repos_not_finished: Vec::new(),
         cost_unknown: false,
+        checkpoint: None,
         cap_usd: 7.77,
         spent_usd: 8.88,
         not_run_passes: vec![camerata_server::cost_cap::NotRunPass {

@@ -45,6 +45,8 @@ pub(super) struct StubCompleter {
 impl LlmPort for StubCompleter {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: self.text.clone(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -155,6 +157,8 @@ impl LlmPort for CapturingCompleter {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.seen.lock().unwrap().push(req);
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -456,6 +460,8 @@ impl RefusingCompleter {
             return Err(refusal);
         }
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[]}"#.to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -617,6 +623,8 @@ fn a_refused_batch_item_is_reported_as_a_refusal_not_as_missing() {
     results.responses.insert(
         "c0-b0".to_string(),
         LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[]}"#.to_string(),
             model: "m".to_string(),
             backend: "api/batch".to_string(),
@@ -675,6 +683,8 @@ impl NeedsFileThenRefuses {
             .unwrap());
         }
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[],"needs_files":["src/b.rs"]}"#.to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -1176,9 +1186,11 @@ fn parse_alternative_recommendations_accepts_an_evidenced_applicable_pick() {
     let recs = parse_alternative_recommendations(raw, &[alt]);
     assert_eq!(recs.len(), 1);
     assert!(recs[0].applicable);
+    // The evidence is carried through, with the model's em dash written as a comma on the way in
+    // (a client reads `path:line, note`; `parse_evidence_citation` reads the place out of it).
     assert_eq!(
         recs[0].evidence.as_deref(),
-        Some("src/api/list_users.rs:42 — cursor param already threaded through")
+        Some("src/api/list_users.rs:42, cursor param already threaded through")
     );
     assert_eq!(recs[0].recommended_option_id, "opt-b");
     assert!(
@@ -2094,6 +2106,71 @@ fn req_a5_6_violates_option_rows_stay_defect_never_deviation() {
         Some(camerata_api_types::audit::FindingKind::Defect),
         "a violates-option decision marks the repo as following the rule's own named \
              defect — its rows are Defects, never Deviations"
+    );
+}
+
+/// A1 item 1: a row of a convention rule whose own fault is an objective security fault (here a
+/// missing ownership check on an update, an IDOR) is a Defect even though the rule is decided
+/// by the codebase's majority convention. It still counts in the departure statistics (the
+/// numerator and the denominator see it), but its kind is never Deviation. A low borderline row
+/// under the SAME rule (access is enforced, only the shape departs) stays a Deviation.
+#[test]
+fn a1_objective_authorization_fault_stays_defect_but_still_counts_as_a_departure() {
+    use camerata_api_types::audit::FindingKind;
+    let rule = "ARCH-FETCH-THEN-AUTHORIZE-1";
+    let mut idor = deviation_fixture(rule, "src/routes/pieces.js", 65);
+    idor.severity = "high".to_string();
+    idor.detail = "Piece PATCH updates any piece by id without fetching or authorizing \
+        ownership. Any authenticated user can therefore modify any other user's piece, \
+        including pieces in other studios (an IDOR). The sibling delete handler scopes by \
+        user id, so this route is missing the check."
+        .to_string();
+    let mut style = deviation_fixture(rule, "src/routes/pieces.js", 54);
+    style.severity = "low".to_string();
+    style.detail = "Ownership check done inline in the handler rather than via an \
+        authorization step. Borderline: access is enforced, the check is an ad-hoc inline \
+        comparison."
+        .to_string();
+    let mut findings = vec![idor, style];
+    let recs = vec![deviation_rec(rule, "opt-a", Some(4))];
+    let alts = vec![two_option_alternatives(rule, Some("opt-a"))];
+    assign_deviation_kinds(&mut findings, &recs, &alts);
+    assert_eq!(
+        findings[0].kind,
+        Some(FindingKind::Defect),
+        "a missing ownership check on an update is an objective authorization fault"
+    );
+    match &findings[1].kind {
+        Some(FindingKind::Deviation(d)) => assert_eq!(
+            d.deviating_sites, 2,
+            "the defect row still counts as a departure from the convention"
+        ),
+        other => panic!("the low inline-check row stays a Deviation, got {other:?}"),
+    }
+}
+
+/// An objective-fault reason is a Defect even under a convention rule whose id names no
+/// security word: "any other user's record" reaches across users. A low sibling with no such
+/// phrase stays a Deviation.
+#[test]
+fn a1_other_users_phrase_marks_a_hygiene_rule_row_a_defect() {
+    use camerata_api_types::audit::FindingKind;
+    let rule = "ARCH-LAYER-STRUCTURE-1";
+    let mut reach = deviation_fixture(rule, "src/routes/records.js", 40);
+    reach.severity = "high".to_string();
+    reach.detail = "any authenticated user can modify any other user's record".to_string();
+    let mut style = deviation_fixture(rule, "src/routes/notes.js", 12);
+    style.severity = "low".to_string();
+    style.detail = "the handler is laid out differently from its siblings".to_string();
+    let mut findings = vec![reach, style];
+    let recs = vec![deviation_rec(rule, "opt-a", Some(4))];
+    let alts = vec![two_option_alternatives(rule, Some("opt-a"))];
+    assign_deviation_kinds(&mut findings, &recs, &alts);
+    assert_eq!(findings[0].kind, Some(FindingKind::Defect));
+    assert!(
+        matches!(&findings[1].kind, Some(FindingKind::Deviation(_))),
+        "the low sibling stays a Deviation, got {:?}",
+        findings[1].kind
     );
 }
 

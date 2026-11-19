@@ -1191,3 +1191,141 @@ fn the_corrected_fixture_names_the_error_its_correction_fixed() {
         "a false-positive ruling corrects 'not a real issue', not 'wrong severity'"
     );
 }
+
+// ── The second look at rows ruled out while flagged ───────────────────────────────────────
+
+#[test]
+fn a_second_look_card_asks_whether_ruling_the_row_out_was_right() {
+    let mut card = card0();
+    card.stratum = SampleStratum::RuledOutFlagged;
+    assert_eq!(question(&card), "Was it right to rule this out?");
+    assert_eq!(stratum_label(card.stratum), Some("ruled out while flagged"));
+    // A No on it is held like a No on a kept row, until something corrects it.
+    card.verdict = Some(verdict(false, None));
+    card.site.held = Some(HoldReason::EngineCheckNoWithoutCorrection);
+    assert!(matches!(card_state(&card), CardState::Held { .. }));
+}
+
+#[test]
+fn the_second_look_has_its_own_rate_line_and_its_own_count_in_the_note() {
+    let mut l = lane(EngineMode::AllVerdicts);
+    let mut card = l.cards[0].clone();
+    card.stratum = SampleStratum::RuledOutFlagged;
+    l.cards.push(card);
+    l.ruled_out_flagged_total = 9;
+    l.strata.push(StratumRate {
+        stratum: SampleStratum::RuledOutFlagged,
+        drawn: 1,
+        verdicts: 0,
+        wrong: 0,
+        rate_percent: None,
+        margin_percent: None,
+    });
+    let line = rate_lines(&l)
+        .into_iter()
+        .find(|r| r.stratum == SampleStratum::RuledOutFlagged)
+        .expect("its own rate line");
+    assert_eq!(
+        line.label,
+        "Real problems among rows ruled out while flagged"
+    );
+    assert!(rate_lines(&l).len() >= 2, "never pooled with the others");
+    let note = allocation_note(&l).unwrap_or_default();
+    assert!(
+        note.contains(
+            "1 of the 9 rows you ruled out while the engine flagged them are in a second look"
+        ),
+        "{note}"
+    );
+    for text in [
+        line.label,
+        note.as_str(),
+        question(&l.cards[l.cards.len() - 1]),
+    ] {
+        assert!(
+            !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+            "{text}"
+        );
+    }
+}
+
+// ── A No on a second-look card has one answer and only un-ruling corrects it ──────────────
+
+fn second_look_card(decision: Option<DecisionState>, decided_at: &str) -> EngineCheckCard {
+    let mut card = card0();
+    card.stratum = SampleStratum::RuledOutFlagged;
+    card.site.edits = Vec::new();
+    card.site.held = None;
+    card.verdict = Some(EngineCheckVerdict {
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
+        ..verdict(false, None)
+    });
+    card.site.decision = decision.map(|state| {
+        let mut d = card
+            .site
+            .decision
+            .clone()
+            .expect("the fixture row is decided");
+        d.state = state;
+        d.decided_at = decided_at.to_string();
+        d
+    });
+    card
+}
+
+#[test]
+fn a_no_on_a_second_look_card_has_one_answer_and_it_keeps_the_row_as_a_problem() {
+    let mut card = second_look_card(None, "");
+    assert_eq!(
+        no_answer(&card),
+        Some(EngineCheckError::RuledOutRealProblem)
+    );
+    assert_eq!(
+        error_label(EngineCheckError::RuledOutRealProblem),
+        "Ruled out, but a real problem"
+    );
+    assert_eq!(
+        kind_of(EngineCheckError::RuledOutRealProblem),
+        CorrectionKind::KeepAsProblem
+    );
+    card.stratum = SampleStratum::ThrownOut;
+    assert_eq!(
+        no_answer(&card),
+        Some(EngineCheckError::ThrownOutRealProblem)
+    );
+    card.stratum = SampleStratum::Kept;
+    assert_eq!(no_answer(&card), None, "a kept card opens the list");
+
+    let mut form = Correction::start(
+        EngineCheckError::RuledOutRealProblem,
+        &second_look_card(None, ""),
+    );
+    assert_eq!(form.title(), "Keep it as a problem");
+    assert!(
+        correction_request(&form, &card, "insp-1").is_err(),
+        "a reason is needed"
+    );
+    form.reason = "the query is built from input".to_string();
+    let Ok(CorrectionRequest::Decision(d)) = correction_request(&form, &card, "insp-1") else {
+        panic!("a decision");
+    };
+    assert_eq!(d.state, DecisionState::Confirmed);
+}
+
+#[test]
+fn a_second_look_no_reads_corrected_only_when_the_row_is_no_longer_ruled_out() {
+    let later = "2099-01-01T00:00:00Z";
+    for (decision, want_corrected) in [
+        (Some(DecisionState::FalsePositive), false),
+        (Some(DecisionState::Confirmed), true),
+        (None, true),
+    ] {
+        let card = second_look_card(decision.clone(), later);
+        assert_eq!(
+            matches!(card_state(&card), CardState::Corrected { .. }),
+            want_corrected,
+            "{decision:?}: {:?}",
+            card_state(&card)
+        );
+    }
+}

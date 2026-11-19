@@ -121,6 +121,25 @@ pub trait BoundedFinding {
     /// bound that moved it. The default drops the note, so a caller with nowhere to put it
     /// (the CI gate) is unchanged.
     fn note_severity_adjustment(&mut self, _note: String) {}
+    /// Whether a reviewer stage doubted this row, as a plain clause naming who and how (for
+    /// example "the per-site reviewer judged it not real"): stage 1 said it is not real, or the
+    /// group reviewer called it a rule misfit or a likely false alarm (owner ruling R-7). A floor
+    /// never raises such a row. The default is `None`, so a caller with no reviewers (the CI
+    /// gate) is unchanged.
+    fn reviewer_doubt(&self) -> Option<String> {
+        None
+    }
+    /// Whether the rule's `min_severity` is only guidance for this row: the model's own rating
+    /// stands and the floor never raises it (owner ruling, 2026-11-17: the agent finder's rows).
+    /// The default is `false`, so the CI gate and every other producer keep the floor.
+    fn rule_minimum_is_guidance(&self) -> bool {
+        false
+    }
+    /// Hold the row for a decision: called when a floor would have raised it but a reviewer
+    /// doubted it, so the human reviewer decides it. `detail` says why in the operator's words
+    /// (who doubted it, and which floor was held back); it is for the operator's own package
+    /// only, never for a client. The default does nothing.
+    fn hold_for_decision(&mut self, _detail: String) {}
 }
 
 /// E2: clamp `severity` DOWN to `rule`'s [`Rule::max_severity`], when one is declared and
@@ -162,23 +181,72 @@ pub fn clamp_to_max_severity(severity: String, rule: Option<&Rule>) -> String {
 ///    SUPABASE-RLS-POLICY-DISABLED-1's platform-owned row (`info`, "confirm in the dashboard")
 ///    into a `critical` in both the scan and `camerata-check`. The decision (logged 2026-10-28)
 ///    is that `info` is exempt, whatever the kind and whoever the producer.
+/// 4. **Not a row a reviewer doubted** ([`BoundedFinding::reviewer_doubt`]). Owner ruling R-7
+///    (2026-11-15): the auditor reports a borderline case at `low`, and a reviewer stage that
+///    then says the row is not real, a rule misfit or a likely false alarm has said the floor's
+///    premise (an under-rated defect) does not hold. The floor lifted exactly those rows to
+///    `critical` and `high` in the graded runs. Such a row keeps its reviewed severity; see
+///    [`floor_held_for_doubt`] for the note and the hold.
 pub fn raise_to_min_severity<F: BoundedFinding + ?Sized>(
     severity: String,
     f: &F,
     rule: Option<&Rule>,
 ) -> String {
-    if !f.bound_kind().is_accusing() || f.is_unlocated() || severity == "info" {
+    if f.reviewer_doubt().is_some() {
         return severity;
     }
-    let Some(raw_floor) = rule.and_then(|r| r.min_severity.as_deref()) else {
-        return severity;
-    };
-    let floor = normalize_severity(raw_floor);
-    if severity_rank(&severity) > severity_rank(&floor) {
-        floor
-    } else {
-        severity
+    match floor_that_would_raise(&severity, f, rule) {
+        Some(floor) => floor,
+        None => severity,
     }
+}
+
+/// The rule's floor when it ranks above `severity` and the floor's first three preconditions
+/// hold (see [`raise_to_min_severity`]); reviewer doubt is NOT consulted here.
+fn floor_that_would_raise<F: BoundedFinding + ?Sized>(
+    severity: &str,
+    f: &F,
+    rule: Option<&Rule>,
+) -> Option<String> {
+    if !f.bound_kind().is_accusing()
+        || f.is_unlocated()
+        || severity == "info"
+        || f.rule_minimum_is_guidance()
+    {
+        return None;
+    }
+    let floor = normalize_severity(rule.and_then(|r| r.min_severity.as_deref())?);
+    (severity_rank(severity) > severity_rank(&floor)).then_some(floor)
+}
+
+/// What R-7 says about a floor that did not raise a row: the note a client may read and the
+/// detail only the operator reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldFloor {
+    /// Neutral, for the client: "severity held at low pending a decision".
+    pub note: String,
+    /// For the operator's package only: who doubted the row and which floor was held back.
+    pub detail: String,
+}
+
+/// R-7: the note for the floor that WOULD have raised `severity` but did not, because a reviewer
+/// doubted the row. `None` when the row is not doubted or no floor would have moved it. The
+/// caller holds the row for a decision and records the note ([`apply_corpus_severity_bounds`]).
+/// The note is neutral because it reaches the client; the reviewer detail is separate.
+pub fn floor_held_for_doubt<F: BoundedFinding + ?Sized>(
+    severity: &str,
+    f: &F,
+    rule: Option<&Rule>,
+) -> Option<HeldFloor> {
+    let doubt = f.reviewer_doubt()?;
+    let floor = floor_that_would_raise(severity, f, rule)?;
+    Some(HeldFloor {
+        note: format!("severity held at {severity} pending a decision"),
+        detail: format!(
+            "{doubt}, so the rule's minimum severity ({floor}) does not raise it; the row keeps \
+             {severity} and is held for a decision"
+        ),
+    })
 }
 
 /// A5.2: clamp a [`BoundKind::Deviation`] row's severity DOWN to its rule's authored
@@ -217,6 +285,67 @@ pub fn downgrade_unlocated<F: BoundedFinding + ?Sized>(severity: String, f: &F) 
     }
 }
 
+/// Why [`raise_to_min_severity`] moved a severity, as the note [`bounded_severity_explained`]
+/// writes it (`severity raised from low to high: <this>`). One constant, so a reader of the
+/// recorded notes can tell a rule minimum from every other bound without matching prose.
+pub const MIN_SEVERITY_REASON: &str = "the rule sets a minimum severity for what it finds";
+
+/// Whether `note`, one recorded severity adjustment, is a raise to the rule's minimum.
+pub fn is_min_severity_note(note: &str) -> bool {
+    note.starts_with("severity raised from ") && note.trim_end().ends_with(MIN_SEVERITY_REASON)
+}
+
+/// Which bound a recorded severity adjustment came from (see [`classify_adjustment`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundStep {
+    /// The rule's `min_severity` raised the row.
+    Floor,
+    /// C4-R1: the row has no file and line, so it went to `info`.
+    NoLocation,
+    /// The rule's `max_severity` lowered the row.
+    Ceiling,
+    /// The deviation ceiling (authored or the default) lowered the row.
+    DeviationCeiling,
+}
+
+/// Read back which bound wrote `note` (one recorded severity adjustment) and the severity that
+/// bound moved the row FROM. `None` for any note this chain did not write as a move (a held-back
+/// floor, a returned severity, the AI tier's own notes). The notes are built in
+/// [`bounded_severity_explained`] from the constants read here, so the two cannot drift.
+pub fn classify_adjustment(note: &str) -> Option<(BoundStep, &str)> {
+    let rest = note
+        .strip_prefix("severity raised from ")
+        .or_else(|| note.strip_prefix("severity lowered from "))?;
+    let (from, rest) = rest.split_once(" to ")?;
+    let (_, why) = rest.split_once(": ")?;
+    let step = match why {
+        MIN_SEVERITY_REASON => BoundStep::Floor,
+        UNLOCATED_WHY => BoundStep::NoLocation,
+        MAX_CAP_WHY => BoundStep::Ceiling,
+        DEVIATION_CAP_WHY => BoundStep::DeviationCeiling,
+        _ => return None,
+    };
+    Some((step, from))
+}
+
+/// The `(from, to)` severities of any recorded note of the form `severity raised|lowered from X
+/// to Y[: why]`, whoever wrote it (a bound, a merge, a phrase floor, a reviewer pass). `None` for
+/// a note that is not a move (a held-back floor, a returned severity).
+pub fn adjustment_move(note: &str) -> Option<(&str, &str)> {
+    let rest = note
+        .strip_prefix("severity raised from ")
+        .or_else(|| note.strip_prefix("severity lowered from "))?;
+    let (from, rest) = rest.split_once(" to ")?;
+    let to = rest.split_once(": ").map_or(rest, |(to, _)| to);
+    Some((from, to.trim()))
+}
+
+/// Why C4-R1 lowered an unlocated row, as its note says it.
+pub const UNLOCATED_WHY: &str = "no file or line was identified for this finding";
+
+/// Why the rule's `max_severity` lowered a row, as its note says it.
+pub const MAX_CAP_WHY: &str = "the rule caps the severity of what it finds";
+
 /// `f`'s severity after every bound: normalize, the floor, C4-R1, then both ceilings (see the
 /// module docs for the order). `rule` is the corpus rule the caller resolved for `f`; `None`
 /// still applies C4-R1 and the deviation ceiling's default, which need no authored rule.
@@ -227,7 +356,10 @@ pub fn bounded_severity<F: BoundedFinding + ?Sized>(f: &F, rule: Option<&Rule>) 
 /// [`bounded_severity`] plus one plain sentence for every bound that moved the severity, in the
 /// order they ran. The severity is the same value `bounded_severity` returns (that function
 /// calls this one), so the reason can never disagree with the result. A bound that leaves the
-/// severity alone adds nothing; an unmoved finding returns an empty list.
+/// severity alone adds nothing, with one exception: a floor a reviewer's doubt held back (R-7)
+/// says so ([`floor_held_for_doubt`]), because a row the floor did not raise is exactly the row the
+/// reader would otherwise expect at the floor. An unmoved finding with no held floor returns an
+/// empty list.
 pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
     f: &F,
     rule: Option<&Rule>,
@@ -245,27 +377,47 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
         after
     };
     let start = normalize_severity(f.severity());
+    let held = floor_held_for_doubt(&start, f, rule);
     let raised = step(
         &start,
         raise_to_min_severity(start.clone(), f, rule),
-        "the rule sets a minimum severity for what it finds".to_string(),
+        MIN_SEVERITY_REASON.to_string(),
     );
     let located = step(
         &raised,
         downgrade_unlocated(raised.clone(), f),
-        "no file or line was identified for this finding".to_string(),
+        UNLOCATED_WHY.to_string(),
     );
     let capped = step(
         &located,
         clamp_to_max_severity(located.clone(), rule),
-        "the rule caps the severity of what it finds".to_string(),
+        MAX_CAP_WHY.to_string(),
     );
     let last = step(
         &capped,
         clamp_deviation_severity(capped.clone(), f, rule),
-        "a consistency deviation is capped below the severity of a defect".to_string(),
+        DEVIATION_CAP_WHY.to_string(),
     );
+    if let Some(note) = held {
+        notes.insert(0, note.note);
+    }
     (last, notes)
+}
+
+/// Why the A5.2 deviation ceiling lowered a row, as its note says it.
+pub const DEVIATION_CAP_WHY: &str =
+    "a consistency deviation is capped below the severity of a defect";
+
+/// The severity the deviation ceiling lowered a row FROM, read back from the note
+/// [`bounded_severity_explained`] wrote for it (`None` for any other note). The note is built and
+/// read here, in one place, so the two cannot drift. Used when a reviewer's reason shows a row
+/// filed as a deviation is a defect: the cap no longer applies and the row takes back the
+/// severity the cap took off.
+pub fn deviation_cap_lowered_from(note: &str) -> Option<&str> {
+    let rest = note.strip_prefix("severity lowered from ")?;
+    let (from, rest) = rest.split_once(" to ")?;
+    let (_, why) = rest.split_once(": ")?;
+    (why == DEVIATION_CAP_WHY).then_some(from)
 }
 
 /// Apply every severity bound to every finding, in place. `resolve` maps a finding's rule id
@@ -279,19 +431,31 @@ pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
 /// - **Minimal write.** The severity is only rewritten when a bound actually moves it. A finding
 ///   no bound touches keeps its producer's exact string; this does not re-case or re-vocabulary
 ///   a severity as a side effect.
+/// - **A held floor holds the row (R-7).** A row whose floor a reviewer's doubt held back is
+///   passed to [`BoundedFinding::hold_for_decision`] and given the held note, whether or not a
+///   ceiling moved it. A rerun hands the same note again; the server's note writer keeps one.
 pub fn apply_corpus_severity_bounds<'c, F: BoundedFinding>(
     findings: &mut [F],
     resolve: impl Fn(&str) -> Option<&'c Rule>,
 ) {
     for f in findings.iter_mut() {
-        let (bounded, notes) = bounded_severity_explained(f, resolve(f.rule_id()));
+        let rule = resolve(f.rule_id());
+        let start = normalize_severity(f.severity());
+        let held = floor_held_for_doubt(&start, f, rule);
+        let (bounded, notes) = bounded_severity_explained(f, rule);
         // Compare against the NORMALIZED original, so an unrelated casing difference
         // ("High" vs "high") is not mistaken for a bound moving the severity.
-        if bounded != normalize_severity(f.severity()) {
+        let moved = bounded != start;
+        if moved {
             f.set_severity(bounded);
+        }
+        if moved || held.is_some() {
             for note in notes {
                 f.note_severity_adjustment(note);
             }
+        }
+        if let Some(held) = held {
+            f.hold_for_decision(held.detail);
         }
     }
 }
@@ -538,6 +702,160 @@ mod tests {
                 bounded_severity(&f, rule)
             );
         }
+    }
+
+    /// A row a reviewer doubted (owner ruling R-7), keeping its notes and its hold.
+    #[derive(Debug, Clone)]
+    struct DoubtedRow {
+        inner: NotedRow,
+        doubted: bool,
+        held: bool,
+    }
+
+    impl BoundedFinding for DoubtedRow {
+        fn severity(&self) -> &str {
+            self.inner.severity()
+        }
+        fn rule_id(&self) -> &str {
+            self.inner.rule_id()
+        }
+        fn bound_kind(&self) -> BoundKind {
+            self.inner.bound_kind()
+        }
+        fn is_unlocated(&self) -> bool {
+            self.inner.is_unlocated()
+        }
+        fn set_severity(&mut self, severity: String) {
+            self.inner.set_severity(severity);
+        }
+        fn note_severity_adjustment(&mut self, note: String) {
+            self.inner.note_severity_adjustment(note);
+        }
+        fn reviewer_doubt(&self) -> Option<String> {
+            self.doubted
+                .then(|| "the reviewer judged it not real".to_string())
+        }
+        fn hold_for_decision(&mut self, _detail: String) {
+            self.held = true;
+        }
+    }
+
+    fn doubted(severity: &str, doubted: bool) -> DoubtedRow {
+        DoubtedRow {
+            inner: noted(severity, BoundKind::Defect),
+            doubted,
+            held: false,
+        }
+    }
+
+    #[test]
+    fn a_floor_never_raises_a_row_a_reviewer_doubted_and_holds_it_with_a_note() {
+        let set = rule_set(|r| r.min_severity = Some("critical".to_string()));
+        let mut rows = vec![doubted("low", true), doubted("low", false)];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].inner.inner.severity, "low");
+        assert!(rows[0].held, "the doubted row is held for a decision");
+        assert_eq!(rows[0].inner.notes.len(), 1, "{:?}", rows[0].inner.notes);
+        assert!(
+            rows[0].inner.notes[0].starts_with("severity held at low"),
+            "{:?}",
+            rows[0].inner.notes
+        );
+        // Nobody doubted the second row: the floor raises it and does not hold it.
+        assert_eq!(rows[1].inner.inner.severity, "critical");
+        assert!(!rows[1].held);
+        // A ceiling still lowers a doubted row: doubt only ever blocks a raise.
+        let set = rule_set(|r| r.max_severity = Some("low".to_string()));
+        let mut rows = vec![doubted("high", true)];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows[0].inner.inner.severity, "low");
+        assert!(!rows[0].held, "no floor was held, so nothing to decide");
+    }
+
+    #[test]
+    fn the_deviation_cap_note_reads_back_the_severity_it_lowered_from() {
+        let set = RuleSet::default();
+        let mut rows = vec![NotedRow {
+            inner: row("critical", BoundKind::Deviation),
+            notes: Vec::new(),
+        }];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows[0].inner.severity, "medium");
+        assert_eq!(rows[0].notes.len(), 1);
+        assert_eq!(
+            deviation_cap_lowered_from(&rows[0].notes[0]),
+            Some("critical")
+        );
+        assert_eq!(
+            deviation_cap_lowered_from(
+                "severity lowered from high to low: the rule caps the severity of what it finds"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_rule_minimum_note_is_told_apart_from_every_other_bound() {
+        let floor = rule_set(|r| r.min_severity = Some("high".to_string()));
+        let (_, notes) =
+            bounded_severity_explained(&row("low", BoundKind::Defect), floor.get_by_id("BOUND-1"));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(is_min_severity_note(&notes[0]), "{notes:?}");
+        let ceiling = rule_set(|r| r.max_severity = Some("low".to_string()));
+        let (_, notes) = bounded_severity_explained(
+            &row("high", BoundKind::Defect),
+            ceiling.get_by_id("BOUND-1"),
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(!is_min_severity_note(&notes[0]), "{notes:?}");
+        let unlocated = Row {
+            path: String::new(),
+            line: 0,
+            ..row("high", BoundKind::Defect)
+        };
+        let (_, notes) = bounded_severity_explained(&unlocated, None);
+        assert!(notes.iter().all(|n| !is_min_severity_note(n)), "{notes:?}");
+    }
+
+    #[test]
+    fn each_recorded_adjustment_reads_back_its_bound_and_its_from_severity() {
+        let both = rule_set(|r| {
+            r.min_severity = Some("high".to_string());
+            r.max_severity = Some("medium".to_string());
+        });
+        let rule = both.get_by_id("BOUND-1");
+        // The floor raises low to high, then the ceiling lowers it to medium.
+        let (_, notes) = bounded_severity_explained(&row("low", BoundKind::Defect), rule);
+        let steps: Vec<_> = notes
+            .iter()
+            .filter_map(|n| classify_adjustment(n))
+            .collect();
+        assert_eq!(
+            steps,
+            vec![(BoundStep::Floor, "low"), (BoundStep::Ceiling, "high")],
+            "{notes:?}"
+        );
+        let (_, notes) = bounded_severity_explained(&row("critical", BoundKind::Deviation), None);
+        assert_eq!(
+            classify_adjustment(&notes[0]),
+            Some((BoundStep::DeviationCeiling, "critical"))
+        );
+        let unlocated = Row {
+            path: String::new(),
+            line: 0,
+            ..row("high", BoundKind::Defect)
+        };
+        let (_, notes) = bounded_severity_explained(&unlocated, None);
+        assert_eq!(
+            classify_adjustment(&notes[0]),
+            Some((BoundStep::NoLocation, "high"))
+        );
+        assert_eq!(
+            classify_adjustment("severity held at low pending a decision"),
+            None
+        );
+        assert_eq!(classify_adjustment("something the AI tier wrote"), None);
     }
 
     #[test]

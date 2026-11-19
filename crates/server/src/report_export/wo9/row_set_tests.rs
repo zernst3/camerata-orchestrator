@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::support::*;
-use crate::release_gate::{read_zip_entries, release, xlsx_sheet_grid, ProductPackage};
+use crate::release_gate::{read_zip_entries, release, ProductPackage};
 use crate::report_export::apply_overlay;
 
 type Tally = BTreeMap<String, usize>;
@@ -54,19 +54,19 @@ fn sites_sheet_rows(entries: &BTreeMap<String, Vec<u8>>) -> Vec<Value> {
         .find(|(name, _)| name.ends_with(".xlsx"))
         .map(|(_, bytes)| bytes.clone())
         .expect("a workbook");
-    let grid = xlsx_sheet_grid(&xlsx, "Sites").expect("a Sites sheet");
+    let grid = sheet_table(&xlsx, "All source rows");
     let header = &grid[0];
     let col = |name: &str| {
         header
             .iter()
             .position(|h| h == name)
-            .unwrap_or_else(|| panic!("the Sites sheet has no {name:?} column: {header:?}"))
+            .unwrap_or_else(|| panic!("All source rows has no {name:?} column: {header:?}"))
     };
-    let (site, level, group) = (col("Site"), col("Review level"), col("Group"));
+    let (site, level, group) = (col("Row role"), col("Review level"), col("Fix id"));
     grid.iter()
         .skip(1)
         .filter(|r| r[site] == "Primary")
-        .map(|r| serde_json::json!({ "review_level": r[level], "group": r[group] }))
+        .map(|r| serde_json::json!({ "review_level": r[level], "fix_id": r[group] }))
         .collect()
 }
 
@@ -112,6 +112,7 @@ fn every_export_renders_the_same_reviewed_row_set() {
     ];
     let want_levels = tally(&outputs[0].1, "review_level");
     let want_groups = tally(&outputs[0].1, "group");
+    let want_fixes = tally(&outputs[0].1, "fix_id");
     assert_eq!(
         want_levels,
         Tally::from([
@@ -131,7 +132,11 @@ fn every_export_renders_the_same_reviewed_row_set() {
     for (name, rows) in &outputs {
         assert_eq!(rows.len(), total, "{name}: row count");
         assert_eq!(tally(rows, "review_level"), want_levels, "{name}: levels");
-        assert_eq!(tally(rows, "group"), want_groups, "{name}: sub-groups");
+        assert_eq!(tally(rows, "fix_id"), want_fixes, "{name}: fixes");
+        // The sheet names the Fix of a row, not its rule group.
+        if *name != "Sites sheet" {
+            assert_eq!(tally(rows, "group"), want_groups, "{name}: sub-groups");
+        }
     }
 
     // The tree in findings.json counts the same rows in each sub-group.
@@ -169,8 +174,8 @@ fn every_export_renders_the_same_reviewed_row_set() {
         .collect();
     assert_eq!(
         pattern_groups,
-        tally(&not_false_positive, "group"),
-        "PDF patterns: sub-groups"
+        tally(&not_false_positive, "fix_id"),
+        "PDF patterns: fixes"
     );
     let mut pattern_levels = Tally::new();
     for p in pdf["sub_group_patterns"].as_array().unwrap() {

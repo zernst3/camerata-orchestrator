@@ -169,10 +169,28 @@ fn moved_sites(
 
 /// Load what the views are composed from and run `compose` on it. Refuses with the route's
 /// answer when the project, a store or the inspection is not there, or `run_id` is not the latest.
-fn with_composer(
+async fn with_composer(
     state: &AppState,
     id: &str,
     run_id: Option<&str>,
+    compose: impl FnOnce(&ReviewComposer<'_>) -> Response,
+) -> Response {
+    // The rule's bounds ride on each row; a corpus that is not there shows none.
+    let dir = camerata_rules::corpus_path();
+    let corpus = if dir.exists() {
+        Some(camerata_rules::load_corpus_lenient(&dir).await.0)
+    } else {
+        None
+    };
+    with_composer_using(state, id, run_id, corpus.as_ref(), compose)
+}
+
+/// [`with_composer`] with the corpus already in hand.
+fn with_composer_using(
+    state: &AppState,
+    id: &str,
+    run_id: Option<&str>,
+    corpus: Option<&camerata_rules::RuleSet>,
     compose: impl FnOnce(&ReviewComposer<'_>) -> Response,
 ) -> Response {
     let project = match guard(state, id) {
@@ -200,6 +218,7 @@ fn with_composer(
     // answered (marked `carried_from`), so the lane shows the card as the No it still is.
     let verdicts = state.engine_check.verdicts_in_force(id, &latest.id);
     let (links, moved) = moved_sites(state, id, &latest);
+    let second_look = state.engine_check.second_look(id, &latest.id);
     let inputs = ReviewInputs {
         run_id: &latest.id,
         engine_version: env!("CARGO_PKG_VERSION"),
@@ -212,8 +231,19 @@ fn with_composer(
         verdicts: &verdicts,
         moved: &moved,
         links: &links,
+        second_look_drawn: &second_look,
+        corpus,
     };
-    compose(&ReviewComposer::new(&inputs))
+    let composer = ReviewComposer::new(&inputs);
+    let response = compose(&composer);
+    // Rows the second look drew now are recorded, so they stay drawn.
+    let added = composer.second_look_added();
+    if !added.is_empty() {
+        if let Err(e) = state.engine_check.add_second_look(id, &latest.id, &added) {
+            tracing::warn!(error = %e, "could not record the second look's draw");
+        }
+    }
+    response
 }
 
 #[derive(Deserialize)]
@@ -228,7 +258,7 @@ pub(crate) async fn get_shell(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    with_composer(&state, &id, q.run_id.as_deref(), |c| {
+    with_composer_using(&state, &id, q.run_id.as_deref(), None, |c| {
         Json(c.shell()).into_response()
     })
 }
@@ -239,7 +269,7 @@ pub(crate) async fn get_tree(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    with_composer(&state, &id, q.run_id.as_deref(), |c| {
+    with_composer_using(&state, &id, q.run_id.as_deref(), None, |c| {
         Json(c.tree()).into_response()
     })
 }
@@ -285,6 +315,7 @@ pub(crate) async fn get_sites(
             ),
         }
     })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -314,6 +345,7 @@ pub(crate) async fn get_queue(
         ))
         .into_response()
     })
+    .await
 }
 
 /// `GET /api/projects/:id/review/engine-check`.
@@ -325,6 +357,7 @@ pub(crate) async fn get_engine_check(
     with_composer(&state, &id, q.run_id.as_deref(), |c| {
         Json(c.engine_check()).into_response()
     })
+    .await
 }
 
 /// `POST /api/projects/:id/review/engine-check/:key`: one Yes or No on one sampled row.
@@ -339,20 +372,19 @@ pub(crate) async fn post_engine_check_verdict(
     let Some(latest) = state.inspections.latest(&id) else {
         return no_inspection();
     };
-    // Only a row of the sample can be judged.
-    let lane_has_it = with_composer(&state, &id, Some(&latest.id), |c| {
-        if c.engine_check()
-            .cards
-            .iter()
-            .any(|card| card.site.site_key == key)
-        {
-            StatusCode::OK.into_response()
-        } else {
-            refusal(
+    // Only a row of the sample can be judged, and with an answer its card takes.
+    let lane_has_it = with_composer_using(&state, &id, Some(&latest.id), None, |c| {
+        let lane = c.engine_check();
+        let Some(card) = lane.cards.iter().find(|card| card.site.site_key == key) else {
+            return refusal(
                 StatusCode::NOT_FOUND,
                 "not_in_sample",
                 "This row is not in the Engine Check sample for this run.",
-            )
+            );
+        };
+        match crate::engine_check::answer_fits_stratum(card.stratum, &req) {
+            Ok(()) => StatusCode::OK.into_response(),
+            Err(e) => refusal(StatusCode::UNPROCESSABLE_ENTITY, e.code(), e.to_string()),
         }
     });
     if lane_has_it.status() != StatusCode::OK {
@@ -384,7 +416,7 @@ pub(crate) async fn get_export_gate(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    with_composer(&state, &id, q.run_id.as_deref(), |c| {
+    with_composer_using(&state, &id, q.run_id.as_deref(), None, |c| {
         Json(c.export_gate()).into_response()
     })
 }
@@ -395,7 +427,7 @@ pub(crate) async fn get_settings(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    with_composer(&state, &id, q.run_id.as_deref(), |c| {
+    with_composer_using(&state, &id, q.run_id.as_deref(), None, |c| {
         Json(c.settings()).into_response()
     })
 }
@@ -444,7 +476,8 @@ fn budget_outcome_for(
     applied: bool,
 ) -> Response {
     if state.inspections.latest(id).is_some() {
-        return with_composer(state, id, None, |c| {
+        // The line has nothing to say about a rule's severity, so it reads no corpus.
+        return with_composer_using(state, id, None, None, |c| {
             Json(c.budget_outcome(req, applied)).into_response()
         });
     }

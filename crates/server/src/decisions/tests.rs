@@ -1832,3 +1832,356 @@ async fn a_corrupt_decision_file_answers_503_keeps_the_file_and_is_never_replace
     // Another project is unaffected.
     assert!(!state.decisions.is_corrupt("some-other-project"));
 }
+
+// ── place decisions (D2, R-6c) ────────────────────────────────────────────────────────────
+
+/// Four rules at one line (a critical carrier, a high, a medium and a low) and a row elsewhere.
+fn place_rows() -> Vec<Finding> {
+    let mut rows = vec![
+        row("SEC-A", "src/p.rs", 7, "let key = SECRET;"),
+        row("SEC-B", "src/p.rs", 7, "let key = SECRET;"),
+        row("SEC-C", "src/p.rs", 7, "let key = SECRET;"),
+        row("SEC-D", "src/p.rs", 7, "let key = SECRET;"),
+        row("SEC-E", "src/q.rs", 2, "let other = 1;"),
+    ];
+    rows[0].severity = "critical".to_string();
+    rows[1].severity = "high".to_string();
+    rows[2].severity = "medium".to_string();
+    rows[3].severity = "low".to_string();
+    rows
+}
+
+fn place_id_of_tree(tree: &ReviewTree) -> String {
+    assert_eq!(tree.places.len(), 1, "{:?}", tree.places);
+    tree.places[0].node_id()
+}
+
+#[tokio::test]
+async fn a_place_decision_writes_the_node_record_and_one_site_record_per_rule_it_covers() {
+    let (state, app, pid) = app_with_project();
+    let mut rows = place_rows();
+    // SEC-C is held (its quoted evidence is not verified): a batch leaves it for a ruling by name.
+    rows[2].captures.insert(
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+        "not found near the cited line".to_string(),
+    );
+    let entry = state
+        .inspections
+        .append(entry_of(&pid, rows, "2026-11-02T10:00:00Z"))
+        .unwrap();
+    let tree = entry.report.tree.as_ref().unwrap();
+    let place = place_id_of_tree(tree);
+    let key_of_rule = |rule: &str| {
+        entry
+            .report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule)
+            .unwrap()
+            .site_key
+            .clone()
+    };
+    let (carrier, held, unticked, covered_too) = (
+        key_of_rule("SEC-A"),
+        key_of_rule("SEC-C"),
+        key_of_rule("SEC-D"),
+        key_of_rule("SEC-B"),
+    );
+    assert_eq!(tree.places[0].carrier, carrier);
+
+    // A decision without a reason is refused: a place with carried rules is a batch.
+    let uri = format!("/api/projects/{pid}/decisions");
+    let (status, _) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(node_req(
+            &place,
+            DecisionState::Confirmed,
+            "",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let mut req = node_req(&place, DecisionState::Confirmed, "one secret, four rules");
+    req.except = vec![unticked.clone()];
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(req))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done: DecisionRecorded = serde_json::from_value(body).unwrap();
+    assert_eq!(done.inherited_count, 2, "{:?}", done.decision);
+    let mut want = vec![carrier.clone(), covered_too.clone()];
+    want.sort();
+    assert_eq!(done.decision.applies_to, want);
+    assert!(done.decision.except.contains(&held));
+    assert!(done.decision.except.contains(&unticked));
+
+    let all = state.decisions.list(&pid);
+    assert_eq!(all.iter().filter(|d| d.is_node_record()).count(), 1);
+    for key in [&carrier, &covered_too] {
+        let site = all.iter().find(|d| &d.key == key).expect("a site record");
+        assert_eq!(
+            site.inherited_from.as_deref(),
+            Some(done.decision.id.as_str())
+        );
+        assert_eq!(site.reason, "one secret, four rules");
+    }
+    assert!(all.iter().all(|d| d.key != held && d.key != unticked));
+
+    // The release gate's group check finds no gap.
+    let (_, reviewed) = crate::edits::routes::review_of(&state, &pid, &entry);
+    let records = crate::report_export::decisions_file::decision_rows(&reviewed);
+    assert!(
+        crate::release_gate::held::group_decision_gaps(&records).is_empty(),
+        "{records:?}"
+    );
+    // A merge is never a place decision.
+    let mut merge = node_req(
+        &place,
+        DecisionState::MergedInto(carrier.clone()),
+        "same thing",
+    );
+    merge.key = String::new();
+    let (status, _) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(merge))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[test]
+fn a_rule_decided_alone_after_the_place_wins_and_revoking_it_brings_the_place_record_back() {
+    let (rows, tree) = tree_of(place_rows());
+    let place = place_id_of_tree(&tree);
+    let carried = rows.iter().find(|f| f.rule_id == "SEC-B").unwrap();
+    let store = DecisionStore::new();
+    store
+        .record_node(
+            "p",
+            &place,
+            &tree.batch_members(&place),
+            &node_req(&place, DecisionState::Confirmed, "one secret"),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let own = store
+        .record_site(
+            "p",
+            &site_req(
+                &carried.site_key,
+                DecisionState::FalsePositive,
+                "this rule is wrong here",
+            ),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    let applied = apply_to(&tree, &store.active("p"), &[]);
+    let d = applied
+        .get(&carried.site_key)
+        .unwrap()
+        .decision
+        .as_ref()
+        .unwrap();
+    assert_eq!(d.state, DecisionState::FalsePositive);
+    assert_eq!(d.inherited_from, None);
+    // The other rules at the place keep the place's decision.
+    let other = rows.iter().find(|f| f.rule_id == "SEC-A").unwrap();
+    let d = applied
+        .get(&other.site_key)
+        .unwrap()
+        .decision
+        .as_ref()
+        .unwrap();
+    assert_eq!(d.state, DecisionState::Confirmed);
+
+    store.revoke("p", &own.id, NOW).unwrap();
+    let applied = apply_to(&tree, &store.active("p"), &[]);
+    let d = applied
+        .get(&carried.site_key)
+        .unwrap()
+        .decision
+        .as_ref()
+        .unwrap();
+    assert_eq!(d.state, DecisionState::Confirmed);
+    assert!(d.inherited_from.is_some());
+}
+
+#[test]
+fn a_new_rule_at_a_decided_place_is_new_since_the_decision() {
+    let (rows1, tree1) = tree_of(place_rows());
+    let place = place_id_of_tree(&tree1);
+    let store = DecisionStore::new();
+    let (record, _) = store
+        .record_node(
+            "p",
+            &place,
+            &tree1.batch_members(&place),
+            &node_req(&place, DecisionState::Confirmed, "one secret"),
+            ctx("insp-1"),
+        )
+        .unwrap();
+    // The rerun finds the same rows and a fifth rule at the same line.
+    let mut again = place_rows();
+    again.push(row("SEC-F", "src/p.rs", 7, "let key = SECRET;"));
+    let (rows2, tree2) = tree_of(again);
+    assert_eq!(
+        place_id_of_tree(&tree2),
+        place,
+        "the place id survives the new rule"
+    );
+    let applied = apply_to(&tree2, &store.active("p"), &[]);
+    for f in rows1.iter().filter(|f| f.path == "src/p.rs") {
+        let s = applied.get(&f.site_key).expect("decided");
+        assert!(s.decision.is_some() && s.new_since_decision.is_none());
+    }
+    let new_key = rows2
+        .iter()
+        .find(|f| f.rule_id == "SEC-F")
+        .unwrap()
+        .site_key
+        .clone();
+    let s = applied.get(&new_key).expect("a standing");
+    assert!(s.is_unresolved());
+    let marker = s.new_since_decision.as_ref().expect("new since decision");
+    assert_eq!(
+        (marker.decision_id.as_str(), marker.node_id.as_str()),
+        (record.id.as_str(), place.as_str())
+    );
+}
+
+// ── ruling out a row the engine flagged needs a reason ────────────────────────────────────
+
+/// Three rows of one rule in three files, the first two flagged "possible false positive" (test
+/// code), the third not. The flag is checked here, so the tests cannot drift from the rule.
+fn two_flagged_one_plain() -> Vec<Finding> {
+    let mut rows = vec![
+        row("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 10, "let a = 1;"),
+        row("SEC-NO-RAW-SQL-CONCAT-1", "src/b.rs", 20, "let b = 2;"),
+        row("SEC-NO-RAW-SQL-CONCAT-1", "src/c.rs", 30, "let c = 3;"),
+    ];
+    rows[0].in_test = true;
+    rows[1].in_test = true;
+    let index = crate::possible_false_positive::FpIndex::new(&rows);
+    assert!(index.of(&rows[0]).is_some() && index.of(&rows[1]).is_some());
+    assert!(index.of(&rows[2]).is_none());
+    rows
+}
+
+#[tokio::test]
+async fn ruling_out_a_flagged_row_without_a_reason_is_refused_and_with_one_is_kept() {
+    let (state, app, pid) = app_with_project();
+    let entry = state
+        .inspections
+        .append(entry_of(
+            &pid,
+            two_flagged_one_plain(),
+            "2026-11-02T10:00:00Z",
+        ))
+        .unwrap();
+    let flagged = key_at(&entry.report.findings, "src/a.rs");
+    let plain = key_at(&entry.report.findings, "src/c.rs");
+    let uri = format!("/api/projects/{pid}/decisions");
+
+    for blank in ["", "   "] {
+        let (status, body) = call(
+            &app,
+            "POST",
+            &uri,
+            Some(to_json(&PostDecisionsReq::Decide(site_req(
+                &flagged,
+                DecisionState::FalsePositive,
+                blank,
+            )))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["code"], "reason_required");
+    }
+    assert!(state.decisions.active(&pid).is_empty(), "nothing was kept");
+
+    // The same refusal for a row the engine did not flag: Ruled out always needs a reason.
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(site_req(
+            &plain,
+            DecisionState::FalsePositive,
+            "",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(site_req(
+            &flagged,
+            DecisionState::FalsePositive,
+            "it is a fixture",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.decisions.active(&pid).len(), 1);
+}
+
+#[tokio::test]
+async fn ruling_out_a_batch_that_holds_a_flagged_row_without_a_reason_is_refused() {
+    let (state, app, pid) = app_with_project();
+    let entry = state
+        .inspections
+        .append(entry_of(
+            &pid,
+            two_flagged_one_plain(),
+            "2026-11-02T10:00:00Z",
+        ))
+        .unwrap();
+    let tree = entry.report.tree.clone().unwrap();
+    let node = rule_node(&tree, "SEC-NO-RAW-SQL-CONCAT-1");
+    let uri = format!("/api/projects/{pid}/decisions");
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(node_req(
+            &node,
+            DecisionState::FalsePositive,
+            "  ",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "reason_required");
+    assert!(state.decisions.active(&pid).is_empty(), "nothing was kept");
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(to_json(&PostDecisionsReq::Decide(node_req(
+            &node,
+            DecisionState::FalsePositive,
+            "all fixtures",
+        )))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state.decisions.active(&pid).len(),
+        4,
+        "node plus three sites"
+    );
+}

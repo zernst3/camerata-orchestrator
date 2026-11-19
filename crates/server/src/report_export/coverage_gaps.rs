@@ -71,6 +71,10 @@ pub struct CoverageGapsJson {
     /// The auditable files the scan did not read, in walk order per repo: at most
     /// [`SKIPPED_FILES_LISTED_PER_REASON`] per reason.
     pub skipped_files: Vec<SkippedFileJson>,
+    /// The line under the PDF's list of skipped files when the list is longer than the PDF shows
+    /// ("and 3 more ..."); empty when the PDF shows them all.
+    #[serde(default)]
+    pub skipped_files_more_line: String,
     /// Skipped files past that bound, counted but not named.
     pub skipped_beyond_cap_total: usize,
     /// One sentence counting every file the scan did not read, by reason, named or not ("12 files
@@ -115,13 +119,13 @@ pub struct ScopeLimitedRuleJson {
 }
 
 /// The sentence for `rules` (non-empty), in plain words.
-fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<String> {
+pub(super) fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<String> {
     let first = rules.first()?;
     let count = rules.len();
     Some(format!(
         "{count} {} checked only against the files in {} scope, not every file in the \
-         repositories (for example {}: {} of {}). The counts per rule are on the workbook's \
-         Coverage sheet and in findings.json.",
+         repositories (for example {}: {} of {}). The counts per rule are on the {} sheet and in \
+         findings.json.",
         if count == 1 { "rule was" } else { "rules were" },
         if count == 1 { "its" } else { "their" },
         first.rule_id,
@@ -131,6 +135,7 @@ fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<String> {
         } else {
             format!("{} files", first.files_total)
         },
+        crate::xlsx_export::vocabulary::RULES_CHECKED,
     ))
 }
 
@@ -320,7 +325,7 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
     }
     let dependency_gaps = dependency_gaps(report);
     let input = report.ledger.input();
-    let skipped_files = input
+    let skipped_files: Vec<SkippedFileJson> = input
         .skipped_files
         .iter()
         .map(|s| SkippedFileJson {
@@ -348,10 +353,17 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             scope: scope.kind.clone(),
         })
         .collect();
+    let skipped_files_more_line = super::counts_prose::more_line(
+        skipped_files
+            .len()
+            .saturating_sub(super::marking::PDF_MAX_SKIPPED_FILES),
+        &super::PdfWordsJson::new().skipped_files_more,
+    );
     CoverageGapsJson {
         failed_ai_passes,
         dependency_gaps,
         skipped_files,
+        skipped_files_more_line,
         skipped_beyond_cap_total: input.skipped_beyond_cap_total,
         skipped_beyond_cap_note: skipped_beyond_cap_sentence(input.skipped_beyond_cap_total),
         skipped_summary: skipped_summary_sentence(&input.skipped_totals, &input.file_cap_hits),

@@ -12,6 +12,8 @@ use camerata_llm::failure::{FailureClass, LlmCallFailure};
 
 fn response(text: &str) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -191,10 +193,11 @@ async fn a_fix_that_fails_both_tries_records_both_with_times_and_the_class() {
 async fn a_stopped_run_sends_no_second_fix_try() {
     let (f, files) = finding_with_code();
     let llm = FailThenGood::new(usize::MAX, Fail::Transport, GOOD_FIX, NO_FIX);
-    let meter = UsageMeter::default();
+    // Each failure lands a minute after the one before, so three span the outage stop's 120 s.
+    let meter = UsageMeter::default().with_health(crate::run_health::RunHealth::stepping(60));
     let (_out, failed) =
         generate_fix_specifics(&llm, "o/r", vec![f], &files, None, Some(&meter), None).await;
-    // Three transport failures in a row stop the run; nothing is sent after that.
+    // Three transport failures in a row, minutes apart, stop the run; nothing is sent after that.
     assert!(meter.outage_stopped());
     assert_eq!(llm.calls(), 3);
     assert_eq!(failed.len(), 1);

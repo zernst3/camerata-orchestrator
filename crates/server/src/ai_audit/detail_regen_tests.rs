@@ -54,6 +54,8 @@ fn role_of(system: &str) -> Role {
 
 fn stub_response(text: String) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text,
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -315,6 +317,10 @@ fn selected() -> Vec<(String, String)> {
 
 fn meter_with(config: EfficiencyConfig) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: config,
         max_cost_usd: None,
@@ -322,6 +328,7 @@ fn meter_with(config: EfficiencyConfig) -> UsageMeter {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     })
 }
 
@@ -766,6 +773,10 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
     let llm = RoleLlm::new(&terse_scan(1), Regen::Writes);
     // Cap already exhausted by the scan pass (each stub call costs 0.01).
     let meter = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(0.005),
@@ -773,6 +784,7 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        checkpoint: Default::default(),
     });
     let (findings, failed) = audit(&llm, &meter).await;
     assert_eq!(findings.len(), 1);
@@ -837,6 +849,10 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
     // One refusal is $0.60 against a $0.50 cap: the cap trips on the first, so the repeat round
     // is not started.
     let meter = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(0.50),
@@ -844,6 +860,7 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        checkpoint: Default::default(),
     });
     let (out, failed) = regenerate_full_details(
         &llm,
@@ -1571,6 +1588,10 @@ async fn the_third_round_is_still_bounded_by_the_spend_limit() {
     // spend to the limit, and the two singles after it are refused before they are sent.
     let llm = RoleLlm::new("{}", Regen::Garbage);
     let meter = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(0.03),
@@ -1578,6 +1599,7 @@ async fn the_third_round_is_still_bounded_by_the_spend_limit() {
         clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
+        checkpoint: Default::default(),
     });
     let (out, failed) = regenerate_full_details(
         &llm,
@@ -2017,7 +2039,8 @@ async fn a_detail_that_fails_both_tries_records_both_with_the_class() {
 #[tokio::test]
 async fn a_stopped_run_sends_no_second_detail_try() {
     let llm = RoleLlm::new(&terse_scan(1), Regen::DownFirst(usize::MAX));
-    let meter = UsageMeter::default();
+    // Each failure lands a minute after the one before, so three span the outage stop's 120 s.
+    let meter = UsageMeter::default().with_health(crate::run_health::RunHealth::stepping(60));
     let input = vec![finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"))];
     let (_out, failed) = regenerate_full_details(
         &llm,
@@ -2375,6 +2398,8 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
                 backend: "api".to_string(),
                 mode: "parallel".to_string(),
                 resolved: true,
+                group_review: String::new(),
+                finder: String::new(),
             },
             ai_scan_key: crate::scan_cache::AiScanKey {
                 audit_model: "claude-a".to_string(),
@@ -3115,6 +3140,10 @@ mod batch_route {
 
     fn capped(cap: f64) -> UsageMeter {
         UsageMeter::with_controls(RunControls {
+            finder: Default::default(),
+            finder_model: None,
+            finder_force_pieces: None,
+            stored_spend_usd: 0.0,
             review: Default::default(),
             efficiency: EfficiencyConfig::default(),
             max_cost_usd: Some(cap),
@@ -3122,6 +3151,7 @@ mod batch_route {
             fix_model: None,
             clone_judge_model: None,
             consensus: false,
+            checkpoint: Default::default(),
         })
     }
 

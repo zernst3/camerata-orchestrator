@@ -91,6 +91,10 @@ async fn run_with(
 ) -> (Vec<String>, UsageMeter) {
     let rec = Recorder::default();
     let m = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: efficiency(prefilter),
         max_cost_usd: None,
@@ -98,6 +102,7 @@ async fn run_with(
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let plan = plan_routes(rules, files, true);
     let repo_map = RepoMap::new(files, &run_nonce(), repo_map::REPO_TREE_TOKEN_BUDGET);
@@ -613,6 +618,8 @@ struct PromptBatch {
 
 fn batch_response() -> crate::llm::LlmResponse {
     crate::llm::LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: "{}".to_string(),
         model: "stub".to_string(),
         backend: "api/batch".to_string(),
@@ -696,6 +703,10 @@ async fn run_batch(
         items: std::sync::Mutex::new(Vec::new()),
     };
     let m = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency: efficiency(prefilter),
         max_cost_usd: None,
@@ -703,6 +714,7 @@ async fn run_batch(
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let plan = plan_routes(rules, files, true);
     let repo_map = RepoMap::new(files, &run_nonce(), repo_map::REPO_TREE_TOKEN_BUDGET);

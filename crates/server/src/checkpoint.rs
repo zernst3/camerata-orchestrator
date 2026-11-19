@@ -421,6 +421,15 @@ pub async fn with_run_checkpoints<F: std::future::Future>(
     }
 }
 
+/// The folder of the run in scope (the parent of its `checkpoints/` folder), or `None` outside a
+/// run. A stage that keeps a file of its own beside `run.json` writes it here.
+pub fn run_dir_in_scope() -> Option<PathBuf> {
+    RUN_CHECKPOINT_DIR
+        .try_with(|dir| dir.parent().map(Path::to_path_buf))
+        .ok()
+        .flatten()
+}
+
 /// The checkpoint key of one batch of a stage's round: the round, then a digest of the site keys
 /// of the findings it covers. The same findings asked in a later round (a smaller batch, a
 /// re-ask) have a key of their own, so a restart replays a round's finished batches and never
@@ -439,6 +448,15 @@ pub fn batch_key<'a>(round: &str, site_keys: impl Iterator<Item = &'a str>) -> S
         .map(|b| format!("{b:02x}"))
         .collect();
     format!("{round}:{digest}")
+}
+
+/// True when the checkpoint of the stage named `stage` (in the run in scope) holds replies from an
+/// earlier attempt: absorbed items or batches. A stage with stored work starts on a resume
+/// whatever the run's spend, because replaying it costs nothing (see
+/// [`crate::ai_audit::UsageMeter::stage_blocked_unless_stored`]).
+pub fn stage_has_stored_work(stage: &str) -> bool {
+    stage_checkpoint(stage)
+        .is_some_and(|c| !c.absorbed_in_order().is_empty() || !c.batches().is_empty())
 }
 
 /// The checkpoint of the stage named `stage` (a file stem: a stage on two repos uses two names)

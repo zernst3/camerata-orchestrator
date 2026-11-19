@@ -215,9 +215,8 @@ pub(crate) fn category_for_finding(
 /// (`normalize_severity`) — a `critical` finding is ALWAYS `do_now` regardless of effort (a
 /// deterministic-floor/preview finding never gets calibrated effort, and the worst finding in
 /// the report must never sit un-actioned in "Do next" just because no one estimated the fix
-/// time). `high` severity still needs `effort == Some("low")` for `do_now`; missing effort is
-/// treated as "not low" there — conservative, so an uncalibrated high finding never gets
-/// silently downgraded to a same-day fix. `medium`/`low` always land in `Plan`.
+/// time). `high` severity is `do_now` at low effort or with no estimate (owner ruling 2026-11-16)
+/// and `do_next` at medium or high effort. `medium`/`low` always land in `Plan`.
 pub(crate) fn matrix_bucket(
     disposition: Disposition,
     severity: &str,
@@ -238,10 +237,12 @@ pub(crate) fn matrix_bucket(
             if severity == "critical" {
                 return "do_now";
             }
-            let low_effort = matches!(effort, Some("low"));
-            match (severity == "high", low_effort) {
-                (true, true) => "do_now",
-                (true, false) => "do_next",
+            // Owner ruling 2026-11-16: a high problem with no estimate is First, like one at
+            // low effort; only a medium or high estimate puts it Next.
+            let slow = matches!(effort, Some("medium" | "high"));
+            match (severity == "high", slow) {
+                (true, false) => "do_now",
+                (true, true) => "do_next",
                 (false, _) => "plan",
             }
         }
@@ -284,9 +285,10 @@ pub(crate) fn matrix_bucket(
 /// AI finding now routes to `"held"` instead — the same severity-unbounded "a human must decide"
 /// destination `is_held_for_review` uses (here, the human decision needed is "supply or confirm
 /// a citation" rather than "resolve a calibration hedge", but the destination, visibility, and
-/// real-severity badge are identical). At medium/low/info it still routes to `"informational"`,
-/// exactly as before — nothing changes for the severity band `is_informational`'s cap was
-/// already written for.
+/// real-severity badge are identical). A1: a MEDIUM row routes to `"held"` as well, so
+/// information only means info severity or a convention: a medium login-throttling gap is a real
+/// finding the reader must see called out, not a note. At low/info it still routes to
+/// `"informational"`, exactly as before.
 ///
 /// C5-8 (R7 amended — re-route, never block): a FINAL check, after every other gate has had its
 /// say, for the one case none of them cover — a row that earns an action bucket
@@ -316,7 +318,7 @@ pub(crate) fn effective_bucket(
         return "held";
     }
     if is_uncited_ai_finding(finding, corpus) {
-        return if severity_rank(severity) <= severity_rank("high") {
+        return if severity_rank(severity) <= severity_rank("medium") {
             "held"
         } else {
             "informational"
@@ -785,12 +787,14 @@ pub(crate) fn finding_ref(
     chosen_option: Option<&str>,
 ) -> FindingRefJson {
     FindingRefJson {
+        fix_id: String::new(),
         rule_id: f.rule_id.clone(),
         repo: f.repo.clone(),
         path: f.path.clone(),
         line: f.line,
         severity: severity.to_string(),
         headline,
+        why_waiting: None,
         // C4-P3: calibration's effort, else the rule's authored band — see `resolve_effort`'s
         // doc comment. Keeps the matrix table AND the "three things this week" box (which reads
         // `FindingRefJson::effort` for its hour estimate / total) in lockstep with
@@ -944,110 +948,12 @@ pub(crate) fn ends_with_known_abbreviation(prefix: &str) -> bool {
     SENTENCE_ABBREVIATIONS.iter().any(|a| lower.ends_with(a))
 }
 
-/// Deterministic exec-summary narrative (never an LLM call). Overridden verbatim by
-/// `ReportOptions::executive_summary_override` when the client supplies one. Special-cases
-/// zero candidates (a plain "0 candidate finding(s) were reviewed..." reads as broken, not
-/// clean) and uses real pluralization throughout (`noun`) rather than the "(s)" CLI-ism.
-///
-/// FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): this used to LEAD with a
-/// blast-radius sentence composed from the top do-now findings' own headlines — the SAME 3
-/// findings the "If you only do three things this week" box (immediately below, on the same
-/// page) already names in full. Between that box and the (also-dropped) "Top priority items"
-/// bullet list, the top 3 were stated three separate times on one page. The exec summary is
-/// now curation-and-counts ONLY: the false-positive triage line, then the single one-pass
-/// bucket-count partition.
-///
-/// # P5: review-state honesty + full reconciliation
-/// `default_narrative` now takes `review_state` and branches on it — this is the fix for a
-/// raw (nobody has reviewed anything this run) export whose narrative used to claim "N were
-/// reviewed... 0 were dispositioned as false positives by the reviewer" no matter what, even
-/// when NO reviewer had ever opened the report. See [`ReviewState`]'s doc comment for the
-/// derivation.
-/// - `Raw`: describes what the ENGINE did ("The engine analyzed N files and produced C
-///   candidate findings..."). NEVER the phrase "reviewed by a human reviewer" or
-///   "dispositioned by a human reviewer" — grep-tested (see
-///   `raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narrative`).
-/// - `Reviewed`: describes the reviewer's actual dispositions, same voice as before this pass.
-///
-/// In BOTH states the narrative reconciles EVERY candidate finding, with each number shown:
-/// `candidates_reviewed == curated_total + held_for_review + excluded_fp +
-/// dependency_advisories` always holds (by construction — see `build_report_json`: every
-/// finding lands in exactly one of those four buckets). This is the fix for the "41 reviewed;
-/// 0 excluded... 18 curated" bug, where the other 23 needs-review rows were held out of the
-/// curated set and never counted anywhere in the narrative.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn default_narrative(
-    review_state: ReviewState,
-    files_scanned: usize,
-    candidates_reviewed: usize,
-    excluded_fp: usize,
-    curated_total: usize,
-    held_for_review: usize,
-    dependency_advisories: usize,
-    do_now: usize,
-    do_next: usize,
-    plan: usize,
-    accepted: usize,
-) -> String {
-    if candidates_reviewed == 0 {
-        return "The scan surfaced no candidate findings to review in this run.".to_string();
-    }
-    let dep_clause = if dependency_advisories == 0 {
-        String::new()
-    } else {
-        format!(
-            " A further {} tracked separately in the dependency snapshot.",
-            noun(
-                dependency_advisories,
-                "dependency advisory is",
-                "dependency advisories are"
-            ),
-        )
-    };
-    match review_state {
-        ReviewState::Raw => format!(
-            "This is a draft export: no finding in this run has had a human triage pass. The \
-             engine analyzed {} and produced {}. {curated_total} {} curated for action \
-             ({do_now} do now, {do_next} do next, {plan} planned, {accepted} already carried \
-             as accepted risk from a prior baseline or in-code waiver), {held_for_review} {} \
-             held for a human reviewer's judgment call, and {excluded_fp} {} auto-excluded as \
-             likely false positives.{dep_clause}",
-            noun(files_scanned, "file", "files"),
-            noun(
-                candidates_reviewed,
-                "candidate finding",
-                "candidate findings"
-            ),
-            if curated_total == 1 { "is" } else { "are" },
-            if held_for_review == 1 { "is" } else { "are" },
-            if excluded_fp == 1 { "was" } else { "were" },
-        ),
-        ReviewState::Reviewed => format!(
-            "{} were reviewed by a human reviewer; {} {} dispositioned as false positives and \
-             excluded entirely from this report. Of the remaining {}, {curated_total} {} \
-             curated for action ({do_now} do now, {do_next} do next, {plan} planned, \
-             {accepted} accepted as risk) and {held_for_review} {} held for further review.\
-             {dep_clause}",
-            noun(
-                candidates_reviewed,
-                "candidate finding",
-                "candidate findings"
-            ),
-            excluded_fp,
-            if excluded_fp == 1 { "was" } else { "were" },
-            noun(curated_total + held_for_review, "finding", "findings"),
-            if curated_total == 1 { "is" } else { "are" },
-            if held_for_review == 1 { "is" } else { "are" },
-        ),
-    }
-}
-
 /// P5: the AI-tier Methodology paragraph must never claim a human already reviewed advisory
 /// findings when this export is [`ReviewState::Raw`] — the paragraph used to unconditionally
 /// say "Every advisory finding is reviewed and dispositioned by a human reviewer before it
 /// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
 /// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
-/// reviewer" in the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
+/// reviewer" in the `Raw` case — grep-tested alongside the narrative's own gate.
 pub(crate) fn ai_tier_note_for(
     review_state: ReviewState,
     repos_not_run: usize,
@@ -1063,9 +969,10 @@ pub(crate) fn ai_tier_note_for(
     if repos_not_run > 0 && repos_not_run >= total_repos {
         // The tier ran nowhere: say so, and make no claim about a review that did not happen.
         return format!(
-            "The advisory language-model tier did not run for {}; see Coverage. Every finding \
+            "The advisory language-model tier did not run for {}; see the {} sheet. Every finding \
              produced in this run came from the deterministic tier.",
-            repos(repos_not_run)
+            repos(repos_not_run),
+            crate::xlsx_export::vocabulary::NOT_CHECKED
         );
     }
     let ran = match review_state {
@@ -1080,7 +987,7 @@ pub(crate) fn ai_tier_note_for(
             "A second, advisory tier uses a calibrated language-model review for findings that \
              require semantic judgment. This export has not yet had a human triage pass: every \
              advisory finding here is the engine's own calibrated output, awaiting a human \
-             reviewer's judgment before any is accepted, marked tech debt, or ruled out. \
+             reviewer's judgment before any is accepted, marked tech debt or ruled out. \
              Lower-confidence items are marked needs-review."
                 .to_string()
         }
@@ -1089,8 +996,9 @@ pub(crate) fn ai_tier_note_for(
         ran
     } else {
         format!(
-            "{ran} The advisory language-model tier did not run for {}; see Coverage.",
-            repos(repos_not_run)
+            "{ran} The advisory language-model tier did not run for {}; see the {} sheet.",
+            repos(repos_not_run),
+            crate::xlsx_export::vocabulary::NOT_CHECKED
         )
     }
 }
@@ -1150,18 +1058,24 @@ pub(crate) fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, 
     }
 }
 
-/// Sum the rough hour ranges across item 7's (up to 3) do-now findings. Only sums items with a
+/// `dependency_fixes_first` is the number of dependency fixes on the Fix plan that are First: when the
+/// box is empty the sentence says so, because a high advisory is due first although no code problem is.
+///
+/// Sum the rough hour ranges across item 7's (up to 3) do-now items, one effort for each Fix. Only sums items with a
 /// calibrated effort; when one or more items have none, the total says so explicitly rather
 /// than folding a guessed number into the sum.
-pub(crate) fn total_hours_label(items: &[&FindingRefJson]) -> String {
-    if items.is_empty() {
-        return "No do-now items this run.".to_string();
+pub(crate) fn total_hours_label_of(
+    efforts: &[Option<String>],
+    dependency_fixes_first: usize,
+) -> String {
+    if efforts.is_empty() {
+        return super::counts_prose::nothing_first_sentence(dependency_fixes_first);
     }
     let mut lo_sum = 0u32;
     let mut hi_sum = 0u32;
     let mut uncounted = 0usize;
-    for f in items {
-        match effort_hours_bounds(f.effort.as_deref()).0 {
+    for effort in efforts {
+        match effort_hours_bounds(effort.as_deref()).0 {
             Some((lo, hi)) => {
                 lo_sum += lo;
                 hi_sum += hi;
@@ -1169,7 +1083,7 @@ pub(crate) fn total_hours_label(items: &[&FindingRefJson]) -> String {
             None => uncounted += 1,
         }
     }
-    let counted = items.len() - uncounted;
+    let counted = efforts.len() - uncounted;
     if counted == 0 {
         return "None of these items has a calibrated effort estimate yet; ask the reviewer for \
                 a rough scoping pass before pricing remediation."
@@ -1235,10 +1149,13 @@ pub(crate) fn evidence_negates_requirement(evidence: &str) -> bool {
 /// so by carrying no location, which is what `located: false` exists to express.
 pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
     let trimmed = evidence.trim();
-    let head = trimmed
-        .split(" — ")
-        .next()
-        .and_then(|s| s.split(" - ").next())
+    // The note follows the place after an em dash, a spaced hyphen, a colon or a comma (the
+    // house form of a client citation is `path:line: note`, and the text the models write is
+    // rewritten to it at parse), so the place is what comes before the first of them.
+    let head = [" \u{2014} ", " - ", ": ", ", "]
+        .iter()
+        .filter_map(|separator| trimmed.split_once(separator).map(|(head, _)| head))
+        .min_by_key(|head| head.len())
         .unwrap_or(trimmed)
         .trim();
     if let Some((path, line_str)) = head.rsplit_once(':') {
@@ -1349,10 +1266,9 @@ pub(crate) fn apply_zero_finding_evidence_check(report: &mut crate::onboard::Sca
             severity: "medium".to_string(),
             snippet: evidence.chars().take(200).collect(),
             detail: format!(
-                "This rule's own evaluation evidence reads \"{evidence}\", which appears to \
-                 negate the rule's own requirement, even though the rule reported zero \
-                 findings this run. Flagged here for manual confirmation rather than listed as \
-                 healthy."
+                "This rule found no violation, but the evidence recorded for it describes a \
+                 possible problem. The evidence reads \"{evidence}\". A reviewer must decide \
+                 whether it is a problem before anyone acts on it."
             ),
             needs_review: true,
             confidence: Some("needs-review".to_string()),
@@ -1379,16 +1295,20 @@ pub(crate) fn apply_zero_finding_evidence_check(report: &mut crate::onboard::Sca
 
 /// For a rule listed under "What's healthy" in a project of several repos: the repos where it
 /// was checked and is clean, and the repos it does not apply to. The list says where the rule
-/// is healthy; a repo it never applied to is not one of them.
+/// is healthy; a repo it never applied to is not one of them. Read the way the patterns section
+/// reads a cell: a problem the reviewer ruled out is not open.
 pub(crate) fn healthy_repos_for(
     report: &crate::onboard::ScanReport,
     rule_id: &str,
+    dispositions: &std::collections::HashMap<String, super::DispositionWire>,
 ) -> (Vec<String>, Vec<String>) {
     use crate::scan_ledger::CellState;
     let mut clean = Vec::new();
     let mut not_applicable = Vec::new();
     for repo in &report.repos {
-        match crate::onboard::patterns_matrix::cell_for(report, rule_id, repo) {
+        match crate::onboard::patterns_matrix::cell_with(report, rule_id, repo, &|f| {
+            super::is_ruled_out(dispositions, f)
+        }) {
             CellState::Clean => clean.push(repo.clone()),
             CellState::NotApplicable { .. } => not_applicable.push(repo.clone()),
             CellState::Violated { .. } | CellState::NotReviewed { .. } => {}

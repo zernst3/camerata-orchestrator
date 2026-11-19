@@ -46,6 +46,37 @@ pub struct BatchPlan {
     pub already_recorded: Vec<String>,
     /// Outliers the reviewer ticked, so they are in `keys`.
     pub ticked_included: usize,
+    /// A place decision only: the rules it writes, with their severity and kind, carrier first.
+    pub written: Vec<PlanRule>,
+    /// A place decision only: the rules it leaves out, and why.
+    pub left_out: Vec<(PlanRule, LeftOutWhy)>,
+    /// A place decision only: carried rules the reviewer unticked.
+    pub excluded_unticked: Vec<String>,
+    /// A node decision only: rows of the node that another row at their place carries. The
+    /// batch still covers them; the sentence says so.
+    pub carried_elsewhere: usize,
+}
+
+/// One rule of a place decision as the prompt names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRule {
+    pub rule_id: String,
+    pub severity: String,
+    /// The row's kind tag (`defect`, `deviation`, ...).
+    pub kind: &'static str,
+}
+
+/// Why a place decision leaves a rule out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeftOutWhy {
+    /// The release gate holds the row; it needs a ruling by name. Carries the hold in words.
+    Held(String),
+    /// The reviewer unticked it.
+    Unticked,
+    /// The reviewer merged the row into another; a place decision never overwrites a merge.
+    Merged,
+    /// It already holds this decision.
+    Already,
 }
 
 impl BatchPlan {
@@ -56,6 +87,7 @@ impl BatchPlan {
             .iter()
             .chain(&self.excluded_held)
             .chain(&self.excluded_merged)
+            .chain(&self.excluded_unticked)
             .chain(&self.already_recorded)
             .cloned()
             .collect();
@@ -67,6 +99,11 @@ impl BatchPlan {
     /// Nothing would be written.
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    /// The plan is a place decision (`place:<id>`): it names the rules it writes and leaves out.
+    pub fn is_place_plan(&self) -> bool {
+        !self.written.is_empty() || !self.left_out.is_empty()
     }
 }
 
@@ -87,6 +124,10 @@ pub fn batch_plan(
         excluded_merged: Vec::new(),
         already_recorded: Vec::new(),
         ticked_included: 0,
+        written: Vec::new(),
+        left_out: Vec::new(),
+        excluded_unticked: Vec::new(),
+        carried_elsewhere: rows.iter().filter(|r| r.carried_by.is_some()).count(),
     };
     for row in rows {
         if row.held.is_some() {
@@ -122,6 +163,9 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 /// The sentence the prompt shows: `This writes 12 site records. 2 outliers are excluded unless
 /// you tick them. 1 held row is excluded. 1 merged row is excluded.` Clauses with nothing to say are left out.
 pub fn plan_sentence(plan: &BatchPlan) -> String {
+    if plan.is_place_plan() {
+        return super::place::place_sentence(plan);
+    }
     let n = plan.keys.len();
     let mut s = format!(
         "This writes {} site {}.",
@@ -168,6 +212,15 @@ pub fn plan_sentence(plan: &BatchPlan) -> String {
             plural(a, "holds", "hold"),
             plural(a, "is", "are"),
             plural(a, "it is", "they are")
+        ));
+    }
+    let c = plan.carried_elsewhere;
+    if c > 0 {
+        s.push_str(&format!(
+            " {} {} carried by another row at {} place.",
+            thousands(c),
+            plural(c, "row here is", "rows here are"),
+            plural(c, "its", "their")
         ));
     }
     s
@@ -381,6 +434,45 @@ pub fn summary_edit_request(
     })
 }
 
+/// The text of a node that `field` edits, as the node shows it now.
+pub fn why_text(node: &TreeNodeView, field: EditField) -> &str {
+    match field {
+        EditField::WhyBusiness => node.why_business.as_deref(),
+        EditField::WhyTechnical => node.why_technical.as_deref(),
+        _ => node.summary.as_deref(),
+    }
+    .unwrap_or_default()
+}
+
+/// The edit that replaces one of a node's two client reasons (`why_business`, `why_technical`):
+/// keyed by the node id, with a required reason, like the summary's.
+pub fn why_edit_request(
+    node: &TreeNodeView,
+    field: EditField,
+    new_text: &str,
+    reason: &str,
+    run_id: &str,
+) -> Result<NewEditReq, SummaryEditError> {
+    let new_text = new_text.trim();
+    if new_text.is_empty() {
+        return Err(SummaryEditError::Empty);
+    }
+    if new_text == why_text(node, field).trim() {
+        return Err(SummaryEditError::Unchanged);
+    }
+    if reason.trim().is_empty() {
+        return Err(SummaryEditError::ReasonRequired);
+    }
+    Ok(NewEditReq {
+        key: node.id.clone(),
+        field,
+        new: new_text.to_string(),
+        reason: reason.trim().to_string(),
+        by: String::new(),
+        run_id: run_id.to_string(),
+    })
+}
+
 /// A stale summary edit's line under the node's summary: the reviewer's text is shown and not
 /// applied (design 5.2).
 pub fn stale_summary_note(node: &TreeNodeView) -> Option<String> {
@@ -462,6 +554,7 @@ mod tests {
             rows.push(r);
         }
         rows.push(merged(400));
+        let merged_key = rows.last().expect("the merged row").site_key.clone();
         let plan = batch_plan(
             "sub:X/1",
             &DecisionState::Confirmed,
@@ -474,11 +567,7 @@ mod tests {
             "only the plain rows are written: {plan:?}"
         );
         assert_eq!(plan.excluded_held.len(), HoldReason::ALL.len(), "{plan:?}");
-        assert_eq!(
-            plan.excluded_merged,
-            vec![rows[9].site_key.clone()],
-            "{plan:?}"
-        );
+        assert_eq!(plan.excluded_merged, vec![merged_key], "{plan:?}");
         let all = plan.keys.len()
             + plan.excluded_outliers.len()
             + plan.excluded_held.len()
@@ -486,7 +575,8 @@ mod tests {
             + plan.already_recorded.len();
         assert_eq!(all, rows.len(), "every member is in exactly one place");
         assert!(
-            plan.except().contains(&rows[9].site_key),
+            plan.except()
+                .contains(&rows.last().expect("the merged row").site_key),
             "the request leaves the merge out"
         );
         let sentence = plan_sentence(&plan);
@@ -494,7 +584,13 @@ mod tests {
             sentence.starts_with("This writes 4 site records."),
             "{sentence}"
         );
-        assert!(sentence.contains("5 held rows are excluded."), "{sentence}");
+        assert!(
+            sentence.contains(&format!(
+                "{} held rows are excluded.",
+                HoldReason::ALL.len()
+            )),
+            "{sentence}"
+        );
         assert!(sentence.contains("1 merged row is excluded."), "{sentence}");
     }
 

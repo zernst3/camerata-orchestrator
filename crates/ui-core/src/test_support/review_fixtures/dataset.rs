@@ -11,20 +11,21 @@ use camerata_api_types::decisions::{ClientAck, DecisionState, Scope};
 use camerata_api_types::edits::EditField;
 use camerata_api_types::review::{
     DisagreementField, EscalationBudget, EscalationCandidate, EscalationReason, EscalationState,
-    OutlierReason, ReviewLevel, Stage2Disagreement, ENGINE_VERIFIED, PERSONALLY_REVIEWED,
-    REVIEWED_AS_PATTERN_PREFIX,
+    FpReason, OutlierReason, PossibleFalsePositive, ReviewLevel, Stage2Disagreement,
+    ENGINE_VERIFIED, PERSONALLY_REVIEWED, REVIEWED_AS_PATTERN_PREFIX,
 };
 use camerata_api_types::review_view::{
-    BreadcrumbItem, CategoryAllocation, CorrectionRef, DecisionView, DuplicateView, EditView,
-    EngineCheckCard, EngineCheckError, EngineCheckLane, EngineCheckSettingsView,
-    EngineCheckVerdict, EscalationSettingsView, EscalationStatus, ExportGateView, FlaggedByView,
-    HeldRow, HoldReason, LaneCounts, Marker, MergedIntoView, MovedFromView, NeededMeSummary,
-    NewSinceDecisionView, NodeCountsView, NodeDecisionGap, NodeDecisionSummary, OutlierView,
-    PlacementView, QueueRow, QueueView, ReviewCounts, ReviewSettingsView, ReviewShellView,
-    SampleStratum, SettingsLimits, SiteRow, SitesPage, Stage1View, Stage2View, StageModelsView,
-    StaleSummary, StratumRate, SummarySource, TreeLevel, TreeNodeKind, TreeNodeView, TreeView,
-    ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX, QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR,
-    SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED, SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
+    BreadcrumbItem, CarriedByView, CarriedRuleView, CategoryAllocation, CorrectionRef,
+    DecisionView, DuplicateView, EditView, EngineCheckCard, EngineCheckError, EngineCheckLane,
+    EngineCheckSettingsView, EngineCheckVerdict, EscalationSettingsView, EscalationStatus,
+    ExportGateView, FlaggedByView, HeldRow, HoldReason, LaneCounts, Marker, MergedIntoView,
+    MovedFromView, NeededMeSummary, NewSinceDecisionView, NodeCountsView, NodeDecisionGap,
+    NodeDecisionSummary, OutlierView, PlacementView, QueueRow, QueueView, ReviewCounts,
+    ReviewSettingsView, ReviewShellView, SamePlaceView, SampleStratum, SettingsLimits, SiteRow,
+    SitesPage, Stage1View, Stage2View, StageModelsView, StaleSummary, StratumRate, SummarySource,
+    TreeLevel, TreeNodeKind, TreeNodeView, TreeView, ESCALATION_FLOOR_MAX, ESCALATION_RATE_MAX,
+    QUEUE_BELOW_PAGE_SIZE, SAMPLE_CATEGORY_FLOOR, SAMPLE_SIZE_MAX, SAMPLE_SIZE_SUGGESTED,
+    SITES_PAGE_SIZE, SMALL_CATEGORY_DRAWN,
 };
 use serde::Serialize;
 
@@ -619,6 +620,7 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         category: Some(cat_label),
         headline: format!("{} at line {line}", rule.label),
         detail: DETAILS[rng.below(DETAILS.len())].to_string(),
+        why_business: String::new(),
         fix: FIXES[rng.below(FIXES.len())].to_string(),
         fix_type: if rng.below(3) == 0 {
             "Tailored fix"
@@ -629,6 +631,11 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         snippet,
         group_path: vec![cat_node(rule.category), rule.node.clone(), sub.node.clone()],
         group_primary: false,
+        fix_id: String::new(),
+        fix_rules: Vec::new(),
+        place_id: String::new(),
+        carries: Vec::new(),
+        carried_by: None,
         stage1,
         stage2,
         markers: Vec::new(),
@@ -645,6 +652,9 @@ fn make_row(i: usize, layout: &Layout, rng: &mut Rng, p: &Params) -> SiteRow {
         added_by_reviewer: false,
         thrown_out_reason: None,
         review_flags: Vec::new(),
+        possible_false_positive: None,
+        same_place_as: Vec::new(),
+        severity_bounds: None,
     }
 }
 
@@ -663,6 +673,7 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         category: Some("Thrown out by the engine".to_string()),
         headline: "Placeholder text where a finding should be".to_string(),
         detail: "The engine kept no usable text for this row.".to_string(),
+        why_business: String::new(),
         fix: String::new(),
         fix_type: "Standard fix".to_string(),
         snippet: format!("// thrown {n}"),
@@ -672,6 +683,11 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
             THROWN_SUB.to_string(),
         ],
         group_primary: false,
+        fix_id: String::new(),
+        fix_rules: Vec::new(),
+        place_id: String::new(),
+        carries: Vec::new(),
+        carried_by: None,
         stage1: Stage1View {
             severity: "low".to_string(),
             ..Stage1View::default()
@@ -691,6 +707,9 @@ fn make_thrown_row(n: usize, rng: &mut Rng, sites: usize) -> SiteRow {
         added_by_reviewer: false,
         thrown_out_reason: Some("junk text: a placeholder where the finding should be".to_string()),
         review_flags: Vec::new(),
+        possible_false_positive: None,
+        same_place_as: Vec::new(),
+        severity_bounds: None,
     }
 }
 
@@ -708,6 +727,7 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
         .copied()
         .filter(|m| match m {
             Marker::Held => row.held.is_some(),
+            Marker::PossibleFalsePositive => row.possible_false_positive.is_some(),
             Marker::Escalated => escalated,
             Marker::Candidate => below,
             Marker::OverBudget => over,
@@ -715,7 +735,10 @@ pub fn markers_for(row: &SiteRow) -> Vec<Marker> {
             Marker::NewSinceDecision => row.new_since_decision.is_some(),
             Marker::Stale => stale,
             Marker::Moved => row.moved_from.is_some(),
-            Marker::PossibleDuplicate => row.possible_duplicate_of.is_some(),
+            Marker::PossibleDuplicate => {
+                row.possible_duplicate_of.is_some() || !row.same_place_as.is_empty()
+            }
+            Marker::Carried => row.carried_by.is_some(),
             Marker::Edited => edited,
         })
         .collect()
@@ -1052,6 +1075,18 @@ pub fn build(p: &Params) -> ReviewDataSet {
             s.outlier_reason = Some(outlier_reasons[n % outlier_reasons.len()]);
             s.outlier_why = OUTLIER_WHYS[n % OUTLIER_WHYS.len()].to_string();
         }
+        // The server flags an outlier for a different object or an intended pattern as a possible
+        // false positive (reason (a)); the fixture does the same, and draws nothing from `rng` for
+        // it, so no other row's features move.
+        if rows[i].stage2.as_ref().is_some_and(|s| {
+            matches!(
+                s.outlier_reason,
+                Some(OutlierReason::DifferentObject | OutlierReason::CouldBeIntentional)
+            )
+        }) {
+            rows[i].possible_false_positive =
+                PossibleFalsePositive::from_reasons(vec![FpReason::GroupReviewerDoubt]);
+        }
     }
     // Held rows (the four reasons in turn) and merged rows without a decision.
     let hold_cycle = [
@@ -1143,6 +1178,26 @@ pub fn build(p: &Params) -> ReviewDataSet {
             line: other.line,
         };
         rows[i].possible_duplicate_of = Some(dup);
+    }
+    // The possible duplicate hint: every other row the engine linked to a neighbour is also at
+    // the same place as another cause, on both sides. Draws nothing from `rng`.
+    for (n, &i) in dup_rows.iter().enumerate().filter(|(n, _)| n % 2 == 1) {
+        let j = normal[(n * 13) % normal.len()];
+        if i == j {
+            continue;
+        }
+        let view_of = |r: &SiteRow| SamePlaceView {
+            fix_id: format!("{:012x}", r.line * 7919 + r.path.len()),
+            title: r.headline.clone(),
+            key: r.site_key.clone(),
+            rule_id: r.rule_id.clone(),
+            line: r.line,
+            group_id: r.group_path.get(2).cloned().unwrap_or_default(),
+            reason: Default::default(),
+        };
+        let (to_j, to_i) = (view_of(&rows[j]), view_of(&rows[i]));
+        rows[i].same_place_as = vec![to_j];
+        rows[j].same_place_as = vec![to_i];
     }
 
     for &i in &added_rows {
@@ -1375,6 +1430,12 @@ pub fn build(p: &Params) -> ReviewDataSet {
     // Engine Check verdicts and the corrections behind them.
     let verdicts = apply_engine_mode(p, &mut rows);
 
+    // The place: the carrier lists the rule it carries and the carried row points back at it.
+    // Done last, so the carried rule shows the decision and hold it finally has.
+    if let Some((carrier, carried)) = plain_pair(&rows, &special) {
+        link_place(&mut rows, carrier, carried);
+    }
+
     // Everything else is engine verified, unless held.
     for r in &mut rows {
         if r.review_level.is_none() && r.held.is_none() && r.thrown_out_reason.is_none() {
@@ -1392,6 +1453,69 @@ pub fn build(p: &Params) -> ReviewDataSet {
         (&node_decisions, &gap_for),
         &verdicts,
     )
+}
+
+/// The last two rows, in the fixed order, that nothing else has touched and that are of two
+/// different rules: the carrier and the row it carries. Choosing them last, from what is left
+/// plain and from the far end, changes no count and no row any other state opens first.
+fn plain_pair(rows: &[SiteRow], special: &[bool]) -> Option<(usize, usize)> {
+    let plain = |i: usize| {
+        let r = &rows[i];
+        !special.get(i).copied().unwrap_or(false)
+            && r.thrown_out_reason.is_none()
+            && r.decision.is_none()
+            && r.held.is_none()
+            && r.edits.is_empty()
+            && r.stage2.as_ref().is_some_and(|s| s.reason.is_none())
+            && r.stage2
+                .as_ref()
+                .is_some_and(|s| s.outlier_reason.is_none())
+            && r.flagged_by.is_empty()
+            && r.merged_into.is_none()
+            && r.review_level.is_none()
+    };
+    let first = (0..rows.len()).rev().find(|&i| plain(i))?;
+    let second = (0..rows.len())
+        .rev()
+        .find(|&i| i != first && plain(i) && rows[i].rule_id != rows[first].rule_id)?;
+    Some((first, second))
+}
+
+/// Make `carrier` the row that carries `carried` at their place (D2).
+fn link_place(rows: &mut [SiteRow], carrier: usize, carried: usize) {
+    let place_id = format!(
+        "place:{}",
+        hex_encode(&rows[carrier].site_key)
+            .chars()
+            .rev()
+            .take(12)
+            .collect::<String>()
+    );
+    let other = rows[carried].clone();
+    let head = rows[carrier].clone();
+    let candidate = other.stage2.as_ref().filter(|s| s.reason.is_some());
+    rows[carrier].place_id.clone_from(&place_id);
+    rows[carrier].carries = vec![CarriedRuleView {
+        rule_id: other.rule_id.clone(),
+        site_key: other.site_key.clone(),
+        node_id: other.group_path[2].clone(),
+        severity: other.severity.clone(),
+        kind: other.kind.clone(),
+        held: other.held,
+        stage1_real: other.stage1.real.clone(),
+        escalation_reason: candidate.and_then(|s| s.reason),
+        escalation_rank: candidate.and_then(|s| s.global_rank),
+        decision: other.decision.clone(),
+    }];
+    rows[carried].place_id = place_id;
+    rows[carried].carried_by = Some(CarriedByView {
+        site_key: head.site_key.clone(),
+        node_id: head.group_path[2].clone(),
+        rule_id: head.rule_id.clone(),
+        path: head.path.clone(),
+        line: head.line,
+        decided: false,
+    });
 }
 
 /// The old and new text of a field for a made-up edit.
@@ -1540,6 +1664,10 @@ fn assemble(
                 counts,
                 decision: node_decision(id),
                 summary_edit: None,
+                why_business_edit: None,
+                why_technical_edit: None,
+                why_business: None,
+                why_technical: None,
             });
         };
     for c in (0..p.categories).chain(std::iter::once(usize::MAX)) {
@@ -1733,8 +1861,12 @@ pub fn settings_for(p: &Params, budget: &EscalationBudget) -> ReviewSettingsView
         stage_models: StageModelsView {
             scan: "claude-sonnet-5-5".to_string(),
             calibration: "claude-sonnet-5-5".to_string(),
-            group_review: "claude-fable-5-1".to_string(),
+            group_review: "claude-fable-5-2".to_string(),
             fix: "claude-sonnet-5-5".to_string(),
+            finder_model: String::new(),
+            duplicate_check: String::new(),
+            clone_judge: String::new(),
+            finder: "engine".to_string(),
         },
         escalation: EscalationSettingsView {
             rate_per_kloc: p.rate_per_kloc,
@@ -1836,6 +1968,7 @@ fn build_engine(
         drawn: cards.len(),
         unread_total,
         thrown_out_total,
+        ruled_out_flagged_total: 0,
         allocation: Vec::new(),
         strata: Vec::new(),
         cards,

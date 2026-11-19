@@ -52,6 +52,29 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
     { id = "RUSTSEC-2026-0368", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
     { id = "RUSTSEC-2026-0369", reason = "zip extract() only; Camerata never unpacks an archive to disk" },
+    # `chrono` is unmaintained (RUSTSEC-2026-0543, all versions, no safe upgrade). It is a
+    # direct dependency of 14 of the 29 workspace crates and of sqlx's `chrono` feature
+    # (crates/persistence). It is a date and time library with no open vulnerability
+    # advisory against the locked 0.4.45.
+    # Moving to `jiff` or `time` is a workspace-wide migration tracked separately in the
+    # camerata-internal follow-ups.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no safe upgrade; workspace-wide migration to jiff or time tracked separately" },
+    # SQLite before 3.54.0 can return stale page-cache memory when a process opens a database
+    # together with a crafted `-wal` file of a different page size. `libsqlite3-sys` 0.30 comes
+    # from `sqlx-sqlite` 0.8 (crates/persistence), which requires `^0.30.1`; sqlx 0.9.0 still
+    # caps it below 0.38, so the fix waits for a sqlx release that accepts 0.39 (tracked in the
+    # camerata-internal accuracy-week follow-ups). Camerata opens only the databases it creates
+    # itself in its own state folder (crates/server/src/lib.rs: artifacts, enforcement catches,
+    # governance events, feedback, orchestrator decisions), which only the operator's
+    # CAMERATA_DATA_DIR can move, and never a SQLite file from a client repository. If code
+    # ever opens a database it did not create, remove this ignore first.
+    { id = "RUSTSEC-2026-0459", reason = "via sqlx 0.8; Camerata opens only databases it created in its own state folder" },
+    # rmcp before 3.9 buffers whole HTTP response bodies in its Streamable HTTP clients
+    # (`transport-streamable-http-client-reqwest` and `-unix-socket`). Camerata enables only
+    # `server` and `transport-io` (crates/mcp, crates/gateway), so neither client is compiled.
+    # The fix is rmcp 3.9, two major versions up (tracked in the accuracy-week follow-ups). If either client feature
+    # is ever enabled, remove this ignore first.
+    { id = "RUSTSEC-2026-0462", reason = "rmcp Streamable HTTP clients only; Camerata enables server and transport-io, neither client is compiled" },
 ]
 
 [licenses]

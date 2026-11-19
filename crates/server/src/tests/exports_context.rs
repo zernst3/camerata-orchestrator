@@ -232,7 +232,10 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
     // never says "audit"/"Audit" (the disclaimer paragraph it embeds verbatim is itself
     // audit-free per `report_export`'s own contract test).
     assert!(readme.contains("Codebase Inspection"), "{readme}");
-    assert!(readme.contains("Repos inspected:"), "{readme}");
+    // A client README says what each file is and how to import the tickets, and nothing about
+    // how the inspection was run (the provenance lives in manifest.json).
+    assert!(!readme.contains("Repos inspected:"), "{readme}");
+    assert!(!readme.contains("Engine version:"), "{readme}");
     assert!(
         !readme.to_lowercase().contains("audit"),
         "README.txt still says audit: {readme}"
@@ -328,6 +331,7 @@ fn product_export_readme_names_the_product_and_never_says_audit() {
     let readme = product_export_readme(
         "acme-inspection",
         &ManifestProvenance::from_cover(&json.cover),
+        true,
     );
     assert!(readme.contains("Codebase Inspection"), "{readme}");
     assert!(readme.contains("Repos inspected:"), "{readme}");
@@ -336,6 +340,71 @@ fn product_export_readme_names_the_product_and_never_says_audit() {
         !readme.to_lowercase().contains("audit"),
         "README.txt still says audit: {readme}"
     );
+}
+
+/// The purpose line the manifest prints for each file speaks the client vocabulary: no retired
+/// word, no word of the old package ("curated", "All-Findings"), no dash and no serial comma.
+#[test]
+fn the_manifest_purposes_use_the_client_vocabulary() {
+    use crate::xlsx_export::vocabulary as v;
+    for path in [
+        "a-inspection.pdf",
+        "a-inspection-findings.xlsx",
+        "findings.json",
+        "README.txt",
+        "decisions.json",
+        "csv/tickets.csv",
+        "csv/all-findings.csv",
+        "json/all-findings.json",
+        "csv/deviations.csv",
+        "json/deviations.json",
+        "something-else.bin",
+    ] {
+        let (purpose, _) = manifest_file_facts(path);
+        assert_eq!(v::banned_synonym_in(&purpose), None, "{path}: {purpose}");
+        for old in ["curated", "all-findings", "sub-group", "provenance"] {
+            assert!(
+                !purpose.to_lowercase().contains(old),
+                "{path}: {purpose:?} says {old:?}"
+            );
+        }
+        assert!(
+            !purpose.contains(['\u{2014}', '\u{2013}'])
+                && !purpose.contains(", and ")
+                && !purpose.contains(", or "),
+            "{path}: {purpose:?}"
+        );
+    }
+    // The two all-findings files are the rows of findings.json, not a sheet of the workbook.
+    for path in ["csv/all-findings.csv", "json/all-findings.json"] {
+        let (purpose, _) = manifest_file_facts(path);
+        assert!(
+            !purpose.to_lowercase().contains("table of the workbook")
+                && !purpose.to_lowercase().contains("xlsx"),
+            "{path}: {purpose:?} calls it a workbook table"
+        );
+        assert!(purpose.contains("findings.json"), "{path}: {purpose:?}");
+    }
+    for old in [
+        "manifest",
+        "RFC 4180",
+        "ingestion",
+        "artifact",
+        "across sheets",
+    ] {
+        for path in [
+            "a-inspection-findings.xlsx",
+            "README.txt",
+            "csv/deviations.csv",
+            "json/deviations.json",
+            "something-else.bin",
+        ] {
+            let (purpose, _) = manifest_file_facts(path);
+            assert!(!purpose.contains(old), "{path}: {purpose:?} says {old:?}");
+        }
+    }
+    let (tickets, _) = manifest_file_facts("csv/tickets.csv");
+    assert!(tickets.contains("each fix"), "{tickets}");
 }
 
 // ── Corpus freshness is operator-only (design amendment 2026-10-21, part 4) ──
@@ -550,7 +619,7 @@ async fn no_corpus_freshness_text_reaches_any_client_artifact() {
         Some("2020-01-01"),
         "anti-vacuity: the sanctioned date is in the package under test"
     );
-    let readme = product_export_readme(&stem, &provenance);
+    let readme = product_export_readme(&stem, &provenance, true);
     let zip_bytes = build_product_zip(
         &stem,
         b"%PDF-1.7 stand-in",
@@ -2178,3 +2247,59 @@ async fn set_credential_for_non_anthropic_name_does_not_touch_the_anthropic_cach
 }
 
 // ── GET /api/models/registry — backend-aware Claude portion (Feature A) ────────
+
+/// The project's finder setting is the run's finder: an agent project runs the agent finder, a
+/// new project runs the engine, and the setting is read when the run starts (never the
+/// environment).
+#[test]
+fn the_projects_finder_reaches_the_audit_runs_controls() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let state = AppState::seeded();
+    let project = state
+        .projects()
+        .create("Finder wiring", vec!["me/repo".to_string()])
+        .expect("create active project");
+    let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Engine);
+    let settings = camerata_api_types::project::ReviewSettings {
+        finder: camerata_api_types::project::ProjectFinder::Agent,
+        ..project.review
+    };
+    state
+        .projects()
+        .set_review_settings(&project.id, settings)
+        .unwrap()
+        .unwrap();
+    assert_eq!(req.run_controls_for(&state).finder, FinderChoice::Agent);
+}
+
+/// The project's finder, duplicate check and clone judge models are the UI-started run's models;
+/// a project that sets none leaves the built-in defaults (the clone judge keeps the fast band).
+#[test]
+fn the_projects_finder_dup_check_and_clone_judge_models_reach_the_audit_runs_controls() {
+    let state = AppState::seeded();
+    let project = state
+        .projects()
+        .create("Model wiring", vec!["me/repo".to_string()])
+        .expect("create active project");
+    let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+    let before = req.run_controls_for(&state);
+    assert_eq!(before.finder_model_for(), "claude-fable-5-2");
+    assert_eq!(before.dup_check_model_for(), "claude-sonnet-5-5");
+    assert_eq!(before.clone_judge_model_for(), "claude-haiku-5-5");
+    let settings = camerata_api_types::project::ReviewSettings {
+        finder_model: "claude-opus-5-5".to_string(),
+        dup_check_model: "claude-haiku-5-5".to_string(),
+        clone_judge_model: "claude-haiku-4-5-20251001".to_string(),
+        ..project.review
+    };
+    state
+        .projects()
+        .set_review_settings(&project.id, settings)
+        .unwrap()
+        .unwrap();
+    let after = req.run_controls_for(&state);
+    assert_eq!(after.finder_model_for(), "claude-opus-5-5");
+    assert_eq!(after.dup_check_model_for(), "claude-haiku-5-5");
+    assert_eq!(after.clone_judge_model_for(), "claude-haiku-4-5-20251001");
+}

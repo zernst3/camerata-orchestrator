@@ -24,6 +24,7 @@
 //! `camerata-app-core` and `camerata-server` in the dependency graph so any adapter
 //! (Axum today, others later) can pull in the provider stack without a cycle.
 
+pub mod claude_version;
 pub mod credentials;
 pub mod failure;
 pub mod llm;
@@ -34,6 +35,10 @@ pub mod rate_limit;
 // Internal retry/backoff policy for the Anthropic API transport (`llm::complete_api` +
 // the Message Batches path). Not part of the public surface — `llm` is the only caller.
 pub(crate) mod retry;
+// The wait seam a test injects (`Llm::with_sleeper`, `set_process_sleeper`).
+#[cfg(any(test, feature = "test-support"))]
+pub use retry::set_process_sleeper;
+pub use retry::Sleeper;
 // The Messages API's server-sent events: the stream parser and the idle-timeout reader behind
 // the API leg of `llm::Llm`.
 pub(crate) mod sse;

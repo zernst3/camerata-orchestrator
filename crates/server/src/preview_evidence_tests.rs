@@ -48,7 +48,7 @@ fn a_tool_row_whose_snippet_is_not_at_its_line_is_flagged_and_held() {
         tool_row(6, "eval(req.query.code);"),
         tool_row(6, "child_process.exec(userInput)"),
     ];
-    crate::join_repo_previews(&mut report, previews, None, &files(), None);
+    crate::join_repo_previews(&mut report, previews, None, None, &files(), None);
     assert_eq!(report.findings.len(), 2, "no tool row is dropped");
     let flagged: Vec<&Finding> = report
         .findings
@@ -95,6 +95,7 @@ fn the_counts_from_both_passes_land_in_one_reconciled_tally() {
     crate::join_repo_previews(
         &mut report,
         vec![tool_row(6, "eval(req.query.code);"), tool_row(6, "nope")],
+        None,
         None,
         &files(),
         None,

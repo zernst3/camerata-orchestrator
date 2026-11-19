@@ -95,7 +95,7 @@ pub fn apply_to(tree: &ReviewTree, decisions: &[Decision], links: &[KeyLink]) ->
         let Scope::Node(node_id) = &rec.scope else {
             continue;
         };
-        if tree.node(node_id).is_none() {
+        if !tree.is_decidable(node_id) {
             continue;
         }
         let covered: HashSet<&str> = rec.applies_to.iter().map(String::as_str).collect();

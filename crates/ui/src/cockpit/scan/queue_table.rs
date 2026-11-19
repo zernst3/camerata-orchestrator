@@ -214,8 +214,10 @@ pub(in crate::cockpit) fn finding_columns(
         // an inline waiver). Report shows all; the gate blocks only the enforced ones.
         ColumnDef::new(ColumnId("status"), "Enforcement", |f: &FindingView| {
             CellValue::Text(match f.status.as_str() {
-                "suppressed-baseline" => "baseline".to_string(),
-                "suppressed-inline" => "waived".to_string(),
+                // A tool in preview is not enforced; the row's `preview` field says so.
+                "active" if f.preview => "preview".to_string(),
+                "suppressed-baseline" | "carried-baseline" => "baseline".to_string(),
+                "suppressed-inline" | "waived-inline" => "waived".to_string(),
                 "suppressed-self-reference" => "self-ref".to_string(),
                 _ => "enforced".to_string(),
             })
@@ -224,6 +226,7 @@ pub(in crate::cockpit) fn finding_columns(
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
                 .with("enforced", BadgeVariant::new("Enforced", "red"))
+                .with("preview", BadgeVariant::new("Preview", "gray"))
                 .with("baseline", BadgeVariant::new("Baseline debt", "gray"))
                 .with("waived", BadgeVariant::new("Waived", "yellow"))
                 .with("self-ref", BadgeVariant::new("Self-referential", "gray")),

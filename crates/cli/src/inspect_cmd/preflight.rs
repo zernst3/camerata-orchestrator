@@ -89,6 +89,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
         .map(|r| RunRepoInput {
             repo: r.repo.clone(),
             code_chars: r.code_chars,
+            files: r.files.len(),
             selected: r.semantic.len(),
             multi_option_selected: r.multi_option_rules,
             routing_groups: camerata_server::scan_routing::plan_routes(
@@ -181,8 +182,9 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
             if ceiling_is_above(dollars, ceiling) {
                 writeln!(
                     out,
-                    "  at most ${ceiling:.2} if the detail step needs every repeat round on every \
-                     finding (the usual run pays for its first round only)"
+                    "  at most ${ceiling:.2} if the scan reports sites at the highest rate seen and the \
+                     detail step needs every repeat round on every finding (the usual run pays \
+                     for its first round only)"
                 )
                 .ok();
             }
@@ -349,6 +351,124 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     }
 }
 
+/// The pre-flight text when the finder is the agent finder (`--finder agent`). The finder stage is
+/// priced by the formula of the agent finder's design (section 7), not by scan passes, so the
+/// figure is the stage's alone: the group review and the fix stage are priced as in [`build`] and
+/// are not in it. `build` is unchanged for the engine finder. `force_pieces` is the internal
+/// `--finder-force-pieces` value. The call site that picks it when `--finder agent` is set is
+/// the runner build's (`inspect_cmd.rs`); until the merge nothing calls it.
+#[allow(dead_code)]
+pub fn build_agent_finder(inputs: &PreflightInputs<'_>, force_pieces: Option<usize>) -> Preflight {
+    use camerata_ui_core::scan::{
+        agent_finder_table_lines, sum_agent_finder, AGENT_FINDER_HIGH_FACTOR,
+        AGENT_FINDER_LOW_FACTOR,
+    };
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(
+        out,
+        "== PRE-FLIGHT ESTIMATE (printed before any model call; an estimate, not a quote) =="
+    )
+    .ok();
+    let per_repo: Vec<(
+        &RepoScanFacts,
+        Option<camerata_ui_core::scan::AgentFinderEstimate>,
+    )> = inputs
+        .repos
+        .iter()
+        .map(|r| {
+            let e = r
+                .read_error
+                .is_none()
+                .then(|| camerata_server::preflight::agent_finder_estimate(r, force_pieces));
+            (r, e)
+        })
+        .collect();
+    let parts: Vec<_> = per_repo.iter().filter_map(|(_, e)| e.clone()).collect();
+    let total = sum_agent_finder(&parts);
+    writeln!(
+        out,
+        "  finder: agent. Estimated cost of the finder stage only: about ${:.2}, most likely between ${:.2} and ${:.2} (the group review and the fix stage are extra and are not in this figure)",
+        total.expected_usd, total.low_usd, total.high_usd
+    )
+    .ok();
+    writeln!(
+        out,
+        "  the range is {AGENT_FINDER_LOW_FACTOR} to {AGENT_FINDER_HIGH_FACTOR} times the figure. The figures are a starting guess and are refit from recorded runs"
+    )
+    .ok();
+    writeln!(out, "  pieces:").ok();
+    for line in agent_finder_table_lines(&total) {
+        writeln!(out, "    {line}").ok();
+    }
+    writeln!(
+        out,
+        "  {} piece(s) and {} joints call(s) in all",
+        total.pieces, total.joints_calls
+    )
+    .ok();
+    writeln!(
+        out,
+        "  the finder stage is not batched: each piece is a live conversation, so --batch does not apply to it"
+    )
+    .ok();
+    writeln!(
+        out,
+        "  this figure is the finder stage only; the group review and the fix stage are not in it"
+    )
+    .ok();
+    if inputs.repos.len() > 1 {
+        writeln!(out, "  per repo:").ok();
+        for (repo, est) in &per_repo {
+            match est {
+                Some(e) => {
+                    writeln!(
+                        out,
+                        "    {}: {} piece(s), about ${:.2}",
+                        repo.repo, e.pieces, e.expected_usd
+                    )
+                    .ok();
+                }
+                None => {
+                    writeln!(
+                        out,
+                        "    {}: could not be read ({}); it is NOT in this estimate",
+                        repo.repo,
+                        repo.read_error.as_deref().unwrap_or("unknown")
+                    )
+                    .ok();
+                }
+            }
+        }
+    }
+    match inputs.cap_usd {
+        Some(cap) => {
+            writeln!(out, "  spend limit: ${cap:.2}").ok();
+            if total.expected_usd > cap {
+                writeln!(
+                    out,
+                    "  WARNING: the estimate is above the spend limit, so this run is expected to stop before it finishes and its export will be marked incomplete."
+                )
+                .ok();
+            } else if total.high_usd > cap {
+                writeln!(
+                    out,
+                    "  note: the high end (${:.2}) is above the spend limit",
+                    total.high_usd
+                )
+                .ok();
+            }
+        }
+        None => {
+            writeln!(out, "  spend limit: none (set one with --max-cost-usd)").ok();
+        }
+    }
+    Preflight {
+        text: out,
+        estimate_usd: (!parts.is_empty()).then_some(total.expected_usd),
+    }
+}
+
 /// Whether the ceiling is worth a line of its own: more than a cent above the expected figure.
 fn ceiling_is_above(expected: f64, ceiling: f64) -> bool {
     ceiling - expected > 0.005
@@ -361,7 +481,11 @@ mod tests {
     fn repo(chars: usize, rules: usize) -> RepoScanFacts {
         RepoScanFacts {
             repo: "acme/api".into(),
-            files: vec![("a.rs".into(), "x".repeat(chars))],
+            // About as many files as real code of this size has (the saved runs average 740
+            // characters a file); the estimate's sites follow the file count.
+            files: (0..(chars / 740).max(1))
+                .map(|i| (format!("f{i}.rs"), "x".repeat(chars / (chars / 740).max(1))))
+                .collect(),
             code_chars: chars,
             semantic: (0..rules)
                 .map(|i| (format!("R-{i}"), "do it".to_string()))
@@ -425,9 +549,10 @@ mod tests {
             "the gate's figure is the expected cost"
         );
 
-        // With the stage off the two figures are one and nothing says "at most".
+        // With the stage off the ceiling is still above the figure: it is quoted on the highest
+        // site rate seen as well as on the repeat rounds, so the "at most" line stays.
         let p = build(&inputs(&repos, None));
-        assert!(!p.text.contains("at most $"), "{}", p.text);
+        assert!(p.text.contains("at most $"), "{}", p.text);
     }
 
     #[test]
@@ -592,8 +717,33 @@ mod tests {
         assert!((with - without).abs() < 1e-9, "{with} vs {without}");
     }
 
+    /// The group reviewer's default model prices at the registry's Fable 5.2 rates, $8 in and $40
+    /// out per million tokens, and the group review part of the figure is 0.8 of what the same run
+    /// costs on Fable 5.1 ($10 / $50).
+    #[test]
+    fn the_group_review_is_priced_at_fable_5_2_rates() {
+        assert_eq!(price_of("claude-fable-5-2"), Some((8.0, 40.0)));
+        assert_eq!(price_of("claude-fable-5-1"), Some((10.0, 50.0)));
+        let repos = [repo(26_544, 152)];
+        let estimate_with = |group_review: &str| {
+            let mut i = inputs(&repos, None);
+            i.model = "claude-sonnet-5-5".into();
+            i.calibration_model = "claude-sonnet-5-5".into();
+            i.group_review_model = group_review.into();
+            build(&i).estimate_usd.unwrap()
+        };
+        let left_out = estimate_with("some-model-without-a-price");
+        let on_5_1 = estimate_with("claude-fable-5-1") - left_out;
+        let on_5_2 = estimate_with("claude-fable-5-2") - left_out;
+        assert!(on_5_2 > 0.0, "the group review is in the figure");
+        assert!(
+            (on_5_2 - 0.8 * on_5_1).abs() < 1e-9,
+            "{on_5_2} vs 0.8 x {on_5_1}"
+        );
+    }
+
     /// A13: the figure counts both reviewers, each on its own model. The group reviewer is priced
-    /// at its model (Fable 5.1 is dearer than Sonnet), shows in the basis, and is left out, with
+    /// at its model (Fable 5.2 is dearer than Sonnet), shows in the basis, and is left out, with
     /// a line saying so, when its model has no list price.
     #[test]
     fn the_group_review_stage_is_priced_at_its_own_model_and_named_in_the_basis() {
@@ -606,7 +756,7 @@ mod tests {
         let mut dear = inputs(&repos, None);
         dear.model = "claude-sonnet-5-5".into();
         dear.calibration_model = "claude-sonnet-5-5".into();
-        dear.group_review_model = "claude-fable-5-1".into();
+        dear.group_review_model = "claude-fable-5-2".into();
         let dear_p = build(&dear);
         assert!(
             dear_p.estimate_usd.unwrap() > cheap_p.estimate_usd.unwrap() + 0.01,
@@ -615,7 +765,7 @@ mod tests {
             dear_p.estimate_usd
         );
         assert!(
-            dear_p.text.contains("group review model claude-fable-5-1"),
+            dear_p.text.contains("group review model claude-fable-5-2"),
             "{}",
             dear_p.text
         );
@@ -665,5 +815,167 @@ mod tests {
         full.clone_judge_model = None;
         let unpriced = build(&full).estimate_usd.unwrap();
         assert!((unpriced - without).abs() < 1e-9, "{unpriced} vs {without}");
+    }
+
+    /// A repository of `files` files and `chars` characters, as the pre-flight reads it.
+    fn with_files(files: usize, chars: usize, rules: usize) -> RepoScanFacts {
+        RepoScanFacts {
+            files: (0..files)
+                .map(|i| (format!("f{i}.rs"), "x".repeat(chars / files)))
+                .collect(),
+            ..repo(chars, rules)
+        }
+    }
+
+    /// The cli figure follows the files the scan reads (the sites stage 1 calibrates follow them),
+    /// where two repositories of one code size used to be quoted the same; so does the API figure
+    /// (the site count is the scan's, not the transport's).
+    #[test]
+    fn both_backends_estimates_follow_the_files() {
+        let few = [with_files(20, 26_544, 152)];
+        let many = [with_files(60, 26_544, 152)];
+        let cli = |repos| {
+            let mut i = inputs(repos, None);
+            i.backend = ProjectBackend::Cli;
+            build(&i).estimate_usd.unwrap()
+        };
+        assert!(cli(&few) < cli(&many), "{} vs {}", cli(&few), cli(&many));
+        let api = |repos| build(&inputs(repos, None)).estimate_usd.unwrap();
+        assert!(api(&few) < api(&many), "{} vs {}", api(&few), api(&many));
+    }
+
+    /// A repo of `n` files of `lines` lines each, so the planner cuts it by size.
+    fn code_repo(name: &str, n: usize, lines: usize) -> RepoScanFacts {
+        let files: Vec<(String, String)> = (0..n)
+            .map(|i| {
+                (
+                    format!("src/m{i:03}/f.rs"),
+                    (0..lines).map(|l| format!("let v{l} = {l};\n")).collect(),
+                )
+            })
+            .collect();
+        RepoScanFacts {
+            repo: name.into(),
+            code_chars: files.iter().map(|(_, t)| t.len()).sum(),
+            files,
+            semantic: Vec::new(),
+            multi_option_rules: 0,
+            read_error: None,
+        }
+    }
+
+    #[test]
+    fn the_agent_text_prices_two_pieces_by_the_formula_and_shows_the_table() {
+        // About 400,000 bytes: two pieces at the 240,000 byte target.
+        let repos = [code_repo("acme/api", 8, 3_000)];
+        let p = build_agent_finder(&inputs(&repos, None), None);
+        let pieces = camerata_server::preflight::agent_finder_pieces(&repos[0], None);
+        eprintln!("{}", p.text);
+        assert_eq!(pieces.len(), 2, "{}", p.text);
+        let lines: usize = pieces.iter().map(|(_, n)| n).sum();
+        let want = lines as f64 / 1000.0 * 1.0 + 2.0 * 0.8 + 1.5;
+        assert!(
+            (p.estimate_usd.unwrap() - want).abs() < 1e-9,
+            "{} vs {want}",
+            p.text
+        );
+        assert!(p.text.contains("finder: agent"), "{}", p.text);
+        // The headline figure says in plain words what it covers.
+        let headline = p
+            .text
+            .lines()
+            .find(|l| l.contains("finder: agent"))
+            .expect("a headline");
+        assert!(
+            headline.contains("finder stage only") && headline.contains("group review"),
+            "{headline}"
+        );
+        assert!(p.text.contains("0.6 to 1.8 times"), "{}", p.text);
+        assert!(
+            p.text.contains("unit")
+                && p.text.contains("pieces")
+                && p.text.contains("files")
+                && p.text.contains("lines"),
+            "{}",
+            p.text
+        );
+        assert!(p.text.contains("acme/api"), "{}", p.text);
+        assert!(p.text.contains("not batched"), "{}", p.text);
+        assert!(
+            !p.text.contains('\u{2014}') && !p.text.contains('\u{2013}'),
+            "{}",
+            p.text
+        );
+    }
+
+    #[test]
+    fn a_one_piece_repository_prices_no_joints_call() {
+        let repos = [code_repo("acme/api", 2, 100)];
+        let p = build_agent_finder(&inputs(&repos, None), None);
+        let lines: usize = camerata_server::preflight::agent_finder_pieces(&repos[0], None)
+            .iter()
+            .map(|(_, n)| n)
+            .sum();
+        let want = lines as f64 / 1000.0 + 0.8;
+        assert!((p.estimate_usd.unwrap() - want).abs() < 1e-9, "{}", p.text);
+        assert!(p.text.contains("0 joints call"), "{}", p.text);
+    }
+
+    #[test]
+    fn the_table_pieces_are_the_pieces_the_planner_returns_for_the_same_files() {
+        use camerata_server::ai_audit::agent_finder::pieces::{
+            plan_pieces, units_for, TARGET_BYTES,
+        };
+        let repos = [code_repo("acme/api", 8, 3_000)];
+        // Plain synthetic code: redaction changes nothing in it.
+        let files = repos[0].files.clone();
+        let planned = plan_pieces(&units_for("acme/api", &files), &files, TARGET_BYTES, None);
+        let table = camerata_server::preflight::agent_finder_pieces(&repos[0], None);
+        assert_eq!(
+            planned.iter().map(|p| p.files.clone()).collect::<Vec<_>>(),
+            table
+                .iter()
+                .map(|(p, _)| p.files.clone())
+                .collect::<Vec<_>>()
+        );
+        let forced = camerata_server::preflight::agent_finder_pieces(&repos[0], Some(4));
+        assert!(forced.len() >= 4);
+    }
+
+    #[test]
+    fn the_engine_text_is_unchanged_and_has_no_agent_lines() {
+        let repos = [repo(400_000, 30)];
+        let p = build(&inputs(&repos, None));
+        for word in ["finder: agent", "joints", "pieces:", "not batched"] {
+            assert!(!p.text.contains(word), "{word} in {}", p.text);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_repo_is_named_and_left_out_of_the_agent_figure() {
+        let mut gone = code_repo("acme/gone", 1, 10);
+        gone.read_error = Some("no such folder".into());
+        let repos = [code_repo("acme/api", 2, 100), gone];
+        let p = build_agent_finder(&inputs(&repos, None), None);
+        assert!(
+            p.text
+                .contains("acme/gone: could not be read (no such folder)"),
+            "{}",
+            p.text
+        );
+    }
+
+    #[test]
+    fn the_cockpit_wire_carries_the_same_figures_as_the_command_line() {
+        let repos = [code_repo("acme/api", 8, 3_000)];
+        let wire = camerata_server::preflight::repo_sizes(&["acme/api".to_string()], &repos, &[]);
+        let figures = wire[0]
+            .agent_finder
+            .clone()
+            .expect("figures for a readable repo");
+        let p = build_agent_finder(&inputs(&repos, None), None);
+        assert!((figures.expected_usd - p.estimate_usd.unwrap()).abs() < 1e-9);
+        assert_eq!(figures.pieces, 2);
+        assert!((figures.low_usd - figures.expected_usd * 0.6).abs() < 1e-9);
     }
 }

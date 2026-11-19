@@ -256,6 +256,40 @@ pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Model-written (or reviewer-written) prose as a client reads it: no em dash, no en dash, no
+/// multiplication sign ([`crate::client_text::plain`]) and no "line 0" for a problem in a whole
+/// file ([`crate::client_text::whole_file_places`]).
+pub(crate) fn client_prose(text: &str) -> String {
+    crate::client_text::whole_file_places(&crate::client_text::plain(text)).into_owned()
+}
+
+/// A finding's `detail` as a client reads it. The parser joins a title to its explanation with
+/// the engine's own separator (`ai_audit::HEADLINE_SEP`, an em dash that the detail stage splits
+/// on again); a client reads "Title: explanation", or "Title. Borderline: explanation" when the
+/// explanation opens with a label, and never the separator.
+pub(crate) fn client_detail(detail: &str) -> String {
+    let joined = match detail.split_once(crate::ai_audit::HEADLINE_SEP) {
+        Some((title, rest)) => {
+            let (title, rest) = (title.trim_end(), rest.trim_start());
+            if title.is_empty() {
+                rest.to_string()
+            } else if rest.is_empty() {
+                // A title with no explanation keeps the colon that says so (the content check
+                // reads it as an empty explanation); a reviewer holds such a row.
+                format!("{}:", title.trim_end_matches([':', '.']))
+            } else if title.ends_with(['.', '!', '?', ':']) {
+                format!("{title} {rest}")
+            } else if crate::client_text::opens_with_label(rest) {
+                format!("{title}. {rest}")
+            } else {
+                format!("{title}: {rest}")
+            }
+        }
+        None => detail.to_string(),
+    };
+    client_prose(&joined)
+}
+
 /// Apply [`strip_zero_width`] (then secret redaction) to the [`Finding`]'s free-text fields that flow,
 /// verbatim or near-verbatim, into every report artifact: `path` (the PDF's `raw()` path
 /// rendering, the xlsx "Location" column, `findings.json`'s `path` field), `snippet` (the PDF's
@@ -268,8 +302,10 @@ pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
 pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
     let mut f = finding.clone();
     f.path = strip_zero_width(&f.path).into_owned();
+    // `snippet` is the client's own code, verbatim: it is also the site key's fingerprint input.
+    // Zero-width characters are stripped and secrets redacted below; nothing is rewritten.
     f.snippet = strip_zero_width(&f.snippet).into_owned();
-    f.detail = strip_zero_width(&f.detail).into_owned();
+    f.detail = client_detail(&strip_zero_width(&f.detail));
     for v in f.captures.values_mut() {
         *v = strip_zero_width(v).into_owned();
     }
@@ -277,13 +313,14 @@ pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
     // the model-written fix (`fix_specific`), every absorbed evidence site's snippet, and the
     // severity rationale. This gap is exactly where the sweep exports' leaked keys sat.
     if let Some(fix) = f.fix_specific.as_mut() {
-        *fix = strip_zero_width(fix).into_owned();
+        *fix = client_prose(&strip_zero_width(fix));
     }
     if let Some(rationale) = f.calibration_rationale.as_mut() {
-        *rationale = strip_zero_width(rationale).into_owned();
+        *rationale = client_prose(&strip_zero_width(rationale));
     }
     for site in &mut f.also_locations {
         site.snippet = strip_zero_width(&site.snippet).into_owned();
+        site.headline = client_prose(&site.headline);
     }
     // Zero-width characters are stripped FIRST so one inserted inside a key cannot hide it from
     // the detector; then the secret redaction (belt and braces: every producer already redacted
@@ -300,6 +337,8 @@ pub(crate) fn sanitize_report_findings(report: &ScanReport) -> ScanReport {
     let mut report = report.clone();
     for f in report.findings.iter_mut() {
         *f = sanitize_finding_text(f);
+        // A report built in this process can still hold an old word; no client surface prints one.
+        crate::finding_status::normalize(f);
     }
     report
 }
@@ -416,8 +455,10 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
     // W28: what the row's OWN STATUS implies, with no triage decision in play. Used both when
     // there is no wire entry and when there is one this version cannot read — see below.
     let from_status = || match finding.status.as_str() {
-        "suppressed-baseline" if !finding.preview => Disposition::BaselineAccepted,
-        "suppressed-inline" => Disposition::WaivedInline,
+        s if crate::finding_status::is_carried_baseline(s) && !finding.preview => {
+            Disposition::BaselineAccepted
+        }
+        s if crate::finding_status::is_waived_inline(s) => Disposition::WaivedInline,
         _ => Disposition::Unresolved,
     };
 
@@ -469,7 +510,7 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
 /// looked at by anyone THIS run.
 ///
 /// Gates two things:
-/// - The narrative voice (`default_narrative`): `Raw` describes what the ENGINE did and never
+/// - The narrative voice (`counts_prose::narrative`): `Raw` describes what the ENGINE did and never
 ///   claims a human reviewed or dispositioned anything; `Reviewed` describes the reviewer's
 ///   actual dispositions.
 /// - The PDF's per-page "DRAFT: not yet reviewed" banner (`Raw` only) — see the Typst
@@ -515,6 +556,59 @@ impl ReviewState {
 /// fixture-content fix: the serializer itself cannot produce "confirmed" language without that
 /// explicit flag.
 ///
+/// Why a row held for a reviewer is waiting, in plain words for the client, or `None` when no
+/// concrete reason applies. The three gates are checked in the order that decides the bucket:
+/// no citation first, then no fix, then no effort estimate (see `effective_bucket`). Each reason
+/// ends in the same call to action, because the row is in the "needs a decision" state until a
+/// reviewer rules on it.
+pub(crate) fn waiting_reason(
+    uncited: bool,
+    no_fix: bool,
+    no_estimate: bool,
+) -> Option<&'static str> {
+    if uncited {
+        Some("No outside standard supports this problem yet, so a reviewer must rule on it before you act.")
+    } else if no_fix {
+        Some("No fix is available for it yet, so a reviewer must rule on it before you act.")
+    } else if no_estimate {
+        Some("No effort estimate is available for it yet, so a reviewer must rule on it before you act.")
+    } else {
+        None
+    }
+}
+
+/// [`waiting_reason`] for one finding: the three gates computed from the finding itself, so the
+/// workbook reads the same reason the PDF's held rows print.
+pub(crate) fn row_waiting_reason(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+    bucket: &str,
+) -> Option<&'static str> {
+    waiting_reason(
+        is_uncited_ai_finding(finding, corpus),
+        is_action_row_missing_a_fix(
+            finding,
+            disposition,
+            severity,
+            corpus,
+            test_file_count,
+            chosen_option,
+        ),
+        is_action_row_missing_an_estimate(
+            finding,
+            disposition,
+            severity,
+            corpus,
+            test_file_count,
+            chosen_option,
+        ) && (bucket == "held" || bucket == "informational"),
+    )
+}
+
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
 pub(crate) fn disposition_label(
     disposition: Disposition,
@@ -529,15 +623,15 @@ pub(crate) fn disposition_label(
         // read like a style note. C5-7: the `held` bucket now also carries a SECOND, unrelated
         // reason (a high/critical uncited AI-tier finding — see `is_uncited_ai_finding`), so
         // this label is deliberately reason-agnostic rather than naming "calibration"
-        // specifically; the row's own headline already states the concrete reason ("calibration
-        // flagged..." / "Needs review (uncited...)") right next to it.
+        // specifically; the row's `why_waiting` states the concrete reason right next to it.
         Disposition::Unresolved if bucket == "held" => {
-            "Held for review (a human reviewer's judgment call is needed before this can be \
-             actioned)"
-                .to_string()
+            format!(
+                "{} (a human reviewer's judgment call is needed before this can be actioned)",
+                crate::xlsx_export::vocabulary::NEEDS_A_DECISION
+            )
         }
         Disposition::Unresolved if bucket == "informational" => {
-            "Convention to consider (informational)".to_string()
+            "Convention to consider (Info)".to_string()
         }
         Disposition::Unresolved => format!("Open (recommended: {})", bucket_title(bucket)),
         // The affirmative call, stated as the auditor's own and nobody else's. It names the
@@ -572,15 +666,17 @@ pub(crate) fn disposition_label(
     }
 }
 
-/// Human title for a `matrix_bucket(...)` result (`"do_now"` -> `"Do now"`, etc.) — shared by
-/// `disposition_label` (M7) and anywhere else a bucket needs a reader-facing label.
+/// Human title for a `matrix_bucket(...)` result (`"do_now"` -> `"First"`, etc.) — shared by
+/// `disposition_label` (M7) and anywhere else a bucket needs a reader-facing label. The words are
+/// the vocabulary's: the fix order (First, Next, Later), Info and Needs a decision.
 pub(crate) fn bucket_title(bucket: &str) -> &'static str {
+    use crate::xlsx_export::vocabulary as v;
     match bucket {
-        "do_now" => "Do now",
-        "do_next" => "Do next",
-        "plan" => "Plan",
-        "informational" => "Informational",
-        "held" => "Held for review",
+        "do_now" => v::FIX_ORDER_FIRST,
+        "do_next" => v::FIX_ORDER_NEXT,
+        "plan" => v::FIX_ORDER_LATER,
+        "informational" => "Info",
+        "held" => v::NEEDS_A_DECISION,
         _ => "Accepted",
     }
 }
@@ -641,11 +737,14 @@ pub(crate) fn clamp_deviation_severity(
 
 mod citations_fixes;
 mod classification;
+pub mod counts;
+pub(crate) mod counts_prose;
 mod json_types;
 mod marking;
 
 pub use citations_fixes::*;
 pub use classification::*;
+pub use counts::{report_counts, ReportCounts};
 pub use json_types::*;
 pub use marking::*;
 
@@ -674,6 +773,19 @@ pub fn build_report_json(
     reviewed: &ReviewedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
+) -> AuditReportJson {
+    let counts = report_counts(reviewed, corpus, opts);
+    build_report_json_with_counts(reviewed, corpus, opts, &counts)
+}
+
+/// [`build_report_json`] with the package's counts worked out once by the caller
+/// (`build_product_package_with_stem`) and passed by reference; they are serialised whole as
+/// `counts` beside the old fields.
+pub fn build_report_json_with_counts(
+    reviewed: &ReviewedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+    opts: &ReportOptions,
+    counts: &ReportCounts,
 ) -> AuditReportJson {
     // The PDF's data is built from the reviewed report and nothing else (design 3B): the rows
     // with the reviewer's overlay applied, and the reviewer's decisions.
@@ -755,6 +867,8 @@ pub fn build_report_json(
     // sort key rather than pushed straight into `matrix` in iteration order. Ordering within a
     // bucket is now a real signal (a security-floor medium must rank ahead of an architecture/
     // advisory medium of the same severity), so it can no longer be left to insertion order.
+    // The Fix each row's sub-group is in, for the top three: three DISTINCT Fixes, not three rows.
+    let fix_index = crate::review_tree::FixIndex::new(report.tree.as_ref(), &report.findings);
     #[allow(clippy::type_complexity)]
     let mut bucketed: HashMap<
         &'static str,
@@ -826,27 +940,19 @@ pub fn build_report_json(
         // true for the same row (no fix usually means no estimate either), so `gate_no_fix`'s
         // arm is checked first and wins the headline in that case — not an ordering ambiguity,
         // just a priority pick between two reasons that both land the SAME row in "held".
-        let headline = if gate_uncited {
-            format!("Needs review (uncited — no grounded citation found): {base_headline}")
-        } else if gate_no_fix {
-            format!(
-                "Needs review (fix not generated — no codebase-specific or rule-level \
-                 remediation available): {base_headline}"
-            )
-        } else if gate_no_estimate && (bucket == "held" || bucket == "informational") {
-            // C6-B4 (amended): a missing estimate NO LONGER routes a row to held, so this
-            // "why is this not curated" marker must only render when the row genuinely IS
-            // out of the action tier for some other reason. A curated action row that merely
-            // lacks an effort band keeps its own headline and renders an honest "not estimated
-            // this run" in its effort field instead — labelling it "Needs review" would be a
-            // false hedge on a confident finding.
-            format!(
-                "Needs review (effort not estimated — no calibrated or rule-level estimate \
-                 available): {base_headline}"
-            )
-        } else {
-            base_headline
-        };
+        // A row held for a reviewer keeps a plain headline. The concrete reason it is waiting is
+        // its own field (`why_waiting`), never a prefix on the headline: "Needs review (uncited
+        // ...)" is the engine talking to itself.
+        let headline = base_headline;
+        // C6-B4 (amended): a missing estimate NO LONGER routes a row to held, so the reason only
+        // applies when the row genuinely IS out of the action tier for some other reason. A
+        // curated action row that merely lacks an effort band keeps no reason and renders an
+        // honest "not estimated this run" in its effort field instead.
+        let why_waiting = waiting_reason(
+            gate_uncited,
+            gate_no_fix,
+            gate_no_estimate && (bucket == "held" || bucket == "informational"),
+        );
         // C3-6 item 3: provenance tier for the within-bucket sort, via `citation_for_finding`
         // (not the plain `resolve_citation`) so an AI-tier finding upgraded to a grounded class
         // (P3) sorts by the SAME resolved citation the curated-findings section shows for it.
@@ -858,17 +964,20 @@ pub fn build_report_json(
             f.path.clone(),
             f.line,
         );
-        bucketed.entry(bucket).or_default().push((
-            sort_key,
-            finding_ref(
-                f,
-                severity,
-                headline,
-                bucket,
-                corpus,
-                chosen_option_for_rule,
-            ),
-        ));
+        let mut reference = finding_ref(
+            f,
+            severity,
+            headline,
+            bucket,
+            corpus,
+            chosen_option_for_rule,
+        );
+        reference.why_waiting = why_waiting.map(str::to_string);
+        reference.fix_id = fix_index.fix_id_of(f);
+        bucketed
+            .entry(bucket)
+            .or_default()
+            .push((sort_key, reference));
     }
     let mut matrix = MatrixJson::default();
     for (key, target) in [
@@ -986,7 +1095,7 @@ pub fn build_report_json(
                     .map(String::as_str);
                 // Bug 4 / C3-6: keep the curated-site LABEL in lockstep with the matrix cell
                 // this finding actually lands in — an informational row reads "Convention to
-                // consider", never "Open (recommended: Plan)". `effective_bucket` is the SAME
+                // consider", never "Open (recommended: Later)". `effective_bucket` is the SAME
                 // call the matrix-building pass above makes for this finding, so the two can
                 // never compute a different answer for the same row.
                 let bucket = effective_bucket(
@@ -1037,25 +1146,13 @@ pub fn build_report_json(
                 // gate's own "Deny…" enforcement prose.
                 let (base_headline, detail) =
                     client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
-                let headline = if gate_uncited {
-                    format!("Needs review (uncited — no grounded citation found): {base_headline}")
-                } else if gate_no_fix {
-                    format!(
-                        "Needs review (fix not generated — no codebase-specific or rule-level \
-                         remediation available): {base_headline}"
-                    )
-                } else if gate_no_estimate && (bucket == "held" || bucket == "informational") {
-                    // C6-B4 (amended) — see the identical guard in the matrix-bucketing loop:
-                    // a missing estimate no longer routes a row out of the action tier, so this
-                    // marker renders only when the row is genuinely held/informational for
-                    // another reason. A curated row simply shows "not estimated this run".
-                    format!(
-                        "Needs review (effort not estimated — no calibrated or rule-level \
-                         estimate available): {base_headline}"
-                    )
-                } else {
-                    base_headline
-                };
+                // The headline stays plain; the reason a row is waiting is `why_waiting`.
+                let headline = base_headline;
+                let why_waiting = waiting_reason(
+                    gate_uncited,
+                    gate_no_fix,
+                    gate_no_estimate && (bucket == "held" || bucket == "informational"),
+                );
                 let specific_fix = f
                     .fix_specific
                     .as_deref()
@@ -1095,6 +1192,7 @@ pub fn build_report_json(
                     // identical citation for every site.
                     citation: citation_for_finding(f, corpus),
                     headline,
+                    why_waiting: why_waiting.map(str::to_string),
                     // P2: `f.fix_specific` was generated at SCAN time by
                     // `ai_audit::generate_fix_specifics` (this layer stays pure/synchronous —
                     // no model access here, just a read) — a codebase-specific fix that the
@@ -1256,12 +1354,19 @@ pub fn build_report_json(
                 .insert(site.rule_id.clone());
         }
     }
+    // The Fixes, the escalated places, the conventions and the problems by area of the reviewed
+    // report, worked out once from one partition of its rows. The scorecard and the cover count
+    // problems (one for each place) from it, the way the workbook's scorecard does.
+    let crate::xlsx_export::PdfSections {
+        escalated: escalated_items,
+        patterns: sub_group_patterns,
+        fixes: fix_facts,
+        conventions,
+        problem_counts,
+    } = crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
     for (category, entries) in &by_category {
-        let mut critical = 0usize;
-        let mut high = 0usize;
-        let mut medium = 0usize;
-        let mut low = 0usize;
+        let [critical, high, medium, low] = problem_counts.get(category).copied().unwrap_or([0; 4]);
         let mut open_high_or_critical = false;
         let mut open_medium = false;
         let mut rule_ids_with_findings: std::collections::HashSet<String> =
@@ -1270,12 +1375,6 @@ pub fn build_report_json(
             let f = entry.0;
             let disposition = entry.1;
             let severity = entry.3.as_str();
-            match severity {
-                "critical" => critical += 1,
-                "high" => high += 1,
-                "medium" => medium += 1,
-                _ => low += 1,
-            }
             rule_ids_with_findings.insert(f.rule_id.clone());
             // `Confirmed` is still open: the auditor has established that the finding is real,
             // which is the opposite of it having been dealt with. Omitting it here would let a
@@ -1295,7 +1394,10 @@ pub fn build_report_json(
                 }
             }
         }
-        let status = if open_high_or_critical {
+        let status = if critical + high + medium + low == 0 {
+            // No problem in this area: it is never marked for action.
+            "Clean"
+        } else if open_high_or_critical {
             "Action-needed"
         } else if open_medium {
             "Attention"
@@ -1363,7 +1465,7 @@ pub fn build_report_json(
     // Capped (S6) at grounded-citation rules first, then whatever else fits, so a large
     // corpus doesn't turn this section into dozens of bullets that read as padding; the
     // remainder is summarized in one honest count line instead of silently dropped.
-    const WHATS_HEALTHY_CAP: usize = 10;
+    const WHATS_HEALTHY_CAP: usize = PDF_MAX_HEALTHY_RULES;
     // C5-1: a rule that only survived a merge as an absorbed `also_matches` member (never its
     // own primary row) still genuinely fired this run — see `matched_rule_ids_by_category`'s doc
     // comment above for the full "0 in Coverage, listed as verified clean" bug this closes.
@@ -1388,6 +1490,17 @@ pub fn build_report_json(
             std::iter::once(f.rule_id.clone())
                 .chain(f.also_matches.iter().cloned())
                 .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
+                // A source collapsed into the row fired under its own rule at this place, and a
+                // row the review tree files under a rule's node is a problem in that rule's
+                // family (a tool's row the mapping assigns to the native rule): neither rule
+                // is clean.
+                .chain(f.flagged_by.iter().map(|b| b.rule_id.clone()))
+                .chain(
+                    f.group_path
+                        .get(1)
+                        .and_then(|node| node.strip_prefix("rule:"))
+                        .map(str::to_string),
+                )
         })
         .collect();
     // W1: "verified clean" is sourced from the LEDGER (`ran && findings_emitted == 0`) when
@@ -1402,25 +1515,31 @@ pub fn build_report_json(
     } else {
         report.provenance.audited_rule_ids.clone()
     };
+    let several_services = has_rule_ledger_data && report.repos.len() > 1;
     let mut healthy_rules: Vec<HealthyRuleJson> = healthy_candidate_ids
         .iter()
         .filter(|rid| !rule_ids_with_any_finding.contains(rid.as_str()))
-        .map(|rid| {
-            let (clean_in, not_applicable_in) = if has_rule_ledger_data && report.repos.len() > 1 {
-                healthy_repos_for(report, rid)
+        .filter_map(|rid| {
+            let (clean_in, not_applicable_in) = if several_services {
+                healthy_repos_for(report, rid, dispositions)
             } else {
                 (Vec::new(), Vec::new())
             };
-            HealthyRuleJson {
+            // With several services, a rule that is clean in none of them is not healthy: the
+            // list would name it without saying where it was checked and found clean.
+            if several_services && clean_in.is_empty() {
+                return None;
+            }
+            Some(HealthyRuleJson {
                 rule_id: rid.clone(),
                 title: corpus
                     .and_then(|c| c.get_by_id(rid))
                     .map(|r| r.title.clone())
-                    .unwrap_or_else(|| rid.clone()),
+                    .unwrap_or_else(|| crate::client_text::plain_rule_name(rid)),
                 citation: resolve_citation(rid, None, corpus),
                 clean_in,
                 not_applicable_in,
-            }
+            })
         })
         .collect();
     healthy_rules.sort_by(|a, b| {
@@ -1488,10 +1607,14 @@ pub fn build_report_json(
             .iter()
             .filter(|n| n.tool == "osv-scanner")
             .all(crate::dep_audit::note_proves_clean);
+    let (dep_summary_line, dep_worst, dep_more_line) = dependency_summary(&dep_rows);
     let dependency_snapshot = DependencySnapshotJson {
         rows: dep_rows,
         coverage_notes: dep_coverage_notes,
         clean: dependency_clean,
+        summary_line: dep_summary_line,
+        worst: dep_worst,
+        more_line: dep_more_line,
     };
 
     // ── Executive summary ──────────────────────────────────────────────────────
@@ -1507,22 +1630,15 @@ pub fn build_report_json(
     // still held out of every action tier via the separate `held` bucket, and must still count
     // toward "held for review" or the total silently undercounts every needs-review row above
     // medium severity.
-    let informational = matrix.informational.len();
-    let held = matrix.held.len();
-    let held_for_review_total = informational + held;
+    // The row tallies of the legacy summary fields (`curated_total`, `held_for_review`, `do_now`,
+    // `do_next`, `plan`, `accepted`, `open`): ROWS of every kind, kept for machine readers for one
+    // release. No client sentence prints them; every sentence reads the counts object.
+    let held_for_review_total = matrix.informational.len() + matrix.held.len();
     let curated_total = code_findings.len() - held_for_review_total;
     let do_now = matrix.do_now.len();
     let do_next = matrix.do_next.len();
     let plan = matrix.plan.len();
     let accepted = matrix.accepted.len();
-    // Still-open action items (every informational/held row is Unresolved by construction — see
-    // `is_informational`/`is_held_for_review` — so subtracting them keeps `open` an ACTION
-    // count, not an appendix one).
-    // `Confirmed` counts here for the same reason it counts in `still_open` above: the auditor
-    // established the finding is real and nobody has fixed it. Subtracting
-    // `held_for_review_total` stays valid because every informational/held row is `Unresolved`
-    // by construction (both gates return early on any other disposition), so confirming a row
-    // removes it from that bucket before it is ever counted there.
     let open = code_findings
         .iter()
         .filter(|(_, d, _, _)| matches!(d, Disposition::Unresolved | Disposition::Confirmed))
@@ -1543,51 +1659,123 @@ pub fn build_report_json(
             f.confidence_rank,
         )
     });
+    // The Fixes, the escalated places and the patterns of the reviewed report, worked out once. The
+    // top three below reads the Fix facts, so an effort is counted once for a Fix however many
+    // rules it closes.
     // FIX 4 (2026-09-13 review): `top3_do_now` still feeds the "Three things this week" box
     // below (the ONE place these findings are now named) — the exec-summary's own
     // `top_do_now` bullet list and blast-radius lead sentence are gone (see
-    // `default_narrative`'s doc comment).
+    // `counts_prose::narrative`'s doc comment).
     //
-    // C6-B2 design point 3: walk `do_now_sorted` in rank order, but SKIP a row that shares a
-    // non-empty root-cause credential token (`FindingRefJson::root_cause_keys`) with a row
-    // already selected — the defense-in-depth distinctness check for the case the merge pass
-    // (`ai_audit::group_semantic` / `backfill_credential_identity`) conservatively left
-    // several sites of ONE leaked credential as separate rows. A skipped row is simply not
-    // chosen for THIS box; `do_now_sorted`/`matrix.do_now` are never mutated, so it still ships
-    // normally everywhere else the report lists do-now findings.
+    // Item #1: the three are three DISTINCT FIXES at three distinct places. Walk `do_now_sorted` in rank order and skip a
+    // row whose Fix is already chosen, so one committed secret that six rules flag is one entry
+    // however the rules rank. A report with no review tree has no Fix ids; its rows fall back to
+    // the older test, one rule at a time (W24: three tables missing RLS are one thing).
     //
-    // W24 (2026-10-20): the credential-token check above is gated on `!root_cause_keys
-    // .is_empty()`, so a row carrying NO token skipped it entirely and was always selected.
-    // Three rows of one rule — three tables missing RLS, three endpoints missing one guard —
-    // could therefore fill all three slots, which the graders observed as "top-3 listing one
-    // root cause three times".
-    //
-    // The fallback is the RULE ID. For THIS box that is the right granularity even though
-    // the rows are all genuine: the box asks the client to do three things this week, and
-    // three instances of one rule are one thing ("enable RLS on these tables"). Spending
-    // every slot on it hides the other two problems, which is the opposite of what the box
-    // is for. Everywhere else the report still lists all of them — `do_now_sorted` and
-    // `matrix.do_now` are untouched, exactly as the credential check already promised.
+    // C6-B2 design point 3 still applies on top: a row that names a credential another chosen row
+    // already names (`FindingRefJson::root_cause_keys`) is skipped, so two Fixes that are sites of
+    // one leaked credential do not take two slots. A skipped row is simply not chosen for THIS
+    // box; `do_now_sorted`/`matrix.do_now` are never mutated, so it still ships normally
+    // everywhere else the report lists do-now findings.
     let mut top3_do_now: Vec<&FindingRefJson> = Vec::new();
     let mut selected_root_causes: std::collections::HashSet<&str> =
         std::collections::HashSet::new();
     let mut selected_rule_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut selected_fixes: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // A chosen Fix blocks every place it holds, and a chosen whole-file place blocks the lines of
+    // its file, so the box always takes the next distinct change (two Fixes can share a place, and
+    // a file and its lines are one secret).
+    let mut selected_places: std::collections::HashSet<(&str, &str, usize)> =
+        std::collections::HashSet::new();
+    let mut selected_files: std::collections::HashSet<(&str, &str)> =
+        std::collections::HashSet::new();
+    // The files of chosen line places: a whole-file row of such a file is skipped too.
+    let mut selected_line_files: std::collections::HashSet<(&str, &str)> =
+        std::collections::HashSet::new();
+    // The box lists only places that are First by the one place rule: a do-now row at a place
+    // another row holds for a decision is not First, so the box is empty exactly when no problem
+    // is First.
+    let mut buckets_at: std::collections::HashMap<(&str, &str, usize, &str), Vec<&str>> =
+        std::collections::HashMap::new();
+    for f in matrix
+        .do_now
+        .iter()
+        .chain(&matrix.do_next)
+        .chain(&matrix.plan)
+        .chain(&matrix.accepted)
+        .chain(&matrix.informational)
+        .chain(&matrix.held)
+    {
+        buckets_at
+            .entry(crate::review_tree::place_key(
+                &f.repo, &f.path, f.line, &f.rule_id,
+            ))
+            .or_default()
+            .push(f.bucket.as_str());
+    }
     for f in &do_now_sorted {
         if top3_do_now.len() >= 3 {
             break;
+        }
+        let first_place = buckets_at
+            .get(&crate::review_tree::place_key(
+                &f.repo, &f.path, f.line, &f.rule_id,
+            ))
+            .is_some_and(|b| {
+                crate::review_tree::class_of_place(b.iter().copied())
+                    == crate::review_tree::PlaceClass::ForAction(
+                        crate::review_tree::FixOrder::First,
+                    )
+            });
+        if !first_place {
+            continue;
+        }
+        if selected_places.contains(&(f.repo.as_str(), f.path.as_str(), f.line))
+            || (f.line > 0 && selected_files.contains(&(f.repo.as_str(), f.path.as_str())))
+            || (f.line == 0 && selected_line_files.contains(&(f.repo.as_str(), f.path.as_str())))
+        {
+            continue;
         }
         let shares_selected_root_cause = !f.root_cause_keys.is_empty()
             && f.root_cause_keys
                 .iter()
                 .any(|k| selected_root_causes.contains(k.as_str()));
-        if shares_selected_root_cause || selected_rule_ids.contains(f.rule_id.as_str()) {
+        let repeats = if f.fix_id.is_empty() {
+            selected_rule_ids.contains(f.rule_id.as_str())
+        } else {
+            selected_fixes.contains(f.fix_id.as_str())
+        };
+        if shares_selected_root_cause || repeats {
             continue;
         }
-        selected_rule_ids.insert(f.rule_id.as_str());
+        if f.fix_id.is_empty() {
+            selected_rule_ids.insert(f.rule_id.as_str());
+        } else {
+            selected_fixes.insert(f.fix_id.as_str());
+        }
         top3_do_now.push(f);
+        selected_places.insert((f.repo.as_str(), f.path.as_str(), f.line));
+        for p in fix_index
+            .fixes()
+            .iter()
+            .find(|x| x.id == f.fix_id)
+            .into_iter()
+            .flat_map(|x| &x.places)
+        {
+            selected_places.insert((p.repo.as_str(), p.path.as_str(), p.line));
+            if p.line == 0 {
+                selected_files.insert((p.repo.as_str(), p.path.as_str()));
+            } else {
+                selected_line_files.insert((p.repo.as_str(), p.path.as_str()));
+            }
+        }
+        if f.line == 0 {
+            selected_files.insert((f.repo.as_str(), f.path.as_str()));
+        } else {
+            selected_line_files.insert((f.repo.as_str(), f.path.as_str()));
+        }
         selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
     }
-    let dependency_advisories = dependency_snapshot.rows.len();
     // W6: never a silent omission — one explicit sentence per pass that failed/timed out
     // this scan, shared verbatim between the summary and the methodology below.
     // W1: fold in a disclosure for EVERY stage-level ledger integrity gap — every scan-time
@@ -1649,59 +1837,97 @@ pub fn build_report_json(
     ));
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
-        _ => (
-            default_narrative(
-                review_state,
-                report.files_scanned,
-                candidates_reviewed,
-                excluded_fp,
-                curated_total,
-                held_for_review_total,
-                dependency_advisories,
-                do_now,
-                do_next,
-                plan,
-                accepted,
-            ),
-            false,
-        ),
+        // The narrative is built from the counts object and nothing else.
+        _ => (counts_prose::narrative(counts, review_state), false),
     };
+    let failed_passes_more_line = counts_prose::more_line(
+        failed_pass_notes
+            .len()
+            .saturating_sub(PDF_MAX_FAILED_PASS_NOTES),
+        &PdfWordsJson::new().failed_passes_more,
+    );
     let executive_summary = ExecutiveSummaryJson {
         narrative,
         is_override,
-        candidates_reviewed,
-        excluded_false_positive: excluded_fp,
+        // Source rows and dependency advisories read the counts object. The bucket tallies below
+        // them are ROWS of every kind (legacy, one more release); no client sentence prints them.
+        candidates_reviewed: counts.rows.total,
+        excluded_false_positive: counts.rows.ruled_out,
         curated_total,
         held_for_review: held_for_review_total,
-        dependency_advisories,
+        dependency_advisories: counts.rows.dependency,
         do_now,
         do_next,
         plan,
         accepted,
         open,
         failed_passes: failed_pass_notes.clone(),
+        failed_passes_more_line: failed_passes_more_line.clone(),
     };
 
     // ── Item 7: "If you only do three things this week" ───────────────────────
     // The same top (up to 3) do-now findings, plus a rough hour estimate per item and a total —
     // the sentence that turns remediation anxiety into a purchase order.
-    let three_things_items: Vec<ThreeThingsItemJson> = top3_do_now
+    let top3_efforts: Vec<Option<String>> = top3_do_now
         .iter()
         .map(|f| {
-            let (_, hours_label) = effort_hours_bounds(f.effort.as_deref());
+            fix_facts
+                .get(&f.fix_id)
+                .map(|x| x.effort.clone())
+                .filter(|e| !e.is_empty())
+                .or_else(|| f.effort.clone())
+        })
+        .collect();
+    let three_things_items: Vec<ThreeThingsItemJson> = top3_do_now
+        .iter()
+        .zip(&top3_efforts)
+        .map(|(f, effort)| {
+            let (_, hours_label) = effort_hours_bounds(effort.as_deref());
+            let fix = fix_facts.get(&f.fix_id);
+            let rules: Vec<String> = fix.map(|x| x.rules.clone()).unwrap_or_default();
+            let places = fix.map_or(1, |x| x.places.max(1));
             ThreeThingsItemJson {
+                fix_id: f.fix_id.clone(),
+                closes_line: crate::xlsx_export::vocabulary::closes_rules(&rules),
+                places_line: if places > 1 {
+                    crate::xlsx_export::vocabulary::places_count(places)
+                } else {
+                    String::new()
+                },
+                rules,
+                places,
                 headline: f.headline.clone(),
                 repo: f.repo.clone(),
                 path: f.path.clone(),
                 line: f.line,
+                place: format!(
+                    "{} ({})",
+                    crate::xlsx_export::vocabulary::place_text(&f.repo, &f.path, f.line),
+                    f.rule_id
+                ),
                 rule_id: f.rule_id.clone(),
                 severity: f.severity.clone(),
                 hours_label,
-                impact: business_impact_for_rule(&f.rule_id).map(str::to_string),
+                // The Fix's business reason when there is one; else the rule's own authored
+                // sentence. Never the technical reason or the reviewer's summary.
+                impact: fix
+                    .map(|x| x.why_business.clone())
+                    .filter(|t| !t.is_empty())
+                    .or_else(|| business_impact_for_rule(&f.rule_id).map(str::to_string)),
             }
         })
         .collect();
-    let total_hours_label = total_hours_label(&top3_do_now);
+    // The dependency fixes the Fix plan lists as First: the empty box says so.
+    let dependency_fixes_first = sub_group_patterns
+        .iter()
+        .filter(|p| {
+            p.is_dependency
+                && p.open_sites > 0
+                && p.sequence == crate::xlsx_export::vocabulary::FIX_ORDER_FIRST
+        })
+        .count();
+    let total_hours_label =
+        classification::total_hours_label_of(&top3_efforts, dependency_fixes_first);
     let three_things = ThreeThingsJson {
         items: three_things_items,
         total_hours_label,
@@ -1721,12 +1947,12 @@ pub fn build_report_json(
         })
         .collect();
     let stats = CoverStatsJson {
-        critical: scorecard_rows.iter().map(|r| r.critical).sum(),
-        high: scorecard_rows.iter().map(|r| r.high).sum(),
-        medium: scorecard_rows.iter().map(|r| r.medium).sum(),
-        low: scorecard_rows.iter().map(|r| r.low).sum(),
-        accepted,
-        dependency_advisories: dependency_snapshot.rows.len(),
+        critical: counts.problems.by_severity.critical,
+        high: counts.problems.by_severity.high,
+        medium: counts.problems.by_severity.medium,
+        low: counts.problems.by_severity.low,
+        accepted: counts.problems.accepted,
+        dependency_advisories: counts.rows.dependency,
     };
     // P6: hide the "Code volume" row entirely rather than ever render "0 characters"/"0
     // lines" — `None` whenever this run genuinely has no real line count (a compliance-blocked
@@ -1779,6 +2005,7 @@ pub fn build_report_json(
         prepared_by: resolve_prepared_by(opts, None),
         brand: resolve_brand(opts, None),
         stats,
+        strip: counts_prose::cover_strip(counts),
         incremental_note: report.ledger.incremental().map(incremental_cover_note),
         internal_incomplete: internal_incomplete_marking(report, opts),
     };
@@ -1788,17 +2015,11 @@ pub fn build_report_json(
     // "the repository" or "the codebase" speaks of the repositories and the services instead.
     let multi_repo = report.repos.len() > 1;
     let methodology = MethodologyJson {
-        candidates_reviewed,
-        excluded_false_positive: excluded_fp,
+        reconciliation: counts_prose::methodology_line(counts, review_state),
+        candidates_reviewed: counts.rows.total,
+        excluded_false_positive: counts.rows.ruled_out,
         held_for_review: held_for_review_total,
-        next_steps: next_steps_note_for(
-            multi_repo,
-            review_state,
-            candidates_reviewed,
-            curated_total,
-            held_for_review_total,
-            excluded_fp,
-        ),
+        next_steps: counts_prose::next_steps(counts, multi_repo, review_state),
         deterministic_note:
             "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
              SAST rules plus a migration-timeline replay for Supabase Row Level Security) \
@@ -1834,7 +2055,7 @@ pub fn build_report_json(
                  production."
                     .to_string()
             },
-            "No review of organizational controls, identity and access management, or \
+            "No review of organizational controls, identity and access management or \
              infrastructure configuration."
                 .to_string(),
         ],
@@ -1846,69 +2067,64 @@ pub fn build_report_json(
              remediation team needs to know."
                 .to_string(),
         failed_passes: failed_pass_notes,
+        failed_passes_more_line,
     };
 
-    let priority_grid = build_priority_grid(&matrix);
+    let priority_grid = build_priority_grid(&matrix, counts);
 
     // WO9 (design 3B item 1): the escalations and one pattern for each sub-group, worked out from
     // the reviewed report. The sentence is derived from the tree being exported, never copied from
     // what stage 2 recorded.
-    let (escalated_items, sub_group_patterns) =
-        crate::xlsx_export::pdf_sections(reviewed, corpus, &opts.chosen_options);
     // (The reviewed report's ledger block is already derived from its tree by `apply_overlay`.)
     let escalation_sentence = report
         .ledger
         .escalation()
         .map(crate::scan_ledger::EscalationBlock::sentence)
         .unwrap_or_default();
-    // Amendment A14 item 4: above the limit only the reshaped PDF is rendered. The per-site
-    // cards, the held-for-review cards and the matrix lists are left out, and the matrix's counts
-    // stay so the release gate can still reconcile the PDF with the other files.
+    // The PDF is a summary at every size: it lists no place, no card and no table of problems.
+    // The matrix and the curated and held groups stay in the data for the release gate's dataset
+    // checks, but `render_data_json` leaves them out of what the template reads.
     let site_total: usize = code_findings
         .iter()
         .map(|(f, _, _, _)| f.distinct_site_count())
         .sum();
-    let reduced = site_total > FULL_PDF_SITE_LIMIT;
-    let mut reduced_matrix = Vec::new();
-    if reduced {
-        for (bucket, list) in [
-            ("do_now", &matrix.do_now),
-            ("do_next", &matrix.do_next),
-            ("plan", &matrix.plan),
-            ("accepted", &matrix.accepted),
-            ("informational", &matrix.informational),
-            ("held", &matrix.held),
-        ] {
-            let mut counts: std::collections::BTreeMap<(String, String), usize> =
-                std::collections::BTreeMap::new();
-            for f in list {
-                *counts
-                    .entry((f.severity.clone(), f.kind.tag().to_string()))
-                    .or_default() += 1;
-            }
-            reduced_matrix.extend(counts.into_iter().map(|((severity, kind), count)| {
-                MatrixTallyJson {
-                    bucket: bucket.to_string(),
-                    severity,
-                    kind,
-                    count,
-                }
-            }));
-        }
-        matrix = MatrixJson::default();
-        curated_findings = Vec::new();
-        held_for_review_findings = Vec::new();
-    }
+    let escalation_cap = PDF_MAX_SERIOUS_PROBLEMS;
+    let any_open_entry = escalated_items
+        .iter()
+        .any(|e| e.decision.starts_with(crate::xlsx_export::vocabulary::OPEN));
+    let escalation_more_line = if escalated_items.len() > escalation_cap {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            escalated_items.len() - escalation_cap,
+            crate::xlsx_export::vocabulary::FIX_PLAN,
+        )
+    } else {
+        String::new()
+    };
+    let other_fixes = other_fixes_of(&sub_group_patterns, &escalated_items, escalation_cap);
 
     AuditReportJson {
+        counts: counts.clone(),
         internal: opts.internal,
         site_total,
-        reduced,
-        reduced_matrix,
+        words: PdfWordsJson::new(),
         escalations: EscalationsJson {
             sentence: escalation_sentence,
             items: escalated_items,
+            cap: escalation_cap,
+            more_line: escalation_more_line,
+            intro: format!(
+                "{} in person, worst first. Each entry is one place, whatever the number of \
+                 rules it breaks. Every place is on the {} sheet.",
+                if review_state.is_draft() || any_open_entry {
+                    "For review"
+                } else {
+                    "Reviewed"
+                },
+                crate::xlsx_export::vocabulary::ALL_PROBLEMS
+            ),
         },
+        other_fixes,
+        conventions,
         sub_group_patterns,
         sub_group_patterns_note: crate::xlsx_export::no_tree_note(reviewed).to_string(),
         review_state,
@@ -1919,12 +2135,13 @@ pub fn build_report_json(
         three_things,
         scorecard: ScorecardJson {
             rows: scorecard_rows,
+            footnote: "A place with rules from several areas is counted in each; the cover counts each place once.".to_string(),
         },
         matrix,
         priority_grid,
         curated_findings,
         held_for_review_findings,
-        patterns_across_services: patterns_across_services_json(report, corpus),
+        patterns_across_services: patterns_across_services_json(report, corpus, dispositions),
         whats_healthy: WhatsHealthyJson {
             rules: healthy_rules,
             further_clean_count,
@@ -1935,6 +2152,146 @@ pub fn build_report_json(
         methodology,
         coverage_gaps: coverage_gaps::coverage_gaps(report),
         disclaimer: audit_report_disclaimer(report.repos.len()).to_string(),
+    }
+}
+
+/// The advisories the PDF states: a count by severity, the worst few and a pointer to the
+/// Dependencies sheet for the rest.
+fn dependency_summary(
+    rows: &[DependencyFindingJson],
+) -> (String, Vec<DependencyFindingJson>, String) {
+    if rows.is_empty() {
+        return (String::new(), Vec::new(), String::new());
+    }
+    let mut sorted: Vec<&DependencyFindingJson> = rows.iter().collect();
+    sorted.sort_by(|a, b| {
+        severity_rank(&a.severity.to_ascii_lowercase())
+            .cmp(&severity_rank(&b.severity.to_ascii_lowercase()))
+            .then_with(|| a.package.cmp(&b.package))
+    });
+    let mut by_severity: Vec<(String, usize)> = Vec::new();
+    for r in &sorted {
+        let sev = r.severity.to_ascii_lowercase();
+        match by_severity.iter_mut().find(|(s, _)| *s == sev) {
+            Some((_, n)) => *n += 1,
+            None => by_severity.push((sev, 1)),
+        }
+    }
+    let counts: Vec<String> = by_severity
+        .iter()
+        .map(|(sev, n)| format!("{n} {sev}"))
+        .collect();
+    let summary = format!(
+        "{}: {}",
+        noun(rows.len(), "known vulnerability", "known vulnerabilities"),
+        counts.join(", ")
+    );
+    let worst: Vec<DependencyFindingJson> = sorted
+        .iter()
+        .take(PDF_MAX_DEPENDENCIES)
+        .map(|r| DependencyFindingJson {
+            package: r.package.clone(),
+            advisory: first_sentences(&r.advisory, 1, 160),
+            severity: r.severity.clone(),
+            repo: r.repo.clone(),
+        })
+        .collect();
+    let more = if rows.len() > PDF_MAX_DEPENDENCIES {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            rows.len() - PDF_MAX_DEPENDENCIES,
+            crate::xlsx_export::vocabulary::DEPENDENCIES,
+        )
+    } else {
+        String::new()
+    };
+    (summary, worst, more)
+}
+
+/// The first `sentences` sentences of `text` on one line, cut at a word at `max_chars`.
+pub(crate) fn first_sentences(text: &str, sentences: usize, max_chars: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = flat.chars().collect();
+    let mut end = chars.len();
+    let mut seen = 0;
+    for (i, c) in chars.iter().enumerate() {
+        let ends_sentence = matches!(c, '.' | '!' | '?')
+            && chars.get(i + 1).is_none_or(|next| next.is_whitespace())
+            && chars
+                .get(i + 2)
+                .is_none_or(|n| n.is_uppercase() || !n.is_alphabetic());
+        if ends_sentence {
+            seen += 1;
+            if seen == sentences {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+    let mut out: String = chars[..end].iter().collect();
+    if out.chars().count() > max_chars {
+        let cut: String = out.chars().take(max_chars).collect();
+        out = match cut.rfind(' ') {
+            Some(at) => cut[..at].trim_end_matches([',', ';', ':']).to_string() + "...",
+            None => cut + "...",
+        };
+    }
+    out
+}
+
+/// "The other fixes": a line for each Fix that is not one of the entries "The most serious
+/// problems" prints, grouped by area in the order the areas first appear, at most
+/// [`PDF_MAX_OTHER_FIXES`] lines. The Fixes are in plan order (First, then Next, then Later).
+fn other_fixes_of(
+    patterns: &[PatternJson],
+    escalated: &[EscalatedSiteJson],
+    escalation_cap: usize,
+) -> OtherFixesJson {
+    let printed: std::collections::HashSet<&str> = escalated
+        .iter()
+        .take(escalation_cap)
+        .map(|e| e.fix_id.as_str())
+        .collect();
+    let remaining: Vec<&PatternJson> = patterns
+        .iter()
+        .filter(|p| p.open_sites > 0 && !printed.contains(p.group.as_str()))
+        .collect();
+    let mut groups: Vec<OtherFixGroupJson> = Vec::new();
+    for p in remaining.iter().take(PDF_MAX_OTHER_FIXES) {
+        let line = OtherFixLineJson {
+            fix_id: p.group.clone(),
+            name: p.name.clone(),
+            severity: p.severity.clone(),
+            places: crate::xlsx_export::vocabulary::places_count(p.open_sites),
+            effort: p.effort.clone(),
+            fix_order: p.sequence.clone(),
+        };
+        match groups.iter_mut().find(|g| g.area == p.area) {
+            Some(g) => g.lines.push(line),
+            None => groups.push(OtherFixGroupJson {
+                area: p.area.clone(),
+                lines: vec![line],
+            }),
+        }
+    }
+    let shown = remaining.len().min(PDF_MAX_OTHER_FIXES);
+    let more_line = if remaining.len() > shown {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            remaining.len() - shown,
+            crate::xlsx_export::vocabulary::FIX_PLAN,
+        )
+    } else {
+        String::new()
+    };
+    OtherFixesJson {
+        groups,
+        intro: format!(
+            "One line for each other fix, grouped by area and in the order to do them. Each fix's \
+             text and places are on the {} and {} sheets.",
+            crate::xlsx_export::vocabulary::FIX_PLAN,
+            crate::xlsx_export::vocabulary::ALL_PROBLEMS
+        ),
+        shown,
+        more_line,
     }
 }
 
@@ -1960,8 +2317,23 @@ fn creation_epoch(data_json: &str) -> Option<i64> {
 /// Serialize the PDF's data: the ONE `data.json` the Typst template reads. The release gate
 /// inspects these exact bytes, so what it checks is byte-identical to what Typst renders.
 pub fn render_data_json(json: &AuditReportJson) -> anyhow::Result<String> {
-    serde_json::to_string(json).context("could not serialize the report to JSON")
+    let mut value = serde_json::to_value(json).context("could not serialize the report to JSON")?;
+    // The PDF lists no problem, so the template reads none of the per-place lists. They stay in
+    // the report for the release gate's dataset checks and are left out of the data Typst parses,
+    // which keeps the PDF's data small at any size.
+    if let Some(map) = value.as_object_mut() {
+        for unread in UNREAD_BY_THE_TEMPLATE {
+            map.remove(unread);
+        }
+    }
+    serde_json::to_string(&value).context("could not serialize the report to JSON")
 }
+
+/// The members of [`AuditReportJson`] that hold one entry for each problem or place. The
+/// template reads none of them: the PDF is a summary, and every row is in the workbook and the
+/// CSV files.
+const UNREAD_BY_THE_TEMPLATE: [&str; 3] =
+    ["matrix", "curated_findings", "held_for_review_findings"];
 
 /// [`compile_pdf_from_data`] over a structured report. For tests and diagnostics: production
 /// exports go through `release_gate::build_product_package`, which keeps the `data.json` bytes
@@ -2087,31 +2459,16 @@ pub(crate) fn typst_timeout(sites: usize) -> Duration {
     }
 }
 
-/// How many sites the PDF prints: every site on a curated card and on a held-for-review card.
-/// The size the time budget scales with. Zero for data that does not parse, which gets the base
+/// How many places the report covers, which the time budget scales with: the data Typst parses
+/// holds a Fix for each group of them. Zero for data that does not parse, which gets the base
 /// budget; a malformed document fails in Typst quickly, not slowly.
 fn pdf_site_count(data_json: &str) -> usize {
     #[derive(serde::Deserialize, Default)]
-    struct Group {
-        #[serde(default)]
-        sites: Vec<serde::de::IgnoredAny>,
-    }
-    #[derive(serde::Deserialize, Default)]
     struct Probe {
         #[serde(default)]
-        curated_findings: Vec<Group>,
-        #[serde(default)]
-        held_for_review_findings: Vec<Group>,
+        site_total: usize,
     }
-    serde_json::from_str::<Probe>(data_json)
-        .map(|p| {
-            p.curated_findings
-                .iter()
-                .chain(&p.held_for_review_findings)
-                .map(|g| g.sites.len())
-                .sum()
-        })
-        .unwrap_or(0)
+    serde_json::from_str::<Probe>(data_json).map_or(0, |p| p.site_total)
 }
 
 /// The error for a compile that outlived its budget: the size of the report, the time it was
@@ -2238,6 +2595,7 @@ pub mod overlay;
 pub mod prose_checks;
 pub mod row_facts;
 pub mod tree_view;
+pub mod unfold;
 pub use overlay::{
     apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, re_mark_line,
     summary_fingerprint, AppliedEdit, MergeNote, ReviewedReport, StaleEditNote, SupersededNote,
@@ -2245,14 +2603,37 @@ pub use overlay::{
 pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFactsIndex};
 
 #[cfg(test)]
+mod addition_tests;
+#[cfg(test)]
+mod counts_surfaces_tests;
+#[cfg(test)]
+mod order_rule_tests;
+#[cfg(test)]
+mod status_word_tests;
+
+#[cfg(test)]
+mod counts_tests;
+
+#[cfg(test)]
 mod coverage_gaps_tests;
+
+#[cfg(test)]
+mod patterns_open_tests;
+
+#[cfg(test)]
+mod unfold_tests;
 
 #[cfg(test)]
 mod wo9 {
     mod decisions_file_tests;
     mod edit_ids_tests;
+    mod fix_tests;
     mod pdf_tests;
+    mod place_tests;
     mod plan_tests;
+    mod possible_dup_tests;
+    mod possible_fp_tests;
+    mod readme_tests;
     mod review_level_tests;
     mod row_set_tests;
     mod signature_tests;
@@ -2260,6 +2641,8 @@ mod wo9 {
     mod stage2_tests;
     pub(super) mod support;
     mod tree_tests;
+    mod why_tests;
+    mod workbook_tests;
 }
 
 #[cfg(test)]
@@ -2276,6 +2659,12 @@ mod fn_batch_b_tests;
 
 #[cfg(test)]
 mod fn_batch_c_adjust_tests;
+
+#[cfg(test)]
+mod held_severity_text_tests;
+
+#[cfg(test)]
+mod severity_bounds_pin_tests;
 
 #[cfg(test)]
 mod fn_batch_c_dep_tests;

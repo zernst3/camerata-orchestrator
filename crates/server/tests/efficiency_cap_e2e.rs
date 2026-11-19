@@ -43,6 +43,8 @@ impl LlmPort for Stub {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: req.model.clone(),
@@ -132,6 +134,11 @@ async fn scan(
 
 fn controls(cap: Option<f64>, efficiency: EfficiencyConfig) -> RunControls {
     RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        checkpoint: Default::default(),
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: cap,
@@ -648,6 +655,8 @@ impl LlmPort for ProcessDefaultStub {
             camerata_server::llm::PriceBasis::realtime(),
         );
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model,
@@ -751,6 +760,8 @@ impl LlmPort for UnpricedReplyStub {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#
                 .to_string(),
             model: "claude-unlisted-9".to_string(),

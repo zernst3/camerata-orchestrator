@@ -63,6 +63,48 @@ pub(super) const CROSS_TENANT_PHRASES: &[&str] = &[
     "belonging to a different organization",
     "data from another account",
 ];
+/// Wording that makes an unauthenticated access problem from the agent finder critical: a write
+/// or personal data (owner ruling R-8). The sensitive-data tables and the full-compromise phrases
+/// above count too.
+pub(super) const FINDER_WRITE_OR_PERSONAL_DATA_PHRASES: &[&str] = &[
+    "writes",
+    "write access",
+    "can write",
+    "allows a write",
+    "modify",
+    "delete",
+    "update",
+    "personal data",
+    "personal information",
+];
+
+/// The phrases in [`UNAUTHENTICATED_OR_FULL_COMPROMISE_PHRASES`] that assert a full compromise,
+/// not only a missing check.
+const FULL_COMPROMISE_PHRASES: &[&str] = &[
+    "full account compromise",
+    "full account takeover",
+    "complete account takeover",
+    "complete account compromise",
+    "account takeover",
+    "take over any account",
+    "take over any user's account",
+    "impersonate any user",
+    "assume any user's identity",
+];
+
+/// Owner ruling R-8: an agent finder problem (it carries the `finder-problem` capture) that only
+/// says access needs no authentication is High; Critical needs sensitive data, a write or a full
+/// compromise in its wording (or the agent rating it Critical, which this floor never lowers).
+fn finder_unauthenticated_is_only_high(f: &Finding, text: &str) -> bool {
+    f.captures
+        .contains_key(super::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
+        && !mentions_escalating_data_class(text)
+        && !FULL_COMPROMISE_PHRASES
+            .iter()
+            .chain(FINDER_WRITE_OR_PERSONAL_DATA_PHRASES)
+            .any(|p| contains_phrase_as_word(text, p))
+}
+
 pub(super) const READ_VERBS: &[&str] = &[
     "read", "view", "fetch", "access", "download", "list", "see", "retrieve",
 ];
@@ -294,6 +336,35 @@ pub(super) fn floor_may_apply(f: &Finding) -> bool {
     finding_class(f) == FindingClass::Security || f.rule_id.starts_with("AI-")
 }
 
+/// Whether `f` is a row the agent finder produced (it carries the `finder-problem` capture).
+pub(crate) fn is_agent_finder_row(f: &Finding) -> bool {
+    f.captures
+        .contains_key(super::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
+}
+
+/// R-8, the only floor an agent finder row still gets: unauthenticated access is at least High,
+/// Critical when the wording hits sensitive data, a write or a full compromise.
+fn agent_row_unauthenticated_floor(f: &Finding, text: &str) -> Option<(&'static str, String)> {
+    if !mentions_unauthenticated_or_full_compromise(text) {
+        return None;
+    }
+    if finder_unauthenticated_is_only_high(f, text) {
+        Some((
+            "high",
+            "Severity floor: unauthenticated access is High by default; it is Critical only \
+             when it reaches sensitive data, allows a write or is a full compromise."
+                .to_string(),
+        ))
+    } else {
+        Some((
+            "critical",
+            "Severity floor: unauthenticated access or a path to full-account compromise is \
+             always Critical."
+                .to_string(),
+        ))
+    }
+}
+
 /// The deterministic D5 severity floor for ONE finding: `None` when no rule of thumb applies,
 /// else the floor severity plus the rationale to record. Order matters — unauthenticated/full-
 /// compromise is checked first (it is the highest floor and the two conditions are mutually
@@ -302,18 +373,32 @@ pub(super) fn floor_may_apply(f: &Finding) -> bool {
 /// precondition cap (which can only LOWER a Critical floor to High, never raise or lower
 /// anything else), then the RLS-hedge guard (which can only RAISE whatever floor is already
 /// computed, never lower it — see the combine step in `apply_severity_calibration_rule`).
-pub(super) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
+pub(crate) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
     if !floor_may_apply(f) {
         return None;
     }
     let text = calibration_floor_scan_text(f);
+    // Owner ruling (2026-11-17): for an agent finder row the model's rating stands. The ONE
+    // raise kept is R-8, the unauthenticated-access floor.
+    if is_agent_finder_row(f) {
+        return agent_row_unauthenticated_floor(f, &text);
+    }
     let mut floor = if mentions_unauthenticated_or_full_compromise(&text) {
-        Some((
-            "critical",
-            "Severity floor: unauthenticated access or a path to full-account compromise is \
+        if finder_unauthenticated_is_only_high(f, &text) {
+            Some((
+                "high",
+                "Severity floor: unauthenticated access is High by default; it is Critical \
+                 only when it reaches sensitive data, allows a write or is a full compromise."
+                    .to_string(),
+            ))
+        } else {
+            Some((
+                "critical",
+                "Severity floor: unauthenticated access or a path to full-account compromise is \
              always Critical."
-                .to_string(),
-        ))
+                    .to_string(),
+            ))
+        }
     } else if mentions_authenticated_cross_tenant_read(&text) {
         if mentions_escalating_data_class(&text) {
             Some((
@@ -391,9 +476,33 @@ pub(super) fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, S
 /// touched the finding (even when the floor didn't change anything — the architect can see the
 /// rule considered it and found the existing severity already sufficient). Never lowers a
 /// severity that already ranks at or above the floor.
+///
+/// Owner ruling R-7: a row a reviewer doubted (`crate::follow_reviewers::doubt_for_severity`; here
+/// that is stage 1's `real: no`, the only reviewer that has spoken yet) is never raised by this
+/// floor. It keeps stage 1's severity and is held for a decision (`needs_review`), so it stays in
+/// the review queue for the human reviewer. The notes a client reads are neutral; which reviewer
+/// doubted the row is in the operator-only hold detail.
 pub(super) fn apply_severity_calibration_rule(mut f: Finding) -> Finding {
     if let Some((floor_sev, reason)) = severity_calibration_floor(&f) {
-        if severity_rank(&f.severity) < severity_rank(floor_sev) {
+        let would_raise = severity_rank(&f.severity) < severity_rank(floor_sev);
+        if let Some(doubt) = crate::follow_reviewers::doubt_for_severity(&f).filter(|_| would_raise)
+        {
+            f.needs_review = true;
+            let detail = format!(
+                "{}, so the severity floor for its wording ({floor_sev}) does not raise it; the \
+                 row keeps {} and is held for a decision",
+                doubt.phrase(),
+                f.severity
+            );
+            crate::follow_reviewers::record_hold(&mut f, &detail);
+            f.calibration_rationale = Some(format!(
+                "Severity floor not applied: the row keeps its severity ({}) and is held for a \
+                 decision.",
+                f.severity
+            ));
+            return f;
+        }
+        if would_raise {
             let before = f.severity.clone();
             f.severity = floor_sev.to_string();
             record_severity_adjustment(&mut f, &before, floor_sev, &reason);
@@ -653,7 +762,7 @@ pub(super) fn mentions_client_only_privilege_gate(text: &str) -> bool {
 /// unlike CORS, these two CAN legitimately co-occur with a floor-earned Critical in the same
 /// finding's prose, and must never demote it). R3 is a full bidirectional clamp like R2; R4 is
 /// cap-only like R1. R1 is checked last.
-pub(super) fn apply_severity_ceiling_rule(f: Finding) -> Finding {
+pub(crate) fn apply_severity_ceiling_rule(f: Finding) -> Finding {
     let before = f.severity.clone();
     let mut out = apply_severity_ceiling_rule_inner(f);
     if out.severity != before {
@@ -697,6 +806,57 @@ pub(super) fn names_cors_class(f: &Finding) -> bool {
         || f.category
             .as_deref()
             .is_some_and(|c| c.to_ascii_lowercase().contains("cors"))
+}
+
+/// Whether `f` is of the secret class: a committed credential, key or token. Decided by the
+/// row's category or rule id (the cockpit's own secret test, the secret-rule list), an exact
+/// KEY word in the rule id, or a snippet that holds a real secret value. Over-exempting is the
+/// safe direction: a real secret in a test file must keep its rating.
+pub(super) fn is_secret_class_row(f: &Finding) -> bool {
+    if crate::onboard::credential_cross_ref::is_secret_exposure(f)
+        || super::finding_merge::is_secret_rule(&f.rule_id)
+        || super::finding_merge::snippet_holds_real_secret(&f.snippet)
+    {
+        return true;
+    }
+    let cat = f
+        .category
+        .as_deref()
+        .map(|c| c.to_ascii_lowercase().replace(' ', "-"))
+        .or_else(|| categorize_rule_id(&f.rule_id));
+    if cat.as_deref() == Some("secret-exposure") {
+        return true;
+    }
+    f.rule_id
+        .to_ascii_uppercase()
+        .split(['-', '_'])
+        .any(|w| w == "KEY" || w == "KEYS")
+}
+
+/// The bidirectional clamp of R2 and R3: set `f` to exactly `target`, with `rationale`. Owner
+/// ruling R-7: the clamp lowers a doubted row as before, but never RAISES one a reviewer doubted
+/// (`crate::follow_reviewers::doubt_for_severity`); that row keeps its severity and is held for a
+/// decision, with a neutral note for the client and the reviewer detail for the operator.
+fn clamp_to(f: &mut Finding, target: &str, rationale: &str) {
+    let raises = severity_rank(&f.severity) < severity_rank(target);
+    if let Some(doubt) = crate::follow_reviewers::doubt_for_severity(f).filter(|_| raises) {
+        f.needs_review = true;
+        let detail = format!(
+            "{}, so the severity ceiling that sets this class to exactly {target} does not raise \
+             it; the row keeps {} and is held for a decision",
+            doubt.phrase(),
+            f.severity
+        );
+        crate::follow_reviewers::record_hold(f, &detail);
+        f.calibration_rationale = Some(format!(
+            "Severity ceiling not applied: the row keeps its severity ({}) and is held for a \
+             decision.",
+            f.severity
+        ));
+        return;
+    }
+    f.severity = target.to_string();
+    f.calibration_rationale = Some(rationale.to_string());
 }
 
 pub(super) fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
@@ -758,6 +918,31 @@ pub(super) fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
         return f;
     }
 
+    // A1: a row whose place is a test file does not ship. It takes the test-scope severity the
+    // deterministic floor already gives such rows, is marked in-test, and so neither reads as a
+    // live exposure nor takes an escalation slot ahead of production code. Decided narrowly: by
+    // the row's own path (an inline test block inside a production file is not visible to a
+    // row), and the secret class keeps its severity, since a real committed secret in a test
+    // file is still a real secret.
+    if camerata_gateway::is_test_or_fixture_path(&f.path)
+        && !is_secret_class_row(&f)
+        && severity_rank(&f.severity) > severity_rank(camerata_gateway::TEST_PATH_SEVERITY)
+    {
+        let was = f.severity.clone();
+        f.severity = camerata_gateway::TEST_PATH_SEVERITY.to_string();
+        f.in_test = true;
+        // Held, never buried: a capped row stays visible for a reviewer, as the deterministic
+        // test-path floor does.
+        f.needs_review = true;
+        f.calibration_rationale = Some(format!(
+            "Severity ceiling: this row is in a test file, which is not shipped. Capped from \
+             {was} to {} and marked as test scope so it does not rank ahead of production code. \
+             The secret class is the exception and keeps its severity.",
+            camerata_gateway::TEST_PATH_SEVERITY
+        ));
+        return f;
+    }
+
     // W24 severity anchor: a test-coverage rule is never CRITICAL.
     //
     // Critical in this report means an unauthenticated exposure or a full compromise. A
@@ -784,33 +969,33 @@ pub(super) fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
     // floor-earned critical is never clamped, and CORS words in another rule's prose never
     // move its rating.
     if names_cors_class(&f) && !floor_earned_critical && mentions_cors_misconfig(&text) {
-        f.severity = "medium".to_string();
-        f.calibration_rationale = Some(
+        clamp_to(
+            &mut f,
+            "medium",
             "Severity ceiling: a browser-mediated CORS/cross-origin misconfiguration requires a \
              victim's browser and an active session to exploit — it is neither a direct \
              unauthenticated exposure (Critical) nor safe to leave buried (Low). Calibrated to \
-             exactly Medium."
-                .to_string(),
+             exactly Medium.",
         );
         return f;
     }
 
     if mentions_open_redirect(&text) && !floor_earned_critical {
         if mentions_redirect_chained_to_credential_capture(&text) {
-            f.severity = "high".to_string();
-            f.calibration_rationale = Some(
+            clamp_to(
+                &mut f,
+                "high",
                 "Severity ceiling: an open/unvalidated redirect chained to credential capture — \
                  the destination can read or exfiltrate a token, cookie, or credential — lets an \
-                 attacker walk away with something usable. Calibrated to exactly High."
-                    .to_string(),
+                 attacker walk away with something usable. Calibrated to exactly High.",
             );
         } else {
-            f.severity = "medium".to_string();
-            f.calibration_rationale = Some(
+            clamp_to(
+                &mut f,
+                "medium",
                 "Severity ceiling: an open/unvalidated redirect, on its own, only harms the user \
                  who follows it and hands the attacker nothing — not High or Critical unless \
-                 chained to credential capture. Calibrated to exactly Medium."
-                    .to_string(),
+                 chained to credential capture. Calibrated to exactly Medium.",
             );
         }
         return f;

@@ -1,6 +1,7 @@
 //! The scan results component.
 
 use super::*;
+use camerata_api_types::cost_checkpoint::CostCheckpoint;
 
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
@@ -125,18 +126,41 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 Err(why) => resume_plan_shown.set(Some(ResumePlanView {
                     text: String::new(),
                     refusal: Some(why),
+                    ..ResumePlanView::default()
                 })),
             }
         });
     });
-    let on_resume = EventHandler::new(move |run_id: String| {
-        resume_plan_shown.set(None);
+    // The cost panel: the run's checkpoint from the polled job, and where the operator stands on
+    // approving a pause. The run resumes only from the confirming click (`resume_on_approval`).
+    let mut cost_checkpoint = use_signal(|| Option::<CostCheckpoint>::None);
+    let mut approve_step = use_signal(ApproveStep::default);
+    let on_approve_confirm = EventHandler::new(move |()| {
+        let (Some(cp), Some(run_id)) = (
+            cost_checkpoint.peek().clone(),
+            audit.peek().as_ref().and_then(|a| a.run_id.clone()),
+        ) else {
+            return;
+        };
+        let step = *approve_step.peek();
         job_failed_message.set(None);
         auditing.set(true);
+        cost_checkpoint.set(None);
+        approve_step.set(ApproveStep::Pause);
+        let paused = cp.clone();
         spawn(async move {
             let result = run_what_remains(
                 loading_count,
-                || async { resume_start(&run_id).await },
+                || async move {
+                    match resume_on_approval(step, &cp, &run_id, |id, usd| async move {
+                        resume_start_at(&id, Some(usd)).await
+                    })
+                    .await
+                    {
+                        Some(started) => started,
+                        None => Err("the approval was not confirmed".to_string()),
+                    }
+                },
                 |jid| async move {
                     active_audit_job.set(Some(jid.clone()));
                     poll_job(
@@ -145,6 +169,43 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         auditing,
                         job_progress,
                         det_progress,
+                        cost_checkpoint,
+                        active_audit_job,
+                        scan_idle_ms,
+                        job_failed_message,
+                        loading_count,
+                    )
+                    .await;
+                },
+            )
+            .await;
+            if let Err(why) = result {
+                // The run is still paused: keep the pause on screen beside the reason.
+                cost_checkpoint.set(Some(paused));
+                auditing.set(false);
+                job_failed_message.set(Some(why));
+            }
+        });
+    });
+    let on_resume = EventHandler::new(move |(run_id, limit): (String, Option<f64>)| {
+        resume_plan_shown.set(None);
+        job_failed_message.set(None);
+        cost_checkpoint.set(None);
+        approve_step.set(ApproveStep::default());
+        auditing.set(true);
+        spawn(async move {
+            let result = run_what_remains(
+                loading_count,
+                || async move { resume_start_at(&run_id, limit).await },
+                |jid| async move {
+                    active_audit_job.set(Some(jid.clone()));
+                    poll_job(
+                        jid,
+                        audit,
+                        auditing,
+                        job_progress,
+                        det_progress,
+                        cost_checkpoint,
                         active_audit_job,
                         scan_idle_ms,
                         job_failed_message,
@@ -169,6 +230,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 auditing,
                 job_progress,
                 det_progress,
+                cost_checkpoint,
                 active_audit_job,
                 scan_idle_ms,
                 job_failed_message,
@@ -214,12 +276,15 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
     // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
     // Per-repo sizes for the estimate (several repos only): fetched once per mount.
+    let agent_finder = active_project
+        .as_ref()
+        .is_some_and(|p| p.review.finder == camerata_api_types::project::ProjectFinder::Agent);
     let repo_sizes = {
         let repos = report.repos.clone();
         use_resource(move || {
             let repos = repos.clone();
             async move {
-                if repos.len() > 1 {
+                if repos.len() > 1 || agent_finder {
                     fetch_repo_sizes(&repos).await
                 } else {
                     None
@@ -243,7 +308,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
         .iter()
         .filter(|f| f.severity == "critical" || f.severity == "high")
         .count();
-    let enforced = findings.iter().filter(|f| f.status == "active").count();
+    let enforced = findings
+        .iter()
+        .filter(|f| f.status == "active" && !f.preview)
+        .count();
     let suppressed = findings.len().saturating_sub(enforced);
 
     // The architect's PER-REPO alternative choices, keyed `chosen_key(repo, rule_id)` ->
@@ -362,6 +430,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // strip), and find the one timer here.
     use_context_provider(|| review.clone());
     let mut stats_open = use_signal(|| false);
+    // THE REWRITE ADVISORY (INTERNAL ONLY): fetched each time the stats view opens, drawn in it.
+    let mut advisory_panel =
+        use_signal(|| Option::<camerata_ui_core::rewrite_advisory::PanelState>::None);
     // Which kind surface is on screen (Pass 2 step 1). Session state, deliberately NOT
     // persisted in the draft: it is a lens, not a decision, and the curator always wants to
     // resume on the Queue. Adding it to `OnboardingDraft` would change a persisted wire shape
@@ -781,6 +852,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 rsx! {
                     super::review::ReviewStatsModal {
                         stats,
+                        advisory: advisory_panel(),
                         on_save: Callback::new(move |()| {
                             let json = json.clone();
                             spawn(async move {
@@ -1271,6 +1343,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             detail_finding.set(None);
                             job_progress.set(None);
                             det_progress.set(None);
+                            cost_checkpoint.set(None);
+                            approve_step.set(ApproveStep::default());
                             // Clear any PREVIOUS run's failure banner — a fresh scan starting
                             // is not itself a failure, and a stale message here would look
                             // like this new run already failed before it even began.
@@ -1307,6 +1381,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                         auditing,
                                         job_progress,
                                         det_progress,
+                                        cost_checkpoint,
                                         active_audit_job,
                                         scan_idle_ms,
                                         job_failed_message,
@@ -1632,9 +1707,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         // Several repos: one estimate per repo, summed (the scan chunks and
                         // calibrates each repo on its own). Single repo, or sizes not back yet:
                         // the one-stream estimate, unchanged.
-                        let sizes: Option<Vec<RepoSizeView>> = if multi_repo { (*repo_sizes.read()).clone().flatten() } else { None };
+                        let all_sizes: Option<Vec<RepoSizeView>> = (*repo_sizes.read()).clone().flatten();
+                        let sizes: Option<Vec<RepoSizeView>> = if multi_repo { all_sizes.clone() } else { None };
                         let mut repo_lines: Vec<String> = Vec::new();
-                        let (toks, dollars, passes) = match sizes {
+                        let (toks, mut dollars, passes) = match sizes {
                             Some(sizes) => {
                                 let selection = repo_selection.read().clone();
                                 // A repo is priced only when its rule choice is known: a guessed
@@ -1647,6 +1723,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                         Some(camerata_ui_core::scan::RunRepoInput {
                                             repo: z.repo.clone(),
                                             code_chars: z.code_chars,
+                                            files: z.files,
                                             selected: ids.len(),
                                             multi_option_selected: report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && ids.contains(&r.id)).count(),
                                             routing_groups: 1,
@@ -1667,6 +1744,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 let est = run_estimate(&[camerata_ui_core::scan::RunRepoInput {
                                     repo: report.repos.first().cloned().unwrap_or_default(),
                                     code_chars: report.code_chars,
+                                    files: report.files_scanned,
                                     selected: sel,
                                     multi_option_selected,
                                     routing_groups: 1,
@@ -1674,6 +1752,22 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 (est.tokens, est.dollars, est.passes)
                             }
                         };
+                        // The agent finder's estimate replaces the engine's figure when the project's
+                        // finder is the agent: the server's per-repo figures, from the one estimate
+                        // function the command line prints from. Not back yet: no figure is shown
+                        // as a made-up number (the engine figure stays, labelled by its own lines).
+                        let finder_figures: Option<Vec<(String, AgentFinderSizeView)>> = if agent_finder {
+                            all_sizes.as_ref().map(|v| v.iter().filter_map(|z| z.agent_finder.clone().map(|a| (z.repo.clone(), a))).collect())
+                        } else {
+                            None
+                        };
+                        if let Some(figs) = finder_figures.as_ref().filter(|f| !f.is_empty()) {
+                            dollars = figs.iter().map(|(_, a)| a.expected_usd).sum();
+                            repo_lines = figs
+                                .iter()
+                                .map(|(repo, a)| camerata_ui_core::scan::agent_finder_repo_line(repo, a.pieces, a.expected_usd, a.low_usd, a.high_usd))
+                                .collect();
+                        }
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
@@ -1832,6 +1926,18 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 // Background-job FAILURE banner (silent-death fix): rendered UNCONDITIONALLY,
                 // not gated on `audited.is_some()` below — a failed or vanished job never
                 // produces a report, so this is the only place a failure would ever surface.
+                // The run's cost against the amount approved, live and after it ends; a pause
+                // before going over offers the one-click approval. Nothing without a spend limit.
+                CostCheckpointPanel {
+                    checkpoint: cost_checkpoint(),
+                    run_id: audit().as_ref().and_then(|a| a.run_id.clone()),
+                    step: approve_step(),
+                    busy: auditing(),
+                    on_ask: Some(EventHandler::new(move |()| { let next = approve_step.peek().ask(); approve_step.set(next); })),
+                    on_back: Some(EventHandler::new(move |()| { let next = approve_step.peek().back(); approve_step.set(next); })),
+                    on_stop: Some(EventHandler::new(move |()| { let next = approve_step.peek().stop(); approve_step.set(next); })),
+                    on_confirm: Some(on_approve_confirm),
+                }
                 ScanJobFailedBanner { message: job_failed_message() }
                 // Live feedback: open this to watch the AI's actual prompt + output for
                 // the audit (so you can trust it's really working, not hung). Shown ONLY for
@@ -2053,7 +2159,21 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 project_id: project_id.clone(),
                                 counts: Some(triage_counts),
                                 review: Some(review.clone()),
-                                on_open_stats: Callback::new(move |()| stats_open.set(true)),
+                                on_open_stats: {
+                                    let advisory_pid = project_id.clone();
+                                    Callback::new(move |()| {
+                                        stats_open.set(true);
+                                        advisory_panel.set(Some(
+                                            camerata_ui_core::rewrite_advisory::PanelState::Loading,
+                                        ));
+                                        let pid = advisory_pid.clone();
+                                        spawn(async move {
+                                            let state =
+                                                super::review::fetch_rewrite_advisory(&pid).await;
+                                            advisory_panel.set(Some(state));
+                                        });
+                                    })
+                                },
                             }
                         }
                     }

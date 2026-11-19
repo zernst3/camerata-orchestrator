@@ -26,7 +26,7 @@ fn plain_text(html: &str) -> String {
 
 #[test]
 fn every_detail_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 24, "every detail state is built");
+    assert_eq!(states().len(), 26, "every detail state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");
@@ -66,7 +66,7 @@ fn detail_plain_has_the_whole_pane_and_none_of_the_marks() {
     ] {
         assert!(html.contains(want), "no `{want}`");
     }
-    assert_eq!(html.matches("site-detail-edit").count(), 9);
+    assert_eq!(html.matches("site-detail-edit").count(), 10);
     for absent in [
         "mark-stale",
         "mark-moved",
@@ -303,7 +303,7 @@ fn detail_merge_picker_lists_the_possible_duplicate_first() {
     let html = plain_text(&page("detail/merge-picker-duplicate-first"));
     let first_item = html.find("site-detail-candidate").expect("a candidate");
     let list = &html[first_item..];
-    let note = list.find("possible duplicate").expect("the duplicate note");
+    let note = list.find("Possible duplicate").expect("the duplicate note");
     let label = list
         .find(&format!("{}:{}", dup.path, dup.line))
         .expect("its label");

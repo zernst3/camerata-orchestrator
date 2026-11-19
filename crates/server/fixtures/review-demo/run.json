@@ -1,5 +1,5 @@
 {
-  "about": "The inspection the review demo opens: one project, one run, 30 kept sites in four rules, 2 thrown-out sites and the group reviewer's stage 2 data (candidates, an outlier, a summary). Every site has an id that the overlays and the moved variant refer to. A site's key is worked out from its snippet when the seed runs, so nothing here names a key.",
+  "about": "The inspection the review demo opens: one project, one run, 31 kept sites in four rules, 2 thrown-out sites and the group reviewer's stage 2 data (candidates, an outlier, a summary). Every site has an id that the overlays and the moved variant refer to. A site's key is worked out from its snippet when the seed runs, so nothing here names a key.",
   "project": {
     "name": "Acme Portal",
     "client_name": "Acme Corporation",
@@ -186,6 +186,13 @@
       "title": "Search service token is in the source",
       "body": "The search service token is assigned to a constant.",
       "snippet": "const SEARCH_TOKEN: &str = \"example-search-token-00000\";"
+    },
+    {
+      "id": "sec-07", "path": "src/api/profile.rs", "line": 33,
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1", "severity": "low",
+      "title": "Profile update reads a fixed signing seed from the request",
+      "body": "A fixed seed is passed with the profile fields; the same line is the missing owner check.",
+      "snippet": "db.update_profile(body.user_id, body.fields).await?;"
     },
     {
       "id": "html-01", "path": "web/src/comments.js", "line": 17,

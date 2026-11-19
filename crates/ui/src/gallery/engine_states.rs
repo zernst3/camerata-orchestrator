@@ -76,6 +76,7 @@ states! {
     small_category => "engine/small-category",
     thrown_out_held => "engine/thrown-out-held",
     thrown_out_confirmed => "engine/thrown-out-confirmed",
+    second_look_held => "engine/second-look-held",
     floor_binds => "engine/floor-binds",
 }
 

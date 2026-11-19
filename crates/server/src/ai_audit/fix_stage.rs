@@ -330,7 +330,7 @@ pub(super) fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<String
         if text.is_empty() {
             continue;
         }
-        out.insert(id.to_string(), text.to_string());
+        out.insert(id.to_string(), crate::client_text::plain(text).into_owned());
     }
     out
 }

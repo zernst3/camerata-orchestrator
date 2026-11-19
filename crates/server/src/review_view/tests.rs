@@ -6,7 +6,7 @@ use camerata_api_types::review::{
 };
 use camerata_api_types::review_view::{Marker, MovedFromView, TreeView};
 
-use super::test_support::{compose, row, sealed, Stores, RUN};
+use super::test_support::{answer_every_pair, compose, row, sealed, Stores, RUN};
 use super::{decode_cursor, encode_cursor, severity_rank};
 use crate::onboard::Finding;
 use crate::report_export::apply_overlay;
@@ -558,6 +558,8 @@ fn after_a_rate_change_the_queue_and_the_client_export_agree_on_the_line() {
         verdicts: &[],
         moved: &moved,
         links: &[],
+        second_look_drawn: &[],
+        corpus: None,
     };
     let queue = super::ReviewComposer::new(&inputs).queue(false, 0, 100);
     let on_screen: BTreeSet<String> = queue
@@ -914,4 +916,923 @@ fn a_false_positive_after_the_no_confirms_the_throw_out_without_a_named_correcti
         (2, 1),
         "the later false positive agrees with the engine; the earlier one does not"
     );
+}
+
+// ── D2: one row per place ─────────────────────────────────────────────────────────────────
+
+/// Three rules at `src/a.rs:5` (a critical carrier, a high and a low row) and a row of a fourth
+/// rule at `src/b.rs:9`; every one of the four is an escalation candidate.
+fn placed() -> crate::onboard::SealedReport {
+    let mut rows = vec![
+        row("SEC-A", "src/a.rs", 5, "critical"),
+        row("SEC-B", "src/a.rs", 5, "high"),
+        row("SEC-C", "src/a.rs", 5, "low"),
+        row("SEC-D", "src/b.rs", 9, "medium"),
+    ];
+    // The low row is held: its quoted evidence was not found.
+    rows[2].captures.insert(
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE.to_string(),
+        "not found near the cited line".to_string(),
+    );
+    sealed(rows, |report| {
+        let key_of = |rule: &str| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.rule_id == rule)
+                .unwrap()
+                .site_key
+                .clone()
+        };
+        let (a, b, c, d) = (
+            key_of("SEC-A"),
+            key_of("SEC-B"),
+            key_of("SEC-C"),
+            key_of("SEC-D"),
+        );
+        let tree = report.tree.as_mut().unwrap();
+        // The group reviewer named the worst-ranked row of the place first, then its sibling.
+        tree.candidates = vec![
+            candidate(&c, "rule:SEC-C", EscalationReason::RuleMisfit, "low", 1),
+            candidate(
+                &d,
+                "rule:SEC-D",
+                EscalationReason::SecretExposure,
+                "medium",
+                2,
+            ),
+            candidate(
+                &b,
+                "rule:SEC-B",
+                EscalationReason::UnauthenticatedReach,
+                "high",
+                3,
+            ),
+            candidate(
+                &a,
+                "rule:SEC-A",
+                EscalationReason::NeedsMoreCode,
+                "critical",
+                4,
+            ),
+        ];
+    })
+}
+
+/// The reviewed report with the line marked from the default settings, as the loader gives it.
+fn placed_overlay(
+    sealed: &crate::onboard::SealedReport,
+    decisions: &[Decision],
+) -> crate::report_export::ReviewedReport {
+    apply_overlay(
+        &crate::report_export::re_mark_line(sealed, &Stores::default().settings),
+        decisions,
+        &[],
+        &[],
+    )
+}
+
+#[test]
+fn the_queue_lists_one_row_per_escalated_place_headed_by_the_carrier() {
+    let sealed = placed();
+    assert_eq!(sealed.tree.as_ref().unwrap().places.len(), 1);
+    let reviewed = placed_overlay(&sealed, &[]);
+    let key_of = |rule: &str| {
+        sealed
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule)
+            .unwrap()
+            .site_key
+            .clone()
+    };
+    let (q, shell) = compose(&reviewed, &Stores::default(), |c| {
+        (c.queue(true, 0, 100), c.shell())
+    });
+    assert_eq!(q.escalated.len(), 2, "four candidates at two places");
+    assert_eq!(shell.lanes.escalations, 2);
+    assert_eq!(q.below_total, 0);
+    // The place's row is the carrier; its candidate is the best-ranked one at the place.
+    let at_a = q
+        .escalated
+        .iter()
+        .find(|r| r.site.path == "src/a.rs")
+        .unwrap();
+    assert_eq!(
+        at_a.site.site_key,
+        key_of("SEC-A"),
+        "the carrier shows the place"
+    );
+    assert_eq!(
+        at_a.candidate.key,
+        key_of("SEC-C"),
+        "the best-ranked candidate"
+    );
+    assert_eq!(at_a.candidate.global_rank, 1);
+    let at_b = q
+        .escalated
+        .iter()
+        .find(|r| r.site.path == "src/b.rs")
+        .unwrap();
+    assert_eq!(at_b.site.site_key, key_of("SEC-D"));
+    assert_eq!(at_b.candidate.key, key_of("SEC-D"));
+}
+
+#[test]
+fn a_carrier_lists_what_it_carries_and_a_carried_row_points_at_its_carrier() {
+    let sealed = placed();
+    let key_of = |rule: &str| {
+        sealed
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule)
+            .unwrap()
+            .site_key
+            .clone()
+    };
+    let (a, b, c) = (key_of("SEC-A"), key_of("SEC-B"), key_of("SEC-C"));
+    let own = decision("d-1", &b, DecisionState::FalsePositive, RUN);
+    let reviewed = placed_overlay(&sealed, &[own]);
+    let page = compose(&reviewed, &Stores::default(), |c| {
+        c.sites_page("rule:SEC-A", None, 500).unwrap()
+    });
+    let carrier = page.rows.iter().find(|r| r.site_key == a).unwrap();
+    assert!(
+        carrier.place_id.starts_with("place:"),
+        "{}",
+        carrier.place_id
+    );
+    assert!(carrier.carried_by.is_none());
+    let ids: Vec<&str> = carrier.carries.iter().map(|x| x.rule_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["SEC-B", "SEC-C"],
+        "the carrier first, then rank order"
+    );
+    let (cb, cc) = (&carrier.carries[0], &carrier.carries[1]);
+    assert_eq!(
+        (cb.site_key.as_str(), cb.severity.as_str()),
+        (b.as_str(), "high")
+    );
+    assert_eq!(
+        cb.decision.as_ref().unwrap().state,
+        DecisionState::FalsePositive
+    );
+    assert!(cb.held.is_none());
+    assert_eq!(
+        cb.escalation_reason,
+        Some(EscalationReason::UnauthenticatedReach)
+    );
+    assert_eq!(cb.escalation_rank, Some(3));
+    assert_eq!(
+        (cc.site_key.as_str(), cc.severity.as_str()),
+        (c.as_str(), "low")
+    );
+    assert!(cc.held.is_some(), "a carried rule keeps its own hold");
+    assert!(cc.decision.is_none());
+
+    let carried = compose(&reviewed, &Stores::default(), |c| {
+        c.sites_page("rule:SEC-B", None, 500).unwrap()
+    });
+    let row_b = carried.rows.iter().find(|r| r.site_key == b).unwrap();
+    let by = row_b.carried_by.as_ref().expect("a pointer to the carrier");
+    assert_eq!(
+        (
+            by.site_key.as_str(),
+            by.rule_id.as_str(),
+            by.path.as_str(),
+            by.line
+        ),
+        (a.as_str(), "SEC-A", "src/a.rs", 5)
+    );
+    assert!(row_b.markers.contains(&Marker::Carried));
+    assert!(row_b.carries.is_empty());
+    assert_eq!(row_b.place_id, carrier.place_id);
+}
+
+#[test]
+fn a_carried_rows_own_sub_group_still_lists_it_and_the_node_counts_are_unchanged() {
+    let sealed = placed();
+    let reviewed = placed_overlay(&sealed, &[]);
+    let (view, page) = compose(&reviewed, &Stores::default(), |c| {
+        (c.tree(), c.sites_page("sub:SEC-C/0", None, 500))
+    });
+    let tree = sealed.tree.as_ref().unwrap();
+    let node = view.nodes.iter().find(|n| n.id == "rule:SEC-C").unwrap();
+    assert_eq!(node.counts.sites, 1, "a node's sites stay honest");
+    assert_eq!(tree.counts("rule:SEC-C").sites, 1);
+    let page = page.expect("the carried row's own sub-group");
+    assert_eq!(page.rows.len(), 1);
+    assert!(page.rows[0].carried_by.is_some());
+}
+
+#[test]
+fn a_carried_row_knows_when_its_carrier_has_been_decided() {
+    let sealed = placed();
+    let key_of = |rule: &str| {
+        sealed
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule)
+            .unwrap()
+            .site_key
+            .clone()
+    };
+    let page = |decisions: &[Decision]| {
+        let reviewed = placed_overlay(&sealed, decisions);
+        compose(&reviewed, &Stores::default(), |c| {
+            c.sites_page("rule:SEC-B", None, 500).unwrap()
+        })
+    };
+    let b = key_of("SEC-B");
+    let before = page(&[]);
+    let row = before.rows.iter().find(|r| r.site_key == b).unwrap();
+    assert!(!row.carried_by.as_ref().unwrap().decided);
+    let carrier_decision = decision("d-9", &key_of("SEC-A"), DecisionState::Confirmed, RUN);
+    let after = page(&[carrier_decision]);
+    let row = after.rows.iter().find(|r| r.site_key == b).unwrap();
+    assert!(
+        row.decision.is_none(),
+        "the carried row has none of its own"
+    );
+    assert!(row.carried_by.as_ref().unwrap().decided);
+}
+
+#[test]
+fn a_site_row_carries_the_possible_false_positive_flag_and_nothing_else_changes() {
+    use camerata_api_types::review::FpReason;
+    let mut in_test = row("SEC-NO-RAW-SQL-CONCAT-1", "tests/orders_test.rs", 9, "high");
+    in_test.in_test = true;
+    let plain = row("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 30, "high");
+    let sealed = sealed(vec![in_test, plain], |_| {});
+    let flagged_key = key_of(&sealed, "tests/orders_test.rs");
+    let plain_key = key_of(&sealed, "src/orders.rs");
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let rows = compose(&reviewed, &Stores::default(), |c| {
+        c.sites_page("rule:SEC-NO-RAW-SQL-CONCAT-1", None, 500)
+            .unwrap()
+    })
+    .rows;
+    assert_eq!(rows.len(), 2, "the flag adds and drops no row");
+    let flagged = rows.iter().find(|r| r.site_key == flagged_key).unwrap();
+    let other = rows.iter().find(|r| r.site_key == plain_key).unwrap();
+    assert_eq!(
+        flagged
+            .possible_false_positive
+            .as_ref()
+            .map(|p| p.reasons.clone()),
+        Some(vec![FpReason::TestCodeOnly])
+    );
+    assert!(flagged.markers.contains(&Marker::PossibleFalsePositive));
+    assert_eq!(other.possible_false_positive, None);
+    assert!(!other.markers.contains(&Marker::PossibleFalsePositive));
+    // The row is as the engine left it: same severity, same kind, no decision.
+    let source = sealed
+        .findings
+        .iter()
+        .find(|f| f.site_key == flagged_key)
+        .unwrap();
+    assert_eq!(flagged.severity, source.severity);
+    assert_eq!(flagged.kind, source.kind);
+    assert_eq!(flagged.decision, None);
+    // The client never reads a site row, but the wire leaves the key off an unflagged row.
+    let wire = serde_json::to_string(other).unwrap();
+    assert!(!wire.contains("possible_false_positive"), "{wire}");
+}
+
+#[test]
+fn a_pair_the_model_did_not_call_the_same_flaw_is_not_linked_in_the_review_view() {
+    use crate::possible_duplicate::check::Verdict;
+    for answer in [Some(Verdict::Different), Some(Verdict::Unclear), None] {
+        let sql = row("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        let authz = row("SEC-AUTHZ-4", "src/orders.rs", 12, "high");
+        let sealed = sealed(vec![sql, authz], |r| {
+            if let Some(v) = answer {
+                answer_every_pair(r, v, "a reason");
+            }
+        });
+        let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+        let rows = compose(&reviewed, &Stores::default(), |c| {
+            c.sites_page("rule:SEC-NO-RAW-SQL-CONCAT-1", None, 500)
+                .unwrap()
+        })
+        .rows;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].same_place_as.is_empty(), "{answer:?}");
+        assert!(!rows[0].markers.contains(&Marker::PossibleDuplicate));
+    }
+}
+
+#[test]
+fn a_site_row_names_the_other_cause_at_the_same_place_and_nothing_else_changes() {
+    let sql = row("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+    let authz = row("SEC-AUTHZ-4", "src/orders.rs", 12, "high");
+    let far = row("SEC-NO-RAW-SQL-CONCAT-1", "src/other.rs", 40, "high");
+    let sealed = sealed(vec![sql, authz, far], |r| {
+        answer_every_pair(
+            r,
+            crate::possible_duplicate::check::Verdict::Same,
+            "Both name the missing owner check.",
+        )
+    });
+    let sql_key = key_of(&sealed, "src/orders.rs");
+    let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+    let sites = |node: &str| {
+        compose(&reviewed, &Stores::default(), |c| {
+            c.sites_page(node, None, 500).unwrap()
+        })
+        .rows
+    };
+    let sql_rows = sites("rule:SEC-NO-RAW-SQL-CONCAT-1");
+    let authz_rows = sites("rule:SEC-AUTHZ-4");
+    assert_eq!(
+        sql_rows.len() + authz_rows.len(),
+        3,
+        "the hint drops no row"
+    );
+    let at_orders = sql_rows.iter().find(|r| r.path == "src/orders.rs").unwrap();
+    assert_eq!(at_orders.site_key, sql_key);
+    let other = &authz_rows[0];
+    assert_eq!(at_orders.same_place_as.len(), 1);
+    assert_eq!(at_orders.same_place_as[0].key, other.site_key);
+    assert_eq!(at_orders.same_place_as[0].rule_id, "SEC-AUTHZ-4");
+    assert_eq!(at_orders.same_place_as[0].line, 12);
+    assert_eq!(at_orders.same_place_as[0].group_id, other.group_path[2]);
+    assert!(!at_orders.same_place_as[0].title.is_empty());
+    assert_eq!(
+        at_orders.same_place_as[0].reason, "Both name the missing owner check.",
+        "the model's reason rides on the link"
+    );
+    assert_eq!(other.same_place_as[0].key, at_orders.site_key);
+    for r in [at_orders, other] {
+        assert!(r.markers.contains(&Marker::PossibleDuplicate), "{r:?}");
+        assert_eq!(r.decision, None);
+    }
+    let alone = sql_rows.iter().find(|r| r.path == "src/other.rs").unwrap();
+    assert!(alone.same_place_as.is_empty());
+    assert!(!alone.markers.contains(&Marker::PossibleDuplicate));
+    // The row is as the engine left it.
+    for r in [at_orders, other] {
+        let source = sealed
+            .findings
+            .iter()
+            .find(|f| f.site_key == r.site_key)
+            .unwrap();
+        assert_eq!(r.severity, source.severity);
+        assert_eq!(r.kind, source.kind);
+    }
+    let wire = serde_json::to_string(alone).unwrap();
+    assert!(!wire.contains("same_place_as"), "{wire}");
+}
+
+// ── the second look at rows ruled out while flagged ───────────────────────────────────────
+
+/// `flagged` rows in test code (the engine flags them "possible false positive") and `plain` rows
+/// in production code, one rule, sealed.
+fn flagged_and_plain(flagged: usize, plain: usize) -> crate::onboard::SealedReport {
+    let mut rows: Vec<Finding> = (0..flagged)
+        .map(|i| {
+            let mut f = row(
+                "SEC-NO-RAW-SQL-CONCAT-1",
+                &format!("src/t{i:02}.rs"),
+                10 + i,
+                "high",
+            );
+            f.in_test = true;
+            f
+        })
+        .collect();
+    rows.extend((0..plain).map(|i| {
+        row(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            &format!("src/p{i:02}.rs"),
+            10 + i,
+            "high",
+        )
+    }));
+    sealed(rows, |_| {})
+}
+
+fn ruling(n: usize, key: &str) -> Decision {
+    decision(
+        &format!("dec-{n:06}"),
+        key,
+        DecisionState::FalsePositive,
+        RUN,
+    )
+}
+
+/// The keys of the cards of `stratum`, in card order.
+fn cards_of(
+    lane: &camerata_api_types::review_view::EngineCheckLane,
+    stratum: camerata_api_types::review_view::SampleStratum,
+) -> Vec<String> {
+    lane.cards
+        .iter()
+        .filter(|c| c.stratum == stratum)
+        .map(|c| c.site.site_key.clone())
+        .collect()
+}
+
+fn flagged_keys(report: &crate::onboard::SealedReport) -> Vec<String> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.path.starts_with("src/t"))
+        .map(|f| f.site_key.clone())
+        .collect()
+}
+
+#[test]
+fn the_first_sample_is_the_same_whatever_has_been_decided_and_the_second_look_adds_its_own_cards() {
+    use camerata_api_types::review_view::SampleStratum::{Kept, RuledOutFlagged};
+    let report = flagged_and_plain(30, 10);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 8;
+
+    let undecided = apply_overlay(&report, &[], &[], &[]);
+    let before = compose(&undecided, &stores, |c| c.engine_check());
+    assert!(
+        cards_of(&before, RuledOutFlagged).is_empty(),
+        "nothing ruled out yet"
+    );
+    assert!(
+        before.strata.iter().all(|s| s.stratum != RuledOutFlagged),
+        "no stratum for a second look that drew nothing"
+    );
+
+    // Ten flagged rows (none in the first sample) and one plain row ruled out.
+    let in_first: Vec<String> = cards_of(&before, Kept);
+    let flagged: Vec<String> = flagged_keys(&report)
+        .into_iter()
+        .filter(|k| !in_first.contains(k))
+        .collect();
+    assert!(flagged.len() >= 16);
+    let plain = report
+        .findings
+        .iter()
+        .find(|f| f.path.starts_with("src/"))
+        .unwrap()
+        .site_key
+        .clone();
+    let mut decisions: Vec<Decision> = flagged
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    decisions.push(ruling(11, &plain));
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let after = compose(&reviewed, &stores, |c| c.engine_check());
+
+    // The first sample does not move: the same cards in the same order, the same count.
+    assert_eq!(cards_of(&after, Kept), cards_of(&before, Kept));
+    assert_eq!(after.drawn, before.drawn);
+
+    // The second look: 3 of the 10 ruled-out flagged rows, none of them the plain row.
+    let second = cards_of(&after, RuledOutFlagged);
+    assert_eq!(second.len(), 3, "{second:?}");
+    assert!(second.iter().all(|k| flagged.contains(k)), "{second:?}");
+    assert!(!second.contains(&plain));
+    assert_eq!(after.ruled_out_flagged_total, 10);
+    let rate = after
+        .strata
+        .iter()
+        .find(|s| s.stratum == RuledOutFlagged)
+        .expect("its own stratum");
+    assert_eq!((rate.drawn, rate.verdicts, rate.wrong), (3, 0, 0));
+    assert_eq!(
+        compose(&reviewed, &stores, |c| c.shell())
+            .lanes
+            .engine_check,
+        after.drawn + 3
+    );
+
+    // More rulings: the same cards stay, and the share grows (16 rows, 4 cards).
+    let more: Vec<Decision> = flagged
+        .iter()
+        .take(16)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &more, &[], &[]);
+    let later = compose(&reviewed, &stores, |c| c.engine_check());
+    let grown = cards_of(&later, RuledOutFlagged);
+    assert_eq!(grown.len(), 4, "{grown:?}");
+    assert!(
+        second.iter().all(|k| grown.contains(k)),
+        "{second:?} -> {grown:?}"
+    );
+    assert_eq!(cards_of(&later, Kept), cards_of(&before, Kept));
+}
+
+#[test]
+fn a_flagged_row_the_first_sample_already_holds_is_not_drawn_twice() {
+    use camerata_api_types::review_view::SampleStratum::{Kept, RuledOutFlagged};
+    let report = flagged_and_plain(6, 0);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 6;
+    let all = flagged_keys(&report);
+    let decisions: Vec<Decision> = all
+        .iter()
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    let first = cards_of(&lane, Kept);
+    assert_eq!(first.len(), 6, "the first sample holds every row");
+    assert!(
+        cards_of(&lane, RuledOutFlagged).is_empty(),
+        "a row already carded once is not carded again"
+    );
+}
+
+#[test]
+fn an_uncorrected_no_on_a_second_look_card_holds_the_row_and_a_later_decision_frees_it() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    use camerata_api_types::review_view::{EngineCheckError, EngineCheckVerdict};
+    let report = flagged_and_plain(12, 0);
+    let flagged = flagged_keys(&report);
+    let mut stores = Stores::default();
+    // A sample of 0 turns the lane off; one row keeps the first sample from holding the rest.
+    stores.settings.sample_size_per_run = 1;
+    let decisions: Vec<Decision> = flagged
+        .iter()
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    let second = cards_of(&lane, RuledOutFlagged);
+    assert!(!second.is_empty());
+    let key = second[0].clone();
+
+    // A No, given after the ruling (the verdict is later than the decision's 09:00).
+    let no = EngineCheckVerdict {
+        key: key.clone(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        carried_from: None,
+    };
+    stores.verdicts = vec![no.clone()];
+    let held = compose(&reviewed, &stores, |c| c.engine_check());
+    let card = held.cards.iter().find(|c| c.site.site_key == key).unwrap();
+    assert_eq!(card.stratum, RuledOutFlagged);
+    assert_eq!(
+        card.site.held,
+        Some(camerata_api_types::review_view::HoldReason::EngineCheckNoWithoutCorrection),
+        "the uncorrected No holds the row from export"
+    );
+    let rate = held
+        .strata
+        .iter()
+        .find(|s| s.stratum == RuledOutFlagged)
+        .unwrap();
+    assert_eq!(
+        (rate.verdicts, rate.wrong),
+        (1, 1),
+        "a No is a wrong ruling"
+    );
+
+    // Ruling it out again, later than the No, is not a correction.
+    let mut re_ruled = decision("dec-000098", &key, DecisionState::FalsePositive, RUN);
+    re_ruled.decided_at = "2026-11-04T10:30:00Z".to_string();
+    let mut with_re_ruling = decisions.clone();
+    with_re_ruling.push(re_ruled);
+    assert_eq!(
+        crate::engine_check::uncorrected_keys(&stores.verdicts, RUN, &with_re_ruling, &[]),
+        vec![key.clone()],
+        "ruling it out again does not free it"
+    );
+
+    // Keeping the row as a problem, later than the No, is the correction.
+    let mut again = decision("dec-000099", &key, DecisionState::Confirmed, RUN);
+    again.decided_at = "2026-11-04T11:00:00Z".to_string();
+    let mut all = decisions.clone();
+    all.push(again);
+    let freed = apply_overlay(&report, &all, &[], &[]);
+    let lane = compose(&freed, &stores, |c| c.engine_check());
+    let card = lane.cards.iter().find(|c| c.site.site_key == key);
+    assert!(
+        card.is_none_or(|c| c.site.held.is_none()),
+        "a later decision clears the hold"
+    );
+}
+
+/// Compose the lane the way the route does: the drawn keys the store holds go in, and the keys
+/// the composer drew new go into the store.
+fn lane_persisting(
+    reviewed: &crate::report_export::ReviewedReport,
+    stores: &mut Stores,
+) -> camerata_api_types::review_view::EngineCheckLane {
+    let (lane, added) = compose(reviewed, stores, |c| {
+        (c.engine_check(), c.second_look_added())
+    });
+    stores.second_look.extend(added);
+    lane
+}
+
+/// A report of 30 flagged and 10 plain rows, the first sample of 8 drawn, and ten flagged rows
+/// outside that sample ruled out: the rulings, the report and the stores with the second look
+/// drawn once (3 cards).
+fn drawn_once() -> (
+    crate::onboard::SealedReport,
+    Vec<Decision>,
+    Stores,
+    Vec<String>,
+) {
+    use camerata_api_types::review_view::SampleStratum::{Kept, RuledOutFlagged};
+    let report = flagged_and_plain(30, 10);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 8;
+    let undecided = apply_overlay(&report, &[], &[], &[]);
+    let in_first = cards_of(&compose(&undecided, &stores, |c| c.engine_check()), Kept);
+    let decisions: Vec<Decision> = flagged_keys(&report)
+        .into_iter()
+        .filter(|k| !in_first.contains(k))
+        .take(10)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, &k))
+        .collect();
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let drawn = cards_of(&lane_persisting(&reviewed, &mut stores), RuledOutFlagged);
+    assert_eq!(drawn.len(), 3);
+    (report, decisions, stores, drawn)
+}
+
+fn assert_all_still_carded(
+    lane: &camerata_api_types::review_view::EngineCheckLane,
+    drawn: &[String],
+    what: &str,
+) {
+    for key in drawn {
+        assert!(
+            lane.cards.iter().any(|c| c.site.site_key == *key),
+            "{what}: the card of {key} is gone"
+        );
+    }
+}
+
+#[test]
+fn a_drawn_card_stays_when_another_ruling_is_undone_or_a_row_is_ruled_out_again() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, decisions, mut stores, drawn) = drawn_once();
+
+    // Another ruling undone (the last ruling is not a drawn row): the pool changes.
+    let undone: Vec<Decision> = decisions
+        .iter()
+        .filter(|d| !drawn.contains(&d.key))
+        .skip(1)
+        .cloned()
+        .collect();
+    let reviewed = apply_overlay(&report, &undone, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_all_still_carded(&lane, &drawn, "another ruling undone");
+
+    // A drawn row ruled out again (its record moves to the end of the order).
+    let mut again = decisions.clone();
+    again.push(ruling(99, &drawn[0]));
+    let reviewed = apply_overlay(&report, &again, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_all_still_carded(&lane, &drawn, "a row ruled out again");
+    assert!(drawn
+        .iter()
+        .all(|k| cards_of(&lane, RuledOutFlagged).contains(k)));
+}
+
+#[test]
+fn a_drawn_card_stays_when_the_flag_goes_or_the_sample_size_changes() {
+    let (report, decisions, mut stores, drawn) = drawn_once();
+
+    // The flag goes from a drawn row (its test scope is lifted).
+    let mut rows = report.findings.clone();
+    for f in rows.iter_mut().filter(|f| f.site_key == drawn[0]) {
+        f.in_test = false;
+    }
+    let unflagged = sealed(rows, |_| {});
+    let reviewed = apply_overlay(&unflagged, &decisions, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_all_still_carded(&lane, &drawn, "the flag removed");
+
+    // A smaller and a larger sample.
+    for size in [2, 20] {
+        stores.settings.sample_size_per_run = size;
+        let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+        let lane = lane_persisting(&reviewed, &mut stores);
+        assert_all_still_carded(&lane, &drawn, &format!("sample size {size}"));
+    }
+}
+
+#[test]
+fn a_row_with_a_standing_second_look_no_always_has_its_card() {
+    use camerata_api_types::review_view::EngineCheckError;
+    use camerata_api_types::review_view::EngineCheckVerdict;
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, decisions, mut stores, drawn) = drawn_once();
+    // A ruled-out flagged row the draw did not take, with a No stored on it, and nothing
+    // persisted (an older store).
+    let other = decisions
+        .iter()
+        .map(|d| d.key.clone())
+        .find(|k| !drawn.contains(k))
+        .unwrap();
+    stores.second_look.clear();
+    stores.verdicts = vec![EngineCheckVerdict {
+        key: other.clone(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        carried_from: None,
+    }];
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    assert!(cards_of(&lane, RuledOutFlagged).contains(&other));
+}
+
+#[test]
+fn the_second_look_rate_keeps_a_no_after_the_row_is_corrected() {
+    use camerata_api_types::review_view::EngineCheckError;
+    use camerata_api_types::review_view::EngineCheckVerdict;
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, mut decisions, mut stores, drawn) = drawn_once();
+    stores.verdicts = vec![EngineCheckVerdict {
+        key: drawn[0].clone(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::RuledOutRealProblem),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        carried_from: None,
+    }];
+    let rate_of = |lane: &camerata_api_types::review_view::EngineCheckLane| {
+        let s = lane
+            .strata
+            .iter()
+            .find(|s| s.stratum == RuledOutFlagged)
+            .expect("its own stratum");
+        (s.drawn, s.verdicts, s.wrong)
+    };
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    assert_eq!(rate_of(&lane_persisting(&reviewed, &mut stores)), (3, 1, 1));
+
+    // The row is kept as a problem (corrected), so it is no longer ruled out: the rate stays.
+    let mut kept = decision("dec-000050", &drawn[0], DecisionState::Confirmed, RUN);
+    kept.decided_at = "2026-11-04T11:00:00Z".to_string();
+    decisions.push(kept);
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    // The draw gained one replacement for the row that left the pool; nothing was removed.
+    assert_eq!(
+        rate_of(&lane),
+        (4, 1, 1),
+        "the corrected row's No still counts"
+    );
+}
+
+#[test]
+fn a_sample_size_of_zero_keeps_the_second_look_on() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let report = flagged_and_plain(12, 0);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 0;
+    let decisions: Vec<Decision> = flagged_keys(&report)
+        .iter()
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_eq!(cards_of(&lane, RuledOutFlagged).len(), 3);
+    assert!(!lane.off, "the lane has cards, so it is not off");
+    assert_eq!(lane.drawn, 0, "the first sample draws nothing");
+    let shell = compose(&reviewed, &stores, |c| c.shell());
+    assert!(!shell.lanes.engine_check_off);
+    assert_eq!(shell.lanes.engine_check, 3);
+
+    // With nothing ruled out the lane is off, as before.
+    let none = apply_overlay(&report, &[], &[], &[]);
+    let mut fresh = Stores::default();
+    fresh.settings.sample_size_per_run = 0;
+    let lane = compose(&none, &fresh, |c| c.engine_check());
+    assert!(lane.off && lane.cards.is_empty());
+}
+
+// ── the second look's share counts only rows still ruled out ───────────────────────────────
+
+/// A 30 flagged and 10 plain row report with a first sample of 8, and the flagged keys outside
+/// that sample, in key order.
+fn flagged_outside_the_first_sample() -> (crate::onboard::SealedReport, Stores, Vec<String>) {
+    use camerata_api_types::review_view::SampleStratum::Kept;
+    let report = flagged_and_plain(30, 10);
+    let mut stores = Stores::default();
+    stores.settings.sample_size_per_run = 8;
+    let undecided = apply_overlay(&report, &[], &[], &[]);
+    let in_first = cards_of(&compose(&undecided, &stores, |c| c.engine_check()), Kept);
+    let outside: Vec<String> = flagged_keys(&report)
+        .into_iter()
+        .filter(|k| !in_first.contains(k))
+        .collect();
+    assert!(outside.len() >= 20);
+    (report, stores, outside)
+}
+
+fn no_on(key: &str, carried: Option<&str>) -> camerata_api_types::review_view::EngineCheckVerdict {
+    camerata_api_types::review_view::EngineCheckVerdict {
+        key: key.to_string(),
+        run_id: RUN.to_string(),
+        right: false,
+        wrong: Some(camerata_api_types::review_view::EngineCheckError::RuledOutRealProblem),
+        correction: None,
+        by: "zach".to_string(),
+        at: "2026-11-04T10:00:00Z".to_string(),
+        carried_from: carried.map(str::to_string),
+    }
+}
+
+#[test]
+fn rows_drawn_and_since_un_ruled_do_not_use_up_the_second_looks_share() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, mut stores, outside) = flagged_outside_the_first_sample();
+    let first_three: Vec<Decision> = outside
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &first_three, &[], &[]);
+    let drawn = cards_of(&lane_persisting(&reviewed, &mut stores), RuledOutFlagged);
+    assert_eq!(drawn.len(), 3);
+
+    // All three answered No and kept as problems, then fifteen more ruled out.
+    stores.verdicts = drawn.iter().map(|k| no_on(k, None)).collect();
+    let mut decisions: Vec<Decision> = drawn
+        .iter()
+        .enumerate()
+        .map(|(i, k)| decision(&format!("dec-0001{i:02}"), k, DecisionState::Confirmed, RUN))
+        .collect();
+    decisions.extend(
+        outside
+            .iter()
+            .filter(|k| !drawn.contains(k))
+            .take(15)
+            .enumerate()
+            .map(|(i, k)| ruling(i + 10, k)),
+    );
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    let cards = cards_of(&lane, RuledOutFlagged);
+    assert_all_still_carded(&lane, &drawn, "the kept rows");
+    assert_eq!(cards.len(), 6, "three kept, three new: {cards:?}");
+}
+
+#[test]
+fn a_drawn_row_with_a_no_is_counted_once_toward_the_share() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, mut stores, outside) = flagged_outside_the_first_sample();
+    let first_three: Vec<Decision> = outside
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &first_three, &[], &[]);
+    let drawn = cards_of(&lane_persisting(&reviewed, &mut stores), RuledOutFlagged);
+    // Still ruled out, each with a No (drawn and standing), and the pool grows to 16: a share of 4.
+    stores.verdicts = drawn.iter().map(|k| no_on(k, None)).collect();
+    let all: Vec<Decision> = outside
+        .iter()
+        .take(16)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    let reviewed = apply_overlay(&report, &all, &[], &[]);
+    let lane = lane_persisting(&reviewed, &mut stores);
+    assert_eq!(cards_of(&lane, RuledOutFlagged).len(), 4);
+}
+
+#[test]
+fn a_no_carried_from_an_earlier_run_still_has_its_card() {
+    use camerata_api_types::review_view::SampleStratum::RuledOutFlagged;
+    let (report, mut stores, outside) = flagged_outside_the_first_sample();
+    let decisions: Vec<Decision> = outside
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(i, k)| ruling(i + 1, k))
+        .collect();
+    // A resume with a new run id: nothing drawn here yet, and the No arrives marked carried.
+    let carried = outside[9].clone();
+    stores.verdicts = vec![no_on(&carried, Some("insp-0"))];
+    let reviewed = apply_overlay(&report, &decisions, &[], &[]);
+    let lane = compose(&reviewed, &stores, |c| c.engine_check());
+    assert!(cards_of(&lane, RuledOutFlagged).contains(&carried));
 }

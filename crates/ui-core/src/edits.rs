@@ -25,7 +25,7 @@ use camerata_api_types::edits::{
     AddFindingReq, ClientAckReq, EditField, FindingAdded, NewEditReq, KNOWN_CATEGORIES,
 };
 use camerata_api_types::review::{DisagreementField, EscalationState, ReviewLevel};
-use camerata_api_types::review_view::{DecisionView, EditView, SiteRow, TreeLevel};
+use camerata_api_types::review_view::{AppliedBound, DecisionView, EditView, SiteRow, TreeLevel};
 
 use crate::tree::state::{TreeIndex, TreeState};
 use crate::tree::{decision_label, kind_tag_of, marker_chips, outlier_phrase, short_date, Chip};
@@ -35,8 +35,8 @@ use crate::triage::UNDO_WINDOW_MS;
 // ── The editable fields ───────────────────────────────────────────────────────────────────
 
 /// The fields a site's own detail edits, in the order spec section 3 lists them. The node
-/// summary is the ninth field of [`EditField::ALL`]; it is edited at the node (WO10).
-pub const SITE_FIELDS: [EditField; 9] = [
+/// summary and the two client reasons of a Fix are edited at the node (WO10).
+pub const SITE_FIELDS: [EditField; 10] = [
     EditField::Headline,
     EditField::Detail,
     EditField::Fix,
@@ -46,6 +46,7 @@ pub const SITE_FIELDS: [EditField; 9] = [
     EditField::Kind,
     EditField::Category,
     EditField::Subgroup,
+    EditField::Business,
 ];
 
 /// The severities a reviewer can set (spec section 3). The server also takes `info`, which only
@@ -68,6 +69,9 @@ pub fn field_label(field: EditField) -> &'static str {
         EditField::Category => "Category",
         EditField::Subgroup => "Sub-group",
         EditField::Summary => "Summary",
+        EditField::WhyBusiness => "Why it matters to the business",
+        EditField::WhyTechnical => "Why it matters technically",
+        EditField::Business => "Why it matters to the business (this place)",
     }
 }
 
@@ -86,7 +90,8 @@ pub fn chord_letter(field: EditField) -> Option<char> {
         EditField::Kind => Some('K'),
         EditField::Category => Some('G'),
         EditField::Subgroup => Some('U'),
-        EditField::Summary => None,
+        EditField::Business => Some('B'),
+        EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical => None,
     }
 }
 
@@ -254,7 +259,7 @@ pub fn context_for(
 pub fn control_for(field: EditField, row: &SiteRow, ctx: &DetailContext) -> Control {
     match field {
         EditField::Headline => Control::Line,
-        EditField::Detail | EditField::Fix => Control::Multi,
+        EditField::Detail | EditField::Fix | EditField::Business => Control::Multi,
         EditField::FixType => {
             Control::Select(FIX_TYPES.iter().map(|f| ControlOption::same(f)).collect())
         }
@@ -296,7 +301,9 @@ pub fn control_for(field: EditField, row: &SiteRow, ctx: &DetailContext) -> Cont
             Control::Select(options)
         }
         EditField::Subgroup => Control::Split,
-        EditField::Summary => Control::NodeSummary,
+        EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical => {
+            Control::NodeSummary
+        }
     }
 }
 
@@ -339,7 +346,8 @@ pub fn current_value(row: &SiteRow, field: EditField, ctx: &DetailContext) -> St
             })
             .or_else(|| row.group_path.get(2).cloned())
             .unwrap_or_default(),
-        EditField::Summary => String::new(),
+        EditField::Business => row.why_business.clone(),
+        EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical => String::new(),
     }
 }
 
@@ -435,7 +443,10 @@ pub fn value_problem(field: EditField, new: &str) -> Option<String> {
         | EditField::Detail
         | EditField::Fix
         | EditField::RuleId
-        | EditField::Summary => new.is_empty().then(|| format!("{name} cannot be empty.")),
+        | EditField::Summary
+        | EditField::WhyBusiness
+        | EditField::WhyTechnical
+        | EditField::Business => new.is_empty().then(|| format!("{name} cannot be empty.")),
         EditField::Subgroup => new
             .is_empty()
             .then(|| "A sub-group needs a name.".to_string()),
@@ -556,7 +567,7 @@ pub struct MergeCandidate {
     /// `path:line`.
     pub label: String,
     pub rule_id: String,
-    /// "possible duplicate" for the row the engine linked.
+    /// "Possible duplicate" for the row the engine linked.
     pub note: Option<String>,
 }
 
@@ -577,10 +588,30 @@ fn merge_matches(row: &SiteRow, ctx: &DetailContext, query: &str) -> Vec<MergeCa
                     key: dup.key.clone(),
                     label: format!("{}:{}", dup.path, dup.line),
                     rule_id: dup.rule_id.clone(),
-                    note: Some("possible duplicate".to_string()),
+                    note: Some("Possible duplicate".to_string()),
                 });
             }
         }
+    }
+    // The other causes at this place: one row each, listed after the engine's own link.
+    for other in &row.same_place_as {
+        if other.key == row.site_key || out.iter().any(|c| c.key == other.key) {
+            continue;
+        }
+        if ctx
+            .pool
+            .iter()
+            .find(|p| p.key == other.key)
+            .is_some_and(|p| p.merged)
+        {
+            continue;
+        }
+        out.push(MergeCandidate {
+            key: other.key.clone(),
+            label: format!("{}:{}", row.path, other.line),
+            rule_id: other.rule_id.clone(),
+            note: Some("same place".to_string()),
+        });
     }
     let query = query.trim().to_lowercase();
     for site in &ctx.pool {
@@ -1252,6 +1283,7 @@ pub fn head_chips(row: &SiteRow) -> Vec<Chip> {
             chip
         })
         .collect();
+    chips.extend(crate::tree::place::also_match_chip(row));
     if row.added_by_reviewer && !chips.iter().any(|c| c.class == "mark-edited") {
         chips.push(Chip {
             class: "mark-edited",
@@ -1301,6 +1333,60 @@ pub fn severity_note(row: &SiteRow) -> Option<String> {
             d.stage1, d.mine
         )
     })
+}
+
+/// What the rule itself says about the row's severity, in plain words, written after the severity
+/// on the row detail: which bound changed it and from what, or (a bound that changed nothing) the
+/// rule's bounds quietly. `None` for a row with neither. The UI only words what the server
+/// carried; it never works a severity out.
+pub fn severity_bounds_note(row: &SiteRow) -> Option<String> {
+    let b = row.severity_bounds.as_ref()?;
+    if !b.applied.is_empty() {
+        let said = |bound: &Option<String>, label: &str| match bound {
+            Some(v) => format!(" ({label} {v})"),
+            None => String::new(),
+        };
+        let steps: Vec<String> = b
+            .applied
+            .iter()
+            .map(|step| {
+                let from = &step.from;
+                match step.bound {
+                    AppliedBound::Floor => format!(
+                        "raised from {from} by the rule's floor{}",
+                        said(&b.floor, "at least")
+                    ),
+                    AppliedBound::Ceiling => format!(
+                        "capped from {from} by the rule's ceiling{}",
+                        said(&b.ceiling, "at most")
+                    ),
+                    AppliedBound::DeviationCeiling => match &b.deviation_ceiling {
+                        Some(v) => {
+                            format!("capped from {from}: a consistency deviation is at most {v}")
+                        }
+                        None => {
+                            format!("capped from {from}: the ceiling for a consistency deviation")
+                        }
+                    },
+                    AppliedBound::NoLocation => {
+                        "set to info: the row has no file and line".to_string()
+                    }
+                }
+            })
+            .collect();
+        return Some(steps.join(", then "));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = &b.floor {
+        parts.push(format!("at least {v}"));
+    }
+    if let Some(v) = &b.ceiling {
+        parts.push(format!("at most {v}"));
+    }
+    if let Some(v) = &b.deviation_ceiling {
+        parts.push(format!("a consistency deviation is at most {v}"));
+    }
+    (!parts.is_empty()).then(|| format!("rule: {}", parts.join(", ")))
 }
 
 /// The Stage 1 line: `high · real yes · effort low · "the key is a literal"`; `None` when stage 1
@@ -1375,6 +1461,75 @@ pub fn flagged_by_line(row: &SiteRow) -> Option<String> {
 }
 
 /// The possible-duplicate line: `SEC-KEY-2 at web/env.ts:3`, with the engine's hint.
+/// The detail's Possible false positive lines: each reason the engine has to doubt the row, as
+/// its short name and its sentence, in the order the row lists them. Empty for a row with none.
+pub fn possible_false_positive_lines(row: &SiteRow) -> Vec<(&'static str, String)> {
+    row.possible_false_positive
+        .iter()
+        .flat_map(|p| {
+            p.reasons
+                .iter()
+                .map(move |r| (r.label(), p.sentence_of(*r)))
+        })
+        .collect()
+}
+
+/// One entry of the detail's "Possible duplicate of" line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateEntry {
+    /// A key no other entry of the line shares (the site key of the other row, or `engine-link`),
+    /// for the list, whatever the labels say.
+    pub key: String,
+    /// What the line shows: the engine's `SEC-KEY-2 at web/env.ts:3`, or the other cause's title.
+    pub label: String,
+    /// The hover text.
+    pub hint: String,
+    /// Where the label opens: the other cause's row (site key, rule id, sub-group). `None` for the
+    /// engine's own link, which is plain text.
+    pub goto: Option<(String, String, String)>,
+}
+
+/// The entries of the "Possible duplicate of" line: the engine's link first, then each other
+/// cause with a row at the same place, nearest first, each row once. Empty for a row with none.
+pub fn duplicate_entries(row: &SiteRow) -> Vec<DuplicateEntry> {
+    let mut out = Vec::new();
+    if let Some((label, hint)) = duplicate_line(row) {
+        out.push(DuplicateEntry {
+            key: "engine-link".to_string(),
+            label,
+            hint,
+            goto: None,
+        });
+    }
+    let linked = row.possible_duplicate_of.as_ref().map(|d| d.key.as_str());
+    for other in &row.same_place_as {
+        if Some(other.key.as_str()) == linked {
+            continue;
+        }
+        out.push(DuplicateEntry {
+            key: other.key.clone(),
+            label: other.title.clone(),
+            hint: {
+                let place = format!(
+                    "{} at line {}, another cause at the same place",
+                    other.rule_id, other.line
+                );
+                if other.reason.trim().is_empty() {
+                    place
+                } else {
+                    format!("{place}. The check says: {}", other.reason.trim())
+                }
+            },
+            goto: Some((
+                other.key.clone(),
+                other.rule_id.clone(),
+                other.group_id.clone(),
+            )),
+        });
+    }
+    out
+}
+
 pub fn duplicate_line(row: &SiteRow) -> Option<(String, String)> {
     let d = row.possible_duplicate_of.as_ref()?;
     Some((
@@ -1518,7 +1673,10 @@ pub fn reduce(
             if *field == EditField::Subgroup {
                 return reduce(mode, &DetailAction::BeginSplit, row, ctx);
             }
-            if *field == EditField::Summary {
+            if matches!(
+                field,
+                EditField::Summary | EditField::WhyBusiness | EditField::WhyTechnical
+            ) {
                 return mode;
             }
             DetailMode::Edit(EditDraft {
@@ -1536,6 +1694,7 @@ pub fn reduce(
                 .possible_duplicate_of
                 .as_ref()
                 .map(|d| d.key.clone())
+                .or_else(|| row.same_place_as.first().map(|o| o.key.clone()))
                 .filter(|k| *k != row.site_key),
             reason: String::new(),
             error: None,
@@ -1701,6 +1860,12 @@ pub fn commit(
                         .as_ref()
                         .filter(|dup| Some(&dup.key) == d.target.as_ref())
                         .map(|dup| format!("{}:{}", dup.path, dup.line))
+                })
+                .or_else(|| {
+                    row.same_place_as
+                        .iter()
+                        .find(|o| Some(&o.key) == d.target.as_ref())
+                        .map(|o| format!("{}:{}", row.path, o.line))
                 })
                 .unwrap_or_else(|| "the other site".to_string());
             Ok(DetailWrite::Decision {

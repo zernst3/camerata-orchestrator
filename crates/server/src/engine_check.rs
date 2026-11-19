@@ -24,7 +24,7 @@ use camerata_api_types::decisions::{effective_by_key, Decision};
 use camerata_api_types::edits::Edit;
 use camerata_api_types::review::EscalationState;
 use camerata_api_types::review_view::{
-    CorrectionRef, EngineCheckVerdict, EngineCheckVerdictReq, SampleStratum,
+    CorrectionRef, EngineCheckError, EngineCheckVerdict, EngineCheckVerdictReq, SampleStratum,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -46,6 +46,12 @@ pub const THROWN_OUT_SHARE_PERCENT: usize = 10;
 /// The fewest thrown-out rows a sample draws, or all of them when fewer exist.
 pub const THROWN_OUT_MINIMUM: usize = 5;
 
+/// The share of the rows the reviewer ruled out while they carried the possible false positive
+/// flag that the second look draws.
+pub const RULED_OUT_SHARE_PERCENT: usize = 20;
+/// The fewest rows the second look draws, or all of them when fewer were ruled out.
+pub const RULED_OUT_MINIMUM: usize = 3;
+
 /// Why a verdict was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCheckStoreError {
@@ -53,6 +59,8 @@ pub enum EngineCheckStoreError {
     WrongRequired,
     /// A Yes carries neither a reason it was wrong nor a correction.
     YesCarriesNothing,
+    /// The answer is not one this kind of card takes.
+    WrongAnswerForCard,
     /// The site key is blank.
     KeyRequired,
     /// The project's file was damaged when the store opened.
@@ -67,6 +75,7 @@ impl EngineCheckStoreError {
         match self {
             Self::WrongRequired => "wrong_required",
             Self::YesCarriesNothing => "yes_carries_nothing",
+            Self::WrongAnswerForCard => "wrong_answer_for_card",
             Self::KeyRequired => "key_required",
             Self::Corrupt => "store_corrupt",
             Self::Persist(_) => "persist_failed",
@@ -83,6 +92,11 @@ impl std::fmt::Display for EngineCheckStoreError {
             Self::YesCarriesNothing => write!(
                 f,
                 "A Yes records the verdict and nothing else: it names no error and no correction."
+            ),
+            Self::WrongAnswerForCard => write!(
+                f,
+                "A No on a row you ruled out says it is a real problem; that is the only No this \
+                 card takes, and no other card takes it."
             ),
             Self::KeyRequired => write!(f, "A verdict names the site it is about."),
             Self::Corrupt => write!(
@@ -104,6 +118,17 @@ struct ProjectVerdicts {
     version: u32,
     #[serde(default)]
     verdicts: Vec<EngineCheckVerdict>,
+    /// The rows the second look at rows ruled out while flagged has drawn, by run, oldest first.
+    /// Append only: a drawn row stays drawn. `serde(default)` so an older file still loads.
+    #[serde(default)]
+    second_look: Vec<SecondLookDraw>,
+}
+
+/// One row the second look drew on one run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SecondLookDraw {
+    run_id: String,
+    key: String,
 }
 
 #[derive(Deserialize)]
@@ -230,6 +255,52 @@ impl EngineCheckStore {
     /// The verdicts given on `run_id`, the LATEST one per site key.
     pub fn latest_for_run(&self, project_id: &str, run_id: &str) -> Vec<EngineCheckVerdict> {
         latest_per_key(&self.list(project_id), run_id)
+    }
+
+    /// The rows the second look has drawn on `run_id`, in the order they were drawn.
+    pub fn second_look(&self, project_id: &str, run_id: &str) -> Vec<String> {
+        self.lock()
+            .get(project_id)
+            .map(|p| {
+                p.second_look
+                    .iter()
+                    .filter(|d| d.run_id == run_id)
+                    .map(|d| d.key.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Record rows the second look drew on `run_id`. Appends the ones not already recorded and
+    /// never removes one.
+    pub fn add_second_look(
+        &self,
+        project_id: &str,
+        run_id: &str,
+        keys: &[String],
+    ) -> Result<(), EngineCheckStoreError> {
+        if self.is_corrupt(project_id) {
+            return Err(EngineCheckStoreError::Corrupt);
+        }
+        let mut guard = self.lock();
+        let mut working = guard.get(project_id).cloned().unwrap_or_default();
+        let before = working.second_look.len();
+        for key in keys {
+            let draw = SecondLookDraw {
+                run_id: run_id.to_string(),
+                key: key.clone(),
+            };
+            if !working.second_look.contains(&draw) {
+                working.second_look.push(draw);
+            }
+        }
+        if working.second_look.len() == before {
+            return Ok(());
+        }
+        self.persist_locked(project_id, &working)
+            .map_err(|e| EngineCheckStoreError::Persist(e.to_string()))?;
+        guard.insert(project_id.to_string(), working);
+        Ok(())
     }
 
     /// Record one verdict. Appends; a later verdict on the same site supersedes the earlier one.
@@ -394,6 +465,25 @@ impl EngineCheckStore {
     }
 }
 
+/// Whether `req` is an answer the card of `stratum` takes: a No on a second-look card (a row ruled
+/// out while flagged) is "ruled out, but a real problem" and nothing else, and no other card takes
+/// that No.
+pub fn answer_fits_stratum(
+    stratum: SampleStratum,
+    req: &EngineCheckVerdictReq,
+) -> Result<(), EngineCheckStoreError> {
+    let ruled_out_no = req.wrong == Some(EngineCheckError::RuledOutRealProblem);
+    let fits = match stratum {
+        SampleStratum::RuledOutFlagged => req.right || ruled_out_no,
+        SampleStratum::Kept | SampleStratum::ThrownOut => !ruled_out_no,
+    };
+    if fits {
+        Ok(())
+    } else {
+        Err(EngineCheckStoreError::WrongAnswerForCard)
+    }
+}
+
 /// What the Engine Check store holds about one run, as the release gate and the review read model
 /// need it. Built from the store by [`EngineCheckStore::evidence_for`]; a caller that holds no
 /// store (the headless `camerata inspect`, a test of something else) carries
@@ -501,6 +591,23 @@ pub fn carry_forward(
 
 // ── the hold rule ─────────────────────────────────────────────────────────────────────────
 
+/// Whether the row's standing decision rules it out, directly or by being merged into a row that
+/// is itself ruled out (a merge into a ruled-out row leaves it out of the package all the same).
+fn still_ruled_out(decided: &HashMap<&str, &Decision>, key: &str) -> bool {
+    use camerata_api_types::decisions::DecisionState;
+    let mut at = key;
+    // A merge chain is short; the bound only stops a cycle. When it runs out (a cycle, or a
+    // chain too long to follow) the answer is "still ruled out": the hold fails safe.
+    for _ in 0..8 {
+        match decided.get(at).map(|d| &d.state) {
+            Some(DecisionState::FalsePositive) => return true,
+            Some(DecisionState::MergedInto(target)) => at = target.as_str(),
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// The site keys an Engine Check No holds from the client export: the latest verdict on the site
 /// is a No, and nothing corrects it. A No is corrected when it names a correction that exists, or
 /// when the reviewer has decided the site or edited it LATER than the verdict. `decisions` and
@@ -527,6 +634,15 @@ pub fn uncorrected_keys(
         .into_iter()
         .filter(|v| !v.right)
         .filter(|v| {
+            // A No on a row ruled out while flagged says the ruling was wrong. Only un-ruling the
+            // row answers it: the row's standing decision is no longer a rule-out (a later ruling
+            // that keeps it, or the ruling undone). Another rule-out, an edit or a group rule-out
+            // does not, and nothing the No names counts.
+            if v.wrong
+                == Some(camerata_api_types::review_view::EngineCheckError::RuledOutRealProblem)
+            {
+                return still_ruled_out(&decided, &v.key);
+            }
             let named = match &v.correction {
                 Some(CorrectionRef::Decision(id)) => decisions.iter().any(|d| d.id == *id),
                 Some(CorrectionRef::Edit(id)) => edits.iter().any(|e| e.id == *id),
@@ -594,7 +710,7 @@ pub fn category_of(f: &Finding) -> String {
 
 /// A row's place in the draw order: a hash of the run and the row, so the order is fixed for a run
 /// and unrelated to anything the reviewer does.
-fn draw_order(run_id: &str, key: &str) -> u64 {
+pub(crate) fn draw_order(run_id: &str, key: &str) -> u64 {
     let digest = Sha256::digest(format!("{run_id}\u{0}{key}").as_bytes());
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
@@ -662,6 +778,44 @@ pub fn draw_sample(report: &ScanReport, size: usize, run_id: &str) -> Sample {
         ));
     }
     sample
+}
+
+/// How many rows the second look holds once `rows` rows have been ruled out while flagged.
+pub fn ruled_out_want(rows: usize) -> usize {
+    rows.min(RULED_OUT_MINIMUM.max((rows * RULED_OUT_SHARE_PERCENT).div_ceil(100)))
+}
+
+/// Draw the second look: the rows the reviewer ruled out while the engine flagged them "possible
+/// false positive". `ruled_out_in_order` is each such row once, in the order the reviewer ruled
+/// them out.
+///
+/// The second look takes [`RULED_OUT_SHARE_PERCENT`] of the rows, at least [`RULED_OUT_MINIMUM`],
+/// or all of them when fewer were ruled out. It is built one ruling at a time: after each ruling
+/// the draw is topped up to what the rows so far call for, with the row whose [`draw_order`] (a
+/// hash of the run and the row) comes first among those not yet drawn. So the draw is the same for
+/// the same run and rulings, a later ruling never takes a drawn row out (a card the reviewer
+/// already answered cannot vanish), and a later ruling can add one.
+///
+/// This draw is separate from [`draw_sample`], which it never reads or changes.
+pub fn draw_ruled_out_flagged(run_id: &str, ruled_out_in_order: &[String]) -> Vec<String> {
+    let mut drawn: Vec<String> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    // The rows seen and not yet drawn, first in draw order first.
+    let mut waiting: BTreeSet<(u64, &str)> = BTreeSet::new();
+    for key in ruled_out_in_order {
+        if !seen.insert(key.as_str()) {
+            continue;
+        }
+        waiting.insert((draw_order(run_id, key), key.as_str()));
+        let want = ruled_out_want(seen.len());
+        while drawn.len() < want {
+            let Some((_, next)) = waiting.pop_first() else {
+                break;
+            };
+            drawn.push(next.to_string());
+        }
+    }
+    drawn
 }
 
 /// Split `size` across categories by unread rows, with a floor of [`CATEGORY_FLOOR`] each (or all

@@ -56,7 +56,8 @@ fn the_package_carries_decisions_json_and_a_decisions_sheet() {
     assert!(!text.contains("SECRET-REVIEWER"), "{text}");
     assert!(!text.contains("the same query helper"), "{text}");
 
-    let grid = xlsx_sheet_grid(&workbook(&entries), "Decisions").expect("a Decisions sheet");
+    let grid = xlsx_sheet_grid(&workbook(&entries), "Reviewer decisions")
+        .expect("a Reviewer decisions sheet");
     assert_eq!(grid.len() - 1, rows.len(), "one sheet row per record");
     assert!(grid[0].iter().any(|h| h == "Decision id"), "{:?}", grid[0]);
 }

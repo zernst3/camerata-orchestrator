@@ -242,7 +242,9 @@ pub(super) fn trimmed_evidence(v: &serde_json::Value) -> Option<String> {
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
+        // The prompt shows the model `path:line — note`; a client reads `path:line, note`
+        // (`parse_evidence_citation` reads the place out of either).
+        .map(|s| crate::client_text::plain(s).into_owned())
 }
 
 /// Parse the recommendation pass's raw model output into one [`RuleRecommendation`] per
@@ -310,11 +312,10 @@ pub fn parse_alternative_recommendations(
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                let reasoning = r["recommendation_reasoning"]
-                    .as_str()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
+                let reasoning = crate::client_text::plain(
+                    r["recommendation_reasoning"].as_str().unwrap_or("").trim(),
+                )
+                .into_owned();
                 // Applicability, gated on evidence — independent of the option-id check below.
                 // `applicable` absent entirely (an older-shaped/malformed entry) fails OPEN
                 // (treated as applicable) so a rule is never silently skipped just because the

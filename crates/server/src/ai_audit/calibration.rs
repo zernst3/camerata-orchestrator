@@ -197,6 +197,10 @@ pub struct Stage1Record {
     pub real: Real,
     /// Stage 1's one-line reason, redacted and with cross-finding pointers removed.
     pub reason: String,
+    /// The severity stage 1 left on the row, before any rule minimum raised it afterwards. `None`
+    /// in a run saved before this was kept: nothing then says what stage 1 rated, and nothing
+    /// guesses.
+    pub severity: Option<String>,
 }
 
 /// The stage 1 verdict recorded on `f`, when there is one.
@@ -205,6 +209,7 @@ pub fn stage1_of(f: &Finding) -> Option<Stage1Record> {
     Some(Stage1Record {
         real: Real::parse(v["real"].as_str()?)?,
         reason: v["reason"].as_str().unwrap_or("").to_string(),
+        severity: v["severity"].as_str().map(str::to_string),
     })
 }
 
@@ -584,7 +589,12 @@ fn apply_verdict(mut f: Finding, verdict: &Stage1Verdict) -> Finding {
     let reason = reason.trim().to_string();
     f.captures.insert(
         STAGE1_CAPTURE.to_string(),
-        serde_json::json!({ "real": verdict.real.as_str(), "reason": reason }).to_string(),
+        // The severity stage 1 left on the row. A rule's declared minimum raises the shown
+        // severity after this, and nothing else keeps what stage 1 rated.
+        serde_json::json!({
+            "real": verdict.real.as_str(), "reason": reason, "severity": f.severity
+        })
+        .to_string(),
     );
     // The reason stays in the row's stage 1 record and goes nowhere else. The client's explanation
     // is left exactly as it was before calibration: no `[calibrated: ...]` and no

@@ -274,6 +274,7 @@ impl Default for RuleRecommendation {
     }
 }
 
+pub mod agent_finder;
 mod failures;
 pub(crate) use failures::*;
 mod usage_meter;
@@ -336,6 +337,9 @@ pub(crate) use calibration::{is_verdict_reply, mentions_exploit_precondition};
 mod redaction_tests;
 
 #[cfg(test)]
+mod dash_tests;
+
+#[cfg(test)]
 mod stage_telemetry_tests;
 
 #[cfg(test)]
@@ -358,6 +362,15 @@ mod injection_tests;
 
 #[cfg(test)]
 mod efficiency_cap_tests;
+
+#[cfg(test)]
+mod spend_limit_stages_tests;
+
+#[cfg(test)]
+mod resume_limit_tests;
+
+#[cfg(test)]
+mod checkpoint_stage_tests;
 
 #[cfg(test)]
 mod fix_model_tests;

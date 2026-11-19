@@ -78,6 +78,14 @@ pub const STAGE2_FIELD_HOMES: &[(&str, &str)] = &[
         "TreeNode.summary of the sub-group, the text the architect reads at it (A15)",
     ),
     (
+        "subgroups[].why_business",
+        "TreeNode.why_business of the sub-group, the Fix plan's business reason and the PDF's",
+    ),
+    (
+        "subgroups[].why_technical",
+        "TreeNode.why_technical of the sub-group, the Fix plan's technical reason",
+    ),
+    (
         "subgroups[].members[]",
         "TreeNode.members of the sub-group, and Finding.group_path of each member",
     ),
@@ -170,7 +178,7 @@ pub fn group_review_system_prompt() -> String {
          site.\n\n\
          Answer with one JSON object and nothing else:\n\
          {\"summary\": \"...\",\n \
-         \"subgroups\": [{\"label\": \"...\", \"cause\": \"...\", \"summary\": \"...\", \"members\": [index, ...]}],\n \
+         \"subgroups\": [{\"label\": \"...\", \"cause\": \"...\", \"summary\": \"...\", \"why_business\": \"...\", \"why_technical\": \"...\", \"members\": [index, ...]}],\n \
          \"outliers\": [{\"index\": i, \"reason\": \"<outlier reason>\", \"why\": \"...\"}],\n \
          \"escalations\": [{\"index\": i, \"reason\": \"<escalation reason>\", \"rank\": n, \"why\": \"...\"}],\n \
          \"disagreements\": [{\"index\": i, \"field\": \"severity\" or \"real\", \"stage1\": \"...\", \"mine\": \"...\", \"why\": \"...\"}]}\n\n\
@@ -188,7 +196,13 @@ pub fn group_review_system_prompt() -> String {
          reads at this sub-group: what its sites share, the fix once, and the sites that differ \
          from the rest of it, each named by its `path:line` exactly as listed and marked as an \
          outlier. The same rule holds: name every site that does not share the stated cause, and \
-         do not state how many sites there are.\n\
+         do not state how many sites there are. `why_business` and `why_technical` are written \
+         for the client, not for the architect: no `path:line`, no outlier marks, no counts and no \
+         mention of the architect. `why_business` says why this matters to the client's \
+         business: what can go wrong for the product, its data, its users or the people who work \
+         on it, and when it starts to matter. Pick the one consequence that fits. Say what can \
+         happen, never what will happen, and give no figures, times or costs the code does not \
+         show. `why_technical` says what breaks and under what conditions.\n\
          - outliers: the sites that do not belong with the rest of their sub-group, each with a \
          reason from the outlier list and a one-line why. An outlier mark alone never puts a \
          site in the architect's queue.\n\
@@ -326,8 +340,16 @@ pub struct Stage2Reply {
 pub struct ReplySubgroup {
     pub label: String,
     pub cause: String,
+    /// What the architect reads. Reviewer-only: no client file carries it.
     pub summary: String,
+    /// Why it matters to the client's business; empty when the reply left it out.
+    pub why_business: String,
+    /// Why it matters technically; empty when the reply left it out.
+    pub why_technical: String,
     pub members: Vec<usize>,
+    /// The reply was a lone sub-group with no `members`; [`Stage2Reply::fill_omitted_members`]
+    /// gives it every index of the part.
+    pub members_omitted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,7 +429,24 @@ fn text_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
 /// label, cause or reason reaches the tree or a row with a secret in it. The same detector the
 /// release gate runs does the redacting, so what ships passes the gate.
 fn prose_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
-    text_of(obj, key, at).map(|text| camerata_secrets::redact_str(&text).into_owned())
+    text_of(obj, key, at).map(|text| {
+        // Redacted first, then rewritten for the client: no em dash, no en dash, no
+        // multiplication sign, and a problem in a whole file is "whole file", not `path:0`.
+        crate::report_export::client_prose(&camerata_secrets::redact_str(&text))
+    })
+}
+
+/// An optional client text: missing, null, blank or not a string reads as empty, never as a
+/// failed reply.
+fn optional_prose_of(obj: &Obj, key: &str) -> String {
+    obj.get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(|text| {
+            crate::report_export::client_prose(&camerata_secrets::redact_str(text))
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 fn index_of(obj: &Obj, key: &str, at: &str) -> Result<usize, String> {
@@ -426,14 +465,103 @@ fn array_of<'v>(obj: &'v Obj, key: &str) -> Result<&'v Vec<serde_json::Value>, S
 const SEVERITY_LABELS: [&str; 4] = ["critical", "high", "medium", "low"];
 const REAL_LABELS: [&str; 3] = ["yes", "no", "unclear"];
 
+/// The JSON object of a reply. The span from the first brace to the last is read first (a fence
+/// or prose around one object). When that is not one object, the top-level `{...}` blocks are
+/// tried, and only the final one counts: a model that wrote a malformed object and then a
+/// corrected one means the corrected one, and a valid object followed by a malformed correction
+/// is refused, never read as the stale first one. A reply with no readable object is refused, and the
+/// refusal says where the JSON broke.
+fn reply_object(raw: &str) -> Result<serde_json::Value, String> {
+    match read_object(raw) {
+        Ok(v) => Ok(v),
+        // Only a reply that did not read gets the one narrow repair; a reply that still fails
+        // is refused with the original message.
+        Err(first) => match repair_stray_reason_colon(raw) {
+            Some(fixed) => read_object(&fixed).map_err(|_| first),
+            None => Err(first),
+        },
+    }
+}
+
+/// The model sometimes writes a colon (and maybe an empty string) after a known reason value,
+/// as in `"reason": "needs_more_code": "", "rank": 2`. Rewrites exactly that, for the known
+/// escalation and outlier reason names, into `"reason": "needs_more_code", "rank": 2`.
+/// `None` when nothing matched.
+fn repair_stray_reason_colon(raw: &str) -> Option<String> {
+    let names: Vec<&str> = EscalationReason::ALL
+        .iter()
+        .map(|r| r.as_str())
+        .chain(OutlierReason::ALL.iter().map(|r| r.as_str()))
+        .collect();
+    let pattern = format!(
+        r#"("reason"\s*:\s*"(?:{})")\s*:\s*(?:""\s*)?,?"#,
+        names
+            .iter()
+            .map(|n| regex::escape(n))
+            .collect::<Vec<_>>()
+            .join("|")
+    );
+    let re = regex::Regex::new(&pattern).ok()?;
+    let fixed = re.replace_all(raw, "$1,");
+    (fixed != raw).then(|| fixed.into_owned())
+}
+
+fn read_object(raw: &str) -> Result<serde_json::Value, String> {
+    let Some(span) = extract_json_object(raw) else {
+        return Err("the reply is not a JSON object".to_string());
+    };
+    let first_error = match serde_json::from_str::<serde_json::Value>(span) {
+        Ok(v) if v.is_object() => return Ok(v),
+        Ok(_) => return Err("the reply is not a JSON object".to_string()),
+        Err(e) => e,
+    };
+    let (mut depth, mut start, mut in_string, mut escaped) = (0usize, 0usize, false, false);
+    let mut last: Option<&str> = None;
+    for (i, c) in raw.char_indices() {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' if depth > 0 => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    last = Some(&raw[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    last.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+        .filter(serde_json::Value::is_object)
+        .ok_or_else(|| format!("the reply is not a JSON object ({first_error})"))
+}
+
 impl Stage2Reply {
+    /// A lone sub-group that left `members` out holds every index this call asked about.
+    pub fn fill_omitted_members(&mut self, asked: &[usize]) {
+        for sg in self.subgroups.iter_mut().filter(|sg| sg.members_omitted) {
+            sg.members = asked.to_vec();
+        }
+    }
+
     /// Read a reply. `Err` carries the reason it is turned down: not JSON, a field the schema
     /// does not have, a reason outside the closed lists, a value of the wrong kind. Whether an
     /// index names a member of the group is not judged here (see [`apply_rule`]).
     pub fn parse(raw: &str) -> Result<Self, String> {
-        let json = extract_json_object(raw)
-            .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
-            .ok_or_else(|| "the reply is not a JSON object".to_string())?;
+        let json = reply_object(raw)?;
         let top = exact_object(
             &json,
             &[
@@ -448,23 +576,45 @@ impl Stage2Reply {
         let summary = prose_of(top, "summary", "the reply")?;
 
         let mut subgroups = Vec::new();
-        for (i, v) in array_of(top, "subgroups")?.iter().enumerate() {
+        let sub_values = array_of(top, "subgroups")?;
+        let sub_count = sub_values.len();
+        for (i, v) in sub_values.iter().enumerate() {
             let at = format!("subgroups[{i}]");
-            let o = exact_object(v, &["label", "cause", "summary", "members"], &at)?;
-            let members = array_of(o, "members")
-                .map_err(|e| format!("{at}: {e}"))?
-                .iter()
-                .map(|m| {
-                    m.as_u64()
-                        .and_then(|n| usize::try_from(n).ok())
-                        .ok_or_else(|| format!("{at}.members holds a value that is not an index"))
-                })
-                .collect::<Result<Vec<usize>, String>>()?;
+            let lone = sub_count == 1;
+            let o = object_with(
+                v,
+                &["label", "cause", "summary"],
+                &["why_business", "why_technical", "members"],
+                &at,
+            )?;
+            // Only a lone sub-group may leave `members` out; with two or more it is required.
+            let members_omitted = lone && !o.contains_key("members");
+            if !lone && !o.contains_key("members") {
+                return Err(format!("{at} is missing the field `members`"));
+            }
+            let members = if members_omitted {
+                Vec::new()
+            } else {
+                array_of(o, "members")
+                    .map_err(|e| format!("{at}: {e}"))?
+                    .iter()
+                    .map(|m| {
+                        m.as_u64()
+                            .and_then(|n| usize::try_from(n).ok())
+                            .ok_or_else(|| {
+                                format!("{at}.members holds a value that is not an index")
+                            })
+                    })
+                    .collect::<Result<Vec<usize>, String>>()?
+            };
             subgroups.push(ReplySubgroup {
                 label: prose_of(o, "label", &at)?,
                 cause: prose_of(o, "cause", &at)?,
                 summary: prose_of(o, "summary", &at)?,
+                why_business: optional_prose_of(o, "why_business"),
+                why_technical: optional_prose_of(o, "why_technical"),
                 members,
+                members_omitted,
             });
         }
 
@@ -550,9 +700,7 @@ impl Stage2Reply {
 
 /// The rule-level summary reply: exactly `{"summary": "..."}`.
 pub(crate) fn parse_rule_summary(raw: &str) -> Result<String, String> {
-    let json = extract_json_object(raw)
-        .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
-        .ok_or_else(|| "the reply is not a JSON object".to_string())?;
+    let json = reply_object(raw)?;
     let o = exact_object(&json, &["summary"], "the reply")?;
     prose_of(o, "summary", "the reply")
 }
@@ -849,9 +997,19 @@ pub(super) fn member_line(f: &Finding, idx: usize, with_repo: bool) -> String {
     } else {
         format!("{}:{}", f.path, f.line)
     };
+    // A rule's declared minimum can raise the shown severity above what the per-site reviewer
+    // rated; say so, so the group reviewer never reads the minimum as that reviewer's call.
+    let severity = match stage1.as_ref().and_then(|s| s.severity.as_deref()) {
+        Some(rated) if !rated.eq_ignore_ascii_case(&f.severity) => {
+            format!(
+                "{} (floor after review; per-site reviewer: {rated})",
+                f.severity
+            )
+        }
+        _ => f.severity.clone(),
+    };
     let mut line = format!(
-        "{idx}: {place} | {} | real: {real} | effort: {} | stage 1: {} | {}",
-        f.severity,
+        "{idx}: {place} | {severity} | real: {real} | effort: {} | stage 1: {} | {}",
         f.effort.as_deref().unwrap_or("-"),
         reason.split_whitespace().collect::<Vec<_>>().join(" "),
         finding_headline(f),
@@ -1171,6 +1329,8 @@ fn apply_rule(
         label: String,
         cause: String,
         summary: String,
+        why_business: String,
+        why_technical: String,
         idxs: Vec<usize>,
     }
     let mut new_subs: Vec<NewSub> = Vec::new();
@@ -1195,6 +1355,8 @@ fn apply_rule(
                     label: sg.label.clone(),
                     cause: sg.cause.clone(),
                     summary: sg.summary.clone(),
+                    why_business: sg.why_business.clone(),
+                    why_technical: sg.why_technical.clone(),
                     idxs,
                 });
             }
@@ -1253,6 +1415,8 @@ fn apply_rule(
         sub_members.insert(id.clone(), sg.idxs.clone());
         let mut node = sub_node(&id, rule_id, &sg.label, &sg.cause);
         node.summary = Some(sg.summary.clone());
+        node.why_business = Some(sg.why_business.clone()).filter(|t| !t.is_empty());
+        node.why_technical = Some(sg.why_technical.clone()).filter(|t| !t.is_empty());
         if let Some((text, source)) = kept_edits.get(&id) {
             node.summary = Some(text.clone());
             node.summary_source = *source;
@@ -1372,7 +1536,11 @@ fn apply_rule(
             let f = &mut findings[m.row];
             // Stage 1's own value, read from the row, whatever the reply quotes.
             let stage1_value = match d.field {
-                DisagreementField::Severity => f.severity.clone(),
+                // Stage 1's own rating, not the severity a severity floor raised it to; a run
+                // saved before that was kept falls back to the row's severity.
+                DisagreementField::Severity => stage1_of(f)
+                    .and_then(|s| s.severity)
+                    .unwrap_or_else(|| f.severity.clone()),
                 DisagreementField::Real => stage1_of(f)
                     .map(|s| s.real.as_str().to_string())
                     .unwrap_or_default(),
@@ -1496,6 +1664,8 @@ fn sub_node(id: &str, rule_id: &str, label: &str, cause: &str) -> TreeNode {
         outliers: Vec::new(),
         summary: None,
         summary_source: TextSource::Model,
+        why_business: None,
+        why_technical: None,
         escalations: Vec::new(),
         flags: Vec::new(),
     }
@@ -1801,6 +1971,12 @@ pub async fn review_groups(
         max_in_flight: cfg.max_in_flight.max(1),
     };
     let ran = run_stage(Stage::GroupReview, &mut items, mode, &stage_ctx).await;
+    // A lone sub-group that left `members` out holds every index of its part.
+    for (id, reply) in items.replies.iter_mut() {
+        if let Some((_, idxs)) = chunk_of.get(id) {
+            reply.fill_omitted_members(idxs);
+        }
+    }
 
     // What came back, per rule group.
     let mut failed_reasons: BTreeMap<usize, Vec<String>> = BTreeMap::new();
@@ -2045,8 +2221,12 @@ fn record_ledger(
             floor: cfg.rank.floor,
             counted_lines: report.code_lines,
             budget: budget.budget,
-            candidates: tree.candidates.len(),
+            // Both counts are in sites (slots), the unit the budget is in; the rows behind them
+            // are stated beside, so the two units never mix in one subtraction.
+            candidates: camerata_api_types::review::count_slots(tree.candidates.iter()).0,
             escalated: budget.escalated,
+            candidate_rows: tree.candidates.len(),
+            escalated_rows: tree.candidates.iter().filter(|c| c.escalated).count(),
             over_budget: budget.over_budget,
             total_sites: total,
             share_escalated: if total == 0 {
@@ -2078,13 +2258,17 @@ pub(super) fn fold_spend_into_report(report: &mut ScanReport, meter: &UsageMeter
         let has_new = !cap.not_run_passes.is_empty() || !cap.not_run_stages.is_empty();
         if has_new {
             report.failed_passes.extend(cap.failed_passes());
-            match report.ledger.cost_cap().cloned() {
-                Some(mut earlier) => {
-                    earlier.absorb(cap);
-                    report.ledger.record_cost_cap(earlier);
-                }
-                None => report.ledger.record_cost_cap(cap),
+        }
+        // Always folded: this meter counts the whole run (it continues the scan's, and a resumed
+        // stage puts its stored usage on it), so the record's spend must be its total even when
+        // the stage refused nothing, or the final report reads the scan's smaller figure beside a
+        // run that is past its limit.
+        match report.ledger.cost_cap().cloned() {
+            Some(mut earlier) => {
+                earlier.absorb(cap);
+                report.ledger.record_cost_cap(earlier);
             }
+            None => report.ledger.record_cost_cap(cap),
         }
     }
     // An outage that stopped this stage.
@@ -2094,6 +2278,26 @@ pub(super) fn fold_spend_into_report(report: &mut ScanReport, meter: &UsageMeter
             report.ledger.record_outage(outage);
         }
     }
+}
+
+/// What the group review is estimated to cost for `sites` rows and `rules` rules on `model`, in
+/// dollars, by the pre-flight's own estimate. `None` when the model has no list price.
+pub(crate) fn group_review_estimate_usd(
+    model: &str,
+    sites: usize,
+    rules: usize,
+    cli_backend: bool,
+) -> Option<f64> {
+    use camerata_api_types::project::ProjectBackend;
+    let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
+    let backend = if cli_backend {
+        ProjectBackend::Cli
+    } else {
+        ProjectBackend::Api
+    };
+    let e = camerata_ui_core::scan::group_review_estimate(sites as f64, rules, backend);
+    let out = e.output_tokens * camerata_ui_core::scan::output_scale(model);
+    Some((e.input_tokens * price.price_in + out * price.price_out) / 1_000_000.0)
 }
 
 /// [`review_groups`] on a meter that continues the scan's own: the whole run's spend counts toward
@@ -2107,7 +2311,46 @@ pub async fn review_groups_metered(
 ) -> GroupReviewOutcome {
     let prior = report.actual_usage.clone().unwrap_or_default();
     let meter = UsageMeter::continuing(controls.clone(), &prior);
-    let outcome = review_groups(report, llm, cfg, Some(&meter)).await;
+    // The stage's pause reaches the job state the UI polls, as the scan's own meter does.
+    if let Some((jobs, id)) = cfg.job {
+        let (jobs, id) = (jobs.clone(), id.to_string());
+        meter.set_job_sink(crate::cost_checkpoint::CheckpointSink::new(move |cp| {
+            jobs.set_cost_checkpoint(&id, cp.clone());
+        }));
+    }
+    // A run the cost checkpoint paused stays paused: this fresh meter learns the stop from the
+    // scan's record, so the stage sends nothing and is recorded NOT RUN (see
+    // `crate::cost_checkpoint`).
+    if let Some(stop) = report
+        .ledger
+        .cost_cap()
+        .and_then(|c| c.checkpoint.as_ref())
+        .filter(|c| c.stopped)
+    {
+        meter.seed_checkpoint_stop(stop);
+    }
+    let repo = report.repos.join(", ");
+    // The stage is priced from the rows it will read; over the approved amount, it does not start.
+    let stage_usd = group_review_estimate_usd(
+        cfg.model,
+        report.findings.len(),
+        cfg.rules.len(),
+        cfg.cli_backend,
+    );
+    let paused = if meter.checkpoint_stopped() {
+        meter.record_stage_not_run(&repo, STAGE_GROUP_REVIEW, false);
+        true
+    } else if meter.cap_reached() {
+        // The limit itself is reached: the stage's own admission refuses each call, as before.
+        false
+    } else {
+        stage_usd.is_some_and(|usd| meter.priced_stage_stops(&repo, STAGE_GROUP_REVIEW, usd))
+    };
+    let outcome = if paused {
+        GroupReviewOutcome::default()
+    } else {
+        review_groups(report, llm, cfg, Some(&meter)).await
+    };
 
     // Usage: the meter started from the scan's, so its snapshot is the whole run's.
     if meter.snapshot().calls > 0 {
@@ -2145,6 +2388,10 @@ pub async fn review_groups_metered(
 /// settings or the flags), the rule text from the rules the run checked, the spend limit from the
 /// run's meter. Does nothing for a report with no findings. Records the model on the report's
 /// provenance. Returns what the run came to, or `None` when it did not run.
+///
+/// Last, the severities and kinds follow what the reviewers said
+/// ([`crate::follow_reviewers::follow_reviewers`], owner ruling R-7): `corpus` is the run's rule
+/// set, the one its severity bounds were applied with.
 pub async fn review_scan_report(
     report: &mut ScanReport,
     llm: &dyn LlmPort,
@@ -2152,6 +2399,7 @@ pub async fn review_scan_report(
     rules: &[(String, String)],
     cli_backend: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    corpus: Option<&camerata_rules::RuleSet>,
 ) -> Option<GroupReviewOutcome> {
     if report.findings.is_empty() {
         return None;
@@ -2184,6 +2432,7 @@ pub async fn review_scan_report(
     };
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
     report.provenance.group_review_model = Some(model);
+    crate::follow_reviewers::follow_reviewers(&mut report.findings, corpus);
     Some(outcome)
 }
 

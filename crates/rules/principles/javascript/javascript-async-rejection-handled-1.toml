@@ -1,0 +1,83 @@
+id = "JAVASCRIPT-ASYNC-REJECTION-HANDLED-1"
+version = 3
+title = "Async event handlers, effects and callbacks catch the failure of every awaited call and show or report it, so no rejection goes unhandled"
+domain = "javascript"
+layer = "language"
+enforcement = "structured"
+# One acceptable state; no legitimate alternative leaves a failure unobserved.
+kind = "defect"
+inspectable = true
+# Severity, transcribed from the work order: an unhandled rejection is a silent failure at
+# medium, and high when the call that fails writes data (a save, a payment, a delete), because
+# the user is then told nothing about a write that did not happen or half happened. The model
+# picks within the band; the bounds keep it there.
+min_severity = "medium"
+max_severity = "high"
+default = true
+cwe = ["CWE-248"]
+# `grounded`: React's documentation states that error boundaries do not catch errors in event
+# handlers or asynchronous code, Node documents that an unhandled rejection terminates the
+# process by default, and the browser fires `unhandledrejection` for the same condition. Only
+# the owner sets `verified`.
+verification = "grounded"
+# Routing: only ECMAScript files (the JAVASCRIPT- id prefix) with async code are sent this rule.
+# `async` covers every function that can await; `.then(` covers promise chains without one.
+applies_to = { contains_any = ["async", ".then("] }
+qualifies = "Applies where async code runs with no caller that waits for its promise, so a rejection inside it has nowhere to go: a React event handler (an async function passed to onClick, onSubmit, onChange or any other event prop, or called from one), an async function started from a useEffect body (an async IIFE, a load() call), a timer, listener or subscription callback and a route or request handler on a runtime that does not turn a rejected promise into an error response (Express 4 without an async wrapper, a plain Node http server, a custom server, a streaming response after headers are sent). The fault is an awaited call that can reject (fetch on a network failure, a parsed response, a server action, an SDK or ORM call that throws) with no try/catch around it, no .catch on the chain and no wrapper that handles it, so the failure becomes an unhandled promise rejection: nothing is shown to the user, loading state stays stuck and on Node the process can exit. The same silent failure includes an awaited call that reports failure in its result instead of throwing (the Supabase client resolves with { data, error }) whose error is never read before the handler carries on as if it succeeded. Rate it high when the unhandled call writes data (an insert, update, delete, payment or upload), medium otherwise. Not a fault: a handler whose awaited calls sit inside a try/catch (or a .catch) that shows, reports or rethrows the error into a path that handles it; a call wrapped by a project helper that does so; a promise returned to a caller that awaits it (that caller is then the place to judge); a Next.js route handler, server action or server component render whose thrown error the framework turns into an error response or routes to the nearest error.tsx boundary, unless it is awaited from a client event handler with no catch, where the rejection lands in the handler. A `queryFn` given to React Query, React Query's `mutate` (not `mutateAsync`, which still rejects when awaited without a catch), SWR's fetcher and a React 19 form action or transition are not a fault: the library surfaces the rejection to its error state. A global unhandledrejection listener that only logs is a backstop, not the handling: the user still sees nothing and the handler's state is still stuck. Floating promises (a promise-returning call that is not awaited at all) are JAVASCRIPT-TYPESCRIPT-NO-FLOATING-PROMISES-1, and the Express 4 async-wrapper requirement is JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1; this rule covers the awaited case those two leave open. Coverage is the reviewed semantic read of the code; Camerata ships no deterministic check for this rule, because whether an awaited call can reject, and whether an enclosing helper or boundary handles it, is not decidable from one function's syntax without false alarms."
+
+# Source note: The page lists what error boundaries do not catch, among them event handlers and
+# asynchronous code, so a rejection in an async handler never reaches a boundary.
+[[sources]]
+url = "https://legacy.reactjs.org/docs/error-boundaries.html"
+title = "React docs (legacy): Error Boundaries (error boundaries do not catch errors in event handlers or asynchronous code)"
+
+# Source note: Documents the unhandledRejection event and that the default mode raises an
+# unhandled rejection as an uncaught exception, which ends the process.
+[[sources]]
+url = "https://nodejs.org/api/process.html#event-unhandledrejection"
+title = "Node.js docs: process: Event 'unhandledRejection'"
+
+# Source note: The browser event fired when a promise is rejected and no handler is attached.
+[[sources]]
+url = "https://developer.mozilla.org/en-US/docs/Web/API/Window/unhandledrejection_event"
+title = "MDN Web Docs: Window: unhandledrejection event"
+
+# Source note: The checksVoidReturn option reports a promise-returning function passed where a
+# void return is expected, such as an event handler prop, because the caller drops the promise
+# and its rejection. Cited for the mechanism; it reports such handlers whether or not they catch
+# internally, so it is not annotated as this rule's linter.
+[[sources]]
+url = "https://typescript-eslint.io/rules/no-misused-promises"
+title = "typescript-eslint: no-misused-promises (checksVoidReturn: promise-returning functions passed where a void return is expected)"
+
+# Source note: The recognised weakness code for an exception that is never caught; the code this
+# rule carries in `cwe`.
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/248.html"
+title = "CWE-248: Uncaught Exception"
+
+[decision]
+question = "When an async event handler, effect or callback awaits a call that can fail, is the failure caught and shown or reported, or can it escape as an unhandled rejection?"
+default = "async-handlers-catch-and-surface-rejections"
+why = "React calls an event handler and ignores what it returns, so an async handler's promise has no one waiting on it; the same holds for an async function started from an effect, a timer or a listener. When an awaited call inside it rejects and nothing catches it, the rejection is unhandled. Error boundaries do not see it, because they only catch errors thrown while rendering. The user gets no message, a spinner set before the call is never cleared and a save the user believes succeeded did not happen; on Node an unhandled rejection ends the process by default. The fault is invisible in local testing, where the network and the database answer, and appears in production on the first timeout, expired session or constraint violation. A try/catch (or a .catch) that resets loading state, tells the user and reports the error turns the same failure into a visible, recoverable one. Clients that resolve with an error object instead of rejecting need the same care: an unread error is the same silent failure."
+
+[[option]]
+id = "async-handlers-catch-and-surface-rejections"
+label = "Every awaited call in an async event handler, effect or callback is inside a try/catch or a .catch that shows or reports the failure"
+directive = "Every async function that no caller awaits (an event handler passed to an event prop, an async function started from an effect, a timer, listener or subscription callback, a request handler on a runtime that does not catch rejections) wraps its awaited calls in try/catch, or ends its promise chain with .catch, and the catch does something visible: it resets loading state, shows the user an error and reports the error to logging or monitoring, or rethrows into a path that handles it. A call that reports failure in its result instead of throwing (the Supabase client's { data, error }) has its error checked before the code proceeds. A handler that writes data (insert, update, delete, payment, upload) never reports success until the write has succeeded. A global unhandledrejection listener is a backstop, never the handling."
+remediation = """
+Wrap the awaited calls in the handler at <path> in try/catch (or add .catch to the chain): in the catch, reset any loading state set before the call, show the user that the action failed and report the error to the project's logging or monitoring. Where the call resolves with an error object instead of throwing, check that error and handle it the same way before proceeding. For a write, report success only after the write succeeded. Verify by making the call fail (block the request in the browser's network tools, or point it at a missing record) and confirming the user sees an error, the loading state clears and no unhandled rejection appears in the console.
+"""
+effort = "low"
+why = "A caught failure resets the interface, tells the user the action did not happen and leaves a report to diagnose, instead of a stuck spinner and a silent unhandled rejection."
+
+[[option]]
+id = "async-handler-rejections-go-unhandled"
+violates = true
+label = "An async event handler, effect or callback awaits a call that can fail with no try/catch or .catch, so a failure becomes an unhandled rejection"
+directive = "Async event handlers, effects and callbacks may await calls with no try/catch or .catch, relying on the call succeeding or on a global handler to notice a failure."
+why = "When an awaited call in an async handler fails and nothing catches it, the rejection is unhandled: error boundaries do not see it, the user gets no message, loading state set before the call is never cleared and on Node the process can exit. When the call writes data, the user is left believing a save, payment or delete succeeded when it did not. The fault is invisible while the network and database answer and appears on the first timeout, expired session or rejected write."
+remediation = """
+Wrap the awaited calls in the handler at <path> in try/catch (or add .catch), reset loading state, show the user the failure and report it. Check the error field of any call that resolves with one instead of throwing. Verify by forcing the call to fail and confirming an error is shown and no unhandled rejection appears in the console.
+"""
+effort = "low"

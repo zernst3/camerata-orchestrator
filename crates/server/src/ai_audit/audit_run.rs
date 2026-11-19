@@ -273,7 +273,13 @@ pub async fn audit_repo(
         // SPEND CAP: a stage that would start after the cap was reached is skipped and recorded
         // as NOT RUN; its rules keep their pre-existing directive, as when the pass fails.
         let alternatives_blocked = !ask_alts.is_empty()
-            && meter.is_some_and(|m| m.stage_blocked(repo, STAGE_ALTERNATIVES));
+            && meter.is_some_and(|m| {
+                m.stage_blocked_unless_stored(
+                    repo,
+                    STAGE_ALTERNATIVES,
+                    crate::checkpoint::stage_has_stored_work(&format!("alternatives_{repo}")),
+                )
+            });
         if !ask_alts.is_empty() && !alternatives_blocked {
             match recommend_alternatives_in(
                 llm,
@@ -736,8 +742,13 @@ pub async fn audit_repo(
     // Whether stage 1 ran, so the ledger names its model only when a model was asked.
     let mut calibration_ran = false;
     let verified = if all_findings.is_empty()
-        || meter.is_some_and(|m| m.stage_blocked(repo, STAGE_CALIBRATION))
-    {
+        || meter.is_some_and(|m| {
+            m.stage_blocked_unless_stored(
+                repo,
+                STAGE_CALIBRATION,
+                crate::checkpoint::stage_has_stored_work(&format!("calibration_{repo}")),
+            )
+        }) {
         // Nothing to calibrate, or the spend cap was reached (recorded as NOT RUN): the
         // findings go on exactly as the scan produced them, none dropped.
         all_findings

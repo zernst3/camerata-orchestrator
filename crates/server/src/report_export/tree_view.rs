@@ -1,5 +1,6 @@
 //! The review tree as a client package prints it (design 3B): the category, rule and sub-group
-//! nodes with their label, cause and summary, and the counts beside each.
+//! nodes with their label, cause and summary, and the counts beside each, then one node for each
+//! Fix, the sub-groups whose places are one change (item #1).
 //!
 //! The counts are read from the rows (A9 item 1), never from the group reviewer's prose, and every
 //! text the group reviewer wrote passes M4's prose checks first ([`super::prose_checks`]). A node
@@ -19,9 +20,11 @@ use crate::review_tree::{is_thrown_out_id, NodeLevel, TextSource, TreeNode};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TreeNodeView {
     pub id: String,
-    /// `category`, `rule` or `subgroup`.
+    /// `category`, `rule`, `subgroup` or `fix`.
     pub level: String,
     pub parent: String,
+    /// The Fix a rule group is in, or a Fix's own id. Empty above the rule groups.
+    pub fix_id: String,
     pub label: String,
     /// Why the sites of a sub-group belong together; empty above the sub-group.
     pub cause: String,
@@ -92,16 +95,25 @@ pub fn tree_view(reviewed: &ReviewedReport, internal: bool) -> Vec<TreeNodeView>
             }
         }
     }
-    tree.nodes
+    let fixes = crate::review_tree::FixIndex::new(Some(tree), &report.findings);
+    let mut out: Vec<TreeNodeView> = tree
+        .nodes
         .iter()
         .filter(|n| !is_thrown_out_id(&n.id))
         .map(|n| {
             let (view_flags, label, cause, summary) = checked_text(n);
+            // The summary is what the reviewer reads: only an internal package carries it.
+            let summary = if internal { summary } else { String::new() };
             let counts = tree.counts(&n.id);
             TreeNodeView {
                 id: n.id.clone(),
                 level: level_name(n.level).to_string(),
                 parent: n.parent.clone().unwrap_or_default(),
+                fix_id: if n.level == NodeLevel::Subgroup {
+                    fixes.fix_of_subgroup(&n.id).unwrap_or_default().to_string()
+                } else {
+                    String::new()
+                },
                 label,
                 cause,
                 summary,
@@ -122,7 +134,39 @@ pub fn tree_view(reviewed: &ReviewedReport, internal: bool) -> Vec<TreeNodeView>
                 }),
             }
         })
-        .collect()
+        .collect();
+    // One node for each Fix, after the tree: it is named by its anchor rule group and counts every
+    // row of the rule groups folded into it.
+    for fx in fixes.fixes() {
+        let members: Vec<&TreeNodeView> = out
+            .iter()
+            .filter(|n| n.level == "subgroup" && fx.members.contains(&n.id))
+            .collect();
+        let Some(anchor) = members.first() else {
+            continue;
+        };
+        let mut review_levels: BTreeMap<String, usize> = BTreeMap::new();
+        for m in &members {
+            for (level, n) in &m.review_levels {
+                *review_levels.entry(level.clone()).or_default() += n;
+            }
+        }
+        let node = TreeNodeView {
+            id: fx.id.clone(),
+            level: "fix".to_string(),
+            parent: String::new(),
+            fix_id: fx.id.clone(),
+            label: anchor.label.clone(),
+            cause: anchor.cause.clone(),
+            summary: anchor.summary.clone(),
+            sites: members.iter().map(|m| m.sites).sum(),
+            false_positives: members.iter().map(|m| m.false_positives).sum(),
+            review_levels,
+            internal: None,
+        };
+        out.push(node);
+    }
+    out
 }
 
 /// The flags the prose checks give a node's label, cause and summary, one per hit (`summary:
@@ -138,11 +182,21 @@ fn checked_text(n: &TreeNode) -> (Vec<String>, String, String, String) {
     let label = client_text("label", &n.label);
     let cause = client_text("cause", n.cause.as_deref().unwrap_or_default());
     let summary = client_text("summary", n.summary.as_deref().unwrap_or_default());
+    let why_business = client_text(
+        "why_business",
+        n.why_business.as_deref().unwrap_or_default(),
+    );
+    let why_technical = client_text(
+        "why_technical",
+        n.why_technical.as_deref().unwrap_or_default(),
+    );
     let flags: Vec<String> = label
         .flags
         .iter()
         .chain(&cause.flags)
         .chain(&summary.flags)
+        .chain(&why_business.flags)
+        .chain(&why_technical.flags)
         .cloned()
         .collect();
     let label_text = if label.flags.is_empty() {

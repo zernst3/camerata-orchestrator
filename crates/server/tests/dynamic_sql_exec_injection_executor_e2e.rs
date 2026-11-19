@@ -286,7 +286,7 @@ async fn dynamic_sql_injection_finding_reaches_curated_findings_critical_and_gro
         "the anon grant must drive this to Critical: {site:?}"
     );
     assert_eq!(
-        site.disposition, "Open (recommended: Do now)",
+        site.disposition, "Open (recommended: First)",
         "no disposition was supplied -> stays Open, recommending Do now for a Critical finding"
     );
     assert_eq!(

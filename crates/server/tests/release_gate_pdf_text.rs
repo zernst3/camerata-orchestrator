@@ -25,8 +25,11 @@ fn typst_on_path() -> bool {
     camerata_test_env::typst_on_path()
 }
 
-/// One high-severity finding per fixture shape, each carrying its secret in the snippet, the
-/// detail and the fix. The values are built at runtime by `camerata_secrets::fixtures`.
+/// One critical finding per fixture shape, each carrying its secret in the snippet, the detail
+/// and the fix, each its own rule and so its own fix, each escalated. The PDF is a summary: it
+/// prints a headline and two sentences of fix for an escalated place and the top three, and no
+/// snippet, so those are the strings a secret could still reach it through. The values are built
+/// at runtime by `camerata_secrets::fixtures`.
 fn report_with_one_finding_per_shape() -> SealedReport {
     let findings: Vec<Finding> = planted_all()
         .into_iter()
@@ -35,8 +38,12 @@ fn report_with_one_finding_per_shape() -> SealedReport {
             repo: "acme/portal".to_string(),
             path: format!("src/config{i}.env"),
             line: i + 1,
-            rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
-            severity: "high".to_string(),
+            rule_id: format!("SEC-NO-VENDOR-TOKEN-{i}-1"),
+            severity: "critical".to_string(),
+            review: camerata_api_types::review::SiteReview {
+                escalation_state: camerata_api_types::review::EscalationState::Escalated,
+                ..Default::default()
+            },
             snippet: p.text.clone(),
             detail: format!("A credential is committed here: {}", p.text),
             fix_specific: Some(format!(
@@ -179,7 +186,8 @@ async fn pdf_text_extraction_detects_a_raw_secret_when_the_gate_is_bypassed() {
         return;
     }
     // Bypass construction-time redaction and the gate on purpose: render a hand-built data.json
-    // whose every `snippet` is a raw key, then look at what the PDF shows. This proves the
+    // whose every headline is a raw key (the PDF prints headlines, not snippets), then look at
+    // what the PDF shows. This proves the
     // extraction approach CAN fail (a check that can never fail proves nothing), and that the
     // data.json check is the load-bearing one: a raw value in data.json is a raw value in the PDF.
     let sealed = report_with_one_finding_per_shape();
@@ -193,7 +201,7 @@ async fn pdf_text_extraction_detects_a_raw_secret_when_the_gate_is_bypassed() {
     let raw =
         camerata_secrets::fixtures::planted(camerata_secrets::SecretShape::StripeLiveSecretKey)
             .value;
-    set_every_snippet(&mut data, &raw);
+    set_every_headline(&mut data, &raw);
     let pdf = compile_pdf_from_data(&data.to_string())
         .await
         .expect("typst compiles the hand-built data");
@@ -207,18 +215,20 @@ async fn pdf_text_extraction_detects_a_raw_secret_when_the_gate_is_bypassed() {
     );
 }
 
-fn set_every_snippet(value: &mut Value, raw: &str) {
+/// Set every headline of the data (the top three's and the escalated places') to `raw`: the one
+/// string of a problem the PDF prints, now that it prints no snippet.
+fn set_every_headline(value: &mut Value, raw: &str) {
     match value {
         Value::Object(map) => {
             for (key, item) in map.iter_mut() {
-                if key == "snippet" && item.is_string() {
+                if key == "headline" && item.is_string() {
                     *item = Value::String(format!("const key = \"{raw}\";"));
                 } else {
-                    set_every_snippet(item, raw);
+                    set_every_headline(item, raw);
                 }
             }
         }
-        Value::Array(items) => items.iter_mut().for_each(|i| set_every_snippet(i, raw)),
+        Value::Array(items) => items.iter_mut().for_each(|i| set_every_headline(i, raw)),
         _ => {}
     }
 }
@@ -282,7 +292,7 @@ async fn the_rendered_pdf_text_check_finds_a_name_that_is_there() {
     );
     let mut data: Value =
         serde_json::from_str(&render_data_json(&json).expect("renders")).expect("parses");
-    set_every_snippet(&mut data, "reviewed_by");
+    set_every_headline(&mut data, "reviewed_by");
     let pdf = compile_pdf_from_data(&data.to_string())
         .await
         .expect("typst compiles the hand-built data");

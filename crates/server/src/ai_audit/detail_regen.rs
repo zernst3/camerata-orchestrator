@@ -550,31 +550,34 @@ fn entry_of(value: &serde_json::Value) -> Option<Entry> {
     if id.is_empty() {
         return None;
     }
-    let field = |name: &str| value[name].as_str().map(str::trim).unwrap_or_default();
+    // Prose the model wrote reaches the client, so it is rewritten as it is read: no em dash, no
+    // en dash, no multiplication sign.
+    let field = |name: &str| {
+        crate::client_text::plain(value[name].as_str().map(str::trim).unwrap_or_default())
+            .into_owned()
+    };
     let (why, direction) = (field("why"), field("fix_direction"));
     if !why.is_empty() {
         let detail = if direction.is_empty() {
-            why.to_string()
+            why.clone()
         } else {
             format!("{why} {direction}")
         };
         return Some(Entry {
             id,
             detail,
-            why: Some(why.to_string()),
+            why: Some(why),
         });
     }
     // One `detail` field, or a fix direction with no explanation: read as the single text it is.
-    let detail = match field("detail") {
-        "" => direction,
-        detail => detail,
-    };
+    let single = field("detail");
+    let detail = if single.is_empty() { direction } else { single };
     if detail.is_empty() {
         return None;
     }
     Some(Entry {
         id,
-        detail: detail.to_string(),
+        detail,
         why: None,
     })
 }
@@ -1859,7 +1862,13 @@ pub(crate) async fn regenerate_full_details_in(
     let mut held: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
-    let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
+    let blocked = meter.is_some_and(|m| {
+        m.stage_blocked_unless_stored(
+            repo,
+            STAGE_DETAIL,
+            crate::checkpoint::stage_has_stored_work(&format!("detail_{repo}")),
+        )
+    });
     if !blocked {
         // What an earlier process stored (replies, batches left live) reaches its findings first.
         pending = resume_held_details(

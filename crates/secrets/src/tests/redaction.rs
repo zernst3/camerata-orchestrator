@@ -297,3 +297,18 @@ fn multibyte_text_around_a_secret_is_preserved() {
     assert!(out.ends_with(" // ünïcode\n"));
     assert!(!out.contains(&p.value));
 }
+
+#[test]
+fn a_uuid_under_a_token_id_field_is_masked() {
+    const HEX: &str = "0123456789abcdef";
+    let id = [
+        body(8, HEX, 31),
+        body(4, HEX, 32),
+        body(4, HEX, 33),
+        body(4, HEX, 34),
+        body(12, HEX, 35),
+    ]
+    .join("-");
+    let text = format!("token_id: {id}\n");
+    assert!(!redact_str(&text).contains(&id));
+}

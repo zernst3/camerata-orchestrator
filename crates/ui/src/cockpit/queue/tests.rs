@@ -218,3 +218,79 @@ fn the_queues_detail_has_no_stack_button_the_stacked_view_is_not_a_queue_key() {
     assert!(pane.contains("site-detail-code"), "the code door stays");
     assert!(!pane.contains("site-detail-stack"), "{pane}");
 }
+
+#[derive(Clone, PartialEq, Props)]
+struct PromptCase {
+    view: QueueView,
+    cursor: String,
+    prompt: QueuePrompt,
+}
+
+#[component]
+fn PromptHarness(props: PromptCase) -> Element {
+    rsx! {
+        QueueScreen {
+            view: Some(props.view.clone()),
+            status: QueueStatus::Ready,
+            state: QueueState {
+                cursor: Some(props.cursor.clone()),
+                ..QueueState::default()
+            },
+            focus: PaneFocus::ReasonPrompt,
+            prompt: Some(props.prompt.clone()),
+            undo: None,
+        }
+    }
+}
+
+#[test]
+fn a_place_prompt_in_the_queue_names_every_rule_and_asks_for_a_reason_on_this_place() {
+    use camerata_api_types::decisions::DecisionState;
+    use camerata_api_types::review_view::CarriedRuleView;
+    let mut view = dataset_base().queue(false, 0, 100);
+    {
+        let site = &mut view.escalated[0].site;
+        site.decision = None;
+        site.held = None;
+        site.place_id = "place:0123456789ab".to_string();
+        site.carries = vec![CarriedRuleView {
+            rule_id: "SEC-OTHER-9".to_string(),
+            site_key: "carried-key".to_string(),
+            node_id: "sub:SEC-OTHER-9/0".to_string(),
+            severity: "low".to_string(),
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
+            held: None,
+            stage1_real: "yes".to_string(),
+            escalation_reason: None,
+            escalation_rank: None,
+            decision: None,
+        }];
+    }
+    let row = &view.escalated[0];
+    let plan = camerata_ui_core::tree::place::place_plan(
+        &row.site,
+        &DecisionState::Confirmed,
+        &std::collections::BTreeSet::new(),
+    );
+    let html = test_harness::render_props(
+        PromptHarness,
+        PromptCase {
+            cursor: row.candidate.key.clone(),
+            prompt: QueuePrompt {
+                key: row.candidate.key.clone(),
+                state: TriageState::Confirmed,
+                reason: String::new(),
+                error: None,
+                plan: Some(plan),
+            },
+            view: view.clone(),
+        },
+    )
+    .replace(GLOBAL_CSS, "");
+    // The chip is in the table row and again in the pane's head.
+    assert!(html.matches("class=\"mark-also\"").count() >= 2, "{html}");
+    assert!(html.contains("batch-sentence"), "{html}");
+    assert!(html.contains("rule records at this place"), "{html}");
+    assert!(html.contains(&row.site.rule_id) && html.contains("SEC-OTHER-9"));
+    assert!(html.contains("on this place (required)"), "{html}");
+}

@@ -161,6 +161,9 @@ impl LlmPort for BatchSeam {
             .realtime()
             .note_rejected_reply(request_key, reason, whole);
     }
+    fn replays(&self, req: &LlmRequest) -> bool {
+        self.api.realtime().replays(req)
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

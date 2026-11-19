@@ -93,8 +93,9 @@ pub fn format_verdict(verdict: &ReleaseGateVerdict) -> String {
     let pdf_note = if verdict.pdf_text_checked {
         "PDF text: extracted and checked"
     } else {
-        "PDF text: not checked here (build with --features pdf-text); the PDF's data.json is \
-         checked when the export is made"
+        "PDF text: read by the gate for the text-style check; build with --features pdf-text \
+         to run the secrets check over it too (the PDF's data.json is checked for secrets when \
+         the export is made)"
     };
     if verdict.report.is_clean() {
         format!(

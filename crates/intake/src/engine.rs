@@ -571,7 +571,8 @@ impl ClaudeLeadEngineer {
         // and the read-only built-ins (Read/Grep/Glob/LS) enabled, so the engineer can scan
         // ANY file in the real codebase while planning, not just the inlined digest. Reads
         // are inherently safe here: no write/exec tool is offered, so this adds no write path.
-        let mut cmd = tokio::process::Command::new("claude");
+        let program = camerata_api_types::claude_cli::claude_program();
+        let mut cmd = tokio::process::Command::new(program);
         // The subscription CLI must never inherit an API key from the parent's `.env`.
         camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a model
@@ -586,8 +587,14 @@ impl ClaudeLeadEngineer {
             .arg("--output-format")
             .arg("json")
             .kill_on_drop(true);
+        // Isolation: the repo as cwd when bound, else an empty engine-owned directory; never the
+        // launcher's directory, and no project settings or operator memory.
+        camerata_api_types::claude_cli::isolate_claude_call(
+            cmd.as_std_mut(),
+            self.repo_dir.as_deref(),
+        );
         if let Some(dir) = &self.repo_dir {
-            cmd.current_dir(dir).arg("--add-dir").arg(dir);
+            cmd.arg("--add-dir").arg(dir);
             // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
             // `--add-dir` so the lead engineer can scan across all the project's repos.
             // READ-only — no write tool is offered. Skip any that duplicate the cwd.
@@ -966,6 +973,40 @@ mod tests {
             argv.iter().any(|a| a.starts_with("Review this.")),
             "{argv:?}"
         );
+    }
+
+    /// The planning call is isolated from the launcher: with no repo it runs in the engine's
+    /// empty directory; with a repo it keeps that repo; both leave project settings and the
+    /// operator's memory out.
+    #[test]
+    fn the_planning_call_is_isolated_from_the_launcher() {
+        let argv = |cmd: &tokio::process::Command| -> Vec<String> {
+            cmd.as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let bare = ClaudeLeadEngineer::new().build_command("plan");
+        assert_eq!(
+            bare.as_std().get_current_dir(),
+            Some(camerata_api_types::claude_cli::engine_empty_cwd().as_path())
+        );
+        let bound = ClaudeLeadEngineer::new()
+            .with_repo_dir("/Users/auditor/clients/acme")
+            .build_command("plan");
+        assert_eq!(
+            bound.as_std().get_current_dir(),
+            Some(std::path::Path::new("/Users/auditor/clients/acme"))
+        );
+        for cmd in [&bare, &bound] {
+            let args = argv(cmd);
+            let at = args.iter().position(|a| a == "--setting-sources");
+            assert_eq!(at.map(|i| args[i + 1].as_str()), Some("user"), "{args:?}");
+            assert!(cmd
+                .as_std()
+                .get_envs()
+                .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && v.is_some()));
+        }
     }
 
     #[test]

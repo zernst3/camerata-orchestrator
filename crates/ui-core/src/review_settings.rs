@@ -409,14 +409,32 @@ pub enum Stage {
     Calibration,
     GroupReview,
     Fix,
+    /// The agent finder's model (the finder KIND is [`Stage::Finder`]).
+    FinderModel,
+    /// The possible-duplicate check's model.
+    DuplicateCheck,
+    /// The clone judge's model.
+    CloneJudge,
+    /// Not a model: the project's finder (`agent` or `engine`). It rides the same route but has
+    /// its own row, so it is not in [`Stage::ALL`].
+    Finder,
 }
 
+/// The finder choices the row offers: the word the route takes and what a person reads.
+pub const FINDER_CHOICES: [(&str, &str); 2] = [
+    ("agent", "Agent (one model reviews each part)"),
+    ("engine", "Engine (rule by rule)"),
+];
+
 impl Stage {
-    pub const ALL: [Stage; 4] = [
+    pub const ALL: [Stage; 7] = [
         Stage::Scan,
         Stage::Calibration,
         Stage::GroupReview,
         Stage::Fix,
+        Stage::FinderModel,
+        Stage::DuplicateCheck,
+        Stage::CloneJudge,
     ];
 
     /// The `step` the step-models route takes for this stage.
@@ -426,6 +444,10 @@ impl Stage {
             Stage::Calibration => "calibration",
             Stage::GroupReview => "group_review",
             Stage::Fix => "fix",
+            Stage::FinderModel => "finder_model",
+            Stage::DuplicateCheck => "duplicate_check",
+            Stage::CloneJudge => "clone_judge",
+            Stage::Finder => "finder",
         }
     }
 
@@ -436,15 +458,31 @@ impl Stage {
             Stage::Calibration => "Calibration (stage 1)",
             Stage::GroupReview => "Group review (stage 2)",
             Stage::Fix => "Fix model",
+            Stage::FinderModel => "Finder model",
+            Stage::DuplicateCheck => "Duplicate check",
+            Stage::CloneJudge => "Clone judge",
+            Stage::Finder => "Finder",
         }
     }
 
     /// The short note beside the select.
-    pub fn hint(self) -> &'static str {
+    pub fn hint(self) -> String {
+        use camerata_api_types::project::{
+            model_display_name, DUP_CHECK_DEFAULT_MODEL, FINDER_DEFAULT_MODEL,
+        };
         match self {
-            Stage::Scan | Stage::Fix => "",
-            Stage::Calibration => "per site, batched",
-            Stage::GroupReview => "one call per rule group, real time",
+            Stage::Scan | Stage::Fix => String::new(),
+            Stage::Finder => "agent: one model reviews each part; engine: rule by rule".to_string(),
+            Stage::Calibration => "per site, batched".to_string(),
+            Stage::GroupReview => "one call per rule group, real time".to_string(),
+            Stage::FinderModel => format!(
+                "not set: {}; used when the finder is agent",
+                model_display_name(FINDER_DEFAULT_MODEL)
+            ),
+            Stage::DuplicateCheck => {
+                format!("not set: {}", model_display_name(DUP_CHECK_DEFAULT_MODEL))
+            }
+            Stage::CloneJudge => "not set: the project's fast tier model".to_string(),
         }
     }
 
@@ -455,13 +493,20 @@ impl Stage {
             Stage::Calibration => &models.calibration,
             Stage::GroupReview => &models.group_review,
             Stage::Fix => &models.fix,
+            Stage::FinderModel => &models.finder_model,
+            Stage::DuplicateCheck => &models.duplicate_check,
+            Stage::CloneJudge => &models.clone_judge,
+            Stage::Finder => &models.finder,
         }
     }
 
-    /// Whether the select offers a "(not set)" first option: only the fix model has a run-time
-    /// default that an explicit pick would override.
+    /// Whether the select offers a "(not set)" first option: the models that have a run-time
+    /// default an explicit pick would override.
     pub fn can_be_unset(self) -> bool {
-        self == Stage::Fix
+        matches!(
+            self,
+            Stage::Fix | Stage::FinderModel | Stage::DuplicateCheck | Stage::CloneJudge
+        )
     }
 }
 

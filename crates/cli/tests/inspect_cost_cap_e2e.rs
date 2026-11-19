@@ -31,6 +31,8 @@ impl LlmPort for Scripted {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.log.lock().unwrap().push("model call".to_string());
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: camerata_server::ai_audit::group_review::stand_in_reply(req.system.as_deref(), &req.prompt)
                 .unwrap_or_else(|| r#"{"findings":[],"proposed_rules":[],"needs_files":[],"verdicts":[],"fixes":[],"recommendations":[]}"#.to_string()),
             model: req.model.clone(),
@@ -114,6 +116,7 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         fix_model: None,
         clone_judge_model: None,
         group_review_model: None,
+        dup_check_model: None,
         escalation_rate: None,
         escalation_floor: None,
         full: true,
@@ -124,6 +127,7 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         client_engagement: false,
         run_client_tooling: false,
         consensus: false,
+        finder: Default::default(),
     }
 }
 

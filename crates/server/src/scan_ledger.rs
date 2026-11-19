@@ -177,6 +177,14 @@ pub struct RuleLedgerEntry {
     /// genuinely looked, found nothing" case).
     #[serde(default)]
     pub not_applicable: bool,
+    /// Set when every answer the agent finder gave for this rule on this repo was "not a problem
+    /// here" (or "not applicable", with at least one of the former): the model looked and judged
+    /// the letter of the rule unmet but harmless. That is not "checked and compliant", so the
+    /// rule is never [`Self::verified_clean`]; it is not a problem row and not judged not
+    /// applicable either. Set via [`ScanLedger::note_not_a_problem_rule`]. `serde(default)` so a
+    /// ledger written before it existed still loads.
+    #[serde(default)]
+    pub judged_not_a_problem: bool,
     /// Set when the rule ran on SOME of the code and the scan was stopped before it ran on the
     /// rest (today: the spend limit). The rule did run (`ran` is true, its findings are real),
     /// but it was NOT checked everywhere, so it is never [`Self::verified_clean`], the
@@ -283,6 +291,18 @@ impl RuleLedgerEntry {
                 reason: why.clone(),
             };
         }
+        // The agent finder looked and judged the rule's letter unmet but harmless. That is not
+        // "checked and compliant", so the cell is never clean; and it is not a problem or an
+        // absent concern either. The closest state the matrix and its release-gate check already
+        // know is not reviewed ("never to be read as clean"), with a reason that says what
+        // happened. The model's own lines are in the operator's "Judged not a problem here" list.
+        if self.judged_not_a_problem {
+            return CellState::NotReviewed {
+                reason: "the model judged the rule's wording unmet here but not a problem; not \
+                         shown compliant (see the operator's notes)"
+                    .to_string(),
+            };
+        }
         // A deterministic architectural rule that evaluated no file in scope had nothing to look
         // at on this repo. That is not a clean result, and in the patterns matrix it must not
         // read as "this service handles the rule differently" against a service that violates
@@ -309,6 +329,7 @@ impl RuleLedgerEntry {
         self.ran
             && self.findings_emitted == 0
             && !self.not_applicable
+            && !self.judged_not_a_problem
             && self.partial_reason.is_none()
     }
 }
@@ -509,6 +530,14 @@ pub struct ScanLedger {
     /// Transient scan-time plumbing only.
     #[serde(skip)]
     not_applicable_pending: BTreeSet<(String, String)>,
+    /// Rule ids queued for [`RuleLedgerEntry::judged_not_a_problem`]; same shape as
+    /// `not_applicable_pending`. Transient.
+    #[serde(skip)]
+    not_a_problem_pending: BTreeSet<(String, String)>,
+    /// The agent finder's "judged not a problem here" notes, one line each (rule, place, reason),
+    /// for the operator. Never in an export. `serde(default)` so an older ledger still loads.
+    #[serde(default)]
+    not_a_problem_notes: Vec<String>,
     /// What this scan was actually FED. See [`ScanInputFacts`].
     #[serde(default)]
     input: ScanInputFacts,
@@ -532,6 +561,17 @@ pub struct ScanLedger {
     /// sites no sub-group named. `None` until the group reviewer has run.
     #[serde(default)]
     escalation: Option<EscalationBlock>,
+    /// The Fix merge (item #1): how many sub-groups went in, how many Fixes came out and which
+    /// sub-groups were folded into which. A block rather than a row stage because it counts
+    /// sub-groups, not rows, so the row arithmetic of the stages stays as it was. `None` for a
+    /// ledger written before Fixes existed.
+    #[serde(default)]
+    fix_merge: Option<crate::review_tree::FixMergeBlock>,
+    /// The place merge (D2): how many problem rows went in, how many places came out and how many
+    /// rows are carried by another row at their place. A block, like the Fix merge, because the
+    /// carrying removes no row. `None` for a ledger written before places existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    place_merge: Option<crate::review_tree::PlaceMergeBlock>,
     /// The run's sites and groups for the estimate's fit; see [`GroupReviewCounts`]. Set with the
     /// escalation block. `None` until the group reviewer has run, and for a ledger written
     /// before the record existed.
@@ -576,6 +616,10 @@ pub struct ScanLedger {
     /// `None` for a full scan.
     #[serde(default)]
     incremental: Option<IncrementalCarry>,
+    /// Waiver comments and baseline entries found in the client's repositories and not honoured
+    /// by this first inspection. Added up over the repos. Printed once, in the counts.
+    #[serde(default)]
+    client_suppressions_found: usize,
     /// The repos each selected rule is bound to, by upper-cased rule id. An empty list is a
     /// project-level rule, which applies to every repo. A rule with no record here is read as
     /// applying everywhere, so a repo with nothing recorded for it is "not reviewed", never
@@ -591,6 +635,53 @@ pub struct ScanLedger {
     /// alone. Operator-only. Empty for a ledger written before the field existed.
     #[serde(default)]
     runner_notes: Vec<String>,
+    /// The agent finder's coverage block: for each piece of code one agent reviewed, how many of
+    /// its files were read in full, read in part, sent again or not reviewed (from the agent's
+    /// tool trace, never from what it said). Empty for a run of the other finder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    finder_coverage: Vec<FinderRepoCoverage>,
+    /// What the possible-duplicate check's model said about each candidate pair of rows at one
+    /// place, and why there is none when the check did not run. Operator-only: the review view and
+    /// the internal exports read it, no client package carries it, and no gate reads it. Empty for
+    /// a ledger written before the check existed.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::possible_duplicate::check::DuplicateChecks::is_empty"
+    )]
+    duplicate_checks: crate::possible_duplicate::check::DuplicateChecks,
+}
+
+/// The agent finder's coverage for one repository: one record for each piece.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinderRepoCoverage {
+    pub repo: String,
+    pub pieces: Vec<FinderPieceCoverage>,
+}
+
+/// One piece's coverage, taken from the tool trace only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinderPieceCoverage {
+    /// The piece's key (unit, number and a digest of its file list).
+    pub piece: String,
+    /// Files the piece owes a full review.
+    pub files_owed: usize,
+    pub read_in_full: usize,
+    pub read_in_part: usize,
+    pub sent_again: usize,
+    pub not_reviewed: usize,
+    /// Files outside the piece that were read (this covers nothing).
+    pub context_files_read: usize,
+    /// Whether the agent's own list of unread files matched the trace; `None` when it wrote none.
+    pub agent_list_matched: Option<bool>,
+    /// The files left not reviewed or read only in part, in path order.
+    pub not_reviewed_files: Vec<String>,
+}
+
+impl FinderPieceCoverage {
+    /// Whether every file the piece owes was read in full or sent again in full.
+    pub fn complete(&self) -> bool {
+        self.not_reviewed == 0 && self.read_in_part == 0
+    }
 }
 
 /// What the escalation formula did in one run (design 4.4 and 4.7). The counts are the tree's,
@@ -609,6 +700,13 @@ pub struct EscalationBlock {
     pub candidates: usize,
     /// Candidates in the architect's queue: the budget's worth plus the ones past it.
     pub escalated: usize,
+    /// The rows behind `candidates` (a site can hold several nominated rows). Zero in a run
+    /// saved before the block stated both units.
+    #[serde(default)]
+    pub candidate_rows: usize,
+    /// The rows behind `escalated`. Zero in a run saved before the block stated both units.
+    #[serde(default)]
+    pub escalated_rows: usize,
     /// `escalated - budget` when positive.
     pub over_budget: usize,
     /// The sites in the report, so the share below is checkable.
@@ -661,6 +759,7 @@ impl EscalationBlock {
         // The budget counts slots: rows at one site share one (R-1).
         let (slots, escalated) =
             camerata_api_types::review::count_slots(candidates.iter().copied());
+        let escalated_rows = candidates.iter().filter(|c| c.escalated).count();
         let budget = tree.budget.budget;
         let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
         let mut over_by_reason: BTreeMap<String, usize> = BTreeMap::new();
@@ -679,6 +778,8 @@ impl EscalationBlock {
             budget,
             candidates: slots,
             escalated,
+            candidate_rows: candidates.len(),
+            escalated_rows,
             over_budget: escalated.saturating_sub(budget),
             total_sites: total,
             share_escalated: if total == 0 {
@@ -912,6 +1013,11 @@ pub struct GroupReviewCounts {
     pub groups: usize,
     /// The rules that ran, the ceiling on the groups.
     pub rules_in_play: usize,
+    /// The files the scan read: what the estimate's site count is sized from
+    /// (`camerata_ui_core::scan::RUN_FIT`), recorded beside the sites it predicts so the next fit
+    /// reads them from one place. 0 on a ledger written before it was recorded.
+    #[serde(default)]
+    pub files: usize,
 }
 
 /// A10: how many rows the engine threw out and kept, by reason (`engine_discard`). Every one of
@@ -1297,6 +1403,19 @@ impl ScanLedger {
         self.input = input;
     }
 
+    /// Record the possible-duplicate check's answers. Overwrites: one scan, one record.
+    pub fn record_duplicate_checks(
+        &mut self,
+        checks: crate::possible_duplicate::check::DuplicateChecks,
+    ) {
+        self.duplicate_checks = checks;
+    }
+
+    /// The possible-duplicate check's stored answers (empty when it did not run).
+    pub fn duplicate_checks(&self) -> &crate::possible_duplicate::check::DuplicateChecks {
+        &self.duplicate_checks
+    }
+
     /// Record the scan's per-stage cost telemetry. Overwrites: one scan, one record.
     pub fn record_stage_telemetry(&mut self, telemetry: crate::stage_telemetry::StageTelemetry) {
         self.stage_telemetry = Some(telemetry);
@@ -1334,6 +1453,26 @@ impl ScanLedger {
         &self.runner_notes
     }
 
+    /// Record the agent finder's coverage of `repo`, one record for each piece (replacing an
+    /// earlier record of the same repository).
+    pub fn record_finder_coverage(
+        &mut self,
+        repo: &str,
+        pieces: impl IntoIterator<Item = FinderPieceCoverage>,
+    ) {
+        self.finder_coverage.retain(|r| r.repo != repo);
+        self.finder_coverage.push(FinderRepoCoverage {
+            repo: repo.to_string(),
+            pieces: pieces.into_iter().collect(),
+        });
+    }
+
+    /// The agent finder's coverage block, one entry for each repository. Empty for a run of the
+    /// other finder.
+    pub fn finder_coverage(&self) -> &[FinderRepoCoverage] {
+        &self.finder_coverage
+    }
+
     /// Record that the run stopped on an outage. Overwrites: one scan, one record.
     pub fn record_outage(&mut self, record: crate::run_health::OutageRecord) {
         self.outage = Some(record);
@@ -1352,6 +1491,16 @@ impl ScanLedger {
     /// Record the engagement this scan ran under. Overwrites: one scan, one record.
     pub fn record_engagement(&mut self, record: crate::client_lock::EngagementRecord) {
         self.engagement = Some(record);
+    }
+
+    /// Add what one repository held: waiver comments and baseline entries that were not honoured.
+    pub fn add_client_suppressions(&mut self, found: usize) {
+        self.client_suppressions_found += found;
+    }
+
+    /// Waivers and baseline entries found in the client's repositories and not honoured.
+    pub fn client_suppressions_found(&self) -> usize {
+        self.client_suppressions_found
     }
 
     /// Record that this run was incremental (H11). Overwrites: one scan, one record.
@@ -1455,8 +1604,29 @@ impl ScanLedger {
             sites: rows_in(crate::ai_audit::group_review::STAGE_SAMPLE_NAME),
             groups: block.rules_reviewed + block.rules_failed,
             rules_in_play: self.merged_rules().values().filter(|r| r.ran).count(),
+            files: self.input.files_scanned,
         });
         self.escalation = Some(block);
+    }
+
+    /// Record the Fix merge, replacing an earlier one (the tree is built again after an edit).
+    pub fn record_fix_merge(&mut self, block: crate::review_tree::FixMergeBlock) {
+        self.fix_merge = Some(block);
+    }
+
+    /// Record the place merge, replacing an earlier one (the tree is built again after an edit).
+    pub fn record_place_merge(&mut self, block: crate::review_tree::PlaceMergeBlock) {
+        self.place_merge = Some(block);
+    }
+
+    /// The place merge of the run, once the tree has been built.
+    pub fn place_merge(&self) -> Option<&crate::review_tree::PlaceMergeBlock> {
+        self.place_merge.as_ref()
+    }
+
+    /// The Fix merge of the run, once the tree has been built.
+    pub fn fix_merge(&self) -> Option<&crate::review_tree::FixMergeBlock> {
+        self.fix_merge.as_ref()
     }
 
     /// The sites and groups of the run, once the group reviewer has run.
@@ -1545,6 +1715,24 @@ impl ScanLedger {
             .insert((repo.to_string(), rule_id.into()));
     }
 
+    /// Queue the "judged not a problem here" fact for `rule_id` on `repo` (see
+    /// [`RuleLedgerEntry::judged_not_a_problem`]); consumed by [`Self::record_rule`] like
+    /// [`Self::note_not_applicable_rule`].
+    pub fn note_not_a_problem_rule(&mut self, repo: &str, rule_id: impl Into<String>) {
+        self.not_a_problem_pending
+            .insert((repo.to_string(), rule_id.into()));
+    }
+
+    /// Append the finder's "judged not a problem here" lines for the operator.
+    pub fn record_not_a_problem_notes(&mut self, notes: Vec<String>) {
+        self.not_a_problem_notes.extend(notes);
+    }
+
+    /// What the agent finder judged not a problem here, one line each. Operator only.
+    pub fn not_a_problem_notes(&self) -> &[String] {
+        &self.not_a_problem_notes
+    }
+
     /// Record (or, for a rule already seen for this repo this scan, ACCUMULATE) one rule's
     /// outcome for `repo`. The entry is kept per (rule, repo): a rule that ran on one repo and
     /// was skipped on another is two entries, and the merged view ([`Self::rule`]) says so
@@ -1578,6 +1766,9 @@ impl ScanLedger {
         let not_applicable = self
             .not_applicable_pending
             .contains(&(repo.to_string(), rule_id.clone()));
+        let judged_not_a_problem = self
+            .not_a_problem_pending
+            .contains(&(repo.to_string(), rule_id.clone()));
         let key = (rule_id.clone(), repo.to_string());
         self.rules
             .entry(key.clone())
@@ -1594,6 +1785,7 @@ impl ScanLedger {
                     e.coverage_note = coverage_note.clone();
                 }
                 e.not_applicable = e.not_applicable || not_applicable;
+                e.judged_not_a_problem = e.judged_not_a_problem || judged_not_a_problem;
             })
             .or_insert(RuleLedgerEntry {
                 rule_id: rule_id.clone(),
@@ -1605,6 +1797,7 @@ impl ScanLedger {
                 findings_emitted,
                 coverage_note,
                 not_applicable,
+                judged_not_a_problem,
                 partial_reason: None,
                 repos_not_run: Vec::new(),
                 not_run_reason: None,
@@ -1770,6 +1963,7 @@ impl ScanLedger {
                     findings_emitted: 0,
                     coverage_note: Some(CORPUS_LOAD_FAILED_NOTE.to_string()),
                     not_applicable: false,
+                    judged_not_a_problem: false,
                     partial_reason: None,
                     repos_not_run: Vec::new(),
                     not_run_reason: None,
@@ -1944,6 +2138,10 @@ impl ScanLedger {
             || self
                 .not_applicable_pending
                 .contains(&(repo.to_string(), rule_id.clone()));
+        let judged_not_a_problem = self.rules.get(&key).is_some_and(|e| e.judged_not_a_problem)
+            || self
+                .not_a_problem_pending
+                .contains(&(repo.to_string(), rule_id.clone()));
         self.rules.insert(
             key.clone(),
             RuleLedgerEntry {
@@ -1956,6 +2154,7 @@ impl ScanLedger {
                 findings_emitted,
                 coverage_note,
                 not_applicable,
+                judged_not_a_problem,
                 partial_reason: None,
                 repos_not_run: Vec::new(),
                 not_run_reason: None,
@@ -2512,6 +2711,9 @@ fn merge_rule_entries(entries: &[&RuleLedgerEntry]) -> RuleLedgerEntry {
                 .collect();
             !applying.is_empty() && applying.iter().all(|e| e.not_applicable)
         },
+        // Any repo that judged the rule not a problem here keeps the merged rule from reading
+        // verified clean: it is not checked and compliant everywhere.
+        judged_not_a_problem: entries.iter().any(|e| e.judged_not_a_problem),
         partial_reason: (!parts.is_empty()).then(|| parts.join("; ")),
         repos_not_run: gaps
             .iter()
@@ -3269,6 +3471,29 @@ mod tests {
         );
     }
 
+    /// A rule the agent finder judged only "not a problem here" is never verified clean, and sits
+    /// in no other bucket either (not not-applicable, not excluded). An older ledger without the
+    /// mark still loads and reads as before.
+    #[test]
+    fn a_rule_judged_only_not_a_problem_here_is_in_no_outcome_bucket() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_not_a_problem_rule("", "ARCH-X-1");
+        for rule in ["ARCH-X-1", "ARCH-Y-1"] {
+            ledger.record_rule("", rule, RuleTier::Semantic, true, None, 5, 0);
+        }
+        let entry = ledger.rule("ARCH-X-1").expect("recorded");
+        assert!(entry.judged_not_a_problem && !entry.verified_clean());
+        assert_eq!(ledger.healthy_rule_ids(), vec!["ARCH-Y-1".to_string()]);
+        assert!(ledger.not_applicable_rule_ids().is_empty());
+        assert!(ledger.excluded_rules().is_empty());
+        let mut old = serde_json::to_value(entry).expect("serializes");
+        old.as_object_mut()
+            .expect("object")
+            .remove("judged_not_a_problem");
+        let loaded: RuleLedgerEntry = serde_json::from_value(old).expect("an older entry loads");
+        assert!(!loaded.judged_not_a_problem && loaded.verified_clean());
+    }
+
     /// The positive twin: a rule recorded with `ran && findings_emitted == 0` WITHOUT ever
     /// being queued as not-applicable is the ordinary, honest "genuinely ran and found
     /// nothing" case — still verified-clean/healthy, proving the new field doesn't change
@@ -4012,6 +4237,10 @@ mod tests {
             0,
             0,
         );
+        ledger.record_input(ScanInputFacts {
+            files_scanned: 36,
+            ..ScanInputFacts::default()
+        });
         ledger.record_stage("ai-calibration", 3, 3, StageAccounting::default());
         ledger.record_stage("ai-group-review", 5, 5, StageAccounting::default());
         assert!(
@@ -4034,6 +4263,7 @@ mod tests {
             "rule groups read, and the one that failed"
         );
         assert_eq!(counts.rules_in_play, 2, "rules that ran");
+        assert_eq!(counts.files, 36, "the files the estimate's sites follow");
         // It survives the file.
         let back: ScanLedger =
             serde_json::from_str(&serde_json::to_string(&ledger).unwrap()).unwrap();

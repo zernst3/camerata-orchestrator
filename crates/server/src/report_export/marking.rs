@@ -3,26 +3,35 @@
 
 use super::*;
 
-/// The site count above which only the reshaped PDF (summary, escalations and patterns) is
-/// rendered (amendment A14 item 4). At 30,000 sites the full PDF compiled in about 22 seconds
-/// (M8); the limit is the size the full PDF was measured at.
-pub const FULL_PDF_SITE_LIMIT: usize = 30_000;
-
 /// A site the group reviewer escalated, as the PDF prints it, with the decision on it. Nothing the
 /// group reviewer wrote about the site (its reason, rank or words) is in it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct EscalatedSiteJson {
-    /// The sub-group the site sits in.
+    /// The sub-group the place sits in.
     pub group: String,
+    /// The Fix the place is in.
+    pub fix_id: String,
     pub headline: String,
     pub severity: String,
     pub repo: String,
     pub path: String,
     pub line: usize,
     pub rule_id: String,
-    /// The decision on the site, as its row states it ("Confirmed by the reviewer ...", "Open ...").
+    /// Every rule at the place, by id, the worst first. One entry is one place (one escalation
+    /// slot), whatever the number of rules at it.
+    pub rules: Vec<String>,
+    /// The decision on the place, as its rows state it ("Confirmed by the reviewer ...", "Open ...").
     pub decision: String,
     pub review_level: String,
+    /// The place as the PDF prints it: `repo / path, line 12`, or `, whole file` for a problem in
+    /// a whole file. Never "line 0".
+    pub place: String,
+    /// "Rules: A, B": every rule at the place, by id. One entry, however many rules.
+    pub rules_line: String,
+    /// The Fix's change in at most two sentences.
+    pub what_to_do: String,
+    /// The Fix's effort band, in words; empty when it is not estimated.
+    pub effort: String,
 }
 
 /// The escalations section: the sentence the ledger states and the sites above the line.
@@ -32,18 +41,51 @@ pub struct EscalationsJson {
     /// when the group review did not run for this report.
     pub sentence: String,
     pub items: Vec<EscalatedSiteJson>,
+    /// How many of `items` the PDF prints, worst first ([`PDF_MAX_SERIOUS_PROBLEMS`]).
+    pub cap: usize,
+    /// "and 4 more in the Fix plan sheet" when the cap leaves some out; empty otherwise.
+    pub more_line: String,
+    /// The sentence above the entries.
+    pub intro: String,
 }
+
+/// The most entries the PDF's "The most serious problems" section prints.
+pub const PDF_MAX_SERIOUS_PROBLEMS: usize = 8;
+/// The most lines the PDF's "The other fixes" section prints.
+pub const PDF_MAX_OTHER_FIXES: usize = 60;
+/// The most rules the PDF's "What is healthy" section lists.
+pub const PDF_MAX_HEALTHY_RULES: usize = 25;
+/// The most skipped files the PDF names; the Not checked sheet holds the rest.
+pub const PDF_MAX_SKIPPED_FILES: usize = 10;
+/// The most "not run" notes the PDF prints in the summary and in the methodology.
+pub const PDF_MAX_FAILED_PASS_NOTES: usize = 5;
+/// The most dependency advisories the PDF names; the Dependencies sheet holds the rest.
+pub const PDF_MAX_DEPENDENCIES: usize = 5;
+/// The most rules the PDF names in the cross-service comparison.
+pub const PDF_MAX_CROSS_SERVICE_LINES: usize = 10;
+/// The most departures the PDF names in "Your conventions".
+pub const PDF_MAX_DEPARTURES: usize = 5;
 
 /// One sub-group as the PDF describes it: what its sites share, the fix once and a worked example.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PatternJson {
-    /// The sub-group's node id; the Sites sheet filter is `Group = <id>`.
+    /// The Fix id; the All problems filter is `Fix id = <id>`.
     pub group: String,
+    /// Whether the Fix is a dependency upgrade.
+    pub is_dependency: bool,
     pub rule_id: String,
     pub rule_title: String,
+    /// The Fix's area (the first when its rules span several).
+    pub area: String,
+    /// The Fix's name, as the Fix plan sheet states it.
+    pub name: String,
+    /// Every rule the Fix satisfies, by id, the worst first.
+    pub rules: Vec<String>,
     pub label: String,
     pub cause: String,
-    pub summary: String,
+    /// Why the Fix matters to the client's business. The PDF's data carries no other reason: not
+    /// the reviewer's summary and not the technical reason.
+    pub why_business: String,
     pub severity: String,
     /// Every site of the sub-group that is not a false positive.
     pub site_count: usize,
@@ -64,18 +106,62 @@ pub struct PatternJson {
     pub pointer: String,
 }
 
-/// How many rows the matrix held in one bucket at one severity and kind. In the reshaped PDF the
-/// matrix lists no site, and this is what the release gate reconciles its counts against.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MatrixTallyJson {
-    pub bucket: String,
+/// One line of "The other fixes": a Fix that is not one of the most serious problems.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OtherFixLineJson {
+    /// The Fix's id, so the release gate can recount its order from the rows.
+    pub fix_id: String,
+    /// The Fix's name.
+    pub name: String,
     pub severity: String,
-    pub kind: String,
-    pub count: usize,
+    /// "3 places".
+    pub places: String,
+    /// The effort band in words; empty when it is not estimated.
+    pub effort: String,
+    /// First, Next or Later; for a Fix with no place for action, its class (Needs a decision or
+    /// Information only).
+    pub fix_order: String,
+}
+
+/// The Fixes of one area, in the order to do them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OtherFixGroupJson {
+    pub area: String,
+    pub lines: Vec<OtherFixLineJson>,
+}
+
+/// "The other fixes": one line for each Fix that is not one of the most serious problems, grouped
+/// by area. At most [`PDF_MAX_OTHER_FIXES`] lines; the rest are counted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OtherFixesJson {
+    pub groups: Vec<OtherFixGroupJson>,
+    /// The sentence above the lines.
+    pub intro: String,
+    /// How many lines are printed.
+    pub shown: usize,
+    /// "and 132 more in the Fix plan sheet" when the cap leaves some out; empty otherwise.
+    pub more_line: String,
+}
+
+/// "Your conventions": counts and short lines, never a row for each convention.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ConventionsSummaryJson {
+    /// True when the inspection derived any convention or departure.
+    pub any: bool,
+    /// What the code does consistently: "12 conventions followed consistently, in 5 areas."
+    pub followed_line: String,
+    /// Where it has no single habit.
+    pub none_adopted_line: String,
+    /// Where it departs from itself.
+    pub departures_line: String,
+    /// The worst few departures, one line each.
+    pub departures: Vec<String>,
+    /// "and 7 more in the Departures sheet"; empty when none are left out.
+    pub more_line: String,
 }
 
 /// One service's cell of a pattern row as the report prints it: the ledger's cell state plus
-/// the finished label ("Violated, 3 sites", "Clean", "Not applicable: ...", "Not reviewed: ...").
+/// the finished label ("3 places", "Clean", "Not applicable: ...", "Not reviewed: ...").
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PatternCellJson {
     pub repo: String,
@@ -105,6 +191,11 @@ pub struct PatternsAcrossServicesJson {
     pub note: String,
     pub rows: Vec<PatternRowJson>,
     pub themes: Vec<crate::onboard::patterns_matrix::Theme>,
+    /// One line for each rule the services differ on ("Title: repo A 3 places; repo B
+    /// clean"), at most [`PDF_MAX_CROSS_SERVICE_LINES`]. The PDF prints these, not the cells.
+    pub summary_lines: Vec<String>,
+    /// "and 4 more in the Patterns across services sheet"; empty when none are left out.
+    pub more_line: String,
 }
 
 /// What the section says about itself: an observation, not a finding.
@@ -116,26 +207,59 @@ pub const PATTERNS_NOTE: &str = "This section compares the services of this proj
 pub fn pattern_cell_label(state: &crate::scan_ledger::CellState) -> String {
     use crate::scan_ledger::CellState;
     match state {
-        CellState::Violated { sites } => {
-            format!(
-                "Violated, {sites} {}",
-                if *sites == 1 { "site" } else { "sites" }
-            )
-        }
+        CellState::Violated { sites } => crate::xlsx_export::vocabulary::places_count(*sites),
         CellState::Clean => "Clean".to_string(),
         CellState::NotApplicable { reason } => format!("Not applicable: {reason}"),
         CellState::NotReviewed { reason } => format!("Not reviewed: {reason}"),
     }
 }
 
+trait LowercaseFirst {
+    fn to_lowercase_first(&self) -> String;
+}
+
+impl LowercaseFirst for str {
+    fn to_lowercase_first(&self) -> String {
+        let mut chars = self.chars();
+        match chars.next() {
+            Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    }
+}
+
+/// Whether the reviewer ruled `f` out (`FalsePositive`). A ruled-out problem is not open.
+pub(crate) fn is_ruled_out(
+    dispositions: &std::collections::HashMap<String, super::DispositionWire>,
+    f: &crate::onboard::Finding,
+) -> bool {
+    dispositions
+        .get(&super::finding_key(f))
+        .is_some_and(|d| d.state == "FalsePositive")
+}
+
 /// The patterns section for a report, or `None` for a project of one repo. A row for a rule
 /// the corpus does not know (an id the model invented) is left out when a corpus is loaded:
 /// the section names rules by title and never prints a raw id.
+///
+/// The matrix is built here from the rows the export reads (the reviewed rows, with the
+/// reviewer's restores, additions and edits) and the reviewer's rulings, never taken from the
+/// copy stored at the seal: that copy predates the overlay, so a problem the reviewer put back
+/// or added would be missing from it and its service could read clean beside it. A problem the
+/// reviewer ruled out is not open. The themes a model grouped the stored rows into are kept only
+/// while every row they cite still exists.
 pub fn patterns_across_services_json(
     report: &crate::onboard::ScanReport,
     corpus: Option<&camerata_rules::RuleSet>,
+    dispositions: &std::collections::HashMap<String, super::DispositionWire>,
 ) -> Option<PatternsAcrossServicesJson> {
-    let matrix = &report.patterns_across_services;
+    let mut fresh =
+        crate::onboard::patterns_matrix::build_with(report, &|f| is_ruled_out(dispositions, f));
+    fresh.themes = crate::onboard::patterns_matrix::keep_valid_themes(
+        report.patterns_across_services.themes.clone(),
+        &fresh,
+    );
+    let matrix = &fresh;
     if !matrix.is_present() {
         return None;
     }
@@ -163,11 +287,34 @@ pub fn patterns_across_services_json(
             })
         })
         .collect();
+    let rows: Vec<PatternRowJson> = rows;
+    let summary_lines: Vec<String> = rows
+        .iter()
+        .take(PDF_MAX_CROSS_SERVICE_LINES)
+        .map(|row| {
+            let cells: Vec<String> = row
+                .cells
+                .iter()
+                .map(|c| format!("{} {}", c.repo, c.label.to_lowercase_first()))
+                .collect();
+            format!("{}: {}", row.title, cells.join("; "))
+        })
+        .collect();
+    let more_line = if rows.len() > PDF_MAX_CROSS_SERVICE_LINES {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            rows.len() - PDF_MAX_CROSS_SERVICE_LINES,
+            crate::xlsx_export::vocabulary::PATTERNS_ACROSS_SERVICES,
+        )
+    } else {
+        String::new()
+    };
     Some(PatternsAcrossServicesJson {
         repos: matrix.repos.clone(),
         note: PATTERNS_NOTE.to_string(),
         rows,
         themes: matrix.themes.clone(),
+        summary_lines,
+        more_line,
     })
 }
 
@@ -449,7 +596,7 @@ pub fn confidentiality_marking(
 pub const AUDIT_REPORT_DISCLAIMER_MULTI: &str =
     "This report is an advisory architectural and security assessment based on static \
      analysis of the repository states identified on the cover page. It is not a \
-     certification, warranty, or guarantee of security. Findings reflect evidence present in \
+     certification, warranty or guarantee of security. Findings reflect evidence present in \
      the inspected code at scan time and may not represent the live production systems. All \
      remediation should be validated by the client's engineering team against the live \
      environments. The preparing reviewer accepts no liability for actions taken on the basis \
@@ -471,7 +618,7 @@ pub fn audit_report_disclaimer(repo_count: usize) -> &'static str {
 pub const AUDIT_REPORT_DISCLAIMER: &str =
     "This report is an advisory architectural and security assessment based on static \
      analysis of the repository state identified on the cover page. It is not a \
-     certification, warranty, or guarantee of security. Findings reflect evidence present in \
+     certification, warranty or guarantee of security. Findings reflect evidence present in \
      the inspected code at scan time and may not represent the live production system. All \
      remediation should be validated by the client's engineering team against the live \
      environment. The preparing reviewer accepts no liability for actions taken on the basis \
@@ -636,127 +783,11 @@ pub(crate) fn failed_pass_disclosures(
                 return format!("{pass} for {}: did not complete.", f.repo);
             }
             format!(
-                "{pass} for {}: not computed — pass failed ({}).",
+                "{pass} for {}: not computed, pass failed ({}).",
                 f.repo, f.reason
             )
         })
         .collect()
-}
-
-/// FIX 3 (2026-09-13 review) — a short, FACTUAL "what happens next" paragraph, rendered in a
-/// new section before Methodology. Deliberately non-pitch: no urgency language. Three factual
-/// steps, one paragraph, no em/en dashes (house style for this client deliverable — see
-/// `AUDIT_REPORT_DISCLAIMER`'s doc comment).
-///
-/// C4-P4 (residual defect 4, 2026-10-01): this used to end step one with "at the rate set out
-/// in the engagement" — a placeholder that promised a number (the design doc's public promise
-/// 2: "the fix rate is written into the report before the client decides") without ever stating
-/// one. A real dollar/hour billing rate genuinely isn't this report's to invent (there is no
-/// such field anywhere in `ReportOptions`, and fabricating one would be worse than the
-/// placeholder it replaces). The number this report CAN state honestly, because every input to
-/// it is already computed for the executive-summary/methodology reconciliation a few lines
-/// above this one, is the TRIAGE fix rate.
-///
-/// C5-6 (REG-6, 2026-10-02): the triage fix rate above used to be `(candidates_reviewed -
-/// excluded_false_positive) / candidates_reviewed` — "kept" counted EVERY non-excluded
-/// candidate, including rows still sitting in [`MatrixJson::held`] / `informational` with no
-/// human disposition at all. On a fresh, unreviewed DRAFT export that produced a flatly false
-/// "100% fix rate" sentence calling undecided held rows "real, actionable items" before a
-/// reviewer had looked at a single one of them. Two independent bugs, both fixed here:
-///
-/// - **No percentage before a human has triaged anything.** [`ReviewState::Raw`] (see its doc
-///   comment — nobody this session has dispositioned a single finding) can never print a
-///   fix-rate percentage, full stop; there is no "rate" yet, only an unreviewed backlog. It
-///   prints the held count instead: "Fix rate not yet established: N of M candidates are held
-///   for a reviewer's decision; 0 excluded so far" — `0 excluded` is not a placeholder, it is
-///   always true here, because [`ReviewState::Raw`] is derived from "no finding carries an
-///   explicit this-session auditor disposition," and an excluded-as-false-positive row IS such
-///   a disposition (see `build_report_json`'s partition loop).
-/// - **Held rows never belong in the rate's numerator OR denominator**, even once a reviewer
-///   has acted on OTHER findings. A row still sitting in `held`/`informational` was not kept as
-///   "real, actionable," nor was it excluded as noise — it is neither, by construction. The
-///   fix rate is now `curated_total / (curated_total + excluded_false_positive)` only: the
-///   share of DECIDED candidates (curated for action vs. excluded as a false positive) that
-///   were kept. The "excluding the rest as likely false positives" clause is appended only when
-///   `excluded_false_positive > 0` — with nothing excluded, "excluding the rest" describes
-///   nothing and is simply dropped, not forced to read "excluding 0."
-///
-/// A zero-candidate (clean) run has no fix rate to report; the paragraph says so plainly
-/// instead of dividing by zero or rendering a percentage that implies findings existed. The
-/// same "nothing to compute a rate from" sentence is reused, defensively, if a `Reviewed`
-/// export somehow has zero curated AND zero excluded candidates (every candidate is held or a
-/// dependency advisory) — dividing zero by zero is not a 0% or 100% fix rate, it is "not yet
-/// established," identically to the draft case.
-#[cfg(test)]
-pub(crate) fn next_steps_note(
-    review_state: ReviewState,
-    candidates_reviewed: usize,
-    curated_total: usize,
-    held_for_review: usize,
-    excluded_false_positive: usize,
-) -> String {
-    next_steps_note_for(
-        false,
-        review_state,
-        candidates_reviewed,
-        curated_total,
-        held_for_review,
-        excluded_false_positive,
-    )
-}
-
-/// [`next_steps_note`] for a project of one repo (`multi_repo` false) or several, where the
-/// retest covers the repositories and the codebases rather than one repository.
-pub(crate) fn next_steps_note_for(
-    multi_repo: bool,
-    review_state: ReviewState,
-    candidates_reviewed: usize,
-    curated_total: usize,
-    held_for_review: usize,
-    excluded_false_positive: usize,
-) -> String {
-    let (rescan_object, introduces) = if multi_repo {
-        ("repositories", "the codebases introduce")
-    } else {
-        ("repository", "the codebase introduces")
-    };
-    let not_yet_established = || {
-        format!(
-            "Fix rate not yet established: {held_for_review} of {} are held for a reviewer's \
-             decision; 0 excluded so far.",
-            noun(candidates_reviewed, "candidate", "candidates"),
-        )
-    };
-    let fix_rate_sentence = if candidates_reviewed == 0 {
-        "This run produced no candidate findings, so there is no fix rate to report.".to_string()
-    } else if matches!(review_state, ReviewState::Raw) {
-        not_yet_established()
-    } else {
-        let denominator = curated_total + excluded_false_positive;
-        if denominator == 0 {
-            not_yet_established()
-        } else {
-            let pct = (curated_total as f64 / denominator as f64) * 100.0;
-            let excluding_clause = if excluded_false_positive > 0 {
-                ", excluding the rest as likely false positives"
-            } else {
-                ""
-            };
-            format!(
-                "This run kept {curated_total} of {} as real, actionable items (a {pct:.0}% \
-                 fix rate){excluding_clause}.",
-                noun(denominator, "candidate finding", "candidate findings"),
-            )
-        }
-    };
-    format!(
-        "There are three steps from here. First, the do-now items above get fixed, by your own \
-         team, an outside contractor, or the reviewing engineer. {fix_rate_sentence} Second, a \
-         retest: the reviewing engineer re-scans the {rescan_object} once the fixes are in and \
-         signs a short addendum confirming each item is closed. Third, ongoing coverage: a \
-         monthly delta rescan plus on-call architect availability for anything new \
-         {introduces} between engagements."
-    )
 }
 
 // ── FIX 7 business-impact map (§"If you only do three things this week") ───────────

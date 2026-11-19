@@ -65,6 +65,8 @@ impl LlmPort for StubJudge {
         self.requests.lock().unwrap().push(req.clone());
         let text = (self.script.lock().unwrap())(&req, index)?;
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),

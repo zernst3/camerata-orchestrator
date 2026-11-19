@@ -732,6 +732,18 @@ mod tests {
         );
     }
 
+    /// Ruling a row out always opens the reason prompt, whatever the row carries, so a row the
+    /// engine flagged "possible false positive" is never ruled out with no reason typed. The
+    /// command takes no row: the prompt cannot depend on the flag.
+    #[test]
+    fn ruling_a_row_out_always_prompts_for_a_reason() {
+        assert!(TriageState::FalsePositive.requires_reason());
+        assert_eq!(
+            PaneCommand::decide(TriageState::FalsePositive),
+            PaneCommand::PromptFor(TriageState::FalsePositive)
+        );
+    }
+
     #[test]
     fn decide_is_the_one_split_between_apply_and_prompt() {
         for state in TriageState::all() {

@@ -118,6 +118,8 @@ impl LlmPort for ThinksUntilTheCap {
         let out = u64::from(req.max_tokens);
         self.seen.lock().unwrap().push(req);
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: String::new(),
             model: "claude-haiku-5-5".to_string(),
             backend: "api".to_string(),
@@ -298,6 +300,8 @@ fn opus_request_with_a_128k_cap() -> LlmRequest {
 
 fn paid_reply(model: &str, cost: f64) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: String::new(),
         model: model.to_string(),
         backend: "api".to_string(),
@@ -460,6 +464,8 @@ impl LlmPort for Scripted {
             replies[0].clone()
         };
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text,
             model: "claude-sonnet-5-5".to_string(),
             backend: "api".to_string(),

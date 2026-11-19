@@ -106,8 +106,19 @@ pub(super) fn client_options() -> ReportOptions {
 
 /// A clean package, built by the production assembly around a stand-in PDF.
 pub(super) fn package() -> ProductPackage {
+    package_with(client_options())
+}
+
+/// A clean INTERNAL package (the operator's own review): its README carries the provenance lines.
+pub(super) fn internal_package() -> ProductPackage {
+    package_with(ReportOptions {
+        internal: true,
+        ..client_options()
+    })
+}
+
+fn package_with(options: ReportOptions) -> ProductPackage {
     let sealed = sealed_report();
-    let options = client_options();
     let json = build_report_json(
         &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
@@ -128,6 +139,10 @@ fn released() -> ReleasedZip {
     release(package()).expect("a clean package must clear the gate")
 }
 
+fn internal_released() -> ReleasedZip {
+    release_internal(internal_package()).expect("a clean internal package must clear the gate")
+}
+
 /// 22a: the backend and provider in `ReportOptions` reach the package's provenance, and the
 /// released package (gate included) states them in the manifest and the README alike.
 #[test]
@@ -137,6 +152,7 @@ fn the_backend_and_provider_in_the_options_reach_the_manifest_and_readme() {
         model: Some(crate::ModelRecord::anthropic(
             crate::llm::ProjectBackend::Api,
         )),
+        internal: true,
         ..client_options()
     };
     let json = build_report_json(
@@ -158,7 +174,7 @@ fn the_backend_and_provider_in_the_options_reach_the_manifest_and_readme() {
     let manifest = package.provenance.inspection_json();
     assert_eq!(manifest["model_backend"], "api");
     assert_eq!(manifest["model_provider"], "anthropic");
-    release(package).expect("the gate's agreement check passes with the model lines");
+    release_internal(package).expect("the gate's agreement check passes with the model lines");
 }
 
 /// The fixture scan with the AI passes recorded as having run.
@@ -179,6 +195,7 @@ fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
             crate::ModelRecord::anthropic(crate::llm::ProjectBackend::Api)
                 .with_client_engagement(true),
         ),
+        internal: true,
         ..client_options()
     };
     let json = build_report_json(
@@ -217,7 +234,7 @@ fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
         package.report_json.cover.model_backend.as_deref(),
         Some("api (anthropic)")
     );
-    release(package).expect("the gate's agreement check passes with the model lines");
+    release_internal(package).expect("the gate's agreement check passes with the model lines");
 }
 
 /// H2: a README whose model line disagrees with the manifest is blocked by the agreement check.
@@ -228,6 +245,7 @@ fn a_readme_model_line_that_disagrees_with_the_manifest_is_blocked() {
         model: Some(crate::ModelRecord::anthropic(
             crate::llm::ProjectBackend::Api,
         )),
+        internal: true,
         ..ReportOptions::default()
     };
     let json = build_report_json(
@@ -249,7 +267,11 @@ fn a_readme_model_line_that_disagrees_with_the_manifest_is_blocked() {
         &format!("Model (the scan): {scan_model}"),
         "Model (the scan): deepseek/deepseek-chat",
     );
-    let failure = blocked(package);
+    let failure = match release_internal(package) {
+        Err(ReleaseError::Blocked(failure)) => failure,
+        Err(other) => panic!("expected the gate to block, got {other}"),
+        Ok(_) => panic!("expected the gate to block, but the package was released"),
+    };
     assert!(
         failure
             .report
@@ -297,7 +319,11 @@ fn xml_escape(text: &str) -> String {
 }
 
 /// Rewrite one part of an xlsx (a zip), keeping every other part byte for byte.
-fn rewrite_xlsx_part(xlsx: &[u8], part: &str, edit: impl FnOnce(&str) -> String) -> Vec<u8> {
+pub(super) fn rewrite_xlsx_part(
+    xlsx: &[u8],
+    part: &str,
+    edit: impl FnOnce(&str) -> String,
+) -> Vec<u8> {
     let entries = read_zip_entries(xlsx).expect("the workbook is a zip");
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
@@ -393,7 +419,7 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 // ---- the happy path -----------------------------------------------------------------------------
 
 #[test]
-fn release_passes_a_clean_package_and_reports_fourteen_checks() {
+fn release_passes_a_clean_package_and_reports_sixteen_checks() {
     let z = released();
     assert!(z.report.is_clean());
     assert_eq!(
@@ -408,11 +434,15 @@ fn release_passes_a_clean_package_and_reports_fourteen_checks() {
             "reviewer decision on unverified evidence",
             "decision records behind merged rows",
             "reviewer decision on restored findings",
+            "reviewer decision on split-out problems",
             "reviewer correction on flagged findings",
             "confidentiality marking",
             "manifest",
             "provenance",
-            "unsynced reviewer changes"
+            "unsynced reviewer changes",
+            "one fix per row",
+            "client text style",
+            "internal notes kept out"
         ]
     );
     assert_eq!(&z.bytes[0..2], b"PK");
@@ -420,7 +450,7 @@ fn release_passes_a_clean_package_and_reports_fourteen_checks() {
 
 #[test]
 fn the_readme_and_manifest_state_the_release_checks_that_ran() {
-    let z = released();
+    let z = internal_released();
     let entries = read_zip_entries(&z.bytes).expect("zip");
     let readme = String::from_utf8_lossy(&entries["README.txt"]).to_string();
     assert!(
@@ -428,8 +458,9 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
             "Release checks: secrets, dataset set, dataset parity, row parity, severity and \
              kind counts, finding content, reviewer decision on unverified evidence, \
              decision records behind merged rows, reviewer decision on restored findings, \
-             reviewer correction on flagged findings, confidentiality marking, manifest, \
-             provenance, unsynced reviewer changes (all passed)"
+             reviewer decision on split-out problems, reviewer correction on flagged findings, confidentiality marking, manifest, \
+             provenance, unsynced reviewer changes, one fix per row, client text style, internal \
+             notes kept out (all passed)"
         ),
         "{readme}"
     );
@@ -523,9 +554,9 @@ fn secrets_check_locates_an_xlsx_hit_by_sheet_and_cell() {
     let cells = xlsx_cells(&pkg.xlsx).expect("cells");
     let target = cells
         .iter()
-        .find(|c| c.sheet == "All Findings" && c.text == "raw SQL concatenation")
-        .or_else(|| cells.iter().find(|c| c.sheet == "All Findings"))
-        .expect("an All Findings cell")
+        .find(|c| c.sheet == "All problems" && c.text == "raw SQL concatenation")
+        .or_else(|| cells.iter().find(|c| c.sheet == "All problems"))
+        .expect("an All problems cell")
         .clone();
     let needle = format!(">{}<", xml_escape(&target.text));
     let replacement = format!(">{}<", xml_escape(&p.value));
@@ -772,7 +803,7 @@ fn manifest_check_flags_one_corrupted_byte_in_any_member() {
 
 #[test]
 fn provenance_check_flags_a_readme_manifest_mismatch() {
-    let entries = entries_of(&released());
+    let entries = entries_of(&internal_released());
     let manifest: Value = serde_json::from_slice(&entries["manifest.json"]).expect("manifest");
     let readme = String::from_utf8(entries["README.txt"].clone()).expect("utf8");
     assert!(
@@ -808,11 +839,12 @@ fn audit_zip_over_a_released_zip_is_clean() {
         "{:?}",
         report.problems().collect::<Vec<_>>()
     );
-    // WO9: 8 -> 9. The merge check now reads the package's own decisions.json, so a standalone
-    // audit of a zip runs it too.
+    // WO9: 8 -> 9, and the client text style check makes 10. The merge check now reads the package's own decisions.json, so a standalone
+    // audit of a zip runs it too. Item #1 adds the one-fix-per-row check: 11. The rewrite
+    // advisory's internal-notes check makes 12.
     assert_eq!(
         report.checks.len(),
-        9,
+        12,
         "row parity needs the in-memory rows"
     );
 }
@@ -1106,7 +1138,7 @@ fn request() -> axum::Json<crate::AuditReportReq> {
     })
 }
 
-fn typst_on_path() -> bool {
+pub(super) fn typst_on_path() -> bool {
     camerata_test_env::typst_on_path()
 }
 
@@ -1220,9 +1252,9 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         Some(
             "secrets, dataset set, dataset parity, row parity, severity and kind counts, \
              finding content, reviewer decision on unverified evidence, decision records behind \
-             merged rows, reviewer decision on restored findings, reviewer correction on \
+             merged rows, reviewer decision on restored findings, reviewer decision on split-out problems, reviewer correction on \
              flagged findings, confidentiality marking, manifest, provenance, unsynced \
-             reviewer changes"
+             reviewer changes, one fix per row, client text style, internal notes kept out"
         )
     );
 }
@@ -1576,7 +1608,7 @@ fn every_sheet_footer_carries_the_pdfs_confidentiality_line_and_the_gate_checks_
 }
 
 /// Rebuild an xlsx (a zip) with each UTF-8 member passed through `f`.
-fn rewrite_xlsx(xlsx: &[u8], f: impl Fn(&str, &str) -> String) -> Vec<u8> {
+pub(super) fn rewrite_xlsx(xlsx: &[u8], f: impl Fn(&str, &str) -> String) -> Vec<u8> {
     let entries = read_zip_entries(xlsx).expect("the workbook is a zip");
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
@@ -1624,12 +1656,13 @@ fn the_manifest_the_pdf_and_the_workbook_name_the_client_identically() {
         .line
         .contains("prepared for Acme Ltd on "));
     assert_eq!(package.provenance.client_name.as_deref(), Some("Acme Ltd"));
-    let index = archive::xlsx_sheet_grid(&package.xlsx, "Index").expect("the Index sheet");
+    let index =
+        archive::xlsx_sheet_grid(&package.xlsx, "Start here").expect("the Start here sheet");
     assert!(
         index
             .iter()
             .any(|row| row.first().is_some_and(|c| c == "Prepared for Acme Ltd")),
-        "the workbook Index names the client the same way"
+        "the workbook Start here names the client the same way"
     );
 }
 
@@ -1747,7 +1780,7 @@ fn mixed_scan_report() -> ScanReport {
     report
 }
 
-fn mixed_package() -> ProductPackage {
+pub(super) fn mixed_package() -> ProductPackage {
     let sealed = mixed_scan_report().seal();
     let options = client_options();
     let json = build_report_json(
@@ -1889,7 +1922,8 @@ fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
     );
 }
 
-/// The groups the PDF renders as finding cards: "Curated findings" and "Held for review".
+/// The curated and held groups of the report data: the PDF prints no card for them, and the
+/// release gate holds them to the matrix.
 fn rendered_groups(
     package: &mut ProductPackage,
 ) -> impl Iterator<Item = &mut crate::report_export::CuratedGroupJson> {
@@ -1907,9 +1941,10 @@ fn rendered_count(package: &mut ProductPackage, severity: &str, kind: &str) -> u
         .count()
 }
 
-/// The PDF renders its findings from `curated_findings` and `held_for_review_findings`, not from
-/// the matrix the counts are first taken from. A site that falls out of those lists is a finding
-/// the reader never sees while the matrix, the cover and every total still agree.
+/// The report data holds `curated_findings` and `held_for_review_findings` beside the matrix the
+/// counts are first taken from (the PDF prints neither list). A site that falls out of those lists
+/// is a problem the datasets no longer agree on while the matrix, the cover and every total still
+/// agree.
 #[test]
 fn the_gate_catches_a_finding_the_pdf_counts_but_does_not_render() {
     let mut package = mixed_package();
@@ -1924,7 +1959,7 @@ fn the_gate_catches_a_finding_the_pdf_counts_but_does_not_render() {
     assert!(
         count_problems(&failure).iter().any(|p| p.file == "PDF data"
             && p.location == "severity critical, kind defect"
-            && p.message.contains("rendered")),
+            && p.message.contains("curated and held groups")),
         "{failure}"
     );
 }
@@ -1950,7 +1985,7 @@ fn the_gate_catches_a_rendered_finding_whose_kind_differs_from_the_matrix() {
     assert!(
         count_problems(&failure)
             .iter()
-            .any(|p| p.file == "PDF data" && p.message.contains("rendered")),
+            .any(|p| p.file == "PDF data" && p.message.contains("curated and held groups")),
         "{failure}"
     );
 }
@@ -1967,7 +2002,7 @@ fn the_gate_catches_a_finding_rendered_twice() {
     assert!(
         count_problems(&failure)
             .iter()
-            .any(|p| p.file == "PDF data" && p.message.contains("rendered")),
+            .any(|p| p.file == "PDF data" && p.message.contains("curated and held groups")),
         "{failure}"
     );
 }
@@ -2009,7 +2044,7 @@ fn the_gate_catches_a_workbook_whose_rows_disagree_by_severity() {
 
 /// The position of `text` in the workbook's shared-string table (each distinct cell text is
 /// stored once; a cell holds the position).
-fn shared_string_index(xlsx: &[u8], text: &str) -> usize {
+pub(super) fn shared_string_index(xlsx: &[u8], text: &str) -> usize {
     let entries = read_zip_entries(xlsx).expect("the workbook is a zip");
     let table = String::from_utf8(
         entries
@@ -2026,8 +2061,8 @@ fn shared_string_index(xlsx: &[u8], text: &str) -> usize {
 }
 
 /// Remove every worksheet row that holds a cell with exactly this text, leaving the rest of the
-/// workbook (its Index counts included) untouched: a row dropped from one sheet by itself.
-fn drop_sheet_rows_with_text(xlsx: &[u8], text: &str) -> Vec<u8> {
+/// workbook (its Start here counts included) untouched: a row dropped from one sheet by itself.
+pub(super) fn drop_sheet_rows_with_text(xlsx: &[u8], text: &str) -> Vec<u8> {
     let cell = format!("t=\"s\"><v>{}</v>", shared_string_index(xlsx, text));
     rewrite_xlsx(xlsx, |name, xml| {
         if !(name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml")) {
@@ -2059,7 +2094,7 @@ fn the_gate_catches_a_no_convention_row_dropped_from_the_conventions_sheet() {
     let problems = count_problems(&failure);
     assert!(
         problems.iter().any(|p| p.file.ends_with("-findings.xlsx")
-            && p.location == "sheet \"Conventions\" rows, kind no_convention"),
+            && p.location == "sheet \"Your conventions\" rows, kind no_convention"),
         "{failure}"
     );
     assert!(
@@ -2079,7 +2114,7 @@ fn the_gate_catches_a_not_assessed_row_dropped_from_the_coverage_sheet() {
         count_problems(&failure)
             .iter()
             .any(|p| p.file.ends_with("-findings.xlsx")
-                && p.location == "sheet \"Coverage\" rows, kind not_assessed"),
+                && p.location == "sheet \"Not checked\" rows, kind not_assessed"),
         "{failure}"
     );
 }
@@ -2087,15 +2122,13 @@ fn the_gate_catches_a_not_assessed_row_dropped_from_the_coverage_sheet() {
 #[test]
 fn the_gate_catches_a_followed_convention_row_dropped_from_the_conventions_sheet() {
     let mut package = mixed_package();
-    package.xlsx = drop_sheet_rows_with_text(
-        &package.xlsx,
-        "Followed consistently \u{2014} no exceptions found",
-    );
+    package.xlsx =
+        drop_sheet_rows_with_text(&package.xlsx, "Followed consistently, no exceptions found");
     let failure = blocked(package);
     assert!(
         count_problems(&failure)
             .iter()
-            .any(|p| p.location == "sheet \"Conventions\" rows, kind convention_observed"),
+            .any(|p| p.location == "sheet \"Your conventions\" rows, kind convention_observed"),
         "{failure}"
     );
 }
@@ -2108,4 +2141,28 @@ fn production_part_cuts_only_at_an_inline_test_module() {
     assert_eq!(production_part(declared), declared);
     let inline = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
     assert_eq!(production_part(inline), "fn a() {}");
+}
+
+/// The severity by effort matrix counts the places the cover counts: a matrix that says one more
+/// problem than the cover is refused.
+#[test]
+fn the_gate_catches_a_matrix_that_counts_a_problem_the_cover_does_not() {
+    let mut package = mixed_package();
+    let cell = package
+        .report_json
+        .priority_grid
+        .rows
+        .iter_mut()
+        .flat_map(|r| r.cells.iter_mut())
+        .find(|c| !c.findings.is_empty())
+        .expect("a filled cell");
+    let again = cell.findings[0].clone();
+    cell.findings.push(again);
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.file == "PDF data" && p.message.contains("severity by effort matrix")),
+        "{failure}"
+    );
 }

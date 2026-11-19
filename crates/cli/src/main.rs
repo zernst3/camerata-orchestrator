@@ -51,6 +51,8 @@ struct Cli {
     command: Command,
 }
 
+// `Inspect` carries every flag of the command, so it is far larger than the other commands.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run the in-process planted-violation acceptance scenario.
@@ -174,10 +176,15 @@ enum Command {
         #[arg(long = "clone-judge-model")]
         clone_judge_model: Option<String>,
         /// Model for the group reviewer (stage 2), the architect's first reader of each rule
-        /// group. Unset: the built-in default, Fable 5.1. Set only here or in a project's
+        /// group. Unset: the built-in default, Fable 5.2. Set only here or in a project's
         /// settings, never by the environment.
         #[arg(long = "group-review-model")]
         group_review_model: Option<String>,
+        /// Model for the possible-duplicate check, which asks, for each pair of problems at one
+        /// place, whether they are the same flaw written twice. Unset: the built-in default,
+        /// Sonnet 5.5. Set only here or in a project's settings, never by the environment.
+        #[arg(long = "dup-check-model")]
+        dup_check_model: Option<String>,
         /// How many escalations the group reviewer may put in the architect's queue per 1,000
         /// counted lines of code. Default 1.0. A few more may go past it (the severe reasons at
         /// critical severity, and unverified evidence); the rest stay below the line, visible.
@@ -199,11 +206,16 @@ enum Command {
         /// costs (the pre-flight still prints the expected cost and the ceiling). Given, it stops
         /// the run, between passes, once actual spend reaches this many US dollars. A run
         /// that stops early lists every pass and stage it did not run, marks its export incomplete
-        /// and exits non-zero (4). The limit is checked before each scan pass, calibration or
-        /// fix batch and deep-tier call starts; one that has started always finishes, and once
-        /// the limit has stopped anything no later stage starts. So a run can end about one pass
+        /// and exits non-zero (4). The limit is checked before every model call or batch of
+        /// every stage starts: each scan pass, the alternatives call, each detail regeneration
+        /// batch, each calibration batch, each group review call, each fix batch, each deep tier
+        /// call and each clone judge batch. One that has started always finishes, and once the
+        /// limit has stopped anything no later stage starts. So a run can end about one pass
         /// over the limit (a pass can include one retry). In batch mode the limit is checked
-        /// before the batch is submitted.
+        /// before the batch is submitted. The limit counts the whole run: on a resume it
+        /// includes what the stored replies already cost, so set it to the stored spend plus
+        /// what you will allow for the rest (the resume prints the stored spend beside the
+        /// limit before any call).
         #[arg(long = "max-cost-usd", value_name = "USD")]
         max_cost_usd: Option<f64>,
         /// Switch a token-efficiency measure `on` or `off` for this run, e.g.
@@ -235,6 +247,26 @@ enum Command {
         /// dropped.
         #[arg(long)]
         consensus: bool,
+        /// Which finder reviews the code: `engine` (the default: the scan passes, then the
+        /// calibration stage) or `agent` (one review agent for each piece of code, with the rules
+        /// as its checklist; the files it read come from its tool trace). The agent finder
+        /// needs a full inspection (it cannot be combined with `--consensus`, and it needs
+        /// `--full` when an earlier inspection of the same code exists).
+        #[arg(long, default_value = "engine", value_parser = camerata::inspect_cmd::finder::parse_finder)]
+        finder: camerata_server::ai_audit::agent_finder::FinderChoice,
+        /// The agent finder's model. Unset: the built-in default (Fable 5.2). Set only here or in
+        /// a project's settings, never by the environment.
+        #[arg(long = "finder-model")]
+        finder_model: Option<String>,
+        /// Internal runs only: cut every unit of code into at least this many pieces, so the
+        /// joints step runs on small code too. Needs `--internal` and `--finder agent`.
+        #[arg(long = "finder-force-pieces", value_name = "K")]
+        finder_force_pieces: Option<usize>,
+        /// After the run, compare its problems with the ones an earlier agent finder run left in
+        /// this state folder (the folder `CAMERATA_STATE_DIR` named for that run) and write the
+        /// difference as an operator note beside the ledger. Never in the export.
+        #[arg(long = "compare-with", value_name = "STATE-FOLDER")]
+        compare_with: Option<PathBuf>,
         /// Run only what remains of a saved run: `--resume <RUN-ID>` or `--resume latest` (the
         /// newest run with work left; with `--repo`, the newest of those repos). Every inspection
         /// is saved part by part, so a part that failed (the AI service was down) or a run that
@@ -528,6 +560,7 @@ async fn main() -> anyhow::Result<()> {
             fix_model,
             clone_judge_model,
             group_review_model,
+            dup_check_model,
             escalation_rate,
             escalation_floor,
             full,
@@ -538,6 +571,10 @@ async fn main() -> anyhow::Result<()> {
             internal,
             run_client_tooling,
             consensus,
+            finder,
+            finder_model,
+            finder_force_pieces,
+            compare_with,
             resume,
         } => {
             if let Some(run) = resume {
@@ -559,6 +596,7 @@ async fn main() -> anyhow::Result<()> {
                 fix_model,
                 clone_judge_model,
                 group_review_model,
+                dup_check_model,
                 escalation_rate,
                 escalation_floor,
                 full,
@@ -569,6 +607,12 @@ async fn main() -> anyhow::Result<()> {
                 client_engagement: !internal,
                 run_client_tooling,
                 consensus,
+                finder: camerata::inspect_cmd::finder::FinderArgs {
+                    finder,
+                    model: finder_model,
+                    force_pieces: finder_force_pieces,
+                    compare_with,
+                },
             })
             .await
         }
@@ -975,6 +1019,40 @@ mod cli_parse_tests {
         );
     }
 
+    /// The `--max-cost-usd` help names every stage that sends a model call and says that a resume
+    /// counts the stored spend. A stage the help leaves out reads as a stage the limit does not
+    /// cover, which was the question R5 had to answer by reading the code.
+    #[test]
+    fn the_spend_limit_help_names_every_stage_and_the_resume_rule() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let inspect = cmd.find_subcommand("inspect").expect("inspect subcommand");
+        let arg = inspect
+            .get_arguments()
+            .find(|a| a.get_id() == "max_cost_usd")
+            .expect("--max-cost-usd");
+        let help = arg.get_help().expect("help text").to_string();
+        for stage in [
+            "scan pass",
+            "alternatives",
+            "detail regeneration",
+            "calibration",
+            "group review",
+            "fix",
+            "deep",
+            "clone judge",
+        ] {
+            assert!(
+                help.contains(stage),
+                "the help does not name {stage}: {help}"
+            );
+        }
+        assert!(
+            help.contains("resume") && help.contains("stored"),
+            "the help says a resume counts the stored spend: {help}"
+        );
+    }
+
     use super::*;
 
     /// Every preserved demo/eval subcommand must still parse with no extra args
@@ -1234,6 +1312,7 @@ mod cli_parse_tests {
                 fix_model,
                 clone_judge_model,
                 group_review_model,
+                dup_check_model,
                 escalation_rate,
                 escalation_floor,
                 full,
@@ -1244,12 +1323,27 @@ mod cli_parse_tests {
                 internal,
                 run_client_tooling,
                 consensus,
+                finder,
+                finder_model,
+                finder_force_pieces,
+                compare_with,
                 resume,
             } => {
                 assert!(resume.is_none(), "a new run unless --resume is given");
+                assert_eq!(
+                    finder,
+                    camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
+                    "the scan passes unless the agent finder is asked for"
+                );
+                assert!(finder_model.is_none() && finder_force_pieces.is_none());
+                assert!(compare_with.is_none());
                 assert!(
                     group_review_model.is_none(),
                     "the default group reviewer unless asked for"
+                );
+                assert!(
+                    dup_check_model.is_none(),
+                    "the default duplicate check model unless asked for"
                 );
                 assert!(escalation_rate.is_none() && escalation_floor.is_none());
                 assert_eq!(client.as_deref(), Some("Example Client Ltd"));
@@ -1298,6 +1392,62 @@ mod cli_parse_tests {
                 ..
             }
         ));
+    }
+
+    /// The finder flags parse: `--finder agent`, its model, the forced pieces and the comparison.
+    #[test]
+    fn inspect_parses_the_finder_flags() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+            "--internal",
+            "--finder",
+            "agent",
+            "--finder-model",
+            "claude-fable-5-2",
+            "--finder-force-pieces",
+            "4",
+            "--compare-with",
+            "/tmp/earlier",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                finder,
+                finder_model,
+                finder_force_pieces,
+                compare_with,
+                ..
+            } => {
+                assert_eq!(
+                    finder,
+                    camerata_server::ai_audit::agent_finder::FinderChoice::Agent
+                );
+                assert_eq!(finder_model.as_deref(), Some("claude-fable-5-2"));
+                assert_eq!(finder_force_pieces, Some(4));
+                assert_eq!(compare_with, Some(PathBuf::from("/tmp/earlier")));
+            }
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        let bad = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+            "--finder",
+            "both",
+        ]);
+        assert!(bad.is_err(), "an unknown finder is a usage error");
     }
 
     /// `--resume` stands in for the repo, export and client, which the saved run holds; without

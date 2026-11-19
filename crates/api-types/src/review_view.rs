@@ -70,16 +70,26 @@ pub enum Marker {
     Stale,
     /// The code moved; the row has a new key.
     Moved,
-    /// Another row may describe the same thing.
+    /// Another row may describe the same thing: the engine linked it ([`SiteRow::possible_duplicate_of`])
+    /// or another cause has a row at the same place ([`SiteRow::same_place_as`]).
     PossibleDuplicate,
+    /// The engine itself has reasons to doubt the row ([`SiteRow::possible_false_positive`]). A
+    /// review aid for the operator: it changes nothing about the row.
+    PossibleFalsePositive,
+    /// Another row at the same place carries this rule: it is decided there unless it is decided
+    /// alone.
+    Carried,
     /// The reviewer changed a field of the row.
     Edited,
 }
 
 impl Marker {
     /// Every marker, in precedence order (spec section 2, "noise rule").
-    pub const PRECEDENCE: [Marker; 10] = [
+    pub const PRECEDENCE: [Marker; 12] = [
         Self::Held,
+        // Second, so the chip shows in the Markers column of every flagged row: the operator
+        // opens these rows first.
+        Self::PossibleFalsePositive,
         Self::Escalated,
         Self::Candidate,
         Self::OverBudget,
@@ -88,6 +98,7 @@ impl Marker {
         Self::Stale,
         Self::Moved,
         Self::PossibleDuplicate,
+        Self::Carried,
         Self::Edited,
     ];
 }
@@ -106,14 +117,17 @@ pub enum HoldReason {
     EngineCheckNoWithoutCorrection,
     /// The row exports as merged and no merge decision with a reason stands behind it.
     MergedWithoutDecision,
+    /// The problem was split out of one a reviewer ruled out, and has no decision of its own.
+    SplitOutWithoutDecision,
 }
 
 impl HoldReason {
     /// Every reason, in the order the release gate runs its checks.
-    pub const ALL: [HoldReason; 5] = [
+    pub const ALL: [HoldReason; 6] = [
         Self::JunkContent,
         Self::EvidenceUnverified,
         Self::RestoredWithoutDecision,
+        Self::SplitOutWithoutDecision,
         Self::MergedWithoutDecision,
         Self::EngineCheckNoWithoutCorrection,
     ];
@@ -126,6 +140,7 @@ impl HoldReason {
             Self::RestoredWithoutDecision => "put back after the engine threw it out, no decision",
             Self::EngineCheckNoWithoutCorrection => "Engine Check said No, no correction yet",
             Self::MergedWithoutDecision => "merged with no decision record",
+            Self::SplitOutWithoutDecision => "split out of a ruled-out problem, no decision",
         }
     }
 }
@@ -248,7 +263,7 @@ pub struct FlaggedByView {
     pub line: usize,
 }
 
-/// A possible duplicate and what it points at (spec section 2: the `dup?` chip).
+/// A possible duplicate and what it points at (spec section 2: the Possible duplicate chip).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DuplicateView {
@@ -259,6 +274,72 @@ pub struct DuplicateView {
     pub line: usize,
 }
 
+/// Another cause with a row at the same place as this row (within a few lines of one file). An
+/// operator review aid: opening it shows the other cause, and nothing about either is changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamePlaceView {
+    /// The other cause's Fix id.
+    pub fix_id: String,
+    /// The other cause's title.
+    pub title: String,
+    /// The site key of the other cause's row nearest this one: the row the link opens.
+    pub key: String,
+    pub rule_id: String,
+    /// That row's line, in the same file as the row that lists it.
+    pub line: usize,
+    /// The sub-group node id of that row, for opening it.
+    pub group_id: String,
+    /// The model's one-line reason for calling the two write-ups the same flaw (the possible-
+    /// duplicate check). Empty when none was given.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+impl SamePlaceView {
+    /// The hint's name, everywhere a person reads it.
+    pub const TERM: &'static str = "Possible duplicate";
+}
+
+/// A rule another row at the same place carries (D2: the "Also matches" list of the carrier). It
+/// keeps its own severity, kind, hold and decision; being carried hides none of them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarriedRuleView {
+    pub rule_id: String,
+    pub site_key: String,
+    /// The sub-group the carried row sits in, so a jump to it can open its node.
+    pub node_id: String,
+    pub severity: String,
+    pub kind: Option<FindingKind>,
+    /// Why the release gate holds the carried row, when it does.
+    pub held: Option<HoldReason>,
+    /// Stage 1's answer about the carried row (`yes`, `no`, `unclear`, or blank).
+    pub stage1_real: String,
+    /// Why the carried row is an escalation candidate, when it is one.
+    pub escalation_reason: Option<EscalationReason>,
+    /// Its place among every candidate of the run, when it is one.
+    pub escalation_rank: Option<u32>,
+    /// The decision the carried row stands under now: its own, or the place's inherited one.
+    pub decision: Option<DecisionView>,
+}
+
+/// The row that carries this one (D2): where its decision is made unless it is decided alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarriedByView {
+    pub site_key: String,
+    /// The sub-group the carrier sits in, so a jump to it can open its node.
+    pub node_id: String,
+    pub rule_id: String,
+    pub path: String,
+    pub line: usize,
+    /// The carrier already holds a decision (so a carried row with none of its own was left out
+    /// of it on purpose, or came after it).
+    #[serde(default)]
+    pub decided: bool,
+}
+
 /// A row merged into another (spec section 8: "Merged into web/env.ts:3").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -266,6 +347,51 @@ pub struct MergedIntoView {
     pub key: String,
     /// `path:line` of the target, as the Decision column prints it.
     pub label: String,
+}
+
+/// Which of the rule's authored bounds moved a row's shown severity away from stage 1's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppliedBound {
+    /// The rule's floor (`min_severity`) raised the row.
+    Floor,
+    /// The rule's ceiling (`max_severity`) lowered the row.
+    Ceiling,
+    /// The deviation ceiling lowered the row.
+    DeviationCeiling,
+    /// The row has no file and line, so the null-location net set it to `info`.
+    NoLocation,
+}
+
+/// One bound's move of a row's severity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedStep {
+    pub bound: AppliedBound,
+    /// The severity the bound moved the row from.
+    pub from: String,
+}
+
+/// The rule's own say in a row's severity, for the operator's row detail. Operator only: no
+/// client export carries it. Absent on a row whose rule sets no bound and whose severity no bound
+/// moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeverityBoundsView {
+    /// The rule's `min_severity`: at least this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<String>,
+    /// The rule's `max_severity`: at most this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<String>,
+    /// The deviation ceiling (the rule's own, or the default when it is the one that applied).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deviation_ceiling: Option<String>,
+    /// The bounds that moved the shown severity to what it is, oldest first, each with the
+    /// severity it moved the row from. Empty when none did (or something later changed the
+    /// severity, so the bounds no longer explain it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<AppliedStep>,
 }
 
 /// One site row (spec section 5, "Columns of a site row", and section 8, the site detail). The
@@ -284,6 +410,9 @@ pub struct SiteRow {
     pub category: Option<String>,
     pub headline: String,
     pub detail: String,
+    /// The row's own business reason, as the All problems sheet reads it. Empty when it has none.
+    #[serde(default)]
+    pub why_business: String,
     /// The fix text for this site.
     pub fix: String,
     /// `Tailored fix` or `Standard fix`.
@@ -293,6 +422,24 @@ pub struct SiteRow {
     pub group_path: Vec<String>,
     /// The sub-group's primary row (the one that orders the sub-group).
     pub group_primary: bool,
+    /// The Fix the sub-group is in: the rule groups whose places are one change. Deciding the Fix
+    /// (node id `fix:<id>`) writes a record for every site of all of them. Empty when the report's
+    /// tree has no Fixes.
+    #[serde(default)]
+    pub fix_id: String,
+    /// Every rule id of the Fix, so a reviewer sees what a decision on it covers.
+    #[serde(default)]
+    pub fix_rules: Vec<String>,
+    /// The place this row heads or is carried at (node id `place:<id>`); empty when the row is
+    /// alone at its place. Deciding the place writes a record for every rule it covers.
+    #[serde(default)]
+    pub place_id: String,
+    /// The rules of the other rows at this place, when this row is the one that carries them.
+    #[serde(default)]
+    pub carries: Vec<CarriedRuleView>,
+    /// The row that carries this one, when another row at the same place does.
+    #[serde(default)]
+    pub carried_by: Option<CarriedByView>,
     pub stage1: Stage1View,
     pub stage2: Option<Stage2View>,
     /// Every marker the row has, in [`Marker::PRECEDENCE`] order.
@@ -317,6 +464,18 @@ pub struct SiteRow {
     pub thrown_out_reason: Option<String>,
     /// Review flags on the row's wording (spec A8); internal.
     pub review_flags: Vec<String>,
+    /// The engine's own reasons to doubt the row, for the operator to look at first. `None` for a
+    /// row with no reason. Operator only: no client export carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub possible_false_positive: Option<crate::review::PossibleFalsePositive>,
+    /// The other causes with a row at the same place as this row, nearest first, each once. Empty
+    /// for a row with none. Operator only: no client export carries it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub same_place_as: Vec<SamePlaceView>,
+    /// The rule's floor and ceilings, and which one changed the shown severity. `None` for a row
+    /// with neither. Operator only: no client export carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity_bounds: Option<SeverityBoundsView>,
 }
 
 // ── Section 4: the shell ──────────────────────────────────────────────────────────────────
@@ -458,6 +617,13 @@ pub struct TreeNodeView {
     /// What the reviewer reads at this node.
     pub summary: Option<String>,
     pub summary_source: SummarySource,
+    /// Why the node matters to the client's business, written for the client (a sub-group's
+    /// text; the Fix plan and the PDF read it). The reviewer's edit replaces it.
+    #[serde(default)]
+    pub why_business: Option<String>,
+    /// Why the node matters technically, written for the client. The reviewer's edit replaces it.
+    #[serde(default)]
+    pub why_technical: Option<String>,
     /// Review flags on the summary (a count the data contradicts, a differing member not named).
     pub flags: Vec<String>,
     /// A node of rows the engine threw out (spec design A12).
@@ -466,6 +632,12 @@ pub struct TreeNodeView {
     pub decision: Option<NodeDecisionSummary>,
     /// The reviewer's edit of the summary (spec U4); the engine's summary is replaced by it.
     pub summary_edit: Option<EditView>,
+    /// The reviewer's edit of the business reason, applied or stale.
+    #[serde(default)]
+    pub why_business_edit: Option<EditView>,
+    /// The reviewer's edit of the technical reason, applied or stale.
+    #[serde(default)]
+    pub why_technical_edit: Option<EditView>,
 }
 
 /// `GET /api/projects/:id/review/tree`: nodes, counts and markers only; never sites (spec U1).
@@ -570,6 +742,11 @@ pub enum EngineCheckError {
     /// [`Self::ALL`], the list the reviewer picks from on a kept row; the thrown-out card has
     /// this one answer, and it puts the row back (a restore decision) as its correction.
     ThrownOutRealProblem,
+    /// A No on a row the reviewer RULED OUT while the engine flagged it (the second look): ruling
+    /// it out was wrong, it is a real problem. Not in [`Self::ALL`]; the second-look card has this
+    /// one answer. Only un-ruling the row corrects it (a later ruling that keeps it, or the ruling
+    /// undone), never another ruling out, an edit or a group rule-out.
+    RuledOutRealProblem,
 }
 
 impl EngineCheckError {
@@ -602,6 +779,10 @@ pub enum SampleStratum {
     Kept,
     /// A row the engine threw out; sampled apart and its rate never pooled with the kept rows.
     ThrownOut,
+    /// A row the engine flagged "possible false positive" that the reviewer then ruled out: a
+    /// second look at the reviewer's own ruling, drawn from the decisions and kept apart from the
+    /// first sample (its rate is never pooled with it either).
+    RuledOutFlagged,
 }
 
 /// One Yes or No on one sampled row, as stored (spec section 7). Internal: it never appears in
@@ -716,13 +897,17 @@ pub struct EngineCheckLane {
     pub run_id: String,
     /// The `sample_size_per_run` setting.
     pub setting: usize,
-    /// The setting is 0: the lane is off and has no cards.
+    /// The setting is 0 and no second-look card is drawn: the lane is off and has no cards.
     pub off: bool,
     pub drawn: usize,
     /// Unread kept rows in the run.
     pub unread_total: usize,
     /// Thrown-out rows in the run.
     pub thrown_out_total: usize,
+    /// Rows the reviewer has ruled out while they carried the possible false positive flag: the
+    /// pool the second look draws from. Zero when none, and in older stored lanes.
+    #[serde(default)]
+    pub ruled_out_flagged_total: usize,
     pub allocation: Vec<CategoryAllocation>,
     /// The kept stratum then the thrown-out stratum; never pooled.
     pub strata: Vec<StratumRate>,
@@ -806,6 +991,19 @@ pub struct StageModelsView {
     /// The group review, stage 2.
     pub group_review: String,
     pub fix: String,
+    /// The agent finder's model. Empty: not set, the run uses its built-in default.
+    #[serde(default)]
+    pub finder_model: String,
+    /// The possible-duplicate check's model. Empty: not set.
+    #[serde(default)]
+    pub duplicate_check: String,
+    /// The clone judge's model. Empty: not set.
+    #[serde(default)]
+    pub clone_judge: String,
+    /// The project's finder, `agent` or `engine` (not a model: it sits here beside the stage
+    /// models because it is the same lane's setting, sent through the same route).
+    #[serde(default)]
+    pub finder: String,
 }
 
 /// The escalation formula (spec section 9).
@@ -911,7 +1109,7 @@ mod tests {
         for m in Marker::PRECEDENCE {
             assert!(seen.insert(m), "{m:?} is listed twice");
         }
-        assert_eq!(seen.len(), 10);
+        assert_eq!(seen.len(), 12);
     }
 
     #[test]

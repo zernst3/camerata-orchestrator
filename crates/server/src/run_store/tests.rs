@@ -10,6 +10,8 @@ use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 
 fn response(text: &str, cost: f64) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -112,6 +114,8 @@ fn models() -> ModelsRecord {
         backend: "api".to_string(),
         mode: "parallel".to_string(),
         resolved: true,
+        group_review: String::new(),
+        finder: String::new(),
     }
 }
 
@@ -1654,6 +1658,8 @@ fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: boo
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
                 truncated,
+                reported_model: None,
+                cli_cost_usd: None,
             }),
             error: None,
             class: None,
@@ -2081,4 +2087,387 @@ async fn a_fresh_transcript_holding_an_object_is_stored_unusable() {
         );
     })
     .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_estimate_and_the_store_name_the_whole_stored_spend() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let model = Scripted::new();
+        {
+            let j = JournalLlm::new(&model, store.clone());
+            j.complete(ask("calibrate this").with_system(crate::ai_audit::verify_system_prompt()))
+                .await
+                .unwrap();
+            j.complete(ask("judge this")).await.unwrap();
+        }
+        let id = store.run_id();
+        drop(store);
+        let e = estimate_resume(&id).unwrap();
+        assert!((e.stored_usd - 0.10).abs() < 1e-9, "{e:?}");
+        assert!(
+            e.render().contains("stored calls cost $0.10"),
+            "the text a resume shows says what is already spent: {}",
+            e.render()
+        );
+        let reopened = RunStore::open(&id).unwrap();
+        assert!(
+            (reopened.stored_usd() - 0.10).abs() < 1e-9,
+            "the whole stored figure, which a spend limit counts up front"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_call_of_a_finished_part_is_not_counted_as_to_send_again() {
+    // The saved tutorly run: a first try of a group review call came back unusable, its item was
+    // read on a later try, and the part finished. The resume said "1 to send again" for it.
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let model = Scripted::new();
+        model.fail_boom.store(true, Ordering::SeqCst);
+        {
+            let j = JournalLlm::new(&model, store.clone());
+            let _ = j
+                .complete(
+                    ask("Repository: acme/api\nBOOM")
+                        .with_system(crate::ai_audit::verify_system_prompt()),
+                )
+                .await;
+        }
+        let id = store.run_id();
+        let open_part = estimate_resume(&id).unwrap();
+        assert_eq!(
+            open_part.calls_to_send_again, 1,
+            "while its part is open the call is owed: {open_part:?}"
+        );
+        store.set_part("acme/api", PartKind::Calibration, PartStatus::Done, None);
+        let done_part = estimate_resume(&id).unwrap();
+        assert_eq!(
+            done_part.calls_to_send_again, 0,
+            "a part that finished owes nothing: {done_part:?}"
+        );
+        assert!(
+            done_part.render().contains("0 to send again"),
+            "{}",
+            done_part.render()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_model_the_backend_reported_is_stored_beside_the_requested_one() {
+    struct Reports;
+    #[async_trait::async_trait]
+    impl LlmPort for Reports {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            let mut r = response("{}", 0.05);
+            r.model = req.model.clone();
+            r.reported_model = Some("claude-opus-5-5".to_string());
+            Ok(r)
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.complete(req).await
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        {
+            let j = JournalLlm::new(&Reports, store.clone());
+            let req = ask("one").with_model("claude-haiku-5-5".to_string());
+            j.complete(req).await.unwrap();
+        }
+        let id = store.run_id();
+        drop(store);
+        let dir = runs_dir().join(&id).join("calls");
+        let file = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .next()
+            .expect("a stored call");
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("\"model\":\"claude-haiku-5-5\""), "{text}");
+        assert!(
+            text.contains("\"reported_model\":\"claude-opus-5-5\""),
+            "{text}"
+        );
+        // And a replay hands it back.
+        let again = RunStore::open(&id).unwrap();
+        let j = JournalLlm::new(&Reports, again);
+        let replayed = j
+            .complete(ask("one").with_model("claude-haiku-5-5".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(replayed.reported_model.as_deref(), Some("claude-opus-5-5"));
+    })
+    .await;
+}
+
+// ---- a resumed run keeps the group review model it started on ----
+
+fn controls_with_group_review(model: &str) -> crate::cost_cap::RunControls {
+    crate::cost_cap::RunControls {
+        review: camerata_api_types::project::ReviewSettings {
+            group_review_model: model.to_string(),
+            ..camerata_api_types::project::ReviewSettings::default()
+        },
+        ..crate::cost_cap::RunControls::default()
+    }
+}
+
+/// The record names the group reviewer's resolved id, defaults included.
+#[test]
+fn the_models_record_stores_the_resolved_group_review_model() {
+    let started = ModelsRecord::from_picks(
+        None,
+        None,
+        &controls_with_group_review("claude-fable-5-1"),
+        "api",
+        "parallel",
+    );
+    assert_eq!(started.group_review, "claude-fable-5-1");
+    let default = ModelsRecord::from_picks(
+        None,
+        None,
+        &crate::cost_cap::RunControls::default(),
+        "api",
+        "parallel",
+    );
+    assert_eq!(
+        default.group_review,
+        camerata_api_types::project::STAGE2_DEFAULT_MODEL
+    );
+}
+
+/// A run started on Fable 5.1 and resumed with no model flag (the default is now Fable 5.2)
+/// makes its remaining group review calls on Fable 5.1: no mixed models in one run.
+#[test]
+fn a_resume_with_no_model_flag_keeps_the_group_review_model_the_run_started_on() {
+    let started = ModelsRecord::from_picks(
+        None,
+        None,
+        &controls_with_group_review("claude-fable-5-1"),
+        "api",
+        "parallel",
+    );
+    let mut resumed = crate::cost_cap::RunControls::default();
+    assert_eq!(
+        resumed.group_review_model_for(),
+        "claude-fable-5-2",
+        "the default has moved on"
+    );
+    let notice = started
+        .hold_group_review_model(&mut resumed, None)
+        .expect("no explicit pick, nothing to refuse");
+    assert_eq!(resumed.group_review_model_for(), "claude-fable-5-1");
+    assert_eq!(
+        notice,
+        "Group review stays on claude-fable-5-1, the model this run started with."
+    );
+    // The same model named explicitly is not a different pick.
+    let mut same = crate::cost_cap::RunControls::default();
+    started
+        .hold_group_review_model(&mut same, Some("claude-fable-5-1"))
+        .unwrap();
+    // A different one is refused, and the controls are left as they were.
+    let mut other = crate::cost_cap::RunControls::default();
+    let why = started
+        .hold_group_review_model(&mut other, Some("claude-opus-5-5"))
+        .expect_err("a different explicit model is refused");
+    assert!(
+        why.contains("claude-fable-5-1") && why.contains("claude-opus-5-5"),
+        "{why}"
+    );
+    assert_eq!(other.group_review_model_for(), "claude-fable-5-2");
+}
+
+/// A run saved before the group reviewer was recorded has nothing to keep: the current pick stands.
+#[test]
+fn a_record_without_a_group_review_model_leaves_the_pick_alone() {
+    let mut old = models();
+    old.group_review = String::new();
+    let mut resumed = controls_with_group_review("claude-opus-5-5");
+    let notice = old.hold_group_review_model(&mut resumed, None).unwrap();
+    assert_eq!(resumed.group_review_model_for(), "claude-opus-5-5");
+    assert!(notice.contains("claude-opus-5-5"), "{notice}");
+}
+
+/// A moved built-in default is kept, not refused: a resolved record whose only difference is the
+/// group review model still allows the resume.
+#[test]
+fn a_resume_is_not_refused_because_the_group_review_default_moved() {
+    let mut saved = models();
+    saved.group_review = "claude-fable-5-1".to_string();
+    let mut now = models();
+    now.group_review = "claude-fable-5-2".to_string();
+    assert!(saved.matches_for_resume(&now));
+    now.audit = "some-other-model".to_string();
+    assert!(
+        !saved.matches_for_resume(&now),
+        "the other models still count"
+    );
+}
+
+// ---- a run saved before the group review model was recorded ----
+
+/// Answers every stage 2 call with a good reply, from the model the request named (as the
+/// backends do), so a stored reply says which model gave it.
+struct AnswersAsAsked;
+
+#[async_trait::async_trait]
+impl LlmPort for AnswersAsAsked {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let mut r = response(GOOD_STAGE2_REPLY, 0.05);
+        r.model = req.model.clone();
+        Ok(r)
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A record that names no group review model takes it from the group review replies the run
+/// already stored (their key includes the model), so the resume reuses them and pays nothing
+/// twice; the resume says which model it stays on.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_record_without_a_group_review_model_takes_it_from_its_stored_replies() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        assert!(store.record().models.group_review.is_empty());
+        {
+            let journal = JournalLlm::new(&AnswersAsAsked, store.clone());
+            journal
+                .complete(stage2_request("review one").with_model("claude-fable-5-1"))
+                .await
+                .unwrap();
+        }
+        let store = reopen(store);
+        let mut resumed = crate::cost_cap::RunControls::default();
+        let notice = store
+            .hold_group_review_model(&mut resumed, None)
+            .expect("no explicit pick");
+        assert_eq!(resumed.group_review_model_for(), "claude-fable-5-1");
+        assert_eq!(
+            notice,
+            "Group review stays on claude-fable-5-1, the model this run started with."
+        );
+        // The stored reply is found under the controls' model, so the resume replays it.
+        let model = Fixed(GOOD_STAGE2_REPLY.to_string(), AtomicUsize::new(0));
+        let journal = JournalLlm::new(&model, store.clone());
+        journal
+            .complete(stage2_request("review one").with_model(resumed.group_review_model_for()))
+            .await
+            .unwrap();
+        assert_eq!(
+            model.1.load(Ordering::SeqCst),
+            0,
+            "the stored reply was reused"
+        );
+        // An explicit different model is refused for such a run too.
+        let mut other = crate::cost_cap::RunControls::default();
+        assert!(store
+            .hold_group_review_model(&mut other, Some("claude-opus-5-5"))
+            .is_err());
+    })
+    .await;
+}
+
+/// With no recorded model and no stored group review reply, the resume says which model it will
+/// use.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_record_with_no_model_and_no_stored_replies_says_the_model_it_will_use() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let mut resumed = controls_with_group_review("claude-opus-5-5");
+    let notice = store.hold_group_review_model(&mut resumed, None).unwrap();
+    assert_eq!(resumed.group_review_model_for(), "claude-opus-5-5");
+    assert!(
+        notice.contains("claude-opus-5-5") && notice.contains("did not record"),
+        "{notice}"
+    );
+}
+
+// ---- a run keeps its finder for life ----
+
+fn controls_with_finder(
+    finder: crate::ai_audit::agent_finder::FinderChoice,
+) -> crate::cost_cap::RunControls {
+    crate::cost_cap::RunControls {
+        finder,
+        ..crate::cost_cap::RunControls::default()
+    }
+}
+
+#[test]
+fn a_run_records_the_finder_its_controls_chose() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    for (choice, word) in [
+        (FinderChoice::Agent, "agent"),
+        (FinderChoice::Engine, "engine"),
+    ] {
+        let rec =
+            ModelsRecord::from_picks(None, None, &controls_with_finder(choice), "cli", "parallel");
+        assert_eq!(rec.finder, word);
+    }
+}
+
+#[test]
+fn the_finder_hold_keeps_the_recorded_finder_and_defaults_to_the_engine() {
+    use crate::ai_audit::agent_finder::FinderChoice;
+    let record = |word: &str| ModelsRecord {
+        finder: word.to_string(),
+        ..models()
+    };
+    // The project now says agent; the run started on the engine, or recorded nothing (an older run).
+    for recorded in ["engine", ""] {
+        let mut c = controls_with_finder(FinderChoice::Agent);
+        let note = record(recorded).hold_finder(&mut c);
+        assert_eq!(c.finder, FinderChoice::Engine, "recorded {recorded:?}");
+        assert_eq!(
+            note.as_deref(),
+            Some("The finder stays on engine, the one this run started with.")
+        );
+    }
+    // The project now says engine; the run started on the agent.
+    let mut c = controls_with_finder(FinderChoice::Engine);
+    let note = record("agent").hold_finder(&mut c);
+    assert_eq!(c.finder, FinderChoice::Agent);
+    assert_eq!(
+        note.as_deref(),
+        Some("The finder stays on agent, the one this run started with.")
+    );
+    // Nothing differs: no note.
+    let mut c = controls_with_finder(FinderChoice::Agent);
+    assert_eq!(record("agent").hold_finder(&mut c), None);
+    assert_eq!(c.finder, FinderChoice::Agent);
 }

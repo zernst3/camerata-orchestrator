@@ -12,6 +12,8 @@ const REPO: &str = "acme/widgets";
 
 fn response(text: &str, truncated: bool) -> LlmResponse {
     LlmResponse {
+        reported_model: None,
+        cli_cost_usd: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -242,6 +244,10 @@ async fn a_cut_off_reply_is_not_retried_when_the_switch_is_off() {
         .set("truncation_retry", false)
         .expect("a known measure");
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: None,
@@ -249,6 +255,7 @@ async fn a_cut_off_reply_is_not_retried_when_the_switch_is_off() {
         fix_model: None,
         clone_judge_model: None,
         consensus: false,
+        checkpoint: Default::default(),
     });
     let files = files();
     let (recs, unfinished) = recommend_alternatives(

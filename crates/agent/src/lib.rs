@@ -508,12 +508,18 @@ impl ClaudeCliDriver {
     /// invocations Claude makes write into the shared artifact store. See the module-level
     /// note in `crates/agent/src/generic.rs` for the full disk-safety design.
     fn build_command(&self, role: &Role, task: &str) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("claude");
+        let program = camerata_api_types::claude_cli::claude_program();
+        let mut cmd = tokio::process::Command::new(program);
         // The subscription CLI must never inherit an API key from the parent's `.env`.
         camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         cmd.args(self.build_args(role, task));
+        // Isolation: the worktree as cwd when there is one, else an empty engine-owned directory;
+        // never the launcher's directory, and no project settings or operator memory.
+        camerata_api_types::claude_cli::isolate_claude_call(
+            cmd.as_std_mut(),
+            self.worktree.as_deref(),
+        );
         if let Some(wt) = &self.worktree {
-            cmd.current_dir(wt);
             // Inject CARGO_TARGET_DIR for disk-safety (2026-06-22).
             if let Some(shared_target) = derive_shared_target_dir(wt) {
                 cmd.env("CARGO_TARGET_DIR", &shared_target);
@@ -583,6 +589,40 @@ mod tests {
             .as_std()
             .get_envs()
             .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none()));
+    }
+
+    /// The agent call is isolated from the launcher: its worktree stays its working directory, a
+    /// call with none runs in the engine's empty directory, and neither loads project settings or
+    /// the operator's memory.
+    #[test]
+    fn the_agent_call_is_isolated_from_the_launcher() {
+        let bare = ClaudeCliDriver::new("/tmp/mcp.json").build_command(&role(), "task");
+        assert_eq!(
+            bare.as_std().get_current_dir(),
+            Some(camerata_api_types::claude_cli::engine_empty_cwd().as_path())
+        );
+        let bound = ClaudeCliDriver::new("/tmp/mcp.json")
+            .with_worktree("/Users/auditor/clients/acme/.camerata-worktrees/feat")
+            .build_command(&role(), "task");
+        assert_eq!(
+            bound.as_std().get_current_dir(),
+            Some(std::path::Path::new(
+                "/Users/auditor/clients/acme/.camerata-worktrees/feat"
+            ))
+        );
+        for cmd in [&bare, &bound] {
+            let args: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let at = args.iter().position(|a| a == "--setting-sources");
+            assert_eq!(at.map(|i| args[i + 1].as_str()), Some("user"), "{args:?}");
+            assert!(cmd
+                .as_std()
+                .get_envs()
+                .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && v.is_some()));
+        }
     }
 
     /// Nothing sent to a model contains a raw secret, the agent a CLI starts included: the task

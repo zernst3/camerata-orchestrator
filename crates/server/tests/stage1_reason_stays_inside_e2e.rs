@@ -47,6 +47,8 @@ impl LlmPort for StubModel {
             "{}".to_string()
         };
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -120,6 +122,11 @@ async fn surfaces() -> (Vec<(String, String)>, Vec<Finding>) {
     let mut efficiency = EfficiencyConfig::default();
     efficiency.set("terse_output", false).unwrap();
     let meter = UsageMeter::with_controls(RunControls {
+        finder: Default::default(),
+        finder_model: None,
+        finder_force_pieces: None,
+        checkpoint: Default::default(),
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: None,

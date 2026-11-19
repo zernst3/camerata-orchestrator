@@ -549,15 +549,30 @@ fn no_sentence_the_lane_builds_has_a_dash_or_names_the_environment() {
 #[test]
 fn each_stage_names_the_step_the_server_route_takes_and_reads_its_own_saved_model() {
     let keys: Vec<&str> = Stage::ALL.iter().map(|s| s.step_key()).collect();
-    assert_eq!(keys, ["audit", "calibration", "group_review", "fix"]);
+    assert_eq!(
+        keys,
+        [
+            "audit",
+            "calibration",
+            "group_review",
+            "fix",
+            "finder_model",
+            "duplicate_check",
+            "clone_judge"
+        ]
+    );
     let m = StageModelsView {
         scan: "a".into(),
         calibration: "b".into(),
         group_review: "c".into(),
         fix: String::new(),
+        finder_model: "d".into(),
+        duplicate_check: "e".into(),
+        clone_judge: String::new(),
+        finder: "agent".into(),
     };
     let current: Vec<&str> = Stage::ALL.iter().map(|s| s.current(&m)).collect();
-    assert_eq!(current, ["a", "b", "c", ""]);
+    assert_eq!(current, ["a", "b", "c", "", "d", "e", ""]);
     let labels: Vec<&str> = Stage::ALL.iter().map(|s| s.label()).collect();
     assert_eq!(
         labels,
@@ -565,7 +580,10 @@ fn each_stage_names_the_step_the_server_route_takes_and_reads_its_own_saved_mode
             "Scan model",
             "Calibration (stage 1)",
             "Group review (stage 2)",
-            "Fix model"
+            "Fix model",
+            "Finder model",
+            "Duplicate check",
+            "Clone judge"
         ]
     );
     assert_eq!(
@@ -575,6 +593,14 @@ fn each_stage_names_the_step_the_server_route_takes_and_reads_its_own_saved_mode
     assert_eq!(Stage::Calibration.hint(), "per site, batched");
     assert!(Stage::Fix.can_be_unset());
     assert!(!Stage::Scan.can_be_unset() && !Stage::GroupReview.can_be_unset());
+    for stage in [Stage::FinderModel, Stage::DuplicateCheck, Stage::CloneJudge] {
+        assert!(stage.can_be_unset(), "{stage:?} shows (not set)");
+    }
+    assert_eq!(
+        Stage::FinderModel.hint(),
+        "not set: Claude Fable 5.2; used when the finder is agent"
+    );
+    assert_eq!(Stage::DuplicateCheck.hint(), "not set: Claude Sonnet 5.5");
 }
 
 fn ids(groups: &[(String, Vec<ModelOption>)]) -> Vec<String> {

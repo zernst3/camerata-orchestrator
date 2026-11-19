@@ -25,7 +25,7 @@ fn attr_values<'a>(html: &'a str, attr: &str) -> Vec<&'a str> {
 
 #[test]
 fn every_tree_state_renders_with_no_em_dash_and_no_raw_nul() {
-    assert_eq!(states().len(), 9, "every tree state is built");
+    assert_eq!(states().len(), 10, "every tree state is built");
     for (id, render) in states() {
         let html = render().replace(GLOBAL_CSS, "");
         assert!(!html.contains('\u{2014}'), "{id} has an em dash");

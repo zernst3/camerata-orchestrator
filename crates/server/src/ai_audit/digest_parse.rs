@@ -706,13 +706,19 @@ pub fn parse_ai_findings(
                 parse_model_severity(f["severity"].as_str().unwrap_or("medium"), "medium");
             // The title is the headline of `Finding::detail`, split off again by the detail
             // regeneration at the FIRST `HEADLINE_SEP`, so the title itself must never hold one.
-            let title = f["title"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .replace(HEADLINE_SEP, " - ");
+            // The model's prose is rewritten as it is read, so a reply with an em dash ships
+            // without one; `code` is the model's verbatim quote and is left as it was written.
+            let title = crate::client_text::plain(
+                &f["title"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .replace(HEADLINE_SEP, " - "),
+            )
+            .into_owned();
             let code = f["code"].as_str().unwrap_or("").trim().to_string();
-            let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
+            let detail =
+                crate::client_text::plain(f["detail"].as_str().unwrap_or("").trim()).into_owned();
             // A10: an entry with a place and a rule but no text at all is not a finding, and it is
             // not deleted either: it is kept below, marked `empty_entry` (adopted rules included).
             let empty_entry = title.is_empty() && detail.is_empty() && code.is_empty();

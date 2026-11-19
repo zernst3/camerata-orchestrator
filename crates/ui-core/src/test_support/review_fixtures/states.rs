@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use camerata_api_types::decisions::DecisionState;
 use camerata_api_types::edits::EditField;
-use camerata_api_types::review::EscalationBudget;
+use camerata_api_types::review::{EscalationBudget, FpReason, PossibleFalsePositive};
 use camerata_api_types::review_view::{
     EscalationBudgetOutcome, EscalationBudgetReq, HeldRow, HoldReason, Marker, SiteRow, TreeLevel,
     SITES_PAGE_SIZE,
@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 67] = [
+pub const FIXTURE_IDS: [&str; 75] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -31,6 +31,7 @@ pub const FIXTURE_IDS: [&str; 67] = [
     "tree/node-decided",
     "tree/not-group-reviewed",
     "tree/narrow",
+    "tree/place",
     "queue/empty",
     "queue/loading",
     "queue/error",
@@ -41,6 +42,10 @@ pub const FIXTURE_IDS: [&str; 67] = [
     "queue/30k",
     "queue/detail-form-open",
     "queue/merge-picker-empty-pool",
+    "queue/place",
+    "queue/possible-false-positive",
+    "queue/possible-false-positive-specific",
+    "queue/possible-duplicate",
     "engine/lane-off",
     "engine/loading",
     "engine/card-pending",
@@ -51,6 +56,7 @@ pub const FIXTURE_IDS: [&str; 67] = [
     "engine/small-category",
     "engine/thrown-out-held",
     "engine/thrown-out-confirmed",
+    "engine/second-look-held",
     "engine/floor-binds",
     "detail/empty",
     "detail/plain",
@@ -76,6 +82,8 @@ pub const FIXTURE_IDS: [&str; 67] = [
     "detail/over-budget",
     "detail/viewer-commit",
     "detail/thrown-out",
+    "detail/carrier",
+    "detail/carried",
     "settings/defaults",
     "settings/rate-changed",
     "settings/invalid",
@@ -185,13 +193,20 @@ fn subgroup_ids(ds: &ReviewDataSet) -> Vec<String> {
         .collect()
 }
 
+/// The markers the `tree/markers` page covers: every one but Carried, which a carried row shows
+/// beside its carrier and has its own page (`tree/place`).
+fn cover_markers() -> impl Iterator<Item = Marker> {
+    Marker::PRECEDENCE
+        .into_iter()
+        .filter(|m| *m != Marker::Carried)
+}
+
 /// Where each marker first shows on the first page of `sub`: (marker, row index).
 fn marker_rows(ds: &ReviewDataSet, sub: &str) -> Vec<(Marker, usize)> {
     let Some(page) = ds.sites_page(sub, None, SITES_PAGE_SIZE) else {
         return Vec::new();
     };
-    Marker::PRECEDENCE
-        .into_iter()
+    cover_markers()
         .filter_map(|m| {
             page.rows
                 .iter()
@@ -242,8 +257,7 @@ fn markers_cover(ds: &ReviewDataSet) -> Vec<(String, usize)> {
             .max()
             .unwrap_or(1),
     )];
-    let mut remaining: Vec<Marker> = Marker::PRECEDENCE
-        .into_iter()
+    let mut remaining: Vec<Marker> = cover_markers()
         .filter(|m| !info[&richest].iter().any(|(have, _)| have == m))
         .collect();
     // Rarest first: a marker only one sub-group has is decided before one many have.
@@ -546,6 +560,188 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 body: Body::Tree(tree_body(&ds, &subs)),
             }
         }
+        "tree/place" => {
+            // The sub-groups of a carrier and of the row it carries, open, the carrier focused:
+            // its chip, the carried row's pointer and the place decision's prompt.
+            let ds = base();
+            let carrier = first_row(&ds, |r| !r.carries.is_empty())?;
+            let carried = first_row(&ds, |r| r.carried_by.is_some())?;
+            let mut subs = vec![carrier.group_path[2].clone()];
+            if !subs.contains(&carried.group_path[2]) {
+                subs.push(carried.group_path[2].clone());
+            }
+            let mut body = tree_body(&ds, &subs);
+            body.selected_site = Some(carrier.site_key);
+            StateFixture {
+                shell: shell_of(&ds),
+                body: Body::Tree(body),
+            }
+        }
+        "queue/place" => {
+            // The first escalated row heads a place that carries a second rule.
+            let ds = base();
+            let carrier = first_row(&ds, |r| !r.carries.is_empty())?;
+            let mut queue = ds.queue(false, 0, 100);
+            if let Some(first) = queue.escalated.first_mut() {
+                first.site.place_id.clone_from(&carrier.place_id);
+                first.site.carries.clone_from(&carrier.carries);
+            }
+            queue_state(&ds, queue)
+        }
+        "queue/possible-false-positive" => {
+            // "Possible false positives first" on: inside each band the flagged rows lead, each
+            // with its chip, and the first of them is focused so the detail lists its reasons.
+            let ds = base();
+            let mut queue = ds.queue(false, 0, 100);
+            for (i, r) in queue.escalated.iter_mut().enumerate() {
+                let reasons = match i % 9 {
+                    4 => vec![
+                        FpReason::ConventionRuleAtMediumOrHigher,
+                        FpReason::ModelOnly,
+                    ],
+                    7 => vec![FpReason::SeverityFromRuleMinimum],
+                    _ => continue,
+                };
+                r.site.possible_false_positive = PossibleFalsePositive::from_reasons(reasons);
+                r.site.markers = super::dataset::markers_for(&r.site);
+            }
+            let focused = queue
+                .escalated
+                .iter()
+                .find(|r| r.site.possible_false_positive.is_some())
+                .map(|r| r.candidate.key.clone());
+            let mut fx = queue_state(&ds, queue);
+            if let Body::Queue(q) = &mut fx.body {
+                q.selected_site = focused;
+            }
+            fx
+        }
+        "queue/possible-false-positive-specific" => {
+            // The flag with the row's own sentences: the finder's reason for being unsure and the
+            // group reviewer's own why, each after the reason's standard sentence. The first
+            // flagged row is focused so the detail lists them.
+            let ds = base();
+            let mut queue = ds.queue(false, 0, 100);
+            for (i, r) in queue.escalated.iter_mut().enumerate() {
+                let flag = match i % 9 {
+                    4 => PossibleFalsePositive::from_reasons(vec![
+                        FpReason::GroupReviewerDoubt,
+                        FpReason::FinderUnsure,
+                    ])
+                    .map(|f| {
+                        f.with_specifics([
+                            (
+                                FpReason::GroupReviewerDoubt,
+                                "It queries a lookup table, not orders.".to_string(),
+                            ),
+                            (
+                                FpReason::FinderUnsure,
+                                "The caller may be checked in a layer not shown.".to_string(),
+                            ),
+                        ])
+                    }),
+                    7 => PossibleFalsePositive::from_reasons(vec![FpReason::FinderUnsure]),
+                    _ => continue,
+                };
+                r.site.possible_false_positive = flag;
+                r.site.markers = super::dataset::markers_for(&r.site);
+            }
+            let focused = queue
+                .escalated
+                .iter()
+                .find(|r| r.site.possible_false_positive.is_some())
+                .map(|r| r.candidate.key.clone());
+            let mut fx = queue_state(&ds, queue);
+            if let Body::Queue(q) = &mut fx.body {
+                q.selected_site = focused;
+            }
+            fx
+        }
+        "queue/possible-duplicate" => {
+            // "Possible duplicates together" on: two causes with a row at the same place sit side
+            // by side inside their band, each with its chip, and the first of them is focused so
+            // the detail names the other cause.
+            let ds = base();
+            let mut queue = ds.queue(false, 0, 100);
+            let mut sorted: Vec<&camerata_api_types::review_view::QueueRow> =
+                queue.escalated.iter().collect();
+            crate::queue::sort_rows(&mut sorted);
+            let within: Vec<String> = sorted
+                .iter()
+                .filter(|r| crate::queue::band_of(r) == crate::queue::Band::WithinBudget)
+                .map(|r| r.site.site_key.clone())
+                .collect();
+            // The first and the last row of the band: far apart in rank order, so the look moves
+            // one of them.
+            let (a, b) = (within[0].clone(), within[within.len() - 1].clone());
+            let view_of = |q: &camerata_api_types::review_view::QueueView, key: &str| {
+                let r = q
+                    .escalated
+                    .iter()
+                    .find(|r| r.site.site_key == key)
+                    .map(|r| &r.site)
+                    .expect("the paired row is in the queue");
+                camerata_api_types::review_view::SamePlaceView {
+                    fix_id: format!("{:012x}", r.line * 7919 + r.path.len()),
+                    title: r.headline.clone(),
+                    key: r.site_key.clone(),
+                    rule_id: r.rule_id.clone(),
+                    line: r.line,
+                    group_id: r.group_path.get(2).cloned().unwrap_or_default(),
+                    reason: Default::default(),
+                }
+            };
+            // The partner sits at the same place: the same file, two lines on.
+            let (path, repo, line) = {
+                let first = queue
+                    .escalated
+                    .iter()
+                    .find(|r| r.site.site_key == a)
+                    .expect("the first row is in the queue");
+                (
+                    first.site.path.clone(),
+                    first.site.repo.clone(),
+                    first.site.line,
+                )
+            };
+            for r in &mut queue.escalated {
+                if r.site.site_key == b {
+                    r.site.path = path.clone();
+                    r.site.repo = repo.clone();
+                    let was = r.site.line;
+                    r.site.line = line + 2;
+                    // The headline names its line ("... at line 321"): it follows the move.
+                    r.site.headline = r
+                        .site
+                        .headline
+                        .replace(&format!("line {was}"), &format!("line {}", r.site.line));
+                }
+            }
+            let (to_a, to_b) = (view_of(&queue, &a), view_of(&queue, &b));
+            for r in &mut queue.escalated {
+                if r.site.site_key == a {
+                    r.site.same_place_as = vec![to_b.clone()];
+                } else if r.site.site_key == b {
+                    r.site.same_place_as = vec![to_a.clone()];
+                } else {
+                    continue;
+                }
+                r.site.markers = super::dataset::markers_for(&r.site);
+            }
+            let mut fx = queue_state(&ds, queue);
+            if let Body::Queue(q) = &mut fx.body {
+                q.selected_site = Some(a);
+            }
+            fx
+        }
+        "detail/carrier" => {
+            let ds = base();
+            detail(&ds, first_row(&ds, |r| !r.carries.is_empty()), None)
+        }
+        "detail/carried" => {
+            let ds = base();
+            detail(&ds, first_row(&ds, |r| r.carried_by.is_some()), None)
+        }
         "tree/narrow" => {
             let ds = base();
             let subs = subs_covering_every_marker(&ds);
@@ -685,6 +881,48 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
             let ds = build(&params(|p| p.engine_mode = EngineMode::ThrownOutConfirmed));
             let at = thrown_out_card_with_verdict(&ds);
             engine_body(&ds, at, false)
+        }
+        "engine/second-look-held" => {
+            // A row the reviewer ruled out while the engine flagged it, drawn into the second
+            // look, with a No ("ruled out, but a real problem") that nothing has answered.
+            use camerata_api_types::review_view::{
+                EngineCheckError, EngineCheckVerdict, HoldReason, SampleStratum, StratumRate,
+            };
+            let mut ds = build(&params(|p| p.engine_mode = EngineMode::Pending));
+            let card = &mut ds.engine.cards[0];
+            card.stratum = SampleStratum::RuledOutFlagged;
+            card.site.decision = Some(camerata_api_types::review_view::DecisionView {
+                id: "dec-second-look".to_string(),
+                state: camerata_api_types::decisions::DecisionState::FalsePositive,
+                reason: "Test code, not production.".to_string(),
+                scope: camerata_api_types::decisions::Scope::Site,
+                inherited_from: None,
+                decided_by: "architect".to_string(),
+                decided_at: "2026-11-04T09:00:00Z".to_string(),
+                needed_me: None,
+                confirmed_by_client: None,
+            });
+            card.site.held = Some(HoldReason::EngineCheckNoWithoutCorrection);
+            card.verdict = Some(EngineCheckVerdict {
+                key: card.site.site_key.clone(),
+                run_id: ds.engine.run_id.clone(),
+                right: false,
+                wrong: Some(EngineCheckError::RuledOutRealProblem),
+                correction: None,
+                by: "architect".to_string(),
+                at: "2026-11-04T10:00:00Z".to_string(),
+                carried_from: None,
+            });
+            ds.engine.ruled_out_flagged_total = 9;
+            ds.engine.strata.push(StratumRate {
+                stratum: SampleStratum::RuledOutFlagged,
+                drawn: 1,
+                verdicts: 1,
+                wrong: 1,
+                rate_percent: Some(100.0),
+                margin_percent: Some(79.3),
+            });
+            engine_body(&ds, Some(0), false)
         }
         "engine/floor-binds" => {
             // A sample size of 6 against four categories with a floor of 3 each: the floor wins

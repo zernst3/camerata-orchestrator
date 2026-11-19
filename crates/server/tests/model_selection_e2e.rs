@@ -70,6 +70,8 @@ impl LlmPort for CapturingCompleter {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.seen.lock().unwrap().push(req.model.clone());
         Ok(LlmResponse {
+            reported_model: None,
+            cli_cost_usd: None,
             text: self.reply.clone(),
             model: req.model.clone(),
             backend: "capture".to_string(),
@@ -723,7 +725,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         &creds_or,
         "/tmp/mcp.json",
         vec![],
-        None,
+        Some(std::path::PathBuf::from("/tmp/wt")),
         false,
         limiter.clone(),
         None,

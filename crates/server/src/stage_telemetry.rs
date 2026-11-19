@@ -51,11 +51,16 @@ pub enum Stage {
     DeepTier,
     /// The clone-advisory judge.
     CloneJudge,
+    /// The agent finder: one agent turn sequence for each piece of code.
+    Finder,
+    /// The possible-duplicate check: one model call per file of candidate pairs
+    /// (`possible_duplicate::check`).
+    DuplicateCheck,
 }
 
 impl Stage {
     /// Every stage, in pipeline order (the order the table prints).
-    pub const ALL: [Stage; 8] = [
+    pub const ALL: [Stage; 10] = [
         Stage::ScanPass,
         Stage::Alternatives,
         Stage::DetailRegeneration,
@@ -64,6 +69,8 @@ impl Stage {
         Stage::FixGeneration,
         Stage::DeepTier,
         Stage::CloneJudge,
+        Stage::Finder,
+        Stage::DuplicateCheck,
     ];
 
     /// The short name the table and the logs use.
@@ -77,6 +84,8 @@ impl Stage {
             Stage::FixGeneration => "fix",
             Stage::DeepTier => "deep",
             Stage::CloneJudge => "clone-judge",
+            Stage::Finder => "finder",
+            Stage::DuplicateCheck => "duplicate-check",
         }
     }
 }

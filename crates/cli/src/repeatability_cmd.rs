@@ -301,9 +301,7 @@ pub async fn run_repeatability_with(
         args.model.as_deref(),
         args.calibration_model.as_deref(),
         false,
-        None,
-        None,
-        None,
+        &camerata_server::cost_cap::RunControls::from_env(),
     );
     if let Some(why) =
         camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models)
@@ -415,6 +413,7 @@ pub async fn run_repeatability_with(
         }
     }
     let controls = camerata_server::cost_cap::RunControls {
+        stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,
         max_cost_usd: Some(per_run),
@@ -424,6 +423,11 @@ pub async fn run_repeatability_with(
         // Repeatability measures the drift of the default configuration.
         clone_judge_model: None,
         consensus: false,
+        // Repeatability measures the default (engine) finder.
+        finder: camerata_server::ai_audit::agent_finder::FinderChoice::Engine,
+        finder_model: None,
+        finder_force_pieces: None,
+        checkpoint: Default::default(),
     };
     let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
     let models = camerata_server::cost_cap::models_the_run_will_use(
@@ -434,6 +438,16 @@ pub async fn run_repeatability_with(
         &controls,
     );
     if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
+        return Err(why);
+    }
+    // The cli backend launches the local Claude Code, which refuses a model it predates: check
+    // before the first run, not after a round of failed calls. A scripted model launches nothing.
+    if let Some(why) = crate::inspect_cmd::cli_version_refusal(
+        matches!(backend_resolution, BackendResolution::Cli),
+        seams.llm.is_some(),
+        &models,
+        camerata_server::claude_version::check_run_models,
+    ) {
         return Err(why);
     }
 

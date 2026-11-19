@@ -51,11 +51,13 @@
       "junk_content",
       "evidence_unverified",
       "restored_without_decision",
+      "split_out_without_decision",
       "merged_without_decision",
       "engine_check_no_without_correction"
     ],
     "markers": [
       "held",
+      "possible_false_positive",
       "escalated",
       "candidate",
       "over_budget",
@@ -64,6 +66,7 @@
       "stale",
       "moved",
       "possible_duplicate",
+      "carried",
       "edited"
     ],
     "outlier_reasons": [
@@ -155,6 +158,10 @@
         ],
         "site": {
           "added_by_reviewer": "bool",
+          "carried_by": "null",
+          "carries": [
+            "empty"
+          ],
           "category": "string",
           "decision": {
             "confirmed_by_client": {
@@ -192,6 +199,15 @@
             }
           ],
           "fix": "string",
+          "fix_id": "string",
+          "fix_rules": [
+            {
+              "$one_of": [
+                "empty",
+                "string"
+              ]
+            }
+          ],
           "fix_type": "string",
           "flagged_by": [
             {
@@ -239,12 +255,18 @@
           },
           "new_since_decision": "null",
           "path": "string",
+          "place_id": "string",
           "possible_duplicate_of": {
             "hint": "string",
             "key": "string",
             "line": "number",
             "path": "string",
             "rule_id": "string"
+          },
+          "possible_false_positive": {
+            "reasons": [
+              "string"
+            ]
           },
           "repo": "string",
           "review_flags": [
@@ -288,7 +310,8 @@
             "scope": "string",
             "state": "string"
           },
-          "thrown_out_reason": "string"
+          "thrown_out_reason": "string",
+          "why_business": "string"
         },
         "stage1": {
           "confidence": "string",
@@ -314,6 +337,7 @@
     ],
     "drawn": "number",
     "off": "bool",
+    "ruled_out_flagged_total": "number",
     "run_id": "string",
     "setting": "number",
     "strata": [
@@ -384,6 +408,10 @@
         ],
         "site": {
           "added_by_reviewer": "bool",
+          "carried_by": "null",
+          "carries": [
+            "empty"
+          ],
           "category": "null",
           "decision": "null",
           "detail": "string",
@@ -402,6 +430,10 @@
             }
           ],
           "fix": "string",
+          "fix_id": "string",
+          "fix_rules": [
+            "string"
+          ],
           "fix_type": "string",
           "flagged_by": [
             "empty"
@@ -423,6 +455,7 @@
           "moved_from": "null",
           "new_since_decision": "null",
           "path": "string",
+          "place_id": "string",
           "possible_duplicate_of": "null",
           "repo": "string",
           "review_flags": [
@@ -456,7 +489,8 @@
             "why": "string"
           },
           "stale_decision": "null",
-          "thrown_out_reason": "null"
+          "thrown_out_reason": "null",
+          "why_business": "string"
         }
       }
     ],
@@ -493,6 +527,10 @@
         ],
         "site": {
           "added_by_reviewer": "bool",
+          "carried_by": "null",
+          "carries": [
+            "empty"
+          ],
           "category": "null",
           "decision": {
             "confirmed_by_client": "null",
@@ -510,6 +548,10 @@
             "empty"
           ],
           "fix": "string",
+          "fix_id": "string",
+          "fix_rules": [
+            "string"
+          ],
           "fix_type": "string",
           "flagged_by": [
             "empty"
@@ -531,6 +573,7 @@
           "moved_from": "null",
           "new_since_decision": "null",
           "path": "string",
+          "place_id": "string",
           "possible_duplicate_of": "null",
           "repo": "string",
           "review_flags": [
@@ -564,7 +607,8 @@
             "why": "string"
           },
           "stale_decision": "null",
-          "thrown_out_reason": "null"
+          "thrown_out_reason": "null",
+          "why_business": "string"
         }
       }
     ],
@@ -609,6 +653,10 @@
     },
     "stage_models": {
       "calibration": "string",
+      "clone_judge": "string",
+      "duplicate_check": "string",
+      "finder": "string",
+      "finder_model": "string",
       "fix": "string",
       "group_review": "string",
       "scan": "string"
@@ -688,6 +736,10 @@
     "rows": [
       {
         "added_by_reviewer": "bool",
+        "carried_by": "null",
+        "carries": [
+          "empty"
+        ],
         "category": "string",
         "decision": {
           "confirmed_by_client": {
@@ -725,6 +777,10 @@
           }
         ],
         "fix": "string",
+        "fix_id": "string",
+        "fix_rules": [
+          "string"
+        ],
         "fix_type": "string",
         "flagged_by": [
           {
@@ -768,12 +824,18 @@
         },
         "new_since_decision": "null",
         "path": "string",
+        "place_id": "string",
         "possible_duplicate_of": {
           "hint": "string",
           "key": "string",
           "line": "number",
           "path": "string",
           "rule_id": "string"
+        },
+        "possible_false_positive": {
+          "reasons": [
+            "string"
+          ]
         },
         "repo": "string",
         "review_flags": [
@@ -817,7 +879,8 @@
           "scope": "string",
           "state": "string"
         },
-        "thrown_out_reason": "null"
+        "thrown_out_reason": "null",
+        "why_business": "string"
       }
     ],
     "run_id": "string",
@@ -869,7 +932,11 @@
           "stale": "bool"
         },
         "summary_source": "string",
-        "thrown_out": "bool"
+        "thrown_out": "bool",
+        "why_business": "null",
+        "why_business_edit": "null",
+        "why_technical": "null",
+        "why_technical_edit": "null"
       }
     ],
     "run_id": "string"

@@ -3,6 +3,7 @@
 
 mod detection;
 mod detector_edges;
+mod false_alarms;
 mod firebase_spans;
 mod json_walk;
 mod model_input;
