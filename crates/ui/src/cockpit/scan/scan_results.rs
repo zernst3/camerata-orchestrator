@@ -488,6 +488,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     let mut custom_rules_w = custom_rules;
     let mut order_preset_w = order_preset;
     let mut draft_loaded = use_signal(|| false);
+    // Set when the saved draft could not be read: nothing is written over it from this screen.
+    let mut draft_unreadable = use_signal(|| false);
     // The write-through bridge to the server's decision store. `bridge_ready` is set once the
     // store has been read (and the old draft's dispositions migrated); until then, and whenever
     // the store could not be reached, the draft carries every disposition itself so nothing is
@@ -522,7 +524,17 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
             let review_restore = review_restore.clone();
             let decision_bridge_load = decision_bridge_load.clone();
             async move {
-                let draft = load_onboarding_draft().await;
+                let draft = match load_onboarding_draft().await {
+                    Ok(draft) => draft,
+                    Err(message) => {
+                        // Said out loud, and the saved draft is left exactly as it is: this
+                        // screen writes nothing over a draft it could not read.
+                        eprintln!("[camerata-ui] {message}");
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message);
+                        draft_unreadable.set(true);
+                        None
+                    }
+                };
                 // The draft's dispositions: old-style ones to migrate, or changes the store did
                 // not hold yet when it was saved. Only a draft of THIS scan counts.
                 let draft_queue = draft
@@ -608,7 +620,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 unreadable: review_save.unreadable(),
                 just_failed: false,
             };
-            if !draft_loaded() {
+            if !draft_loaded() || draft_unreadable() {
                 return;
             }
             // Each group's reviewed flag is refreshed from the dispositions right here, the one

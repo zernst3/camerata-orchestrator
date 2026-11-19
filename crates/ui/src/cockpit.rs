@@ -2147,6 +2147,7 @@ fn ProjectsHome() -> Element {
                         }
                         button {
                             class: "btn-run",
+                            "data-test": "continue-onboarding",
                             onclick: move |_| {
                                 // Keep the draft; OnboardView restores it when opened.
                                 resume_prompt.set(false);
@@ -2273,6 +2274,7 @@ fn ProjectsHome() -> Element {
                                             }
                                             button {
                                                 class: "btn-run",
+                                                "data-test": "open-project",
                                                 onclick: move |_| {
                                                     let id = id_open.clone();
                                                     spawn(async move {
@@ -2281,10 +2283,16 @@ fn ProjectsHome() -> Element {
                                                             // draft (server scopes the draft to the now-active
                                                             // project), ask before entering instead of silently
                                                             // resuming. Otherwise go straight in.
-                                                            if load_onboarding_draft().await.is_some() {
-                                                                resume_prompt.set(true);
-                                                            } else {
-                                                                screen.set(CockpitScreen::InProject);
+                                                            match load_onboarding_draft().await {
+                                                                Ok(Some(_)) => resume_prompt.set(true),
+                                                                Ok(None) => screen.set(CockpitScreen::InProject),
+                                                                Err(message) => {
+                                                                    // A draft that cannot be read is said out
+                                                                    // loud, then the project opens as it would
+                                                                    // with none; the file is left as it is.
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message);
+                                                                    screen.set(CockpitScreen::InProject);
+                                                                }
                                                             }
                                                         } else {
                                                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not open the project.");

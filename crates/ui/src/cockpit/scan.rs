@@ -207,3 +207,7 @@ mod resume_button_tests;
 /// estimate, the Inspect button and the help behind "?".
 #[cfg(test)]
 mod inspection_screen_tests;
+
+/// Loading the saved draft never turns an unreadable part into "nothing saved".
+#[cfg(test)]
+mod draft_load_tests;
