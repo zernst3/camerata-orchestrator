@@ -2519,11 +2519,21 @@ fn the_finder_model_hold_keeps_the_recorded_model_and_says_so() {
         why.contains("claude-fable-5-2") && why.contains("claude-opus-5-5"),
         "{why}"
     );
-    // An older run recorded none: the current pick stands and the line says so.
+    // An older run recorded none and the resume names none: it keeps Fable 5.2, the default
+    // when it started, and the line says so.
     let mut old = controls_with_finder(FinderChoice::Agent);
     let line = record("").hold_finder_model(&mut old).unwrap().unwrap();
+    assert!(
+        line.contains("claude-fable-5-2") && line.contains("recorded none"),
+        "{line}"
+    );
+    assert_eq!(old.finder_model_for(), "claude-fable-5-2");
+    // With an explicit pick on such a run, the pick stands.
+    let mut picked = controls_with_finder(FinderChoice::Agent);
+    picked.finder_model = Some("claude-opus-5-5".to_string());
+    let line = record("").hold_finder_model(&mut picked).unwrap().unwrap();
     assert!(line.contains("did not record a finder model"), "{line}");
-    assert_eq!(old.finder_model_for(), "claude-opus-5-5");
+    assert_eq!(picked.finder_model_for(), "claude-opus-5-5");
     // An engine run has no finder model to hold.
     let mut e = controls_with_finder(FinderChoice::Engine);
     assert_eq!(

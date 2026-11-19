@@ -1632,7 +1632,8 @@ async fn a_server_scan_on_an_agent_project_runs_the_agent_finder() {
 
 /// Outside review Part 1 item 4, route level: an agent finder scan, started from the app, stops
 /// before any call or run spend when a rule file did not load, on both audit routes (the job and
-/// the synchronous one), for an internal project as for a client one.
+/// the synchronous one). This rig is an internal project; the command line test
+/// (`a_corrupt_rule_file_stops_every_agent_run_before_any_spend`) covers both kinds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(process_env)]
 async fn an_agent_scan_stops_on_both_audit_routes_when_a_rule_file_did_not_load() {

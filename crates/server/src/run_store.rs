@@ -254,6 +254,9 @@ pub struct ModelsRecord {
     pub finder_model: String,
 }
 
+/// The agent finder's default model when a run saved without a recorded finder model started.
+const LEGACY_FINDER_MODEL: &str = "claude-fable-5-2";
+
 /// The word a finder is recorded as.
 fn finder_word(finder: crate::ai_audit::agent_finder::FinderChoice) -> &'static str {
     match finder {
@@ -308,17 +311,26 @@ impl ModelsRecord {
             return Ok(None);
         }
         let recorded = self.finder_model.trim();
-        if recorded.is_empty() {
-            return Ok(Some(format!(
-                "The finder runs on {}: this run did not record a finder model.",
-                controls.finder_model_for()
-            )));
-        }
         let explicit = controls
             .finder_model
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty());
+        if recorded.is_empty() {
+            // A run saved before the model was recorded started on the default of that time,
+            // Fable 5.2. With no explicit pick it keeps that model; an explicit pick stands.
+            if explicit.is_some() {
+                return Ok(Some(format!(
+                    "The finder runs on {}: this run did not record a finder model.",
+                    controls.finder_model_for()
+                )));
+            }
+            controls.finder_model = Some(LEGACY_FINDER_MODEL.to_string());
+            return Ok(Some(format!(
+                "The finder stays on {LEGACY_FINDER_MODEL}, the model this run started on (it \
+                 recorded none, and this was the default then)."
+            )));
+        }
         if let Some(pick) = explicit.filter(|m| *m != recorded) {
             return Err(format!(
                 "this run's finder is on {recorded}, and this resume asks for {pick}. The stored \
