@@ -122,9 +122,14 @@ pub use rescan::*;
 pub use scan_results::*;
 pub(super) use wire::*;
 
-/// The export dialog offers the triage log as an unticked box (off by default).
+/// The export dialog has no triage log box (the log left the client package) and offers it in an
+/// operator files block instead.
 #[cfg(test)]
 mod export_dialog_triage_log_box;
+
+/// Held rows live in the triage table; the export panel keeps one line (work order E).
+#[cfg(test)]
+mod held_rows_tests;
 
 /// The inspection setup's client-name field follows the project it is shown for. The field keeps
 /// its own text while it is on screen, so without a key a switch from one project to another

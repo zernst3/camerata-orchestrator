@@ -182,8 +182,9 @@ const SPEC: &[(&str, &str, &[&str])] = &[
     (
         "export",
         "WO10",
-        &["clear", "blocked", "one-line-two-reasons"],
+        &["clear", "blocked", "one-line-two-reasons", "blocked-many"],
     ),
+    ("findings", "WO-E", &["held-rows", "held-filter-on"]),
 ];
 
 /// A state id and the function that renders its page.

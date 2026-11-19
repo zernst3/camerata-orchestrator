@@ -1,9 +1,11 @@
-//! H4 item 3: the optional triage log, per rule, of what the AI pass proposed, what review kept
-//! and what was thrown out, and why. Off by default.
+//! The triage log, per rule, of what the AI pass proposed, what review kept and what was thrown
+//! out, and why. It is the operator's file: the client package never carries it.
 
 use std::collections::HashMap;
 
-use super::triage_log::{build_triage_log, TriageLogRow, TRIAGE_LOG_CSV, TRIAGE_LOG_SHEET};
+use super::triage_log::{
+    build_triage_log, operator_csv, TriageLogRow, INTERNAL_MARK, TRIAGE_LOG_CSV, TRIAGE_LOG_SHEET,
+};
 use super::*;
 use crate::onboard::Finding;
 use crate::report_export::{finding_key, DispositionWire};
@@ -122,70 +124,95 @@ async fn the_log_counts_what_the_ai_pass_proposed_kept_and_threw_out_per_rule_an
     assert!(!r.rule.is_empty());
 }
 
+/// Every option a client export can be given, the old `triage_log` key a stale client may still
+/// send included.
+fn every_option_on() -> ReportOptions {
+    let mut options: ReportOptions = serde_json::from_str(
+        r#"{"triage_log": true, "project_title": "Acme", "prepared_by": "A. Person",
+            "executive_summary_override": "A summary.", "brand": "Acme Co"}"#,
+    )
+    .expect("a stale client's body still parses");
+    options.client_name = "Example Client Ltd".to_string();
+    options
+}
+
 #[tokio::test]
-async fn the_triage_log_is_off_by_default() {
+async fn the_client_workbook_never_has_a_triage_log_sheet() {
     let corpus = corpus().await;
     let (report, dispositions) = scenario();
-    let options = ReportOptions::default();
-    assert!(!options.triage_log);
     let xlsx = build_workbook(
         &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
         Some(&corpus),
-        &options,
+        &every_option_on(),
     )
     .unwrap();
-    let strings = crate::release_gate::xlsx_strings(&xlsx).unwrap().join("\n");
+    let sheets = crate::release_gate::xlsx_sheet_names(&xlsx).unwrap();
     assert!(
-        !strings.contains(TRIAGE_LOG_SHEET),
-        "no triage sheet by default"
+        !sheets.iter().any(|s| s == TRIAGE_LOG_SHEET),
+        "no Triage Log sheet, whatever is set: {sheets:?}"
     );
-    let csv = build_csv_exports(
-        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
-        Some(&corpus),
-        &options,
-    )
-    .unwrap();
+    assert!(
+        sheets.iter().any(|s| s == vocabulary::ALL_PROBLEMS),
+        "anti-vacuity: the workbook has its real sheets: {sheets:?}"
+    );
+}
+
+/// `CAMERATA_EXPORT_TRIAGE_LOG` no longer adds anything to the client package: the command line
+/// writes the operator's file beside the zip instead.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_environment_switch_adds_nothing_to_the_client_package() {
+    let _env = camerata_test_env::EnvGuard::set(crate::report_export::EXPORT_TRIAGE_LOG_ENV, "1");
+    let mut options = ReportOptions::default();
+    options.apply_env_defaults();
+    let corpus = corpus().await;
+    let (report, dispositions) = scenario();
+    let reviewed = crate::report_export::ReviewedReport::unreviewed(&report, &dispositions);
+    let xlsx = build_workbook(&reviewed, Some(&corpus), &options).unwrap();
+    let sheets = crate::release_gate::xlsx_sheet_names(&xlsx).unwrap();
+    assert!(!sheets.iter().any(|s| s == TRIAGE_LOG_SHEET), "{sheets:?}");
+    let csv = build_csv_exports(&reviewed, Some(&corpus), &options).unwrap();
     assert!(csv.iter().all(|(path, _)| path != TRIAGE_LOG_CSV));
 }
 
 #[tokio::test]
-async fn when_asked_for_the_triage_log_rides_as_a_workbook_sheet_and_a_csv() {
+async fn the_client_csv_set_never_has_the_triage_log() {
     let corpus = corpus().await;
     let (report, dispositions) = scenario();
-    let options = ReportOptions {
-        triage_log: true,
-        ..ReportOptions::default()
-    };
-    let xlsx = build_workbook(
-        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
-        Some(&corpus),
-        &options,
-    )
-    .unwrap();
-    let grid = crate::release_gate::xlsx_sheet_grid(&xlsx, TRIAGE_LOG_SHEET)
-        .expect("the workbook has a Triage Log sheet");
-    let flat: Vec<String> = grid.iter().flatten().cloned().collect();
-    assert!(
-        flat.iter().any(|c| c == "SEC-NO-HARDCODED-SECRETS-1"),
-        "{flat:?}"
-    );
-    assert!(
-        flat.iter().any(|c| c.contains("test fixture, not shipped")),
-        "{flat:?}"
-    );
-
     let csv = build_csv_exports(
         &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
         Some(&corpus),
-        &options,
+        &every_option_on(),
     )
     .unwrap();
-    let (_, bytes) = csv
-        .iter()
-        .find(|(path, _)| path == TRIAGE_LOG_CSV)
-        .expect("the CSV is exported");
-    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(
+        csv.iter().all(|(path, _)| path != TRIAGE_LOG_CSV),
+        "no csv/triage-log.csv, whatever is set"
+    );
+    assert!(
+        csv.iter().any(|(path, _)| path == tickets::TICKETS_CSV),
+        "anti-vacuity: the other CSV files are there"
+    );
+}
+
+#[tokio::test]
+async fn the_operator_file_is_marked_internal_then_has_the_header_and_the_rows() {
+    let corpus = corpus().await;
+    let (report, dispositions) = scenario();
+    let bytes = operator_csv(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &HashMap::new(),
+    )
+    .unwrap();
+    let text = String::from_utf8(bytes).unwrap();
     let mut lines = text.lines();
+    let first = lines.next().unwrap();
+    assert!(first.starts_with(INTERNAL_MARK), "{first}");
+    assert!(
+        first.contains("Rows that reached review; 0 rows merged into another"),
+        "{first}"
+    );
     assert_eq!(
         lines.next(),
         Some("Rule ID,Rule,Proposed by the AI pass,Kept,Held for review,Information only,Thrown out,Why")
@@ -193,41 +220,39 @@ async fn when_asked_for_the_triage_log_rides_as_a_workbook_sheet_and_a_csv() {
     let data: Vec<&str> = lines.collect();
     assert_eq!(data.len(), 1, "{text}");
     assert!(data[0].starts_with("SEC-NO-HARDCODED-SECRETS-1,"), "{text}");
+    assert!(data[0].contains("test fixture, not shipped"), "{text}");
 }
 
 #[test]
-fn an_empty_triage_log_still_has_its_header() {
+fn an_empty_operator_file_still_has_its_mark_and_header() {
     let report = tests::report_with(Vec::new(), Vec::new()).seal();
-    let options = ReportOptions {
-        triage_log: true,
-        ..ReportOptions::default()
-    };
-    let csv = build_csv_exports(
+    let bytes = operator_csv(
         &crate::report_export::ReviewedReport::unreviewed(&report, &HashMap::new()),
         None,
-        &options,
+        &HashMap::new(),
     )
     .unwrap();
-    let (_, bytes) = csv
-        .iter()
-        .find(|(path, _)| path == TRIAGE_LOG_CSV)
-        .expect("the CSV is exported even when empty");
-    assert!(String::from_utf8_lossy(bytes).starts_with("Rule ID,"));
+    let text = String::from_utf8(bytes).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].starts_with(INTERNAL_MARK), "{text}");
+    assert!(lines[1].starts_with("Rule ID,"), "{text}");
 }
 
-/// The key the export dialog sends (`triage_log`) is the one `ReportOptions` reads.
+/// A stale client still sends the old key: it parses and changes nothing.
 #[test]
-fn the_export_dialogs_options_key_turns_the_triage_log_on() {
+fn the_old_triage_log_key_is_ignored_by_the_export_options() {
     let on: ReportOptions = serde_json::from_str(r#"{"triage_log": true}"#).unwrap();
-    assert!(on.triage_log);
-    let off: ReportOptions = serde_json::from_str(r#"{"triage_log": false}"#).unwrap();
-    assert!(!off.triage_log);
     let absent: ReportOptions = serde_json::from_str("{}").unwrap();
-    assert!(!absent.triage_log);
+    assert_eq!(
+        format!("{on:?}"),
+        format!("{absent:?}"),
+        "the old key leaves no trace in the options"
+    );
 }
 
 #[test]
-fn the_env_switch_turns_the_triage_log_on_only_for_one_or_true() {
+fn the_env_switch_asks_for_the_operator_file_only_for_one_or_true() {
     use crate::report_export::triage_log_env_on;
     assert!(triage_log_env_on(Some("1")));
     assert!(triage_log_env_on(Some("true")));
@@ -271,62 +296,29 @@ fn the_caption_states_that_the_counts_are_rows_that_reached_review() {
 }
 
 #[tokio::test]
-async fn the_sheet_carries_the_caption_with_the_ledgers_deduped_count() {
+async fn the_operator_files_first_line_carries_the_ledgers_deduped_count() {
     let corpus = corpus().await;
     let (_, dispositions) = scenario();
     let report = sealed_with_repeats_dropped(4);
     assert_eq!(report.ledger.deduped_total(), 4);
-    let options = ReportOptions {
-        triage_log: true,
-        ..ReportOptions::default()
-    };
-    let xlsx = build_workbook(
+    let bytes = operator_csv(
         &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
         Some(&corpus),
-        &options,
+        &HashMap::new(),
     )
     .unwrap();
-    let grid = crate::release_gate::xlsx_sheet_grid(&xlsx, TRIAGE_LOG_SHEET).expect("the sheet");
-    let flat: Vec<String> = grid.iter().flatten().cloned().collect();
+    let text = String::from_utf8(bytes).unwrap();
+    let first = text.lines().next().unwrap();
     assert!(
-        flat.iter().any(|c| c
-            == "Rows that reached review; 4 rows merged into another at the same location are not listed"),
-        "{flat:?}"
+        first.contains(
+            "Rows that reached review; 4 rows merged into another at the same location are not listed"
+        ),
+        "{first}"
     );
 }
 
-/// Every sheet, the Triage Log included, carries the confidentiality footer: the sheet is added
-/// before the footer loop runs.
-#[tokio::test]
-async fn every_sheet_including_the_triage_log_carries_the_footer() {
-    let corpus = corpus().await;
-    let (report, dispositions) = scenario();
-    let options = ReportOptions {
-        triage_log: true,
-        client_name: "Example Client Ltd".to_string(),
-        ..ReportOptions::default()
-    };
-    let xlsx = build_workbook(
-        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
-        Some(&corpus),
-        &options,
-    )
-    .unwrap();
-    let sheets = crate::release_gate::xlsx_sheet_names(&xlsx).unwrap();
-    assert!(
-        sheets.iter().any(|s| s == TRIAGE_LOG_SHEET),
-        "anti-vacuity: the Triage Log sheet is present: {sheets:?}"
-    );
-    let footers = crate::release_gate::xlsx_header_footers(&xlsx).unwrap();
-    for sheet in &sheets {
-        let footer = footers
-            .iter()
-            .find(|f| f.part == "footer" && &f.sheet == sheet)
-            .unwrap_or_else(|| panic!("sheet {sheet:?} has no footer"));
-        assert!(
-            footer.left.contains("Example Client Ltd"),
-            "sheet {sheet:?}: {:?}",
-            footer.left
-        );
-    }
+/// The operator file's text follows the package's words rule: no dashes and no serial commas.
+#[test]
+fn the_mark_has_no_dashes() {
+    assert!(!INTERNAL_MARK.contains(['\u{2013}', '\u{2014}']));
 }

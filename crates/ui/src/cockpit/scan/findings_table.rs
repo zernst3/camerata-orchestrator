@@ -610,6 +610,64 @@ pub(in crate::cockpit) fn FindingDetailPane(
     }
 }
 
+/// The column that marks the rows the release gate holds (work order E). Present only when the
+/// screen provides [`crate::cockpit::export_gate::HeldRows`], so every other mount of the table is
+/// unchanged.
+pub(in crate::cockpit) const HELD_COLUMN: ColumnId = ColumnId("held");
+
+/// What the held column says on a held row, and its filter's one option. The package's own term
+/// for the concept (the workbook's "Needs a decision" sheet).
+pub(in crate::cockpit) const HELD_WORD: &str = "Needs a decision";
+
+/// What the held column holds on every other row. It sorts after [`HELD_WORD`], so an ascending
+/// sort puts the held rows first.
+const NOT_HELD_WORD: &str = "Not held";
+
+/// The site keys the release gate holds, shared with the column's accessor and the row class. Both
+/// are `Send + Sync` closures that chorale keeps for the table's life, so the keys sit behind a
+/// lock and the table writes the gate's latest read into it on every render.
+pub(in crate::cockpit) type HeldStore =
+    std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>;
+
+/// Whether the gate holds this row. A poisoned lock reads as not held: the gate itself still
+/// refuses at export, and this only marks.
+pub(in crate::cockpit) fn is_held(store: &HeldStore, f: &FindingView) -> bool {
+    store
+        .read()
+        .is_ok_and(|keys| keys.contains(&finding_key(f)))
+}
+
+/// The held column: "Needs a decision" on a held row. Sortable (held rows first) and filterable.
+pub(in crate::cockpit) fn held_column(store: HeldStore) -> ColumnDef<FindingView> {
+    ColumnDef::new(HELD_COLUMN, "Decision", move |f: &FindingView| {
+        CellValue::Text(
+            if is_held(&store, f) {
+                HELD_WORD
+            } else {
+                NOT_HELD_WORD
+            }
+            .to_string(),
+        )
+    })
+    .sortable()
+    .filter(FilterKind::MultiSelect {
+        options: vec![HELD_WORD.to_string()],
+    })
+    .initial_width(170.0)
+}
+
+/// The row class: the critical highlight, plus a red left edge on a row the gate holds.
+pub(in crate::cockpit) fn row_class_with_held(store: Option<HeldStore>) -> RowClass<FindingView> {
+    RowClass::new(move |f: &FindingView| {
+        let mut classes: Vec<String> = Vec::new();
+        classes.extend(finding_row_class(f));
+        if store.as_ref().is_some_and(|s| is_held(s, f)) {
+            classes.push("finding-row-held".to_string());
+        }
+        (!classes.is_empty()).then(|| classes.join(" "))
+    })
+}
+
 /// The findings table with TRIAGE: sort by repo/severity/type, filter, select rows
 /// and Ignore / Resolve / Accept-as-tech-debt (open a ticket) them. Virtualized by
 /// chorale, so a large audit doesn't choke the UI.
@@ -671,6 +729,17 @@ pub(in crate::cockpit) fn FindingsTable(
     on_open_stats: Callback<()>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // The rows the release gate holds, when the screen shares them (work order E): marked red in
+    // the status column and the row's edge. Only the gate's own read says which rows are held.
+    let held_ctx = try_use_context::<crate::cockpit::export_gate::HeldRows>();
+    let has_held = held_ctx.is_some();
+    let held_reasons: std::collections::HashMap<String, String> = held_ctx
+        .map(|h| camerata_ui_core::tree::export::held_reasons(&h.gate.read()))
+        .unwrap_or_default();
+    let held_store: HeldStore = use_hook(HeldStore::default);
+    if let Ok(mut keys) = held_store.write() {
+        *keys = held_reasons.keys().cloned().collect();
+    }
     // Whether the progress strip (and so the timer's two controls) is drawn above the table.
     let has_counts = counts.is_some();
     // Every queue row, before this table's triage-state filter: the viewer's gutter marks the
@@ -730,8 +799,65 @@ pub(in crate::cockpit) fn FindingsTable(
     // The column set is rebuilt for the order indicator below, so the repo list is cloned
     // before `use_table` takes ownership of its copy.
     let indicator_repos = filter_repos.clone();
-    let handle =
-        use_table(move || finding_table_state(rows.clone(), filter_repos.clone(), in_techdebt));
+    // The site keys this table holds, so the export panel can say how many held rows are here and
+    // how many are only in Review.
+    let table_keys: std::collections::HashSet<String> =
+        rows.iter().map(|(_, f)| finding_key(f)).collect();
+    let held_for_table = held_store.clone();
+    let handle = use_table(move || {
+        let mut state = finding_table_state(rows.clone(), filter_repos.clone(), in_techdebt);
+        if has_held {
+            state.columns.insert(0, held_column(held_for_table.clone()));
+        }
+        state
+    });
+    use_effect(move || {
+        if let Some(mut h) = held_ctx {
+            h.table_keys.set(Some(table_keys.clone()));
+        }
+    });
+    use_drop(move || {
+        if let Some(mut h) = held_ctx {
+            h.table_keys.set(None);
+        }
+    });
+    // The panel's "Show them": filter the table to exactly the held rows. Re-applied whenever the
+    // gate is read again, so a row decided elsewhere leaves the filtered view; switched off again
+    // only if it was on.
+    let mut held_filter_applied = use_signal(|| false);
+    let held_for_filter = held_store.clone();
+    use_effect(move || {
+        let Some(h) = held_ctx else { return };
+        let on = *h.filter.read();
+        // The gate's latest read goes into the shared keys first: the filter below is evaluated
+        // against them, whatever order the table's render and this effect ran in.
+        let keys: std::collections::HashSet<String> =
+            camerata_ui_core::tree::export::held_keys(&h.gate.read())
+                .into_iter()
+                .collect();
+        if let Ok(mut store) = held_for_filter.write() {
+            *store = keys;
+        }
+        // chorale keeps the view it derived (filter and sort) until the table's data changes, and
+        // the held column's cells just did. Writing the first row back unchanged bumps the data
+        // generation, which makes it derive the view again against the new keys.
+        let first = handle.signal().peek().rows.first().cloned();
+        if let Some((id, row)) = first {
+            handle.update_row(id, row);
+        }
+        if on {
+            handle.set_filter(
+                HELD_COLUMN,
+                Some(FilterValue::MultiSelect(
+                    std::iter::once(HELD_WORD.to_string()).collect(),
+                )),
+            );
+            held_filter_applied.set(true);
+        } else if *held_filter_applied.peek() {
+            handle.set_filter(HELD_COLUMN, None);
+            held_filter_applied.set(false);
+        }
+    });
     // ── THE HUB'S QUEUE JUMP, applied to chorale's own column filter ────────────────────
     //
     // `applied` is PEEKED, never read, so this effect subscribes to exactly one signal
@@ -768,8 +894,14 @@ pub(in crate::cockpit) fn FindingsTable(
     // The column set the bar resolves sorted-column headers against. Built once per mount and
     // shared by `Rc`, so the bar's props stay cheap to compare (`ColumnDef` holds `Arc`'d
     // closures and is not `PartialEq`).
-    let order_columns =
-        use_hook(|| std::rc::Rc::new(finding_columns(indicator_repos.clone(), in_techdebt)));
+    let held_for_bar = held_store.clone();
+    let order_columns = use_hook(|| {
+        let mut cols = finding_columns(indicator_repos.clone(), in_techdebt);
+        if has_held {
+            cols.insert(0, held_column(held_for_bar));
+        }
+        std::rc::Rc::new(cols)
+    });
     // Subscribe to the disposition map so the bucket flag column re-renders when the architect
     // marks resolve-later/now (the renderer below captures this snapshot).
     let bucket_snapshot = dispositions.read().clone();
@@ -1727,6 +1859,23 @@ pub(in crate::cockpit) fn FindingsTable(
                 rsx! { span { class: "{cls}", title: "{tip}", "{label}" } }
             }) as RowCellRenderer<FindingView>,
         );
+        // The held column (work order E): a red status cell reading "Needs a decision" with the
+        // gate's reason as its title. The words carry the meaning, so the red does not.
+        if has_held {
+            let reasons = held_reasons.clone();
+            m.insert(
+                HELD_COLUMN,
+                std::sync::Arc::new(move |f: &FindingView, val: &CellValue| {
+                    let held = matches!(val, CellValue::Text(t) if t == HELD_WORD);
+                    let reason = reasons.get(&finding_key(f)).cloned().unwrap_or_default();
+                    rsx! {
+                        if held {
+                            span { class: "held-status", title: "{reason}", "{HELD_WORD}" }
+                        }
+                    }
+                }) as RowCellRenderer<FindingView>,
+            );
+        }
         // REMOVED (design §9.3): the "Needs review" cell renderer — an orange chip followed by
         // the model's hedging SENTENCE, inline, at 300px, on every row that had one. It was
         // the only renderer in the Queue that drew prose it had recovered with a regex. The
@@ -2006,7 +2155,7 @@ pub(in crate::cockpit) fn FindingsTable(
         // not a docked panel, so an inline detail would reflow the table under the cursor on
         // every cursor-down. See `FindingDetailPane`'s doc comment.
         div { class: "queue-split",
-        div { class: "queue-split-table",
+        div { class: "queue-split-table", id: crate::cockpit::export_gate::TABLE_ANCHOR_ID,
         CamerataTable {
             handle,
             sort_enabled: true,
@@ -2033,7 +2182,7 @@ pub(in crate::cockpit) fn FindingsTable(
             // predicate is a named pure function rather than an inline closure: "the
             // highlight stays" is then an assertion a test can make, instead of a claim about
             // a closure no test can reach.
-            row_class: RowClass::new(finding_row_class),
+            row_class: row_class_with_held(has_held.then(|| held_store.clone())),
             // A row click FOCUSES the pane on that row; it no longer pops the modal
             // (design §9.6 — "the row-click modal for Queue rows, replaced by the docked
             // detail pane"). Mouse and keyboard drive the SAME `RowCursor`, so there is one
@@ -2130,4 +2279,107 @@ pub(in crate::cockpit) fn FindingsTable(
         }
         }
     }
+}
+
+// ── The gallery's held-rows pages (work order E) ─────────────────────────────────────────────
+
+/// Twelve findings of one repo, five of them held by the release gate, and the gate that holds
+/// them. The keys have the real shape (repo, path, fingerprint, ordinal, joined by NUL).
+fn held_gallery_data() -> (
+    Vec<FindingView>,
+    camerata_api_types::review_view::ExportGateView,
+) {
+    use camerata_api_types::review_view::{ExportGateView, HeldRow, HoldReason};
+    let mut findings = Vec::new();
+    let mut gate = ExportGateView::default();
+    let held_at = [1usize, 3, 4, 7, 10];
+    for i in 0..12usize {
+        let path = format!("src/handlers/h{i:02}.ts");
+        let key = format!(
+            "acme/portal\0{path}\0{:016x}\0{i}",
+            0xA11C_E000_u64 + i as u64
+        );
+        let severity = ["critical", "high", "medium", "low"][i % 4];
+        let f: FindingView = serde_json::from_value(serde_json::json!({
+            "repo": "acme/portal", "path": path, "line": 10 + i,
+            "rule_id": format!("AI-RULE-{}", i % 3), "severity": severity,
+            "snippet": format!("call_{i}()"), "detail": "d", "status": "active",
+            "kind": "defect", "site_key": key,
+        }))
+        .expect("a gallery finding");
+        if held_at.contains(&i) {
+            gate.held.push(HeldRow {
+                key: key.clone(),
+                path: path.clone(),
+                line: 10 + i,
+                rule_id: format!("AI-RULE-{}", i % 3),
+                reason: HoldReason::EvidenceUnverified,
+                detail: String::new(),
+                node_id: String::new(),
+            });
+        }
+        findings.push(f);
+    }
+    (findings, gate)
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct HeldGalleryProps {
+    filter_on: bool,
+}
+
+/// The export line over the triage table, as the screen shows them when the gate holds rows.
+#[component]
+fn HeldGalleryPage(props: HeldGalleryProps) -> Element {
+    use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+    use_context_provider(|| Signal::new(None::<FindingView>));
+    let request = use_signal(|| Option::<String>::None);
+    use_context_provider(|| super::viewer::ViewerRequest(request));
+    let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+    let order_preset = use_signal(|| OrderPreset::CriticalFirst);
+    let (findings, gate) = held_gallery_data();
+    let keys: std::collections::HashSet<String> = findings.iter().map(finding_key).collect();
+    use_context_provider({
+        let gate = gate.clone();
+        move || crate::cockpit::export_gate::HeldRows {
+            gate: Signal::new(gate),
+            filter: Signal::new(props.filter_on),
+            table_keys: Signal::new(None),
+        }
+    });
+    rsx! {
+        div { class: "audit-export-panel",
+            crate::cockpit::export_gate::ExportGate {
+                gate,
+                table_keys: Some(keys),
+                button { class: "btn-run", "Export product" }
+            }
+        }
+        FindingsTable {
+            findings,
+            repos: vec!["acme/portal".to_string()],
+            descriptions: std::collections::HashMap::new(),
+            dispositions,
+            order_preset,
+        }
+    }
+}
+
+/// The page of the gallery state `findings/held-rows` (`filter_on` false) or
+/// `findings/held-filter-on`. The table's effects run before the page is read, so the filter the
+/// panel's button sets is applied, as it is on screen after the click.
+pub(crate) fn held_rows_gallery(filter_on: bool) -> String {
+    // The table starts tasks (its fix lookups); they need a runtime to be created in. It is
+    // entered and never polled, so nothing is fetched.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the gallery page");
+    let _entered = runtime.enter();
+    let mut vdom = VirtualDom::new_with_props(HeldGalleryPage, HeldGalleryProps { filter_on });
+    vdom.rebuild_in_place();
+    for _ in 0..4 {
+        let _ = vdom.render_immediate_to_vec();
+    }
+    crate::test_harness::document("Camerata gallery", &dioxus_ssr::render(&vdom))
 }

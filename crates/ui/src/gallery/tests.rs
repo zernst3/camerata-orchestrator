@@ -79,6 +79,9 @@ const SPEC_STATES: &[&str] = &[
     "export/clear",
     "export/blocked",
     "export/one-line-two-reasons",
+    "export/blocked-many",
+    "findings/held-rows",
+    "findings/held-filter-on",
 ];
 
 /// The states still placeholders, with the work order that owns each. A work order that builds a
@@ -205,7 +208,7 @@ fn the_index_links_every_page_grouped_by_screen_with_the_placeholder_count_on_to
     );
     assert!(index.contains(&format!("{} placeholders", report.placeholders)));
     for screen in [
-        "shell", "tree", "queue", "engine", "detail", "settings", "export",
+        "shell", "tree", "queue", "engine", "detail", "settings", "export", "findings",
     ] {
         assert!(
             index.contains(&format!("<h2>{screen}</h2>")),

@@ -449,8 +449,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| crate::cockpit::tree::DoorRequest(door));
     // Bumped after every write in the tree, so the shell's counts and the export panel's gate
     // read again.
-    let review_refresh = use_signal(|| 0u32);
+    let mut review_refresh = use_signal(|| 0u32);
     use_context_provider(|| crate::cockpit::tree::ShellRefresh(review_refresh));
+    // The rows the release gate holds, shared by the export panel and the triage table.
+    use_context_provider(crate::cockpit::export_gate::HeldRows::new);
     use_effect(move || {
         if door.read().is_some() {
             review_open.set(true);
@@ -722,6 +724,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                     if out.stored_any {
                         // Re-save the draft now that those changes are stored.
                         bridge_tick += 1;
+                        // The release gate reads the store: read it again, so the export line
+                        // and the table's red marks follow a decision made in the table.
+                        review_refresh += 1;
                     }
                 });
             }

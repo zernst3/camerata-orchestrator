@@ -1882,6 +1882,8 @@ pub fn router(state: AppState) -> Router {
         )
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
+        // ── Triage log (the operator's file, never in the client package) ─────
+        .route("/api/projects/:id/triage-log.csv", get(export_triage_log))
         // ── Audit-report (PDF) export ─────────────────────────────────────────
         .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
@@ -3508,6 +3510,80 @@ async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String
             ),
         ],
         markdown,
+    )
+        .into_response()
+}
+
+/// `GET /api/projects/:id/triage-log.csv` — the operator's triage log: per rule, what the AI pass
+/// proposed, what review kept, held or set aside and threw out, and why. The first line marks it
+/// internal. It is written outside the client package and is not gated, because no client reads
+/// it; the client package never carries it. 404 when the project or its scan results are missing.
+async fn export_triage_log(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Some(project) = state.projects.get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    };
+    // The reviewer's work is read exactly as the exports read it; a damaged file means it is
+    // unknown, so nothing is written from guesses.
+    if state.decisions.is_corrupt(&id) {
+        return crate::decisions::routes::corrupt_response();
+    }
+    if state.edits.is_corrupt(&id) {
+        return crate::edits::routes::corrupt_response();
+    }
+    let Some(report) = state.get_last_scan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No scan results available for this project. Run an inspection first."
+            })),
+        )
+            .into_response();
+    };
+    let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
+        &state.decisions.active(&id),
+    ));
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+    let reviewed = reviewed_for_export(&state, &id, &report, &std::collections::HashMap::new());
+    let csv = match xlsx_export::triage_log::operator_csv(
+        &reviewed,
+        corpus.as_ref(),
+        &project_chosen_options(&project),
+    ) {
+        Ok(csv) => csv,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": format!("{e:#}") })),
+            )
+                .into_response();
+        }
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}\"",
+                    xlsx_export::triage_log::INTERNAL_FILE_NAME
+                ),
+            ),
+        ],
+        csv,
     )
         .into_response()
 }

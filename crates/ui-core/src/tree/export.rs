@@ -1,8 +1,10 @@
-//! The export-blocked panel's rows (spec section 10).
+//! The export-blocked line and the rows behind it (spec section 10, work order E).
 //!
-//! The panel mirrors the release gate: it lists what [`ExportGateView`] lists, which the server
-//! derives from the gate's own refusal functions, and adds nothing of its own. Each row has a door
-//! to the thing it names.
+//! The panel mirrors the release gate: it counts what [`ExportGateView`] lists, which the server
+//! derives from the gate's own refusal functions, and adds nothing of its own. The held rows are
+//! marked in the triage table itself (red status cell "Needs a decision", the reason as its
+//! title); the panel keeps one line and a button. A row the table does not hold is only in Review,
+//! and the line says so and offers a door there.
 
 use camerata_api_types::review_view::{ExportGateView, HeldRow, HoldReason, NodeDecisionGap};
 
@@ -63,6 +65,8 @@ impl GateRowKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateRow {
     pub kind: GateRowKind,
+    /// The row's site key (what the triage table's rows are keyed by); empty for a group decision.
+    pub key: String,
     /// `web/env.ts:3`, or the node id for a group decision.
     pub place: String,
     pub rule_id: String,
@@ -140,6 +144,7 @@ fn held_rows(gate: &ExportGateView) -> Vec<GateRow> {
             let first = rows[0];
             GateRow {
                 kind: group[0].1,
+                key: first.key.clone(),
                 place: format!("{}:{}", first.path, first.line),
                 rule_id: first.rule_id.clone(),
                 reason: reasons.join("; "),
@@ -152,15 +157,16 @@ fn held_rows(gate: &ExportGateView) -> Vec<GateRow> {
 fn gap_row(g: &NodeDecisionGap) -> GateRow {
     GateRow {
         kind: GateRowKind::Gap,
+        key: String::new(),
         place: g.node_id.clone(),
         rule_id: String::new(),
         reason: format!(
             "the decision has no record for {} {}",
             thousands(g.missing.len()),
             if g.missing.len() == 1 {
-                "site"
+                "place"
             } else {
-                "sites"
+                "places"
             }
         ),
         door: Door::Node {
@@ -179,40 +185,77 @@ pub fn gate_rows(gate: &ExportGateView) -> Vec<GateRow> {
         .collect()
 }
 
-/// The panel's first line, or `None` when the gate is open and the export button stays.
-pub fn blocked_headline(gate: &ExportGateView) -> Option<String> {
+/// The site key of every row that needs a decision, once each, in the gate's order. The triage
+/// table marks exactly these rows.
+pub fn held_keys(gate: &ExportGateView) -> Vec<String> {
+    held_rows(gate).into_iter().map(|r| r.key).collect()
+}
+
+/// Why each held row is held, by site key: the words the table shows as the status cell's title.
+pub fn held_reasons(gate: &ExportGateView) -> std::collections::HashMap<String, String> {
+    held_rows(gate)
+        .into_iter()
+        .map(|r| (r.key, r.reason))
+        .collect()
+}
+
+/// The panel's one line and where its buttons go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedLine {
+    /// `Export blocked: 8 rows need a decision (3 are in Review).`
+    pub text: String,
+    /// How many held rows the triage table holds: what "Show them" filters to.
+    pub in_table: usize,
+    /// How many held rows are only in Review, plus group decisions that miss records.
+    pub in_review: usize,
+    /// Where "Open Review" goes: the first thing the table does not hold. `None` when the table
+    /// holds every row.
+    pub review_door: Option<Door>,
+}
+
+/// The panel's line, or `None` when the gate is open and the export button stays. `table_keys` is
+/// the site keys the triage table holds (`None`: no table is on screen, so every row is in
+/// Review). The count and the set of held rows are the gate's alone; the table only says which of
+/// them it can show.
+pub fn blocked_line(
+    gate: &ExportGateView,
+    table_keys: Option<&std::collections::HashSet<String>>,
+) -> Option<BlockedLine> {
     if !gate.is_blocked() {
         return None;
     }
     let rows = gate.rows_needing_a_decision();
+    let held = held_rows(gate);
+    let in_table = held
+        .iter()
+        .filter(|r| table_keys.is_some_and(|keys| keys.contains(&r.key)))
+        .count();
+    let in_review_rows = rows.saturating_sub(in_table);
     let gap_sites: usize = gate
         .node_decisions_missing_members
         .iter()
         .map(|g| g.missing.len())
         .sum();
-    let mut line = String::from("Export blocked:");
-    if rows > 0 {
-        line.push_str(&format!(
-            " {} {} a decision before the package can be built.",
-            thousands(rows),
-            if rows == 1 { "row needs" } else { "rows need" }
-        ));
-    }
-    if gap_sites > 0 {
-        let groups = gate.node_decisions_missing_members.len();
-        line.push_str(&format!(
-            " {} group {} missing records for {} {}.",
-            thousands(groups),
-            if groups == 1 {
-                "decision is"
-            } else {
-                "decisions are"
-            },
-            thousands(gap_sites),
-            if gap_sites == 1 { "site" } else { "sites" }
-        ));
-    }
-    Some(line)
+    let review_door = held
+        .iter()
+        .find(|r| !table_keys.is_some_and(|keys| keys.contains(&r.key)))
+        .map(|r| r.door.clone())
+        .or_else(|| {
+            gate.node_decisions_missing_members
+                .first()
+                .map(|g| gap_row(g).door)
+        });
+    Some(BlockedLine {
+        text: crate::export_panel::blocked_line(
+            rows,
+            in_review_rows,
+            gate.node_decisions_missing_members.len(),
+            gap_sites,
+        ),
+        in_table,
+        in_review: in_review_rows + gate.node_decisions_missing_members.len(),
+        review_door,
+    })
 }
 
 #[cfg(test)]
@@ -345,29 +388,80 @@ mod tests {
     }
 
     #[test]
-    fn the_headline_counts_the_rows_that_need_a_decision() {
+    fn the_line_counts_the_rows_that_need_a_decision() {
         let gate = &data().gate;
-        let line = blocked_headline(gate).unwrap();
+        let line = blocked_line(gate, None).unwrap();
         assert!(
-            line.starts_with(&format!(
-                "Export blocked: {} rows need a decision before the package can be built.",
+            line.text.starts_with(&format!(
+                "Export blocked: {} rows need a decision",
                 gate.rows_needing_a_decision()
             )),
-            "{line}"
+            "{}",
+            line.text
         );
-        assert!(line.contains("group decision"), "{line}");
-        assert!(!line.contains('\u{2014}'));
+        assert!(line.text.contains("group decision"), "{}", line.text);
+        assert!(!line.text.contains('\u{2014}'));
     }
 
     #[test]
-    fn a_clear_gate_has_no_panel_and_one_row_reads_in_the_singular() {
-        assert_eq!(blocked_headline(&ExportGateView::default()), None);
+    fn rows_the_table_holds_are_counted_and_the_rest_are_in_review_with_a_door() {
+        let gate = &data().gate;
+        let keys = held_keys(gate);
+        assert!(keys.len() >= 2, "the base fixture holds several rows");
+        let table: std::collections::HashSet<String> =
+            keys.iter().take(keys.len() - 1).cloned().collect();
+        let line = blocked_line(gate, Some(&table)).unwrap();
+        assert_eq!(line.in_table, keys.len() - 1);
+        assert!(line.text.contains("(1 is in Review)"), "{}", line.text);
+        let door = line
+            .review_door
+            .expect("a door to the row only Review holds");
+        let last = keys.last().unwrap();
+        assert!(
+            gate_rows(gate)
+                .iter()
+                .any(|r| &r.key == last && r.door == door),
+            "the door goes to the row the table does not hold"
+        );
+        // The table holds every row: no door, nothing is in Review but the group decisions.
+        let all: std::collections::HashSet<String> = keys.iter().cloned().collect();
+        let line = blocked_line(gate, Some(&all)).unwrap();
+        assert_eq!(line.in_table, keys.len());
+        assert!(!line.text.contains("in Review)"), "{}", line.text);
+    }
+
+    #[test]
+    fn with_no_table_every_row_is_in_review() {
+        let gate = &data().gate;
+        let line = blocked_line(gate, None).unwrap();
+        assert_eq!(line.in_table, 0);
+        assert!(line.text.contains("(all are in Review)"), "{}", line.text);
+        assert!(line.review_door.is_some());
+    }
+
+    #[test]
+    fn the_held_keys_and_reasons_are_the_gates_rows_once_each() {
+        let gate = &data().gate;
+        let keys = held_keys(gate);
+        let distinct: std::collections::HashSet<&String> = keys.iter().collect();
+        assert_eq!(keys.len(), distinct.len(), "once each");
+        let held_only = gate.rows_needing_a_decision();
+        assert_eq!(keys.len(), held_only);
+        let reasons = held_reasons(gate);
+        assert_eq!(reasons.len(), keys.len());
+        assert!(reasons.values().all(|r| !r.is_empty()));
+    }
+
+    #[test]
+    fn a_clear_gate_has_no_line_and_one_row_reads_in_the_singular() {
+        assert_eq!(blocked_line(&ExportGateView::default(), None), None);
         assert!(gate_rows(&ExportGateView::default()).is_empty());
         let mut one = ExportGateView::default();
         one.held.push(data().gate.held[0].clone());
+        let table: std::collections::HashSet<String> = held_keys(&one).into_iter().collect();
         assert_eq!(
-            blocked_headline(&one).unwrap(),
-            "Export blocked: 1 row needs a decision before the package can be built."
+            blocked_line(&one, Some(&table)).unwrap().text,
+            "Export blocked: 1 row needs a decision."
         );
     }
 
