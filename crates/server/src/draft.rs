@@ -37,6 +37,9 @@ fn write_with_backup(path: &std::path::Path, json: &str) -> std::io::Result<()> 
 pub struct DraftStore {
     path: Option<Arc<PathBuf>>,
     mem: Arc<Mutex<HashMap<String, serde_json::Value>>>,
+    /// Set when the file on disk could not be read at start and was set aside; the operator is
+    /// told on the next read of the draft, and it clears when the first new draft is written.
+    notice: Arc<Mutex<Option<String>>>,
 }
 
 impl DraftStore {
@@ -49,6 +52,7 @@ impl DraftStore {
     /// bare draft object, pre-per-project) fails to parse as a map and is dropped — a
     /// one-time loss on upgrade (re-scan to recreate); going forward it's a map.
     pub fn at(path: PathBuf) -> Self {
+        let mut notice = None;
         let mem = match std::fs::read_to_string(&path) {
             Ok(s) => serde_json::from_str::<HashMap<String, serde_json::Value>>(&s)
                 .unwrap_or_else(|e| {
@@ -61,6 +65,11 @@ impl DraftStore {
                         aside.display()
                     );
                     let _ = std::fs::write(&aside, s);
+                    notice = Some(format!(
+                        "The saved onboarding draft file could not be read, so no earlier review \
+                         was restored. The file was kept untouched at {}. Nothing was deleted.",
+                        aside.display()
+                    ));
                     HashMap::new()
                 }),
             Err(_) => HashMap::new(),
@@ -68,7 +77,14 @@ impl DraftStore {
         Self {
             path: Some(Arc::new(path)),
             mem: Arc::new(Mutex::new(mem)),
+            notice: Arc::new(Mutex::new(notice)),
         }
+    }
+
+    /// Why no draft could be restored, when the draft file on disk was unreadable at start and
+    /// nothing has been saved since. `None` otherwise.
+    pub fn unreadable_notice(&self) -> Option<String> {
+        self.notice.lock().ok().and_then(|n| n.clone())
     }
 
     /// Best-effort flush of the whole map to disk; the in-memory mirror is authoritative.
@@ -77,6 +93,9 @@ impl DraftStore {
         let Ok(map) = self.mem.lock() else { return };
         if let Ok(s) = serde_json::to_string(&*map) {
             let _ = write_with_backup(p.as_ref().as_path(), &s);
+            if let Ok(mut n) = self.notice.lock() {
+                *n = None;
+            }
         }
     }
 

@@ -851,8 +851,21 @@ pub(crate) fn process_rule_config_for(
 
 pub(crate) async fn onboard_draft_get(
     State(state): State<AppState>,
-) -> Json<Option<serde_json::Value>> {
+) -> axum::response::Response {
     let pid = active_project_id(&state);
+    // A draft file that could not be read at start was set aside untouched: say so, instead of
+    // answering "no draft" as though nothing had ever been saved.
+    if state.draft.load(&pid).is_none() {
+        if let Some(message) = state.draft.unreadable_notice() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "ok": false, "code": "draft_unreadable", "message": message
+                })),
+            )
+                .into_response();
+        }
+    }
     // A draft with no review but a saved inspection of the same repos gets that inspection as
     // its review, so "Continue where you left off" reopens a run whose results never reached
     // the draft (the screen was closed while it ran, or the app restarted).
@@ -866,7 +879,7 @@ pub(crate) async fn onboard_draft_get(
             }
         }
     }
-    Json(state.draft.load(&pid))
+    Json(state.draft.load(&pid)).into_response()
 }
 
 /// Save/replace the active project's onboarding draft (opaque blob; the UI owns its shape).
