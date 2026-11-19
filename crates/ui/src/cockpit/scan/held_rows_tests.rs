@@ -1032,3 +1032,26 @@ fn the_held_tint_differs_from_the_critical_tint() {
     assert!(held.contains("repeating-linear-gradient"), "{held}");
     assert!(!held.contains("0.06"), "{held}");
 }
+
+/// Both row edges (critical 4px, held 7px) sit on the checkbox cell, whose inline `box-shadow` is
+/// chorale's row separator. Each edge rule is `!important` and re-draws the separator in the
+/// colour chorale puts on the row (`--chorale-separator-color`), not a fixed black, so the row
+/// keeps its divider (and a selected row its selected divider colour).
+#[test]
+fn both_row_edges_redraw_the_separator_in_chorales_colour() {
+    let css = crate::style::GLOBAL_CSS;
+    for sel in [
+        ".finding-row-critical > td:first-child {",
+        ".finding-row-held > td:first-child {",
+    ] {
+        let at = css.find(sel).unwrap_or_else(|| panic!("{sel}"));
+        let end = css[at..].find('}').unwrap();
+        let rule = &css[at..at + end];
+        assert!(rule.contains("!important"), "{rule}");
+        assert!(
+            rule.contains("inset 0 -1px 0 0 var(--chorale-separator-color"),
+            "{rule}"
+        );
+        assert!(!rule.contains("rgba(0, 0, 0, 0.25) !important"), "{rule}");
+    }
+}

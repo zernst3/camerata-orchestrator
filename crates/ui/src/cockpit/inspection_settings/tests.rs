@@ -344,6 +344,8 @@ struct Fake {
     project: RefCell<Value>,
     writes: RefCell<Vec<(String, String, String)>>,
     refuse: Cell<Option<&'static str>>,
+    /// A failure other than a refusal (unconfirmed, saved but unreadable).
+    fail: RefCell<Option<SaveFailure>>,
 }
 
 impl Fake {
@@ -352,6 +354,7 @@ impl Fake {
             project: RefCell::new(new_project_json()),
             writes: RefCell::new(Vec::new()),
             refuse: Cell::new(None),
+            fail: RefCell::new(None),
         })
     }
 }
@@ -366,16 +369,20 @@ impl InspectionIo for Fake {
         id: &'a str,
         step: &'a str,
         model: &'a str,
-    ) -> IoFuture<'a, Result<ProjectView, String>> {
+    ) -> IoFuture<'a, Result<ProjectView, SaveFailure>> {
         Box::pin(async move {
             self.writes
                 .borrow_mut()
                 .push((id.to_string(), step.to_string(), model.to_string()));
             if let Some(why) = self.refuse.get() {
-                return Err(why.to_string());
+                return Err(SaveFailure::Refused(why.to_string()));
+            }
+            if let Some(failure) = self.fail.borrow().clone() {
+                return Err(failure);
             }
             apply_step(&mut self.project.borrow_mut(), step, model);
-            serde_json::from_value(self.project.borrow().clone()).map_err(|e| e.to_string())
+            serde_json::from_value(self.project.borrow().clone())
+                .map_err(|_| SaveFailure::SavedUnreadable)
         })
     }
 
@@ -573,7 +580,9 @@ async fn a_refused_write_shows_the_servers_message_and_keeps_the_old_value() {
     screen.pump(300).await;
     let html = screen.html();
     assert!(
-        html.contains("the finder must be agent or engine"),
+        html.contains(
+            "Not saved. Finder: the finder must be Agent or Engine. The previous value was kept."
+        ),
         "{html}"
     );
     assert!(
@@ -1065,4 +1074,88 @@ fn the_non_anthropic_warning_state_shows_the_engagement_warning() {
         ),
         "{html}"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_write_that_could_not_be_confirmed_does_not_say_the_value_was_kept() {
+    let fake = Fake::new();
+    *fake.fail.borrow_mut() = Some(SaveFailure::Unconfirmed);
+    let mut screen = mounted(&fake, false).await;
+    screen.pick("is-model-group_review", "claude-sonnet-5-5");
+    screen.pump(300).await;
+    let html = screen.html();
+    assert!(html.contains("may or may not have been saved"), "{html}");
+    assert!(!html.contains("The previous value was kept"), "{html}");
+    assert!(!html.contains("Not saved"), "{html}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_save_whose_answer_could_not_be_read_says_it_saved() {
+    let fake = Fake::new();
+    *fake.fail.borrow_mut() = Some(SaveFailure::SavedUnreadable);
+    let mut screen = mounted(&fake, false).await;
+    screen.pick("is-model-group_review", "claude-sonnet-5-5");
+    screen.pump(300).await;
+    let html = screen.html();
+    assert!(
+        html.contains("saved, but the server's answer could not be read"),
+        "{html}"
+    );
+    assert!(!html.contains("Not saved"), "{html}");
+}
+
+#[test]
+fn the_step_answer_tells_a_refusal_from_an_unreadable_save_from_a_garbled_answer() {
+    let ok = json!({ "ok": true, "project": new_project_json() });
+    assert!(read_step_answer(&ok).is_ok());
+    // The server said ok but the project is not one this app can read: the write landed.
+    let unreadable = json!({ "ok": true, "project": { "nonsense": 1 } });
+    assert_eq!(
+        read_step_answer(&unreadable),
+        Err(SaveFailure::SavedUnreadable)
+    );
+    let no_project = json!({ "ok": true });
+    assert_eq!(
+        read_step_answer(&no_project),
+        Err(SaveFailure::SavedUnreadable)
+    );
+    let refused = json!({ "ok": false, "message": "no such project" });
+    assert_eq!(
+        read_step_answer(&refused),
+        Err(SaveFailure::Refused("no such project".to_string()))
+    );
+    // Neither ok nor not ok: nothing can be said about whether it saved.
+    assert_eq!(
+        read_step_answer(&json!({ "x": 1 })),
+        Err(SaveFailure::Unconfirmed)
+    );
+}
+
+#[test]
+fn a_blank_row_says_loading_only_while_the_registry_loads() {
+    #[derive(Clone, PartialEq, Props)]
+    struct Case {
+        loading: bool,
+    }
+    #[component]
+    fn Shown(props: Case) -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let mut p = new_project_json();
+        p["review"]["finder"] = json!("engine");
+        rsx! {
+            InspectionSettingsView {
+                project: serde_json::from_value::<ProjectView>(p).unwrap(),
+                models_loading: props.loading,
+                show_unused: true,
+                on_event: move |_| {},
+            }
+        }
+    }
+    let loading = crate::test_harness::render_fragment(Shown, Case { loading: true });
+    let missing = crate::test_harness::render_fragment(Shown, Case { loading: false });
+    // Scan and Calibration rows have no "(not set)" option, so the placeholder shows there.
+    assert!(loading.contains("Loading models"), "{loading}");
+    assert!(!loading.contains("No model list available"), "{loading}");
+    assert!(missing.contains("No model list available"), "{missing}");
+    assert!(!missing.contains("Loading models"), "{missing}");
 }

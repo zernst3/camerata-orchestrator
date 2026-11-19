@@ -85,7 +85,7 @@ fn the_held_styles_are_their_own_rules() {
     );
     assert!(
         css.contains(
-            ".finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }"
+            ".finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b,"
         ),
         "the critical edge is unchanged and not shared"
     );

@@ -20,9 +20,9 @@ use std::rc::Rc;
 
 use camerata_api_types::project::{ProjectBackend, ProjectFinder};
 use camerata_ui_core::inspection_settings::{
-    conflict_line, each_run_lines, engagement_model_conflicts, model_groups, rows, save_error_line,
-    unused_rows_button, InspectionValues, RowSpec, Stage, FINDER_CHOICES, MODELS_NOTE,
-    RUN_IN_FLIGHT_NOTE,
+    conflict_line, each_run_lines, engagement_model_conflicts, model_groups, rows,
+    save_failure_line, unused_rows_button, InspectionValues, RowSpec, SaveFailure, Stage,
+    FINDER_CHOICES, MODELS_NOTE, RUN_IN_FLIGHT_NOTE,
 };
 use camerata_ui_core::models::ModelsResp;
 use dioxus::prelude::*;
@@ -39,14 +39,14 @@ type IoFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub(crate) trait InspectionIo {
     /// The active project, when it is `id` (a blank `id` accepts whichever is active).
     fn project<'a>(&'a self, id: &'a str) -> IoFuture<'a, Option<ProjectView>>;
-    /// One write on `POST /api/projects/:id/step-models`: the updated project, or the server's
-    /// reason it refused.
+    /// One write on `POST /api/projects/:id/step-models`: the updated project, or why the write
+    /// did not come back as a confirmed save.
     fn set_step<'a>(
         &'a self,
         id: &'a str,
         step: &'a str,
         model: &'a str,
-    ) -> IoFuture<'a, Result<ProjectView, String>>;
+    ) -> IoFuture<'a, Result<ProjectView, SaveFailure>>;
     /// The model registry for the selects.
     fn models(&self) -> IoFuture<'_, Option<ModelsResp>>;
 }
@@ -85,7 +85,7 @@ impl InspectionIo for HttpInspectionIo {
         id: &'a str,
         step: &'a str,
         model: &'a str,
-    ) -> IoFuture<'a, Result<ProjectView, String>> {
+    ) -> IoFuture<'a, Result<ProjectView, SaveFailure>> {
         Box::pin(async move {
             let resp = reqwest::Client::new()
                 .post(format!(
@@ -96,26 +96,33 @@ impl InspectionIo for HttpInspectionIo {
                 .json(&serde_json::json!({ "step": step, "model": model }))
                 .send()
                 .await
-                .map_err(|e| format!("Could not reach the local server ({e})."))?;
-            let body: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|_| "The server sent an answer the app could not read.".to_string())?;
-            if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-                return Err(body
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("The server refused the change.")
-                    .to_string());
-            }
-            body.get("project")
-                .and_then(|p| serde_json::from_value(p.clone()).ok())
-                .ok_or_else(|| "The server did not send the updated project.".to_string())
+                .map_err(|_| SaveFailure::Unconfirmed)?;
+            let body: serde_json::Value =
+                resp.json().await.map_err(|_| SaveFailure::Unconfirmed)?;
+            read_step_answer(&body)
         })
     }
 
     fn models(&self) -> IoFuture<'_, Option<ModelsResp>> {
         Box::pin(crate::chat::fetch_models())
+    }
+}
+
+/// Read the step-models route's answer: the updated project, a refusal, or a save whose project
+/// could not be read (the server said `ok` but sent back something this app cannot parse).
+pub(crate) fn read_step_answer(body: &serde_json::Value) -> Result<ProjectView, SaveFailure> {
+    match body.get("ok").and_then(|v| v.as_bool()) {
+        Some(true) => body
+            .get("project")
+            .and_then(|p| serde_json::from_value(p.clone()).ok())
+            .ok_or(SaveFailure::SavedUnreadable),
+        Some(false) => Err(SaveFailure::Refused(
+            body.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        )),
+        None => Err(SaveFailure::Unconfirmed),
     }
 }
 
@@ -142,6 +149,10 @@ pub(crate) struct InspectionSettingsViewProps {
     /// current model alone.
     #[props(default)]
     pub models: Option<ModelsResp>,
+    /// The registry fetch is still in flight (so a blank row says "Loading models", not that no
+    /// list is available).
+    #[props(default)]
+    pub models_loading: bool,
     /// A run is in flight: every control is disabled and the note says why.
     #[props(default)]
     pub run_in_flight: bool,
@@ -168,6 +179,7 @@ pub(crate) struct InspectionSettingsViewProps {
 fn InspectionRow(
     spec: RowSpec,
     models: Option<ModelsResp>,
+    models_loading: bool,
     locked: bool,
     saved: bool,
     on_event: EventHandler<InspectionEvent>,
@@ -179,7 +191,7 @@ fn InspectionRow(
     let groups = if is_finder {
         Vec::new()
     } else {
-        let mut groups = model_groups(&models, &current);
+        let mut groups = model_groups(&models, &current, models_loading);
         // A row that can be unset already offers "(not set: ...)" as its option, so the id-less
         // placeholder the registry fallback adds for a blank model is not shown beside it.
         if spec.unset_option.is_some() && current.is_empty() {
@@ -275,6 +287,7 @@ pub(crate) fn InspectionSettingsView(props: InspectionSettingsViewProps) -> Elem
                     saved: saved == Some(spec.stage),
                     spec,
                     models: models.clone(),
+                    models_loading: props.models_loading,
                     locked,
                     on_event,
                 }
@@ -383,6 +396,8 @@ pub(crate) fn InspectionSettingsHost(
         let api = models_api.clone();
         async move { api.0.models().await }
     });
+    // `None` while the fetch is in flight, `Some(None)` once it finished without a list.
+    let models_loading = models.read().is_none();
     let models = models.read().clone().flatten();
 
     let write_api = api.clone();
@@ -424,8 +439,8 @@ pub(crate) fn InspectionSettingsHost(
                             on_changed.call(updated);
                         }
                     }
-                    Err(message) => {
-                        save_error.set(Some(save_error_line(stage, &message)));
+                    Err(failure) => {
+                        save_error.set(Some(save_failure_line(stage, &failure)));
                         // The select shows the refused pick; build it fresh so it shows what the
                         // project still holds.
                         epoch += 1;
@@ -456,6 +471,7 @@ pub(crate) fn InspectionSettingsHost(
         InspectionSettingsView {
             project: current,
             models,
+            models_loading,
             run_in_flight,
             saving: saving(),
             saved: saved(),

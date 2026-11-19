@@ -254,25 +254,57 @@ pub fn rows(values: &InspectionValues, show_unused: bool) -> Vec<RowSpec> {
         .collect()
 }
 
-/// The one operator line for a refused model write: names the row, says what to do, and says the
-/// previous value was kept. `server` is the server's own reason (for example "model must not be
-/// empty"), which is turned into plain words and never shown raw.
+/// Why a model write did not come back as a confirmed save. The three are different to the
+/// operator: a refusal changed nothing, an unconfirmed write may or may not have landed, and a
+/// write that landed but whose answer could not be read did save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveFailure {
+    /// The server answered and refused. Carries the server's own reason, which is never shown raw.
+    Refused(String),
+    /// The write could not be confirmed: the server could not be reached, or its answer was not
+    /// readable at all.
+    Unconfirmed,
+    /// The server said it saved, but the project it sent back could not be read.
+    SavedUnreadable,
+}
+
+/// The plain reason for a server refusal. Known refusals have their own words; any other refusal
+/// gets one generic sentence, never the server's string.
+fn refusal_reason(server: &str) -> &'static str {
+    match server.trim().trim_end_matches('.') {
+        "model must not be empty" => "a model must be chosen",
+        "unknown step" => "this is not a setting the server knows",
+        "no such project" => "the project was not found",
+        "the finder must be agent or engine" => "the finder must be Agent or Engine",
+        _ => "the server refused the change",
+    }
+}
+
+/// The one operator line for a refused model write: names the row, says why in plain words, and
+/// says the previous value was kept. The server's own string is never shown.
 pub fn save_error_line(stage: Stage, server: &str) -> String {
-    let reason = match server.trim() {
-        "model must not be empty" => "a model must be chosen".to_string(),
-        other => {
-            let other = other.trim_end_matches('.');
-            let mut chars = other.chars();
-            match chars.next() {
-                Some(c) => format!("{}{}", c.to_lowercase(), chars.as_str()),
-                None => "the server refused the change".to_string(),
-            }
-        }
-    };
     format!(
-        "Not saved. {}: {reason}. The previous value was kept.",
-        stage.label()
+        "Not saved. {}: {}. The previous value was kept.",
+        stage.label(),
+        refusal_reason(server)
     )
+}
+
+/// The operator line for a model write that did not come back as a confirmed save, honest about
+/// whether the value changed.
+pub fn save_failure_line(stage: Stage, failure: &SaveFailure) -> String {
+    match failure {
+        SaveFailure::Refused(server) => save_error_line(stage, server),
+        SaveFailure::Unconfirmed => format!(
+            "{}: the change could not be confirmed. It may or may not have been saved. Reload to \
+             see the current value.",
+            stage.label()
+        ),
+        SaveFailure::SavedUnreadable => format!(
+            "{}: saved, but the server's answer could not be read. Reload to see the new value.",
+            stage.label()
+        ),
+    }
 }
 
 /// The rows the finder in effect does not use.
@@ -390,13 +422,24 @@ pub fn summary_line(values: &InspectionValues) -> String {
 /// The option groups for a row's select: the registry's models, with the row's current model
 /// always among them so the select never shows a model that is not there and never renders
 /// empty while the registry loads.
-pub fn model_groups(models: &Option<ModelsResp>, current: &str) -> Vec<(String, Vec<ModelOption>)> {
+///
+/// `loading` is whether the registry fetch is still in flight. The id-less placeholder a blank
+/// model gets with no registry says "Loading models" only while it is loading, and "No model list
+/// available" once the fetch has finished without one.
+pub fn model_groups(
+    models: &Option<ModelsResp>,
+    current: &str,
+    loading: bool,
+) -> Vec<(String, Vec<ModelOption>)> {
     let mut groups = chat_model_groups(models, current);
-    // The chat fallback says "Loading models" for a blank model. Here the registry is either
-    // loaded or it is not coming (the host loads it once), so never say "Loading".
+    let placeholder = if loading {
+        "Loading models\u{2026}"
+    } else {
+        "No model list available"
+    };
     for (_, options) in &mut groups {
         for option in options.iter_mut().filter(|o| o.id.is_empty()) {
-            option.label = "No model list available".to_string();
+            option.label = placeholder.to_string();
         }
     }
     let listed = groups
