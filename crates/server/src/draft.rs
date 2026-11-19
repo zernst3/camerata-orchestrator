@@ -199,7 +199,14 @@ impl DraftStore {
         }
         if let Some(p) = &self.path {
             let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
-            write_with_backup(p.as_ref().as_path(), &json)?;
+            let path = p.as_ref().as_path();
+            write_with_backup(path, &json)?;
+            // A deletion leaves no copy of the project's draft: the recovery copy that write
+            // just rotated holds it, so it becomes the file as it now stands.
+            let bak = sibling(path, ".bak");
+            if bak.exists() {
+                std::fs::write(&bak, &json)?;
+            }
         }
         *m = kept;
         Ok(())

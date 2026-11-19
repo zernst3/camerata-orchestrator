@@ -151,7 +151,7 @@ fn a_write_that_failed_does_not_clear_the_notice_and_a_good_one_leaves_no_temp_f
 }
 
 #[test]
-fn only_one_previous_copy_is_kept_and_a_clear_also_leaves_one() {
+fn only_one_previous_copy_is_kept_and_a_projects_deletion_leaves_none() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("onboarding-draft.json");
     let store = DraftStore::at(path.clone());
@@ -167,14 +167,9 @@ fn only_one_previous_copy_is_kept_and_a_clear_also_leaves_one() {
         "one copy: the write before"
     );
 
+    // A project's deletion leaves no copy of its draft behind, the .bak included.
     store.clear_checked("p1").unwrap();
-    let prev: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&bak).unwrap()).unwrap();
-    assert_eq!(
-        prev,
-        serde_json::json!({"p1": {"scan": 3}}),
-        "a clear keeps what it removed"
-    );
+    assert!(!std::fs::read_to_string(&bak).unwrap().contains("scan"));
 }
 
 // ── adopt_audit, directly ─────────────────────────────────────────────────────────────────
