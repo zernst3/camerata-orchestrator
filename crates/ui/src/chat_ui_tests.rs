@@ -353,6 +353,27 @@ impl Stub {
             .await;
     }
 
+    /// The project context answers ok for the first `n` requests, then fails (a transient outage).
+    async fn project_ok_then_failing(&self, n: u64) {
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active/context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true, "project_id": "proj-16", "project_name": "Faktura Test",
+                "client_engagement": true,
+                "scan_results_section": "Total findings: 41\n"
+            })))
+            .up_to_n_times(n)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active/context"))
+            .respond_with(ResponseTemplate::new(503))
+            .with_priority(2)
+            .mount(&self.server)
+            .await;
+    }
+
     /// The project context cannot be loaded.
     async fn project_failing(&self) {
         Mock::given(method("GET"))
@@ -880,4 +901,78 @@ async fn an_open_project_whose_context_is_loading_or_failed_is_not_called_no_pro
     );
     assert!(!html.contains("No project open"), "{html}");
     assert!(!html.contains("Loading this project"), "{html}");
+}
+
+/// A SLOW CONTEXT (slower than the 2.5 s refresh tick). The panel still learns the project (a
+/// tick must not cancel the in-flight fetch); a turn sent about it, then leaving the project,
+/// leaves nothing behind: the transcript is gone and the next post has no history.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn leaving_a_project_whose_context_was_slow_still_clears_the_conversation() {
+    let stub = Stub::start("api", None).await;
+    stub.registry_ok().await;
+    stub.project_delayed(3500).await;
+    stub.chat_replies("CLIENT-SECRET-REPLY").await;
+    let _env = bff!(stub);
+    let mut page = Page::mount(true, None).await;
+    page.click_fab().await;
+    page.type_text("Tell me about the client").await;
+    page.press_enter().await; // the send awaits a fresh (slow) fetch
+    page.settle_until("CLIENT-SECRET-REPLY", 15000).await;
+    assert!(
+        page.html().contains("CLIENT-SECRET-REPLY"),
+        "{}",
+        page.html()
+    );
+    // The panel itself learned the project despite the slow fetch (no tick cancelled it).
+    page.settle_until("Project open: Faktura Test", 10000).await;
+    assert!(
+        page.html().contains("Project open: Faktura Test"),
+        "{}",
+        page.html()
+    );
+    let first = stub.chat_posts().await;
+    assert_eq!(first[0]["project_id"], "proj-16", "{}", first[0]);
+    page.set_project_open(false).await;
+    let html = page.html();
+    assert!(
+        !html.contains("CLIENT-SECRET-REPLY") && !html.contains("Tell me about the client"),
+        "{html}"
+    );
+    page.type_text("Anything else?").await;
+    page.press_enter().await;
+    let posts = stub.chat_posts().await;
+    let last = posts.last().unwrap();
+    assert_eq!(
+        last["history"],
+        serde_json::json!([]),
+        "no history rides along: {last}"
+    );
+    assert!(last["project_id"].is_null());
+}
+
+/// A TRANSIENT FAILED FETCH while the project stays open does not wipe the conversation.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_failed_refresh_while_the_project_stays_open_keeps_the_conversation() {
+    let stub = Stub::start("api", None).await;
+    stub.registry_ok().await;
+    stub.project_ok_then_failing(2).await; // the mount fetch and the send's fetch succeed
+    stub.chat_replies("KEPT-REPLY").await;
+    let _env = bff!(stub);
+    let mut page = Page::mount(true, None).await;
+    page.click_fab().await;
+    page.settle_until("Project open: Faktura Test", 5000).await;
+    page.type_text("A question").await;
+    page.press_enter().await;
+    page.settle_until("KEPT-REPLY", 5000).await;
+    // Let a refresh tick fail (the panel then says it could not load the context).
+    page.settle_until("Could not load this project", 10000)
+        .await;
+    let html = page.html();
+    assert!(html.contains("Could not load this project"), "{html}");
+    assert!(
+        html.contains("KEPT-REPLY") && html.contains("A question"),
+        "the conversation stays; {html}"
+    );
 }

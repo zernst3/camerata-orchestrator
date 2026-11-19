@@ -1283,8 +1283,10 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     // The project layers for the PANEL: fetched only while a project is open, re-fetched on each
     // tick so the strip stays live. The send paths refetch fresh and build their prompt through
     // the very same `ChatContext::assemble`, so the panel and the prompt cannot disagree.
-    let ctx_res = use_resource(move || {
-        let _ = refresh_tick();
+    // It depends on `project_open` only. The tick re-fetches it through the effect below, and only
+    // when the previous fetch has FINISHED: a tick must never cancel an in-flight (slow) fetch,
+    // or a context slower than the tick would never arrive.
+    let mut ctx_res = use_resource(move || {
         let open_project = project_open_sig();
         async move {
             if open_project {
@@ -1292,6 +1294,14 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
             } else {
                 None
             }
+        }
+    });
+    use_effect(move || {
+        let _ = refresh_tick();
+        if project_open_sig.peek().to_owned()
+            && matches!(*ctx_res.state().peek(), UseResourceState::Ready)
+        {
+            ctx_res.restart();
         }
     });
     let uow_res = use_resource(move || {
@@ -1347,17 +1357,18 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
         active_finding.read().clone(),
     )
     .with_context_resolved(ctx_res.read().is_some());
-    // A different (or closed) project must not inherit the last one's conversation or finding:
-    // clear both when the open project's id changes or closes.
-    let mut last_project_id = use_signal(|| Option::<String>::None);
-    let now_project_id = chat_ctx.project_id().map(str::to_string);
-    if last_project_id() != now_project_id {
-        if last_project_id().is_some() {
+    // Leaving the open project (back to the projects home) ends its conversation: clear the
+    // transcript and the focused finding, whatever the state of the context fetch (every switch
+    // from one project to another passes through the projects home). A failed or slow fetch
+    // while the project stays open clears nothing.
+    let mut was_open = use_signal(|| props.project_open);
+    if was_open() != props.project_open {
+        if was_open() && !props.project_open {
             turns.write().clear();
             active_finding.set(None);
             last_injected_finding.set(None);
         }
-        last_project_id.set(now_project_id);
+        was_open.set(props.project_open);
     }
     let ctx_rows = chat_ctx.rows();
     let project_line = chat_ctx.project_line();

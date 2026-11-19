@@ -9602,8 +9602,9 @@ mod bff_tests {
 #[cfg(test)]
 mod render_tests {
     use super::{
-        CiRuleItem, CiRulesPanel, CreateOrOpenUow, DecisionsReviewPanel, GovDevSel,
-        InvestigationPhaseView, NewAuthoredUowButton, RunView, UowListEntry, UowStage, WorkItem,
+        CiRuleItem, CiRulesPanel, CreateOrOpenUow, DecisionsReviewPanel, DevelopmentPhaseView,
+        GovDevSel, InvestigationPhaseView, NewAuthoredUowButton, RunView, UowListEntry, UowStage,
+        WorkItem,
     };
     use dioxus::prelude::*;
 
@@ -10031,6 +10032,122 @@ mod render_tests {
             input_id,
             Box::new(SerializedFormData::new(
                 "What did the note say?".to_string(),
+                Vec::new(),
+            )),
+        );
+        for _ in 0..10 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            take(&vdom.render_immediate_to_vec(), &mut listeners);
+        }
+        let click: Box<dyn std::any::Any> = Box::new(SerializedMouseData::default());
+        fire("click", send_id, click);
+        for _ in 0..60 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(30), vdom.wait_for_work())
+                    .await;
+            take(&vdom.render_immediate_to_vec(), &mut listeners);
+        }
+        let bodies = chat_bodies(&server).await;
+        assert_eq!(bodies.len(), 1, "one chat request: {bodies:?}");
+        assert_eq!(bodies[0]["project_id"], "proj-16", "{}", bodies[0]);
+        assert!(bodies[0]["system"]
+            .as_str()
+            .unwrap()
+            .contains("=== STORY ==="));
+    }
+
+    // The REAL development panel (its chat-back box, shown while a run waits for a clarification):
+    // type a message, click Send, and the chat request names the project open on screen.
+    #[component]
+    fn DevelopmentHarness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let uow_refresh = use_signal(|| 0u32);
+        let uows_refresh = use_signal(|| 0u32);
+        let active_run = use_signal(|| Option::<RunView>::None);
+        let strongest = use_signal(String::new);
+        let balanced = use_signal(String::new);
+        let fast = use_signal(String::new);
+        let finished = use_signal(|| false);
+        let uow = use_resource(|| async { Option::<super::UowView>::None });
+        rsx! {
+            DevelopmentPhaseView {
+                story_id: "S-1".to_string(),
+                uow_refresh,
+                uows_refresh,
+                active_run,
+                models: None,
+                dev_strongest: strongest,
+                dev_balanced: balanced,
+                dev_fast: fast,
+                development_finished: finished,
+                uow_for_stage: uow,
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_development_chat_send_names_the_open_project() {
+        use dioxus::dioxus_core::Mutation;
+        use dioxus::html::{SerializedFormData, SerializedMouseData};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let server =
+            stub_for_phase_chat(serde_json::json!({ "id": "proj-16", "name": "Faktura" })).await;
+        Mock::given(method("GET"))
+            .and(path("/api/stories/S-1/clarifications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "c-1", "story_id": "S-1", "question": "Which way?", "addressee": "architect" }
+            ])))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let mut vdom = VirtualDom::new(DevelopmentHarness);
+        let mut listeners: Vec<(String, dioxus::dioxus_core::ElementId)> = Vec::new();
+        let take = |m: &dioxus::dioxus_core::Mutations, l: &mut Vec<_>| {
+            for e in &m.edits {
+                if let Mutation::NewEventListener { name, id } = e {
+                    l.push((name.clone(), *id));
+                }
+            }
+        };
+        take(&vdom.rebuild_to_vec(), &mut listeners);
+        for _ in 0..30 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(30), vdom.wait_for_work())
+                    .await;
+            take(&vdom.render_immediate_to_vec(), &mut listeners);
+        }
+        assert!(
+            dioxus_ssr::render(&vdom).contains("Chat back (development scope)"),
+            "the chat-back box is shown while a clarification is open"
+        );
+        // The chat textarea is the LAST input listener (it follows the clarification question);
+        // its Send button is the first click listener registered after it.
+        let input_pos = listeners
+            .iter()
+            .rposition(|(n, _)| n == "input")
+            .expect("chat input");
+        let input_id = listeners[input_pos].1;
+        let send_id = listeners[input_pos + 1..]
+            .iter()
+            .find(|(n, _)| n == "click")
+            .expect("send button")
+            .1;
+        let runtime = vdom.runtime();
+        let fire = |name: &str, id, data: Box<dyn std::any::Any>| {
+            let platform: std::rc::Rc<dyn std::any::Any> =
+                std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
+            runtime.handle_event(name, dioxus::dioxus_core::Event::new(platform, true), id);
+        };
+        fire(
+            "input",
+            input_id,
+            Box::new(SerializedFormData::new(
+                "Which way?".to_string(),
                 Vec::new(),
             )),
         );
