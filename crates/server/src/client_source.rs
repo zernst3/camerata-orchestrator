@@ -16,6 +16,7 @@
 //!   guard that keeps a test from deleting a real one.
 //! - [`ops`]: in-flight claims, so delete, re-fetch, rescan and scans never overlap.
 //! - [`guard`]: the thirteen ordered reasons a folder is refused.
+//! - [`delete_project`]: the separate "delete this project and all its data" action.
 //! - [`purge`] and [`delete`]: the plan, the removal in a fixed order, and the two endpoints.
 //! - [`resolution`]: readiness and the checkout list, read through the source status.
 //! - [`read`]: where a finding's code may be read from (the inspected commit, never a missing
@@ -29,6 +30,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 pub mod delete;
+pub mod delete_project;
 pub mod git;
 pub mod guard;
 pub mod handlers;

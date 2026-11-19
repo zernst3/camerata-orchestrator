@@ -1752,6 +1752,14 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/repos/:repo/source/delete",
             post(crate::client_source::delete::delete),
         )
+        .route(
+            "/api/projects/:id/delete-all-preview",
+            post(crate::client_source::delete_project::delete_all_preview),
+        )
+        .route(
+            "/api/projects/:id/delete-all",
+            post(crate::client_source::delete_project::delete_all_handler),
+        )
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
         .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))
         .route("/api/projects/:id/branch", post(checkout_branch))
