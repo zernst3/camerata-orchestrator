@@ -703,7 +703,8 @@ async fn fetch_app_chat_model() -> Option<String> {
         .json()
         .await
         .ok()?;
-    s.chat_model.filter(|m| !m.trim().is_empty())
+    s.chat_model
+        .filter(|m| !m.trim().is_empty() && !m.trim().eq_ignore_ascii_case("default"))
 }
 
 /// Persist the app-level chat assistant model via `POST /api/settings/chat-model`. Best-effort.
@@ -716,6 +717,16 @@ async fn save_app_chat_model(model: &str) -> bool {
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Persist the operator's pick from the chat select. Only a real registry model is saved; the
+/// loading placeholder, "default" and ids the registry does not know are refused (returns false
+/// and posts nothing).
+async fn persist_chat_choice(models: &Option<ModelsResp>, chosen: &str) -> bool {
+    if !camerata_ui_core::models::is_registry_model(models, chosen) {
+        return false;
+    }
+    save_app_chat_model(chosen).await
 }
 
 /// Capture a chat reply as a project-memory learning (#112): resolve the active project, then POST
@@ -826,11 +837,15 @@ pub struct ChatBubbleProps {
     /// opaquely, keeping the chat module free of WorkItem dependencies.
     #[props(default)]
     pub pulled_issues_section: Option<String>,
+    /// Mount with the panel already open (tests drive the open panel without a click).
+    #[props(default)]
+    pub start_open: bool,
 }
 
 #[component]
 pub fn ChatBubble(props: ChatBubbleProps) -> Element {
-    let mut open = use_signal(|| false);
+    let start_open = props.start_open;
+    let mut open = use_signal(move || start_open);
     let models_res = use_resource(fetch_models);
     let models = models_res.read().clone().flatten();
 
@@ -913,6 +928,30 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
             }
         }
     });
+
+    // Startup race: the bubble mounts at app start, possibly before the embedded server answers,
+    // so the first registry / app-model / rules-catalog fetches can fail and (being one-shot
+    // resources) would stay failed. Re-fetch when the panel opens and then on every tick while
+    // it is open and still not loaded, so the select and the catalog row heal on their own.
+    // Reads are untracked (peek) so a failing fetch cannot spin: only `open` and the tick re-run it.
+    {
+        let mut models_res = models_res;
+        let mut app_chat_model_res = app_chat_model_res;
+        let mut rules_res_heal = use_context::<Resource<Option<String>>>();
+        use_effect(move || {
+            let _ = refresh_tick();
+            if !open() {
+                return;
+            }
+            if matches!(&*models_res.peek(), Some(None)) {
+                models_res.restart();
+                app_chat_model_res.restart();
+            }
+            if matches!(&*rules_res_heal.peek(), Some(None)) {
+                rules_res_heal.restart();
+            }
+        });
+    }
 
     // Layer 3: UoW snapshot — re-fetched on each tick (and once on mount). Reading
     // `refresh_tick()` inside the closure registers the dependency that re-runs it.
@@ -1010,13 +1049,19 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                         value: "{model}",
                         onchange: move |e| {
                             let chosen = e.value();
+                            // The loading placeholder (no id) is not a choice: ignore it.
+                            if chosen.trim().is_empty() {
+                                return;
+                            }
                             model.set(chosen.clone());
                             // Mark a manual choice so the seeding effect stops re-applying
                             // the app-level value over the user's selection this session.
                             user_override.set(true);
-                            // Persist the choice as the app-level (cross-project) chat model.
+                            // Persist the choice as the app-level (cross-project) chat model,
+                            // but only a real registry model (never a placeholder).
+                            let registry = models.clone();
                             spawn(async move {
-                                save_app_chat_model(&chosen).await;
+                                persist_chat_choice(&registry, &chosen).await;
                             });
                         },
                         // Resilient: chat_model_groups ALWAYS yields at least the current
@@ -2899,4 +2944,158 @@ mod tests {
     }
 
     // (ModelsResp::grouped provider-partitioning tests moved to camerata-ui-core::models.)
+
+    // ── real-component regression: the chat select heals after a failed first fetch ──
+    // Startup race: the registry endpoint is not answering when the bubble mounts. The select
+    // must still end up listing the registry's models once the server answers (it used to stay
+    // stuck on the single fallback option forever).
+    use dioxus::prelude::*;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct BubbleHarnessProps {
+        open: bool,
+    }
+
+    #[component]
+    fn BubbleHarness(props: BubbleHarnessProps) -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let rules = use_resource(|| async { Option::<String>::None });
+        use_context_provider(|| rules);
+        crate::provider_safety::provide_provider_policy_context();
+        rsx! { super::ChatBubble { start_open: props.open } }
+    }
+
+    /// Drive the real component to the point where `done(html)` holds or `max` elapses.
+    async fn render_until(
+        open: bool,
+        max: std::time::Duration,
+        done: impl Fn(&str) -> bool,
+    ) -> String {
+        let mut vdom = VirtualDom::new_with_props(BubbleHarness, BubbleHarnessProps { open });
+        vdom.rebuild_in_place();
+        let deadline = tokio::time::Instant::now() + max;
+        loop {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(200), vdom.wait_for_work())
+                    .await;
+            vdom.render_immediate(&mut dioxus::core::NoOpMutations);
+            let html = dioxus_ssr::render(&vdom);
+            if done(&html) || tokio::time::Instant::now() >= deadline {
+                return html;
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn chat_model_select_heals_after_a_failed_first_registry_fetch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // First request fails (the server is not ready), every later one answers.
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "id": "claude-opus-5", "display": "Opus", "provider": "claude" },
+                    { "id": "claude-sonnet-5", "display": "Sonnet", "provider": "claude" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "chat_model": "default" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let html = render_until(true, std::time::Duration::from_secs(15), |h| {
+            h.contains("claude-sonnet-5")
+        })
+        .await;
+        assert!(
+            html.contains("claude-opus-5") && html.contains("claude-sonnet-5"),
+            "the select must list the registry models after the first fetch failed; html=\n{html}"
+        );
+        assert!(
+            !html.contains("value=\"default\""),
+            "the placeholder must never be an option; html=\n{html}"
+        );
+    }
+
+    // Choosing the id-less fallback option (or the word "default") must post nothing: the
+    // placeholder is never saved as the app chat model.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn choosing_the_placeholder_option_posts_nothing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/chat-model"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let loaded = Some(camerata_ui_core::models::ModelsResp {
+            models: vec![camerata_ui_core::models::ModelOption {
+                label: "Opus".into(),
+                id: "claude-opus-5".into(),
+                provider: "claude".into(),
+            }],
+            default: String::new(),
+            backend: String::new(),
+        });
+        // Registry not loaded: nothing is savable, not even a real-looking id.
+        assert!(!super::persist_chat_choice(&None, "").await);
+        assert!(!super::persist_chat_choice(&None, "default").await);
+        // Registry loaded: the placeholder and unknown ids are still refused.
+        assert!(!super::persist_chat_choice(&loaded, "").await);
+        assert!(!super::persist_chat_choice(&loaded, "default").await);
+        // (the server mock's expect(0) verifies on drop that no POST was made)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn choosing_a_registry_model_posts_it() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/chat-model"))
+            .and(body_json(serde_json::json!({ "model": "claude-opus-5" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let loaded = Some(camerata_ui_core::models::ModelsResp {
+            models: vec![camerata_ui_core::models::ModelOption {
+                label: "Opus".into(),
+                id: "claude-opus-5".into(),
+                provider: "claude".into(),
+            }],
+            default: String::new(),
+            backend: String::new(),
+        });
+        assert!(super::persist_chat_choice(&loaded, "claude-opus-5").await);
+    }
 }
