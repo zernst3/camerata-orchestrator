@@ -1,5 +1,5 @@
 {
-  "about": "The clean variant: the base project after the reviewer has released every held row, so the release gate refuses nothing and the export panel shows its Export button. Each held row of the base variant gets the decision a reviewer would give it (the row the engine merged gets a recorded merge), and the Engine Check No on sql-11 is given its correction (the verdict is posted again with the correction named, replacing the uncorrected one).",
+  "about": "The clean variant: the base project after the reviewer has released every held row, so the release gate refuses nothing (the two critical secrets nobody had decided get a decision too) and the export panel shows its Export button. Each held row of the base variant gets the decision a reviewer would give it (the row the engine merged gets a recorded merge), and the Engine Check No on sql-11 is given its correction (the verdict is posted again with the correction named, replacing the uncorrected one).",
   "decisions": [
     {
       "site": "sql-02",
@@ -14,6 +14,20 @@
       "reason": "the phone number is placed inside the query text between quotes",
       "decided_by": "zach",
       "decided_at": "2026-11-03T10:02:00Z"
+    },
+    {
+      "site": "sec-01",
+      "state": "confirmed",
+      "reason": "a live provider key is in the source and has to be rotated",
+      "decided_by": "zach",
+      "decided_at": "2026-11-03T10:04:00Z"
+    },
+    {
+      "site": "sec-02",
+      "state": "confirmed",
+      "reason": "the mail password is in the source and has to be rotated",
+      "decided_by": "zach",
+      "decided_at": "2026-11-03T10:05:00Z"
     },
     {
       "site": "thrown-01",

@@ -307,6 +307,7 @@ fn row(i: usize, bucket: &'static str, severity: &str, kind: CountKind) -> Count
         kind,
         tool_preview: false,
         escalated: false,
+        reviewed_in_person: false,
         rule_id: format!("SYN-{}", i % 161),
     }
 }

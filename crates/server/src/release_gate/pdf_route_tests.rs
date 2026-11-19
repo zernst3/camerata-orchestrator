@@ -159,6 +159,19 @@ fn evidence_unverified() -> (crate::AppState, String) {
     state_with(report)
 }
 
+fn critical_without_decision() -> (crate::AppState, String) {
+    let mut report = scan_report();
+    report.findings[0].severity = "critical".to_string();
+    state_with(report)
+}
+
+fn unsure_without_decision() -> (crate::AppState, String) {
+    let mut report = scan_report();
+    report.findings[0].needs_review = true;
+    report.findings[0].confidence = Some("needs-review".to_string());
+    state_with(report)
+}
+
 fn junk_content() -> (crate::AppState, String) {
     let mut report = scan_report();
     report.findings[0].detail = "A title \u{2014} I cannot assist.".to_string();
@@ -241,7 +254,7 @@ fn node_decision_missing_a_member() -> (crate::AppState, String) {
     (state, id)
 }
 
-const HELD: [Held; 8] = [
+const HELD: [Held; 10] = [
     Held {
         name: "evidence unverified",
         check: CheckId::EvidenceUnverified,
@@ -270,6 +283,18 @@ const HELD: [Held; 8] = [
         name: "engine check no without correction",
         check: CheckId::EngineCheckNoWithoutCorrection,
         build: engine_check_no_without_correction,
+        request,
+    },
+    Held {
+        name: "critical without decision",
+        check: CheckId::CriticalOrUnsureWithoutDecision,
+        build: critical_without_decision,
+        request,
+    },
+    Held {
+        name: "unsure without decision",
+        check: CheckId::CriticalOrUnsureWithoutDecision,
+        build: unsure_without_decision,
         request,
     },
     Held {

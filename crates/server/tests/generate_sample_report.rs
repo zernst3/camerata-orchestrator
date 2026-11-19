@@ -253,6 +253,19 @@ async fn regenerate_sample_report() {
             confirmed_by_client: false,
         },
     );
+    // The release gate refuses a critical problem with no decision of its own, so the sample's
+    // two critical problems carry the auditor's own confirmation (not a client's).
+    for critical in [&rls_enabled, &key_service_role] {
+        dispositions.insert(
+            report_export::finding_key(critical),
+            DispositionWire {
+                state: "Confirmed".to_string(),
+                reason: "read in person against the repository and confirmed".to_string(),
+                bucket: String::new(),
+                confirmed_by_client: false,
+            },
+        );
+    }
     dispositions.insert(
         report_export::finding_key(&auth_getsession),
         DispositionWire {

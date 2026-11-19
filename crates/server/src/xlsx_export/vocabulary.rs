@@ -496,6 +496,41 @@ pub fn places_word(n: usize) -> &'static str {
     }
 }
 
+/// What a person read in this inspection and the review budget that bounds it, in one line the
+/// PDF and the workbook's Start here both print (so a blank "Reviewed in person" cell is
+/// explained, not hidden). The sentence about every critical place and every place the engine was
+/// unsure of is printed only when the release gate guarantees it
+/// ([`crate::release_gate::needs_decision`]).
+pub fn review_line(c: &crate::report_export::ReviewCounts) -> String {
+    let n = c.reviewed_in_person;
+    let mut out = if n == 0 {
+        "No place was reviewed in person.".to_string()
+    } else {
+        format!(
+            "{n} {} {} reviewed in person.",
+            places_word(n),
+            if n == 1 { "was" } else { "were" }
+        )
+    };
+    if let Some(budget) = c.review_budget {
+        out.push_str(&format!(
+            " The review budget for this inspection is {budget} {}.",
+            places_word(budget)
+        ));
+    }
+    if n > 0 && c.every_critical_and_unsure_decided {
+        out.push_str(
+            " Every critical place and every place the engine was unsure of is among them, \
+             whatever the budget.",
+        );
+    }
+    out.push_str(&format!(
+        " The other places were checked by the engine against the code, so their \
+         {H_REVIEWED_IN_PERSON} cell is blank."
+    ));
+    out
+}
+
 /// A place's position as the PDF and the sheets say it: "line 12", or "whole file" for a problem
 /// in a whole file (the report records that as line 0, and no reader ever sees "line 0").
 pub fn place_label(line: usize) -> String {
@@ -761,6 +796,11 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "Reviewed in person",
         "Yes when a person read the problem in your code. Blank means the engine checked it against your files without a person reading it.",
         "All problems; Dependencies",
+    ),
+    e(
+        "Review budget",
+        "How many places a person reads in person in one inspection, set from the amount of code. Every critical place and every place the engine was unsure of is read whatever the budget.",
+        "Start here; the PDF's most serious problems",
     ),
     e(
         "Engine verified",

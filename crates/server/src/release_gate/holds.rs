@@ -6,7 +6,8 @@
 //! ([`super::evidence::undecided_unverified`], [`super::junk::undecided_junk`],
 //! [`super::held::undecided_restored`], [`super::held::undecided_split_out`], [`super::engine_check::uncorrected_no`] and
 //! [`super::engine_check::uncorrected_no_thrown_out`],
-//! [`super::held::merge_is_backed`] and [`super::held::group_decision_gaps`]) and turns its rows into [`super::Problem`]s. This module
+//! [`super::needs_decision::undecided`], [`super::held::merge_is_backed`] and
+//! [`super::held::group_decision_gaps`]) and turns its rows into [`super::Problem`]s. This module
 //! turns the same rows into an [`ExportGateView`], so the panel lists exactly what the gate
 //! refuses for the same reviewed report and cannot drift from it. It adds no rule of its own.
 //!
@@ -20,7 +21,7 @@ use std::collections::HashMap;
 
 use camerata_api_types::review_view::{ExportGateView, HeldRow, HoldReason, NodeDecisionGap};
 
-use super::{engine_check, evidence, held, junk};
+use super::{engine_check, evidence, held, junk, needs_decision};
 use crate::onboard::Finding;
 use crate::report_export::decisions_file::decision_rows;
 use crate::report_export::overlay::merged_target;
@@ -135,6 +136,21 @@ pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {
                 )
             }),
     );
+
+    // Outside review item 2: a critical row and an unsure row need a decision of their own. A row
+    // another check already lists is listed once, under that check's reason: one decision clears
+    // both.
+    let mut listed: std::collections::HashSet<String> =
+        rows.iter().map(|r| r.key.clone()).collect();
+    for (f, why) in needs_decision::undecided(findings, reviewed) {
+        if listed.insert(f.site_key.clone()) {
+            let reason = match why {
+                needs_decision::Why::Critical => HoldReason::CriticalWithoutDecision,
+                needs_decision::Why::Unsure => HoldReason::UnsureWithoutDecision,
+            };
+            rows.push(held_row(f, reason, ""));
+        }
+    }
 
     // Merges and group decisions are checked against the decision records the package prints.
     let records = decision_rows(reviewed);

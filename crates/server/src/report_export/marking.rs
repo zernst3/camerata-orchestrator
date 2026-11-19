@@ -47,6 +47,9 @@ pub struct EscalationsJson {
     pub more_line: String,
     /// The sentence above the entries.
     pub intro: String,
+    /// How many places were reviewed in person and the review budget, so a blank "Reviewed in
+    /// person" cell is explained. The workbook's Start here prints the same words.
+    pub review_line: String,
 }
 
 /// The most entries the PDF's "The most serious problems" section prints.

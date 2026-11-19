@@ -4031,8 +4031,8 @@ The deterministic floor and checkers still read RAW code (they must find the sec
 **The gate** (`server/src/release_gate.rs`). `build_product_package` is the one assembly of a
 product export and `release` is the ONLY function that returns zip bytes (HTTP `export_product`,
 `camerata inspect --export` and the sample generator all use it; source-grep tests pin
-`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs **18 checks** (`CheckId::ALL` in `crates/server/src/release_gate/report.rs`,
-updated 2026-11-18; the first version had nine) over the archive it built and over the package's own
+`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs **19 checks** (`CheckId::ALL` in `crates/server/src/release_gate/report.rs`,
+updated 2026-11-19; the first version had nine) over the archive it built and over the package's own
 rows. The label is what the operator reads in `[brackets]` and in the "Release checks" line:
 
 | # | Check (label) | What it holds |
@@ -4048,13 +4048,14 @@ rows. The label is what the operator reads in `[brackets]` and in the "Release c
 | 9 | reviewer decision on restored findings | a finding the engine threw out and the reviewer put back is decided before it ships (A12 item 2) |
 | 10 | reviewer decision on split-out problems | a problem split out of one the reviewer ruled out has a decision of its own |
 | 11 | reviewer correction on flagged findings | a site the Engine Check said No to carries a correction, a decision or a later edit. An Engine Check file that cannot be read refuses too. (The README's label does not say Engine Check: it never appears in a client output.) |
-| 12 | confidentiality marking | every workbook sheet's footer carries the confidentiality line naming the client, and it is the PDF's line |
-| 13 | manifest | every manifest hash equals the archive member's hash and every member is listed. A client package whose manifest records an incomplete run is refused. |
-| 14 | provenance | an internal package's README provenance lines equal the manifest's. A client package's README carries none of them. |
-| 15 | unsynced reviewer changes | the review screen holds no change the decision store has not accepted (an undo whose revoke has not landed would export the decision the reviewer took back) |
-| 16 | one fix per row | every row has a Fix, the tickets and the Fix plan list the same Fixes once each, the PDF's escalation list has one entry for each escalated place and its top three are three distinct Fixes (item #1); also one row per place |
-| 17 | client text style | no em dash, en dash or multiplication sign in any file a client receives (PDF text, every workbook string, every CSV and JSON file, the README). Skipped for an internal package. |
-| 18 | internal notes kept out | no package, client or internal, carries the operator's rewrite advisory or one of its names |
+| 12 | reviewer decision on critical and unsure findings | every finding shown at critical severity, and every finding the finder was unsure of (marked needs a decision), carries a reviewer's decision of its own, whatever the review budget. A high is not forced. The export panel lists the same rows (`release_gate::holds`), and a group decision leaves them out, so each is decided in person (outside review item 2) |
+| 13 | confidentiality marking | every workbook sheet's footer carries the confidentiality line naming the client, and it is the PDF's line |
+| 14 | manifest | every manifest hash equals the archive member's hash and every member is listed. A client package whose manifest records an incomplete run is refused. |
+| 15 | provenance | an internal package's README provenance lines equal the manifest's. A client package's README carries none of them. |
+| 16 | unsynced reviewer changes | the review screen holds no change the decision store has not accepted (an undo whose revoke has not landed would export the decision the reviewer took back) |
+| 17 | one fix per row | every row has a Fix, the tickets and the Fix plan list the same Fixes once each, the PDF's escalation list has one entry for each escalated place and its top three are three distinct Fixes (item #1); also one row per place |
+| 18 | client text style | no em dash, en dash or multiplication sign in any file a client receives (PDF text, every workbook string, every CSV and JSON file, the README). Skipped for an internal package. |
+| 19 | internal notes kept out | no package, client or internal, carries the operator's rewrite advisory or one of its names |
 
 The
 comparison logic is production code the export tests call. A refusal is a `GateFailure`: its

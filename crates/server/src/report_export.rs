@@ -744,7 +744,7 @@ mod marking;
 
 pub use citations_fixes::*;
 pub use classification::*;
-pub use counts::{report_counts, ReportCounts};
+pub use counts::{report_counts, ReportCounts, ReviewCounts};
 pub use json_types::*;
 pub use marking::*;
 
@@ -2014,22 +2014,24 @@ pub fn build_report_json_with_counts(
     // A project of several repos is several independent services, so the prose that speaks of
     // "the repository" or "the codebase" speaks of the repositories and the services instead.
     let multi_repo = report.repos.len() > 1;
+    // Which finder ran, from the run record, and what a person read, from the review store (the
+    // counts): the method text says only what happened.
+    let method_facts = MethodFacts {
+        finder: finder_of(report),
+        review: counts.review.clone(),
+    };
     let methodology = MethodologyJson {
         reconciliation: counts_prose::methodology_line(counts, review_state),
         candidates_reviewed: counts.rows.total,
         excluded_false_positive: counts.rows.ruled_out,
         held_for_review: held_for_review_total,
         next_steps: counts_prose::next_steps(counts, multi_repo, review_state),
-        deterministic_note:
-            "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
-             SAST rules plus a migration-timeline replay for Supabase Row Level Security) \
-             produces findings that either hold or do not, with no model judgment. These are \
-             labeled deterministic in the report."
-                .to_string(),
+        deterministic_note: deterministic_note_for(method_facts.finder),
         ai_tier_note: ai_tier_note_for(
             review_state,
             coverage_gaps::repos_without_ai_review(report).len(),
             report.repos.len(),
+            &method_facts,
         ),
         citation_note: RELATED_STANDARD_NOTE.to_string(),
         not_done: vec![
@@ -2058,6 +2060,7 @@ pub fn build_report_json_with_counts(
             "No review of organizational controls, identity and access management or \
              infrastructure configuration."
                 .to_string(),
+            NOT_ASSESSED_LINE.to_string(),
         ],
         severity_scale_note:
             "Severity is bimodal by design. Deterministic floor findings are proven defects \
@@ -2122,6 +2125,7 @@ pub fn build_report_json_with_counts(
                 },
                 crate::xlsx_export::vocabulary::ALL_PROBLEMS
             ),
+            review_line: crate::xlsx_export::vocabulary::review_line(&counts.review),
         },
         other_fixes,
         conventions,
@@ -2671,6 +2675,9 @@ mod fn_batch_c_dep_tests;
 
 #[cfg(test)]
 mod fn_batch_c_followup_tests;
+
+#[cfg(test)]
+mod method_truth_tests;
 
 #[cfg(test)]
 mod fn_batch_c_incremental_tests;

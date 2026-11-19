@@ -273,7 +273,7 @@ fn pump_requests(mut client: TcpStream, mut upstream: TcpStream, log: &Log) {
 /// Which seeded project to open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Seed {
-    /// One inspection and the reviewer's work on it: five held rows.
+    /// One inspection and the reviewer's work on it: seven held rows.
     Base,
     /// The base project with every held row released: the export button shows.
     Clean,

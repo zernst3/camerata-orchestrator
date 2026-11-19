@@ -217,6 +217,14 @@ pub(super) fn recount(
         {
             c.problems.escalated += 1;
         }
+        // A place a person read: any row there carries the review level `personally_reviewed`,
+        // which is what the workbook's "Reviewed in person" cell says.
+        if members
+            .iter()
+            .any(|m| text(m, "review_level") == camerata_api_types::review::PERSONALLY_REVIEWED)
+        {
+            c.review.reviewed_in_person += 1;
+        }
     }
 
     // Fail closed: each open place of another rule that a ruled-out row carries, and that no
@@ -270,6 +278,12 @@ pub(super) fn recount(
     c.other.rules_checked = report.counts.other.rules_checked;
     // Found in the client's repository at scan time; no row in the package can recount it.
     c.other.client_suppressions_found = report.counts.other.client_suppressions_found;
+    // The review budget is a setting of the run and whether every critical and unsure row was
+    // decided is the gate's own check ([`super::needs_decision`]): neither can be recounted from
+    // the archive, so the recount takes the object's figures and the check compares the rest.
+    c.review.review_budget = report.counts.review.review_budget;
+    c.review.every_critical_and_unsure_decided =
+        report.counts.review.every_critical_and_unsure_decided;
     c.other.rules_with_problems = problem_rows
         .iter()
         .map(|r| text(r, "rule_id"))

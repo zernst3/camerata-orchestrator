@@ -238,7 +238,7 @@ fn liveview_serves_only_the_review_lanes() {
         false_positive: 2,
         tech_debt: 1,
         merged: 1,
-        held: 5,
+        held: 7,
     });
     stack.assert_no_model_calls();
 }
@@ -453,7 +453,7 @@ const BASE: Strip = Strip {
     false_positive: 2,
     tech_debt: 1,
     merged: 1,
-    held: 5,
+    held: 7,
 };
 
 #[test]
@@ -593,7 +593,7 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
         ".engine-state-text",
         "held from export until corrected (wrong severity)",
     );
-    assert_eq!(stack.strip().held, 5);
+    assert_eq!(stack.strip().held, 7);
 
     // Correct it: it was wrong about the severity, and the right one is critical.
     stack.click(".engine-card button", "Correct it");
@@ -652,7 +652,7 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
     assert_eq!(verdict["wrong"], "wrong_severity", "{verdict}");
     assert_eq!(verdict["correction"]["edit"], edit["id"], "{verdict}");
 
-    stack.assert_shell_counts(&Strip { held: 4, ..BASE });
+    stack.assert_shell_counts(&Strip { held: 6, ..BASE });
     stack.assert_no_model_calls();
 }
 
