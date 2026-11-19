@@ -3,6 +3,9 @@
 use super::*;
 use camerata_api_types::cost_checkpoint::CostCheckpoint;
 
+/// The html id of the Review tab's button (an expression, so a test can find it by it).
+const REVIEW_OPEN_ID: &str = "review-open";
+
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
 /// chorale tables with fresh rows.
@@ -1419,11 +1422,19 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 if report.code_chars > 0 {
                     {
                         let uses_model = checks().uses_a_model();
+                        // The Finder model the project uses, named on the Agent estimate.
+                        let finder_model_name = camerata_api_types::project::model_display_name(
+                            active_project
+                                .as_ref()
+                                .map(|p| p.review.finder_model.trim())
+                                .filter(|m| !m.is_empty())
+                                .unwrap_or(camerata_api_types::project::FINDER_DEFAULT_MODEL),
+                        );
                         let backend = active_project.as_ref().map(|p| p.backend).unwrap_or_default();
                         let estimate: EstimateShown = if !uses_model {
                             EstimateShown::deterministic()
                         } else if finder == camerata_api_types::project::ProjectFinder::Agent {
-                            agent_estimate_block(&repo_sizes.read().clone(), backend)
+                            agent_estimate_block(&repo_sizes.read().clone(), backend, &finder_model_name)
                         } else {
                             engine_estimate_block(
                                 &report,
@@ -1677,6 +1688,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 // The review lanes: the tree, and the Queue as the Flat view.
                 if !project_id.is_empty() {
                     button {
+                        id: REVIEW_OPEN_ID,
                         class: if review_open() { "kind-tab active" } else { "kind-tab" },
                         title: "The tree of groups: decide a whole group at once, with the exceptions listed.",
                         onclick: move |_| {

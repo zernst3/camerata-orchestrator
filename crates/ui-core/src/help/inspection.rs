@@ -35,8 +35,8 @@ pub fn inspect_topic(finder: ProjectFinder) -> HelpTopic {
         ProjectFinder::Engine => {
             "The Engine finder checks the code rule by rule: the model checks it against only \
              the rules you ticked and also flags anything else worth a look, as advice. The \
-             deterministic security rules for secrets, raw SQL and secret URLs always run as the \
-             enforced floor."
+             deterministic security rules for secrets, raw SQL and secret URLs run as the enforced \
+             floor, unless Checks to run is set to AI review only."
         }
     };
     topic(
@@ -134,11 +134,10 @@ pub fn estimate_topic(finder: ProjectFinder, backend: ProjectBackend) -> HelpTop
                 "The figure is for the finder stage only. Group review, fix and duplicate check \
                  are extra and are not in it. It is an estimate, not a quote.",
                 "It is built from the size of each repository: its pieces and its lines of code, \
-                 at fixed rates taken from earlier runs. It does not change with the Finder \
-                 model you pick. A repository cut into two or more pieces also gets one joints \
+                 at fixed rates taken from earlier runs. Those rates are not priced for the Finder \
+                 model you pick and do not change with it, so a model that costs more or less \
+                 than the one the rates came from makes the real cost differ. A repository cut into two or more pieces also gets one joints \
                  call, which looks across the pieces.",
-                "The range runs from 0.6 times to 1.8 times the figure and is where the cost most \
-                 likely lands, not a limit.",
                 "When the sizes cannot be read, the screen says the estimate is not available \
                  instead of showing a figure it cannot stand behind.",
             ],
@@ -239,9 +238,21 @@ mod tests {
         assert!(!est.contains("tokens") && !est.contains("passes"), "{est}");
         // The estimate does not price the picked model, and the text says so.
         assert!(
-            est.contains("does not change with the Finder model"),
+            est.contains("not priced for the Finder model you pick"),
             "{est}"
         );
+    }
+
+    #[test]
+    fn the_floor_sentence_matches_checks_to_run_and_no_range_is_promised() {
+        let engine = inspect_topic(ProjectFinder::Engine).body;
+        assert!(!engine.contains("always run"), "{engine}");
+        assert!(
+            engine.contains("unless Checks to run is set to AI review only"),
+            "{engine}"
+        );
+        let est = estimate_topic(ProjectFinder::Agent, ProjectBackend::Cli).body;
+        assert!(!est.contains("0.6") && !est.contains("most"), "{est}");
     }
 
     #[test]

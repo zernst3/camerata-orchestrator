@@ -31,6 +31,7 @@ fn agent_figure() -> EstimateBlock {
             high_usd: 7.56,
         }],
         &[],
+        "Claude Opus 5.5",
     );
     let AgentEstimateView::Figure(text) = view else {
         unreachable!("one figure was given");

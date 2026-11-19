@@ -24,6 +24,12 @@ use super::{AuditModelsResp, RepoSizeView};
 #[derive(Clone, Copy)]
 pub(crate) struct LiveProject(pub Signal<Option<ProjectView>>);
 
+/// Present below the Inspection screen, which shows the Inspection settings at its top. A second
+/// copy (Review > Settings) would repeat every control id on the page, so it points to the top
+/// panel instead.
+#[derive(Clone, Copy)]
+pub(crate) struct InspectionPanelOnScreen;
+
 /// The html ids the tests and the walkthrough find the controls by.
 pub(crate) const RUN_BLOCK_ID: &str = "inspection-run";
 pub(crate) const CHECKS_ID: &str = "inspection-checks";
@@ -233,7 +239,7 @@ pub(crate) fn InspectionEstimate(block: EstimateBlock) -> Element {
                         span { class: "audit-cost-meta", "{text.calls}" }
                         HelpButton { topic: help_text::estimate_topic(finder_backend.0, finder_backend.1) }
                     }
-                    p { class: "audit-cost-range", "{text.range}" }
+                    p { class: "audit-cost-range", "{text.model_line}" }
                     if !text.repo_lines.is_empty() {
                         ul { class: "audit-cost-repos",
                             for line in text.repo_lines.iter() {
@@ -286,6 +292,7 @@ pub(in crate::cockpit) type SizesState = Option<Option<Vec<RepoSizeView>>>;
 pub(in crate::cockpit) fn agent_estimate_block(
     sizes: &SizesState,
     backend: ProjectBackend,
+    finder_model: &str,
 ) -> EstimateShown {
     use camerata_ui_core::scan::inspection_run::{
         agent_estimate_unavailable, agent_estimate_view, AgentEstimateView, AgentRepoFigure,
@@ -322,7 +329,7 @@ pub(in crate::cockpit) fn agent_estimate_block(
             }
         }
     }
-    match agent_estimate_view(&figures, &unreadable) {
+    match agent_estimate_view(&figures, &unreadable, finder_model) {
         AgentEstimateView::Figure(text) => EstimateShown {
             short: text.value.clone(),
             block: EstimateBlock::Agent {

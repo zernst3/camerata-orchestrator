@@ -470,10 +470,13 @@ async fn an_agent_project_shows_no_model_rows_a_locked_full_inspection_no_run_mo
         "{estimate}"
     );
     assert!(estimate.contains("about $4.20"), "{estimate}");
+    // The figure is not priced from the Finder model, and the screen names the model it is not
+    // priced for. No range is shown.
     assert!(
-        estimate.contains("most likely between $2.52 and $7.56"),
+        estimate.contains("Not priced for Claude Opus 5.5"),
         "{estimate}"
     );
+    assert!(!estimate.contains("most likely"), "{estimate}");
     assert!(estimate.contains("3 pieces, 1 joints call"), "{estimate}");
     assert!(estimate.contains("Other stages are extra."), "{estimate}");
     for engine in ["pass(es)", "rule(s)", "tokens"] {
@@ -694,6 +697,125 @@ async fn an_agent_run_after_an_engine_pick_still_sends_every_file_and_the_defaul
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["mode"], json!("auto"), "{}", started[0]);
     assert_eq!(started[0]["incremental"], json!(false), "{}", started[0]);
+}
+
+// ── Review > Settings, through the real screen ──────────────────────────────────────────────
+
+/// Every html `id` on the page that is not unique.
+fn repeated_ids(html: &str) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for part in html.split(" id=\"").skip(1) {
+        if let Some(end) = part.find('"') {
+            *seen.entry(part[..end].to_string()).or_default() += 1;
+        }
+    }
+    let mut out: Vec<String> = seen
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(id, _)| id)
+        .collect();
+    out.sort();
+    out
+}
+
+/// A server whose scan has a finished inspection (so the Review tab is there) and a review shell.
+async fn stub_with_a_review(finder: &str) -> (MockServer, SharedProject) {
+    let (server, shared) = stub_server(finder, Sizes::Back).await;
+    let shell = camerata_ui_core::test_support::review_fixtures::fixture("shell/held-count")
+        .expect("the shell fixture")
+        .shell
+        .ready()
+        .cloned()
+        .expect("a ready shell");
+    Mock::given(method("GET"))
+        .and(path("/api/projects/p-1/review"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::to_value(&shell).unwrap()),
+        )
+        .mount(&server)
+        .await;
+    let scan = json!({
+        "repos": ["me/api"], "files_scanned": 10, "code_chars": 4000, "findings": [],
+        "proposed_rules": [], "gated": false
+    });
+    let mut audit = scan.clone();
+    audit["findings"] = json!([
+        { "repo": "me/api", "path": "src/z.rs", "line": 40, "rule_id": "R-A", "severity": "high",
+          "snippet": "z", "detail": "d", "status": "active", "kind": "defect" }
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/api/onboard/draft"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "scan": scan, "audit": audit
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/projects/p-1/decisions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "decisions": [], "standings": [], "migrated_from_draft": true, "latest_run_id": "insp-1"
+        })))
+        .mount(&server)
+        .await;
+    (server, shared)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn opening_review_settings_repeats_no_control_id_and_a_finder_change_still_reaches_the_run_block(
+) {
+    let (server, _) = stub_with_a_review("agent").await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut screen = Screen::mount(rules_proposed);
+    screen.pump(900).await;
+    assert_eq!(
+        repeated_ids(&screen.html()),
+        Vec::<String>::new(),
+        "before Review"
+    );
+
+    screen.click("review-open");
+    screen.pump(600).await;
+    screen.click("review-lane-settings");
+    screen.pump(600).await;
+    let html = screen.html();
+    assert!(
+        html.contains("class=\"review-settings\""),
+        "the lane is open: {html}"
+    );
+    assert_eq!(
+        repeated_ids(&html),
+        Vec::<String>::new(),
+        "Review > Settings repeats a control id"
+    );
+    assert_eq!(html.matches("id=\"inspection-client-name\"").count(), 1);
+    assert_eq!(html.matches("id=\"is-model-finder\"").count(), 1);
+    assert!(
+        html.contains("The Inspection settings are at the top of this screen."),
+        "{html}"
+    );
+
+    // The panel the lane points to is the one that moves the run block, with the lane open.
+    screen.pick("is-model-finder", "engine");
+    screen.pump(900).await;
+    let html = screen.html();
+    assert!(
+        html.contains("id=\"inspection-run-mode\""),
+        "Run mode appears: {html}"
+    );
+    assert!(!tag_of(&block(&html, RUN), "inspection-full").contains("disabled"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn no_control_id_is_repeated_on_the_start_screen_or_the_rules_proposed_screen() {
+    let (server, _) = stub_server("engine", Sizes::Back).await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    for app in [start_screen as fn() -> Element, rules_proposed] {
+        let mut screen = Screen::mount(app);
+        screen.pump(900).await;
+        assert_eq!(repeated_ids(&screen.html()), Vec::<String>::new());
+    }
 }
 
 // ── The finder changes on screen ────────────────────────────────────────────────────────────

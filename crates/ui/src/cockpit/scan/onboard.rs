@@ -279,6 +279,7 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
     // What the settings last saved, shared with the results' run block (see `LiveProject`).
     let mut live_project = use_signal(|| None::<ProjectView>);
     use_context_provider(|| LiveProject(live_project));
+    use_context_provider(|| InspectionPanelOnScreen);
     let run_in_flight = active_audit_job.read().is_some();
 
     let brownfield_cls = if path() == OnboardPath::Brownfield {

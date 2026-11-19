@@ -159,8 +159,9 @@ pub struct AgentEstimateText {
     pub label: &'static str,
     /// "about $4.20".
     pub value: String,
-    /// "most likely between $2.52 and $7.56".
-    pub range: String,
+    /// "Not priced for Claude Opus 5.5: the rates are fixed and do not change with the Finder
+    /// model." The figure is not priced from the chosen model, so the screen says so.
+    pub model_line: String,
     /// "3 pieces, 1 joints call".
     pub calls: String,
     /// The one line that says the other stages are extra.
@@ -201,6 +202,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 pub fn agent_estimate_view(
     figures: &[AgentRepoFigure],
     unreadable: &[(String, String)],
+    finder_model: &str,
 ) -> AgentEstimateView {
     if figures.is_empty() {
         let reason = match unreadable.first() {
@@ -210,19 +212,16 @@ pub fn agent_estimate_view(
         return AgentEstimateView::Unavailable(agent_estimate_unavailable(&reason));
     }
     let expected: f64 = figures.iter().map(|f| f.expected_usd).sum();
-    let low: f64 = figures.iter().map(|f| f.low_usd).sum();
-    let high: f64 = figures.iter().map(|f| f.high_usd).sum();
     let pieces: usize = figures.iter().map(|f| f.pieces).sum();
     let joints: usize = figures.iter().map(|f| f.joints_calls).sum();
     let mut repo_lines = Vec::new();
     if figures.len() + unreadable.len() > 1 {
         for f in figures {
-            repo_lines.push(super::agent_finder_repo_line(
-                &f.repo,
-                f.pieces,
-                f.expected_usd,
-                f.low_usd,
-                f.high_usd,
+            repo_lines.push(format!(
+                "{}: about {}, {}",
+                f.repo,
+                money(f.expected_usd),
+                plural(f.pieces, "piece", "pieces")
             ));
         }
         for (repo, why) in unreadable {
@@ -236,7 +235,7 @@ pub fn agent_estimate_view(
         } else {
             format!("about {}", money(expected))
         },
-        range: format!("most likely between {} and {}", money(low), money(high)),
+        model_line: agent_model_line(finder_model),
         calls: format!(
             "{}, {}",
             plural(pieces, "piece", "pieces"),
@@ -245,6 +244,14 @@ pub fn agent_estimate_view(
         extra: AGENT_ESTIMATE_EXTRA,
         repo_lines,
     })
+}
+
+/// The inline line that says the figure is not priced for the model the project uses: the rates
+/// are fixed starting guesses taken from earlier runs, and no model price enters them.
+pub fn agent_model_line(finder_model: &str) -> String {
+    format!(
+        "Not priced for {finder_model}: the rates are fixed and do not change with the Finder model."
+    )
 }
 
 /// The Engine finder's scope line under its estimate: what the figure is priced over.
@@ -307,20 +314,23 @@ mod tests {
     #[test]
     fn the_agent_estimate_says_the_finder_stage_and_that_the_others_are_extra() {
         let AgentEstimateView::Figure(text) =
-            agent_estimate_view(&[figure("acme/api", 3, 1, 4.2)], &[])
+            agent_estimate_view(&[figure("acme/api", 3, 1, 4.2)], &[], "Claude Opus 5.5")
         else {
             panic!("a figure was given");
         };
         assert_eq!(text.label, "Estimated cost of the finder stage");
         assert_eq!(text.value, "about $4.20");
-        assert_eq!(text.range, "most likely between $2.52 and $7.56");
+        // The figure is not priced from the chosen model, and the screen says so by name. No
+        // range is shown: a 0.6 to 1.8 spread cannot hold for a model at another price.
+        assert_eq!(
+            text.model_line,
+            "Not priced for Claude Opus 5.5: the rates are fixed and do not change with the Finder model."
+        );
+        assert!(!text.model_line.contains("most likely"));
         assert_eq!(text.calls, "3 pieces, 1 joints call");
         assert_eq!(text.extra, "Other stages are extra.");
         assert!(text.repo_lines.is_empty(), "one repository needs no list");
-        let all = format!(
-            "{} {} {} {}",
-            text.value, text.range, text.calls, text.extra
-        );
+        let all = format!("{} {} {}", text.value, text.calls, text.extra);
         for engine_word in ["token", "pass", "rule"] {
             assert!(!all.contains(engine_word), "{engine_word}: {all}");
         }
@@ -331,6 +341,7 @@ mod tests {
         let AgentEstimateView::Figure(text) = agent_estimate_view(
             &[figure("acme/api", 1, 0, 2.0), figure("acme/web", 2, 1, 3.0)],
             &[("acme/old".to_string(), "no local folder set".to_string())],
+            "Claude Opus 5.5",
         ) else {
             panic!("figures were given");
         };
@@ -343,7 +354,8 @@ mod tests {
 
     #[test]
     fn with_no_figure_the_sentence_is_all_there_is_and_no_dollar_figure_is_made_up() {
-        let AgentEstimateView::Unavailable(text) = agent_estimate_view(&[], &[]) else {
+        let AgentEstimateView::Unavailable(text) = agent_estimate_view(&[], &[], "Claude Opus 5.5")
+        else {
             panic!("no figure");
         };
         assert!(text.starts_with("Estimate not available for the Agent finder"));
@@ -351,6 +363,7 @@ mod tests {
         let AgentEstimateView::Unavailable(why) = agent_estimate_view(
             &[],
             &[("acme/api".to_string(), "no local folder set".to_string())],
+            "Claude Opus 5.5",
         ) else {
             panic!("no figure");
         };
