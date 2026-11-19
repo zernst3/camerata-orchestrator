@@ -498,7 +498,11 @@ async fn deleting_a_project_removes_every_copy_of_its_data_and_nothing_of_the_ot
         .iter()
         .any(|i| i.category == "development console record" && i.path.starts_with("uow.json#")));
     // The deleting mark is released when the deletion ends.
-    assert!(fx.state.source_ops.deleting_refusal(&fx.project_id).is_none());
+    assert!(fx
+        .state
+        .source_ops
+        .deleting_refusal(&fx.project_id)
+        .is_none());
 
     // A restart finds nothing of A either (the files, not the memory, were removed).
     let again = fx.restarted();
@@ -724,7 +728,10 @@ async fn a_folder_linked_to_the_wrong_repo_loses_nothing_of_another_projects() {
     for f in &w.b_files {
         assert!(f.exists(), "B's file was removed: {}", f.display());
     }
-    assert!(out.partial, "the refused folder is reported, the project kept");
+    assert!(
+        out.partial,
+        "the refused folder is reported, the project kept"
+    );
     assert!(fx.state.projects.get(&fx.project_id).is_some());
     assert!(out
         .record
@@ -764,7 +771,10 @@ async fn a_failed_session_removal_is_found_again_by_the_retry() {
         .unwrap();
 
     assert!(!second.partial, "{:?}", second.record.items);
-    assert!(!session.exists(), "the retry found and removed the session file");
+    assert!(
+        !session.exists(),
+        "the retry found and removed the session file"
+    );
     assert!(hits(&fx.root, SENT_A).is_empty());
     assert!(fx.state.projects.get(&fx.project_id).is_none());
 }
@@ -782,7 +792,10 @@ async fn a_write_that_fails_is_reported_failed_not_removed_and_a_retry_succeeds(
         let path = fx.root.join("data").join(file);
         chmod(&path, 0o444);
         assert!(
-            std::fs::OpenOptions::new().append(true).open(&path).is_err(),
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .is_err(),
             "run these tests as an ordinary user"
         );
 
@@ -792,11 +805,8 @@ async fn a_write_that_fails_is_reported_failed_not_removed_and_a_retry_succeeds(
 
         assert!(first.partial, "{file}: {:?}", first.record.items);
         assert!(
-            first
-                .record
-                .items
-                .iter()
-                .any(|i| i.category == category && matches!(i.outcome, super::PurgeOutcome::Failed { .. })),
+            first.record.items.iter().any(|i| i.category == category
+                && matches!(i.outcome, super::PurgeOutcome::Failed { .. })),
             "{file}: no failed {category} item in {:?}",
             first.record.items
         );
@@ -805,7 +815,8 @@ async fn a_write_that_fails_is_reported_failed_not_removed_and_a_retry_succeeds(
                 .record
                 .items
                 .iter()
-                .any(|i| i.path.contains(file.trim_end_matches(".json")) && i.category == category
+                .any(|i| i.path.contains(file.trim_end_matches(".json"))
+                    && i.category == category
                     && i.outcome == super::PurgeOutcome::Removed),
             "{file}: reported removed although the write failed"
         );
@@ -816,7 +827,10 @@ async fn a_write_that_fails_is_reported_failed_not_removed_and_a_retry_succeeds(
             .await
             .unwrap();
         assert!(!second.partial, "{file}: {:?}", second.record.items);
-        assert!(hits(&fx.root, SENT_A).is_empty(), "{file}: A data left after the retry");
+        assert!(
+            hits(&fx.root, SENT_A).is_empty(),
+            "{file}: A data left after the retry"
+        );
         assert!(fx.state.projects.get(&fx.project_id).is_none(), "{file}");
     }
 }
@@ -844,7 +858,11 @@ async fn a_scan_or_job_start_while_the_project_is_being_deleted_is_refused() {
     )
     .await;
 
-    let state = fx.state.jobs.get(&job).expect("the refused job is recorded");
+    let state = fx
+        .state
+        .jobs
+        .get(&job)
+        .expect("the refused job is recorded");
     assert_eq!(state.status, "failed");
     assert!(
         state.message.unwrap_or_default().contains("being deleted"),
@@ -915,12 +933,13 @@ async fn console_rows_tied_to_a_shared_repository_are_kept_and_listed() {
         .await
         .unwrap();
 
-    assert!(fx.state.uow.get(&shared.story_id).is_some(), "the shared unit stays");
-    assert!(out
-        .record
-        .kept
-        .iter()
-        .any(|k| k.what.contains("development console record") && k.why.contains("another project")));
+    assert!(
+        fx.state.uow.get(&shared.story_id).is_some(),
+        "the shared unit stays"
+    );
+    assert!(out.record.kept.iter().any(
+        |k| k.what.contains("development console record") && k.why.contains("another project")
+    ));
     // Acme's own unit (it records its project) went.
     assert!(fx
         .state
@@ -951,7 +970,12 @@ async fn http(state: &crate::AppState, method: &str, uri: &str) -> (StatusCode, 
 async fn the_plain_project_delete_is_refused_while_the_project_holds_data() {
     let w = world().await;
     let fx = &w.fx;
-    let (status, body) = http(&fx.state, "DELETE", &format!("/api/projects/{}", fx.project_id)).await;
+    let (status, body) = http(
+        &fx.state,
+        "DELETE",
+        &format!("/api/projects/{}", fx.project_id),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "project_holds_data");
     assert_eq!(
@@ -965,7 +989,12 @@ async fn the_plain_project_delete_is_refused_while_the_project_holds_data() {
     let findings = fx.state.projects.create("Findings", Vec::new()).unwrap();
     fx.state
         .set_last_scan(findings.id.clone(), report_at(REPO, &"1".repeat(40)));
-    let (status, body) = http(&fx.state, "DELETE", &format!("/api/projects/{}", findings.id)).await;
+    let (status, body) = http(
+        &fx.state,
+        "DELETE",
+        &format!("/api/projects/{}", findings.id),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(fx.state.projects.get(&findings.id).is_some());
 }

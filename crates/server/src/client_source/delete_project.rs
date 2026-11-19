@@ -587,9 +587,8 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     // Scan cache, draft entry.
     let data = data_dir(state)?;
     let cache_bytes = state.scan_cache.project_bytes(&project.id);
-    let in_file = |name: &str| {
-        ids_in_file(&data.join(name)).map_or(true, |ids| ids.contains(&project.id))
-    };
+    let in_file =
+        |name: &str| ids_in_file(&data.join(name)).map_or(true, |ids| ids.contains(&project.id));
     if cache_bytes > 0 || in_file("scan-cache.json") {
         add(
             &mut extras,
@@ -642,7 +641,11 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
             state.inspections.file_for(&project.id),
             true,
         ),
-        ("decision store", state.decisions.file_for(&project.id), false),
+        (
+            "decision store",
+            state.decisions.file_for(&project.id),
+            false,
+        ),
         ("edit store", state.edits.file_for(&project.id), false),
         (
             "engine check store",
@@ -748,7 +751,11 @@ async fn dev_rows(
     }
     let lower = |r: &String| r.to_ascii_lowercase();
     let own: HashSet<String> = project.repos.iter().map(lower).collect();
-    let other: HashSet<String> = others.iter().flat_map(|p| p.repos.iter()).map(lower).collect();
+    let other: HashSet<String> = others
+        .iter()
+        .flat_map(|p| p.repos.iter())
+        .map(lower)
+        .collect();
     let classify = |repos: &[String]| -> Who {
         let repos: Vec<String> = repos.iter().map(lower).collect();
         if repos.is_empty() {
@@ -820,7 +827,9 @@ async fn dev_rows(
         .into_iter()
         .filter(|e| match e.subject_kind {
             camerata_app_core::escalation::SubjectKind::Uow => story_scope.contains(&e.routine_id),
-            camerata_app_core::escalation::SubjectKind::Routine => routine_ids.contains(&e.routine_id),
+            camerata_app_core::escalation::SubjectKind::Routine => {
+                routine_ids.contains(&e.routine_id)
+            }
         })
         .map(|e| e.id)
         .collect();
@@ -1043,8 +1052,10 @@ pub async fn delete_all(
         }
         match action {
             Action::Path(path) | Action::StoreFile(path) => {
-                if matches!(item.category.as_str(), "decision store" | "edit store" | "engine check store")
-                    && !memory_forgotten
+                if matches!(
+                    item.category.as_str(),
+                    "decision store" | "edit store" | "engine check store"
+                ) && !memory_forgotten
                 {
                     forget_console_memory(state, &project);
                     memory_forgotten = true;

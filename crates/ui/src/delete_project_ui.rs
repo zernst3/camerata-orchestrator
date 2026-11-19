@@ -724,7 +724,10 @@ mod tests {
         fire(&vdom, "click", marked(&w, "dp-confirm"));
         pump(&mut vdom, &mut w, 500).await;
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("The project and its data were removed from this machine."), "{html}");
+        assert!(
+            html.contains("The project and its data were removed from this machine."),
+            "{html}"
+        );
         assert!(!html.contains("could not be removed"), "{html}");
     }
 

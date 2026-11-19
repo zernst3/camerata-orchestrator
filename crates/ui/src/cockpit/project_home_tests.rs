@@ -101,7 +101,8 @@ fn remove_button(w: &Wired) -> ElementId {
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
 async fn the_old_delete_is_relabelled_and_sits_beside_the_data_deletes_not_in_place_of_them() {
-    let server = stub(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true}))).await;
+    let server =
+        stub(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true}))).await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let mut vdom = VirtualDom::new(home);
     let mut w = Wired::default();
@@ -142,13 +143,17 @@ async fn removing_a_project_that_holds_data_shows_the_servers_refusal_and_keeps_
         !messages.iter().any(|m| m.contains("removed from the list")),
         "{messages:?}"
     );
-    assert!(dioxus_ssr::render(&vdom).contains("Acme"), "the project stays listed");
+    assert!(
+        dioxus_ssr::render(&vdom).contains("Acme"),
+        "the project stays listed"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
 async fn removing_a_project_with_no_data_is_confirmed_by_the_server() {
-    let server = stub(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true}))).await;
+    let server =
+        stub(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true}))).await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
     let mut vdom = VirtualDom::new(home);
@@ -160,14 +165,21 @@ async fn removing_a_project_with_no_data_is_confirmed_by_the_server() {
     // The first click only warns, in words that do not promise a data deletion.
     let armed = toast_messages();
     assert!(
-        armed.iter().any(|m| m.contains("from the list") && m.contains("does not delete its data")),
+        armed
+            .iter()
+            .any(|m| m.contains("from the list") && m.contains("does not delete its data")),
         "{armed:?}"
     );
-    assert!(!armed.iter().any(|m| m.contains("permanently delete")), "{armed:?}");
+    assert!(
+        !armed.iter().any(|m| m.contains("permanently delete")),
+        "{armed:?}"
+    );
     click(&vdom, remove_button(&w));
     pump(&mut vdom, &mut w, 600).await;
     assert!(
-        toast_messages().iter().any(|m| m == "Project removed from the list."),
+        toast_messages()
+            .iter()
+            .any(|m| m == "Project removed from the list."),
         "{:?}",
         toast_messages()
     );
