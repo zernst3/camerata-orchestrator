@@ -3212,6 +3212,7 @@ html, body {
 .ws-danger { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .ws-danger-summary { font-size: 12px; color: var(--ink-faint); cursor: pointer; }
 .ws-danger-text { font-size: 12px; color: var(--ink-faint); margin: 8px 0; }
+.pg-danger { flex: 1 0 100%; margin-top: 0; }
 .src-modal { max-width: 720px; }
 .src-plan { list-style: none; margin: 10px 0 4px; padding: 0; font-size: 12.5px; }
 .src-plan li { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--line); }

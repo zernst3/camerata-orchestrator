@@ -2279,6 +2279,11 @@ fn ProjectsHome() -> Element {
                                                 "Open"
                                             }
                                         }
+                                        crate::delete_project_ui::ProjectDangerZone {
+                                            project_id: p.id.clone(),
+                                            project_name: p.name.clone(),
+                                            on_changed: move |_| refresh += 1,
+                                        }
                                     }
                                 }
                             }
