@@ -851,10 +851,11 @@ pub(crate) fn process_rule_config_for(
 
 pub(crate) async fn onboard_draft_get(State(state): State<AppState>) -> axum::response::Response {
     let pid = active_project_id(&state);
-    // A draft file that could not be read at start was set aside untouched: say so, instead of
-    // answering "no draft" as though nothing had ever been saved.
+    // A draft file that could not be read at start was set aside untouched: say so once,
+    // instead of answering "no draft" as though nothing had ever been saved. Told once, so the
+    // operator's next step (start again, save) is not blocked by the same message.
     if state.draft.load(&pid).is_none() {
-        if let Some(message) = state.draft.unreadable_notice() {
+        if let Some(message) = state.draft.take_unreadable_notice() {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({
@@ -866,15 +867,16 @@ pub(crate) async fn onboard_draft_get(State(state): State<AppState>) -> axum::re
     }
     // A draft with no review but a saved inspection of the same repos gets that inspection as
     // its review, so "Continue where you left off" reopens a run whose results never reached
-    // the draft (the screen was closed while it ran, or the app restarted).
-    if let Some(draft) = state.draft.load(&pid) {
-        let no_audit = draft.get("audit").is_none_or(|a| a.is_null());
-        if no_audit {
-            if let Some(report) = state.get_last_scan(&pid) {
-                if let Ok(v) = serde_json::to_value(&report) {
-                    state.draft.adopt_audit(&pid, &report.repos, v);
-                }
-            }
+    // the draft (the screen was closed while it ran, or the app restarted). Not while a run for
+    // this project is in flight: the screen has cleared its review to take the new run's, and
+    // the run adopts its own result when it finishes.
+    if !state.jobs.has_running_for_project(&pid) {
+        if let Some(report) = state.get_last_scan(&pid) {
+            state
+                .draft
+                .adopt_audit(&pid, &report.repos, &report.provenance.finished_at, || {
+                    serde_json::to_value(&report).unwrap_or(serde_json::Value::Null)
+                });
         }
     }
     Json(state.draft.load(&pid)).into_response()

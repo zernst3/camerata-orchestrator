@@ -530,7 +530,11 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         // Said out loud, and the saved draft is left exactly as it is: this
                         // screen writes nothing over a draft it could not read.
                         eprintln!("[camerata-ui] {}", message.message);
-                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message.message);
+                        crate::toast::push_toast(
+                            toasts,
+                            crate::toast::ToastKind::Error,
+                            message.message,
+                        );
                         // Only a draft that exists and cannot be read is protected from
                         // being written over; a read the server refused (told once) is not.
                         if message.unparseable_draft {

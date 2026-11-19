@@ -36,7 +36,10 @@ async fn a_malformed_audit_is_an_error_naming_the_saved_review_not_no_draft() {
     let Err(error) = result else {
         panic!("a draft whose audit cannot be read must not load as Ok");
     };
-    assert!(error.unparseable_draft, "a draft exists that cannot be read");
+    assert!(
+        error.unparseable_draft,
+        "a draft exists that cannot be read"
+    );
     let message = error.message;
     assert!(
         message.starts_with("The saved review in your onboarding draft could not be read"),

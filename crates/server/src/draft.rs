@@ -13,6 +13,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// The reserved key in the draft map that holds, per project, when its draft was last discarded
+/// (Start over, a new scan, completion). A finished inspection older than that belongs to the
+/// discarded draft and is never adopted into a new one. Project ids never take this form.
+const CLEARED_KEY: &str = "_cleared_at";
+
 /// `path` with `suffix` appended to its file name (`onboarding-draft.json` -> `.json.bak`).
 fn sibling(path: &std::path::Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -20,13 +25,26 @@ fn sibling(path: &std::path::Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Write `json` to `path`, first keeping the file's previous content as `<path>.bak` (one
-/// previous copy, replaced on each write).
+/// Whether `bytes` are a draft map this build can read.
+fn parses_as_map(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes)
+        .ok()
+        .is_some_and(|s| serde_json::from_str::<HashMap<String, serde_json::Value>>(s).is_ok())
+}
+
+/// Write `json` to `path` through a temp file and a rename, so a crash mid-write leaves the old
+/// file whole, never half of the new one. The file's previous content is first kept as
+/// `<path>.bak` (one previous copy, replaced on each write), but only when that content is a
+/// draft map this build can read: an unreadable file is never copied over the last good `.bak`.
 fn write_with_backup(path: &std::path::Path, json: &str) -> std::io::Result<()> {
-    if path.exists() {
-        let _ = std::fs::copy(path, sibling(path, ".bak"));
+    if let Ok(current) = std::fs::read(path) {
+        if parses_as_map(&current) {
+            let _ = std::fs::write(sibling(path, ".bak"), &current);
+        }
     }
-    std::fs::write(path, json)
+    let tmp = sibling(path, ".tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Persists per-project onboarding drafts to `<data_dir>/camerata/onboarding-draft.json`
@@ -38,7 +56,7 @@ pub struct DraftStore {
     path: Option<Arc<PathBuf>>,
     mem: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     /// Set when the file on disk could not be read at start and was set aside; the operator is
-    /// told on the next read of the draft, and it clears when the first new draft is written.
+    /// told once, on the next read of the draft ([`Self::take_unreadable_notice`]).
     notice: Arc<Mutex<Option<String>>>,
 }
 
@@ -48,32 +66,50 @@ impl DraftStore {
         Self::default()
     }
 
-    /// Persist to (and rehydrate from) `path`. A file in the OLD single-draft shape (a
-    /// bare draft object, pre-per-project) fails to parse as a map and is dropped — a
-    /// one-time loss on upgrade (re-scan to recreate); going forward it's a map.
+    /// Persist to (and rehydrate from) `path`. A file this build cannot read (not UTF-8, not a
+    /// draft map such as the old bare-draft shape, or a read error) is never dropped: it is
+    /// copied aside to a timestamped `.unreadable-<seconds>` file, the operator is told, and the
+    /// store starts empty.
     pub fn at(path: PathBuf) -> Self {
         let mut notice = None;
-        let mem = match std::fs::read_to_string(&path) {
-            Ok(s) => {
-                serde_json::from_str::<HashMap<String, serde_json::Value>>(&s).unwrap_or_else(|e| {
-                    // A file we cannot read as a map is never dropped: it is set aside, so the
-                    // first flush of an empty map cannot overwrite the only copy.
-                    let aside = sibling(&path, ".unreadable");
-                    eprintln!(
-                        "[camerata-server] {} could not be read ({e}); kept untouched at {}",
-                        path.display(),
-                        aside.display()
-                    );
-                    let _ = std::fs::write(&aside, s);
-                    notice = Some(format!(
-                        "The saved onboarding draft file could not be read, so no earlier review \
-                         was restored. The file was kept untouched at {}. Nothing was deleted.",
-                        aside.display()
+        let mem = match std::fs::read(&path) {
+            Ok(bytes) => match std::str::from_utf8(&bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|s| {
+                    serde_json::from_str::<HashMap<String, serde_json::Value>>(s)
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(map) => map,
+                Err(why) => {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let aside = sibling(&path, &format!(".unreadable-{secs}"));
+                    notice = Some(Self::aside_notice(
+                        &path,
+                        &aside,
+                        &why,
+                        std::fs::write(&aside, &bytes),
                     ));
                     HashMap::new()
-                })
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => {
+                // The file exists but cannot be read (permissions, I/O error): nothing is
+                // written over it until the operator is told.
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let aside = sibling(&path, &format!(".unreadable-{secs}"));
+                notice = Some(Self::aside_notice(
+                    &path,
+                    &aside,
+                    &e.to_string(),
+                    std::fs::copy(&path, &aside).map(|_| ()),
+                ));
+                HashMap::new()
             }
-            Err(_) => HashMap::new(),
         };
         Self {
             path: Some(Arc::new(path)),
@@ -82,20 +118,50 @@ impl DraftStore {
         }
     }
 
-    /// Why no draft could be restored, when the draft file on disk was unreadable at start and
-    /// nothing has been saved since. `None` otherwise.
-    pub fn unreadable_notice(&self) -> Option<String> {
-        self.notice.lock().ok().and_then(|n| n.clone())
+    /// The operator-facing words for a draft file that was set aside, also printed to stderr.
+    fn aside_notice(
+        path: &std::path::Path,
+        aside: &std::path::Path,
+        why: &str,
+        copied: std::io::Result<()>,
+    ) -> String {
+        eprintln!(
+            "[camerata-server] {} could not be read ({why}); set aside at {}",
+            path.display(),
+            aside.display()
+        );
+        let kept = match copied {
+            Ok(()) => format!("A copy was kept untouched at {}.", aside.display()),
+            Err(e) => format!(
+                "A copy could not be made ({e}); the file itself at {} was left as it was.",
+                path.display()
+            ),
+        };
+        format!(
+            "The saved onboarding draft file could not be read, so no earlier review was restored. \
+             {kept} The draft saved before the last save, when there was one, is the recovery \
+             copy at {}. Nothing was deleted.",
+            sibling(path, ".bak").display()
+        )
     }
 
-    /// Best-effort flush of the whole map to disk; the in-memory mirror is authoritative.
+    /// Why no draft could be restored, when the draft file on disk was unreadable at start and
+    /// nothing has been saved since. Taking it clears it: the operator is told once, and what
+    /// they do next (start again, save) is not blocked by a message that keeps coming back.
+    pub fn take_unreadable_notice(&self) -> Option<String> {
+        self.notice.lock().ok().and_then(|mut n| n.take())
+    }
+
+    /// Best-effort flush of the whole map to disk; the in-memory mirror is authoritative. The
+    /// unreadable-file notice is dropped only once a write has succeeded.
     fn flush(&self) {
         let Some(p) = &self.path else { return };
         let Ok(map) = self.mem.lock() else { return };
         if let Ok(s) = serde_json::to_string(&*map) {
-            let _ = write_with_backup(p.as_ref().as_path(), &s);
-            if let Ok(mut n) = self.notice.lock() {
-                *n = None;
+            if write_with_backup(p.as_ref().as_path(), &s).is_ok() {
+                if let Ok(mut n) = self.notice.lock() {
+                    *n = None;
+                }
             }
         }
     }
@@ -108,8 +174,19 @@ impl DraftStore {
             .and_then(|m| m.get(project_id).cloned())
     }
 
+    /// Record, inside `map`, that `project_id`'s draft was discarded at `at`.
+    fn stamp_cleared(map: &mut HashMap<String, serde_json::Value>, project_id: &str, at: &str) {
+        let entry = map
+            .entry(CLEARED_KEY.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(o) = entry.as_object_mut() {
+            o.insert(project_id.to_string(), serde_json::json!(at));
+        }
+    }
+
     /// Drop `project_id`'s draft and write the file; when the write fails nothing is dropped and
-    /// the error is returned.
+    /// the error is returned. The project's discard stamp goes too (this is the project's
+    /// deletion, which must leave nothing of it behind).
     pub fn clear_checked(&self, project_id: &str) -> std::io::Result<()> {
         let mut m = self
             .mem
@@ -117,6 +194,9 @@ impl DraftStore {
             .map_err(|_| std::io::Error::other("draft store mutex poisoned"))?;
         let mut kept = m.clone();
         kept.remove(project_id);
+        if let Some(o) = kept.get_mut(CLEARED_KEY).and_then(|v| v.as_object_mut()) {
+            o.remove(project_id);
+        }
         if let Some(p) = &self.path {
             let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
             write_with_backup(p.as_ref().as_path(), &json)?;
@@ -140,20 +220,32 @@ impl DraftStore {
         self.flush();
     }
 
-    /// Put a finished run's `report` into `project_id`'s draft as its `audit`, when the draft is
-    /// of the same repos and holds no audit yet: the review the run produced must be reopenable
-    /// even when no screen was mounted to receive it. Never replaces an audit already there.
+    /// Put a finished run's report into `project_id`'s draft as its `audit`, so the review the
+    /// run produced is reopenable even when no screen was mounted to receive it. `report` is
+    /// built only when the run is going to be adopted. Adopted when ALL hold:
+    /// - the draft exists and was scanned over exactly `repos` (same repos, same order);
+    /// - the run finished after the draft was last discarded (a draft with no discard stamp,
+    ///   saved before stamps existed, takes any run);
+    /// - the draft has no audit, or its audit was itself adopted from an earlier run and this
+    ///   run is newer. An audit the operator's own screen saved is never replaced.
+    ///
     /// Returns whether the draft changed.
     pub fn adopt_audit(
         &self,
         project_id: &str,
         repos: &[String],
-        report: serde_json::Value,
+        finished_at: &str,
+        report: impl FnOnce() -> serde_json::Value,
     ) -> bool {
         let changed = {
             let Ok(mut m) = self.mem.lock() else {
                 return false;
             };
+            let stamp = m
+                .get(CLEARED_KEY)
+                .and_then(|c| c.get(project_id))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             let Some(draft) = m.get_mut(project_id).and_then(|d| d.as_object_mut()) else {
                 return false;
             };
@@ -167,13 +259,38 @@ impl DraftStore {
                             .zip(repos)
                             .all(|(a, b)| a.as_str() == Some(b.as_str()))
                 });
-            let has_audit = draft.get("audit").is_some_and(|a| !a.is_null());
-            if !same_scan || has_audit {
-                false
-            } else {
-                draft.insert("audit".to_string(), report);
-                true
+            if !same_scan {
+                return false;
             }
+            if let Some(stamp) = stamp {
+                match (instant(finished_at), instant(&stamp)) {
+                    (Some(done), Some(cleared)) if done > cleared => {}
+                    _ => return false,
+                }
+            }
+            let audit = draft.get("audit").filter(|a| !a.is_null());
+            if let Some(audit) = audit {
+                let adopted = draft
+                    .get("audit_adopted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let held_at = audit
+                    .get("provenance")
+                    .and_then(|p| p.get("finished_at"))
+                    .and_then(|v| v.as_str())
+                    .and_then(instant);
+                let newer = match (instant(finished_at), held_at) {
+                    (Some(done), Some(held)) => done > held,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+                if !(adopted && newer) {
+                    return false;
+                }
+            }
+            draft.insert("audit".to_string(), report());
+            draft.insert("audit_adopted".to_string(), serde_json::json!(true));
+            true
         };
         if changed {
             self.flush();
@@ -181,13 +298,30 @@ impl DraftStore {
         changed
     }
 
-    /// Drop `project_id`'s draft (onboarding completed, or the architect started fresh).
+    /// Drop `project_id`'s draft (onboarding completed, or the architect started fresh), and
+    /// remember when: an inspection that finished before now is not this project's next draft.
     pub fn clear(&self, project_id: &str) {
+        self.clear_at(
+            project_id,
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        );
+    }
+
+    /// [`Self::clear`] at a stated moment (RFC 3339).
+    pub fn clear_at(&self, project_id: &str, at: &str) {
         if let Ok(mut m) = self.mem.lock() {
             m.remove(project_id);
+            Self::stamp_cleared(&mut m, project_id, at);
         }
         self.flush();
     }
+}
+
+/// An RFC 3339 timestamp as an instant, whatever its offset or fraction.
+fn instant(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&chrono::Utc))
 }
 
 #[cfg(test)]

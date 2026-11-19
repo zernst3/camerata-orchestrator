@@ -3496,8 +3496,13 @@ pub(crate) async fn start_audit_job(
                     // (when it has one for these repos) even if no screen is mounted to
                     // receive it: a run finished while the screen was closed must still be
                     // reopenable with "Continue where you left off".
-                    if let Ok(v) = serde_json::to_value(&report) {
-                        state.draft.adopt_audit(id, &report.repos, v);
+                    if let Some(stored) = state.get_last_scan(id) {
+                        state.draft.adopt_audit(
+                            id,
+                            &stored.repos,
+                            &stored.provenance.finished_at,
+                            || serde_json::to_value(&stored).unwrap_or(serde_json::Value::Null),
+                        );
                     }
                 }
                 // No project: only the project-agnostic fallback can hold it, and there is no

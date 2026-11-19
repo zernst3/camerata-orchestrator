@@ -688,7 +688,9 @@ pub(in crate::cockpit) async fn load_onboarding_draft(
         .send()
         .await
         .map_err(|e| {
-            DraftLoadError::told(format!("The saved onboarding draft could not be loaded ({e})."))
+            DraftLoadError::told(format!(
+                "The saved onboarding draft could not be loaded ({e})."
+            ))
         })?;
     let status = resp.status();
     if !status.is_success() {
@@ -705,9 +707,14 @@ pub(in crate::cockpit) async fn load_onboarding_draft(
                 }),
         ));
     }
-    let value = resp.json::<Option<serde_json::Value>>().await.map_err(|e| {
-        DraftLoadError::told(format!("The saved onboarding draft could not be loaded ({e})."))
-    })?;
+    let value = resp
+        .json::<Option<serde_json::Value>>()
+        .await
+        .map_err(|e| {
+            DraftLoadError::told(format!(
+                "The saved onboarding draft could not be loaded ({e})."
+            ))
+        })?;
     let Some(value) = value else { return Ok(None) };
     serde_json::from_value::<OnboardingDraft>(value.clone())
         .map(Some)

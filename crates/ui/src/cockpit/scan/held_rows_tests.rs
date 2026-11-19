@@ -1230,7 +1230,10 @@ async fn an_unreadable_draft_switches_off_only_the_draft_save_never_a_decision()
             break;
         }
     }
-    assert!(html.contains("camerata-finding-pane"), "the Queue never drew: {html}");
+    assert!(
+        html.contains("camerata-finding-pane"),
+        "the Queue never drew: {html}"
+    );
     let request = screen_request(&vdom);
     confirm_in_the_table(&mut vdom, request, key_of(0)).await;
     pump_tours(&mut vdom, 100, &mut tours).await;
@@ -1246,7 +1249,10 @@ async fn an_unreadable_draft_switches_off_only_the_draft_save_never_a_decision()
         .iter()
         .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
         .count();
-    assert_eq!(draft_posts, 0, "nothing was written over the unreadable draft");
+    assert_eq!(
+        draft_posts, 0,
+        "nothing was written over the unreadable draft"
+    );
     assert!(
         rendered(&vdom).contains("is not saving this review"),
         "the banner is still there after the decision"
