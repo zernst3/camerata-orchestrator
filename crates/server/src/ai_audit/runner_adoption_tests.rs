@@ -636,6 +636,7 @@ async fn a_lazy_stage_is_built_in_ranges_and_sent_in_windows_on_the_batch_path()
         job: None,
         checkpoint: None,
         settings: StageSettings::default(),
+        feedback: None,
     };
     let out = run_stage(Stage::Calibration, &mut stage, StageMode::Batch, &ctx).await;
     assert!(out.is_complete(), "{:?}", out.failed);
@@ -667,6 +668,7 @@ async fn a_lazy_stage_in_parallel_mode_builds_ahead_only_by_a_range() {
         job: None,
         checkpoint: None,
         settings: StageSettings::default(),
+        feedback: None,
     };
     let out = run_stage(
         Stage::Calibration,

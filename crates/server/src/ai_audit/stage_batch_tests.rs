@@ -543,6 +543,7 @@ fn ctx<'a>(realtime: &'a dyn LlmPort, batch: Option<&'a dyn BatchApi>) -> StageC
         job: None,
         checkpoint: None,
         settings: settings(),
+        feedback: None,
     }
 }
 

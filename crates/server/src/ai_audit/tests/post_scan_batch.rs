@@ -33,6 +33,7 @@ fn capped(cap: f64) -> UsageMeter {
 const BATCH: StageRoute<'static> = StageRoute {
     batch: true,
     job: None,
+    feedback: None,
 };
 
 // ── fix generation ──────────────────────────────────────────────────────────────────────────

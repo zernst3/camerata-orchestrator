@@ -1326,6 +1326,7 @@ async fn resume_held_fixes(
         job: route.job,
         checkpoint: Some(&checkpoint),
         settings: stage_batch::StageSettings::default(),
+        feedback: route.feedback_for("Fix"),
     };
     let mut stage = FixRound {
         llm,
@@ -1492,6 +1493,7 @@ pub(super) async fn run_fix_specifics_round(
         job: route.job,
         checkpoint: checkpoint.as_ref(),
         settings: stage_batch::StageSettings::default(),
+        feedback: route.feedback_for("Fix"),
     };
     let outcome = stage_batch::run_stage(Stage::FixGeneration, &mut stage, mode, &ctx).await;
     // What the runner could not get a reply for: those findings stay pending. The spend limit

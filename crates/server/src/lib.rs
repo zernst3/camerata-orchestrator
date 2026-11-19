@@ -2627,6 +2627,7 @@ async fn onboard_audit(
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
                 corpus.as_ref(),
             )
             .await;
@@ -2637,6 +2638,7 @@ async fn onboard_audit(
                 &review_controls,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
             )
             .await;
         }
@@ -3341,6 +3343,7 @@ pub(crate) async fn start_audit_job(
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                             corpus.as_ref(),
                         )
                         .await;
@@ -3352,6 +3355,7 @@ pub(crate) async fn start_audit_job(
                             &review_controls,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                         )
                         .await;
                     }),

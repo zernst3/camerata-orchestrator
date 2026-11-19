@@ -3170,17 +3170,27 @@ pub async fn audit_repos_with_llm_controlled(
                         let audited = if controls.finder
                             == crate::ai_audit::agent_finder::FinderChoice::Agent
                         {
-                            match Box::pin(crate::ai_audit::agent_finder::run::find_repo_for_run(
-                                llm,
-                                spec,
-                                &part.changed,
-                                &audit_rules,
-                                corpus,
-                                &controls,
-                                chosen_options,
-                                &backend_resolution,
-                                Some(&meter),
-                            ))
+                            match Box::pin(
+                                crate::ai_audit::agent_finder::run::with_finder_activity(
+                                    feedback.map(|(store, key)| {
+                                        crate::ai_audit::agent_finder::run::FinderActivity::new(
+                                            store.clone(),
+                                            key,
+                                        )
+                                    }),
+                                    crate::ai_audit::agent_finder::run::find_repo_for_run(
+                                        llm,
+                                        spec,
+                                        &part.changed,
+                                        &audit_rules,
+                                        corpus,
+                                        &controls,
+                                        chosen_options,
+                                        &backend_resolution,
+                                        Some(&meter),
+                                    ),
+                                ),
+                            )
                             .await
                             {
                                 Ok((found, rules, recs, failed_parts, samples, extras)) => {
@@ -3660,6 +3670,7 @@ pub async fn audit_repos_with_llm_controlled(
                             crate::ai_audit::stage_batch::StageRoute {
                                 batch: mode == crate::ai_audit::ScanMode::Batch,
                                 job,
+                                feedback,
                             },
                         )
                         .await;

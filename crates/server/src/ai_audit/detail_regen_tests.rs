@@ -3167,6 +3167,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, None).await;
 
@@ -3210,6 +3211,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, None).await;
 
@@ -3242,6 +3244,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, Some(&meter)).await;
 
@@ -3293,6 +3296,7 @@ mod resume_by_member {
     const BATCH: StageRoute<'static> = StageRoute {
         batch: true,
         job: None,
+        feedback: None,
     };
 
     fn at(line: usize) -> Finding {

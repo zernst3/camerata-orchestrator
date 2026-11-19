@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use camerata_api_types::review::{DisagreementField, EscalationReason, OutlierReason};
 
-use super::stage_batch::{run_stage, ItemReject, StageCtx, StageItems, StageMode, StageSettings};
+use super::stage_batch::{
+    run_stage, ItemReject, StageCtx, StageFeedback, StageItems, StageMode, StageSettings,
+};
 use super::*;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 use crate::onboard::{Finding, ScanReport};
@@ -1796,6 +1798,8 @@ pub struct GroupReviewConfig<'a> {
     pub cli_backend: bool,
     /// The job the stage reports to: its activity is touched and its progress set as calls end.
     pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
+    /// Where the stage shows in Agent activity: the transcript store and the key the panel reads.
+    pub feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
 }
 
 /// What a group review run came to.
@@ -1979,6 +1983,11 @@ pub async fn review_groups(
         job: cfg.job,
         checkpoint: chunk_checkpoint.as_ref(),
         settings: StageSettings::default(),
+        feedback: cfg.feedback.map(|(store, key)| StageFeedback {
+            store,
+            key,
+            name: "Group review",
+        }),
     };
     let mode = StageMode::Parallel {
         max_in_flight: cfg.max_in_flight.max(1),
@@ -2069,6 +2078,11 @@ pub async fn review_groups(
         let summary_ctx = StageCtx {
             checkpoint: summary_checkpoint.as_ref(),
             settings: stage_ctx.settings.clone(),
+            feedback: cfg.feedback.map(|(store, key)| StageFeedback {
+                store,
+                key,
+                name: "Group review, rule summaries",
+            }),
             ..stage_ctx
         };
         Some(run_stage(Stage::GroupReview, &mut summaries, mode, &summary_ctx).await)
@@ -2412,6 +2426,7 @@ pub async fn review_scan_report(
     rules: &[(String, String)],
     cli_backend: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Option<GroupReviewOutcome> {
     if report.findings.is_empty() {
@@ -2442,6 +2457,7 @@ pub async fn review_scan_report(
         },
         cli_backend,
         job,
+        feedback,
     };
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
     report.provenance.group_review_model = Some(model);

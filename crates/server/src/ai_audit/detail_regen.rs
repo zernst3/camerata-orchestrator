@@ -1612,6 +1612,7 @@ async fn run_detail_round(
         job: route.job,
         checkpoint: checkpoint.as_ref(),
         settings: StageSettings::default(),
+        feedback: route.feedback_for("Detail rewrite"),
     };
     let outcome = run_stage(Stage::DetailRegeneration, &mut stage, mode, &ctx).await;
     // What the runner could not get a reply for: those findings stay pending. A refusal by the
@@ -1710,6 +1711,7 @@ async fn resume_held_details(
         job: route.job,
         checkpoint: Some(&checkpoint),
         settings: StageSettings::default(),
+        feedback: route.feedback_for("Detail rewrite"),
     };
     let mut stage = DetailRound {
         llm,
