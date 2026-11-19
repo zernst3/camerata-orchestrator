@@ -1026,3 +1026,47 @@ async fn continue_restores_the_review_from_the_saved_inspection_e2e() {
     let (_, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
     assert!(json(&body)["audit"].is_null(), "another scan's draft keeps no audit");
 }
+
+/// Reading the draft never replaces a review the draft already holds, even when a saved
+/// inspection of the same repos exists: the operator's own saved review wins.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn continue_never_replaces_a_review_the_draft_already_holds_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    inspect(fx).await;
+    let scan = serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    let mine = serde_json::json!({ "repos": [REPO], "findings": [], "marker": "the operator's own review" });
+    fx.state
+        .draft
+        .save(&pid, serde_json::json!({ "scan": scan, "audit": mine.clone() }));
+
+    let (_, body) = call(&fx.state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert_eq!(json(&body)["audit"], mine, "the held review is not replaced");
+}
+
+/// A draft file the app cannot read is set aside untouched, and the operator is told on the
+/// next read of the draft (the screen shows the message), not left with a silent fresh start.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn an_unreadable_draft_file_is_reported_to_the_operator_e2e() {
+    let rig = rig();
+    let fx = &rig.fx;
+    let file = rig.fx.root.join("data").join("onboarding-draft.json");
+    let torn = r#"{"p1": {"scan": {"repos": ["a/b"]}, "audit": {"findings": ["#;
+    std::fs::write(&file, torn).unwrap();
+    let state = fx.restarted();
+    state.projects.set_active(&fx.project_id);
+
+    let (status, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&body));
+    let message = json(&body)["message"].as_str().unwrap_or_default().to_string();
+    assert!(message.contains("could not be read"), "{message}");
+    assert!(message.contains("onboarding-draft.json.unreadable"), "{message}");
+    assert_eq!(
+        std::fs::read_to_string(file.with_file_name("onboarding-draft.json.unreadable")).unwrap(),
+        torn,
+        "the unreadable file is kept untouched"
+    );
+}

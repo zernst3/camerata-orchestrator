@@ -56,8 +56,6 @@ pub mod decisions;
 pub mod decompose;
 pub mod dep_audit;
 pub mod draft;
-#[cfg(test)]
-mod draft_tests;
 pub mod edits;
 pub mod enforcement_ledger;
 pub mod engine_check;
@@ -5139,6 +5137,9 @@ mod model_input_chat_tests;
 
 #[cfg(test)]
 mod site_key_paths_tests;
+
+#[cfg(test)]
+mod draft_tests;
 
 #[cfg(test)]
 mod tests;
