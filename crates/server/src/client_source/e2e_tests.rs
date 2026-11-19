@@ -971,14 +971,21 @@ async fn a_finished_run_lands_in_the_onboarding_draft_e2e() {
     let rig = rig();
     let fx = &rig.fx;
     let pid = fx.project_id.clone();
-    let scan = serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    let scan =
+        serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
     fx.state
         .draft
         .save(&pid, serde_json::json!({ "scan": scan, "audit": null }));
 
     inspect(fx).await;
 
-    let (_, body) = call(&fx.state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
+    let (_, body) = call(
+        &fx.state,
+        "GET",
+        "/api/onboard/draft",
+        serde_json::json!(null),
+    )
+    .await;
     let draft = json(&body);
     assert!(
         draft["audit"]["findings"]
@@ -999,7 +1006,8 @@ async fn continue_restores_the_review_from_the_saved_inspection_e2e() {
     let pid = fx.project_id.clone();
     inspect(fx).await;
     // What the app held before the fix: a draft with the scan and no review.
-    let scan = serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    let scan =
+        serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
     fx.state.draft.save(
         &pid,
         serde_json::json!({ "scan": scan.clone(), "audit": null, "dispositions": {} }),
@@ -1019,12 +1027,18 @@ async fn continue_restores_the_review_from_the_saved_inspection_e2e() {
     assert_eq!(draft["scan"], scan, "the rest of the draft is untouched");
 
     // A draft of other repos is not given this inspection's review.
-    let other = serde_json::to_value(crate::onboard::ScanReport::gated(&["acme/other".to_string()])).unwrap();
+    let other = serde_json::to_value(crate::onboard::ScanReport::gated(&[
+        "acme/other".to_string()
+    ]))
+    .unwrap();
     state
         .draft
         .save(&pid, serde_json::json!({ "scan": other, "audit": null }));
     let (_, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
-    assert!(json(&body)["audit"].is_null(), "another scan's draft keeps no audit");
+    assert!(
+        json(&body)["audit"].is_null(),
+        "another scan's draft keeps no audit"
+    );
 }
 
 /// Reading the draft never replaces a review the draft already holds, even when a saved
@@ -1036,14 +1050,26 @@ async fn continue_never_replaces_a_review_the_draft_already_holds_e2e() {
     let fx = &rig.fx;
     let pid = fx.project_id.clone();
     inspect(fx).await;
-    let scan = serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
+    let scan =
+        serde_json::to_value(crate::onboard::ScanReport::gated(&[REPO.to_string()])).unwrap();
     let mine = serde_json::json!({ "repos": [REPO], "findings": [], "marker": "the operator's own review" });
-    fx.state
-        .draft
-        .save(&pid, serde_json::json!({ "scan": scan, "audit": mine.clone() }));
+    fx.state.draft.save(
+        &pid,
+        serde_json::json!({ "scan": scan, "audit": mine.clone() }),
+    );
 
-    let (_, body) = call(&fx.state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
-    assert_eq!(json(&body)["audit"], mine, "the held review is not replaced");
+    let (_, body) = call(
+        &fx.state,
+        "GET",
+        "/api/onboard/draft",
+        serde_json::json!(null),
+    )
+    .await;
+    assert_eq!(
+        json(&body)["audit"],
+        mine,
+        "the held review is not replaced"
+    );
 }
 
 /// A draft file the app cannot read is set aside untouched, and the operator is told on the
@@ -1060,10 +1086,21 @@ async fn an_unreadable_draft_file_is_reported_to_the_operator_e2e() {
     state.projects.set_active(&fx.project_id);
 
     let (status, body) = call(&state, "GET", "/api/onboard/draft", serde_json::json!(null)).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&body));
-    let message = json(&body)["message"].as_str().unwrap_or_default().to_string();
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let message = json(&body)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     assert!(message.contains("could not be read"), "{message}");
-    assert!(message.contains("onboarding-draft.json.unreadable"), "{message}");
+    assert!(
+        message.contains("onboarding-draft.json.unreadable"),
+        "{message}"
+    );
     assert_eq!(
         std::fs::read_to_string(file.with_file_name("onboarding-draft.json.unreadable")).unwrap(),
         torn,

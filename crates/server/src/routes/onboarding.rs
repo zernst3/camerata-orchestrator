@@ -849,9 +849,7 @@ pub(crate) fn process_rule_config_for(
         .unwrap_or_default()
 }
 
-pub(crate) async fn onboard_draft_get(
-    State(state): State<AppState>,
-) -> axum::response::Response {
+pub(crate) async fn onboard_draft_get(State(state): State<AppState>) -> axum::response::Response {
     let pid = active_project_id(&state);
     // A draft file that could not be read at start was set aside untouched: say so, instead of
     // answering "no draft" as though nothing had ever been saved.

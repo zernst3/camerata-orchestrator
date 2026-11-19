@@ -216,13 +216,17 @@ async fn continue_on_a_draft_that_got_its_review_back_lands_on_the_restored_revi
         !text.contains("0 findings"),
         "it is not the blank scan: {text}"
     );
-    assert!(toast_messages().is_empty(), "no error toast: {:?}", toast_messages());
+    assert!(
+        toast_messages().is_empty(),
+        "no error toast: {:?}",
+        toast_messages()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
-async fn opening_a_project_whose_draft_cannot_be_read_says_so_and_does_not_pretend_nothing_is_saved()
-{
+async fn opening_a_project_whose_draft_cannot_be_read_says_so_and_does_not_pretend_nothing_is_saved(
+) {
     let server = server_with_draft(ResponseTemplate::new(200).set_body_json(serde_json::json!({
         "scan": scan_with(serde_json::json!([])),
         "audit": { "repos": ["me/api"], "findings": 7 },

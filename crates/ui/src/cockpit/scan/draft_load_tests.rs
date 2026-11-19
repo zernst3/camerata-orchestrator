@@ -54,7 +54,10 @@ async fn the_servers_own_refusal_is_shown_when_the_draft_file_was_unreadable() {
     .await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let message = load_onboarding_draft().await.err().expect("refused");
-    assert!(message.contains("kept untouched at /x/onboarding-draft.json.unreadable"), "{message}");
+    assert!(
+        message.contains("kept untouched at /x/onboarding-draft.json.unreadable"),
+        "{message}"
+    );
 }
 
 #[tokio::test]

@@ -54,8 +54,8 @@ impl DraftStore {
     pub fn at(path: PathBuf) -> Self {
         let mut notice = None;
         let mem = match std::fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str::<HashMap<String, serde_json::Value>>(&s)
-                .unwrap_or_else(|e| {
+            Ok(s) => {
+                serde_json::from_str::<HashMap<String, serde_json::Value>>(&s).unwrap_or_else(|e| {
                     // A file we cannot read as a map is never dropped: it is set aside, so the
                     // first flush of an empty map cannot overwrite the only copy.
                     let aside = sibling(&path, ".unreadable");
@@ -71,7 +71,8 @@ impl DraftStore {
                         aside.display()
                     ));
                     HashMap::new()
-                }),
+                })
+            }
             Err(_) => HashMap::new(),
         };
         Self {
@@ -143,7 +144,12 @@ impl DraftStore {
     /// of the same repos and holds no audit yet: the review the run produced must be reopenable
     /// even when no screen was mounted to receive it. Never replaces an audit already there.
     /// Returns whether the draft changed.
-    pub fn adopt_audit(&self, project_id: &str, repos: &[String], report: serde_json::Value) -> bool {
+    pub fn adopt_audit(
+        &self,
+        project_id: &str,
+        repos: &[String],
+        report: serde_json::Value,
+    ) -> bool {
         let changed = {
             let Ok(mut m) = self.mem.lock() else {
                 return false;
@@ -157,7 +163,9 @@ impl DraftStore {
                 .and_then(|r| r.as_array())
                 .is_some_and(|r| {
                     r.len() == repos.len()
-                        && r.iter().zip(repos).all(|(a, b)| a.as_str() == Some(b.as_str()))
+                        && r.iter()
+                            .zip(repos)
+                            .all(|(a, b)| a.as_str() == Some(b.as_str()))
                 });
             let has_audit = draft.get("audit").is_some_and(|a| !a.is_null());
             if !same_scan || has_audit {
