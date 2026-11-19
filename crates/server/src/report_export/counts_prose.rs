@@ -156,8 +156,13 @@ pub(crate) fn methodology_line(c: &ReportCounts, state: ReviewState) -> String {
     );
     let review = if state.is_draft() {
         "This export has not yet had a human review."
+    } else if c.review.reviewed_in_person == 0 {
+        "No place was reviewed in person; the engine checked every place against the code."
     } else {
-        "Reviewed by a human reviewer."
+        // Not "reviewed by a human reviewer": a person read only part of the places, and the
+        // method text states how many.
+        "A person has ruled on part of this export; the Reviewed in person column of the All \
+         problems sheet shows which places."
     };
     format!("{core} {review}{}", suppressions_sentence(c))
 }

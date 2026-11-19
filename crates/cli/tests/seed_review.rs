@@ -37,7 +37,7 @@ fn seed_review_writes_a_project_and_a_second_run_into_the_same_folder_is_refused
     );
     assert!(stdout.contains("Seeded project proj-1"), "{stdout}");
     assert!(
-        stdout.contains("held 5"),
+        stdout.contains("held 7"),
         "the report carries the counts: {stdout}"
     );
     for store in [

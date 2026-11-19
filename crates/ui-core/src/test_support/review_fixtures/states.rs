@@ -1258,8 +1258,12 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 .collect();
             gate.merged_without_decision.clear();
             gate.node_decisions_missing_members.clear();
+            // The shell's strip counts the same rows the line does.
+            let mut shell = ds.shell.clone();
+            shell.counts.held = gate.rows_needing_a_decision();
+            shell.export_gate = gate.clone();
             StateFixture {
-                shell: shell_of(&ds),
+                shell: Loaded::Ready(shell),
                 body: Body::Export(ExportBody { gate }),
             }
         }

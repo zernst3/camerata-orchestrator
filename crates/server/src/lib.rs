@@ -1114,6 +1114,30 @@ impl AppState {
         guard.clone()
     }
 
+    /// Drop the in-memory copies of a project's last completed scan: its entry in `last_scan`,
+    /// and the project-agnostic `recent_scan` when that scan covered one of the project's repos
+    /// (it may be this project's). Returns how many copies were dropped. Used when a project and
+    /// all its data are deleted; the persisted inspections are removed by the caller.
+    pub(crate) fn forget_project_scans(&self, project_id: &str, repos: &[String]) -> usize {
+        let mut dropped = 0;
+        let mut last = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
+        if last.remove(project_id).is_some() {
+            dropped += 1;
+        }
+        drop(last);
+        let mut recent = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
+        let covers_project = recent.as_ref().is_some_and(|r| {
+            r.repos
+                .iter()
+                .any(|scanned| repos.iter().any(|own| own.eq_ignore_ascii_case(scanned)))
+        });
+        if covers_project {
+            *recent = None;
+            dropped += 1;
+        }
+        dropped
+    }
+
     /// Build state seeded with the representative spine + seeded open clarifications,
     /// native provider. Used by tests and the creds-free demo default.
     pub fn seeded() -> Self {
@@ -1728,6 +1752,14 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/repos/:repo/source/delete",
             post(crate::client_source::delete::delete),
         )
+        .route(
+            "/api/projects/:id/delete-all-preview",
+            post(crate::client_source::delete_project::delete_all_preview),
+        )
+        .route(
+            "/api/projects/:id/delete-all",
+            post(crate::client_source::delete_project::delete_all_handler),
+        )
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
         .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))
         .route("/api/projects/:id/branch", post(checkout_branch))
@@ -2091,7 +2123,11 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
     // comes due. Spawned here (not in `router`) so tests that build the router don't
     // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
-    crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
+    crate::auto_fire::spawn_routine_scheduler(
+        state.routines.clone(),
+        state.escalations.clone(),
+        state.source_ops.clone(),
+    );
 
     // Stall sweep (LIFECYCLE-6): periodically auto-cancel AUTONOMOUS runs that have stalled
     // (no activity past the active project's routine threshold). Watched runs stay alert-only.
@@ -2293,6 +2329,14 @@ async fn onboard_audit(
             return Json(r);
         }
     };
+    // A project being deleted with all its data starts nothing.
+    if let Some(why) = state
+        .projects
+        .active()
+        .and_then(|p| state.source_ops.deleting_refusal(&p.id))
+    {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // The client-engagement lock, before any repository is located or read.
     if let Some(why) = client_lock_refusal_for_scan(
         state.projects.active().as_ref(),
@@ -2363,6 +2407,8 @@ async fn onboard_audit(
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
+    // However this scan ends, no row of it stays "running".
+    let _sweep = crate::transcript::SweepOnDrop::new(state.transcripts.clone(), SCAN_AUDIT_KEY);
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
     let active_project = state.projects.active();
     let project_id = active_project.as_ref().map(|p| p.id.clone());
@@ -2627,6 +2673,7 @@ async fn onboard_audit(
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
                 corpus.as_ref(),
             )
             .await;
@@ -2637,6 +2684,7 @@ async fn onboard_audit(
                 &review_controls,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
             )
             .await;
         }
@@ -2762,6 +2810,15 @@ pub(crate) async fn start_audit_job(
     // The job is stamped with its project (ROUTES-5, so a project's deep-report export finds ITS
     // OWN latest deep report) AND it seeds the incremental-scan manifest lookup below.
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // A project being deleted with all its data starts nothing: the job fails at once.
+    if let Some(why) = project_id
+        .as_deref()
+        .and_then(|id| state.source_ops.deleting_refusal(id))
+    {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
     // The client-engagement lock, before any repository is located or read: the job fails at
     // once with the reason, and nothing is spawned.
     if let Some(why) = client_lock_refusal_for_scan(
@@ -2847,7 +2904,10 @@ pub(crate) async fn start_audit_job(
         // never got to handle.
         let body_jobs = jobs.clone();
         let body_jid = jid.clone();
+        let sweep = crate::transcript::SweepOnDrop::new(transcripts.clone(), SCAN_AUDIT_KEY);
         run_job_body_with_panic_guard(&jobs, &jid, async move {
+            // Held to the end of the body (normal end, cancel, panic): closes any row left running.
+            let _sweep = sweep;
             if sources.is_empty() {
                 body_jobs.fail(
                     &body_jid,
@@ -3341,6 +3401,7 @@ pub(crate) async fn start_audit_job(
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                             corpus.as_ref(),
                         )
                         .await;
@@ -3352,6 +3413,7 @@ pub(crate) async fn start_audit_job(
                             &review_controls,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                         )
                         .await;
                     }),

@@ -118,7 +118,7 @@ fn worktrees_inside(checkout: &Path, worktrees: &[PathBuf]) -> Vec<PathBuf> {
 
 /// Session files recorded for deletion: for each id, every `<claude dir>/*/<id>.jsonl` file and
 /// `<claude dir>/*/<id>/` directory that exists. Blocking.
-fn find_session_paths(claude_dir: &Path, id: &str) -> Vec<(PathBuf, bool)> {
+pub(super) fn find_session_paths(claude_dir: &Path, id: &str) -> Vec<(PathBuf, bool)> {
     let mut out = Vec::new();
     let Ok(read) = std::fs::read_dir(claude_dir) else {
         return out;
@@ -348,7 +348,7 @@ pub async fn plan(state: &AppState, target: &GuardedTarget) -> PurgePlan {
 }
 
 /// Remove one file or directory tree, mapping "was not there" to `AlreadyAbsent`.
-fn remove_path(path: &Path) -> PurgeOutcome {
+pub(super) fn remove_path(path: &Path) -> PurgeOutcome {
     if let Err(blocked) = ensure_not_real_location_in_test(path) {
         return PurgeOutcome::Failed {
             error: blocked.to_string(),

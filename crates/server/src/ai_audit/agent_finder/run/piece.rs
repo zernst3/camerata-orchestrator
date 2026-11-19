@@ -35,6 +35,62 @@ pub(super) struct Shared<'a> {
     pub meter: Option<&'a UsageMeter>,
     /// How many pieces (and halves of refused pieces) the repository is reviewed in.
     pub n_pieces: usize,
+    /// Where each model call shows in Agent activity; `None` shows nothing.
+    pub activity: Option<super::FinderActivity>,
+}
+
+impl Shared<'_> {
+    /// The first run of a call, shown in Agent activity from the moment it starts.
+    pub(super) async fn run_shown(
+        &self,
+        stage: &str,
+        room: &Room,
+        brief: &str,
+        limits: &PieceLimits,
+    ) -> anyhow::Result<AgentRun> {
+        let session = self.session_for(stage);
+        if let Some(a) = &self.activity {
+            a.begin(&session, &self.role_for(stage), brief);
+        }
+        let result = self.agent.run(room, brief, limits).await;
+        if let Some(a) = &self.activity {
+            a.end(&session, &result);
+        }
+        result
+    }
+
+    /// One more turn on a conversation, shown in Agent activity the same way.
+    pub(super) async fn follow_up_shown(
+        &self,
+        stage: &str,
+        room: &Room,
+        prior: &AgentRun,
+        turn: &FollowUp,
+        limits: &PieceLimits,
+    ) -> anyhow::Result<AgentRun> {
+        let session = self.session_for(stage);
+        if let Some(a) = &self.activity {
+            let mut prompt = turn.message.clone();
+            if !turn.send_files.is_empty() {
+                prompt.push_str("\n\nFiles sent in full:\n");
+                prompt.push_str(&turn.send_files.join("\n"));
+            }
+            a.begin(&session, &self.role_for(stage), &prompt);
+        }
+        let result = self.agent.follow_up(room, prior, turn, limits).await;
+        if let Some(a) = &self.activity {
+            a.end(&session, &result);
+        }
+        result
+    }
+
+    fn session_for(&self, stage: &str) -> String {
+        format!("finder:{}:{stage}", self.repo)
+    }
+
+    fn role_for(&self, stage: &str) -> String {
+        format!("{stage} ({})", self.repo)
+    }
 }
 
 /// The recorded conversation of a finished piece: what a resume replays.
@@ -1026,9 +1082,9 @@ pub(super) async fn converse(
     limits: &PieceLimits,
 ) -> Result<Vec<AgentRun>, anyhow::Error> {
     let mut runs: Vec<AgentRun> = Vec::new();
+    let label = format!("Finder, piece {} of {}", index + 1, shared.n_pieces);
     let first = shared
-        .agent
-        .run(room, super::super::brief_text::PIECE_BRIEF, limits)
+        .run_shown(&label, room, super::super::brief_text::PIECE_BRIEF, limits)
         .await?;
     meter_turns(shared, &first);
     runs.push(first);
@@ -1042,20 +1098,27 @@ pub(super) async fn converse(
             break;
         }
         let view = interpret(room, not_served, checklist, piece, &runs);
-        let turn = if !repaired && view.needs_repair() {
+        let (turn, step) = if !repaired && view.needs_repair() {
             repaired = true;
-            FollowUp::text(repair_message(&view))
+            (FollowUp::text(repair_message(&view)), "repair turn")
         } else if !sent && !view.unread_sendable.is_empty() {
             sent = true;
-            FollowUp::with_files(SEND_AGAIN_MESSAGE, &view.unread_sendable)
+            (
+                FollowUp::with_files(SEND_AGAIN_MESSAGE, &view.unread_sendable),
+                "unread files sent again",
+            )
         } else if !asked && view.needs_rules_follow_up() {
             asked = true;
-            FollowUp::text(rules_message(&view))
+            (FollowUp::text(rules_message(&view)), "missing rules turn")
         } else {
             break;
         };
         let prior = runs.last().expect("one run").clone();
-        match shared.agent.follow_up(room, &prior, &turn, limits).await {
+        let stage = format!("{label}, {step}");
+        match shared
+            .follow_up_shown(&stage, room, &prior, &turn, limits)
+            .await
+        {
             Ok(run) => {
                 meter_turns(shared, &run);
                 live = run.conversation.clone();
@@ -1072,6 +1135,5 @@ pub(super) async fn converse(
         }
     }
     shared.agent.release(&live);
-    let _ = index;
     Ok(runs)
 }

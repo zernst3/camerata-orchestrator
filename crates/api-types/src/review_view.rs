@@ -119,17 +119,23 @@ pub enum HoldReason {
     MergedWithoutDecision,
     /// The problem was split out of one a reviewer ruled out, and has no decision of its own.
     SplitOutWithoutDecision,
+    /// The problem is shown at critical severity and no reviewer decision is recorded for it.
+    CriticalWithoutDecision,
+    /// The finder was unsure the problem is real and no reviewer decision is recorded for it.
+    UnsureWithoutDecision,
 }
 
 impl HoldReason {
     /// Every reason, in the order the release gate runs its checks.
-    pub const ALL: [HoldReason; 6] = [
+    pub const ALL: [HoldReason; 8] = [
         Self::JunkContent,
         Self::EvidenceUnverified,
         Self::RestoredWithoutDecision,
         Self::SplitOutWithoutDecision,
         Self::MergedWithoutDecision,
         Self::EngineCheckNoWithoutCorrection,
+        Self::CriticalWithoutDecision,
+        Self::UnsureWithoutDecision,
     ];
 
     /// The reason in words, for the export-blocked panel.
@@ -141,6 +147,8 @@ impl HoldReason {
             Self::EngineCheckNoWithoutCorrection => "Engine Check said No, no correction yet",
             Self::MergedWithoutDecision => "merged with no decision record",
             Self::SplitOutWithoutDecision => "split out of a ruled-out problem, no decision",
+            Self::CriticalWithoutDecision => "critical, no decision",
+            Self::UnsureWithoutDecision => "the finder was unsure, no decision",
         }
     }
 }

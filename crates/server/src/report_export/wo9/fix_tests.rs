@@ -72,6 +72,12 @@ fn reviewed_of(
     apply_overlay(sealed, records, &[], &[])
 }
 
+/// [`reviewed_of`] for a test that releases the package: the rows the gate wants decided in person
+/// (critical or unsure) carry a decision, which the other tests leave out so a place stays open.
+fn reviewed_for_release(sealed: &SealedReport) -> ReviewedReport {
+    reviewed_of(sealed, &with_critical_and_unsure_decided(sealed, &[]))
+}
+
 fn options() -> ReportOptions {
     client_options()
 }
@@ -351,7 +357,7 @@ fn a_fix_decision_writes_one_record_per_member_and_the_merge_gate_accepts_it() {
 // ---- the release gate's one-fix-per-row check ------------------------------------------------
 
 fn released_secret_entries() -> std::collections::BTreeMap<String, Vec<u8>> {
-    let reviewed = reviewed_of(&secret_report(), &[]);
+    let reviewed = reviewed_for_release(&secret_report());
     released_entries(&reviewed, &options())
 }
 
@@ -452,7 +458,7 @@ fn tickets_equal_plan_rows_equal_fixes_with_open_places() {
 
 #[test]
 fn escalation_entries_equal_slots_and_top_three_fix_ids_are_distinct() {
-    let reviewed = reviewed_of(&secret_report(), &[]);
+    let reviewed = reviewed_for_release(&secret_report());
     let package = package_of(&reviewed, &options());
     let clean =
         crate::release_gate::fix_report_problems(&package.report_json, &package.findings_export);

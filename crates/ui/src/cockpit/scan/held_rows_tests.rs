@@ -403,6 +403,10 @@ async fn forty_held_rows_are_red_in_the_table_and_the_panel_is_one_line() {
         count(&html, "finding-row-held"),
         "every marked cell sits in a row with the red edge"
     );
+    assert!(
+        html.contains(">Held</"),
+        "the column header is drawn: {html}"
+    );
     assert!(html.contains("Held: decide before export"), "{html}");
     assert!(
         !html.contains(">Needs a decision<"),
@@ -954,5 +958,30 @@ async fn a_decision_in_the_table_reaches_the_export_line_through_the_store() {
     assert!(
         html.contains("Export blocked: 39 held rows need a decision"),
         "the export line did not follow the stored decision: {html}"
+    );
+    // The real results screen hosts the table in the container that fills its width and scrolls
+    // from the left edge (the rules are pinned in the gallery tests), with the Held column in it.
+    assert!(html.contains("class=\"queue-split\""), "{html}");
+    assert!(html.contains("queue-split-table"), "{html}");
+    assert!(
+        html.contains(">Held</"),
+        "the real screen's table has the Held column"
+    );
+}
+
+/// A row that is both critical and held shows the held tint: the held background rule must come
+/// after the critical one in the stylesheet (same specificity, so the later rule wins).
+#[test]
+fn a_critical_held_row_shows_the_held_tint_because_its_rule_comes_last() {
+    let css = crate::style::GLOBAL_CSS;
+    let critical = css
+        .find(".finding-row-critical > td { background")
+        .expect("the critical tint rule");
+    let held = css
+        .find(".finding-row-held > td { background")
+        .expect("the held tint rule");
+    assert!(
+        held > critical,
+        "the held tint must follow the critical tint"
     );
 }

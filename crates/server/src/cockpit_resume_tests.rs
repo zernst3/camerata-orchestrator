@@ -1747,3 +1747,48 @@ fn a_limit_that_is_not_a_positive_number_is_the_smallest_limit_never_no_limit() 
         );
     }
 }
+
+// ---- Agent activity rows of the stages after the scan ----
+
+/// The group review shows in Agent activity on the saved background job path: its row is there
+/// (blocked, with the reason, because the fake model is down for it) and nothing is left running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_job_scan_shows_its_group_review_row_in_agent_activity() {
+    if !camerata_test_env::python3_on_path_for("a_job_scan_shows_its_group_review_row") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    let rows = rig.state.transcripts.get(crate::SCAN_AUDIT_KEY);
+    let review = rows
+        .iter()
+        .find(|r| r.role.starts_with("Group review ("))
+        .unwrap_or_else(|| panic!("no group review row: {rows:#?}"));
+    assert_eq!(review.status, "blocked", "{review:#?}");
+    assert!(
+        rows.iter().all(|r| r.status != "running"),
+        "no row is left running when the scan ends: {rows:#?}"
+    );
+}
+
+/// The same on the plain request path (`POST /api/onboard/audit`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_plain_request_scan_shows_its_group_review_row_in_agent_activity() {
+    if !camerata_test_env::python3_on_path_for("a_plain_request_scan_shows_its_group_review_row") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    // Start clean, so a row found afterwards is this request's own.
+    rig.state.transcripts.clear(crate::SCAN_AUDIT_KEY);
+    let _ = onboard_audit(State(rig.state.clone()), Json(audit_request())).await;
+    let rows = rig.state.transcripts.get(crate::SCAN_AUDIT_KEY);
+    assert!(
+        rows.iter().any(|r| r.role.starts_with("Group review (")),
+        "no group review row: {rows:#?}"
+    );
+    assert!(
+        rows.iter().all(|r| r.status != "running"),
+        "no row is left running when the scan ends: {rows:#?}"
+    );
+}

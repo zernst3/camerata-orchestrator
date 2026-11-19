@@ -341,6 +341,35 @@ impl ProjectStore {
         ok
     }
 
+    /// Delete a project like [`Self::delete`] but write the file first: when the write fails
+    /// nothing is removed and the error is returned. `Ok(false)` when there is no such project.
+    pub fn delete_checked(&self, id: &str) -> std::io::Result<bool> {
+        let mut s = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("project store mutex poisoned"))?;
+        if !s.projects.iter().any(|p| p.id == id) {
+            return Ok(false);
+        }
+        let projects: Vec<Project> = s.projects.iter().filter(|p| p.id != id).cloned().collect();
+        let active = if s.active.as_deref() == Some(id) {
+            projects.first().map(|p| p.id.clone())
+        } else {
+            s.active.clone()
+        };
+        let next = State {
+            projects,
+            active,
+            counter: s.counter,
+        };
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&next).map_err(std::io::Error::other)?;
+            std::fs::write(path.as_path(), json)?;
+        }
+        *s = next;
+        Ok(true)
+    }
+
     /// Set the active project.
     pub fn set_active(&self, id: &str) -> bool {
         let ok = {

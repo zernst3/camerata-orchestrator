@@ -204,6 +204,47 @@ pub fn project_files_covering(state_dir: &Path, checkout: &Path) -> Vec<PathBuf>
     out
 }
 
+/// The multi-repo project sets under `state_dir` that list one of `own` (canonical folders) and
+/// none of `others`, as the file stems (`project-<n>-<hash>`) to remove, and, apart, the stems of
+/// sets that list one of `own` AND one of `others` (they hold another project's findings too, so
+/// a project deletion keeps them). A list that is not valid JSON names no folder and is skipped.
+pub fn project_set_stems_for(
+    state_dir: &Path,
+    own: &[PathBuf],
+    others: &[PathBuf],
+) -> (Vec<String>, Vec<String>) {
+    let own: Vec<String> = own.iter().map(|p| canonical_string(p)).collect();
+    let others: Vec<String> = others.iter().map(|p| canonical_string(p)).collect();
+    let Ok(entries) = std::fs::read_dir(state_dir) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("project-") && n.ends_with(".repos.json"))
+        .collect();
+    names.sort();
+    let (mut mine, mut shared) = (Vec::new(), Vec::new());
+    for name in names {
+        let Ok(text) = std::fs::read_to_string(state_dir.join(&name)) else {
+            continue;
+        };
+        let Ok(listed) = serde_json::from_str::<Vec<String>>(&text) else {
+            continue;
+        };
+        if !listed.iter().any(|l| own.contains(l)) {
+            continue;
+        }
+        let stem = name.trim_end_matches(".repos.json").to_string();
+        if listed.iter().any(|l| others.contains(l)) {
+            shared.push(stem);
+        } else {
+            mine.push(stem);
+        }
+    }
+    (mine, shared)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

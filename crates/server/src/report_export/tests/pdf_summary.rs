@@ -748,8 +748,18 @@ fn every_sheet_the_pdf_names_is_a_workbook_tab() {
     let words = crate::report_export::PdfWordsJson::new();
     let mut strings = vec![
         super::super::coverage_gaps::scope_limited_sentence(&[rule]).unwrap(),
-        crate::report_export::ai_tier_note_for(ReviewState::Raw, 1, 1),
-        crate::report_export::ai_tier_note_for(ReviewState::Raw, 1, 2),
+        crate::report_export::ai_tier_note_for(
+            ReviewState::Raw,
+            1,
+            1,
+            &crate::report_export::MethodFacts::default(),
+        ),
+        crate::report_export::ai_tier_note_for(
+            ReviewState::Raw,
+            1,
+            2,
+            &crate::report_export::MethodFacts::default(),
+        ),
         words.details_intro.clone(),
         words.skipped_files_more.clone(),
         words.failed_passes_more.clone(),

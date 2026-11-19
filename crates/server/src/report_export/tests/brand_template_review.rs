@@ -1209,14 +1209,21 @@ fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
     assert!(
         json.methodology
             .reconciliation
-            .contains("Reviewed by a human reviewer"),
+            .contains("A person has ruled on part of this export"),
         "{}",
         json.methodology.reconciliation
     );
+    // A reviewed report says how many places a person read, never that every finding was.
     assert!(
-        json.methodology
+        json.methodology.ai_tier_note.contains("I reviewed"),
+        "{}",
+        json.methodology.ai_tier_note
+    );
+    assert!(
+        !json
+            .methodology
             .ai_tier_note
-            .contains("reviewed and dispositioned by a human reviewer"),
+            .contains("dispositioned by a human reviewer"),
         "{}",
         json.methodology.ai_tier_note
     );
@@ -1323,13 +1330,17 @@ fn shipped_template_methodology_line_is_gated_on_review_state() {
         template.contains("d.methodology.reconciliation"),
         "the template must print the reconciling line it is given"
     );
-    let counts = counts_of_problems(3, 1, 0);
+    let mut counts = counts_of_problems(3, 1, 0);
+    counts.review.reviewed_in_person = 1;
     let raw = counts_prose::methodology_line(&counts, ReviewState::Raw);
     assert!(raw.contains("has not yet had a human review"), "{raw}");
-    assert!(!raw.contains("Reviewed by a human reviewer"), "{raw}");
+    assert!(
+        !raw.contains("A person has ruled on part of this export"),
+        "{raw}"
+    );
     let reviewed = counts_prose::methodology_line(&counts, ReviewState::Reviewed);
     assert!(
-        reviewed.contains("Reviewed by a human reviewer"),
+        reviewed.contains("A person has ruled on part of this export"),
         "{reviewed}"
     );
     assert!(
@@ -1551,10 +1562,30 @@ fn no_client_facing_authored_string_contains_the_word_audit() {
         AUDIT_REPORT_DISCLAIMER.to_string(),
         counts_prose::next_steps(&counts_of_problems(7, 0, 3), false, ReviewState::Reviewed),
         counts_prose::next_steps(&counts_of_problems(0, 0, 0), false, ReviewState::Raw),
-        ai_tier_note_for(ReviewState::Raw, 0, 1),
-        ai_tier_note_for(ReviewState::Reviewed, 0, 1),
-        ai_tier_note_for(ReviewState::Raw, 1, 2),
-        ai_tier_note_for(ReviewState::Reviewed, 2, 2),
+        ai_tier_note_for(
+            ReviewState::Raw,
+            0,
+            1,
+            &crate::report_export::MethodFacts::default(),
+        ),
+        ai_tier_note_for(
+            ReviewState::Reviewed,
+            0,
+            1,
+            &crate::report_export::MethodFacts::default(),
+        ),
+        ai_tier_note_for(
+            ReviewState::Raw,
+            1,
+            2,
+            &crate::report_export::MethodFacts::default(),
+        ),
+        ai_tier_note_for(
+            ReviewState::Reviewed,
+            2,
+            2,
+            &crate::report_export::MethodFacts::default(),
+        ),
         counts_prose::narrative(&counts_of_problems(3, 1, 1), ReviewState::Raw),
         counts_prose::narrative(&counts_of_problems(3, 1, 1), ReviewState::Reviewed),
         disposition_label(Disposition::Ignored, "some reason", "accepted", false),

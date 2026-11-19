@@ -43,6 +43,10 @@ pub enum CheckId {
     /// out. Its operator-facing name says "Engine Check"; the label the README prints does not,
     /// because the Engine Check never appears in a client output.
     EngineCheckNoWithoutCorrection,
+    /// Every finding shown at critical severity, and every finding the finder was unsure of,
+    /// carries a reviewer's decision before a client package leaves. Runs over the in-memory
+    /// rows, like the evidence check.
+    CriticalOrUnsureWithoutDecision,
     /// Every workbook sheet's footer carries the confidentiality line, naming the client, and
     /// it is the PDF's line.
     Marking,
@@ -68,7 +72,7 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 18] = [
+    pub const ALL: [CheckId; 19] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -80,6 +84,7 @@ impl CheckId {
         CheckId::RestoredWithoutDecision,
         CheckId::SplitOutWithoutDecision,
         CheckId::EngineCheckNoWithoutCorrection,
+        CheckId::CriticalOrUnsureWithoutDecision,
         CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
@@ -103,6 +108,9 @@ impl CheckId {
             CheckId::RestoredWithoutDecision => "reviewer decision on restored findings",
             CheckId::SplitOutWithoutDecision => "reviewer decision on split-out problems",
             CheckId::EngineCheckNoWithoutCorrection => "reviewer correction on flagged findings",
+            CheckId::CriticalOrUnsureWithoutDecision => {
+                "reviewer decision on critical and unsure findings"
+            }
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",

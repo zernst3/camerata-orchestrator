@@ -294,6 +294,8 @@ pub async fn audit_repo(
                 StageRoute {
                     batch: mode == ScanMode::Batch,
                     job,
+                    // Alternatives record their own calls in the transcript.
+                    feedback: None,
                 },
             )
             .await
@@ -714,6 +716,7 @@ pub async fn audit_repo(
             StageRoute {
                 batch: mode == ScanMode::Batch,
                 job,
+                feedback,
             },
         )
         .await;
