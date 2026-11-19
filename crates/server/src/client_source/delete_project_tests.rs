@@ -1008,3 +1008,187 @@ async fn the_plain_project_delete_still_removes_a_project_with_no_data() {
     assert_eq!(body["ok"], true);
     assert!(fx.state.projects.get(&empty.id).is_none());
 }
+
+// ── round 3 ──────────────────────────────────────────────────────────────────────────────
+
+async fn post(state: &crate::AppState, uri: &str) -> (StatusCode, serde_json::Value) {
+    http(state, "POST", uri).await
+}
+
+#[tokio::test]
+async fn a_failure_after_the_stories_leaves_the_unit_the_retry_needs_to_find_the_rest() {
+    let w = world().await;
+    let fx = &w.fx;
+    let stories = fx.root.join("data").join("stories.json");
+    chmod(&stories, 0o444);
+    assert!(
+        std::fs::OpenOptions::new().append(true).open(&stories).is_err(),
+        "run these tests as an ordinary user"
+    );
+
+    let first = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(first.partial);
+    // The dependents went first; the units of work (through which the retry finds them) stayed.
+    assert!(
+        fx.state
+            .uow
+            .list()
+            .iter()
+            .any(|u| u.project_id.as_deref() == Some(fx.project_id.as_str())),
+        "the unit of work must stay until its dependents and stories are gone"
+    );
+    let failed: Vec<&str> = first
+        .record
+        .items
+        .iter()
+        .filter(|i| i.category == "development console record" && !i.outcome.is_clear())
+        .map(|i| i.path.as_str())
+        .collect();
+    assert!(failed.iter().any(|p| p.starts_with("stories.json#")), "{failed:?}");
+    assert!(
+        failed.iter().any(|p| p.starts_with("uow.json#")),
+        "the unit set is reported as not attempted: {failed:?}"
+    );
+
+    chmod(&stories, 0o644);
+    let second = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+    assert!(!second.partial, "{:?}", second.record.items);
+    for f in DEV_FILES {
+        let text = std::fs::read_to_string(fx.root.join("data").join(f)).unwrap();
+        assert!(!text.contains(SENT_A), "{f} still holds A after the retry");
+    }
+}
+
+#[tokio::test]
+async fn unattributed_rows_and_the_logs_are_listed_as_kept_with_their_reasons() {
+    let w = world().await;
+    let fx = &w.fx;
+    // A unit with no project and no repository: it may be this project's.
+    fx.state.uow.create_native(None, None).unwrap();
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    let unassigned = out
+        .record
+        .kept
+        .iter()
+        .find(|k| k.what.starts_with("1 development console record"))
+        .expect("the unattributed unit is counted");
+    assert!(unassigned.why.contains("may include this project's"), "{}", unassigned.why);
+    assert!(unassigned.why.contains("check them by hand"), "{}", unassigned.why);
+    let logs = out
+        .record
+        .kept
+        .iter()
+        .find(|k| k.what.contains("enforcement_catches.db"))
+        .expect("the SQLite logs are listed");
+    assert!(logs.why.contains("not client code"), "{}", logs.why);
+    assert!(out.record.kept.iter().any(|k| k.what == "source-records.json"));
+    assert!(out.record.render_text().contains("check them by hand"));
+}
+
+#[tokio::test]
+async fn a_refused_checkout_names_the_way_out_in_the_record_and_in_the_remove_refusal() {
+    let w = world().await;
+    let fx = &w.fx;
+    fx.state
+        .settings
+        .set_repo_path(REPO, Some(b_checkout(fx).to_string_lossy().into_owned()));
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    let blocked = out
+        .record
+        .items
+        .iter()
+        .find(|i| i.category == "checkout" && !i.outcome.is_clear())
+        .expect("the refused folder is a failed item");
+    let super::PurgeOutcome::Failed { error } = &blocked.outcome else {
+        panic!("not failed")
+    };
+    assert!(error.contains("is a clone of"), "the guard's own reason is kept: {error}");
+    assert!(
+        error.contains("The way out: unlink acme/app in the project's repositories"),
+        "{error}"
+    );
+    assert!(error.contains("remove the folder by hand, then delete again."), "{error}");
+
+    // Remove from list is blocked by the same dead end, and says the same way out.
+    let (status, body) = http(&fx.state, "DELETE", &format!("/api/projects/{}", fx.project_id)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(message.starts_with("This project still has data on this machine."), "{message}");
+    assert!(message.contains("The way out: unlink acme/app"), "{message}");
+}
+
+#[tokio::test]
+async fn the_last_check_keeps_the_project_when_a_scan_started_or_another_item_failed() {
+    let w = world().await;
+    let fx = &w.fx;
+    let project = fx.state.projects.get(&fx.project_id).unwrap();
+    let clear: Vec<super::delete_project::ProjectDeletionItem> = Vec::new();
+    assert_eq!(super::delete_project::final_block(&fx.state, &project, &clear), None);
+
+    // A scan job that started after the checks at the top of the deletion.
+    let job = fx.state.jobs.create("audit", Some(fx.project_id.clone()));
+    let why = super::delete_project::final_block(&fx.state, &project, &clear)
+        .expect("a running scan blocks the last phase");
+    assert!(why.contains("a scan started during the deletion"), "{why}");
+    fx.state.jobs.fail(&job, "stopped");
+
+    let failed = vec![super::delete_project::ProjectDeletionItem {
+        category: "saved run".to_string(),
+        path: "x".to_string(),
+        files: 0,
+        bytes: 0,
+        outcome: super::PurgeOutcome::Failed {
+            error: "denied".to_string(),
+        },
+    }];
+    let why = super::delete_project::final_block(&fx.state, &project, &failed)
+        .expect("a failed item blocks the last phase");
+    assert!(why.contains("another location could not be removed"), "{why}");
+}
+
+#[tokio::test]
+async fn a_governed_run_or_a_routine_start_is_refused_while_the_project_is_being_deleted() {
+    let w = world().await;
+    let fx = &w.fx;
+    let unit = fx
+        .state
+        .uow
+        .list()
+        .into_iter()
+        .find(|u| u.project_id.as_deref() == Some(fx.project_id.as_str()))
+        .expect("A's unit");
+    let routine = fx
+        .state
+        .routines
+        .list_for_project(&fx.project_id)
+        .pop()
+        .expect("A's routine");
+    let _deleting = fx.state.source_ops.begin_deleting(&fx.project_id).unwrap();
+    let sentence = "This project is being deleted with all its data, so nothing can be started on it.";
+
+    let (status, body) = post(&fx.state, &format!("/api/stories/{}/run", unit.story_id)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], sentence);
+
+    let (status, body) = post(&fx.state, &format!("/api/routines/{}/run", routine.id)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], sentence);
+
+    // Another project's routine is not affected.
+    let other = fx.state.routines.list_for_project(&w.b_id).pop().unwrap();
+    let (status, _) = post(&fx.state, &format!("/api/routines/{}/run", other.id)).await;
+    assert_ne!(status, StatusCode::CONFLICT);
+}

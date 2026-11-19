@@ -896,7 +896,7 @@ async fn dev_rows(
 /// Why the last phase (the inspections, then the project record) must not run yet, or `None`:
 /// another location is not clear, or a scan or job started on the project during the deletion
 /// (the marker refuses new starts; this catches one that began before it was set).
-fn final_block(
+pub(super) fn final_block(
     state: &AppState,
     project: &Project,
     items: &[ProjectDeletionItem],
