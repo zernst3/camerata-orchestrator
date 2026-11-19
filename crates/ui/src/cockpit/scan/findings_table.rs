@@ -317,7 +317,7 @@ pub(in crate::cockpit) fn FindingDetailPane(
         .unwrap_or_default();
     rsx! {
         aside {
-            class: "finding-pane",
+            class: if row.is_some() { "finding-pane" } else { "finding-pane finding-pane-empty" },
             id: "{DETAIL_PANE_ID}",
             "data-finding-key": "{pane_key}",
             // The pane is a focusable REGION: tabbing into it arms the keys, tabbing out

@@ -60,6 +60,66 @@ fn export_blocked_many_is_still_one_line_whatever_the_count() {
     assert!(html.contains(">Open Review</button>"));
 }
 
+/// The shell strip above the many-rows state counts the rows the line counts (it once said 11).
+#[test]
+fn export_blocked_many_strip_agrees_with_the_line() {
+    let html = page("export/blocked-many");
+    assert!(html.contains("Held 40"), "the strip says Held 40: {html}");
+    assert!(!html.contains("Held 11"), "{html}");
+}
+
+/// The two buttons of the export line sit a normal gap apart, and a held row's edge is its own
+/// rule, wider and darker than the critical highlight's, so the two read apart.
+#[test]
+fn the_held_styles_are_their_own_rules() {
+    let css = GLOBAL_CSS;
+    assert!(
+        css.contains(
+            ".export-blocked { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }"
+        ),
+        "the line's buttons are 8px apart"
+    );
+    assert!(
+        css.contains(".finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d; }"),
+        "the held edge is its own wider, darker rule"
+    );
+    assert!(
+        css.contains(
+            ".finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }"
+        ),
+        "the critical edge is unchanged and not shared"
+    );
+    assert!(css.contains(".finding-row-held > td { background: rgba(143, 29, 29, 0.12); }"));
+}
+
+/// The held-rows pages render the app's own table container, with no gallery wrapper: it fills
+/// the width it is given and scrolls inside its own column from the left edge, so the Held column
+/// the table adds is not cut off. The real container's rules are pinned here and the real screen
+/// is checked in `held_rows_tests`.
+#[test]
+fn the_findings_pages_use_the_real_container_that_scrolls_from_the_left_edge() {
+    for id in ["findings/held-rows", "findings/held-filter-on"] {
+        let html = page(id);
+        assert!(
+            !html.contains("held-gallery"),
+            "{id}: no gallery-only wrapper"
+        );
+        assert!(html.contains("class=\"queue-split\""), "{id}");
+        assert!(html.contains("queue-split-table"), "{id}");
+        assert!(html.contains(">Held</"), "{id}: the Held header is drawn");
+        assert!(html.contains("Held: decide before export"), "{id}");
+        assert!(html.contains("finding-row-held"), "{id}");
+    }
+    let css = GLOBAL_CSS;
+    assert!(!css.contains(".held-gallery"));
+    assert!(css.contains(".queue-split { display: flex; align-items: flex-start; gap: 12px; width: 100%; min-width: 0; align-self: stretch; box-sizing: border-box; }"));
+    assert!(css.contains(".queue-split-table { flex: 1 1 auto; min-width: 0; overflow-x: auto; }"));
+    assert!(
+        css.contains(".finding-pane-empty { display: none; }"),
+        "an empty pane draws nothing when stacked"
+    );
+}
+
 /// The triage table with held rows: the red cell and its words, and the panel's one line above.
 #[test]
 fn findings_held_rows_marks_the_held_rows_red_with_words() {

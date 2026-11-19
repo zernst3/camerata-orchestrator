@@ -1131,10 +1131,15 @@ html, body {
 /* Critical (security) row highlight: applied to the whole <tr> via chorale 0.2.3's
    row_class hook (replaces the old per-cell stripe). A red left border + faint red tint
    marks the security-floor rows unmistakably; selection background still composes over it. */
-.finding-row-critical > td:first-child, .finding-row-held > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+.finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+/* A row the release gate holds (work order E): a wider, darker edge and its own tint, so it reads
+   apart from the critical highlight even on a critical row. */
+.finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d; }
 /* A row the release gate holds (work order E): the status cell is red AND says so in words. */
 .held-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; background: #d4332b; }
 .finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }
+/* After the critical tint, so a row that is both critical and held shows the held tint. */
+.finding-row-held > td { background: rgba(143, 29, 29, 0.12); }
 
 /* Needs-a-choice row highlight (proposed-rules table): a SELECTED rule with alternatives but
    no chosen option. Amber tint + left border marks the rows that block audit/arm until the
@@ -1228,8 +1233,11 @@ html, body {
    scroll context so a merged row's site list cannot push the disposition controls off screen
    — the controls are the whole point of the surface. Below 1100px the split stacks, because
    two 420px columns in a 900px window is two unusable columns. */
-.queue-split { display: flex; align-items: flex-start; gap: 12px; }
-.queue-split-table { flex: 1 1 auto; min-width: 0; }
+/* The table and its pane fill the width they are given (the app root centres its children, which
+   cuts a table wider than the page off on BOTH sides), and the table scrolls inside its own
+   column from the left edge. */
+.queue-split { display: flex; align-items: flex-start; gap: 12px; width: 100%; min-width: 0; align-self: stretch; box-sizing: border-box; }
+.queue-split-table { flex: 1 1 auto; min-width: 0; overflow-x: auto; }
 .finding-pane {
   flex: 0 0 380px; align-self: flex-start; position: sticky; top: 8px;
   max-height: calc(100vh - 120px); overflow-y: auto;
@@ -1243,6 +1251,8 @@ html, body {
 @media (max-width: 1100px) {
   .queue-split { flex-direction: column; }
   .finding-pane { flex: 1 1 auto; width: 100%; position: static; max-height: none; }
+  /* Stacked under the table, a pane with no row would draw an empty box. */
+  .finding-pane-empty { display: none; }
 }
 .pane-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
 .pane-rule { font-weight: 700; color: var(--ink); }
@@ -7338,7 +7348,8 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
   margin: 10px 0; padding: 10px 12px; border: 1px solid var(--danger-color); border-radius: 6px;
   background: rgba(220, 38, 38, 0.08);
 }
-.export-blocked-head { margin: 0 0 8px; font-weight: 700; color: var(--ink); }
+.export-blocked { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.export-blocked-head { flex: 1 1 100%; margin: 0 0 2px; font-weight: 700; color: var(--ink); }
 .gate-rows { display: flex; flex-direction: column; gap: 4px; }
 .gate-row {
   display: grid; grid-template-columns: 56px minmax(240px, 2fr) 90px 3fr auto;
