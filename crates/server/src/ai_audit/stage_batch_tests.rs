@@ -2286,14 +2286,17 @@ async fn cheap_requests_are_admitted_together_after_one_big_call() {
     for _ in 0..12 {
         permits.push(
             meter
-                .admit_for_request(&req)
+                .admit_for_request(&req, Stage::FixGeneration)
                 .await
                 .expect("a one-cent request fits under $20 with $7 spent"),
         );
     }
     drop(permits);
     // The reservations came back with the permits.
-    assert!(meter.admit_for_request(&req).await.is_ok());
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_ok());
 }
 
 #[tokio::test]
@@ -2306,10 +2309,19 @@ async fn a_request_reserve_is_released_when_its_permit_drops_and_the_limit_still
     });
     meter.record_stage(Stage::Finder, &priced_reply(19.99));
     let req = cheap_request();
-    let first = meter.admit_for_request(&req).await.expect("first");
-    assert!(meter.admit_for_request(&req).await.is_err());
+    let first = meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .expect("first");
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_err());
     drop(first);
-    assert!(meter.admit_for_request(&req).await.is_ok());
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_ok());
 }
 
 #[tokio::test]
@@ -2325,7 +2337,7 @@ async fn the_overshoot_stays_bounded_by_the_requests_own_ceilings() {
         .with_max_tokens(128_000);
     let ceiling = request_ceiling_usd(&req).unwrap();
     let mut permits = Vec::new();
-    while let Ok(p) = meter.admit_for_request(&req).await {
+    while let Ok(p) = meter.admit_for_request(&req, Stage::FixGeneration).await {
         permits.push(p);
         assert!(permits.len() < 100, "the limit never closed");
     }
@@ -2336,4 +2348,52 @@ async fn the_overshoot_stays_bounded_by_the_requests_own_ceilings() {
         permits.len()
     );
     assert!(permits.len() >= 3);
+}
+
+#[tokio::test]
+async fn a_stage_whose_calls_cost_more_than_their_ceiling_reserves_what_they_really_cost() {
+    // On the CLI backend a call can cost more than its request's ceiling (the CLI's own overhead
+    // is not in the prompt). A request-scoped pass must reserve the larger of its ceiling and the
+    // largest real cost its stage has had, or the overshoot is no longer bounded.
+    let cap = 10.0;
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(cap),
+        ..crate::cost_cap::RunControls::default()
+    });
+    let req = cheap_request();
+    let ceiling = request_ceiling_usd(&req).unwrap();
+    assert!(
+        ceiling < 0.1,
+        "the request's own ceiling is small: {ceiling}"
+    );
+    // One fix call really cost $2.
+    meter.record_stage(Stage::FixGeneration, &priced_reply(2.0));
+    let mut permits = Vec::new();
+    while let Ok(p) = meter.admit_for_request(&req, Stage::FixGeneration).await {
+        permits.push(p);
+        assert!(
+            permits.len() < 50,
+            "the limit never closed: ceilings alone admit them all"
+        );
+    }
+    // spent $2 of $10, each in flight reserves $2: admitted while 2 + n*2 < 10 (n = 0 to 3).
+    assert_eq!(permits.len(), 4, "{}", permits.len());
+    // Another stage's calls do not inflate this stage's reserve.
+    drop(permits);
+    let other = meter.admit_for_request(&req, Stage::Calibration).await;
+    assert!(other.is_ok());
+}
+
+#[tokio::test]
+async fn a_refused_admission_carries_the_cause_it_was_refused_for() {
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(5.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(5.5));
+    let req = cheap_request();
+    let Err(cause) = meter.admit_for_request(&req, Stage::FixGeneration).await else {
+        panic!("the limit is reached");
+    };
+    assert_eq!(cause, RefusalCause::LimitReached);
 }

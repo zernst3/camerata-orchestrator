@@ -1512,16 +1512,16 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         disabled: auditing(),
                         value: "{audit_mode}",
                         onchange: move |e| audit_mode.set(e.value()),
-                        option { value: "auto", "Default (batch on the API backend, else parallel)" }
+                        option { value: "auto", "Default (batch on the API backend, else parallel; saved, resumable)" }
                         option { value: "parallel", "Parallel (real time)" }
                         option { value: "sequential", "Sequential (real time, slower, gentlest)" }
-                        option { value: "job", "Background job (walk away, default mode)" }
+                        option { value: "job", "Large scan (same as Default; picked for big codebases)" }
                         option { value: "batch", "Batch (50% off, async, API key required)" }
                     }
                     if audit_mode() == recommended_mode {
                         span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
                     }
-                    span { class: "audit-model-hint", "Default runs the scan as a Message Batch on the API backend (half price, results when the whole batch is done) and in real time on the CLI backend. Parallel and Sequential force real time. Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
+                    span { class: "audit-model-hint", "Default runs the scan as a Message Batch on the API backend (half price, results when the whole batch is done) and in real time on the CLI backend. Parallel and Sequential force real time. Parallel runs rule-batches concurrently. Every scan runs server-side as a saved job, so you can leave and watch findings stream in, and Run what remains can resume it. Large scan is the same as Default; it is only what is picked for huge or multi-repo codebases. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
                 }
                 // Incremental scan — on by default; re-scans only pay AI for changed files.
                 // The checkbox forces a full re-scan over every file.

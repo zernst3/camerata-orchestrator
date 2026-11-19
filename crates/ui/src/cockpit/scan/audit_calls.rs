@@ -883,21 +883,24 @@ pub(in crate::cockpit) async fn poll_job(
             None => {
                 misses += 1;
                 if misses >= 3 {
-                    job_failed_message.set(Some(
-                        "Lost contact with the running scan (the server may have restarted \
-                         or the job was lost). Please retry."
-                            .to_string(),
-                    ));
+                    // Every scan is a saved job, so three failed polls prove nothing about the
+                    // job: it may well still be running (and paying) on the server. The job id is
+                    // KEPT (a later mount picks the job up from it) and the message never invites
+                    // a second paid run.
+                    job_failed_message.set(Some(LOST_CONTACT_MESSAGE.to_string()));
                     auditing.set(false);
                     job_progress.set(None);
                     det_progress.set(None);
-                    active_audit_job.set(None);
                     break;
                 }
             }
         }
     }
 }
+
+/// What the screen says when the scan's status cannot be read three times in a row. The scan is
+/// saved and may still be running on the server, so it must not be started again.
+pub(in crate::cockpit) const LOST_CONTACT_MESSAGE: &str = "Lost contact with the scan. It may still be running on the server, and it is saved, so do not start it again: wait a few minutes and reopen this inspection to see where it stands.";
 
 /// The "Deterministic scan" progress component — rendered ABOVE the AI agent-activity drawer.
 /// Shows the deterministic pass's per-tool state (start/run/done + findings count) and an

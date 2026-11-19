@@ -1232,11 +1232,15 @@ impl ScanReport {
             let cause = if self.ledger.is_outage_stopped() {
                 "the run stopped because the model provider could not be reached"
             } else if self.ledger.is_cost_capped() {
-                if self.ledger.cost_cap().is_some_and(|c| c.cost_unknown) {
-                    "the spend limit could not be enforced (a call's cost could not be \
-                     determined) and stopped the run"
-                } else {
-                    "the spend limit stopped the run"
+                match self.ledger.cost_cap() {
+                    Some(c) if c.cost_unknown => {
+                        "the spend limit could not be enforced (a call's cost could not be \
+                         determined) and stopped the run"
+                    }
+                    Some(c) if c.checkpoint.as_ref().is_some_and(|cp| cp.stopped) => {
+                        crate::cost_checkpoint::CAUSE_PROJECTED
+                    }
+                    _ => "the spend limit stopped the run",
                 }
             } else {
                 "the spend limit or an outage stopped the run"
@@ -3965,8 +3969,9 @@ fn fold_spend_records(
         all_failed_passes.extend(cap.failed_passes());
         if cap.stopped_the_run() {
             notes.push(format!(
-                "INCOMPLETE: the spend limit stopped this scan; {} scan pass(es) and {} stage(s) \
+                "INCOMPLETE: {}; {} scan pass(es) and {} stage(s) \
                  did not run (see the list of passes that did not run)",
+                cap.cause(),
                 cap.not_run_passes.len(),
                 cap.not_run_stages.len()
             ));
@@ -4123,6 +4128,90 @@ mod tests {
         assert!(
             failed.is_empty() && notes.is_empty(),
             "a note is not a failure"
+        );
+    }
+
+    /// The note on an incomplete scan names what really stopped it, from the cap's own cause: a
+    /// checkpoint pause and an unknown cost are not "the spend limit stopped this scan".
+    #[tokio::test]
+    async fn the_incomplete_note_names_the_real_cause_of_the_stop() {
+        fn capped() -> crate::ai_audit::UsageMeter {
+            crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls {
+                max_cost_usd: Some(20.0),
+                ..crate::cost_cap::RunControls::default()
+            })
+        }
+        fn reply(model: &str, cost: Option<f64>) -> crate::llm::LlmResponse {
+            crate::llm::LlmResponse {
+                reported_model: None,
+                cli_cost_usd: None,
+                text: String::new(),
+                model: model.to_string(),
+                backend: "api".to_string(),
+                cost_usd: cost,
+                input_tokens: Some(100),
+                output_tokens: Some(10),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            }
+        }
+        async fn note_of(meter: &crate::ai_audit::UsageMeter) -> String {
+            assert!(meter.admit_for_stage("acme/api", "fix").await.is_err());
+            let mut ledger = crate::scan_ledger::ScanLedger::new();
+            let (mut failed, mut notes) = (Vec::new(), Vec::new());
+            fold_spend_records(&mut ledger, meter, &mut failed, &mut notes);
+            notes.join(" | ")
+        }
+
+        // Checkpoint pause.
+        let paused = capped();
+        paused.seed_checkpoint_stop(&crate::cost_checkpoint::CostCheckpoint {
+            approved_usd: 10.0,
+            spent_usd: 1.0,
+            projected_usd: 15.0,
+            pieces_done: 1,
+            pieces_left: 3,
+            stopped: true,
+            new_estimate_usd: Some(15.0),
+            difference_usd: Some(5.0),
+            stopped_before: "agent finder".into(),
+            reserve_usd: 0.0,
+        });
+        let note = note_of(&paused).await;
+        assert!(
+            note.contains(crate::cost_checkpoint::CAUSE_PROJECTED),
+            "{note}"
+        );
+        assert!(
+            !note.contains("the spend limit stopped this scan"),
+            "{note}"
+        );
+
+        // Unknown cost.
+        let unknown = capped();
+        unknown.record_stage(
+            crate::stage_telemetry::Stage::Finder,
+            &reply("claude-from-the-future", None),
+        );
+        let note = note_of(&unknown).await;
+        assert!(note.contains("could not be enforced"), "{note}");
+        assert!(
+            !note.contains("the spend limit stopped this scan"),
+            "{note}"
+        );
+
+        // A limit really reached keeps its words.
+        let reached = capped();
+        reached.record_stage(
+            crate::stage_telemetry::Stage::Finder,
+            &reply("claude-sonnet-5-5", Some(25.0)),
+        );
+        let note = note_of(&reached).await;
+        assert!(
+            note.contains("the spend limit set for this run was reached"),
+            "{note}"
         );
     }
 

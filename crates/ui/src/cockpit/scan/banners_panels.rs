@@ -18,19 +18,83 @@ use super::*;
 pub(in crate::cockpit) fn ScanJobFailedBanner(message: Option<String>) -> Element {
     rsx! {
         if let Some(msg) = message {
-            div {
-                class: "onboard-gate scan-job-failed-banner",
-                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
-                span { class: "onboard-gate-dot" }
-                div {
-                    p { class: "onboard-gate-h", "Scan failed" }
-                    p { class: "onboard-gate-b", "{msg}" }
-                    p { class: "onboard-gate-hint",
-                        "The background scan stopped before it could finish. Check your project's backend setup (Claude CLI on PATH, or an Anthropic API key), then retry the scan."
+            {
+                let kind = job_failure_kind(&msg);
+                rsx! {
+                    div {
+                        class: "onboard-gate scan-job-failed-banner",
+                        "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
+                        span { class: "onboard-gate-dot" }
+                        div {
+                            p { class: "onboard-gate-h", "{kind.heading()}" }
+                            p { class: "onboard-gate-b", "{msg}" }
+                            if let Some(hint) = kind.hint() {
+                                p { class: "onboard-gate-hint", "{hint}" }
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// What kind of stop a job failure message is, which decides the heading and the hint under it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::cockpit) enum JobFailureKind {
+    /// The server refused the scan for a client engagement (its own text says why).
+    ClientLock,
+    /// The scan's status could not be read; it may still be running.
+    LostContact,
+    /// Anything else the job reported.
+    Failed,
+}
+
+impl JobFailureKind {
+    pub(in crate::cockpit) fn heading(self) -> &'static str {
+        match self {
+            Self::ClientLock => "Refused for a client engagement",
+            Self::LostContact => "Lost contact with the scan",
+            Self::Failed => "Scan failed",
+        }
+    }
+
+    pub(in crate::cockpit) fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::ClientLock => Some(
+                "Set this project to the Anthropic API with Anthropic models in its settings, then run the scan again.",
+            ),
+            Self::LostContact => None,
+            Self::Failed => Some(
+                "The background scan stopped before it could finish. Check your project's backend setup (Claude CLI on PATH, or an Anthropic API key), then retry the scan.",
+            ),
+        }
+    }
+}
+
+pub(in crate::cockpit) fn job_failure_kind(message: &str) -> JobFailureKind {
+    if message == super::LOST_CONTACT_MESSAGE {
+        JobFailureKind::LostContact
+    } else if message.starts_with("This is a client engagement") {
+        JobFailureKind::ClientLock
+    } else {
+        JobFailureKind::Failed
+    }
+}
+
+/// The sentence under the incomplete banner's heading, from what really stopped the run (the
+/// words of the server's own cause), or `None` for failures that are not a stop. A pause at a cost
+/// checkpoint and a limit that could not be enforced are not "the spend limit".
+pub(in crate::cockpit) fn stop_line_for(failed: &[FailedPassView]) -> Option<&'static str> {
+    let any = |needle: &str| failed.iter().any(|f| f.reason.contains(needle));
+    if any("could not be enforced") {
+        Some("The spend limit could not be enforced, so the run stopped. The findings below cover only the part of the code and the rules that did run.")
+    } else if any("paused because its projected cost") {
+        Some("Paused at a cost checkpoint. The findings below cover only the part of the code and the rules that did run.")
+    } else if any("spend limit") {
+        Some("Stopped by the spend limit. The findings below cover only the part of the code and the rules that did run.")
+    } else {
+        None
     }
 }
 
@@ -74,9 +138,7 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
         return rsx! {};
     }
     let n = failed_passes.len();
-    let stopped_by_limit = failed_passes
-        .iter()
-        .any(|f| f.reason.contains("spend limit"));
+    let stop_line = stop_line_for(&failed_passes);
     if compact {
         return rsx! {
             div { class: "onboard-gate scan-incomplete-banner scan-incomplete-compact",
@@ -92,10 +154,8 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
             span { class: "onboard-gate-dot" }
             div {
                 p { class: "onboard-gate-h", "Incomplete: {n} pass(es) or stage(s) did not run" }
-                if stopped_by_limit {
-                    p { class: "onboard-gate-b",
-                        "Stopped by the spend limit. The findings below cover only the part of the code and the rules that did run."
-                    }
+                if let Some(line) = stop_line {
+                    p { class: "onboard-gate-b", "{line}" }
                 }
                 ul { class: "scan-incomplete-list",
                     for (i , f) in failed_passes.iter().enumerate() {
