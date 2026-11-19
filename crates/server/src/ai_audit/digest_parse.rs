@@ -214,7 +214,11 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 /// 5: defects D2 and D4. The detail-regeneration reply is one entry per finding keyed by its id
 /// (the schema requires every id), and the fix prompt says an omitted id is asked about once
 /// more and is never sent for a convention row.
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 5;
+///
+/// 6: untrusted-content fencing (outside review item 1). The untrusted-content clause now reads
+/// "in the user message and tool results", so a reply cached under version 5 answers an older
+/// question.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 6;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).
