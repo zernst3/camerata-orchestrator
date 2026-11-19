@@ -35,6 +35,7 @@ use crate::api_agent_driver::{
     post_anthropic_body, AnthropicPostError, ApiShape, ParsedResponse, ToolInvocation,
 };
 use crate::llm::{CallUsage, LlmResponse, PriceBasis};
+use crate::prompt_frame::{frame_untrusted, with_untrusted_clause, FrameNonce};
 use crate::stage_telemetry::Stage;
 
 /// What a request waits on between two attempts. A test swaps in a recorder.
@@ -54,7 +55,8 @@ pub(crate) trait FinderWire: Send + Sync {
 /// The five tools, by the names the command line tool uses.
 const TOOL_NAMES: [&str; 5] = ["Read", "Glob", "Grep", "LS", "Write"];
 
-/// The system text. The brief (the first user turn) carries the task.
+/// The system text. The brief (the first user turn) carries the task. [`with_untrusted_clause`]
+/// adds the run's frame token and the rule that framed text is data, never instructions.
 const SYSTEM_TEXT: &str = "You are a code reviewer working in a small review room. The room \
 holds the files of the part you review and a few files around it, all read only. You have five \
 tools: Read (file_path, offset, limit), Glob (pattern), Grep (pattern, glob), LS (path) and Write \
@@ -81,6 +83,9 @@ const MAX_GREP_LINE_CHARS: usize = 400;
 struct Kept {
     messages: Vec<Value>,
     spent_usd: f64,
+    /// The run's frame token. The system text names it from the first request on, so a
+    /// follow-up must keep it.
+    nonce: FrameNonce,
 }
 
 /// The conversations a transport keeps so a follow-up can continue one. An entry lives until the
@@ -209,7 +214,7 @@ impl ApiPieceAgent {
         Ok(())
     }
 
-    fn keep(&self, messages: Vec<Value>, spent_usd: f64) -> ConversationHandle {
+    fn keep(&self, messages: Vec<Value>, spent_usd: f64, nonce: FrameNonce) -> ConversationHandle {
         let mut store = self
             .store
             .lock()
@@ -221,6 +226,7 @@ impl ApiPieceAgent {
             Kept {
                 messages,
                 spent_usd,
+                nonce,
             },
         );
         ConversationHandle::new(format!("api:{}:{n}", self.token))
@@ -433,8 +439,10 @@ impl ApiPieceAgent {
         limits: &PieceLimits,
         shown: Vec<String>,
         spent_before: f64,
+        nonce: &FrameNonce,
     ) -> AgentRun {
         let tools = tool_schemas();
+        let system = with_untrusted_clause(SYSTEM_TEXT.to_string(), nonce);
         let outputs_before = room.outputs();
         let mut trace: Vec<ToolEvent> = Vec::new();
         // The events of the turn just served. They enter the trace only once the request that
@@ -467,7 +475,7 @@ impl ApiPieceAgent {
             }
             let (mut body, use_caching) = build_anthropic_request_body_with_limit(
                 &self.model,
-                Some(SYSTEM_TEXT),
+                Some(&system),
                 &messages,
                 &tools,
                 limits.max_turn_tokens,
@@ -547,7 +555,7 @@ impl ApiPieceAgent {
                     messages.push(raw_assistant_msg);
                     let results: Vec<(String, String)> = calls
                         .iter()
-                        .map(|c| (c.id.clone(), serve(room, c, &mut pending)))
+                        .map(|c| (c.id.clone(), serve(room, c, &mut pending, nonce)))
                         .collect();
                     append_tool_results(&mut messages, ApiShape::Anthropic, &results);
                 }
@@ -578,7 +586,7 @@ impl ApiPieceAgent {
             usage,
             stop,
             shown_in_full,
-            conversation: self.keep(messages, spent),
+            conversation: self.keep(messages, spent, nonce.clone()),
         }
     }
 }
@@ -593,7 +601,10 @@ impl PieceAgent for ApiPieceAgent {
     ) -> anyhow::Result<AgentRun> {
         self.preflight()?;
         let messages = vec![json!({"role": "user", "content": brief})];
-        Ok(self.drive(room, messages, limits, Vec::new(), 0.0).await)
+        let nonce = nonce_for_room(room);
+        Ok(self
+            .drive(room, messages, limits, Vec::new(), 0.0, &nonce)
+            .await)
     }
 
     async fn follow_up(
@@ -608,10 +619,10 @@ impl PieceAgent for ApiPieceAgent {
             .conversation(&prior.conversation)
             .ok_or_else(|| anyhow::anyhow!("this transport holds no conversation for that run"))?;
         let mut messages = kept.messages;
-        let (text, shown) = turn.render(room);
+        let (text, shown) = turn.render_framed(room, &kept.nonce);
         messages.push(json!({"role": "user", "content": text}));
         let run = self
-            .drive(room, messages, limits, shown, kept.spent_usd)
+            .drive(room, messages, limits, shown, kept.spent_usd, &kept.nonce)
             .await;
         // The step's own handle continues the piece from here.
         self.forget(&prior.conversation);
@@ -760,6 +771,22 @@ pub(crate) fn tool_schemas() -> Vec<Value> {
     ]
 }
 
+/// The run's frame token: drawn once per run over every text the room serves, so it occurs in
+/// none of them. A seeded run (a resumable one) draws it from its seed instead, the same rule as
+/// the engine finder's.
+pub(crate) fn nonce_for_room(room: &Room) -> FrameNonce {
+    FrameNonce::generate_avoiding_files(&[&room.file_pairs()])
+}
+
+/// Frame text a tool returns from the room. This is the ONE place this transport frames client
+/// text (a structural test pins it): file text, search hits and file names are all client
+/// controlled. A token inside the text can only have come from the model (it knows the token
+/// from the system text) writing it into a room file, so it is cut out rather than trusted.
+fn fence(nonce: &FrameNonce, label: &str, text: &str) -> String {
+    let body = text.replace(nonce.as_str(), "[frame token removed]");
+    frame_untrusted(nonce, label, &body)
+}
+
 fn str_arg<'a>(input: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|k| input.get(*k).and_then(Value::as_str))
@@ -775,7 +802,12 @@ fn count_arg(input: &Value, key: &str) -> Option<usize> {
 /// Serve one tool call from the room and record it in the trace. A call the room refuses, a
 /// name outside the list and an argument that is missing are answered with a text and leave the
 /// room as it was; only a Read is recorded when it finds nothing (it covers no lines).
-fn serve(room: &Room, call: &ToolInvocation, trace: &mut Vec<ToolEvent>) -> String {
+fn serve(
+    room: &Room,
+    call: &ToolInvocation,
+    trace: &mut Vec<ToolEvent>,
+    nonce: &FrameNonce,
+) -> String {
     let input = &call.input;
     match call.name.as_str() {
         "Read" => {
@@ -798,7 +830,7 @@ fn serve(room: &Room, call: &ToolInvocation, trace: &mut Vec<ToolEvent>) -> Stri
                             out.total_lines
                         )
                     } else {
-                        out.text
+                        fence(nonce, path, &out.text)
                     }
                 }
                 Err(e) => {
@@ -823,7 +855,7 @@ fn serve(room: &Room, call: &ToolInvocation, trace: &mut Vec<ToolEvent>) -> Stri
             if paths.is_empty() {
                 "no files match".to_string()
             } else {
-                paths.join("\n")
+                fence(nonce, &format!("Glob {pattern}"), &paths.join("\n"))
             }
         }
         "Grep" => {
@@ -835,14 +867,17 @@ fn serve(room: &Room, call: &ToolInvocation, trace: &mut Vec<ToolEvent>) -> Stri
             });
             match room.grep(pattern, str_arg(input, &["glob"])) {
                 Ok(hits) if hits.is_empty() => "no matches".to_string(),
-                Ok(hits) => hits
-                    .iter()
-                    .map(|h| {
-                        let text: String = h.text.chars().take(MAX_GREP_LINE_CHARS).collect();
-                        format!("{}:{}:{text}", h.path, h.line)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                Ok(hits) => {
+                    let lines = hits
+                        .iter()
+                        .map(|h| {
+                            let text: String = h.text.chars().take(MAX_GREP_LINE_CHARS).collect();
+                            format!("{}:{}:{text}", h.path, h.line)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    fence(nonce, &format!("Grep {pattern}"), &lines)
+                }
                 Err(e) => e.to_string(),
             }
         }
@@ -853,7 +888,7 @@ fn serve(room: &Room, call: &ToolInvocation, trace: &mut Vec<ToolEvent>) -> Stri
             });
             match room.ls(path) {
                 Ok(children) if children.is_empty() => "(empty)".to_string(),
-                Ok(children) => children.join("\n"),
+                Ok(children) => fence(nonce, &format!("LS {path}"), &children.join("\n")),
                 Err(e) => e.to_string(),
             }
         }

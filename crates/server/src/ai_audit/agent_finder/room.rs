@@ -389,6 +389,14 @@ impl Room {
         all.into_iter().collect()
     }
 
+    /// The path and text of every file the room serves, the output files included: the texts a
+    /// frame token must avoid (`FrameNonce::generate_avoiding_files`).
+    pub fn file_pairs(&self) -> Vec<(String, String)> {
+        let mut all: BTreeMap<String, String> = self.files.clone();
+        all.extend(self.out_lock().iter().map(|(k, v)| (k.clone(), v.clone())));
+        all.into_iter().collect()
+    }
+
     /// Whether `path` names a file of the room.
     pub fn contains(&self, path: &str) -> bool {
         self.text_of(path).is_some()
