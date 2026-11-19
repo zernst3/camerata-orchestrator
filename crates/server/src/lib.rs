@@ -2677,24 +2677,6 @@ pub(crate) fn captures_enforcement_catches(is_resume: bool, is_delta_retest: boo
     !is_resume && !is_delta_retest
 }
 
-#[cfg(test)]
-mod enforcement_capture_tests {
-    use super::captures_enforcement_catches;
-
-    #[test]
-    fn only_a_fresh_full_scan_records_enforcement_catches() {
-        assert!(captures_enforcement_catches(false, false));
-        assert!(
-            !captures_enforcement_catches(true, false),
-            "a resume would record twice"
-        );
-        assert!(
-            !captures_enforcement_catches(false, true),
-            "a delta retest would record twice"
-        );
-    }
-}
-
 /// Start the audit job for `req` and return its id. The asynchronous body of
 /// [`onboard_audit_start`], shared with the delta rescan (`client_source::rescan`) so there is
 /// ONE implementation of "run an audit as a job". See [`AuditJobOptions`].
@@ -4901,6 +4883,24 @@ impl From<anyhow::Error> for AppError {
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod enforcement_capture_tests {
+    use super::captures_enforcement_catches;
+
+    #[test]
+    fn only_a_fresh_full_scan_records_enforcement_catches() {
+        assert!(captures_enforcement_catches(false, false));
+        assert!(
+            !captures_enforcement_catches(true, false),
+            "a resume would record twice"
+        );
+        assert!(
+            !captures_enforcement_catches(false, true),
+            "a delta retest would record twice"
+        );
+    }
+}
 
 #[cfg(test)]
 mod lib_multirepo_tests;
