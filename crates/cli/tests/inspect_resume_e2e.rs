@@ -1399,7 +1399,7 @@ async fn resume_with_preflight(
 }
 
 /// A run that started on Fable 5.1 and is resumed with no model flag (the built-in default is
-/// Fable 5.2 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
+/// Opus 5.5 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
 /// in one line.
 #[tokio::test]
 #[serial_test::serial(process_env)]

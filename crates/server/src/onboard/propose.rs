@@ -724,7 +724,8 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
     if !path.exists() {
         return Vec::new();
     }
-    let (set, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+    let (set, errs) = camerata_rules::load_corpus_lenient(&path).await;
+    crate::log_corpus_load_errors("rule proposal", &errs);
     // The union of all repos' domains selects the candidate rules from the corpus.
     let mut all_domains = std::collections::BTreeSet::new();
     for (_, ds) in repo_domains {

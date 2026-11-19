@@ -375,6 +375,24 @@ pub async fn split_scannable_rules_from(
     (scannable, excluded, preview, set, load_failures)
 }
 
+/// Item 4: the corpus loads outside a scan run (export citations, rule proposals, drift views,
+/// the alternatives rerun) cannot fail a run, but they must not drop a rule file silently either:
+/// each failure is logged at error level with the file and the parser's reason. A scan run itself
+/// records the same failures through [`record_corpus_load_failures`].
+pub fn log_corpus_load_errors(
+    site: &str,
+    errors: &[(std::path::PathBuf, camerata_rules::RulesError)],
+) {
+    for (path, error) in errors {
+        tracing::error!(
+            site,
+            path = %path.display(),
+            error = %error,
+            "a rule file did not load and is missing here",
+        );
+    }
+}
+
 /// W13 — ONE rule file the corpus loader could not parse, kept rather than discarded.
 ///
 /// The three fields are deliberately split by AUDIENCE, because conflating them is how this

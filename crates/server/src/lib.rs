@@ -2428,6 +2428,19 @@ async fn onboard_audit(
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
         _ => crate::llm::Backend::Cli,
     };
+    // A client engagement on the agent finder stops, before any spend, when a rule file did not
+    // load (the rule would silently not be checked).
+    if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
+        &run_controls,
+        active_project.as_ref().is_none_or(|p| p.client_engagement),
+        &corpus_load_failures,
+    ) {
+        let mut r = crate::onboard::ScanReport::gated(&repos);
+        r.gated = false;
+        r.ai_error = Some(why.clone());
+        r.message = Some(why);
+        return Json(r);
+    }
     // The agent finder's setup, built by the one function the command line uses (this request has
     // no run folder of its own, so the rooms go under the per-user state folder).
     let finder_setup = match crate::ai_audit::agent_finder::run::finder_setup_for_run(
@@ -3097,6 +3110,18 @@ pub(crate) async fn start_audit_job(
                 &backend_resolution,
                 crate::llm::BackendResolution::Blocked { .. }
             );
+            // A client engagement on the agent finder stops, before any spend, when a rule file
+            // did not load (the rule would silently not be checked).
+            if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
+                &run_controls,
+                engagement_project
+                    .as_ref()
+                    .is_none_or(|p| p.client_engagement),
+                &corpus_load_failures,
+            ) {
+                body_jobs.fail(&body_jid, why);
+                return;
+            }
             // The agent finder's setup, built by the one function the command line uses: the
             // rooms folder inside the run's own folder, the saved key, the project's engagement
             // kind. A missing key stops the run before the first call.
@@ -3661,7 +3686,9 @@ async fn export_audit_report(
     // model-inferred." rather than failing the export.
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };
@@ -3988,7 +4015,9 @@ async fn export_product(
 
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };

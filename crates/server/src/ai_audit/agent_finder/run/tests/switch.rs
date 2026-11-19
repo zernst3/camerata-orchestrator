@@ -91,3 +91,30 @@ fn the_refusal_messages_use_no_dashes_or_serial_commas() {
         assert!(!why.contains(", and ") && !why.contains(", or "), "{why}");
     }
 }
+
+fn broken_rule() -> Vec<crate::CorpusLoadFailure> {
+    vec![crate::CorpusLoadFailure {
+        rule_id: "SEC-EXAMPLE-1".to_string(),
+        path: std::path::PathBuf::from("corpus/sec/sec-example-1.toml"),
+        error: "unknown variant `typo`".to_string(),
+    }]
+}
+
+/// Item 4: a client engagement on the agent finder stops before any spend when a rule file did
+/// not load; the message names the rule, the file and the reason. Other runs go on (the failure is
+/// recorded in the ledger and the integrity gate).
+#[test]
+fn a_rule_file_that_did_not_load_stops_a_client_agent_run() {
+    let why = super::super::refuse_unloadable_rules(&agent_controls(), true, &broken_rule())
+        .expect_err("a client agent run must not go on with a rule missing");
+    assert!(why.contains("SEC-EXAMPLE-1"), "{why}");
+    assert!(why.contains("sec-example-1.toml"), "{why}");
+    assert!(why.contains("unknown variant"), "{why}");
+    assert!(why.contains("Nothing was spent"), "{why}");
+    let ok = |c: &RunControls, client: bool, f: &[crate::CorpusLoadFailure]| {
+        super::super::refuse_unloadable_rules(c, client, f)
+    };
+    assert_eq!(ok(&agent_controls(), false, &broken_rule()), Ok(()));
+    assert_eq!(ok(&RunControls::default(), true, &broken_rule()), Ok(()));
+    assert_eq!(ok(&agent_controls(), true, &[]), Ok(()));
+}

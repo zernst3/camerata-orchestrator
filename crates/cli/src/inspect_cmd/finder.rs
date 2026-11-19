@@ -15,7 +15,8 @@ use camerata_server::onboard::Finding;
 /// The finder flags of `camerata inspect`. Saved with the run, so a resume uses the same finder.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FinderArgs {
-    /// `--finder agent|engine` (default `engine`, the scan passes).
+    /// `--finder agent|engine` (the command line's default is `agent`; this struct's own default,
+    /// used for a saved run record that has no finder, stays `engine`).
     #[serde(default)]
     pub finder: FinderChoice,
     /// `--finder-model`: the agent finder's model. `None`/blank = the built-in default. Never the

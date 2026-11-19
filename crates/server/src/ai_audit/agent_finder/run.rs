@@ -212,6 +212,33 @@ pub fn refuse_unsupported_finder_settings(
     Ok(())
 }
 
+/// Outside review Part 1 item 4: a rule file that did not parse never reaches the agent finder's
+/// checklist, so a client engagement on the agent finder stops before any spend when one failed to
+/// load (a run with a rule silently missing would read as clean for that rule). `client_engagement`
+/// is the project's kind (the command line's non `--internal`). The message names each rule id and
+/// the file with the parser's reason, for the operator. An internal run is not stopped: the same
+/// failures are recorded in the run's ledger, coverage notes and integrity gate by
+/// `record_corpus_load_failures`, which every run calls.
+pub fn refuse_unloadable_rules(
+    controls: &RunControls,
+    client_engagement: bool,
+    failures: &[crate::CorpusLoadFailure],
+) -> Result<(), String> {
+    if controls.finder != super::FinderChoice::Agent || !client_engagement || failures.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<String> = failures
+        .iter()
+        .map(|f| format!("{} ({}: {})", f.rule_id, f.path.display(), f.error))
+        .collect();
+    Err(format!(
+        "{} rule file(s) did not load, so the agent finder would run without those rules and \
+         report nothing for them: {}. Fix the rule files and run again. Nothing was spent.",
+        failures.len(),
+        lines.join("; ")
+    ))
+}
+
 /// One unit of work: a piece to run, a piece to replay or a piece that cannot be tried again.
 enum Work {
     Fresh(Piece),

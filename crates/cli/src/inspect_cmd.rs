@@ -100,7 +100,7 @@ pub struct InspectArgs {
     /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
     pub fix_model: Option<String>,
     /// `--group-review-model`: the group reviewer's (stage 2) model. `None`/blank = the built-in
-    /// default, Fable 5.2 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
+    /// default, Opus 5.5 (`camerata_server::ai_audit::group_review::resolve_group_review_model`).
     /// Never the environment.
     #[serde(default)]
     pub group_review_model: Option<String>,
@@ -1077,6 +1077,16 @@ pub async fn run_inspect_pipeline_with(
     )
     .map_err(InspectError::Failed)?;
 
+    // A rule file that did not load is a rule the agent finder would silently not check. A client
+    // engagement stops here, before the estimate and before anything is spent; an internal run
+    // goes on and records the failure (see `record_corpus_load_failures` below).
+    camerata_server::ai_audit::agent_finder::run::refuse_unloadable_rules(
+        &controls,
+        args.client_engagement,
+        &corpus_load_failures,
+    )
+    .map_err(InspectError::Failed)?;
+
     // A spend limit needs every model priced; refuse before the estimate, before any model call.
     if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
@@ -1167,7 +1177,7 @@ pub async fn run_inspect_pipeline_with(
         )
         .iter()
         .any(|(roles, _)| roles.contains("the clone judge"));
-        let pf = preflight::build(&preflight::PreflightInputs {
+        let preflight_inputs = preflight::PreflightInputs {
             backend: args.backend,
             batch,
             fix_model: Some(camerata_server::ai_audit::resolve_audit_model(
@@ -1186,7 +1196,14 @@ pub async fn run_inspect_pipeline_with(
             exact,
             terse_output: controls.efficiency.terse_output,
             consensus: controls.consensus,
-        });
+        };
+        // The agent finder is priced by its own formula, never by the engine's scan passes.
+        let pf = if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent
+        {
+            preflight::build_agent_finder(&preflight_inputs, controls.finder_force_pieces)
+        } else {
+            preflight::build(&preflight_inputs)
+        };
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
         // The cost checkpoint's pre-flight figures for the agent finder: the cost of one piece,
@@ -3250,7 +3267,7 @@ mod tests {
         let defaults = args.run_controls().unwrap();
         assert!((defaults.review.escalation_rate_per_kloc - 1.0).abs() < f32::EPSILON);
         assert_eq!(defaults.review.escalation_floor, 20);
-        assert_eq!(defaults.group_review_model_for(), "claude-fable-5-2");
+        assert_eq!(defaults.group_review_model_for(), "claude-opus-5-5");
         assert_eq!(defaults.dup_check_model_for(), "claude-sonnet-5-5");
         args.dup_check_model = Some("claude-opus-5-5".to_string());
         assert_eq!(
@@ -3271,7 +3288,7 @@ mod tests {
         args.group_review_model = Some("  ".to_string());
         assert_eq!(
             args.run_controls().unwrap().group_review_model_for(),
-            "claude-fable-5-2"
+            "claude-opus-5-5"
         );
     }
 

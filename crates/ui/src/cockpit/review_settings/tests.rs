@@ -140,7 +140,7 @@ fn every_settable_model_has_a_row_with_its_current_value_selected() {
         assert!(select_of(step).contains("(not set)"), "{step}");
     }
     assert!(
-        html.contains("not set: Claude Fable 5.2; used when the finder is agent"),
+        html.contains("not set: Claude Opus 5.5; used when the finder is agent"),
         "{html}"
     );
     assert!(html.contains("not set: Claude Sonnet 5.5"), "{html}");
