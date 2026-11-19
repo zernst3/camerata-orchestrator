@@ -1361,10 +1361,14 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     // transcript and the focused finding, whatever the state of the context fetch (every switch
     // from one project to another passes through the projects home). A failed or slow fetch
     // while the project stays open clears nothing.
+    // Bumped whenever the conversation is cleared, so a reply still in flight when it happens is
+    // dropped instead of landing in the new (cleared) transcript.
+    let mut generation = use_signal(|| 0u32);
     let mut was_open = use_signal(|| props.project_open);
     if was_open() != props.project_open {
         if was_open() && !props.project_open {
             turns.write().clear();
+            *generation.write() += 1;
             active_finding.set(None);
             last_injected_finding.set(None);
         }
@@ -1561,6 +1565,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     turns.write().push(Turn { role: "you", text: prompt.clone() });
                                     draft.set(String::new());
                                     sending.set(true);
+                                    let sent_generation = generation();
                                     let catalog_send = catalog_kd2.clone();
                                     let finding_send = finding_kd.clone();
                                     spawn(async move {
@@ -1578,7 +1583,10 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         )
                                         .await;
                                         sending.set(false);
-                                        turns.write().push(Turn { role: "ai", text: chat_reply_text(reply) });
+                                        // Drop the reply if the conversation was cleared meanwhile.
+                                        if generation() == sent_generation {
+                                            turns.write().push(Turn { role: "ai", text: chat_reply_text(reply) });
+                                        }
                                     });
                                 }
                             }
@@ -1611,6 +1619,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     turns.write().push(Turn { role: "you", text: prompt.clone() });
                                     draft.set(String::new());
                                     sending.set(true);
+                                    let sent_generation = generation();
                                     let catalog_send = catalog_btn2.clone();
                                     let finding_send = finding_btn.clone();
                                     spawn(async move {
@@ -1625,7 +1634,10 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         )
                                         .await;
                                         sending.set(false);
-                                        turns.write().push(Turn { role: "ai", text: chat_reply_text(reply) });
+                                        // Drop the reply if the conversation was cleared meanwhile.
+                                        if generation() == sent_generation {
+                                            turns.write().push(Turn { role: "ai", text: chat_reply_text(reply) });
+                                        }
                                     });
                                 }
                             },
@@ -1636,6 +1648,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             title: "Clear conversation",
                             onclick: move |_| {
                                 turns.write().clear();
+                                *generation.write() += 1;
                                 active_finding.set(None);
                                 last_injected_finding.set(None);
                             },

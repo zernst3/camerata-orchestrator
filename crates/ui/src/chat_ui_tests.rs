@@ -396,6 +396,20 @@ impl Stub {
             .await;
     }
 
+    /// The chat answers with `text` only after `ms` (the model is still thinking).
+    async fn chat_replies_after(&self, text: &str, ms: u64) {
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(ms))
+                    .set_body_json(serde_json::json!({ "text": text, "backend": "cli" })),
+            )
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
     async fn requests_to(&self, verb: &str, p: &str) -> Vec<serde_json::Value> {
         self.server
             .received_requests()
@@ -975,4 +989,57 @@ async fn a_failed_refresh_while_the_project_stays_open_keeps_the_conversation() 
         html.contains("KEPT-REPLY") && html.contains("A question"),
         "the conversation stays; {html}"
     );
+}
+
+/// A REPLY STILL IN FLIGHT when the operator leaves the project must not land in the cleared
+/// transcript (and so must not be sent as history from the home screen). `by_button` picks the
+/// send path: the Send button or Enter.
+async fn leave_while_the_model_is_thinking(by_button: bool) {
+    let stub = Stub::start("api", None).await;
+    stub.registry_ok().await;
+    stub.project(true, true).await;
+    stub.chat_replies_after("LATE-CLIENT-REPLY", 2000).await;
+    let _env = bff!(stub);
+    let mut page = Page::mount(true, None).await;
+    page.click_fab().await;
+    page.settle_until("Project open: Faktura Test", 5000).await;
+    page.type_text("Tell me about the client").await;
+    if by_button {
+        page.click_send().await;
+    } else {
+        page.press_enter().await;
+    }
+    assert_eq!(stub.chat_posts().await.len(), 1, "the question went out");
+    // Back to the projects home while the model is still thinking, then the reply arrives.
+    page.set_project_open(false).await;
+    page.settle(3500).await;
+    let html = page.html();
+    assert!(
+        !html.contains("LATE-CLIENT-REPLY"),
+        "the late reply is dropped; {html}"
+    );
+    assert!(!html.contains("Tell me about the client"), "{html}");
+    // The next message from the home screen carries no history.
+    page.type_text("Anything else?").await;
+    page.press_enter().await;
+    let posts = stub.chat_posts().await;
+    let last = posts.last().unwrap();
+    assert_eq!(
+        last["history"],
+        serde_json::json!([]),
+        "no history rides along: {last}"
+    );
+    assert!(last["project_id"].is_null());
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_reply_in_flight_when_leaving_the_project_is_dropped_enter_path() {
+    leave_while_the_model_is_thinking(false).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_reply_in_flight_when_leaving_the_project_is_dropped_send_button_path() {
+    leave_while_the_model_is_thinking(true).await;
 }
