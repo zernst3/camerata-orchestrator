@@ -573,3 +573,105 @@ fn the_incomplete_banner_names_what_really_stopped_the_run() {
     assert!(!paused.contains("spend limit"), "{paused}");
     assert_eq!(stop_line_for(&failed("overloaded")), None);
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn a_definite_job_unknown_answer_says_the_scan_is_gone_and_clears_the_job() {
+    // A restarted server answers 200 with null for a job id it no longer holds: the job is
+    // certainly dead, which is not the same as no answer.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/onboard/audit/job/job-9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::Value::Null))
+        .mount(&server)
+        .await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut vdom = VirtualDom::new(poll_harness);
+    vdom.rebuild_in_place();
+    pump(&mut vdom, 2_500).await;
+
+    let sig = POLL_SIGNALS.with(|p| p.borrow().expect("the harness ran"));
+    let message = sig.failed.peek().clone().expect("the loss is announced");
+    assert_eq!(message, JOB_GONE_MESSAGE);
+    assert!(message.contains("no longer running"), "{message}");
+    assert!(message.contains("Run what remains"), "{message}");
+    assert!(!message.contains("may still be running"), "{message}");
+    assert_eq!(sig.active.peek().clone(), None, "a dead job is not kept");
+    assert!(!*sig.auditing.peek());
+    assert_eq!(job_failure_kind(&message), JobFailureKind::Gone);
+}
+
+#[test]
+fn the_live_progress_line_names_the_real_cause_or_none() {
+    let paused = job_progress_label_for(3, 6, 2, 3, NotRunCause::Checkpoint);
+    assert!(
+        paused.contains("3 NOT RUN (paused at a cost checkpoint)"),
+        "{paused}"
+    );
+    assert!(!paused.contains("spend limit"), "{paused}");
+    let unknown = job_progress_label_for(3, 6, 2, 3, NotRunCause::Unknown);
+    assert!(unknown.contains("3 NOT RUN \u{b7}"), "{unknown}");
+    assert!(!unknown.contains("spend limit"), "{unknown}");
+    let limit = job_progress_label_for(3, 6, 2, 3, NotRunCause::SpendLimit);
+    assert!(limit.contains("3 NOT RUN (spend limit)"), "{limit}");
+    let none = job_progress_label_for(3, 6, 2, 0, NotRunCause::Unknown);
+    assert!(!none.contains("NOT RUN"), "{none}");
+}
+
+#[test]
+fn only_a_backend_setup_failure_gets_the_backend_setup_hint() {
+    for setup in [
+        "This project is set to the Anthropic API backend, but no API key is configured.",
+        "claude CLI (`claude`) was not found on PATH",
+        "Claude Code is too old for the model claude-fable-5-2",
+    ] {
+        assert_eq!(job_failure_kind(setup), JobFailureKind::Failed, "{setup}");
+        assert!(JobFailureKind::Failed.hint().is_some());
+    }
+    for other in [
+        "Cannot inspect 1 of 2 repositories: acme/web (no local folder). Set the folder for each one.",
+        "Unknown scan mode `turbo`.",
+        "No local repos to audit. Browse to each repo's local folder first.",
+    ] {
+        assert_eq!(job_failure_kind(other), JobFailureKind::Other, "{other}");
+    }
+    assert_eq!(JobFailureKind::Other.hint(), None);
+    assert_eq!(JobFailureKind::Other.heading(), "Scan failed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn a_partial_run_refusal_shows_the_servers_text_and_no_backend_setup_hint() {
+    let refusal = "Cannot inspect 1 of 2 repositories: acme/web (no local folder). Set the folder \
+                   for each one, or run again with allow_partial to inspect the rest.";
+    let server = MockServer::start().await;
+    stub_for_a_scan_run(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/onboard/audit/job/job-9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(job_poll(
+            "failed",
+            serde_json::Value::Null,
+            Some(refusal),
+        )))
+        .mount(&server)
+        .await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+    let mut vdom = VirtualDom::new(results_with_a_selected_rule);
+    let mut wired = Wired::default();
+    wired.take(&vdom.rebuild_to_vec());
+    pump_wired(&mut vdom, &mut wired, 800).await;
+    wired.click_tour(&vdom, "run-inspection");
+    pump_wired(&mut vdom, &mut wired, 3_000).await;
+
+    let html = dioxus_ssr::render(&vdom);
+    assert!(
+        html.contains("Cannot inspect 1 of 2 repositories"),
+        "{html}"
+    );
+    assert!(html.contains("Scan failed"), "{html}");
+    assert!(
+        !html.contains("Check your project"),
+        "no setup hint for a partial run: {html}"
+    );
+}

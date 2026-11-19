@@ -771,18 +771,43 @@ where
     Ok(())
 }
 
-pub(in crate::cockpit) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
-    reqwest::get(format!(
+/// What one poll of a job came back with.
+pub(in crate::cockpit) enum PollAnswer {
+    /// The job's state.
+    Status(Box<JobStatusEnvelope>),
+    /// A definite answer that the server does not know this job (a 200 with null: the server
+    /// restarted, so the job is certainly not running).
+    Unknown,
+    /// No usable answer (a network error, a bad status, a body that is not a job): the job may be
+    /// fine.
+    NoAnswer,
+}
+
+pub(in crate::cockpit) async fn audit_job_poll_answer(job_id: &str) -> PollAnswer {
+    let Ok(resp) = reqwest::get(format!(
         "{}/api/onboard/audit/job/{}",
         crate::bff_base(),
         job_id
     ))
     .await
-    .ok()?
-    .json::<Option<JobStatusEnvelope>>()
-    .await
-    .ok()
-    .flatten()
+    else {
+        return PollAnswer::NoAnswer;
+    };
+    if !resp.status().is_success() {
+        return PollAnswer::NoAnswer;
+    }
+    match resp.json::<Option<JobStatusEnvelope>>().await {
+        Ok(Some(env)) => PollAnswer::Status(Box::new(env)),
+        Ok(None) => PollAnswer::Unknown,
+        Err(_) => PollAnswer::NoAnswer,
+    }
+}
+
+pub(in crate::cockpit) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
+    match audit_job_poll_answer(job_id).await {
+        PollAnswer::Status(env) => Some(*env),
+        PollAnswer::Unknown | PollAnswer::NoAnswer => None,
+    }
 }
 
 /// Drive an async audit job to completion: poll every ~1.5s, update progress + (on done) the
@@ -833,8 +858,19 @@ pub(in crate::cockpit) async fn poll_job(
     let mut misses = 0u32;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        match audit_job_poll(&jid).await {
-            Some(js) => {
+        let answer = audit_job_poll_answer(&jid).await;
+        match answer {
+            PollAnswer::Unknown => {
+                // The server answered, and it does not know the job: it restarted, so the job is
+                // certainly not running. Nothing to wait for and nothing to keep.
+                job_failed_message.set(Some(JOB_GONE_MESSAGE.to_string()));
+                auditing.set(false);
+                job_progress.set(None);
+                det_progress.set(None);
+                active_audit_job.set(None);
+                break;
+            }
+            PollAnswer::Status(js) => {
                 misses = 0;
                 scan_idle_ms.set(js.idle_ms);
                 job_progress.set(Some((
@@ -880,7 +916,7 @@ pub(in crate::cockpit) async fn poll_job(
                     _ => {}
                 }
             }
-            None => {
+            PollAnswer::NoAnswer => {
                 misses += 1;
                 if misses >= 3 {
                     // Every scan is a saved job, so three failed polls prove nothing about the
@@ -897,6 +933,10 @@ pub(in crate::cockpit) async fn poll_job(
         }
     }
 }
+
+/// What the screen says when the server answers that it does not know the scan's job: it was
+/// restarted, so the job is certainly dead. The scan itself is saved.
+pub(in crate::cockpit) const JOB_GONE_MESSAGE: &str = "The scan is no longer running: the server was restarted and lost the job. It is saved. Open it from the saved inspections and use Run what remains.";
 
 /// What the screen says when the scan's status cannot be read three times in a row. The scan is
 /// saved and may still be running on the server, so it must not be started again.

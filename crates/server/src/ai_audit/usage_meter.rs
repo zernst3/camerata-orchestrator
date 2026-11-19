@@ -36,7 +36,7 @@ pub struct UsageMeter {
     max_request_micro_usd: AtomicU64,
     /// The largest real cost any single call of each stage has had, in micro-dollars, indexed by
     /// `Stage as usize`: what a request-scoped pass reserves at least ([`Self::admit_for_request`]).
-    stage_max_call_micro: [AtomicU64; 10],
+    stage_max_call_micro: [AtomicU64; Stage::ALL.len()],
     /// How this run executes: efficiency switches and the spend cap. Set once, before the first
     /// call, by [`Self::with_controls`]; the default is every measure on and no cap.
     controls: crate::cost_cap::RunControls,
@@ -1095,4 +1095,25 @@ pub struct ActualUsage {
     /// (a resumed stage's checkpoint). The spend limit uses it to count a stored dollar once.
     #[serde(default)]
     pub resumed_cost_usd: f64,
+}
+
+#[cfg(test)]
+mod stage_index_tests {
+    use super::*;
+
+    /// The per-stage cost table is sized from `Stage::ALL`, so a new stage cannot index past it
+    /// in the cost path; every stage's index is in range and no two share one.
+    #[test]
+    fn every_stage_indexes_the_per_stage_cost_table_in_range_and_apart() {
+        let meter = UsageMeter::default();
+        let mut seen = std::collections::BTreeSet::new();
+        for stage in Stage::ALL {
+            let i = stage as usize;
+            assert!(
+                i < meter.stage_max_call_micro.len(),
+                "{stage:?} indexes {i}"
+            );
+            assert!(seen.insert(i), "{stage:?} shares index {i}");
+        }
+    }
 }

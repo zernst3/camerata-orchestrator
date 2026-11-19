@@ -1837,6 +1837,11 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 // discovered) + a findings-so-far count, so a walk-away scan shows life.
                 if let Some((done, total, nf, not_run)) = job_progress() {
                     {
+                        let not_run_cause = if cost_checkpoint().is_some_and(|c| c.stopped) {
+                            NotRunCause::Checkpoint
+                        } else {
+                            NotRunCause::Unknown
+                        };
                         let pct = (done * 100).checked_div(total).unwrap_or(0).min(100);
                         let n_repos = report.repos.len();
                         rsx! {
@@ -1844,7 +1849,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 div { class: "job-progress-track",
                                     div { class: "job-progress-fill", style: "width: {pct}%" }
                                 }
-                                span { class: "job-progress-label", "{job_progress_label(done, total, nf, not_run)}" }
+                                span { class: "job-progress-label", "{job_progress_label_for(done, total, nf, not_run, not_run_cause)}" }
                                 // Multi-repo scans run ONE repo at a time, and the pass
                                 // denominator grows as each repo is reached — so the agent
                                 // activity below shows only the repo currently running, not all
