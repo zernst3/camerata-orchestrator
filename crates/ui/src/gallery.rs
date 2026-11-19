@@ -22,10 +22,10 @@ use dioxus::prelude::*;
 use crate::test_harness;
 
 mod app_states;
-pub(crate) mod inspection_settings_states;
 mod detail_states;
 mod engine_states;
 mod export_states;
+pub(crate) mod inspection_settings_states;
 mod queue_states;
 mod shell_states;
 mod tree_states;

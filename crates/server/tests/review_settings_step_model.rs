@@ -61,7 +61,11 @@ async fn a_blank_group_review_model_clears_the_setting_and_the_run_resolves_the_
     )
     .await;
     let reply: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(reply["ok"], json!(true), "a blank clears, it is not refused: {text}");
+    assert_eq!(
+        reply["ok"],
+        json!(true),
+        "a blank clears, it is not refused: {text}"
+    );
     let after = f.state.projects().get(&f.project_id).unwrap();
     assert_eq!(after.review.group_review_model, "");
     assert_eq!(
@@ -103,7 +107,10 @@ async fn applying_a_model_profile_keeps_the_inspection_models_and_sets_the_devel
     assert_eq!(status, 200, "{text}");
     let after = f.state.projects().get(&id).unwrap();
     assert_eq!(after.step_models.audit, before.step_models.audit);
-    assert_eq!(after.step_models.calibration, before.step_models.calibration);
+    assert_eq!(
+        after.step_models.calibration,
+        before.step_models.calibration
+    );
     assert_eq!(after.step_models.fix, before.step_models.fix);
     assert_ne!(
         after.step_models.research_chat, before.step_models.research_chat,

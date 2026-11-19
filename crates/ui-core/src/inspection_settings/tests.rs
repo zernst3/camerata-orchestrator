@@ -193,7 +193,9 @@ fn no_text_of_the_component_has_a_dash_or_names_the_environment_outside_its_one_
     let mut all = vec![
         MODELS_NOTE.to_string(),
         RUN_IN_FLIGHT_NOTE.to_string(),
-        conflict_line(ProjectBackend::Cli, true).unwrap().to_string(),
+        conflict_line(ProjectBackend::Cli, true)
+            .unwrap()
+            .to_string(),
     ];
     for stage in Stage::ALL {
         all.push(stage.hint());
@@ -205,7 +207,10 @@ fn no_text_of_the_component_has_a_dash_or_names_the_environment_outside_its_one_
         &ReviewSettings::for_new_project(),
     ));
     for text in all {
-        assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'), "{text}");
+        assert!(
+            !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+            "{text}"
+        );
         let rest = text.replace("never the environment", "").to_lowercase();
         assert!(!rest.contains("environment"), "{text}");
     }

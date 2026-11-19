@@ -124,9 +124,7 @@ impl Stage {
             ),
             Stage::GroupReview => "Stage 2: one call per rule group, real time.".to_string(),
             Stage::Fix => "Writes one fix per problem.".to_string(),
-            Stage::DuplicateCheck => {
-                "Asks whether two write-ups are the same problem.".to_string()
-            }
+            Stage::DuplicateCheck => "Asks whether two write-ups are the same problem.".to_string(),
             Stage::CloneJudge => "Used only when a clone rule is selected.".to_string(),
         }
     }

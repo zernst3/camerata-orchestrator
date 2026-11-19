@@ -297,8 +297,9 @@ pub(crate) fn applied_message(outcome: &EscalationBudgetOutcome) -> String {
     effect_sentence(outcome)
 }
 
-/// The Settings lane: the host over the shell's api, the model registry for its selects, and a
-/// run-in-flight flag from the scan panel's job. After an apply it says what happened and has the
+/// The Settings lane: the shared Inspection settings (they read the project, so they show before
+/// the first inspection), then the host over the shell's api, and a run-in-flight flag from the
+/// scan panel's job. After an apply it says what happened and has the
 /// shell read the counts again (the line moved, so the Escalations count may have).
 #[component]
 fn SettingsLane() -> Element {
@@ -378,6 +379,21 @@ mod tests {
         let html = lane_html(Lane::Settings);
         assert!(html.contains("Loading settings"), "{html}");
         assert!(!html.contains("not built yet"), "{html}");
+    }
+
+    /// Review > Settings mounts the shared Inspection settings component above the lane, and it
+    /// does not wait for the review settings route (which refuses until a result exists).
+    #[test]
+    fn the_settings_lane_mounts_the_shared_inspection_settings_above_the_lane() {
+        let html = lane_html(Lane::Settings);
+        let inspection = html
+            .find("class=\"inspection-settings\"")
+            .unwrap_or_else(|| panic!("no Inspection settings in the lane: {html}"));
+        let lane = html.find("class=\"review-settings\"").expect("the lane");
+        assert!(
+            inspection < lane,
+            "the component sits above the lane: {html}"
+        );
     }
 
     #[test]

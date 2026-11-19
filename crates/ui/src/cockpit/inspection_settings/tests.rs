@@ -72,16 +72,32 @@ fn the_opus_recipe_shows_in_the_designed_row_order_with_its_values_selected() {
         ]
     );
     assert!(select_of(&html, "is-model-finder").contains("value=\"agent\" selected"));
-    assert!(select_of(&html, "is-model-finder_model").contains("value=\"claude-opus-5-5\" selected"));
-    assert!(select_of(&html, "is-model-group_review").contains("value=\"claude-opus-5-5\" selected"));
+    assert!(
+        select_of(&html, "is-model-finder_model").contains("value=\"claude-opus-5-5\" selected")
+    );
+    assert!(
+        select_of(&html, "is-model-group_review").contains("value=\"claude-opus-5-5\" selected")
+    );
     assert!(select_of(&html, "is-model-fix").contains("value=\"claude-haiku-5-5\" selected"));
-    assert!(select_of(&html, "is-model-duplicate_check").contains("value=\"claude-sonnet-5-5\" selected"));
+    assert!(select_of(&html, "is-model-duplicate_check")
+        .contains("value=\"claude-sonnet-5-5\" selected"));
     // Scan model and Calibration model are not used by the Agent finder: hidden, with the
     // button that counts them.
-    assert!(!html.contains("id=\"is-model-audit\"") && !html.contains("id=\"is-model-calibration\""));
-    assert!(html.contains("Show the 2 rows the Engine finder uses"), "{html}");
+    assert!(
+        !html.contains("id=\"is-model-audit\"") && !html.contains("id=\"is-model-calibration\"")
+    );
+    assert!(
+        html.contains("Show the 2 rows the Engine finder uses"),
+        "{html}"
+    );
     // Where it runs and who it is for, in the one component.
-    for text in ["Where it runs", "Project backend", "Client engagement", "Client name", "Required before export"] {
+    for text in [
+        "Where it runs",
+        "Project backend",
+        "Client engagement",
+        "Client name",
+        "Required before export",
+    ] {
         assert!(html.contains(text), "{text}\n{html}");
     }
     assert!(html.contains("Saved"), "the row that just saved says so");
@@ -102,8 +118,14 @@ fn the_engine_finder_shows_scan_and_calibration_and_not_the_finder_model() {
             "Clone judge model"
         ]
     );
-    assert!(html.contains("Show the 1 row the Agent finder uses"), "{html}");
-    assert!(!select_of(&html, "is-model-audit").contains("(not set"), "scan is always stored");
+    assert!(
+        html.contains("Show the 1 row the Agent finder uses"),
+        "{html}"
+    );
+    assert!(
+        !select_of(&html, "is-model-audit").contains("(not set"),
+        "scan is always stored"
+    );
     assert!(html.contains("Built-in default: Claude Sonnet 5.5."));
     assert!(html.contains("Built-in default: Claude Opus 5.5."));
 }
@@ -120,14 +142,23 @@ fn every_unset_row_names_its_built_in_default() {
     ] {
         let select = select_of(&html, id);
         assert!(select.contains(shown), "{id}: {select}");
-        assert!(select.contains("value=\"\" selected"), "{id} shows not set: {select}");
+        assert!(
+            select.contains("value=\"\" selected"),
+            "{id} shows not set: {select}"
+        );
     }
 }
 
 #[test]
 fn the_words_are_the_new_ones_and_the_old_labels_are_gone() {
     let html = page("agent-opus");
-    for gone in ["Calibration (stage 1)", "Group review (stage 2)", "or a CLI flag", "Duplicate check<", "Clone judge<"] {
+    for gone in [
+        "Calibration (stage 1)",
+        "Group review (stage 2)",
+        "or a CLI flag",
+        "Duplicate check<",
+        "Clone judge<",
+    ] {
         assert!(!html.contains(gone), "{gone} is gone: {html}");
     }
     assert!(html.contains("Models come from this project, never the environment."));
@@ -139,7 +170,10 @@ fn the_hidden_rows_show_marked_as_not_used_after_the_reveal() {
     let html = page("hidden-rows-shown");
     assert_eq!(row_order(&html).len(), 8, "{html}");
     assert!(html.contains("not used by the Agent finder"), "{html}");
-    assert!(!html.contains("Show the 2 rows"), "the button is gone once open");
+    assert!(
+        !html.contains("Show the 2 rows"),
+        "the button is gone once open"
+    );
 }
 
 #[test]
@@ -147,7 +181,6 @@ fn the_conflict_line_shows_for_cli_with_client_engagement_and_only_then() {
     let html = page("cli-client-conflict");
     assert!(html.contains("inspection-settings-conflict"), "{html}");
     assert!(html.contains("A client engagement runs on the API only."));
-    assert!(tag_of(&html, "is-model-finder").len() > 0);
     for id in ["agent-opus", "engine", "all-unset", "run-in-flight"] {
         assert!(
             !page(id).contains("inspection-settings-conflict"),
@@ -171,6 +204,41 @@ fn a_run_in_flight_locks_every_select_and_says_why() {
 }
 
 #[test]
+fn while_a_write_is_in_flight_every_select_is_locked() {
+    #[derive(Clone, PartialEq, Props)]
+    struct Case {
+        project: ProjectView,
+    }
+    #[component]
+    fn Saving(props: Case) -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! {
+            InspectionSettingsView {
+                project: props.project,
+                saving: true,
+                on_event: move |_| {},
+            }
+        }
+    }
+    let props = page_props("inspection-settings/agent-opus").expect("a state");
+    let html = crate::test_harness::render_fragment(
+        Saving,
+        Case {
+            project: props.project,
+        },
+    );
+    let selects: Vec<&str> = html.split("<select").skip(1).collect();
+    assert!(selects.len() >= 6, "{html}");
+    for chunk in selects {
+        let tag = &chunk[..chunk.find('>').unwrap()];
+        assert!(
+            tag.contains("disabled"),
+            "a select is still live while saving: {tag}"
+        );
+    }
+}
+
+#[test]
 fn a_refusal_shows_the_servers_words_in_an_alert() {
     let html = page("save-error");
     assert!(html.contains("model must not be empty"), "{html}");
@@ -180,9 +248,13 @@ fn a_refusal_shows_the_servers_words_in_an_alert() {
 #[test]
 fn with_the_registry_missing_each_select_offers_its_current_value() {
     let html = page("registry-missing");
-    assert!(select_of(&html, "is-model-finder_model").contains("value=\"claude-opus-5-5\" selected"));
+    assert!(
+        select_of(&html, "is-model-finder_model").contains("value=\"claude-opus-5-5\" selected")
+    );
     assert!(select_of(&html, "is-model-fix").contains("value=\"claude-haiku-5-5\" selected"));
-    assert!(select_of(&html, "is-model-group_review").contains("value=\"claude-opus-5-5\" selected"));
+    assert!(
+        select_of(&html, "is-model-group_review").contains("value=\"claude-opus-5-5\" selected")
+    );
 }
 
 #[test]
@@ -198,10 +270,16 @@ fn no_state_has_a_dash_or_names_the_environment_outside_its_one_sentence() {
         "registry-missing",
     ] {
         let html = page(id);
-        assert!(!html.contains('\u{2014}') && !html.contains('\u{2013}'), "{id}");
+        assert!(
+            !html.contains('\u{2014}') && !html.contains('\u{2013}'),
+            "{id}"
+        );
         let rest = html.replace("never the environment", "").to_lowercase();
         assert!(!rest.contains("environment"), "{id}");
-        assert!(html.contains("never the environment"), "{id} carries the sentence");
+        assert!(
+            html.contains("never the environment"),
+            "{id} carries the sentence"
+        );
     }
     assert!(page_props("inspection-settings/nope").is_none());
 }
@@ -344,7 +422,8 @@ impl Screen {
     async fn pump(&mut self, ms: u64) {
         let until = tokio::time::Instant::now() + Duration::from_millis(ms);
         while tokio::time::Instant::now() < until {
-            let _ = tokio::time::timeout(Duration::from_millis(10), self.vdom.wait_for_work()).await;
+            let _ =
+                tokio::time::timeout(Duration::from_millis(10), self.vdom.wait_for_work()).await;
             let edits = self.vdom.render_immediate_to_vec();
             self.take(&edits);
         }
@@ -361,7 +440,9 @@ impl Screen {
             .get(html_id)
             .unwrap_or_else(|| panic!("no element {html_id}: {:?}", self.by_html_id.keys()));
         assert!(
-            self.listeners.iter().any(|(n, i)| n == "change" && *i == id),
+            self.listeners
+                .iter()
+                .any(|(n, i)| n == "change" && *i == id),
             "{html_id} has no change listener"
         );
         let data: Rc<dyn std::any::Any> = Rc::new(dioxus::html::PlatformEventData::new(Box::new(
@@ -428,9 +509,14 @@ async fn a_new_project_shows_the_recipe_with_no_run_and_no_inspection_result() {
         "{html}"
     );
     assert!(select_of(&html, "is-model-finder").contains("value=\"agent\" selected"));
-    assert!(select_of(&html, "is-model-group_review").contains("value=\"claude-opus-5-5\" selected"));
+    assert!(
+        select_of(&html, "is-model-group_review").contains("value=\"claude-opus-5-5\" selected")
+    );
     assert!(select_of(&html, "is-model-finder_model").contains("(not set: Claude Opus 5.5)"));
-    assert!(fake.writes.borrow().is_empty(), "showing the settings writes nothing");
+    assert!(
+        fake.writes.borrow().is_empty(),
+        "showing the settings writes nothing"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -441,7 +527,11 @@ async fn changing_the_finder_sends_one_write_and_redraws_the_rows_from_the_retur
     screen.pump(300).await;
     assert_eq!(
         *fake.writes.borrow(),
-        [("p-1".to_string(), "finder".to_string(), "engine".to_string())],
+        [(
+            "p-1".to_string(),
+            "finder".to_string(),
+            "engine".to_string()
+        )],
         "exactly one write, under the finder step"
     );
     let html = screen.html();
@@ -470,7 +560,10 @@ async fn a_refused_write_shows_the_servers_message_and_keeps_the_old_value() {
     screen.pick("is-model-finder", "engine");
     screen.pump(300).await;
     let html = screen.html();
-    assert!(html.contains("the finder must be agent or engine"), "{html}");
+    assert!(
+        html.contains("the finder must be agent or engine"),
+        "{html}"
+    );
     assert!(
         select_of(&html, "is-model-finder").contains("value=\"agent\" selected"),
         "the old value is still what the select shows: {html}"
@@ -490,14 +583,19 @@ async fn a_run_in_flight_locks_the_selects_and_a_pick_writes_nothing() {
     }
     screen.pick("is-model-group_review", "claude-sonnet-5-5");
     screen.pump(200).await;
-    assert!(fake.writes.borrow().is_empty(), "a locked pick writes nothing");
+    assert!(
+        fake.writes.borrow().is_empty(),
+        "a locked pick writes nothing"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn showing_the_hidden_rows_is_a_real_click_and_writes_nothing() {
     let fake = Fake::new();
     let mut screen = mounted(&fake, false).await;
-    assert!(screen.html().contains("Show the 2 rows the Engine finder uses"));
+    assert!(screen
+        .html()
+        .contains("Show the 2 rows the Engine finder uses"));
     screen.click("is-reveal-unused");
     screen.pump(200).await;
     let html = screen.html();
@@ -578,7 +676,9 @@ fn start_screen() -> Element {
 #[serial_test::serial(process_env)]
 async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() {
     let server = MockServer::start().await;
-    let shared = SharedProject(std::sync::Arc::new(std::sync::Mutex::new(new_project_json())));
+    let shared = SharedProject(std::sync::Arc::new(std::sync::Mutex::new(
+        new_project_json(),
+    )));
     Mock::given(method("GET"))
         .and(path("/api/projects/active"))
         .respond_with(ActiveReply(shared.clone()))
@@ -606,7 +706,10 @@ async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() 
     screen.pump(800).await;
     let html = screen.html();
     // Before any run: the settings are on the start screen, from the project alone.
-    assert!(html.contains("Onboard repos into governance"), "the start screen\n{html}");
+    assert!(
+        html.contains("Onboard repos into governance"),
+        "the start screen\n{html}"
+    );
     assert!(html.contains("Finder and models"), "{html}");
     assert!(
         select_of(&html, "is-model-finder").contains("value=\"agent\" selected"),
@@ -638,16 +741,35 @@ async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() 
         let saved = shared.0.lock().unwrap();
         assert_eq!(saved["review"]["finder"], json!("agent"));
         assert_eq!(saved["review"]["finder_model"], json!("claude-opus-5-5"));
-        assert_eq!(saved["review"]["group_review_model"], json!("claude-opus-5-5"));
+        assert_eq!(
+            saved["review"]["group_review_model"],
+            json!("claude-opus-5-5")
+        );
         assert_eq!(saved["step_models"]["fix"], json!("claude-haiku-5-5"));
-        assert_eq!(saved["review"]["dup_check_model"], json!("claude-sonnet-5-5"));
+        assert_eq!(
+            saved["review"]["dup_check_model"],
+            json!("claude-sonnet-5-5")
+        );
     }
     // And the rows the operator sees.
     let html = screen.html();
-    assert!(select_of(&html, "is-model-finder_model").contains("value=\"claude-opus-5-5\" selected"), "{html}");
-    assert!(select_of(&html, "is-model-group_review").contains("value=\"claude-opus-5-5\" selected"), "{html}");
-    assert!(select_of(&html, "is-model-fix").contains("value=\"claude-haiku-5-5\" selected"), "{html}");
-    assert!(select_of(&html, "is-model-duplicate_check").contains("value=\"claude-sonnet-5-5\" selected"), "{html}");
+    assert!(
+        select_of(&html, "is-model-finder_model").contains("value=\"claude-opus-5-5\" selected"),
+        "{html}"
+    );
+    assert!(
+        select_of(&html, "is-model-group_review").contains("value=\"claude-opus-5-5\" selected"),
+        "{html}"
+    );
+    assert!(
+        select_of(&html, "is-model-fix").contains("value=\"claude-haiku-5-5\" selected"),
+        "{html}"
+    );
+    assert!(
+        select_of(&html, "is-model-duplicate_check")
+            .contains("value=\"claude-sonnet-5-5\" selected"),
+        "{html}"
+    );
     assert!(html.contains("Saved"), "{html}");
 
     // Switching to the Engine finder swaps the rows, with the same real select.
@@ -656,5 +778,58 @@ async fn the_opus_recipe_is_set_on_the_inspection_start_screen_before_any_run() 
     let html = screen.html();
     assert!(html.contains("id=\"is-model-audit\""), "{html}");
     assert!(!html.contains("id=\"is-model-finder_model\""), "{html}");
-    assert_eq!(shared.0.lock().unwrap()["review"]["finder"], json!("engine"));
+    assert_eq!(
+        shared.0.lock().unwrap()["review"]["finder"],
+        json!("engine")
+    );
+}
+
+// ── Settings > This project mounts the same component ───────────────────────────────────
+
+fn settings_page() -> Element {
+    use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+    use_context_provider(|| Signal::new(None::<String>));
+    rsx! { super::super::SettingsView { global_only: false } }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn settings_this_project_shows_the_one_component_once_with_the_projects_values() {
+    let server = MockServer::start().await;
+    let shared = SharedProject(std::sync::Arc::new(std::sync::Mutex::new(
+        new_project_json(),
+    )));
+    Mock::given(method("GET"))
+        .and(path("/api/projects/active"))
+        .respond_with(ActiveReply(shared.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/projects/p-1/step-models"))
+        .respond_with(StepModelsReply(shared.clone()))
+        .mount(&server)
+        .await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut screen = Screen::mount(settings_page);
+    screen.pump(800).await;
+    let html = screen.html();
+    assert!(html.contains("This project"), "{html}");
+    assert!(html.contains("Finder and models"), "{html}");
+    assert_eq!(
+        html.matches("id=\"is-model-finder\"").count(),
+        1,
+        "the component is mounted once, not beside a second copy of its controls"
+    );
+    assert_eq!(
+        html.matches("Project backend").count(),
+        1,
+        "one Backend control, the component's"
+    );
+    // The real select writes the project, here as in the other two mounts.
+    screen.pick("is-model-finder", "engine");
+    screen.pump(300).await;
+    assert_eq!(
+        shared.0.lock().unwrap()["review"]["finder"],
+        json!("engine")
+    );
 }

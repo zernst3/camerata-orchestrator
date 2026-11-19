@@ -34,7 +34,9 @@ fn registry() -> ModelsResp {
 }
 
 /// A project that has never been inspected, with the settings `edit` leaves it.
-pub(crate) fn project(edit: impl FnOnce(&mut ReviewSettings, &mut StepModels) -> (ProjectBackend, bool)) -> ProjectView {
+pub(crate) fn project(
+    edit: impl FnOnce(&mut ReviewSettings, &mut StepModels) -> (ProjectBackend, bool),
+) -> ProjectView {
     let mut review = ReviewSettings::for_new_project();
     let mut steps = StepModels::default();
     let (backend, engagement) = edit(&mut review, &mut steps);
@@ -152,7 +154,8 @@ pub(crate) fn page_props(id: &str) -> Option<PageProps> {
 
 /// The full HTML document of the state `id`.
 pub(crate) fn render(id: &str) -> String {
-    let props = page_props(id).unwrap_or_else(|| panic!("{id} is not an inspection-settings state"));
+    let props =
+        page_props(id).unwrap_or_else(|| panic!("{id} is not an inspection-settings state"));
     test_harness::render_props(InspectionSettingsStatePage, props)
 }
 

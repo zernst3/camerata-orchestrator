@@ -78,7 +78,13 @@ fn defaults_show_the_saved_formula_and_a_disabled_apply() {
     assert!(!html.contains("review-settings-banner"));
     assert!(!html.contains("review-settings-locked"));
     // The stage models are the Inspection settings component's now: this lane carries none.
-    for gone in ["Stage models", "Scan model", "Group review", "Fix model", "<select"] {
+    for gone in [
+        "Stage models",
+        "Scan model",
+        "Group review",
+        "Fix model",
+        "<select",
+    ] {
         assert!(!html.contains(gone), "{gone} left the lane\n{html}");
     }
 }
@@ -132,7 +138,9 @@ fn saving_shows_the_word_and_locks_the_controls() {
     assert!(html.contains(">Saving<"), "{html}");
     assert!(tag_with_class(&html, "review-settings-apply").contains("disabled"));
     assert!(tag_with_class(&html, "review-settings-num").contains("disabled"));
-    assert!(tag_with_class(&html, "audit-model-select").contains("disabled"));
+    // The model selects are the Inspection settings component's now, which locks them while it
+    // saves (its own test); this lane draws none.
+    assert!(!html.contains("<select"), "{html}");
     assert!(!html.contains("review-settings-banner"));
 }
 
@@ -159,7 +167,11 @@ fn an_error_shows_the_servers_reason_in_a_banner_and_keeps_the_typed_values() {
 fn a_run_in_flight_locks_every_control_and_says_why() {
     let html = fragment("settings/run-in-flight");
     assert!(html.contains(RUN_IN_FLIGHT_NOTE), "{html}");
-    assert_eq!(html.matches("<select").count(), 0, "the model rows are not in this lane");
+    assert_eq!(
+        html.matches("<select").count(),
+        0,
+        "the model rows are not in this lane"
+    );
     for chunk in html.split("<input").skip(1) {
         let tag = &chunk[..chunk.find('>').unwrap()];
         assert!(tag.contains("disabled"), "an input is still live: {tag}");
