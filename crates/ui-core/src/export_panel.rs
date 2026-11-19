@@ -53,7 +53,7 @@ pub fn blocked_line(rows: usize, in_review: usize, groups: usize, group_sites: u
     let mut line = String::from("Export blocked:");
     if rows > 0 {
         line.push_str(&format!(
-            " {} {} a decision",
+            " {} held {} a decision",
             thousands(rows),
             if rows == 1 { "row needs" } else { "rows need" }
         ));
@@ -153,27 +153,27 @@ mod tests {
     fn the_blocked_line_counts_rows_and_says_how_many_are_in_review() {
         assert_eq!(
             blocked_line(8, 0, 0, 0),
-            "Export blocked: 8 rows need a decision."
+            "Export blocked: 8 held rows need a decision."
         );
         assert_eq!(
             blocked_line(1, 0, 0, 0),
-            "Export blocked: 1 row needs a decision."
+            "Export blocked: 1 held row needs a decision."
         );
         assert_eq!(
             blocked_line(8, 3, 0, 0),
-            "Export blocked: 8 rows need a decision (3 are in Review)."
+            "Export blocked: 8 held rows need a decision (3 are in Review)."
         );
         assert_eq!(
             blocked_line(8, 8, 0, 0),
-            "Export blocked: 8 rows need a decision (all are in Review)."
+            "Export blocked: 8 held rows need a decision (all are in Review)."
         );
         assert_eq!(
             blocked_line(1, 1, 0, 0),
-            "Export blocked: 1 row needs a decision (it is in Review)."
+            "Export blocked: 1 held row needs a decision (it is in Review)."
         );
         assert_eq!(
             blocked_line(2, 1, 0, 0),
-            "Export blocked: 2 rows need a decision (1 is in Review)."
+            "Export blocked: 2 held rows need a decision (1 is in Review)."
         );
         assert_eq!(
             blocked_line(0, 0, 2, 5),

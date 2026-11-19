@@ -23,7 +23,7 @@ fn export_blocked_is_one_line_with_a_button_and_no_per_row_list() {
     assert!(ds.gate.is_blocked());
     assert!(
         html.contains(&format!(
-            "Export blocked: {} rows need a decision",
+            "Export blocked: {} held rows need a decision",
             ds.gate.rows_needing_a_decision()
         )),
         "{html}"
@@ -50,7 +50,7 @@ fn export_blocked_is_one_line_with_a_button_and_no_per_row_list() {
 fn export_blocked_many_is_still_one_line_whatever_the_count() {
     let html = page("export/blocked-many");
     assert!(
-        html.contains("Export blocked: 40 rows need a decision (3 are in Review)."),
+        html.contains("Export blocked: 40 held rows need a decision (3 are in Review)."),
         "{html}"
     );
     assert_eq!(html.matches("role=\"alert\"").count(), 1);
@@ -65,33 +65,41 @@ fn export_blocked_many_is_still_one_line_whatever_the_count() {
 fn findings_held_rows_marks_the_held_rows_red_with_words() {
     let html = page("findings/held-rows");
     assert!(
-        html.contains("Export blocked: 5 rows need a decision."),
+        html.contains("Export blocked: 5 held rows need a decision."),
         "{html}"
     );
     assert!(html.matches("class=\"held-status\"").count() >= 1, "{html}");
-    assert!(html.contains("Needs a decision"), "{html}");
+    assert!(html.contains("Held: decide before export"), "{html}");
     assert!(html.contains("finding-row-held"), "{html}");
 }
 
-/// With "Show them" applied the table holds the held rows and no other.
+/// With "Show them" applied the table holds the held rows and no other. The gallery's held rows
+/// are findings 1, 3, 4, 7 and 10 of twelve.
 #[test]
 fn findings_held_filter_on_shows_only_the_held_rows() {
     let off = page("findings/held-rows");
     let on = page("findings/held-filter-on");
-    let rows_of = |html: &str| html.matches("call_").count();
-    assert!(
-        rows_of(&on) < rows_of(&off),
-        "the filter removes rows: {} against {}",
-        rows_of(&on),
-        rows_of(&off)
-    );
+    let held = [1usize, 3, 4, 7, 10];
+    let shown = |html: &str, i: usize| html.contains(&format!("call_{i}()"));
+    for i in 0..12usize {
+        if !held.contains(&i) {
+            assert!(
+                shown(&off, i),
+                "anti-vacuity: row {i} is in the unfiltered table"
+            );
+            assert!(
+                !shown(&on, i),
+                "row {i} is not held and must not be shown: {on}"
+            );
+        }
+    }
+    for i in held {
+        assert!(shown(&on, i), "held row {i} is shown: {on}");
+    }
     assert_eq!(
         on.matches("class=\"held-status\"").count(),
-        on.matches("finding-row-held").count()
-    );
-    assert!(
-        !on.contains("Not held"),
-        "every row left is a held row: {on}"
+        held.len(),
+        "one red cell per held row"
     );
 }
 
@@ -129,7 +137,7 @@ fn a_row_two_checks_refuse_is_counted_once_and_names_both_reasons() {
         "the fixture holds one row for two reasons"
     );
     assert!(html.contains(&format!(
-        "Export blocked: {} rows need a decision",
+        "Export blocked: {} held rows need a decision",
         body.gate.rows_needing_a_decision()
     )));
     let reasons = camerata_ui_core::tree::export::held_reasons(&body.gate);

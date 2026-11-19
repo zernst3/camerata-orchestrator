@@ -2,7 +2,7 @@
 //!
 //! The export panel reads `ExportGateView` and, when the release gate refuses, replaces its export
 //! button with ONE line and a button. The rows themselves are marked in the triage table (a red
-//! "Needs a decision" status cell), so a run with many held rows no longer stretches the screen.
+//! "Held" status cell), so a run with many held rows no longer stretches the screen.
 //! The gate itself stays mechanical in `release_gate.rs`; this only mirrors it. The count and the
 //! set of held rows come only from `ExportGateView`: nothing is recomputed here.
 
@@ -26,8 +26,13 @@ pub(crate) const TABLE_ANCHOR_ID: &str = "camerata-findings-table";
 pub(crate) struct HeldRows {
     /// The release gate's last read. Written by [`ExportGateHost`], read by the table.
     pub gate: Signal<ExportGateView>,
-    /// Whether the table shows only the held rows. Set by the panel's "Show them" button.
+    /// Whether the operator wants the table to show only the held rows. Set by the panel's "Show
+    /// them" button; the table clears it when no held row remains or the operator takes the filter
+    /// off in the column header.
     pub filter: Signal<bool>,
+    /// How many times "Show them" has been pressed. Each press also clears the table's other column
+    /// filters, once, which `filter` alone cannot say.
+    pub show_requests: Signal<u32>,
     /// The site keys the table holds, or `None` while no table is on screen.
     pub table_keys: Signal<Option<HashSet<String>>>,
 }
@@ -38,6 +43,7 @@ impl HeldRows {
         Self {
             gate: Signal::new(ExportGateView::default()),
             filter: Signal::new(false),
+            show_requests: Signal::new(0),
             table_keys: Signal::new(None),
         }
     }
@@ -129,6 +135,7 @@ pub(crate) fn ExportGateHost(
             on_show: move |()| {
                 if let Some(mut h) = held {
                     h.filter.set(true);
+                    h.show_requests += 1;
                 }
                 scroll_table_into_view();
             },

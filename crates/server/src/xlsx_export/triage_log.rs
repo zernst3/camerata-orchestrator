@@ -251,7 +251,13 @@ pub fn operator_csv(
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_options: &HashMap<String, String>,
 ) -> anyhow::Result<Vec<u8>> {
-    let log = build_triage_log(reviewed, corpus, chosen_options);
+    let mut log = build_triage_log(reviewed, corpus, chosen_options);
+    // The file is internal, but a reviewer's reason is free text and can quote a credential from the
+    // client's code; the same redaction every client file passes is applied here too.
+    for row in &mut log {
+        crate::onboard::redact::redact_string(&mut row.rule);
+        crate::onboard::redact::redact_string(&mut row.why);
+    }
     let first = format!(
         "{INTERNAL_MARK} {}.\n",
         caption(reviewed.report().ledger.deduped_total())

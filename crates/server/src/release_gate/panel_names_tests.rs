@@ -17,14 +17,37 @@ use crate::xlsx_export::vocabulary::{banned_synonym_in, PDF_SECTIONS, SHEETS};
 const STEM: &str = "acme-inspection";
 const STAND_IN_PDF: &[u8] = b"%PDF-1.7 stand-in for the gate tests";
 
+/// The reviewer's decisions on every row of the seeded report. A package is only built from
+/// reviewed rows (criticals and rows the engine is unsure of are held until decided), so the
+/// fixture carries a decision for each.
+fn confirmed(
+    report: &crate::onboard::ScanReport,
+) -> HashMap<String, crate::report_export::DispositionWire> {
+    report
+        .findings
+        .iter()
+        .map(|f| {
+            (
+                crate::report_export::finding_key(f),
+                crate::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect()
+}
+
 /// A released package for a seeded project, with its files by path.
 fn released_files() -> std::collections::BTreeMap<String, Vec<u8>> {
     let options = ReportOptions {
         client_name: "Example Client Ltd".to_string(),
         ..ReportOptions::default()
     };
-    let sealed = scan_report().seal();
-    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new());
+    let report = scan_report();
+    let decisions = confirmed(&report);
+    let sealed = report.seal();
+    let reviewed = crate::report_export::ReviewedReport::unreviewed(&sealed, &decisions);
     let json = build_report_json(&reviewed, None, &options);
     let data = render_data_json(&json).expect("data.json renders");
     let package = assemble_package(

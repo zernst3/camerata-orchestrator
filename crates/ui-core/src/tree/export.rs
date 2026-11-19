@@ -393,7 +393,7 @@ mod tests {
         let line = blocked_line(gate, None).unwrap();
         assert!(
             line.text.starts_with(&format!(
-                "Export blocked: {} rows need a decision",
+                "Export blocked: {} held rows need a decision",
                 gate.rows_needing_a_decision()
             )),
             "{}",
@@ -461,7 +461,7 @@ mod tests {
         let table: std::collections::HashSet<String> = held_keys(&one).into_iter().collect();
         assert_eq!(
             blocked_line(&one, Some(&table)).unwrap().text,
-            "Export blocked: 1 row needs a decision."
+            "Export blocked: 1 held row needs a decision."
         );
     }
 

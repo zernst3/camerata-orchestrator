@@ -615,9 +615,14 @@ pub(in crate::cockpit) fn FindingDetailPane(
 /// unchanged.
 pub(in crate::cockpit) const HELD_COLUMN: ColumnId = ColumnId("held");
 
-/// What the held column says on a held row, and its filter's one option. The package's own term
-/// for the concept (the workbook's "Needs a decision" sheet).
-pub(in crate::cockpit) const HELD_WORD: &str = "Needs a decision";
+/// What the held column holds on a held row, and its filter's one option: the operator's own term
+/// for a row the release gate holds ("Needs a decision" is the client workbook's sheet and stays
+/// there).
+pub(in crate::cockpit) const HELD_WORD: &str = "Held";
+
+/// What the held cell says: the word and what to do about it. The words carry the meaning, so the
+/// red does not have to.
+pub(in crate::cockpit) const HELD_CELL_TEXT: &str = "Held: decide before export";
 
 /// What the held column holds on every other row. It sorts after [`HELD_WORD`], so an ascending
 /// sort puts the held rows first.
@@ -637,9 +642,9 @@ pub(in crate::cockpit) fn is_held(store: &HeldStore, f: &FindingView) -> bool {
         .is_ok_and(|keys| keys.contains(&finding_key(f)))
 }
 
-/// The held column: "Needs a decision" on a held row. Sortable (held rows first) and filterable.
+/// The held column: "Held" on a held row. Sortable (held rows first) and filterable.
 pub(in crate::cockpit) fn held_column(store: HeldStore) -> ColumnDef<FindingView> {
-    ColumnDef::new(HELD_COLUMN, "Decision", move |f: &FindingView| {
+    ColumnDef::new(HELD_COLUMN, "Held", move |f: &FindingView| {
         CellValue::Text(
             if is_held(&store, f) {
                 HELD_WORD
@@ -799,10 +804,6 @@ pub(in crate::cockpit) fn FindingsTable(
     // The column set is rebuilt for the order indicator below, so the repo list is cloned
     // before `use_table` takes ownership of its copy.
     let indicator_repos = filter_repos.clone();
-    // The site keys this table holds, so the export panel can say how many held rows are here and
-    // how many are only in Review.
-    let table_keys: std::collections::HashSet<String> =
-        rows.iter().map(|(_, f)| finding_key(f)).collect();
     let held_for_table = held_store.clone();
     let handle = use_table(move || {
         let mut state = finding_table_state(rows.clone(), filter_repos.clone(), in_techdebt);
@@ -811,9 +812,28 @@ pub(in crate::cockpit) fn FindingsTable(
         }
         state
     });
+    // The site keys this table holds NOW, so the export panel can say how many held rows are here
+    // and how many are only in Review. Read off the table's own rows each time they change (a row
+    // decided and removed leaves the set, even if its write was never stored), not once at mount.
+    let rows_marker = use_memo(move || {
+        let signal = handle.signal();
+        let state = signal.read();
+        (
+            std::sync::Arc::as_ptr(&state.rows) as usize,
+            state.rows.len(),
+        )
+    });
     use_effect(move || {
+        let _ = rows_marker();
         if let Some(mut h) = held_ctx {
-            h.table_keys.set(Some(table_keys.clone()));
+            let keys: std::collections::HashSet<String> = handle
+                .signal()
+                .peek()
+                .rows
+                .iter()
+                .map(|(_, f)| finding_key(f))
+                .collect();
+            h.table_keys.set(Some(keys));
         }
     });
     use_drop(move || {
@@ -821,22 +841,28 @@ pub(in crate::cockpit) fn FindingsTable(
             h.table_keys.set(None);
         }
     });
-    // The panel's "Show them": filter the table to exactly the held rows. Re-applied whenever the
-    // gate is read again, so a row decided elsewhere leaves the filtered view; switched off again
-    // only if it was on.
+    // The panel's "Show them": filter the table to exactly the held rows, after clearing every
+    // other column filter (a rule, repo or text filter would hide held rows the line counts).
+    // `applied` is whether this table put the held filter on. It is re-applied when the gate is
+    // read again, so a row decided elsewhere leaves the view. It is dropped, and the wish with it,
+    // when no held row remains. Nothing is re-applied after the operator clears the column filter
+    // by hand (the second effect notices and drops the wish).
     let mut held_filter_applied = use_signal(|| false);
+    let mut seen_show_request = use_signal(|| 0u32);
+    let mut queue_rule_reset = queue_rule_filter;
     let held_for_filter = held_store.clone();
     use_effect(move || {
-        let Some(h) = held_ctx else { return };
-        let on = *h.filter.read();
+        let Some(mut h) = held_ctx else { return };
+        let wanted = *h.filter.read();
+        let request = *h.show_requests.read();
         // The gate's latest read goes into the shared keys first: the filter below is evaluated
         // against them, whatever order the table's render and this effect ran in.
-        let keys: std::collections::HashSet<String> =
+        let gate_keys: std::collections::HashSet<String> =
             camerata_ui_core::tree::export::held_keys(&h.gate.read())
                 .into_iter()
                 .collect();
         if let Ok(mut store) = held_for_filter.write() {
-            *store = keys;
+            *store = gate_keys.clone();
         }
         // chorale keeps the view it derived (filter and sort) until the table's data changes, and
         // the held column's cells just did. Writing the first row back unchanged bumps the data
@@ -845,7 +871,38 @@ pub(in crate::cockpit) fn FindingsTable(
         if let Some((id, row)) = first {
             handle.update_row(id, row);
         }
-        if on {
+        let any_here = handle
+            .signal()
+            .peek()
+            .rows
+            .iter()
+            .any(|(_, f)| gate_keys.contains(&finding_key(f)));
+        if wanted && gate_keys.is_empty() {
+            // Nothing is held any more: stop wanting the filter, and take it off.
+            held_filter_applied.set(false);
+            handle.set_filter(HELD_COLUMN, None);
+            h.filter.set(false);
+            return;
+        }
+        if request != *seen_show_request.peek() {
+            seen_show_request.set(request);
+            if wanted {
+                let others: Vec<ColumnId> = handle
+                    .signal()
+                    .peek()
+                    .filters
+                    .keys()
+                    .copied()
+                    .filter(|c| *c != HELD_COLUMN)
+                    .collect();
+                for column in others {
+                    handle.set_filter(column, None);
+                }
+                // The hub's rule jump believes its filter is still on; tell it it is not.
+                queue_rule_reset.set(None);
+            }
+        }
+        if wanted && any_here {
             handle.set_filter(
                 HELD_COLUMN,
                 Some(FilterValue::MultiSelect(
@@ -854,8 +911,20 @@ pub(in crate::cockpit) fn FindingsTable(
             );
             held_filter_applied.set(true);
         } else if *held_filter_applied.peek() {
-            handle.set_filter(HELD_COLUMN, None);
             held_filter_applied.set(false);
+            handle.set_filter(HELD_COLUMN, None);
+        }
+    });
+    let held_filter_present =
+        use_memo(move || handle.signal().read().filters.contains_key(&HELD_COLUMN));
+    use_effect(move || {
+        let present = held_filter_present();
+        if !present && *held_filter_applied.peek() {
+            // The operator took the filter off in the column header: they no longer want it.
+            held_filter_applied.set(false);
+            if let Some(mut h) = held_ctx {
+                h.filter.set(false);
+            }
         }
     });
     // ── THE HUB'S QUEUE JUMP, applied to chorale's own column filter ────────────────────
@@ -1859,8 +1928,8 @@ pub(in crate::cockpit) fn FindingsTable(
                 rsx! { span { class: "{cls}", title: "{tip}", "{label}" } }
             }) as RowCellRenderer<FindingView>,
         );
-        // The held column (work order E): a red status cell reading "Needs a decision" with the
-        // gate's reason as its title. The words carry the meaning, so the red does not.
+        // The held column (work order E): a red status cell reading "Held: decide before export"
+        // with the gate's reason as its title. The words carry the meaning, so the red does not.
         if has_held {
             let reasons = held_reasons.clone();
             m.insert(
@@ -1870,7 +1939,7 @@ pub(in crate::cockpit) fn FindingsTable(
                     let reason = reasons.get(&finding_key(f)).cloned().unwrap_or_default();
                     rsx! {
                         if held {
-                            span { class: "held-status", title: "{reason}", "{HELD_WORD}" }
+                            span { class: "held-status", title: "{reason}", "{HELD_CELL_TEXT}" }
                         }
                     }
                 }) as RowCellRenderer<FindingView>,
@@ -2344,6 +2413,7 @@ fn HeldGalleryPage(props: HeldGalleryProps) -> Element {
         move || crate::cockpit::export_gate::HeldRows {
             gate: Signal::new(gate),
             filter: Signal::new(props.filter_on),
+            show_requests: Signal::new(0),
             table_keys: Signal::new(None),
         }
     });

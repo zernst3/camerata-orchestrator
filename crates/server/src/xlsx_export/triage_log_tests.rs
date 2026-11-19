@@ -223,6 +223,35 @@ async fn the_operator_file_is_marked_internal_then_has_the_header_and_the_rows()
     assert!(data[0].contains("test fixture, not shipped"), "{text}");
 }
 
+/// A reviewer's reason is free text; a credential pasted into it must not reach even the internal
+/// file.
+#[tokio::test]
+async fn a_credential_in_a_reviewers_reason_is_redacted_in_the_operator_file() {
+    use camerata_secrets::fixtures::planted;
+    use camerata_secrets::SecretShape;
+    let corpus = corpus().await;
+    let (report, _) = scenario();
+    let secret = planted(SecretShape::StripeLiveSecretKey);
+    let thrown = ai_finding("SEC-NO-HARDCODED-SECRETS-1", 3, "high");
+    let mut dispositions = HashMap::new();
+    dispositions.insert(finding_key(&thrown), false_positive(&secret.text));
+    let bytes = operator_csv(
+        &crate::report_export::ReviewedReport::unreviewed(&report, &dispositions),
+        Some(&corpus),
+        &HashMap::new(),
+    )
+    .unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        text.contains("thrown out: marked a false positive"),
+        "anti-vacuity: the reason is in the file: {text}"
+    );
+    assert!(
+        !text.contains(&secret.value),
+        "the credential leaked: {text}"
+    );
+}
+
 #[test]
 fn an_empty_operator_file_still_has_its_mark_and_header() {
     let report = tests::report_with(Vec::new(), Vec::new()).seal();

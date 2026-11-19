@@ -12,16 +12,39 @@ use crate::xlsx_export::triage_log::{TRIAGE_LOG_CSV, TRIAGE_LOG_SHEET};
 const STEM: &str = "acme-inspection";
 const STAND_IN_PDF: &[u8] = b"%PDF-1.7 stand-in for the gate tests";
 
+/// The reviewer's decisions on every row of the seeded report. A package is only built from
+/// reviewed rows (criticals and rows the engine is unsure of are held until decided), so the
+/// fixture carries a decision for each.
+fn confirmed(
+    report: &crate::onboard::ScanReport,
+) -> HashMap<String, crate::report_export::DispositionWire> {
+    report
+        .findings
+        .iter()
+        .map(|f| {
+            (
+                crate::report_export::finding_key(f),
+                crate::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect()
+}
+
 fn package_with(options: &ReportOptions) -> ProductPackage {
-    let sealed = scan_report().seal();
+    let report = scan_report();
+    let decisions = confirmed(&report);
+    let sealed = report.seal();
     let json = build_report_json(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &decisions),
         None,
         options,
     );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &decisions),
         None,
         options,
         STEM,
