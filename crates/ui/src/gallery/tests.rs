@@ -82,6 +82,7 @@ const SPEC_STATES: &[&str] = &[
     "export/blocked-many",
     "findings/held-rows",
     "findings/held-filter-on",
+    "app/build-mismatch",
 ];
 
 /// The states still placeholders, with the work order that owns each. A work order that builds a
@@ -318,7 +319,13 @@ fn no_gallery_page_renders_a_native_control_the_stylesheet_does_not_theme() {
 #[test]
 fn fixtures_cover_every_state() {
     use camerata_ui_core::test_support::review_fixtures::{fixture, FIXTURE_IDS};
-    let registered: Vec<String> = registry().iter().map(GalleryState::id).collect();
+    // The `app/*` states are not review screens and have no review fixture: they render from pure
+    // props of their own. Every other state is a review state and has one.
+    let registered: Vec<String> = registry()
+        .iter()
+        .map(GalleryState::id)
+        .filter(|id| !id.starts_with("app/"))
+        .collect();
     for id in &registered {
         assert!(
             fixture(id).is_some(),

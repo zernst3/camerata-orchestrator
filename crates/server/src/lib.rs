@@ -4699,6 +4699,13 @@ impl ManifestProvenance {
 /// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
 pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
 
+/// Whether the tree had uncommitted changes when this binary was built (`build.rs`). Reported on
+/// `/api/health` for information; the app compares commits only.
+pub const ENGINE_DIRTY: bool = match option_env!("CAMERATA_GIT_DIRTY") {
+    Some(flag) => flag.len() == 1 && flag.as_bytes()[0] == b'1',
+    None => false,
+};
+
 /// The README line of an internal package made from a run that did not complete.
 pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this inspection did not \
      run to completion and is not for a client.";
