@@ -1009,8 +1009,8 @@ fn the_held_pill_has_room_for_its_whole_text() {
 fn the_held_edge_rule_beats_the_first_cells_inline_box_shadow() {
     let css = crate::style::GLOBAL_CSS;
     let at = css
-        .find(".finding-row-held > td:first-child {")
-        .expect("the held edge rule");
+        .find(".chorale-root .finding-row-held > td:first-child {")
+        .expect("the held edge rule inside a chorale table");
     let end = css[at..].find('}').unwrap();
     let rule = &css[at..at + end];
     assert!(rule.contains("inset 7px 0 0 0"), "{rule}");
@@ -1041,8 +1041,8 @@ fn the_held_tint_differs_from_the_critical_tint() {
 fn both_row_edges_redraw_the_separator_in_chorales_colour() {
     let css = crate::style::GLOBAL_CSS;
     for sel in [
-        ".finding-row-critical > td:first-child {",
-        ".finding-row-held > td:first-child {",
+        ".chorale-root .finding-row-critical > td:first-child {",
+        ".chorale-root .finding-row-held > td:first-child {",
     ] {
         let at = css.find(sel).unwrap_or_else(|| panic!("{sel}"));
         let end = css[at..].find('}').unwrap();
@@ -1053,5 +1053,22 @@ fn both_row_edges_redraw_the_separator_in_chorales_colour() {
             "{rule}"
         );
         assert!(!rule.contains("rgba(0, 0, 0, 0.25) !important"), "{rule}");
+    }
+}
+
+/// The queue and the tree reuse `finding-row-critical` on plain (non-chorale) tables, where a
+/// first-cell marker such as the over-budget underline must still win: the plain edge rules carry
+/// no `!important`; only the `.chorale-root` variants do.
+#[test]
+fn the_plain_edge_rules_leave_other_tables_first_cell_markers_alone() {
+    let css = crate::style::GLOBAL_CSS;
+    for sel in [
+        "\n.finding-row-critical > td:first-child {",
+        "\n.finding-row-held > td:first-child {",
+    ] {
+        let at = css.find(sel).unwrap_or_else(|| panic!("{sel}"));
+        let end = css[at..].find('}').unwrap();
+        let rule = &css[at..at + end];
+        assert!(!rule.contains("!important"), "{rule}");
     }
 }
