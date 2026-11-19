@@ -1329,3 +1329,55 @@ fn a_second_look_no_reads_corrected_only_when_the_row_is_no_longer_ruled_out() {
         );
     }
 }
+
+// ── The word a click-through waits on to know a correction landed ─────────────────────────
+
+/// Every state a card can read.
+fn every_state() -> Vec<CardState> {
+    let error = Some(EngineCheckError::WrongSeverity);
+    vec![
+        CardState::Pending,
+        CardState::Yes,
+        CardState::Held {
+            error,
+            carried_from: None,
+        },
+        CardState::Held {
+            error,
+            carried_from: Some("insp-1".to_string()),
+        },
+        CardState::HeldThrownOut { carried_from: None },
+        CardState::HeldThrownOut {
+            carried_from: Some("insp-1".to_string()),
+        },
+        CardState::ThrownOut,
+        CardState::Restored,
+        CardState::ThrownOutConfirmed { error },
+        CardState::Corrected { error },
+    ]
+}
+
+#[test]
+fn the_word_corrected_alone_does_not_tell_a_corrected_card_from_a_held_one() {
+    // The held states say "held from export until corrected", so a screen test that waits for
+    // the bare word "corrected" is satisfied by a card that is still held. This pins why it must
+    // wait on the corrected state's own opening words instead.
+    let held = card_state_text(&CardState::Held {
+        error: Some(EngineCheckError::WrongSeverity),
+        carried_from: None,
+    });
+    assert!(held.contains("corrected"), "{held}");
+}
+
+#[test]
+fn only_the_corrected_state_opens_with_no_corrected() {
+    const MARK: &str = "No, corrected";
+    for state in every_state() {
+        let text = card_state_text(&state);
+        assert_eq!(
+            text.contains(MARK),
+            matches!(state, CardState::Corrected { .. }),
+            "{state:?}: {text}"
+        );
+    }
+}
