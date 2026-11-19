@@ -14,6 +14,7 @@ pub const RUN_MODE_TOPIC_ID: &str = "run-mode";
 pub const FULL_INSPECTION_TOPIC_ID: &str = "full-inspection";
 pub const SPEND_LIMIT_TOPIC_ID: &str = "spend-limit";
 pub const ESTIMATE_TOPIC_ID: &str = "estimate";
+pub const BACKEND_TOPIC_ID: &str = "backend";
 
 fn topic(id: &'static str, title: &'static str, paragraphs: &[&str]) -> HelpTopic {
     HelpTopic {
@@ -173,6 +174,23 @@ pub fn estimate_topic(finder: ProjectFinder, backend: ProjectBackend) -> HelpTop
     }
 }
 
+/// "Backend": where this project's AI calls run, and what each choice needs.
+pub fn backend_topic() -> HelpTopic {
+    topic(
+        BACKEND_TOPIC_ID,
+        "Backend",
+        &[
+            "The backend decides where every AI call this project makes runs: the inspection, \
+             alternative recommendations, rescans and the governed dev loop.",
+            "CLI runs on your Claude Code subscription and needs no key. API runs on the \
+             Anthropic API and needs a saved Anthropic API key. It is the compliant, metered \
+             chain for client code.",
+            "If the API is chosen and no key is saved, the AI steps on this project do not run \
+             until one is saved. The deterministic checks still run.",
+        ],
+    )
+}
+
 /// Every topic this file owns (the Engine and Agent forms of the two that differ).
 pub fn topics() -> Vec<HelpTopic> {
     let mut all = vec![
@@ -180,6 +198,7 @@ pub fn topics() -> Vec<HelpTopic> {
         run_mode_topic(),
         full_inspection_topic(),
         spend_limit_topic(),
+        backend_topic(),
     ];
     for finder in [ProjectFinder::Agent, ProjectFinder::Engine] {
         all.push(inspect_topic(finder));

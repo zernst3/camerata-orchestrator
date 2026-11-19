@@ -167,7 +167,13 @@ pub(in crate::cockpit) async fn export_product_zip(
 /// prints it in the confidentiality line, and the export refuses while it is blank, so the
 /// field says so until it is filled.
 #[component]
-pub(in crate::cockpit) fn ClientNameSetup(project_id: String, initial: String) -> Element {
+pub(in crate::cockpit) fn ClientNameSetup(
+    project_id: String,
+    initial: String,
+    /// Locked while a run is in flight (the field is shown but cannot be edited).
+    #[props(default)]
+    disabled: bool,
+) -> Element {
     // The field keeps its own text while it is on screen, so it is keyed by the project it is
     // for and by the name that project has saved. Switching projects (or the saved name
     // changing under it) builds a fresh field, so one project's text can never be shown against
@@ -182,13 +188,18 @@ pub(in crate::cockpit) fn ClientNameSetup(project_id: String, initial: String) -
                 key: "{key}",
                 project_id: project_id.clone(),
                 initial: initial.clone(),
+                disabled,
             }
         }
     }
 }
 
 #[component]
-pub(super) fn ClientNameField(project_id: String, initial: String) -> Element {
+pub(super) fn ClientNameField(
+    project_id: String,
+    initial: String,
+    #[props(default)] disabled: bool,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut name = use_signal(|| initial.clone());
     let blank = name().trim().is_empty();
@@ -202,6 +213,7 @@ pub(super) fn ClientNameField(project_id: String, initial: String) -> Element {
                 class: "audit-export-input",
                 placeholder: "Required before export",
                 value: "{name}",
+                disabled,
                 oninput: move |e| name.set(e.value()),
                 onchange: move |_| {
                     let pid = project_id.clone();

@@ -254,6 +254,27 @@ pub fn rows(values: &InspectionValues, show_unused: bool) -> Vec<RowSpec> {
         .collect()
 }
 
+/// The one operator line for a refused model write: names the row, says what to do, and says the
+/// previous value was kept. `server` is the server's own reason (for example "model must not be
+/// empty"), which is turned into plain words and never shown raw.
+pub fn save_error_line(stage: Stage, server: &str) -> String {
+    let reason = match server.trim() {
+        "model must not be empty" => "a model must be chosen".to_string(),
+        other => {
+            let other = other.trim_end_matches('.');
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(c) => format!("{}{}", c.to_lowercase(), chars.as_str()),
+                None => "the server refused the change".to_string(),
+            }
+        }
+    };
+    format!(
+        "Not saved. {}: {reason}. The previous value was kept.",
+        stage.label()
+    )
+}
+
 /// The rows the finder in effect does not use.
 pub fn unused_rows(finder: ProjectFinder) -> Vec<Stage> {
     Stage::ALL
@@ -371,6 +392,13 @@ pub fn summary_line(values: &InspectionValues) -> String {
 /// empty while the registry loads.
 pub fn model_groups(models: &Option<ModelsResp>, current: &str) -> Vec<(String, Vec<ModelOption>)> {
     let mut groups = chat_model_groups(models, current);
+    // The chat fallback says "Loading models" for a blank model. Here the registry is either
+    // loaded or it is not coming (the host loads it once), so never say "Loading".
+    for (_, options) in &mut groups {
+        for option in options.iter_mut().filter(|o| o.id.is_empty()) {
+            option.label = "No model list available".to_string();
+        }
+    }
     let listed = groups
         .iter()
         .any(|(_, options)| options.iter().any(|m| m.id == current));

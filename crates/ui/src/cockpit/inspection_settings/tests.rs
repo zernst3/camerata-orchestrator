@@ -239,9 +239,15 @@ fn while_a_write_is_in_flight_every_select_is_locked() {
 }
 
 #[test]
-fn a_refusal_shows_the_servers_words_in_an_alert() {
+fn a_refusal_shows_an_operator_sentence_in_an_alert_never_the_raw_server_string() {
     let html = page("save-error");
-    assert!(html.contains("model must not be empty"), "{html}");
+    assert!(
+        html.contains(
+            "Not saved. Group review model: a model must be chosen. The previous value was kept."
+        ),
+        "{html}"
+    );
+    assert!(!html.contains("model must not be empty"), "{html}");
     assert!(html.contains("role=\"alert\""));
 }
 
@@ -268,6 +274,7 @@ fn no_state_has_a_dash_or_names_the_environment_outside_its_one_sentence() {
         "run-in-flight",
         "save-error",
         "registry-missing",
+        "non-anthropic-warning",
     ] {
         let html = page(id);
         assert!(
@@ -971,6 +978,88 @@ fn the_fix_row_says_what_runs_when_it_is_not_set() {
     let html = page("all-unset");
     assert!(
         html.contains("or the calibration model when the Haiku fix switch is off"),
+        "{html}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_write_names_the_row_and_says_the_old_value_was_kept() {
+    let fake = Fake::new();
+    fake.refuse.set(Some("model must not be empty"));
+    let mut screen = mounted(&fake, false).await;
+    screen.pick("is-model-group_review", "");
+    screen.pump(300).await;
+    let html = screen.html();
+    assert!(
+        html.contains(
+            "Not saved. Group review model: a model must be chosen. The previous value was kept."
+        ),
+        "{html}"
+    );
+    assert!(!html.contains("model must not be empty"), "{html}");
+}
+
+#[test]
+fn the_backend_card_has_the_two_one_line_hints_and_no_serial_comma_or_scan_word() {
+    let cli = page("agent-opus");
+    assert!(
+        cli.contains("CLI selected. Runs on your Claude Code subscription."),
+        "{cli}"
+    );
+    let api = page("engine");
+    assert!(
+        api.contains("API selected. Runs on the Anthropic API. Needs a saved Anthropic API key."),
+        "{api}"
+    );
+    for html in [&cli, &api] {
+        assert!(!html.contains("rescans, and"), "no serial comma: {html}");
+        assert!(!html.contains("the scan, alternative"), "{html}");
+        assert!(
+            html.contains("aria-label=\"About Backend\""),
+            "the longer text is behind the ? button: {html}"
+        );
+    }
+}
+
+#[test]
+fn the_backend_help_topic_keeps_the_long_text_true_and_free_of_serial_commas() {
+    let topic = camerata_ui_core::help::inspection::backend_topic();
+    assert!(topic.body.contains("Anthropic API key"), "{}", topic.body);
+    assert!(
+        topic.body.contains("the deterministic checks still run")
+            || topic.body.contains("The deterministic checks still run"),
+        "{}",
+        topic.body
+    );
+    assert!(!topic.body.contains(", and "), "{}", topic.body);
+}
+
+#[test]
+fn a_run_in_flight_locks_the_backend_control_visibly_and_the_client_name() {
+    let html = page("run-in-flight");
+    assert!(html.contains("backend-toggle backend-toggle-locked"), "{html}");
+    let name = tag_of(&html, "inspection-client-name");
+    assert!(name.contains("disabled"), "client name is locked: {name}");
+    let free = page("agent-opus");
+    assert!(!free.contains("backend-toggle-locked"));
+    assert!(!tag_of(&free, "inspection-client-name").contains("disabled"));
+}
+
+#[test]
+fn with_the_registry_missing_an_unset_row_says_not_set_and_never_loading() {
+    let html = page("registry-missing");
+    let clone = select_of(&html, "is-model-clone_judge");
+    assert!(clone.contains("(not set: Claude Haiku 5.5)"), "{clone}");
+    assert!(!html.contains("Loading models"), "{html}");
+}
+
+#[test]
+fn the_non_anthropic_warning_state_shows_the_engagement_warning() {
+    let html = page("non-anthropic-warning");
+    assert!(
+        html.contains(
+            "This project is a client engagement: only Anthropic models may run. Group review model is set to openai/gpt-5."
+        ),
         "{html}"
     );
 }

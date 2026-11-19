@@ -2915,6 +2915,8 @@ html, body {
   border: 1px solid var(--line); border-radius: 50%; background: var(--surface);
   color: var(--ink-soft); font-size: 12px; font-weight: 700; line-height: 1; cursor: pointer;
 }
+.export-heading { display: flex; align-items: center; }
+.export-heading > p { margin: 0; }
 .help-button:hover, .help-button:focus-visible { border-color: var(--accent); color: var(--accent-ink); }
 .help-backdrop {
   position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center;
@@ -2982,6 +2984,7 @@ html, body {
   border: 1px solid var(--line); background: var(--surface); color: var(--ink);
   font: inherit; font-size: 13px; padding: 8px 11px; border-radius: 8px;
 }
+.audit-export-input:disabled { opacity: .55; cursor: not-allowed; }
 .audit-export-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
 /* The executive-summary override is a multi-sentence narrative that REPLACES a whole report
    section, not a short label — it needs real room, not the 2-row box it used to get. Sized
@@ -6263,6 +6266,8 @@ select:not([multiple]):not([size]):disabled {
   color: #fff;
   cursor: default;
 }
+.backend-toggle-locked { opacity: 0.5; border-style: dashed; }
+.backend-toggle-locked .backend-seg { cursor: not-allowed; }
 .backend-key-warning {
   margin-top: 8px;
   font-size: 13px;

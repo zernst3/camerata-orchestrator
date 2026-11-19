@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use camerata_api_types::project::{ProjectBackend, ProjectFinder};
 use camerata_ui_core::inspection_settings::{
-    conflict_line, each_run_lines, engagement_model_conflicts, model_groups, rows,
+    conflict_line, each_run_lines, engagement_model_conflicts, model_groups, rows, save_error_line,
     unused_rows_button, InspectionValues, RowSpec, Stage, FINDER_CHOICES, MODELS_NOTE,
     RUN_IN_FLIGHT_NOTE,
 };
@@ -179,7 +179,16 @@ fn InspectionRow(
     let groups = if is_finder {
         Vec::new()
     } else {
-        model_groups(&models, &current)
+        let mut groups = model_groups(&models, &current);
+        // A row that can be unset already offers "(not set: ...)" as its option, so the id-less
+        // placeholder the registry fallback adds for a blank model is not shown beside it.
+        if spec.unset_option.is_some() && current.is_empty() {
+            for (_, options) in &mut groups {
+                options.retain(|o| !o.id.is_empty());
+            }
+            groups.retain(|(_, options)| !options.is_empty());
+        }
+        groups
     };
     rsx! {
         div { class: "audit-model-row inspection-settings-row",
@@ -311,6 +320,7 @@ pub(crate) fn InspectionSettingsView(props: InspectionSettingsViewProps) -> Elem
             super::scan::ClientNameSetup {
                 project_id: project.id.clone(),
                 initial: project.client_name.clone(),
+                disabled: run_locked,
             }
 
             h3 { class: "scan-section-h", "Each run" }
@@ -415,7 +425,7 @@ pub(crate) fn InspectionSettingsHost(
                         }
                     }
                     Err(message) => {
-                        save_error.set(Some(message));
+                        save_error.set(Some(save_error_line(stage, &message)));
                         // The select shows the refused pick; build it fresh so it shows what the
                         // project still holds.
                         epoch += 1;
