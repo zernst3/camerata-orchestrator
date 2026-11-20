@@ -578,6 +578,9 @@ pub(crate) const STANCE_LAYER_DOMAINS: &[&str] = &[
 
 /// Whether the calibrator or the finder doubts the row (`needs_review` or a needs-review
 /// confidence) and the reviewer has not ruled on it by editing the row's severity themselves.
+/// Used only to decide whether the row is HELD ([`is_held_for_review`]): the doubt itself stays
+/// the engine's statement in every export (`needs_review`, the confidence), as on a Confirmed
+/// row, and the reviewer's ruling is carried by the label, Decision so far and the record.
 fn calibration_doubt(f: &Finding) -> bool {
     (f.needs_review || f.confidence.as_deref() == Some("needs-review"))
         && !super::overlay::reviewer_edited_field(f, camerata_api_types::edits::EditField::Severity)
@@ -748,7 +751,10 @@ pub(crate) fn finding_confidence_rank(f: &Finding) -> u8 {
 // guarantees that WHEREVER a finding lands, its exported confidence/needs_review fields never
 // contradict each other or the bucket that put it there.
 pub(crate) fn is_hedged(f: &Finding, bucket: &str) -> bool {
-    calibration_doubt(f) || bucket == "informational" || bucket == "held"
+    f.needs_review
+        || f.confidence.as_deref() == Some("needs-review")
+        || bucket == "informational"
+        || bucket == "held"
 }
 
 /// The canonical EXPORTED confidence string for `f`, reconciled against [`is_hedged`] — never
@@ -776,10 +782,6 @@ pub(crate) fn is_hedged(f: &Finding, bucket: &str) -> bool {
 pub(crate) fn hedge_confidence(f: &Finding, bucket: &str) -> Option<String> {
     if is_hedged(f, bucket) {
         Some("needs-review".to_string())
-    } else if f.confidence.as_deref() == Some("needs-review") {
-        // The reviewer's own severity edit lifted the calibrator's doubt: the row no longer
-        // exports as unsure, and the biconditional above holds.
-        Some("high".to_string())
     } else if f.confidence.is_none() && !is_ai_tier(f) {
         Some("high".to_string())
     } else {

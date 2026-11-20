@@ -605,7 +605,8 @@ pub(crate) fn row_waiting_reason(
 /// The disposition label of a row as the exports print it: a merged row's pointer, else a row the
 /// reviewer decided by changing its severity themselves ("Severity set by the reviewer"), else
 /// [`disposition_label`]. A severity edit is the row's decision (Zach, 2026-11-20), so it must not
-/// read "Open". A row held for another reason keeps its own label.
+/// read "Open". A row held for unverified evidence, junk text or a put-back cannot ship without a decision record, so
+/// the label never hides those holds from the gate.
 pub(crate) fn row_disposition_label(
     f: &Finding,
     disposition: Disposition,
@@ -617,7 +618,6 @@ pub(crate) fn row_disposition_label(
         return label.to_string();
     }
     if disposition == Disposition::Unresolved
-        && !matches!(bucket, "held" | "informational")
         && overlay::reviewer_edited_field(f, camerata_api_types::edits::EditField::Severity)
     {
         return format!(

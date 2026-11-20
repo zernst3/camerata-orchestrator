@@ -404,8 +404,6 @@ fn review_level_label(wire: &str) -> &'static str {
     }
 }
 
-/// What a reviewer has already decided about a problem, in plain words. An open problem has no
-/// decision yet.
 /// Whether a row has a decision: any disposition but none yet, or a severity the reviewer set
 /// themselves. The counts and the Decision so far cell both read it, so they cannot disagree.
 pub(super) fn row_is_decided(row: &FindingRow) -> bool {
@@ -421,6 +419,8 @@ fn severity_set_by_reviewer(row: &FindingRow) -> bool {
             .starts_with(v::SEVERITY_SET_BY_REVIEWER)
 }
 
+/// What a reviewer has already decided about a problem, in plain words. An open problem has no
+/// decision yet.
 pub(super) fn decision_so_far(row: &FindingRow) -> String {
     if !row.facts.merged_into.is_empty() {
         return row.disposition_label.clone();

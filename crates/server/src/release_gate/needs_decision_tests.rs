@@ -751,25 +751,68 @@ fn findings_row(zip: &[u8], path: &str) -> serde_json::Value {
 /// decided row, not as "Needs a decision". Ruling: a severity edit is the reviewer's decision.
 #[test]
 fn a_released_unsure_row_reads_as_decided_not_as_needs_a_decision() {
-    let sealed = report_with(doubted_row()).seal();
+    // The doubt is the engine's statement and exports as it is, as on a Confirmed unsure row;
+    // the reviewer's ruling is the label, the Decision so far cell and the severity_set record.
+    for row in [doubted_row(), unsure_medium()] {
+        let sealed = report_with(row.clone()).seal();
+        let sealed_row = sealed_row(&sealed, "src/cache.rs");
+        let edit = edit_on(1, &sealed_row, EditField::Severity, "medium", "high");
+        let reviewed =
+            crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+        let released = release(package_of_reviewed(&reviewed)).expect("released");
+        let json = findings_row(&released.bytes, "src/cache.rs");
+        let label = json["disposition_label"].as_str().unwrap_or_default();
+        assert!(label.starts_with("Severity set by the reviewer"), "{json}");
+        assert!(!label.starts_with("Needs a decision"), "{json}");
+        assert_eq!(
+            all_problems_cell(&released.bytes, "src/cache.rs", "Decision so far"),
+            "Severity set by the reviewer",
+            "{json}"
+        );
+        // The same hedge values a Confirmed unsure row exports.
+        let confirmed = package_with(report_with(row.clone()), &decided(&row, "Confirmed"));
+        let confirmed_zip = release(confirmed).expect("released");
+        let c = findings_row(&confirmed_zip.bytes, "src/cache.rs");
+        assert_eq!(json["needs_review"], c["needs_review"], "{json} {c}");
+        assert_eq!(json["confidence"], c["confidence"], "{json} {c}");
+        assert_eq!(json["needs_review"], true, "{json}");
+        assert_eq!(json["confidence"], "needs-review", "{json}");
+    }
+}
+
+/// The decided count agrees too: on the real unsure row, an internal export counts the flagged
+/// row as decided once the reviewer set its severity.
+#[test]
+fn the_decided_count_includes_the_real_unsure_row_with_a_severity_edit() {
+    let sealed = report_with(unsure_medium()).seal();
     let row = sealed_row(&sealed, "src/cache.rs");
     let edit = edit_on(1, &row, EditField::Severity, "medium", "high");
     let reviewed =
         crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
-    let released = release(package_of_reviewed(&reviewed)).expect("released");
-    let json = findings_row(&released.bytes, "src/cache.rs");
-    let label = json["disposition_label"]
-        .as_str()
-        .or_else(|| json["disposition"].as_str())
-        .unwrap_or_default()
-        .to_string();
-    assert!(label.starts_with("Severity set by the reviewer"), "{json}");
-    assert!(!label.contains("Needs a decision"), "{json}");
-    assert_ne!(json["bucket"], "held", "{json}");
-    assert_ne!(json["needs_review"], true, "{json}");
-    assert_eq!(
-        all_problems_cell(&released.bytes, "src/cache.rs", "Decision so far"),
-        "Severity set by the reviewer"
+    let options = ReportOptions {
+        internal: true,
+        ..client_options()
+    };
+    let json = build_report_json(&reviewed, None, &options);
+    let data = render_data_json(&json).unwrap();
+    let package = assemble_package(
+        &reviewed,
+        None,
+        &options,
+        "acme-inspection",
+        (json, data, b"%PDF-1.7 stand-in".to_vec()),
+    )
+    .unwrap();
+    let strings = xlsx_strings(&package.xlsx).unwrap();
+    assert!(
+        strings
+            .iter()
+            .any(|c| c == "1 row flagged as a possible false positive, 1 decided"),
+        "{:?}",
+        strings
+            .iter()
+            .filter(|c| c.contains("flagged"))
+            .collect::<Vec<_>>()
     );
 }
 
