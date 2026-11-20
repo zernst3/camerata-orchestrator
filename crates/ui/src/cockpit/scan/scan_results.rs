@@ -1050,12 +1050,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             p { class: "rule-modal-label", "Finding" }
                             p { class: "rule-modal-title", "{f.snippet}" }
                             // Enclosing-code-block context (finding-code-context feature,
-                            // docs/design/2026-07-27_finding-code-context.md): keyed by
-                            // repo/path/line so switching findings remounts this section and
-                            // starts a fresh on-demand fetch rather than showing stale content
-                            // left over from the previously open finding.
+                            // docs/design/2026-07-27_finding-code-context.md): the section
+                            // re-fetches when the finding changes (its fetch is reactive; a
+                            // lone `key:` on a plain child is ignored by the differ).
                             FindingCodeContext {
-                                key: "{f.repo}\u{1f}{f.path}\u{1f}{f.line}",
                                 finding: f.clone(),
                                 // The viewer lives in the Queue, so the door only exists while
                                 // the Queue is the surface on screen. The modal closes; the
@@ -1070,10 +1068,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 }),
                             }
                             // Recommended fix (docs/design/2026-07-26_audit-report-refinements.md):
-                            // keyed by rule_id so switching findings remounts this section and
-                            // starts a fresh on-demand fetch, same idiom as FindingCodeContext.
+                            // re-fetches when the rule changes, same idiom as FindingCodeContext.
                             FindingRecommendedFix {
-                                key: "{f.rule_id}",
                                 rule_id: f.rule_id.clone(),
                             }
                             p { class: "rule-modal-label", "Explanation" }

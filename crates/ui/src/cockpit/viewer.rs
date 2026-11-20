@@ -5468,7 +5468,8 @@ mod host_tests {
             .and(query_param("around", "4"))
             .respond_with(ok({
                 let mut b = file_body("here", 14, &[]);
-                b["block"] = serde_json::json!({"start_line": 2, "end_line": 4, "kind": "function"});
+                b["block"] =
+                    serde_json::json!({"start_line": 2, "end_line": 4, "kind": "function"});
                 b
             }))
             .mount(&server)
@@ -5478,7 +5479,8 @@ mod host_tests {
             .and(query_param("around", "9"))
             .respond_with(ok({
                 let mut b = file_body("here", 14, &[]);
-                b["block"] = serde_json::json!({"start_line": 8, "end_line": 10, "kind": "function"});
+                b["block"] =
+                    serde_json::json!({"start_line": 8, "end_line": 10, "kind": "function"});
                 b
             }))
             .mount(&server)

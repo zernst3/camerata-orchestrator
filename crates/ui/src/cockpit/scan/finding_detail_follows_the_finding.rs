@@ -38,8 +38,8 @@ fn app() -> Element {
 
 async fn settle(vdom: &mut VirtualDom) {
     for _ in 0..4 {
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(60), vdom.wait_for_work())
-            .await;
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(60), vdom.wait_for_work()).await;
         let _ = vdom.render_immediate_to_vec();
     }
 }
@@ -80,7 +80,10 @@ async fn changing_the_finding_replaces_the_code_context_and_the_recommended_fix(
     vdom.rebuild_in_place();
     settle(&mut vdom).await;
     let html = dioxus_ssr::render(&vdom);
-    assert!(html.contains("alpha_code") && html.contains("fix for A"), "{html}");
+    assert!(
+        html.contains("alpha_code") && html.contains("fix for A"),
+        "{html}"
+    );
 
     let shown = SHOWN.with(|s| s.borrow().expect("the harness ran"));
     vdom.in_runtime(|| {

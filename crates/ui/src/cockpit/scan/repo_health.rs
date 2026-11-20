@@ -311,9 +311,9 @@ pub(in crate::cockpit) fn audited_origins(
 }
 
 /// The "Code context" section of the finding-detail modal. Fetches ON-DEMAND every time it
-/// mounts; the caller keys this component by `repo`/`path`/`line` (see the finding-detail
-/// modal) so opening a DIFFERENT finding remounts it fresh rather than showing stale content
-/// left over from the previous one.
+/// mounts and again whenever `finding` changes: the fetch reads the finding reactively, so a
+/// DIFFERENT finding never shows content left over from the previous one. (A `key:` on a plain
+/// child is ignored by the differ, so this component does not rely on a remount.)
 ///
 /// Degradation floor (design §5): the stored `finding.snippet` is already rendered above this
 /// section by the caller. ANY failure here — file moved/deleted, line gone, non-UTF8,
@@ -328,19 +328,17 @@ pub(super) fn FindingCodeContext(
     #[props(default)]
     on_open_viewer: Option<Callback<()>>,
 ) -> Element {
-    let expect_line = finding
-        .snippet
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let f = finding.clone();
-    let ctx_res = use_resource(move || {
-        let f = f.clone();
-        let expect_line = expect_line.clone();
-        async move { fetch_finding_context(&f.repo, &f.path, f.line, &expect_line).await }
-    });
+    // Reactive on the finding: a changed finding is a new fetch, never the first one's answer.
+    let ctx_res = use_resource(use_reactive!(|(finding,)| async move {
+        let expect_line = finding
+            .snippet
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        fetch_finding_context(&finding.repo, &finding.path, finding.line, &expect_line).await
+    }));
 
     let ctx = ctx_res.read().clone();
     let door = on_open_viewer.map(|cb| {
@@ -364,7 +362,11 @@ pub(super) fn FindingCodeContext(
         // stored snippet above already covers the finding, so say nothing further here
         // rather than showing a confusing empty error box.
         Some(None) => rsx! {},
-        Some(Some(v)) => rsx! { FindingContextBlock { view: v } },
+        // Keyed by the block's lines so "Show full block" does not carry over to another block.
+        // The arm's element lands in a dynamic slot, where the differ honours the key.
+        Some(Some(v)) => {
+            rsx! { FindingContextBlock { key: "{v.start_line}-{v.violation_line}", view: v } }
+        }
     };
     rsx! {
         if let Some(door) = door {
@@ -490,8 +492,8 @@ pub(super) async fn fetch_finding_fix(rule_id: &str) -> Option<FindingFixView> {
 }
 
 /// The "Recommended fix" block of the finding-detail modal. Fetches ON-DEMAND every time it
-/// mounts; the caller keys this component by `rule_id` (see the finding-detail modal) so
-/// switching to a different finding remounts it fresh.
+/// mounts and again whenever `rule_id` changes (the fetch reads it reactively; a lone `key:` on
+/// a plain child is ignored by the differ, so the component cannot rely on a remount).
 ///
 /// Degradation floor (matches `FindingCodeContext`'s discipline): no corpus entry, no
 /// adopted default option, a blank directive, a request that fails outright, or a response
@@ -501,11 +503,10 @@ pub(super) async fn fetch_finding_fix(rule_id: &str) -> Option<FindingFixView> {
 /// panics.
 #[component]
 pub(super) fn FindingRecommendedFix(rule_id: String) -> Element {
-    let rid = rule_id.clone();
-    let fix_res = use_resource(move || {
-        let rid = rid.clone();
-        async move { fetch_finding_fix(&rid).await }
-    });
+    // Reactive on the rule: a changed rule is a new fetch, never the first one's answer.
+    let fix_res = use_resource(use_reactive!(|(rule_id,)| async move {
+        fetch_finding_fix(&rule_id).await
+    }));
 
     let fix = fix_res.read().clone();
     match fix {

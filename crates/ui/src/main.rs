@@ -27,6 +27,8 @@ mod credentials;
 mod delete_project_ui;
 mod design;
 mod gallery;
+#[cfg(test)]
+mod key_semantics_tests;
 pub mod loading;
 pub mod md;
 mod provider_safety;
