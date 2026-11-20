@@ -102,7 +102,21 @@ pub fn agent_total_timeout() -> std::time::Duration {
 /// wrapping the whole streaming loop, so a runaway process that keeps trickling
 /// output is still killed eventually.
 pub(crate) async fn stream_subprocess(
+    cmd: tokio::process::Command,
+    on_activity: Option<HeartbeatFn>,
+    inactivity_window: std::time::Duration,
+    total_timeout: std::time::Duration,
+) -> Result<(String, std::process::ExitStatus), AgentError> {
+    stream_subprocess_with_stdin(cmd, None, on_activity, inactivity_window, total_timeout).await
+}
+
+/// [`stream_subprocess`] that also hands `stdin_prompt` to the child on its standard input
+/// (closed after the last byte). `None` leaves stdin as the caller set it. The `claude` CLI
+/// takes its prompt this way: the OS caps the argument list (macOS `ARG_MAX`, about 1 MB), so a
+/// large task as an argument fails the spawn with "Argument list too long".
+pub(crate) async fn stream_subprocess_with_stdin(
     mut cmd: tokio::process::Command,
+    stdin_prompt: Option<String>,
     on_activity: Option<HeartbeatFn>,
     inactivity_window: std::time::Duration,
     total_timeout: std::time::Duration,
@@ -112,8 +126,18 @@ pub(crate) async fn stream_subprocess(
     cmd.kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if stdin_prompt.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
 
     let mut child = cmd.spawn().map_err(AgentError::Spawn)?;
+    if let (Some(prompt), Some(stdin)) = (stdin_prompt, child.stdin.take()) {
+        // On its own task: a child that answers before it has read everything must not block
+        // on a full pipe. A child that exits early is reported by its exit status.
+        tokio::spawn(async move {
+            let _ = camerata_api_types::claude_cli::write_prompt(stdin, prompt.into_bytes()).await;
+        });
+    }
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr_handle = child.stderr.take().expect("stderr is piped");
 
@@ -421,10 +445,18 @@ impl ClaudeCliDriver {
         self
     }
 
-    /// Build the argv for `claude -p` for the given role + task. Pure and
-    /// testable — does not spawn anything. The returned vec is everything after
-    /// the `claude` program name.
-    pub fn build_args(&self, role: &Role, task: &str) -> Vec<String> {
+    /// The task as it is handed to `claude -p`: on STDIN, not in the argument list, which the OS
+    /// caps (macOS `ARG_MAX`, about 1 MB). The model-input chokepoint
+    /// (`camerata_secrets::model_input`): nothing handed to a model carries a raw secret, the
+    /// task of a governed agent included.
+    pub fn stdin_prompt(&self, task: &str) -> String {
+        camerata_secrets::model_input::redact_for_model(task).into_owned()
+    }
+
+    /// Build the argv for `claude -p` for the given role. The task is NOT in it (see
+    /// [`Self::stdin_prompt`]). Pure and testable — does not spawn anything. The returned vec
+    /// is everything after the `claude` program name.
+    pub fn build_args(&self, role: &Role) -> Vec<String> {
         // Per-role allowedTools: the governed write tool + read-only builtins, PLUS the
         // governed `delegate` tool when (and only when) this driver is the orchestrator.
         // The READ-CLASS `ask_clarification` tool is appended when this driver opts in
@@ -451,9 +483,6 @@ impl ClaudeCliDriver {
         }
         let mut args: Vec<String> = vec![
             "-p".to_string(),
-            // The model-input chokepoint (`camerata_secrets::model_input`): nothing handed to a
-            // model carries a raw secret, the task of a governed agent included.
-            camerata_secrets::model_input::redact_for_model(task).into_owned(),
             "--strict-mcp-config".to_string(),
             "--mcp-config".to_string(),
             self.mcp_config_path.clone(),
@@ -507,12 +536,12 @@ impl ClaudeCliDriver {
     /// (`<clone>/.camerata-worktrees/<branch>`), `CARGO_TARGET_DIR` is injected so any cargo
     /// invocations Claude makes write into the shared artifact store. See the module-level
     /// note in `crates/agent/src/generic.rs` for the full disk-safety design.
-    fn build_command(&self, role: &Role, task: &str) -> tokio::process::Command {
+    fn build_command(&self, role: &Role) -> tokio::process::Command {
         let program = camerata_api_types::claude_cli::claude_program();
         let mut cmd = tokio::process::Command::new(program);
         // The subscription CLI must never inherit an API key from the parent's `.env`.
         camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
-        cmd.args(self.build_args(role, task));
+        cmd.args(self.build_args(role));
         // Isolation: the worktree as cwd when there is one, else an empty engine-owned directory;
         // never the launcher's directory, and no project settings or operator memory.
         camerata_api_types::claude_cli::isolate_claude_call(
@@ -541,9 +570,10 @@ fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
 #[async_trait::async_trait]
 impl AgentDriver for ClaudeCliDriver {
     async fn run(&self, role: &Role, task: &str) -> anyhow::Result<AgentOutcome> {
-        let cmd = self.build_command(role, task);
-        let (stdout, _status) = stream_subprocess(
+        let cmd = self.build_command(role);
+        let (stdout, _status) = stream_subprocess_with_stdin(
             cmd,
+            Some(self.stdin_prompt(task)),
             self.on_activity.clone(),
             agent_inactivity_window(),
             agent_total_timeout(),
@@ -584,7 +614,7 @@ mod tests {
     #[test]
     fn the_claude_subprocess_never_inherits_the_anthropic_api_key() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json");
-        let cmd = driver.build_command(&role(), "do the thing");
+        let cmd = driver.build_command(&role());
         assert!(cmd
             .as_std()
             .get_envs()
@@ -596,14 +626,14 @@ mod tests {
     /// the operator's memory.
     #[test]
     fn the_agent_call_is_isolated_from_the_launcher() {
-        let bare = ClaudeCliDriver::new("/tmp/mcp.json").build_command(&role(), "task");
+        let bare = ClaudeCliDriver::new("/tmp/mcp.json").build_command(&role());
         assert_eq!(
             bare.as_std().get_current_dir(),
             Some(camerata_api_types::claude_cli::engine_empty_cwd().as_path())
         );
         let bound = ClaudeCliDriver::new("/tmp/mcp.json")
             .with_worktree("/Users/auditor/clients/acme/.camerata-worktrees/feat")
-            .build_command(&role(), "task");
+            .build_command(&role());
         assert_eq!(
             bound.as_std().get_current_dir(),
             Some(std::path::Path::new(
@@ -626,7 +656,8 @@ mod tests {
     }
 
     /// Nothing sent to a model contains a raw secret, the agent a CLI starts included: the task
-    /// is handed to `claude -p` as an argument, so it is redacted on its way into the argv.
+    /// is handed to `claude -p` on stdin, so it is redacted on its way into the prompt, and it is
+    /// not in the argument list at all.
     #[test]
     fn the_task_handed_to_claude_carries_no_raw_secret() {
         let planted =
@@ -636,15 +667,19 @@ mod tests {
             "Fix the bug. The env file says {}. Then add a test.",
             planted.text
         );
-        let args = driver.build_args(&role(), &task);
+        let args = driver.build_args(&role());
         assert!(
-            !args.iter().any(|a| a.contains(&planted.value)),
-            "a secret value reached the claude argv"
+            !args.iter().any(|a| a.contains("Fix the bug.")),
+            "the task must not ride in the claude argv: {args:?}"
+        );
+        let prompt = driver.stdin_prompt(&task);
+        assert!(
+            !prompt.contains(&planted.value),
+            "a secret value reached the claude stdin"
         );
         assert!(
-            args.iter()
-                .any(|a| a.contains("Fix the bug.") && a.contains("Then add a test.")),
-            "the task itself still goes: {args:?}"
+            prompt.contains("Fix the bug.") && prompt.contains("Then add a test."),
+            "the task itself still goes: {prompt:?}"
         );
     }
 
@@ -712,7 +747,7 @@ mod tests {
     #[test]
     fn build_args_includes_delegate_only_for_orchestrator_driver() {
         let normal = ClaudeCliDriver::new("/tmp/mcp.json");
-        let normal_args = normal.build_args(&role(), "task");
+        let normal_args = normal.build_args(&role());
         let allowed = {
             let i = normal_args
                 .iter()
@@ -726,7 +761,7 @@ mod tests {
         );
 
         let lead = ClaudeCliDriver::new("/tmp/mcp.json").as_orchestrator(true);
-        let lead_args = lead.build_args(&role(), "task");
+        let lead_args = lead.build_args(&role());
         let lead_allowed = {
             let i = lead_args
                 .iter()
@@ -752,7 +787,7 @@ mod tests {
     #[test]
     fn build_args_wires_per_role_allowed_tools() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json");
-        let args = driver.build_args(&role(), "do a thing");
+        let args = driver.build_args(&role());
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         let allowed_val = &args[allowed_idx + 1];
         assert!(allowed_val.contains(GATED_WRITE_TOOL));
@@ -765,7 +800,7 @@ mod tests {
         // every write/exec/spawn tool is on the explicit denylist, AND absent from the
         // allowlist. `Task` matters most (a subagent could otherwise regain Write/Bash).
         let driver = ClaudeCliDriver::new("/tmp/mcp.json");
-        let args = driver.build_args(&role(), "task");
+        let args = driver.build_args(&role());
         let disallowed = {
             let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
             args[i + 1].clone()
@@ -790,7 +825,7 @@ mod tests {
     fn ask_clarification_absent_by_default_present_only_when_opted_in() {
         // Default driver: the clarification tool is NOT offered.
         let normal = ClaudeCliDriver::new("/tmp/mcp.json");
-        let normal_args = normal.build_args(&role(), "task");
+        let normal_args = normal.build_args(&role());
         let normal_allowed = {
             let i = normal_args
                 .iter()
@@ -807,7 +842,7 @@ mod tests {
 
         // Opted-in driver (the investigation agent): the tool is offered.
         let clarifier = ClaudeCliDriver::new("/tmp/mcp.json").with_clarification(true);
-        let args = clarifier.build_args(&role(), "task");
+        let args = clarifier.build_args(&role());
         let allowed = {
             let i = args.iter().position(|a| a == "--allowedTools").unwrap();
             args[i + 1].clone()
@@ -824,7 +859,7 @@ mod tests {
         // intact — gated_write is still the only write tool, and every write/exec/spawn
         // built-in (esp. Task) stays on the disallowed denylist and off the allowlist.
         let clarifier = ClaudeCliDriver::new("/tmp/mcp.json").with_clarification(true);
-        let args = clarifier.build_args(&role(), "task");
+        let args = clarifier.build_args(&role());
         let allowed = {
             let i = args.iter().position(|a| a == "--allowedTools").unwrap();
             args[i + 1].clone()
@@ -854,7 +889,7 @@ mod tests {
     #[test]
     fn propose_decision_rides_with_ask_clarification_and_adds_no_write_path() {
         let allowed_of = |d: &ClaudeCliDriver| {
-            let args = d.build_args(&role(), "task");
+            let args = d.build_args(&role());
             let i = args.iter().position(|a| a == "--allowedTools").unwrap();
             args[i + 1].clone()
         };
@@ -882,7 +917,7 @@ mod tests {
         // The CLI runs with --dangerously-skip-permissions, under which --allowedTools is
         // advisory only, so a tool that is not granted must be on --disallowedTools too.
         let disallowed_of = |d: &ClaudeCliDriver, role: &Role| {
-            let args = d.build_args(role, "task");
+            let args = d.build_args(role);
             let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
             args[i + 1].clone()
         };
@@ -922,14 +957,14 @@ mod tests {
     #[test]
     fn build_args_without_worktree_has_no_add_dir() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json");
-        let args = driver.build_args(&role(), "task");
+        let args = driver.build_args(&role());
         assert!(!args.iter().any(|a| a == "--add-dir"));
     }
 
     #[test]
     fn build_args_with_worktree_adds_dir_scope() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_worktree("/tmp/wt/backend");
-        let args = driver.build_args(&role(), "task");
+        let args = driver.build_args(&role());
         let idx = args
             .iter()
             .position(|a| a == "--add-dir")
@@ -940,7 +975,7 @@ mod tests {
     #[test]
     fn build_args_without_model_or_resume_omits_those_flags() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json");
-        let args = driver.build_args(&role(), "task");
+        let args = driver.build_args(&role());
         assert!(!args.iter().any(|a| a == "--model"));
         assert!(!args.iter().any(|a| a == "--resume"));
     }
@@ -948,7 +983,7 @@ mod tests {
     #[test]
     fn build_args_with_model_passes_model_flag() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-sonnet-5");
-        let args = driver.build_args(&role(), "task");
+        let args = driver.build_args(&role());
         let i = args
             .iter()
             .position(|a| a == "--model")
@@ -957,7 +992,7 @@ mod tests {
         // A blank model id is ignored (CLI default).
         let blank = ClaudeCliDriver::new("/tmp/mcp.json").with_model("   ");
         assert!(!blank
-            .build_args(&role(), "task")
+            .build_args(&role())
             .iter()
             .any(|a| a == "--model"));
     }
@@ -965,21 +1000,25 @@ mod tests {
     #[test]
     fn build_args_resuming_passes_resume_flag() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json").resuming("sess-abc123");
-        let args = driver.build_args(&role(), "the authorized directive");
+        let args = driver.build_args(&role());
         let i = args
             .iter()
             .position(|a| a == "--resume")
             .expect("--resume present");
         assert_eq!(args[i + 1], "sess-abc123");
-        // The directive still rides as the -p task.
-        let p = args.iter().position(|a| a == "-p").unwrap();
-        assert_eq!(args[p + 1], "the authorized directive");
+        // The directive still goes to `claude -p` as the task, on stdin.
+        assert!(args.iter().any(|a| a == "-p"));
+        assert!(!args.iter().any(|a| a == "the authorized directive"));
+        assert_eq!(
+            driver.stdin_prompt("the authorized directive"),
+            "the authorized directive"
+        );
     }
 
     #[test]
     fn build_args_preserves_strict_mcp_and_disallowed() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json");
-        let args = driver.build_args(&role(), "task");
+        let args = driver.build_args(&role());
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
         assert!(args.iter().any(|a| a == "--disallowedTools"));
         let dis_idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
