@@ -6,7 +6,8 @@
 //! of an element, is the same scope re-rendered with new props: its hooks keep their state. The
 //! viewer relied on the second reading and showed the first finding's state for every finding
 //! (2026-11-20). These tests pin the rule the UI code now follows: a keyed host that must start
-//! clean is rendered inside a list (`for k in [key]`).
+//! clean is rendered inside a list (`for k in [key]`). A keyed component nested inside an
+//! element is a plain child even when that element sits in an `if` (onboard.rs was the example).
 
 use dioxus::prelude::*;
 use std::cell::{Cell, RefCell};

@@ -339,11 +339,15 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
             if let Some(p) = active_project.as_ref() {
                 div { class: "onboard-inspection-settings",
                     p { class: "scan-section-h", "Inspection settings" }
-                    super::super::inspection_settings::InspectionSettingsHost {
-                        key: "{p.id}",
-                        project_id: p.id.clone(),
-                        run_in_flight,
-                        on_changed: move |changed: ProjectView| live_project.set(Some(changed)),
+                    // A list of one: `key` is honoured only among list children, so another
+                    // project is then a fresh host.
+                    for project_id in [p.id.clone()] {
+                        super::super::inspection_settings::InspectionSettingsHost {
+                            key: "{project_id}",
+                            project_id: project_id.clone(),
+                            run_in_flight,
+                            on_changed: move |changed: ProjectView| live_project.set(Some(changed)),
+                        }
                     }
                 }
             }

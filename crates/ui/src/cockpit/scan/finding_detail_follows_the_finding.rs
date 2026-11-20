@@ -1,12 +1,11 @@
 //! Tests: the finding-detail modal's two on-demand sections follow the finding they are given.
 //!
-//! The modal mounts `FindingCodeContext` and `FindingRecommendedFix` with a `key:` meant to give
-//! each finding a fresh section. Dioxus honours `key` only among the children of a list, and
-//! these two are plain children of the modal, so the key did nothing: the first finding's fetch
-//! stayed on screen when the finding changed. The components now read their props reactively,
-//! which these tests drive through the real components.
+//! The modal mounts `FindingCodeContext` and `FindingRecommendedFix` through
+//! `FindingDetailSections`, which renders each as a keyed list of one (Dioxus honours `key` only
+//! among list children). A different finding is then a fresh section: the previous finding's
+//! answer is gone while the new one loads, and "loading" shows.
 
-use super::{FindingCodeContext, FindingRecommendedFix};
+use super::FindingDetailSections;
 use camerata_ui_core::triage::FindingView;
 use dioxus::prelude::*;
 use std::cell::RefCell;
@@ -31,8 +30,7 @@ fn app() -> Element {
     SHOWN.with(|s| *s.borrow_mut() = Some(shown));
     let (line, rule_id) = shown();
     rsx! {
-        FindingCodeContext { finding: finding(line, &rule_id) }
-        FindingRecommendedFix { rule_id }
+        FindingDetailSections { finding: finding(line, &rule_id) }
     }
 }
 
@@ -63,12 +61,15 @@ async fn serve_with_delay(delay: std::time::Duration) -> MockServer {
         Mock::given(method("GET"))
             .and(path("/api/onboard/finding-context"))
             .and(query_param("line", line))
-            .respond_with(reply(serde_json::json!({
-                "status": "ok", "lines": [text], "start_line": line.parse::<usize>().unwrap(),
-                "violation_line": line.parse::<usize>().unwrap(), "kind": "function",
-                "matches_snippet": true, "source": "git",
-                "commit": "a".repeat(40), "head_differs": false
-            }), line == "9"))
+            .respond_with(reply(
+                serde_json::json!({
+                    "status": "ok", "lines": [text], "start_line": line.parse::<usize>().unwrap(),
+                    "violation_line": line.parse::<usize>().unwrap(), "kind": "function",
+                    "matches_snippet": true, "source": "git",
+                    "commit": "a".repeat(40), "head_differs": false
+                }),
+                line == "9",
+            ))
             .mount(&server)
             .await;
     }
@@ -145,5 +146,8 @@ async fn while_the_next_answer_is_pending_the_previous_findings_text_is_gone() {
         settle(&mut vdom).await;
     }
     let html = dioxus_ssr::render(&vdom);
-    assert!(html.contains("beta_code") && html.contains("fix for B"), "{html}");
+    assert!(
+        html.contains("beta_code") && html.contains("fix for B"),
+        "{html}"
+    );
 }

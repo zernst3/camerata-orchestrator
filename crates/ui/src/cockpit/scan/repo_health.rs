@@ -311,9 +311,9 @@ pub(in crate::cockpit) fn audited_origins(
 }
 
 /// The "Code context" section of the finding-detail modal. Fetches ON-DEMAND every time it
-/// mounts and again whenever `finding` changes: the fetch reads the finding reactively, so a
-/// DIFFERENT finding never shows content left over from the previous one. (A `key:` on a plain
-/// child is ignored by the differ, so this component does not rely on a remount.)
+/// mounts. The caller mounts it through [`FindingDetailSections`], which keys it by finding so a
+/// DIFFERENT finding is a fresh section (a re-run `use_resource` would keep the previous
+/// finding's answer on screen until the new one arrives).
 ///
 /// Degradation floor (design §5): the stored `finding.snippet` is already rendered above this
 /// section by the caller. ANY failure here — file moved/deleted, line gone, non-UTF8,
@@ -328,17 +328,19 @@ pub(super) fn FindingCodeContext(
     #[props(default)]
     on_open_viewer: Option<Callback<()>>,
 ) -> Element {
-    // Reactive on the finding: a changed finding is a new fetch, never the first one's answer.
-    let ctx_res = use_resource(use_reactive!(|(finding,)| async move {
-        let expect_line = finding
-            .snippet
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        fetch_finding_context(&finding.repo, &finding.path, finding.line, &expect_line).await
-    }));
+    let expect_line = finding
+        .snippet
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let f = finding.clone();
+    let ctx_res = use_resource(move || {
+        let f = f.clone();
+        let expect_line = expect_line.clone();
+        async move { fetch_finding_context(&f.repo, &f.path, f.line, &expect_line).await }
+    });
 
     let ctx = ctx_res.read().clone();
     let door = on_open_viewer.map(|cb| {
@@ -492,8 +494,7 @@ pub(super) async fn fetch_finding_fix(rule_id: &str) -> Option<FindingFixView> {
 }
 
 /// The "Recommended fix" block of the finding-detail modal. Fetches ON-DEMAND every time it
-/// mounts and again whenever `rule_id` changes (the fetch reads it reactively; a lone `key:` on
-/// a plain child is ignored by the differ, so the component cannot rely on a remount).
+/// mounts. The caller mounts it through [`FindingDetailSections`], which keys it by finding.
 ///
 /// Degradation floor (matches `FindingCodeContext`'s discipline): no corpus entry, no
 /// adopted default option, a blank directive, a request that fails outright, or a response
@@ -503,10 +504,11 @@ pub(super) async fn fetch_finding_fix(rule_id: &str) -> Option<FindingFixView> {
 /// panics.
 #[component]
 pub(super) fn FindingRecommendedFix(rule_id: String) -> Element {
-    // Reactive on the rule: a changed rule is a new fetch, never the first one's answer.
-    let fix_res = use_resource(use_reactive!(|(rule_id,)| async move {
-        fetch_finding_fix(&rule_id).await
-    }));
+    let rid = rule_id.clone();
+    let fix_res = use_resource(move || {
+        let rid = rid.clone();
+        async move { fetch_finding_fix(&rid).await }
+    });
 
     let fix = fix_res.read().clone();
     match fix {
@@ -522,5 +524,28 @@ pub(super) fn FindingRecommendedFix(rule_id: String) -> Element {
         },
         // No corpus directive for this rule — omit the block entirely, never an empty one.
         Some(Some(_)) => rsx! {},
+    }
+}
+
+/// The finding-detail modal's two on-demand sections for one finding. Each is rendered as a
+/// keyed list of one: `key` is honoured only among list children, and a fresh mount is what
+/// brings back "loading…", drops the previous finding's answer and resets "Show full block".
+#[component]
+pub(super) fn FindingDetailSections(
+    finding: FindingView,
+    #[props(default)] on_open_viewer: Option<Callback<()>>,
+) -> Element {
+    let context_key = format!(
+        "{}\u{1f}{}\u{1f}{}",
+        finding.repo, finding.path, finding.line
+    );
+    let fix_key = format!("{context_key}\u{1f}{}", finding.rule_id);
+    rsx! {
+        for k in [context_key] {
+            FindingCodeContext { key: "{k}", finding: finding.clone(), on_open_viewer }
+        }
+        for k in [fix_key] {
+            FindingRecommendedFix { key: "{k}", rule_id: finding.rule_id.clone() }
+        }
     }
 }

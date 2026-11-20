@@ -1050,10 +1050,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                             p { class: "rule-modal-label", "Finding" }
                             p { class: "rule-modal-title", "{f.snippet}" }
                             // Enclosing-code-block context (finding-code-context feature,
-                            // docs/design/2026-07-27_finding-code-context.md): the section
-                            // re-fetches when the finding changes (its fetch is reactive; a
-                            // lone `key:` on a plain child is ignored by the differ).
-                            FindingCodeContext {
+                            // docs/design/2026-07-27_finding-code-context.md) and the
+                            // recommended fix (docs/design/2026-07-26_audit-report-refinements.md),
+                            // each a fresh section per finding.
+                            FindingDetailSections {
                                 finding: f.clone(),
                                 // The viewer lives in the Queue, so the door only exists while
                                 // the Queue is the surface on screen. The modal closes; the
@@ -1066,11 +1066,6 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                         detail_finding.set(None);
                                     })
                                 }),
-                            }
-                            // Recommended fix (docs/design/2026-07-26_audit-report-refinements.md):
-                            // re-fetches when the rule changes, same idiom as FindingCodeContext.
-                            FindingRecommendedFix {
-                                rule_id: f.rule_id.clone(),
                             }
                             p { class: "rule-modal-label", "Explanation" }
                             {
