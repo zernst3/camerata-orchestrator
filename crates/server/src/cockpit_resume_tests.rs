@@ -22,10 +22,12 @@ args = sys.argv[1:]
 if args == ["--version"]:
     print(os.environ.get("FAKE_VERSION", "2.1.321 (Claude Code)"))
     sys.exit(0)
-prompt = args[args.index("-p") + 1] if "-p" in args else ""
 system = args[args.index("--system-prompt") + 1] if "--system-prompt" in args else ""
 if os.environ.get("CAMERATA_FAKE_WARM"):
     sys.exit(0)
+# The prompt arrives on stdin (`claude -p` with no prompt argument). Read after the warm-up exit: a
+# warm-up run has the test harness's stdin, which never ends.
+prompt = sys.stdin.read() if "-p" in args else ""
 def note(stage):
     down = os.environ.get("FAKE_503_STAGE_FILE", "")
     if down and os.path.exists(down) and open(down).read().strip() == stage:
