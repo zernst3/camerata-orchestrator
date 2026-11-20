@@ -24,7 +24,7 @@ fn sealed_report() -> SealedReport {
     scan_report().seal()
 }
 
-pub(super) fn scan_report() -> ScanReport {
+pub(crate) fn scan_report() -> ScanReport {
     let findings = vec![Finding {
         repo: "acme/portal".to_string(),
         path: "src/db.rs".to_string(),

@@ -10,7 +10,7 @@ use crate::onboard::{Finding, ScanReport};
 use crate::report_export::{build_report_json, finding_key, render_data_json, DispositionWire};
 use camerata_api_types::review::{EscalationReason, EscalationState};
 
-fn package_with(
+pub(crate) fn package_with(
     report: ScanReport,
     dispositions: &HashMap<String, DispositionWire>,
 ) -> ProductPackage {
@@ -63,7 +63,7 @@ fn unsure_medium() -> Finding {
     }
 }
 
-fn report_with(extra: Finding) -> ScanReport {
+pub(crate) fn report_with(extra: Finding) -> ScanReport {
     let mut report = scan_report();
     report.findings.push(extra);
     report
@@ -80,7 +80,7 @@ fn decided(row: &Finding, state: &str) -> HashMap<String, DispositionWire> {
     )])
 }
 
-fn decision_problems(failure: &GateFailure) -> Vec<&Problem> {
+pub(crate) fn decision_problems(failure: &GateFailure) -> Vec<&Problem> {
     failure
         .report
         .checks

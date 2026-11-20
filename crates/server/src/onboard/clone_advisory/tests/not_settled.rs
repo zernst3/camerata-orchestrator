@@ -76,7 +76,11 @@ async fn the_unsure_row_for_an_unsure_answer_reads_in_the_operators_words() {
         .find(|f| f.needs_review)
         .expect("an unsure row");
     assert_eq!(row.kind, Some(FindingKind::Defect));
-    assert!(row.detail.contains("the judge was unsure"), "{}", row.detail);
+    assert!(
+        row.detail.contains("the review was unsure"),
+        "{}",
+        row.detail
+    );
     assert!(
         !row.detail.contains("could not be decided") && !row.detail.contains("declined"),
         "{}",

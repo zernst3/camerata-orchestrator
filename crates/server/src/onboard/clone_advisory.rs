@@ -282,9 +282,7 @@ pub async fn judge_clone_candidates(
                     req.repo, candidate, why, req.files,
                 ));
             }
-        } else if let Some(row) =
-            not_assessed_row(&req, rule, &counts, llm.is_some(), &outcome)
-        {
+        } else if let Some(row) = not_assessed_row(&req, rule, &counts, llm.is_some(), &outcome) {
             outcome.not_assessed.push(row);
         }
         let call_failure = if llm.is_none() {

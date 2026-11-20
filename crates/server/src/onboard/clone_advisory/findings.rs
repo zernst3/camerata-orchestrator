@@ -385,11 +385,11 @@ pub enum UnsureWhy {
     NoUsableAnswer,
 }
 
-/// The rows for a candidate the judge could not settle, in a rule where other candidates were
+/// The rows for a candidate the review could not settle, in a rule where other candidates were
 /// judged: one per site, like a confirmed candidate, but marked unsure (`needs_review` and a
 /// needs-review confidence, the same held state calibration uses), so the release gate holds each
 /// until the reviewer confirms it, rules it a false positive or edits its severity. The detail
-/// names every candidate site and says the judge was unsure and why. No claim is made that the
+/// names every candidate site and says the review was unsure and why. No claim is made that the
 /// candidate is a real problem.
 pub fn unsure_findings(
     repo: &str,
@@ -405,17 +405,18 @@ pub fn unsure_findings(
     };
     let reason = match why {
         UnsureWhy::JudgeUnsure => format!(
-            "the judge was unsure: the excerpts did not settle whether these places are {subject}"
+            "the review was unsure, because the excerpts did not settle whether these places \
+             are {subject}"
         ),
         UnsureWhy::NoUsableAnswer => format!(
-            "the judge gave no usable answer for this candidate in this scan, so it is not known \
-             whether these places are {subject}"
+            "the review gave no usable answer for these places in this scan, so it is not known \
+             whether they are {subject}"
         ),
     };
     let detail = format!(
-        "This candidate needs a reviewer's decision before it is reported or dismissed: {reason}. \
-         The search found the same {}-token block, apart from variable names, at {}. Verify by \
-         diffing the listed lines, then confirm it, mark it a false positive or set its severity.",
+        "This problem needs a decision before it is reported or dismissed: {reason}. The search \
+         found the same {}-token block, apart from variable names, at {}. Verify by diffing the \
+         listed lines, then confirm it, mark it a false positive or set its severity.",
         c.facts.token_len,
         join_and(&sites)
     );
