@@ -4355,11 +4355,19 @@ mod host_tests {
         static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
         /// The project id the mounted viewer's link carries (empty by default).
         static PROJECT: RefCell<String> = const { RefCell::new(String::new()) };
+        /// The path of the harness's second finding (the first is always `src/x.rs`).
+        static SECOND_PATH: RefCell<String> = RefCell::new("src/x.rs".to_string());
+        /// The commit the harness records for `me/api` (empty: none, so nothing is prefetched).
+        static SHA: RefCell<String> = const { RefCell::new(String::new()) };
     }
 
     fn finding(line: usize) -> FindingView {
+        finding_in("src/x.rs", line)
+    }
+
+    fn finding_in(file: &str, line: usize) -> FindingView {
         serde_json::from_value(serde_json::json!({
-            "repo": "me/api", "path": "src/x.rs", "line": line, "rule_id": "SQL-INJECTION-1",
+            "repo": "me/api", "path": file, "line": line, "rule_id": "SQL-INJECTION-1",
             "severity": "high", "snippet": format!("s{line}"), "detail": "d",
             "status": "active", "kind": "defect"
         }))
@@ -4367,7 +4375,8 @@ mod host_tests {
     }
 
     fn app() -> Element {
-        let all = vec![finding(4), finding(9)];
+        let second = SECOND_PATH.with(|p| p.borrow().clone());
+        let all = vec![finding(4), finding_in(&second, 9)];
         let table_rows: Vec<_> = all
             .iter()
             .map(|f| (chorale_core::RowId::new(), f.clone()))
@@ -4407,7 +4416,14 @@ mod host_tests {
             visible_keys,
             dispositions,
             all_findings: Arc::new(all.clone()),
-            shas: Arc::new(HashMap::new()),
+            shas: Arc::new({
+                let sha = SHA.with(|s| s.borrow().clone());
+                if sha.is_empty() {
+                    HashMap::new()
+                } else {
+                    HashMap::from([("me/api".to_string(), sha)])
+                }
+            }),
             sha_conflicts: Arc::new(HashSet::new()),
             project_id: PROJECT.with(|p| p.borrow().clone()),
             open,
@@ -5372,5 +5388,139 @@ mod host_tests {
         );
 
         PROJECT.with(|p| p.borrow_mut().clear());
+    }
+
+    /// The source-file requests the mock saw, as `path` + `around` query pairs.
+    async fn source_requests(server: &MockServer) -> Vec<(String, String)> {
+        let q = |r: &wiremock::Request, k: &str| {
+            r.url
+                .query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_default()
+        };
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .filter(|r| r.url.path() == "/api/onboard/source-file")
+            .map(|r| (q(r, "path"), q(r, "around")))
+            .collect()
+    }
+
+    /// The bug (2026-11-20): `ViewerRoot` keyed the host by the finding, but Dioxus 0.7 reads
+    /// `key` only when diffing a list, so the host kept the first finding's state. Moving with
+    /// `}` to a finding in another file fired no fetch and the viewer sat on "Loading" forever.
+    /// No commit is recorded, so the prefetch cannot paper over it: only the host's own fetch
+    /// can show the second file.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn moving_to_a_finding_in_another_file_fetches_and_shows_that_file() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        SECOND_PATH.with(|p| *p.borrow_mut() = "src/other.rs".to_string());
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        let page = html(&vdom);
+        assert!(page.contains("here 1"), "the first file shows: {page}");
+        assert_eq!(source_requests(&server).await.len(), 1);
+
+        keydown(&vdom, panel, "}", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        SECOND_PATH.with(|p| *p.borrow_mut() = "src/x.rs".to_string());
+        assert!(
+            page.contains("there 1") && !page.contains("here 1"),
+            "the second file's code is shown: {page}"
+        );
+        assert!(!page.contains("Loading"), "{page}");
+        let reqs = source_requests(&server).await;
+        assert!(
+            reqs.iter().any(|(p, a)| p == "src/other.rs" && a == "9"),
+            "a source-file request was made for the second file: {reqs:?}"
+        );
+    }
+
+    /// The same-file move: the second finding's block and position are shown, not the first's.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn moving_within_a_file_shows_the_new_findings_block_and_position() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = MockServer::start().await;
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("around", "4"))
+            .respond_with(ok({
+                let mut b = file_body("here", 14, &[]);
+                b["block"] = serde_json::json!({"start_line": 2, "end_line": 4, "kind": "function"});
+                b
+            }))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("around", "9"))
+            .respond_with(ok({
+                let mut b = file_body("here", 14, &[]);
+                b["block"] = serde_json::json!({"start_line": 8, "end_line": 10, "kind": "function"});
+                b
+            }))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .respond_with(ok(serde_json::json!({
+                "status": "ok", "start_line": 8, "kind": "function",
+                "lines": ["a", "b", "c"]
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        let page = html(&vdom);
+        assert!(page.contains("finding 1 of 2 in this file"), "{page}");
+        assert!(band_lines(&page).contains(&2), "{page}");
+
+        keydown(&vdom, panel, "]", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("finding 2 of 2 in this file"), "{page}");
+        let band = band_lines(&page);
+        assert!(
+            band.contains(&9) && !band.contains(&3),
+            "the second finding's block (8 to 10) is banded, not the first's: {band:?}"
+        );
+    }
+
+    /// The numbers of the lines the page marks as inside the finding's block.
+    fn band_lines(page: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        for chunk in page.split("<div class=\"cv-line").skip(1) {
+            let head = chunk.split('>').next().unwrap_or("");
+            if head.contains("cv-line-band") {
+                if let Some(i) = chunk.find("here ") {
+                    let n: String = chunk[i + 5..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    if let Ok(n) = n.parse() {
+                        out.push(n);
+                    }
+                }
+            }
+        }
+        out
     }
 }
