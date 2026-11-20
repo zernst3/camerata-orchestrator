@@ -37,6 +37,14 @@ fn parses_as_map(bytes: &[u8]) -> bool {
 /// `<path>.bak` (one previous copy, replaced on each write), but only when that content is a
 /// draft map this build can read: an unreadable file is never copied over the last good `.bak`.
 fn write_with_backup(path: &std::path::Path, json: &str) -> std::io::Result<()> {
+    // A rename would replace a read-only file without asking; a plain write would not. Keep the
+    // plain write's answer: a file the operator or the system made read-only is not replaced.
+    if std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the draft file is read-only",
+        ));
+    }
     if let Ok(current) = std::fs::read(path) {
         if parses_as_map(&current) {
             let _ = std::fs::write(sibling(path, ".bak"), &current);
