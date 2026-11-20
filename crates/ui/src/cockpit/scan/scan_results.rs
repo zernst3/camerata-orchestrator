@@ -488,6 +488,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     let mut custom_rules_w = custom_rules;
     let mut order_preset_w = order_preset;
     let mut draft_loaded = use_signal(|| false);
+    // Set when the saved draft could not be read: nothing is written over it from this screen.
+    let mut draft_unreadable = use_signal(|| false);
     // The write-through bridge to the server's decision store. `bridge_ready` is set once the
     // store has been read (and the old draft's dispositions migrated); until then, and whenever
     // the store could not be reached, the draft carries every disposition itself so nothing is
@@ -522,7 +524,25 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
             let review_restore = review_restore.clone();
             let decision_bridge_load = decision_bridge_load.clone();
             async move {
-                let draft = load_onboarding_draft().await;
+                let draft = match load_onboarding_draft().await {
+                    Ok(draft) => draft,
+                    Err(message) => {
+                        // Said out loud, and the saved draft is left exactly as it is: this
+                        // screen writes nothing over a draft it could not read.
+                        eprintln!("[camerata-ui] {}", message.message);
+                        crate::toast::push_toast(
+                            toasts,
+                            crate::toast::ToastKind::Error,
+                            message.message,
+                        );
+                        // Only a draft that exists and cannot be read is protected from
+                        // being written over; a read the server refused (told once) is not.
+                        if message.unparseable_draft {
+                            draft_unreadable.set(true);
+                        }
+                        None
+                    }
+                };
                 // The draft's dispositions: old-style ones to migrate, or changes the store did
                 // not hold yet when it was saved. Only a draft of THIS scan counts.
                 let draft_queue = draft
@@ -611,6 +631,10 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
             if !draft_loaded() {
                 return;
             }
+            // The draft is saved only while it can be: with a saved draft this build cannot
+            // read, nothing is written over it. The decisions below are the server's own store
+            // and are written either way.
+            let save_draft = !draft_unreadable();
             // Each group's reviewed flag is refreshed from the dispositions right here, the one
             // place the log is written out, so it can never be stale in the draft.
             let queue_rows = audit_v
@@ -663,16 +687,18 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 order_preset: op,
                 review_log,
             };
-            let queue = save_queue.clone();
-            spawn(async move {
-                save_onboarding_draft_ordered(&queue, draft, || {
-                    // Stamp the local time so the UI can show "auto-saved at HH:MM:SS".
-                    last_saved.set(Some(
-                        chrono::Local::now().format("%-I:%M:%S %p").to_string(),
-                    ));
-                })
-                .await;
-            });
+            if save_draft {
+                let queue = save_queue.clone();
+                spawn(async move {
+                    save_onboarding_draft_ordered(&queue, draft, || {
+                        // Stamp the local time so the UI can show "auto-saved at HH:MM:SS".
+                        last_saved.set(Some(
+                            chrono::Local::now().format("%-I:%M:%S %p").to_string(),
+                        ));
+                    })
+                    .await;
+                });
+            }
             // Write the screen's decisions through to the store as they happen.
             if availability == Some(camerata_ui_core::decisions::Availability::Live) {
                 let sync = DecisionSync {
@@ -787,6 +813,17 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
         });
 
     rsx! {
+        // The saved draft cannot be read: this screen saves nothing over it. A banner, not a
+        // toast, because it stays true for as long as the screen is open.
+        if draft_unreadable() {
+            div { class: "decisions-banner", role: "alert",
+                span {
+                    "Your saved review could not be read, so this screen is not saving this review. \
+                     The saved file is untouched and nothing was deleted. Your decisions are still \
+                     saved to the decision store."
+                }
+            }
+        }
         // The decision store could not be read: say so, never draw a decision as Unresolved.
         if let Some(text) = decision_banner() {
             div { class: "decisions-banner", role: "alert",

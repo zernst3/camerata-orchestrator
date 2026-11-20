@@ -3490,7 +3490,21 @@ pub(crate) async fn start_audit_job(
                     }
                     scan_state.set_last_scan_in_memory(id.clone(), report.clone());
                 }
-                (Some(id), None) => scan_state.set_last_scan(id.clone(), report.clone()),
+                (Some(id), None) => {
+                    scan_state.set_last_scan(id.clone(), report.clone());
+                    // The review this run produced goes into the project's onboarding draft
+                    // (when it has one for these repos) even if no screen is mounted to
+                    // receive it: a run finished while the screen was closed must still be
+                    // reopenable with "Continue where you left off".
+                    if let Some(stored) = state.get_last_scan(id) {
+                        state.draft.adopt_audit(
+                            id,
+                            &stored.repos,
+                            &stored.provenance.finished_at,
+                            || serde_json::to_value(&stored).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                }
                 // No project: only the project-agnostic fallback can hold it, and there is no
                 // project to key a persisted inspection to.
                 (None, _) => scan_state.set_recent_scan(report.clone()),
@@ -5128,6 +5142,9 @@ mod model_input_chat_tests;
 
 #[cfg(test)]
 mod site_key_paths_tests;
+
+#[cfg(test)]
+mod draft_tests;
 
 #[cfg(test)]
 mod tests;

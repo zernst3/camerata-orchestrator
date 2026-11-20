@@ -1234,3 +1234,80 @@ async fn a_governed_run_or_a_routine_start_is_refused_while_the_project_is_being
     let (status, _) = post(&fx.state, &format!("/api/routines/{}/run", other.id)).await;
     assert_ne!(status, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn a_set_aside_unreadable_draft_is_listed_as_a_leftover_and_never_removed() {
+    let w = world().await;
+    let fx = &w.fx;
+    let aside = fx
+        .root
+        .join("data")
+        .join("onboarding-draft.json.unreadable-1700000000");
+    std::fs::write(&aside, "{ torn, may name proj-1").unwrap();
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    let item = out
+        .record
+        .kept
+        .iter()
+        .find(|k| {
+            k.what
+                .ends_with("onboarding-draft.json.unreadable-1700000000")
+        })
+        .expect("the set-aside draft is listed");
+    assert!(
+        item.why.contains("may include this project's"),
+        "{}",
+        item.why
+    );
+    assert!(item.why.contains("check it by hand"), "{}", item.why);
+    assert!(aside.exists(), "it is not removed: it cannot be attributed");
+    assert!(
+        out.record
+            .render_text()
+            .contains("onboarding-draft.json.unreadable-1700000000"),
+        "the deletion record names it"
+    );
+}
+
+#[tokio::test]
+async fn a_cleared_projects_deletion_leaves_its_id_nowhere_in_the_draft_file_or_its_bak() {
+    let w = world().await;
+    let fx = &w.fx;
+    // The architect started over: no draft, but a discard stamp for the project.
+    fx.state
+        .draft
+        .save(&fx.project_id, serde_json::json!({"scan": 1}));
+    fx.state.draft.clear(&fx.project_id);
+    fx.state
+        .draft
+        .save("other-project", serde_json::json!({"scan": 2}));
+    let file = fx.root.join("data").join("onboarding-draft.json");
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains(&fx.project_id),
+        "the stamp names the project"
+    );
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+    assert!(!out.partial, "{:?}", out.record.items);
+
+    for f in ["onboarding-draft.json", "onboarding-draft.json.bak"] {
+        let text = std::fs::read_to_string(fx.root.join("data").join(f)).unwrap_or_default();
+        assert!(
+            !text.contains(&fx.project_id),
+            "{f} still names the project: {text}"
+        );
+    }
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("other-project"),
+        "another project's draft is kept"
+    );
+}

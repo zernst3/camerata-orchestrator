@@ -1213,7 +1213,9 @@ async fn load_onboarding_draft_parses_present_draft() {
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let draft = super::load_onboarding_draft().await;
 
-    let draft = draft.expect("a present draft parses");
+    let draft = draft
+        .expect("a present draft loads")
+        .expect("a present draft parses");
     assert_eq!(draft.scan.files_scanned, 3);
     assert_eq!(draft.viewed_repo, "owner/a");
 }
@@ -1234,7 +1236,10 @@ async fn load_onboarding_draft_none_when_null() {
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let draft = super::load_onboarding_draft().await;
 
-    assert!(draft.is_none(), "a null body means no draft in progress");
+    assert!(
+        draft.expect("a null body loads").is_none(),
+        "a null body means no draft in progress"
+    );
 }
 
 #[tokio::test]

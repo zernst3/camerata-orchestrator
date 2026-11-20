@@ -261,7 +261,19 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
     // audit from the same draft.
     use_future(move || async move {
         if scan.peek().is_none() {
-            if let Some(draft) = load_onboarding_draft().await {
+            let loaded = match load_onboarding_draft().await {
+                Ok(draft) => draft,
+                Err(message) => {
+                    // An unreadable draft is said out loud, never taken for "nothing saved".
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Error,
+                        message.message,
+                    );
+                    None
+                }
+            };
+            if let Some(draft) = loaded {
                 // Rehydrate the repos textarea too — otherwise it reloads empty (showing the
                 // placeholder) even though the scan + rules restored, which reads as "the repos
                 // were lost." The repo set is exactly the scanned repos.

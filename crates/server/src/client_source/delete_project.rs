@@ -609,7 +609,8 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         );
     }
     let draft_bytes = state.draft.stored_bytes(&project.id);
-    if draft_bytes > 0 || in_file("onboarding-draft.json") {
+    if draft_bytes > 0 || state.draft.holds_project(&project.id) || in_file("onboarding-draft.json")
+    {
         add(
             &mut extras,
             step(
@@ -620,6 +621,32 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
                 Action::Draft,
             ),
         );
+    }
+
+    // Draft files set aside because they could not be read: they name no project, so Camerata
+    // cannot tell whose they are. They are never removed here; each is listed as a leftover that
+    // may hold this project's data.
+    if let Ok(read) = std::fs::read_dir(&data) {
+        let mut aside: Vec<PathBuf> = read
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name().is_some_and(|n| {
+                    n.to_string_lossy()
+                        .starts_with("onboarding-draft.json.unreadable-")
+                })
+            })
+            .collect();
+        aside.sort();
+        for p in aside {
+            kept.push(KeptItem {
+                what: p.display().to_string(),
+                why: "an onboarding draft file Camerata could not read and set aside; it names \
+                      no project, so it may include this project's data. It is not deleted: \
+                      check it by hand"
+                    .to_string(),
+            });
+        }
     }
 
     // The development console rows of this project (units of work, stories, questions,

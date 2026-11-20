@@ -2122,6 +2122,10 @@ fn ProjectsHome() -> Element {
 
         // Resume-onboarding prompt — shown when an opened project has an in-progress draft.
         if resume_prompt() {
+            {
+                // A variable, not a literal, so the attribute is set at run time (tests find it).
+                let continue_mark = "continue-onboarding";
+                rsx! {
             div { class: "rule-modal-overlay",
                 div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
                     div { class: "rule-modal-head",
@@ -2147,6 +2151,7 @@ fn ProjectsHome() -> Element {
                         }
                         button {
                             class: "btn-run",
+                            "data-test": continue_mark,
                             onclick: move |_| {
                                 // Keep the draft; OnboardView restores it when opened.
                                 resume_prompt.set(false);
@@ -2155,6 +2160,8 @@ fn ProjectsHome() -> Element {
                             "Continue where you left off"
                         }
                     }
+                }
+            }
                 }
             }
         }
@@ -2186,6 +2193,7 @@ fn ProjectsHome() -> Element {
                                 let has_onboarded = !p.onboarded.is_empty();
                                 let is_pending = pending_delete().as_deref() == Some(p.id.as_str());
                                 let remove_mark = "remove-from-list";
+                                let open_mark = "open-project";
                                 let is_pending_reset = pending_reset().as_deref() == Some(p.id.as_str());
                                 rsx! {
                                     div { class: "pg-card", key: "{p.id}",
@@ -2273,6 +2281,7 @@ fn ProjectsHome() -> Element {
                                             }
                                             button {
                                                 class: "btn-run",
+                                                "data-test": open_mark,
                                                 onclick: move |_| {
                                                     let id = id_open.clone();
                                                     spawn(async move {
@@ -2281,10 +2290,16 @@ fn ProjectsHome() -> Element {
                                                             // draft (server scopes the draft to the now-active
                                                             // project), ask before entering instead of silently
                                                             // resuming. Otherwise go straight in.
-                                                            if load_onboarding_draft().await.is_some() {
-                                                                resume_prompt.set(true);
-                                                            } else {
-                                                                screen.set(CockpitScreen::InProject);
+                                                            match load_onboarding_draft().await {
+                                                                Ok(Some(_)) => resume_prompt.set(true),
+                                                                Ok(None) => screen.set(CockpitScreen::InProject),
+                                                                Err(message) => {
+                                                                    // A draft that cannot be read is said out
+                                                                    // loud, then the project opens as it would
+                                                                    // with none; the file is left as it is.
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message.message);
+                                                                    screen.set(CockpitScreen::InProject);
+                                                                }
                                                             }
                                                         } else {
                                                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not open the project.");
@@ -6717,3 +6732,6 @@ mod tests {
 
 #[cfg(test)]
 mod project_home_tests;
+
+#[cfg(test)]
+mod continue_restore_tests;
