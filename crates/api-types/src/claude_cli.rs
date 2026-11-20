@@ -311,24 +311,6 @@ pub fn remove_live_system_prompts() {
     }
 }
 
-/// Whether a process with this id exists (`kill -0`). Without a way to ask, it is assumed to.
-fn process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_or(true, |s| s.success())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
-}
-
 /// At start, remove the system prompt directories under `root` left by a process that is gone
 /// (a SIGKILL, a crash, a power cut), and any of this process's own that are not in flight.
 /// A directory of ANOTHER live process (the CLI running beside the server) is left alone. Returns
@@ -350,7 +332,7 @@ pub fn sweep_leftover_system_prompts_in(root: &std::path::Path) -> usize {
             Some(pid) if pid == own => !live_system_prompts()
                 .lock()
                 .is_ok_and(|live| live.contains(&path)),
-            Some(pid) => !process_alive(pid),
+            Some(pid) => !crate::process_alive::is_alive(pid),
             // Not a name this module made: not ours to judge.
             None => false,
         };
@@ -593,10 +575,8 @@ mod tests {
         let _registry = registry_lock();
         let root = Root::new("sweep");
         std::fs::create_dir_all(&root.0).unwrap();
-        // A pid that is certainly gone: a child that has exited and been reaped.
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        let dead = child.id();
-        child.wait().unwrap();
+        // A pid that is certainly gone: above any pid the OS hands out.
+        let dead = 3_999_999u32;
         let leftover = root.0.join(format!("{dead}-0-1"));
         std::fs::create_dir_all(&leftover).unwrap();
         std::fs::write(leftover.join("system-prompt.txt"), "client data").unwrap();

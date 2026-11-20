@@ -71,6 +71,7 @@ pub mod governance;
 pub mod lifecycle;
 pub mod llm;
 pub mod model_registry;
+pub mod process_alive;
 pub mod project;
 pub mod review;
 pub mod review_timing;
