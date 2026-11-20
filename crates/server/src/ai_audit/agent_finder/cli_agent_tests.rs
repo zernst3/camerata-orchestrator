@@ -804,7 +804,10 @@ async fn the_agent_is_told_where_the_files_are() {
     assert!(prompt.contains("THE BRIEF"), "{prompt}");
     assert!(prompt.contains("`code/`"), "{prompt}");
     let args = rig.log("args-1.txt");
-    assert!(!args.contains("THE BRIEF"), "the brief is not in argv: {args}");
+    assert!(
+        !args.contains("THE BRIEF"),
+        "the brief is not in argv: {args}"
+    );
 }
 
 #[tokio::test]
