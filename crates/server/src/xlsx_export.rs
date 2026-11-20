@@ -792,11 +792,7 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
         .collect();
     let decided = flagged
         .iter()
-        .filter(|r| {
-            r.is_fp
-                || r.disposition_kind
-                    .is_some_and(|d| d != Disposition::Unresolved)
-        })
+        .filter(|r| r.is_fp || sheets::row_is_decided(r))
         .count();
     (flagged.len(), decided)
 }
@@ -807,9 +803,7 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
 fn possible_duplicate_counts(rows: &[FindingRow]) -> (usize, usize) {
     let mut fixes: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
     for r in rows.iter().filter(|r| !r.possible_duplicate_of.is_empty()) {
-        let decided = r.is_fp
-            || r.disposition_kind
-                .is_some_and(|d| d != Disposition::Unresolved);
+        let decided = r.is_fp || sheets::row_is_decided(r);
         let all = fixes.entry(r.facts.fix_id.as_str()).or_insert(true);
         *all &= decided;
     }

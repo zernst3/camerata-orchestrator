@@ -547,3 +547,13 @@ async fn a_summary_edit_of_a_node_that_is_not_in_the_tree_is_refused() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["code"], "unknown_node", "{body}");
 }
+
+/// Review round 1, item 6: the same severity in another case is no change.
+#[test]
+fn a_severity_in_another_case_is_no_change() {
+    let store = EditStore::new();
+    assert!(matches!(
+        store.record_edit("p", draft("k", EditField::Severity, "high", "High"), ctx()),
+        Err(EditStoreError::NoChange)
+    ));
+}

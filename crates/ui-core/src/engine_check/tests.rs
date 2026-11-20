@@ -1354,7 +1354,14 @@ fn every_state() -> Vec<CardState> {
         CardState::Restored,
         CardState::ThrownOutConfirmed { error },
         CardState::Corrected { error },
-        CardState::CorrectedHeld { error },
+        CardState::CorrectedHeld {
+            error,
+            hold: camerata_api_types::review_view::HoldReason::CriticalWithoutDecision,
+        },
+        CardState::CorrectedHeld {
+            error,
+            hold: camerata_api_types::review_view::HoldReason::JunkContent,
+        },
     ]
 }
 
@@ -1392,6 +1399,10 @@ fn a_corrected_no_on_a_row_still_held_for_a_decision_does_not_say_it_ships() {
     for hold in [
         HoldReason::CriticalWithoutDecision,
         HoldReason::UnsureWithoutDecision,
+        HoldReason::EvidenceUnverified,
+        HoldReason::JunkContent,
+        HoldReason::SplitOutWithoutDecision,
+        HoldReason::MergedWithoutDecision,
     ] {
         let mut card = no_card(Some(CorrectionRef::Edit("edit-000001".to_string())));
         card.site.held = Some(hold);
@@ -1402,11 +1413,26 @@ fn a_corrected_no_on_a_row_still_held_for_a_decision_does_not_say_it_ships() {
         );
         let text = card_state_text(&state);
         assert!(!text.contains("what ships"), "{text}");
-        assert!(
-            text.contains("held from export until you set its severity, confirm it or mark it a false positive"),
-            "{text}"
+        let severity_way =
+            text.contains("set its severity, confirm it or mark it a false positive");
+        assert_eq!(
+            severity_way,
+            matches!(
+                hold,
+                HoldReason::CriticalWithoutDecision | HoldReason::UnsureWithoutDecision
+            ),
+            "{hold:?}: {text}"
         );
+        assert!(text.contains("held from export until you"), "{text}");
     }
+    // A put-back thrown-out row that was corrected and is still held reads held too.
+    let mut put_back = no_card(Some(CorrectionRef::Edit("edit-000001".to_string())));
+    put_back.stratum = SampleStratum::ThrownOut;
+    put_back.site.held = Some(HoldReason::CriticalWithoutDecision);
+    assert!(matches!(
+        card_state(&put_back),
+        CardState::CorrectedHeld { .. }
+    ));
     // With nothing holding the row, the corrected version is what ships.
     let card = no_card(Some(CorrectionRef::Edit("edit-000001".to_string())));
     assert!(matches!(card_state(&card), CardState::Corrected { .. }));

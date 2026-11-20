@@ -577,6 +577,13 @@ fn apply_edits(rows: &mut [Finding], edits: &[&Edit]) -> EditOutcome {
     };
     let mut ids: HashMap<usize, Vec<String>> = HashMap::new();
     let mut fields: HashMap<usize, Vec<&'static str>> = HashMap::new();
+    // Only an edit applied here may leave the marks that say a row was edited: the release gate
+    // reads them as the reviewer's decision, so a mark a sealed row already carries (forged, or
+    // copied from another row by a merge) must never count.
+    for f in rows.iter_mut() {
+        f.captures.remove(REVIEWER_EDITED_CAPTURE);
+        f.captures.remove(REVIEWER_FIELDS_CAPTURE);
+    }
 
     for e in edits {
         let hit = index

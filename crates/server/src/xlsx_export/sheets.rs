@@ -406,6 +406,21 @@ fn review_level_label(wire: &str) -> &'static str {
 
 /// What a reviewer has already decided about a problem, in plain words. An open problem has no
 /// decision yet.
+/// Whether a row has a decision: any disposition but none yet, or a severity the reviewer set
+/// themselves. The counts and the Decision so far cell both read it, so they cannot disagree.
+pub(super) fn row_is_decided(row: &FindingRow) -> bool {
+    row.disposition_kind
+        .is_some_and(|d| d != Disposition::Unresolved)
+        || severity_set_by_reviewer(row)
+}
+
+fn severity_set_by_reviewer(row: &FindingRow) -> bool {
+    row.disposition_kind == Some(Disposition::Unresolved)
+        && row
+            .disposition_label
+            .starts_with(v::SEVERITY_SET_BY_REVIEWER)
+}
+
 pub(super) fn decision_so_far(row: &FindingRow) -> String {
     if !row.facts.merged_into.is_empty() {
         return row.disposition_label.clone();
@@ -413,11 +428,7 @@ pub(super) fn decision_so_far(row: &FindingRow) -> String {
     match row.disposition_kind {
         // A severity the reviewer set is their decision, though the row carries no record (the
         // label is [`crate::report_export::row_disposition_label`]'s).
-        Some(Disposition::Unresolved)
-            if row
-                .disposition_label
-                .starts_with(v::SEVERITY_SET_BY_REVIEWER) =>
-        {
+        Some(Disposition::Unresolved) if severity_set_by_reviewer(row) => {
             v::SEVERITY_SET_BY_REVIEWER.to_string()
         }
         None | Some(Disposition::Unresolved) => String::new(),

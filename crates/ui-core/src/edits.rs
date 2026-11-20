@@ -479,7 +479,13 @@ pub fn edit_request(
 ) -> Result<NewEditReq, EditRefusal> {
     let new = new.trim();
     // The value it already has is no change, even when it could not be typed (a deviation).
-    if new == current_value(row, field, ctx).trim() {
+    let now = current_value(row, field, ctx);
+    let same = if field == EditField::Severity {
+        new.eq_ignore_ascii_case(now.trim())
+    } else {
+        new == now.trim()
+    };
+    if same {
         return Err(EditRefusal::Unchanged);
     }
     if let Some(why) = value_problem(field, new) {

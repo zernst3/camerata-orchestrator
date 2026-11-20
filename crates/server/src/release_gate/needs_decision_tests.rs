@@ -704,3 +704,244 @@ fn the_exports_record_a_severity_edit_as_the_decision() {
     // No em or en dashes, no serial commas in the words.
     assert!(!label.contains('\u{2014}') && !label.contains('\u{2013}'));
 }
+
+// ── round 1 review: the released package, forged marks, stale edits, counts ─────────────────
+
+/// A row the finder was unsure of, with no model confidence (a row with one is an AI-tier row and
+/// is held again for having no published citation, which a severity edit does not lift).
+fn doubted_row() -> Finding {
+    let mut f = unsure_medium();
+    f.confidence = None;
+    f
+}
+
+fn all_problems_cell(zip: &[u8], path: &str, header: &str) -> String {
+    let entries = read_zip_entries(zip).unwrap();
+    let xlsx = entries
+        .iter()
+        .find(|(name, _)| name.ends_with(".xlsx"))
+        .map(|(_, bytes)| bytes.clone())
+        .unwrap();
+    let grid = xlsx_sheet_grid(&xlsx, "All problems").expect("All problems sheet");
+    let col = grid[0]
+        .iter()
+        .position(|h| h == header)
+        .unwrap_or_else(|| panic!("no {header} column in {:?}", grid[0]));
+    let row = grid
+        .iter()
+        .skip(1)
+        .find(|r| r.iter().any(|c| c.contains(path)))
+        .unwrap_or_else(|| panic!("no row for {path}"));
+    row[col].clone()
+}
+
+fn findings_row(zip: &[u8], path: &str) -> serde_json::Value {
+    let entries = read_zip_entries(zip).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == path)
+        .unwrap_or_else(|| panic!("no findings.json row for {path}"))
+        .clone()
+}
+
+/// Review round 1, item 1: an unsure row the reviewer released by a severity edit ships as a
+/// decided row, not as "Needs a decision". Ruling: a severity edit is the reviewer's decision.
+#[test]
+fn a_released_unsure_row_reads_as_decided_not_as_needs_a_decision() {
+    let sealed = report_with(doubted_row()).seal();
+    let row = sealed_row(&sealed, "src/cache.rs");
+    let edit = edit_on(1, &row, EditField::Severity, "medium", "high");
+    let reviewed =
+        crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+    let released = release(package_of_reviewed(&reviewed)).expect("released");
+    let json = findings_row(&released.bytes, "src/cache.rs");
+    let label = json["disposition_label"]
+        .as_str()
+        .or_else(|| json["disposition"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(label.starts_with("Severity set by the reviewer"), "{json}");
+    assert!(!label.contains("Needs a decision"), "{json}");
+    assert_ne!(json["bucket"], "held", "{json}");
+    assert_ne!(json["needs_review"], true, "{json}");
+    assert_eq!(
+        all_problems_cell(&released.bytes, "src/cache.rs", "Decision so far"),
+        "Severity set by the reviewer"
+    );
+}
+
+/// The severity edit lifts the reviewer-doubt hedge only: unverified evidence, junk text and a
+/// put-back row stay held.
+#[test]
+fn a_severity_edit_does_not_lift_the_other_holds() {
+    use crate::report_export::{is_held_for_review, Disposition};
+    for capture in [
+        crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE,
+        crate::junk_finding::JUNK_CONTENT_CAPTURE,
+        crate::engine_discard::ENGINE_RESTORED_CAPTURE,
+    ] {
+        let mut f = unsure_medium();
+        f.captures.insert(capture.to_string(), "x".to_string());
+        f.captures.insert(
+            crate::report_export::overlay::REVIEWER_FIELDS_CAPTURE.to_string(),
+            "severity".to_string(),
+        );
+        assert!(is_held_for_review(&f, Disposition::Unresolved), "{capture}");
+    }
+    let mut plain = unsure_medium();
+    plain.captures.insert(
+        crate::report_export::overlay::REVIEWER_FIELDS_CAPTURE.to_string(),
+        "severity".to_string(),
+    );
+    assert!(!is_held_for_review(&plain, Disposition::Unresolved));
+    let mut headline_only = unsure_medium();
+    headline_only.captures.insert(
+        crate::report_export::overlay::REVIEWER_FIELDS_CAPTURE.to_string(),
+        "headline".to_string(),
+    );
+    assert!(is_held_for_review(&headline_only, Disposition::Unresolved));
+}
+
+/// Item 5: only a real stored edit counts. A sealed row that already carries the reviewer-edit
+/// marks (forged or carried over by a merge) is still held.
+#[test]
+fn a_sealed_row_with_forged_edit_marks_is_still_held() {
+    let mut row = critical_below_the_line();
+    row.captures.insert(
+        crate::report_export::overlay::REVIEWER_FIELDS_CAPTURE.to_string(),
+        "severity".to_string(),
+    );
+    row.captures.insert(
+        crate::report_export::overlay::REVIEWER_EDITED_CAPTURE.to_string(),
+        "edit-999999".to_string(),
+    );
+    let sealed = report_with(row).seal();
+    let reviewed = crate::report_export::apply_overlay(&sealed, &[], &[], &[]);
+    assert_eq!(
+        needs_decision::undecided(&reviewed.report().findings, &reviewed).count(),
+        1,
+        "a forged mark is not a decision"
+    );
+    assert_eq!(
+        package_of_reviewed(&reviewed)
+            .critical_or_unsure_without_decision
+            .len(),
+        1
+    );
+}
+
+/// Item 6: a stale severity edit (the row changed since) is not applied and decides nothing.
+#[test]
+fn a_stale_severity_edit_does_not_decide_the_row() {
+    let sealed = report_with(critical_below_the_line()).seal();
+    let row = sealed_row(&sealed, "src/admin.rs");
+    let mut edit = edit_on(1, &row, EditField::Severity, "critical", "high");
+    edit.fingerprint_at_edit = "not-the-rows-fingerprint".to_string();
+    let reviewed = crate::report_export::apply_overlay(&sealed, &[], &[edit], &[]);
+    assert_eq!(reviewed.stale_edits().len(), 1);
+    assert_eq!(
+        needs_decision::undecided(&reviewed.report().findings, &reviewed).count(),
+        1
+    );
+}
+
+/// Item 7: the counts agree with the Decision so far cell. A flagged row decided only by a
+/// severity edit counts as decided in the internal workbook's possible-false-positive tally.
+#[test]
+fn the_counts_agree_with_decision_so_far_for_a_severity_edit() {
+    // The calibration doubt flags the row as a possible false positive.
+    let row = doubted_row();
+    let sealed = report_with(row).seal();
+    let row = sealed_row(&sealed, "src/cache.rs");
+    let edit = edit_on(1, &row, EditField::Severity, "medium", "high");
+    let reviewed =
+        crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+    let options = ReportOptions {
+        internal: true,
+        ..client_options()
+    };
+    let json = build_report_json(&reviewed, None, &options);
+    let data = render_data_json(&json).unwrap();
+    let package = assemble_package(
+        &reviewed,
+        None,
+        &options,
+        "acme-inspection",
+        (json, data, b"%PDF-1.7 stand-in".to_vec()),
+    )
+    .unwrap();
+    let strings = xlsx_strings(&package.xlsx).unwrap();
+    assert!(
+        strings
+            .iter()
+            .any(|c| c == "1 row flagged as a possible false positive, 1 decided"),
+        "a severity edit decides the flagged row: {:?}",
+        strings
+            .iter()
+            .filter(|c| c.contains("flagged"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Item 7, medium row with no record: the cell, the label and the open count agree.
+#[test]
+fn a_sure_medium_with_a_severity_edit_reads_decided_everywhere() {
+    let mut row = doubted_row();
+    row.needs_review = false;
+    let sealed = report_with(row).seal();
+    let row = sealed_row(&sealed, "src/cache.rs");
+    let edit = edit_on(1, &row, EditField::Severity, "medium", "high");
+    let reviewed =
+        crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+    let released = release(package_of_reviewed(&reviewed)).expect("released");
+    let json = findings_row(&released.bytes, "src/cache.rs");
+    assert!(
+        json["disposition_label"]
+            .as_str()
+            .or_else(|| json["disposition"].as_str())
+            .unwrap_or_default()
+            .starts_with("Severity set by the reviewer"),
+        "{json}"
+    );
+    assert_eq!(
+        all_problems_cell(&released.bytes, "src/cache.rs", "Decision so far"),
+        "Severity set by the reviewer"
+    );
+}
+
+/// Item 8: the actual strings the exports print carry no em or en dash and no serial comma.
+#[test]
+fn the_strings_the_exports_print_for_a_severity_edit_follow_the_text_rules() {
+    let (_, reviewed, _) = base_row_edited(EditField::Severity, "high", "critical");
+    let package = package_of_reviewed(&reviewed);
+    let decisions =
+        String::from_utf8(crate::report_export::decisions_file::decisions_json(&reviewed).unwrap())
+            .unwrap();
+    let report_text = serde_json::to_string(&package.report_json).unwrap();
+    let sealed = report_with(critical_below_the_line()).seal();
+    let undecided =
+        package_of_reviewed(&crate::report_export::apply_overlay(&sealed, &[], &[], &[]));
+    let problem = undecided.critical_or_unsure_without_decision[0]
+        .message
+        .clone();
+    for text in [&decisions, &report_text, &problem] {
+        assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'));
+    }
+    let strings = xlsx_strings(&package.xlsx).unwrap();
+    for s in strings
+        .iter()
+        .filter(|s| s.contains("Severity set by the reviewer"))
+    {
+        assert!(!s.contains('\u{2014}') && !s.contains('\u{2013}'), "{s}");
+        assert!(!s.contains(", and ") && !s.contains(", or "), "{s}");
+    }
+    assert!(
+        problem.contains("confirm it, mark it a false positive or set its severity"),
+        "{problem}"
+    );
+    assert!(!problem.contains("positive, or"), "{problem}");
+    assert!(!crate::xlsx_export::vocabulary::SEVERITY_SET_BY_REVIEWER.contains(','));
+}
