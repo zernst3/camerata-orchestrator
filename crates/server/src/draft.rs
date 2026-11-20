@@ -37,18 +37,22 @@ fn parses_as_map(bytes: &[u8]) -> bool {
 /// `<path>.bak` (one previous copy, replaced on each write), but only when that content is a
 /// draft map this build can read: an unreadable file is never copied over the last good `.bak`.
 fn write_with_backup(path: &std::path::Path, json: &str) -> std::io::Result<()> {
-    // A rename would replace a read-only file without asking; a plain write would not. Keep the
-    // plain write's answer: a file the operator or the system made read-only is not replaced.
+    if let Ok(current) = std::fs::read(path) {
+        if parses_as_map(&current) {
+            let _ = std::fs::write(sibling(path, ".bak"), &current);
+        }
+    }
+    write_atomic(path, json)
+}
+
+/// Write `json` to `path` through a temp file and a rename. A file that is read-only is not
+/// replaced (a rename would replace it without asking; a plain write would not).
+fn write_atomic(path: &std::path::Path, json: &str) -> std::io::Result<()> {
     if std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "the draft file is read-only",
         ));
-    }
-    if let Ok(current) = std::fs::read(path) {
-        if parses_as_map(&current) {
-            let _ = std::fs::write(sibling(path, ".bak"), &current);
-        }
     }
     let tmp = sibling(path, ".tmp");
     std::fs::write(&tmp, json)?;
@@ -192,9 +196,11 @@ impl DraftStore {
         }
     }
 
-    /// Drop `project_id`'s draft and write the file; when the write fails nothing is dropped and
-    /// the error is returned. The project's discard stamp goes too (this is the project's
-    /// deletion, which must leave nothing of it behind).
+    /// Drop `project_id`'s draft and its discard stamp, for the project's deletion. Leaves no
+    /// copy: the `.bak` is rewritten to the file as it will stand, not rotated. Memory changes
+    /// only after BOTH writes succeed. The `.bak` goes first: if it fails nothing else was
+    /// touched, and if the main file then fails the `.bak` merely lacks the project already, so
+    /// disk and memory never disagree about whether the draft is there.
     pub fn clear_checked(&self, project_id: &str) -> std::io::Result<()> {
         let mut m = self
             .mem
@@ -208,16 +214,24 @@ impl DraftStore {
         if let Some(p) = &self.path {
             let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
             let path = p.as_ref().as_path();
-            write_with_backup(path, &json)?;
-            // A deletion leaves no copy of the project's draft: the recovery copy that write
-            // just rotated holds it, so it becomes the file as it now stands.
             let bak = sibling(path, ".bak");
             if bak.exists() {
                 std::fs::write(&bak, &json)?;
             }
+            write_atomic(path, &json)?;
         }
         *m = kept;
         Ok(())
+    }
+
+    /// Whether the store holds anything of `project_id`: its draft or its discard stamp.
+    pub fn holds_project(&self, project_id: &str) -> bool {
+        self.mem.lock().is_ok_and(|m| {
+            m.contains_key(project_id)
+                || m.get(CLEARED_KEY)
+                    .and_then(|c| c.as_object())
+                    .is_some_and(|o| o.contains_key(project_id))
+        })
     }
 
     /// The size in bytes of `project_id`'s saved draft as stored (0 when there is none).

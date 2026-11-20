@@ -298,3 +298,51 @@ fn a_draft_with_no_discard_stamp_still_adopts() {
     store.save("p1", draft_of(&["a/b"]));
     assert!(store.adopt_audit("p1", &repos(&["a/b"]), T1, || run(T1)));
 }
+
+fn set_readonly(path: &std::path::Path, readonly: bool) {
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_readonly(readonly);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+#[test]
+fn a_deletion_that_fails_part_way_leaves_memory_and_disk_agreeing() {
+    for fail_on in ["onboarding-draft.json.bak", "onboarding-draft.json"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("onboarding-draft.json");
+        let store = DraftStore::at(path.clone());
+        store.save("p1", serde_json::json!({"scan": 1}));
+        store.save("p2", serde_json::json!({"scan": 2}));
+        let target = dir.path().join(fail_on);
+        set_readonly(&target, true);
+        assert!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&target)
+                .is_err(),
+            "run these tests as an ordinary user"
+        );
+
+        assert!(
+            store.clear_checked("p1").is_err(),
+            "{fail_on}: the failure is reported"
+        );
+        assert!(
+            store.load("p1").is_some(),
+            "{fail_on}: memory still holds the draft"
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("p1"),
+            "{fail_on}: the main file still holds it too"
+        );
+
+        set_readonly(&target, false);
+        store.clear_checked("p1").expect("the retry succeeds");
+        assert!(store.load("p1").is_none());
+        for f in ["onboarding-draft.json", "onboarding-draft.json.bak"] {
+            let text = std::fs::read_to_string(dir.path().join(f)).unwrap();
+            assert!(!text.contains("p1"), "{f}: {text}");
+        }
+    }
+}
