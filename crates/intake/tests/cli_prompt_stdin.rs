@@ -19,8 +19,9 @@ fn two_megabyte_grounding() -> String {
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn a_large_planning_prompt_reaches_the_cli_on_stdin() {
-    let dir = std::env::temp_dir().join(format!("camerata-intake-stdin-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    // Removed when it drops, a failed assertion included.
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path().to_path_buf();
     let stub = dir.join("claude");
     std::fs::write(
         &stub,
@@ -64,5 +65,4 @@ printf '%s\n' '{"result":"not a plan"}'
     ] {
         assert!(lines.contains(&flag), "{flag} is unchanged: {lines:?}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

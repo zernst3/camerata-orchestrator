@@ -137,11 +137,6 @@ pub fn isolate_room_call(cmd: &mut std::process::Command, room_dir: &std::path::
 /// not ride in the argument list: the OS caps the arguments and environment of one process (about
 /// 1 MB on macOS, `ARG_MAX`), and a prompt that carries whole documents is larger, so the spawn
 /// fails with "Argument list too long (os error 7)". Stdin has no such cap.
-///
-/// Run it on its own task (`tokio::spawn`) while the caller reads the child's output: a child
-/// that starts answering before it has read everything would otherwise block both sides on full
-/// pipes. A child that exits early leaves a broken pipe; that is not this function's error to
-/// report (the exit status and stderr already say why), so callers drop the result.
 pub async fn write_prompt<W>(mut stdin: W, prompt: Vec<u8>) -> std::io::Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -149,6 +144,109 @@ where
     use tokio::io::AsyncWriteExt;
     stdin.write_all(&prompt).await?;
     stdin.shutdown().await
+}
+
+/// A [`write_prompt`] running on its own task, so a child that answers before it has read
+/// everything cannot block both sides on full pipes.
+///
+/// Dropping it aborts the task, so a call that is killed, times out or is dropped leaves no
+/// writer behind. [`PromptWriter::finish`] reports how the write ended: a child that exits early
+/// leaves a broken pipe, which is its exit status's to explain and is not an error here; any other
+/// failure means the prompt did not reach the child whole, and the answer to a truncated prompt
+/// must not be taken as the answer.
+pub struct PromptWriter {
+    handle: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+}
+
+impl PromptWriter {
+    /// Start writing `prompt` to `stdin` on a new task. Needs a running tokio runtime.
+    pub fn start<W>(stdin: W, prompt: Vec<u8>) -> Self
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self {
+            handle: Some(tokio::spawn(write_prompt(stdin, prompt))),
+        }
+    }
+
+    /// Wait for the write to end. `Ok` when it completed or the child closed its input early
+    /// (broken pipe); `Err` for any other write failure.
+    pub async fn finish(mut self) -> std::io::Result<()> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        match handle.await {
+            Ok(Err(e)) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
+            // Completed, broken pipe, or the task was cancelled (nothing was left to finish).
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Drop for PromptWriter {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// A private copy of a system prompt on disk, for `claude --system-prompt-file`.
+///
+/// A system prompt can be as large as the prompt (the chat's carries the whole manuals), and
+/// `--system-prompt <text>` puts it in the argument list, which the OS caps. The file is created
+/// in a fresh private directory (mode 0700), is readable by its owner alone (0600), and is
+/// removed with its directory when this value is dropped: on success, error, timeout or kill,
+/// whichever way the call ends. It is a file and not stdin because the flag REPLACES the Claude
+/// Code scaffolding, which folding the text into the prompt would not do.
+pub struct SystemPromptFile {
+    dir: std::path::PathBuf,
+    file: std::path::PathBuf,
+}
+
+impl SystemPromptFile {
+    /// Write `text` to a new private file under the system temp directory.
+    pub fn create(text: &str) -> std::io::Result<Self> {
+        Self::create_in(&std::env::temp_dir(), text)
+    }
+
+    /// As [`Self::create`], under `parent`.
+    pub fn create_in(parent: &std::path::Path, text: &str) -> std::io::Result<Self> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let dir = parent.join(format!(
+            "camerata-system-prompt-{}-{}-{nanos}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        let file = dir.join("system-prompt.txt");
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&file)
+            .and_then(|mut f| f.write_all(text.as_bytes()));
+        let this = Self { dir, file };
+        written?;
+        Ok(this)
+    }
+
+    /// The file's path, for `--system-prompt-file`.
+    pub fn path(&self) -> &std::path::Path {
+        &self.file
+    }
+}
+
+impl Drop for SystemPromptFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+        let _ = std::fs::remove_dir(&self.dir);
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +309,125 @@ mod tests {
         assert!(cmd
             .get_envs()
             .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none()));
+    }
+
+    /// A writer that fails every write with `kind`.
+    struct FailingWriter(std::io::ErrorKind);
+
+    impl tokio::io::AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(self.0)))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A writer that never accepts a byte: a child that does not read its stdin.
+    struct StalledWriter;
+
+    impl tokio::io::AsyncWrite for StalledWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_that_fails_for_any_reason_but_a_broken_pipe_is_an_error() {
+        let failed = PromptWriter::start(
+            FailingWriter(std::io::ErrorKind::PermissionDenied),
+            b"prompt".to_vec(),
+        )
+        .finish()
+        .await;
+        assert_eq!(
+            failed.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_pipe_is_the_childs_exit_status_to_explain_not_a_write_error() {
+        let result = PromptWriter::start(
+            FailingWriter(std::io::ErrorKind::BrokenPipe),
+            b"prompt".to_vec(),
+        )
+        .finish()
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_complete_write_delivers_every_byte_and_closes_the_input() {
+        let (mut reader, writer) = tokio::io::duplex(64);
+        let sent: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let w = PromptWriter::start(writer, sent.clone());
+        let mut got = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut got)
+            .await
+            .unwrap();
+        assert!(w.finish().await.is_ok());
+        assert_eq!(got, sent);
+    }
+
+    /// A call that is killed or dropped leaves no writer behind.
+    #[tokio::test]
+    async fn dropping_the_writer_aborts_a_write_that_is_stuck() {
+        let writer = PromptWriter::start(StalledWriter, b"prompt".to_vec());
+        let handle = writer.handle.as_ref().unwrap().abort_handle();
+        drop(writer);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stuck writer task was aborted");
+    }
+
+    #[test]
+    fn the_system_prompt_file_is_private_holds_the_text_and_goes_when_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = std::env::temp_dir();
+        let text = "line one\nline two\n".repeat(100_000);
+        let file = SystemPromptFile::create_in(&parent, &text).unwrap();
+        let path = file.path().to_path_buf();
+        let dir = path.parent().unwrap().to_path_buf();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+        drop(file);
+        assert!(!path.exists(), "the file is removed on drop");
+        assert!(!dir.exists(), "so is its private directory");
     }
 }

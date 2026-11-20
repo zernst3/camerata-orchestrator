@@ -25,7 +25,11 @@ args = sys.argv[1:]
 if args == ["--version"]:
     print("2.1.321 (Claude Code)")
     sys.exit(0)
-system = args[args.index("--system-prompt") + 1] if "--system-prompt" in args else ""
+# The system prompt is a private file named by --system-prompt-file (it is too big for argv).
+system = ""
+if "--system-prompt-file" in args:
+    with open(args[args.index("--system-prompt-file") + 1]) as f:
+        system = f.read()
 if os.environ.get("CAMERATA_FAKE_WARM"):
     sys.exit(0)
 # The prompt arrives on stdin (`claude -p` with no prompt argument). Read after the warm-up exit: a

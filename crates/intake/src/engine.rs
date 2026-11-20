@@ -580,13 +580,26 @@ pub(crate) async fn output_with_prompt(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn()?;
-    if let Some(stdin) = child.stdin.take() {
-        let bytes = stdin_prompt(prompt).into_bytes();
-        tokio::spawn(async move {
-            let _ = camerata_api_types::claude_cli::write_prompt(stdin, bytes).await;
-        });
+    // Dropped (so aborted) on every way out of this function, a cancelled call included.
+    let writer = child.stdin.take().map(|stdin| {
+        camerata_api_types::claude_cli::PromptWriter::start(
+            stdin,
+            stdin_prompt(prompt).into_bytes(),
+        )
+    });
+    let out = child.wait_with_output().await?;
+    // A broken pipe is the child closing its input early (its exit status says why). Any other
+    // write failure means the prompt did not arrive whole: the call fails rather than return the
+    // answer to a truncated prompt.
+    if let Some(writer) = writer {
+        if let Err(e) = writer.finish().await {
+            eprintln!("[camerata-intake] writing the prompt to the claude CLI failed: {e}");
+            if out.status.success() {
+                return Err(e);
+            }
+        }
     }
-    child.wait_with_output().await
+    Ok(out)
 }
 
 impl ClaudeLeadEngineer {

@@ -113,11 +113,13 @@ async fn a_prompt_larger_than_the_os_argument_limit_reaches_the_cli_on_stdin() {
 
 #[test]
 fn the_command_line_carries_no_prompt_and_the_prompt_is_handed_back_for_stdin() {
-    let (cmd, prompt) = build_cli_command(
+    let call = build_cli_command(
         &LlmRequest::new("a prompt carrying client source"),
         "claude-haiku-4-5",
         "sid",
-    );
+    )
+    .unwrap();
+    let (cmd, prompt) = (call.cmd, call.prompt);
     let args: Vec<String> = cmd
         .as_std()
         .get_args()

@@ -131,13 +131,16 @@ pub(crate) async fn stream_subprocess_with_stdin(
     }
 
     let mut child = cmd.spawn().map_err(AgentError::Spawn)?;
-    if let (Some(prompt), Some(stdin)) = (stdin_prompt, child.stdin.take()) {
-        // On its own task: a child that answers before it has read everything must not block
-        // on a full pipe. A child that exits early is reported by its exit status.
-        tokio::spawn(async move {
-            let _ = camerata_api_types::claude_cli::write_prompt(stdin, prompt.into_bytes()).await;
-        });
-    }
+    // On its own task: a child that answers before it has read everything must not block on a
+    // full pipe. Dropping the writer (every early return below: a stall, a kill, an error) aborts
+    // the task.
+    let writer = match (stdin_prompt, child.stdin.take()) {
+        (Some(prompt), Some(stdin)) => Some(camerata_api_types::claude_cli::PromptWriter::start(
+            stdin,
+            prompt.into_bytes(),
+        )),
+        _ => None,
+    };
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr_handle = child.stderr.take().expect("stderr is piped");
 
@@ -204,11 +207,26 @@ pub(crate) async fn stream_subprocess_with_stdin(
 
     let status = child.wait().await.map_err(AgentError::Spawn)?;
 
+    // How the prompt write ended. A broken pipe is the child closing its input early, which its
+    // exit status explains; any other failure means the prompt did not arrive whole, so the
+    // output is the answer to a truncated prompt and the run fails (and says why).
+    let written = match writer {
+        Some(w) => w.finish().await,
+        None => Ok(()),
+    };
+
     if !status.success() {
+        if let Err(e) = &written {
+            eprintln!("[camerata-agent] writing the task to the claude CLI failed: {e}");
+        }
         return Err(AgentError::NonZeroExit {
             status: status.to_string(),
             stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
         });
+    }
+    if let Err(e) = written {
+        eprintln!("[camerata-agent] writing the task to the claude CLI failed: {e}");
+        return Err(AgentError::Spawn(e));
     }
 
     Ok((accumulated, status))

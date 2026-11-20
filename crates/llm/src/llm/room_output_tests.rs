@@ -29,7 +29,9 @@ fn room_call() -> LlmRequest {
 }
 
 fn build(req: &LlmRequest) -> tokio::process::Command {
-    build_cli_command(req, "claude-fable-5-2", "sid").0
+    build_cli_command(req, "claude-fable-5-2", "sid")
+        .unwrap()
+        .cmd
 }
 
 #[test]

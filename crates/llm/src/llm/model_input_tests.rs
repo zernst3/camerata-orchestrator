@@ -103,11 +103,13 @@ fn a_batch_submitted_with_hand_built_items_is_redacted_at_the_upload() {
 #[test]
 fn the_claude_cli_argv_carries_no_raw_secret() {
     let (req, a, b) = leaky();
-    let (cmd, prompt) = build_cli_command(
+    let call = build_cli_command(
         &req,
         "claude-sonnet-5-5",
         "11111111-2222-4333-8444-555555555555",
-    );
+    )
+    .unwrap();
+    let (cmd, prompt) = (call.cmd, call.prompt);
     let argv: Vec<String> = cmd
         .as_std()
         .get_args()

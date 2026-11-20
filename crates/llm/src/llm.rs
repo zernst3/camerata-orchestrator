@@ -151,15 +151,20 @@ pub(crate) fn nul_safe(s: &str) -> String {
 }
 
 /// Build the `claude -p` command for one completion (everything except the spawn), so the exact
-/// argument list is testable without a `claude` binary. Returns the command and the prompt that
-/// must be written to its stdin: the prompt is NOT in the argument list, which the OS caps
-/// (macOS `ARG_MAX`, about 1 MB) and which a prompt carrying whole documents exceeds
-/// ("Argument list too long (os error 7)"). Use [`spawn_cli`] to start it with the prompt fed.
-fn build_cli_command(
-    req: &LlmRequest,
-    model: &str,
-    session_id: &str,
-) -> (tokio::process::Command, String) {
+/// argument list is testable without a `claude` binary. Neither the prompt nor the system prompt is
+/// in the argument list, which the OS caps (macOS `ARG_MAX`, about 1 MB) and which text carrying
+/// whole documents exceeds ("Argument list too long (os error 7)"): the prompt goes to stdin and
+/// the system prompt to a private file named by `--system-prompt-file`. Use [`spawn_cli`] to start
+/// the call with the prompt fed; the [`CliCall`] must outlive the child (it owns that file).
+struct CliCall {
+    cmd: tokio::process::Command,
+    /// The prompt to write to the child's stdin.
+    prompt: String,
+    /// The system prompt's file, removed when this drops.
+    system_file: Option<camerata_api_types::claude_cli::SystemPromptFile>,
+}
+
+fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> std::io::Result<CliCall> {
     // The model-input chokepoint: the prompt and the system prompt go out redacted.
     let req = crate::model_input::guarded(req);
     let req = &*req;
@@ -192,23 +197,50 @@ fn build_cli_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     harden_completion(&mut cmd, req);
-    (cmd, nul_safe(&req.prompt))
+    // The system prompt REPLACES the Claude Code scaffolding (`--system-prompt-file`, the file
+    // form of `--system-prompt`, listed in `claude --help`). `req` is already the redacted copy.
+    let system_file = match &req.system {
+        Some(system) => {
+            // Not the OS error as it comes: a missing temp directory is `NotFound`, which the
+            // caller would report as a missing `claude`.
+            let file = camerata_api_types::claude_cli::SystemPromptFile::create(&nul_safe(system))
+                .map_err(|e| {
+                    std::io::Error::other(format!("could not write the system prompt file: {e}"))
+                })?;
+            cmd.arg("--system-prompt-file").arg(file.path());
+            Some(file)
+        }
+        None => None,
+    };
+    Ok(CliCall {
+        cmd,
+        prompt: nul_safe(&req.prompt),
+        system_file,
+    })
 }
 
-/// Start a command built by [`build_cli_command`] and feed it the prompt on stdin. The write runs
-/// on its own task so a child that answers before it has read everything cannot block on a full
-/// pipe; a broken pipe from a child that exits early is reported by its exit status, not here.
+/// Start a call built by [`build_cli_command`] and feed it the prompt on stdin. The write runs
+/// on its own task (see [`camerata_api_types::claude_cli::PromptWriter`]); the caller reads how it
+/// ended, and dropping it aborts it.
 fn spawn_cli(
-    mut cmd: tokio::process::Command,
-    prompt: String,
-) -> std::io::Result<tokio::process::Child> {
+    call: CliCall,
+) -> std::io::Result<(
+    tokio::process::Child,
+    camerata_api_types::claude_cli::PromptWriter,
+    Option<camerata_api_types::claude_cli::SystemPromptFile>,
+)> {
+    let CliCall {
+        mut cmd,
+        prompt,
+        system_file,
+    } = call;
     let mut child = cmd.spawn()?;
-    if let Some(stdin) = child.stdin.take() {
-        tokio::spawn(async move {
-            let _ = camerata_api_types::claude_cli::write_prompt(stdin, prompt.into_bytes()).await;
-        });
-    }
-    Ok(child)
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("the claude CLI has no stdin pipe"))?;
+    let writer = camerata_api_types::claude_cli::PromptWriter::start(stdin, prompt.into_bytes());
+    Ok((child, writer, system_file))
 }
 
 /// The directory a `claude -p` call runs in (and whose Claude Code session folder holds its
@@ -282,9 +314,6 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
         None => {
             cmd.arg("--tools").arg("");
         }
-    }
-    if let Some(system) = &req.system {
-        cmd.arg("--system-prompt").arg(nul_safe(system));
     }
     // A clean-room call (see [`RoomOutput`]): no instruction file is read, and the tools that
     // could run code, reach the web or hand the work to another agent are denied by name. The
@@ -2334,25 +2363,27 @@ impl Llm {
                 created_at: now_rfc3339(),
             });
         }
-        let (cmd, prompt) = build_cli_command(req, model, &session_id);
-        let child = match spawn_cli(cmd, prompt) {
-            Ok(child) => child,
-            Err(e) => {
-                // A missing binary means no provider can be reached at all, so it stops the run;
-                // any other spawn failure is local.
-                let class = if e.kind() == std::io::ErrorKind::NotFound {
-                    crate::failure::FailureClass::AuthOrBilling
-                } else {
-                    crate::failure::FailureClass::Io
-                };
-                let message = map_spawn_error(e).to_string();
-                let err = cli_failure(model, class, false, message, None, "");
-                let record = crate::failure::call_failure_of(&err)
-                    .and_then(|f| f.attempts.first().cloned())
-                    .unwrap_or_default();
-                return Step::Stop { record, last: err };
-            }
-        };
+        // Held to the end of this attempt (success, error, timeout, kill): the system prompt's
+        // file goes with it, and so does the stdin writer if the call ends before it does.
+        let (child, writer, _system_file) =
+            match build_cli_command(req, model, &session_id).and_then(spawn_cli) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    // A missing binary means no provider can be reached at all, so it stops the run;
+                    // any other spawn failure is local.
+                    let class = if e.kind() == std::io::ErrorKind::NotFound {
+                        crate::failure::FailureClass::AuthOrBilling
+                    } else {
+                        crate::failure::FailureClass::Io
+                    };
+                    let message = map_spawn_error(e).to_string();
+                    let err = cli_failure(model, class, false, message, None, "");
+                    let record = crate::failure::call_failure_of(&err)
+                        .and_then(|f| f.attempts.first().cloned())
+                        .unwrap_or_default();
+                    return Step::Stop { record, last: err };
+                }
+            };
         // Track the PID for the shutdown hook; the guard untracks on every exit path.
         let _pid_guard = child.id().map(ClaudePidGuard::new);
 
@@ -2387,7 +2418,28 @@ impl Llm {
         match read_cli_stream_capturing(child, model, idle, overall_timeout, on_delta, capture)
             .await
         {
-            Ok(resp) => Step::Done(resp),
+            Ok(resp) => {
+                // The answer to a prompt that did not reach the child whole is not the answer: a
+                // write failure other than a broken pipe (the child closing its input early,
+                // which its exit status explains) fails the call, and is logged.
+                if let Err(e) = writer.finish().await {
+                    tracing::warn!("writing the prompt to the claude CLI failed: {e}");
+                    let message = format!("writing the prompt to the claude CLI failed: {e}");
+                    let err = cli_failure(
+                        model,
+                        crate::failure::FailureClass::Io,
+                        false,
+                        message,
+                        None,
+                        "",
+                    );
+                    let record = crate::failure::call_failure_of(&err)
+                        .and_then(|f| f.attempts.first().cloned())
+                        .unwrap_or_default();
+                    return Step::Stop { record, last: err };
+                }
+                Step::Done(resp)
+            }
             Err(e) => {
                 let Some(failure) = crate::failure::call_failure_of(&e) else {
                     // A refusal or an error nobody typed: not worth another run.
@@ -3828,6 +3880,8 @@ mod cli_isolation_tests;
 mod cli_pricing_tests;
 #[cfg(test)]
 mod cli_stdin_tests;
+#[cfg(test)]
+mod cli_system_prompt_tests;
 #[cfg(test)]
 mod model_input_tests;
 #[cfg(test)]
@@ -6175,11 +6229,13 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
     #[test]
     fn cli_command_is_tagged_with_the_given_session_id() {
         let req = LlmRequest::new("hello");
-        let (cmd, prompt) = build_cli_command(
+        let call = build_cli_command(
             &req,
             "claude-haiku-4-5",
             "11111111-2222-4333-8444-555555555555",
-        );
+        )
+        .unwrap();
+        let (cmd, prompt) = (call.cmd, call.prompt);
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
@@ -6199,7 +6255,8 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
     /// the parent would otherwise silently make `claude -p` bill the API.
     #[test]
     fn cli_command_removes_the_inherited_anthropic_key_from_the_child_env() {
-        let (cmd, _prompt) = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid");
+        let call = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid").unwrap();
+        let (cmd, _prompt) = (call.cmd, call.prompt);
         let removed = cmd
             .as_std()
             .get_envs()
