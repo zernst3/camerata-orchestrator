@@ -596,10 +596,11 @@ pub async fn source_file_with(
             }
             .to_json(),
         ),
-        // Not linked / not on disk: indistinguishable from "file missing" to the UI.
-        SourceRead::Unresolved { .. } => {
-            respond(StatusCode::OK, FindingContextOutcome::FileMissing.to_json())
-        }
+        // Not linked / no local folder: its own status and reason, never "file missing".
+        SourceRead::Unresolved { reason } => respond(
+            StatusCode::OK,
+            FindingContextOutcome::RepoUnlinked { reason }.to_json(),
+        ),
         // No commit is known for this inspection: the working tree, labelled.
         SourceRead::WorkingTree { dir } => {
             match read_rendered(Origin::WorkingTree(&dir), path, around, limits).await {

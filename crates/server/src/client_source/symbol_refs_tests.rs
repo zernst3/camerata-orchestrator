@@ -651,7 +651,7 @@ async fn a_repo_that_escapes_the_workspace_is_refused() {
         let endpoint = format!("/api/onboard/symbol-refs?repo={repo}&symbol=needle_fn");
         let (status, _, json) = get(&fx, &endpoint).await;
         assert_eq!(status, StatusCode::OK, "{endpoint}: {json}");
-        assert_eq!(json["status"], "file_missing", "{endpoint}: {json}");
+        assert_eq!(json["status"], "repo_unlinked", "{endpoint}: {json}");
         assert!(json.get("hits").is_none(), "{endpoint}: {json}");
     }
     assert_eq!(
