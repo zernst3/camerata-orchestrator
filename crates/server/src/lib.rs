@@ -2090,6 +2090,15 @@ fn trigger_anthropic_refresh_if_needed(
 /// provider is selected from the environment, so setting the GitHub vars switches the
 /// whole BFF onto a real repo with no code change.
 pub async fn serve(addr: &str) -> anyhow::Result<()> {
+    // A `claude` call's system prompt file is removed when the call ends, or at shutdown
+    // (`kill_inflight_claude`). A SIGKILL, a crash or a power cut skips both: remove what a dead
+    // process left, so client data never outlives the process that wrote it. It is per call, so
+    // this and the shutdown removal are the whole lifecycle: deleting a project's client source
+    // or the project itself has no such file to find (none is kept between calls).
+    let swept = camerata_api_types::claude_cli::sweep_leftover_system_prompts();
+    if swept > 0 {
+        println!("removed {swept} leftover system prompt folder(s) from an earlier run");
+    }
     let state = AppState::from_env();
 
     // OpenRouter model-registry refresh, trigger 1 of 3 (startup). The other two are the

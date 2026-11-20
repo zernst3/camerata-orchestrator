@@ -1,7 +1,8 @@
 //! The operator chat assistant is model input like every inspection prompt: whatever the cockpit
 //! put in its context (the scan results, the draft, an earlier answer) is redacted before it
 //! reaches a model, on any backend. The handler runs against a fake `claude` on PATH that records
-//! the argv it was given (the recorded transport); nothing reaches the network.
+//! the argv it was given and the prompt it read on stdin (the recorded transport); nothing reaches
+//! the network.
 //! Secret values are built at runtime (`camerata_secrets::fixtures`).
 
 use super::*;
@@ -9,10 +10,18 @@ use axum::extract::State;
 use camerata_secrets::fixtures::planted;
 use camerata_secrets::SecretShape;
 
-/// Writes every argument it receives, one per line, to `$FAKE_ARGS_OUT`, and answers.
+/// Writes every argument it receives, one per line, to `$FAKE_ARGS_OUT`, the prompt it reads on
+/// stdin to `$FAKE_STDIN_OUT` and the text of the system prompt file it is given to
+/// `$FAKE_SYSTEM_OUT`, and answers.
 const RECORDING_CLAUDE: &str = r#"#!/bin/sh
 [ -n "$CAMERATA_FAKE_WARM" ] && exit 0
 printf '%s\n' "$@" > "$FAKE_ARGS_OUT"
+cat > "$FAKE_STDIN_OUT"
+prev=''
+for a in "$@"; do
+  [ "$prev" = "--system-prompt-file" ] && cp "$a" "$FAKE_SYSTEM_OUT"
+  prev="$a"
+done
 printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
 "#;
 
@@ -38,7 +47,11 @@ async fn the_chat_assistants_context_reaches_the_transport_redacted() {
         std::env::var("PATH").unwrap_or_default()
     );
     let _path = camerata_test_env::EnvGuard::set("PATH", &path);
+    let stdin_out = root.path().join("stdin-recorded");
+    let system_out = root.path().join("system-recorded");
     let _out = camerata_test_env::EnvGuard::set("FAKE_ARGS_OUT", &out);
+    let _stdin_out = camerata_test_env::EnvGuard::set("FAKE_STDIN_OUT", &stdin_out);
+    let _system_out = camerata_test_env::EnvGuard::set("FAKE_SYSTEM_OUT", &system_out);
     let _on = camerata_test_env::EnvGuard::remove(crate::feature_flags::MODEL_PROMPT_REDACTION_ENV);
 
     // A secret in each place the assistant's context is made of: the scan results section the
@@ -79,7 +92,12 @@ async fn the_chat_assistants_context_reaches_the_transport_redacted() {
     let reply = chat(State(state), axum::Json(req)).await;
     assert!(reply.is_ok(), "the fake claude answers");
 
-    let argv = std::fs::read_to_string(&out).expect("the transport recorded what it was sent");
+    // What the transport was sent: its argument list, its stdin and its system prompt file.
+    let mut argv = std::fs::read_to_string(&out).expect("the transport recorded its argv");
+    argv.push_str(&std::fs::read_to_string(&stdin_out).expect("the transport recorded its stdin"));
+    argv.push_str(
+        &std::fs::read_to_string(&system_out).expect("the transport recorded its system prompt"),
+    );
     for p in [&in_context, &in_history, &in_question] {
         assert!(
             !argv.contains(&p.value),

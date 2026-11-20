@@ -149,6 +149,10 @@ impl GenericCliDriver {
     /// Build the argv (everything after the program name) for the given role and
     /// task. Pure and testable: no process is spawned.
     ///
+    /// The task rides in the argv on purpose: a third-party CLI names its own prompt flag and may
+    /// have no way to read stdin. The `claude` CLI is not driven from here; [`crate::ClaudeCliDriver`]
+    /// sends its task on stdin, past the OS argument-size cap.
+    ///
     /// Returned vec: `base_args + [task_flag, task]`.
     ///
     /// The `role` is accepted so the signature matches [`crate::ClaudeCliDriver::build_args`]
