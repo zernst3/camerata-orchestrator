@@ -103,7 +103,7 @@ fn a_batch_submitted_with_hand_built_items_is_redacted_at_the_upload() {
 #[test]
 fn the_claude_cli_argv_carries_no_raw_secret() {
     let (req, a, b) = leaky();
-    let cmd = build_cli_command(
+    let (cmd, prompt) = build_cli_command(
         &req,
         "claude-sonnet-5-5",
         "11111111-2222-4333-8444-555555555555",
@@ -113,11 +113,12 @@ fn the_claude_cli_argv_carries_no_raw_secret() {
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    // What the CLI is sent is its argument list and its stdin: neither carries a raw secret.
     assert_clean("cli argv", &argv.join("\u{1}"), &[&a, &b]);
+    assert_clean("cli stdin", &prompt, &[&a, &b]);
     assert!(
-        argv.iter()
-            .any(|arg| arg.contains("User asks: why is this held?")),
-        "the question itself still goes: {argv:?}"
+        prompt.contains("User asks: why is this held?"),
+        "the question itself still goes: {prompt:?}"
     );
 }
 

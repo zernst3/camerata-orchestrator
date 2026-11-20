@@ -16,7 +16,7 @@ const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 /// Remove the Anthropic API key from a `claude` subprocess's environment. Takes the std command
 /// so it works for both `std::process::Command` and, via `as_std_mut()`,
-/// `tokio::process::Command`, without this leaf crate depending on tokio.
+/// `tokio::process::Command`.
 pub fn scrub_anthropic_key_env(cmd: &mut std::process::Command) {
     cmd.env_remove(ANTHROPIC_API_KEY_ENV);
 }
@@ -128,6 +128,27 @@ pub fn isolate_room_call(cmd: &mut std::process::Command, room_dir: &std::path::
         .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
         .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
         .current_dir(room_dir);
+}
+
+/// Hand a prompt to a `claude` child on its standard input, then close the input so the CLI
+/// sees the end of the prompt.
+///
+/// `claude -p` reads its prompt from stdin when none is given as an argument. The prompt must
+/// not ride in the argument list: the OS caps the arguments and environment of one process (about
+/// 1 MB on macOS, `ARG_MAX`), and a prompt that carries whole documents is larger, so the spawn
+/// fails with "Argument list too long (os error 7)". Stdin has no such cap.
+///
+/// Run it on its own task (`tokio::spawn`) while the caller reads the child's output: a child
+/// that starts answering before it has read everything would otherwise block both sides on full
+/// pipes. A child that exits early leaves a broken pipe; that is not this function's error to
+/// report (the exit status and stderr already say why), so callers drop the result.
+pub async fn write_prompt<W>(mut stdin: W, prompt: Vec<u8>) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    stdin.write_all(&prompt).await?;
+    stdin.shutdown().await
 }
 
 #[cfg(test)]

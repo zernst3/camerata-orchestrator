@@ -151,8 +151,15 @@ pub(crate) fn nul_safe(s: &str) -> String {
 }
 
 /// Build the `claude -p` command for one completion (everything except the spawn), so the exact
-/// argument list is testable without a `claude` binary.
-fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::process::Command {
+/// argument list is testable without a `claude` binary. Returns the command and the prompt that
+/// must be written to its stdin: the prompt is NOT in the argument list, which the OS caps
+/// (macOS `ARG_MAX`, about 1 MB) and which a prompt carrying whole documents exceeds
+/// ("Argument list too long (os error 7)"). Use [`spawn_cli`] to start it with the prompt fed.
+fn build_cli_command(
+    req: &LlmRequest,
+    model: &str,
+    session_id: &str,
+) -> (tokio::process::Command, String) {
     // The model-input chokepoint: the prompt and the system prompt go out redacted.
     let req = crate::model_input::guarded(req);
     let req = &*req;
@@ -164,19 +171,16 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     };
     // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
     // leaving a stalled `claude` running in the background.
-    // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
-    // responding. spawn() INHERITS the parent's stdin, and the desktop app's inherited
-    // stdin is an open pipe that never EOFs — so the audit hung for minutes producing
-    // nothing (shell tests were fast only because their stdin was a TTY/closed).
-    // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
-    // and responds at once.
+    // stdin(piped): the prompt goes in on stdin (`claude -p` with no prompt argument reads it
+    // until EOF), and `spawn_cli` closes it after the last byte. It must never be inherited:
+    // `claude -p` blocks until EOF on its stdin, and the desktop app's inherited stdin is an
+    // open pipe that never EOFs, so the audit once hung for minutes producing nothing.
     // The Cli backend is the SUBSCRIPTION path: it must never silently bill the API because an
     // `ANTHROPIC_API_KEY` from `.env` was inherited into this subprocess.
     camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
     cmd.kill_on_drop(true)
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::piped())
         .arg("-p")
-        .arg(nul_safe(&req.prompt))
         .arg("--model")
         .arg(model)
         .arg("--output-format")
@@ -188,7 +192,23 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     harden_completion(&mut cmd, req);
-    cmd
+    (cmd, nul_safe(&req.prompt))
+}
+
+/// Start a command built by [`build_cli_command`] and feed it the prompt on stdin. The write runs
+/// on its own task so a child that answers before it has read everything cannot block on a full
+/// pipe; a broken pipe from a child that exits early is reported by its exit status, not here.
+fn spawn_cli(
+    mut cmd: tokio::process::Command,
+    prompt: String,
+) -> std::io::Result<tokio::process::Child> {
+    let mut child = cmd.spawn()?;
+    if let Some(stdin) = child.stdin.take() {
+        tokio::spawn(async move {
+            let _ = camerata_api_types::claude_cli::write_prompt(stdin, prompt.into_bytes()).await;
+        });
+    }
+    Ok(child)
 }
 
 /// The directory a `claude -p` call runs in (and whose Claude Code session folder holds its
@@ -551,9 +571,10 @@ fn cli_failure(
 /// specific message: a Finder/Dock-launched app inherits a minimal PATH that typically
 /// omits Homebrew's `/opt/homebrew/bin`, so the raw OS error ("No such file or
 /// directory") gives no hint that the fix is a PATH problem, not a missing install.
-/// Every other spawn error keeps the original generic wording, verbatim, so this only
-/// ever narrows the message, never changes behavior for other failure kinds. Pure and
-/// unit-testable in isolation (no process spawn required).
+/// Every other spawn error names the real OS error and does not blame PATH or the install
+/// (a prompt too large for the OS, a permission problem and a missing interpreter all
+/// land here, and none of them is fixed by reinstalling). Pure and unit-testable in
+/// isolation (no process spawn required).
 fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
         anyhow::anyhow!(
@@ -563,7 +584,7 @@ fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
              Backend to API and add an Anthropic API key."
         )
     } else {
-        anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
+        anyhow::anyhow!("failed to spawn `claude` CLI: {e}")
     }
 }
 
@@ -2313,8 +2334,8 @@ impl Llm {
                 created_at: now_rfc3339(),
             });
         }
-        let mut cmd = build_cli_command(req, model, &session_id);
-        let child = match cmd.spawn() {
+        let (cmd, prompt) = build_cli_command(req, model, &session_id);
+        let child = match spawn_cli(cmd, prompt) {
             Ok(child) => child,
             Err(e) => {
                 // A missing binary means no provider can be reached at all, so it stops the run;
@@ -3805,6 +3826,8 @@ mod temperature_tests;
 mod cli_isolation_tests;
 #[cfg(test)]
 mod cli_pricing_tests;
+#[cfg(test)]
+mod cli_stdin_tests;
 #[cfg(test)]
 mod model_input_tests;
 #[cfg(test)]
@@ -6152,7 +6175,7 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
     #[test]
     fn cli_command_is_tagged_with_the_given_session_id() {
         let req = LlmRequest::new("hello");
-        let cmd = build_cli_command(
+        let (cmd, prompt) = build_cli_command(
             &req,
             "claude-haiku-4-5",
             "11111111-2222-4333-8444-555555555555",
@@ -6167,15 +6190,16 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
             .position(|a| a == "--session-id")
             .expect("--session-id is on the command line");
         assert_eq!(args[at + 1], "11111111-2222-4333-8444-555555555555");
-        // The prompt rides in the same command, so the id really does name its session.
-        assert!(args.iter().any(|a| a == "hello"));
+        // The prompt goes to the same child on stdin, so the id really does name its session.
+        assert_eq!(prompt, "hello");
+        assert!(!args.iter().any(|a| a == "hello"));
     }
 
     /// The Cli (subscription) backend must never inherit the Anthropic API key: a `.env` key in
     /// the parent would otherwise silently make `claude -p` bill the API.
     #[test]
     fn cli_command_removes_the_inherited_anthropic_key_from_the_child_env() {
-        let cmd = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid");
+        let (cmd, _prompt) = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid");
         let removed = cmd
             .as_std()
             .get_envs()

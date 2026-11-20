@@ -29,7 +29,7 @@ fn room_call() -> LlmRequest {
 }
 
 fn build(req: &LlmRequest) -> tokio::process::Command {
-    build_cli_command(req, "claude-fable-5-2", "sid")
+    build_cli_command(req, "claude-fable-5-2", "sid").0
 }
 
 #[test]
@@ -37,7 +37,6 @@ fn without_the_option_the_argument_list_is_what_it_always_was() {
     let args = args_of(&build(&read_only()));
     let expected: Vec<String> = [
         "-p",
-        "hi",
         "--model",
         "claude-fable-5-2",
         "--output-format",
