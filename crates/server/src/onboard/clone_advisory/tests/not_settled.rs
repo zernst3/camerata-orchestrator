@@ -77,7 +77,7 @@ async fn the_unsure_row_for_an_unsure_answer_reads_in_the_operators_words() {
         .expect("an unsure row");
     assert_eq!(row.kind, Some(FindingKind::Defect));
     assert!(
-        row.detail.contains("the review was unsure"),
+        row.detail.contains("could not tell whether"),
         "{}",
         row.detail
     );

@@ -213,17 +213,16 @@ async fn a_failed_batch_loses_only_that_batch() {
         (c.found, c.judged, c.confirmed, c.unjudged),
         (40, 24, 24, 16)
     );
-    let (held, confirmed): (Vec<_>, Vec<_>) = outcome.findings.iter().partition(|f| f.needs_review);
-    assert_eq!(confirmed.len(), 48, "24 candidates of two sites each");
-    // One rule, one surface: the lost batch's candidates are held rows for the reviewer, not a
-    // not_assessed row beside the confirmed ones.
-    assert!(outcome.not_assessed.is_empty());
-    assert_eq!(held.len(), 32, "16 candidates of two sites each");
-    assert!(
-        held[0].detail.contains("no usable answer"),
-        "{}",
-        held[0].detail
+    assert_eq!(
+        outcome.findings.len(),
+        48,
+        "24 candidates of two sites each"
     );
+    // One rule, one surface: the lost batch is a gap the ledger discloses, never held rows (the
+    // model did not look at it) and never a not_assessed row beside the confirmed ones.
+    assert!(outcome.findings.iter().all(|f| !f.needs_review));
+    assert!(outcome.not_assessed.is_empty());
+    assert_eq!(outcome.failed.len(), 1);
 }
 
 #[tokio::test]

@@ -93,9 +93,12 @@ pub struct JudgeCounts {
     /// Candidates within the cap that got no definite verdict: `unsure`, no verdict, a failed
     /// batch, or no model.
     pub unjudged: u32,
-    /// Of `unjudged`, the ones the model answered "unsure" (an allowed verdict: the candidate
-    /// is reported as not checked, never as clean). The rest got no usable answer.
+    /// Of `unjudged`, the ones the model looked at and answered "unsure" (an allowed verdict,
+    /// never cached, never clean). The rest got no usable answer.
     pub unsure: u32,
+    /// Of `unsure`, the ones shown as held Queue rows because the rule had judged candidates.
+    /// The reviewer decides those; they are not a coverage gap.
+    pub held: u32,
     /// Candidates past the per-scan cap: counted, never judged.
     pub over_cap: u32,
     /// Of `judged`, the ones answered from the verdict cache.
@@ -107,6 +110,12 @@ impl JudgeCounts {
     /// found is fully assessed by the deterministic pass alone.
     pub fn fully_assessed(&self) -> bool {
         self.unjudged == 0 && self.over_cap == 0
+    }
+
+    /// The candidates nobody looked at or no answer came back for: never judged (over the cap, a
+    /// failed or unsent batch, no model) or unsure with no row. A held unsure row is not one.
+    pub fn coverage_gaps(&self) -> u32 {
+        self.unjudged.saturating_sub(self.held) + self.over_cap
     }
 }
 
@@ -262,28 +271,26 @@ pub async fn judge_clone_candidates(
             .unwrap_or(u32::MAX)
             .saturating_sub(counts.judged);
 
+        // One rule, one surface. A candidate the model looked at and answered "unsure" about
+        // is a Queue row marked unsure, held until the reviewer decides it (only when other
+        // candidates were judged; a rule where nothing was settled is one not_assessed row).
+        // A candidate nobody judged (over the cap, a failed or unsent batch) has no verdict to
+        // show: it is a coverage gap the ledger discloses, never a held row. A rule gets its
+        // single `not_assessed` row only when it produced no Queue row at all.
         if counts.judged > 0 {
-            // One rule, one surface: a rule with at least one judged candidate never also carries
-            // a `not_assessed` row. Each candidate inside the cap that got no definite verdict is
-            // a row in the Queue marked unsure, held until the reviewer decides it, so nothing
-            // that might be a violation is hidden. Candidates past the cap were never listed to
-            // the judge, so they have no site to show: the ledger's partial-rule note discloses
-            // them (`record_in_ledger`), and the rule stays "not fully assessed" there.
             for candidate in candidates {
-                if judged.contains_key(&candidate.id) {
-                    continue;
+                if unsure_ids.contains(&candidate.id) && !judged.contains_key(&candidate.id) {
+                    counts.held += 1;
+                    outcome
+                        .findings
+                        .extend(findings::unsure_findings(req.repo, candidate, req.files));
                 }
-                let why = if unsure_ids.contains(&candidate.id) {
-                    findings::UnsureWhy::JudgeUnsure
-                } else {
-                    findings::UnsureWhy::NoUsableAnswer
-                };
-                outcome.findings.extend(findings::unsure_findings(
-                    req.repo, candidate, why, req.files,
-                ));
             }
-        } else if let Some(row) = not_assessed_row(&req, rule, &counts, llm.is_some(), &outcome) {
-            outcome.not_assessed.push(row);
+        }
+        if counts.confirmed == 0 && counts.held == 0 {
+            if let Some(row) = not_assessed_row(&req, rule, &counts, llm.is_some(), &outcome) {
+                outcome.not_assessed.push(row);
+            }
         }
         let call_failure = if llm.is_none() {
             Some("no model was available, so nothing was judged".to_string())
@@ -679,12 +686,10 @@ fn finish_transcript(
             if counts.over_cap > 0 {
                 line.push_str(&format!(", {} beyond the limit", counts.over_cap));
             }
-            if !counts.fully_assessed() {
-                line.push_str(if counts.judged > 0 {
-                    " (held for a reviewer's decision)"
-                } else {
-                    " (reported as not checked)"
-                });
+            if counts.coverage_gaps() > 0 {
+                line.push_str(" (reported as not checked)");
+            } else if counts.held > 0 {
+                line.push_str(" (held for a reviewer's decision)");
             }
             (line, "done")
         }
@@ -703,7 +708,7 @@ fn finish_transcript(
 pub fn record_in_ledger(ledger: &mut ScanLedger, repo: &str, outcome: &JudgeOutcome) {
     for (rule, counts) in &outcome.counts {
         let id = rule.id();
-        let fully = counts.fully_assessed() && (outcome.model_available || counts.found == 0);
+        let fully = counts.coverage_gaps() == 0 && (outcome.model_available || counts.found == 0);
         let skip_reason = if fully {
             None
         } else if !outcome.model_available {
@@ -711,10 +716,15 @@ pub fn record_in_ledger(ledger: &mut ScanLedger, repo: &str, outcome: &JudgeOutc
             Some(crate::scan_ledger::ADVISORY_UNAVAILABLE_NOTE.to_string())
         } else {
             ledger.note_advisory_partial_rule(repo, id);
+            let held = if counts.held > 0 {
+                format!("; {} left for the reviewer", counts.held)
+            } else {
+                String::new()
+            };
             Some(format!(
                 "{FAILED_PASS_NAME} incomplete: {} of {} candidate sites were not assessed this \
-                 scan",
-                counts.unjudged + counts.over_cap,
+                 scan (over the limit or no answer){held}",
+                counts.coverage_gaps(),
                 counts.found
             ))
         };
