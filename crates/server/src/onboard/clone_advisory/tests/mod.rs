@@ -22,6 +22,7 @@ mod repros;
 mod rows;
 mod seam;
 mod size_check;
+mod unsure_rows;
 
 type Script = Box<dyn FnMut(&LlmRequest, usize) -> anyhow::Result<String> + Send>;
 

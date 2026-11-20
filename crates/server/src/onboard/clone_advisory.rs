@@ -15,8 +15,11 @@
 //! - ONE closed question per rule ([`prompt::question`]); the answer is a verdict word from a
 //!   closed vocabulary. Only the rule's affirmative word ships a finding.
 //! - `unsure`, an unparsed response, a verdict word outside the vocabulary, an id that was not
-//!   asked about and a failed batch can never promote a candidate. They are counted, disclosed
-//!   with ONE `not_assessed` row per rule, and retried next scan (`unsure` is not cached).
+//!   asked about and a failed batch can never promote a candidate to a confirmed finding. They
+//!   are counted and retried next scan (`unsure` is not cached). When the rule has at least one
+//!   judged candidate, each such candidate is a Queue row marked unsure (held for the reviewer's
+//!   decision, [`findings::unsure_findings`]); when no candidate of the rule was judged, the rule
+//!   gets ONE `not_assessed` row. A rule never carries both: that would put it on two surfaces.
 //! - The judge never sees a file: its input is [`camerata_checks::clone_rules::JudgeInput`],
 //!   at most 3 members of at most 30 lines each, plus deterministic facts.
 //! - Cost is bounded by construction: batches of [`BATCH_SIZE`], at most
@@ -111,9 +114,11 @@ impl JudgeCounts {
 #[derive(Debug, Clone, Default)]
 pub struct JudgeOutcome {
     /// One finding per site of each confirmed candidate (a candidate written in four places
-    /// is four rows).
+    /// is four rows), and one unsure row (`needs_review`) per site of each candidate the judge
+    /// could not settle in a rule that had judged candidates.
     pub findings: Vec<Finding>,
-    /// At most one `not_assessed` row per rule that left candidates undecided.
+    /// At most one `not_assessed` row per rule, and only for a rule with no judged candidate
+    /// (one with a judged candidate shows its undecided ones as unsure rows in `findings`).
     pub not_assessed: Vec<Finding>,
     /// Per ARMED rule.
     pub counts: BTreeMap<CloneRule, JudgeCounts>,
@@ -221,7 +226,7 @@ pub async fn judge_clone_candidates(
         let session = format!("clone-judge:{}:{}", rule.id(), req.repo);
         register_transcript(feedback, &session, req.repo, rule, candidates, over_cap);
 
-        let judged = judge_rule(
+        let (judged, unsure_ids) = judge_rule(
             llm,
             &req,
             &nonce,
@@ -257,7 +262,29 @@ pub async fn judge_clone_candidates(
             .unwrap_or(u32::MAX)
             .saturating_sub(counts.judged);
 
-        if let Some(row) = not_assessed_row(&req, rule, &counts, llm.is_some(), &outcome) {
+        if counts.judged > 0 {
+            // One rule, one surface: a rule with at least one judged candidate never also carries
+            // a `not_assessed` row. Each candidate inside the cap that got no definite verdict is
+            // a row in the Queue marked unsure, held until the reviewer decides it, so nothing
+            // that might be a violation is hidden. Candidates past the cap were never listed to
+            // the judge, so they have no site to show: the ledger's partial-rule note discloses
+            // them (`record_in_ledger`), and the rule stays "not fully assessed" there.
+            for candidate in candidates {
+                if judged.contains_key(&candidate.id) {
+                    continue;
+                }
+                let why = if unsure_ids.contains(&candidate.id) {
+                    findings::UnsureWhy::JudgeUnsure
+                } else {
+                    findings::UnsureWhy::NoUsableAnswer
+                };
+                outcome.findings.extend(findings::unsure_findings(
+                    req.repo, candidate, why, req.files,
+                ));
+            }
+        } else if let Some(row) =
+            not_assessed_row(&req, rule, &counts, llm.is_some(), &outcome)
+        {
             outcome.not_assessed.push(row);
         }
         let call_failure = if llm.is_none() {
@@ -301,10 +328,11 @@ async fn judge_rule(
     session: &str,
     counts: &mut JudgeCounts,
     outcome: &mut JudgeOutcome,
-) -> BTreeMap<String, Verdict> {
+) -> (BTreeMap<String, Verdict>, HashSet<String>) {
     let mut judged: BTreeMap<String, Verdict> = BTreeMap::new();
+    let mut unsure_ids: HashSet<String> = HashSet::new();
     let Some(llm) = llm else {
-        return judged; // offline: nothing is judged, nothing is read from the cache
+        return (judged, unsure_ids); // offline: nothing is judged, nothing is read from the cache
     };
     // Cached verdicts first: an unchanged family on a re-scan is never re-billed.
     let mut pending: Vec<&Candidate> = Vec::new();
@@ -398,7 +426,8 @@ async fn judge_rule(
             };
             if verdict.word == "unsure" {
                 counts.unsure += 1;
-                continue; // retried next scan: never cached, never shipped
+                unsure_ids.insert(candidate.id.clone());
+                continue; // retried next scan: never cached, never a confirmed finding
             }
             cache.insert(
                 cache_key(candidate, req.judge_model),
@@ -427,7 +456,7 @@ async fn judge_rule(
             scope_note: false,
         });
     }
-    judged
+    (judged, unsure_ids)
 }
 
 /// The one `not_assessed` row for a rule that left candidates undecided, if any.
@@ -653,7 +682,11 @@ fn finish_transcript(
                 line.push_str(&format!(", {} beyond the limit", counts.over_cap));
             }
             if !counts.fully_assessed() {
-                line.push_str(" (reported as not checked)");
+                line.push_str(if counts.judged > 0 {
+                    " (held for a reviewer's decision)"
+                } else {
+                    " (reported as not checked)"
+                });
             }
             (line, "done")
         }

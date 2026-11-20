@@ -376,6 +376,65 @@ pub fn confirmed_findings(
         .collect()
 }
 
+/// Why a candidate has no definite verdict, for its unsure row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsureWhy {
+    /// The judge answered "unsure" (or contradicted itself).
+    JudgeUnsure,
+    /// No usable answer came back for it (a failed or unreadable batch).
+    NoUsableAnswer,
+}
+
+/// The rows for a candidate the judge could not settle, in a rule where other candidates were
+/// judged: one per site, like a confirmed candidate, but marked unsure (`needs_review` and a
+/// needs-review confidence, the same held state calibration uses), so the release gate holds each
+/// until the reviewer confirms it, rules it a false positive or edits its severity. The detail
+/// names every candidate site and says the judge was unsure and why. No claim is made that the
+/// candidate is a real problem.
+pub fn unsure_findings(
+    repo: &str,
+    c: &Candidate,
+    why: UnsureWhy,
+    files: &[(String, String)],
+) -> Vec<Finding> {
+    let sites: Vec<String> = c.facts.sites.iter().map(site_ref).collect();
+    let subject = match c.rule {
+        CloneRule::SingleSourceLogic => "one application decision written in more than one place",
+        CloneRule::NamingOneConcept => "one concept that goes by more than one name",
+        CloneRule::SharedPrimitive => "one UI mechanism written by hand in each place",
+    };
+    let reason = match why {
+        UnsureWhy::JudgeUnsure => format!(
+            "the judge was unsure: the excerpts did not settle whether these places are {subject}"
+        ),
+        UnsureWhy::NoUsableAnswer => format!(
+            "the judge gave no usable answer for this candidate in this scan, so it is not known \
+             whether these places are {subject}"
+        ),
+    };
+    let detail = format!(
+        "This candidate needs a reviewer's decision before it is reported or dismissed: {reason}. \
+         The search found the same {}-token block, apart from variable names, at {}. Verify by \
+         diffing the listed lines, then confirm it, mark it a false positive or set its severity.",
+        c.facts.token_len,
+        join_and(&sites)
+    );
+    let mut rows = confirmed_findings(repo, c, "", files);
+    let verdict = match why {
+        UnsureWhy::JudgeUnsure => "unsure",
+        UnsureWhy::NoUsableAnswer => "no_answer",
+    };
+    for row in &mut rows {
+        row.detail = detail.clone();
+        row.needs_review = true;
+        row.confidence = Some("needs-review".to_string());
+        row.captures
+            .insert("judge_verdict".to_string(), verdict.to_string());
+        crate::onboard::redact::redact_finding(row);
+    }
+    rows
+}
+
 /// One `not_assessed` row for a rule that was armed and found candidates but could not decide
 /// them (never a finding, never clean).
 pub fn not_assessed_row(
