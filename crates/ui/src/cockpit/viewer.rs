@@ -16,8 +16,9 @@
 //!
 //! The viewer never has a "current finding" of its own. [`CodeViewerHost`] is handed the
 //! finding the Queue's `RowCursor` is on, and every navigation writes to that cursor. The host
-//! is keyed by the finding's key, so a new finding is a fresh host: scroll, prompts and the
-//! fetch all start clean, and a cached file paints on the first frame.
+//! is keyed by the finding's key AND rendered as a list of one (Dioxus honours `key` only among
+//! the children of a list), so a new finding is a fresh host: scroll, prompts and the fetch all
+//! start clean, and a cached file paints on the first frame.
 //!
 //! ## One disposition path
 //!
@@ -1413,7 +1414,8 @@ pub(super) fn ViewerUndoBar(
 
 /// The viewer's host at the results root. Renders nothing until the Queue has registered a link
 /// and opened the viewer; then it resolves the finding the cursor is on and mounts
-/// [`CodeViewerHost`] on it, keyed by that finding.
+/// [`CodeViewerHost`] on it, keyed by that finding inside a list of one (a lone `key` is
+/// ignored by the differ).
 #[component]
 pub(super) fn ViewerRoot() -> Element {
     let slot = try_use_context::<ViewerSlot>();
@@ -1462,18 +1464,24 @@ pub(super) fn ViewerRoot() -> Element {
             }
         };
     };
+    // `key` is honoured only when the differ compares the children of a list, so the host is
+    // rendered as a list of one: another finding is then a new host, not the old one re-run
+    // with new props (which would keep the first finding's fetch, block and scroll).
+    let host_key = dom_key(&finding_key(&finding));
     rsx! {
-        CodeViewerHost {
-            key: "{dom_key(&finding_key(&finding))}",
-            finding,
-            link,
-            cache,
-            session,
-            history,
-            status,
-            help,
-            hub,
-            on_close,
+        for host_key in [host_key] {
+            CodeViewerHost {
+                key: "{host_key}",
+                finding: finding.clone(),
+                link: link.clone(),
+                cache,
+                session,
+                history,
+                status,
+                help,
+                hub,
+                on_close,
+            }
         }
     }
 }
@@ -1513,7 +1521,8 @@ fn reference_path(finding_path: &str, viewing: Option<&String>) -> Option<String
     viewing.filter(|p| p.as_str() != finding_path).cloned()
 }
 
-/// THE STATEFUL VIEWER. Mounted while the viewer is open, keyed by the focused finding's key.
+/// THE STATEFUL VIEWER. Mounted while the viewer is open, keyed by the focused finding's key in
+/// a list of one (see `ViewerRoot`).
 #[component]
 #[allow(clippy::too_many_lines)]
 pub(super) fn CodeViewerHost(
@@ -1556,8 +1565,8 @@ pub(super) fn CodeViewerHost(
     let mut help = help;
     let toasts = try_use_context::<Signal<Vec<crate::toast::Toast>>>();
 
-    // Per-finding state. The host is keyed by the finding, so all of this starts clean when
-    // the cursor moves.
+    // Per-finding state. `ViewerRoot` mounts a new host (a keyed list of one) for each finding,
+    // so all of this starts clean when the cursor moves.
     let initial_top = scroll_top_for_line(
         violation_line,
         CODE_LINE_H_PX,
@@ -5436,7 +5445,7 @@ mod host_tests {
         let page = html(&vdom);
         SECOND_PATH.with(|p| *p.borrow_mut() = "src/x.rs".to_string());
         assert!(
-            page.contains("there 1") && !page.contains("here 1"),
+            page.contains("<span>there 1</span>") && !page.contains("<span>here 1</span>"),
             "the second file's code is shown: {page}"
         );
         assert!(!page.contains("Loading"), "{page}");
