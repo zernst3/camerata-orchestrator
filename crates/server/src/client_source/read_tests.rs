@@ -405,10 +405,34 @@ async fn an_inspection_naming_a_traversal_repo_does_not_make_it_readable() {
         fx.project_id.clone(),
         super::test_support::report_at("../../etc", &fx.head),
     );
+    WORKING_TREE_READS.with(|c| c.set(0));
     let read = source_for_read(&fx.state, Some(&fx.project_id), "../../etc", None)
         .await
         .unwrap();
-    assert!(matches!(read, SourceRead::Unresolved { .. }), "{read:?}");
+    // Refused by the NAME check (the "not linked" words), not merely by a later folder lookup.
+    let SourceRead::Unresolved { reason } = read else {
+        panic!("a traversal name must be refused: {read:?}");
+    };
+    assert!(reason.contains("not linked to this project"), "{reason}");
+    for endpoint in [
+        "/api/onboard/finding-context?repo=..%2F..%2Fetc&path=passwd&line=1",
+        "/api/onboard/finding-context?repo=..%2F..%2Fetc&path=passwd&line=1&project=",
+    ] {
+        let (_, _, json) = get(&fx, endpoint).await;
+        assert_eq!(json["status"], "repo_unlinked", "{json}");
+        assert!(
+            json["reason"]
+                .as_str()
+                .unwrap()
+                .contains("not linked to this project"),
+            "{json}"
+        );
+    }
+    assert_eq!(
+        WORKING_TREE_READS.with(std::cell::Cell::get),
+        0,
+        "no filesystem read for a refused name"
+    );
 }
 
 #[tokio::test]

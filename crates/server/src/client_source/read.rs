@@ -199,11 +199,7 @@ pub(crate) fn project_owns_repo(
     repo: &str,
 ) -> bool {
     project.repos.iter().any(|r| r.eq_ignore_ascii_case(repo))
-        || state
-            .inspections
-            .list(&project.id)
-            .iter()
-            .any(|e| e.audited_ref(repo).is_some())
+        || state.inspections.any_audits(&project.id, repo)
 }
 
 /// The project that owns `repo` for a read: the named one (and only that one), else the active
@@ -267,9 +263,15 @@ pub async fn source_for_read(
     // that a project owns. A traversal ("../../etc"), an absolute path or a repo no project has
     // is refused here, before any directory is built or any file is read: the path jail of the
     // readers is relative to the directory this resolves, so it cannot catch this itself.
-    let project_id = match owning_project(state, project_hint, repo) {
-        Some(id) if is_owner_name(repo) => id,
-        _ => {
+    // The name is checked first, so a junk name never triggers the inspection scan.
+    let owner = if is_owner_name(repo) {
+        owning_project(state, project_hint, repo)
+    } else {
+        None
+    };
+    let project_id = match owner {
+        Some(id) => id,
+        None => {
             return Ok(SourceRead::Unresolved {
                 reason: format!(
                     "{repo} is not linked to this project, so its code cannot be shown."

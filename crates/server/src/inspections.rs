@@ -298,6 +298,23 @@ impl InspectionStore {
         self.lock().get(project_id).and_then(|l| l.last()).cloned()
     }
 
+    /// Whether any entry of `project_id` audited `repo` (case-insensitive). Answered under the
+    /// lock without cloning any entry or report.
+    pub fn any_audits(&self, project_id: &str, repo: &str) -> bool {
+        self.lock()
+            .get(project_id)
+            .is_some_and(|l| l.iter().any(|e| e.audited_ref(repo).is_some()))
+    }
+
+    /// The newest entry of `project_id` that covers `repo` with a commit. Clones only that one
+    /// entry, not the whole list.
+    pub fn newest_with_sha(&self, project_id: &str, repo: &str) -> Option<InspectionEntry> {
+        self.lock()
+            .get(project_id)
+            .and_then(|l| l.iter().rev().find(|e| e.sha_for(repo).is_some()))
+            .cloned()
+    }
+
     /// Every entry for a project, newest first.
     pub fn list(&self, project_id: &str) -> Vec<InspectionEntry> {
         self.lock()

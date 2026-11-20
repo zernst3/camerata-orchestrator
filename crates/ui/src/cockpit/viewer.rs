@@ -4353,6 +4353,8 @@ mod host_tests {
 
     thread_local! {
         static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
+        /// The project id the mounted viewer's link carries (empty by default).
+        static PROJECT: RefCell<String> = const { RefCell::new(String::new()) };
     }
 
     fn finding(line: usize) -> FindingView {
@@ -4407,7 +4409,7 @@ mod host_tests {
             all_findings: Arc::new(all.clone()),
             shas: Arc::new(HashMap::new()),
             sha_conflicts: Arc::new(HashSet::new()),
-            project_id: String::new(),
+            project_id: PROJECT.with(|p| p.borrow().clone()),
             open,
             undo_entry: use_signal(|| None),
             now_ms: use_signal(|| 0),
@@ -5283,5 +5285,92 @@ mod host_tests {
         let page = html(&vdom);
         assert!(page.contains("file not found"), "{page}");
         assert!(!page.contains("not linked to this project"), "{page}");
+    }
+
+    /// The path the bug lived on: the operator is in a project (a non-empty id). Real key presses
+    /// (`S`, Enter in the prompt, Enter on the hit) open another file of the same repo, which the
+    /// server says is not linked. The request carries the project hint (the mock answers only
+    /// for `project=proj-7`) and the viewer shows the pinned words.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_real_key_press_reaches_the_unlinked_words_through_the_project_hint() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        PROJECT.with(|p| *p.borrow_mut() = "proj-7".to_string());
+        let server = MockServer::start().await;
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("path", "src/x.rs"))
+            .and(query_param("project", "proj-7"))
+            .respond_with(ok(file_body(
+                "here",
+                14,
+                &[(4, "    let q = build_sql(x);")],
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("path", "src/other.rs"))
+            .and(query_param("project", "proj-7"))
+            .respond_with(ok(serde_json::json!({
+                "status": "repo_unlinked",
+                "reason": "me/api is not linked to this project, so its code cannot be shown."
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .respond_with(ok(serde_json::json!({"status": "file_missing"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .respond_with(ok(serde_json::json!({
+                "status": "ok", "source": "git", "symbol": "build_sql", "more": false,
+                "hits": [{"path": "src/other.rs", "line": 3, "text": "build_sql(y)"}]
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        let page = html(&vdom);
+        assert!(page.contains("here 1"), "the first file shows code: {page}");
+        assert!(!page.contains("not linked to this project"), "{page}");
+
+        keydown(&vdom, panel, "s", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, seen.last("keydown"), "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, panel, "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("me/api is not linked to this project, so its code cannot be shown."),
+            "{page}"
+        );
+        assert!(!page.contains("file not found"), "{page}");
+        assert!(!page.contains("changed since scan"), "{page}");
+        // Every request carried the project hint (the mocks above answer nothing without it).
+        let urls: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/api/onboard/source-file")
+            .map(|r| r.url.to_string())
+            .collect();
+        assert!(urls.len() >= 2, "{urls:?}");
+        assert!(
+            urls.iter().all(|u| u.contains("project=proj-7")),
+            "{urls:?}"
+        );
+
+        PROJECT.with(|p| p.borrow_mut().clear());
     }
 }
