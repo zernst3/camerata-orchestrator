@@ -10,7 +10,7 @@ use crate::onboard::{Finding, ScanReport};
 use crate::report_export::{build_report_json, finding_key, render_data_json, DispositionWire};
 use camerata_api_types::review::{EscalationReason, EscalationState};
 
-fn package_with(
+pub(crate) fn package_with(
     report: ScanReport,
     dispositions: &HashMap<String, DispositionWire>,
 ) -> ProductPackage {
@@ -63,7 +63,7 @@ fn unsure_medium() -> Finding {
     }
 }
 
-fn report_with(extra: Finding) -> ScanReport {
+pub(crate) fn report_with(extra: Finding) -> ScanReport {
     let mut report = scan_report();
     report.findings.push(extra);
     report
@@ -80,7 +80,7 @@ fn decided(row: &Finding, state: &str) -> HashMap<String, DispositionWire> {
     )])
 }
 
-fn decision_problems(failure: &GateFailure) -> Vec<&Problem> {
+pub(crate) fn decision_problems(failure: &GateFailure) -> Vec<&Problem> {
     failure
         .report
         .checks
@@ -442,7 +442,7 @@ use camerata_api_types::review_view::{CorrectionRef, EngineCheckError, EngineChe
 const EDIT_AT: &str = "2026-11-20T10:00:00Z";
 const CHECK_RUN: &str = "insp-1";
 
-fn edit_on(n: usize, f: &Finding, field: EditField, old: &str, new: &str) -> Edit {
+pub(crate) fn edit_on(n: usize, f: &Finding, field: EditField, old: &str, new: &str) -> Edit {
     Edit {
         id: format!("edit-{n:06}"),
         key: f.site_key.clone(),
@@ -460,7 +460,7 @@ fn edit_on(n: usize, f: &Finding, field: EditField, old: &str, new: &str) -> Edi
     }
 }
 
-fn sealed_row(sealed: &crate::onboard::SealedReport, path: &str) -> Finding {
+pub(crate) fn sealed_row(sealed: &crate::onboard::SealedReport, path: &str) -> Finding {
     sealed
         .findings
         .iter()
@@ -469,7 +469,9 @@ fn sealed_row(sealed: &crate::onboard::SealedReport, path: &str) -> Finding {
         .clone()
 }
 
-fn package_of_reviewed(reviewed: &crate::report_export::ReviewedReport) -> ProductPackage {
+pub(crate) fn package_of_reviewed(
+    reviewed: &crate::report_export::ReviewedReport,
+) -> ProductPackage {
     let options = client_options();
     let json = build_report_json(reviewed, None, &options);
     let data = render_data_json(&json).expect("data.json renders");

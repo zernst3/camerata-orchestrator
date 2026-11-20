@@ -50,7 +50,7 @@ async fn a_call_that_answered_with_one_unsure_is_done_and_says_what_was_not_sett
     assert!(
         agent
             .output
-            .contains("Done: 2 judged, 1 unsure (reported as not checked)"),
+            .contains("Done: 2 judged, 1 unsure (held for a reviewer's decision)"),
         "{}",
         agent.output
     );
@@ -59,15 +59,42 @@ async fn a_call_that_answered_with_one_unsure_is_done_and_says_what_was_not_sett
     let counts = &outcome.counts[&RULE];
     assert_eq!((counts.judged, counts.unjudged, counts.unsure), (2, 1, 1));
     assert!(!counts.fully_assessed());
-    assert_eq!(outcome.not_assessed.len(), 1);
+    // The unsure candidate is a held Queue row now, not a second surface for the rule.
+    assert!(outcome.not_assessed.is_empty());
+    assert!(outcome.findings.iter().any(|f| f.needs_review));
     let mut ledger = crate::scan_ledger::ScanLedger::default();
     record_in_ledger(&mut ledger, "acme/shop", &outcome);
 }
 
 #[tokio::test]
-async fn the_not_assessed_row_for_an_unsure_answer_reads_in_the_operators_words() {
+async fn the_unsure_row_for_an_unsure_answer_reads_in_the_operators_words() {
     let store = TranscriptStore::new();
     let outcome = one_of_three_unsure(&store).await;
+    let row = outcome
+        .findings
+        .iter()
+        .find(|f| f.needs_review)
+        .expect("an unsure row");
+    assert_eq!(row.kind, Some(FindingKind::Defect));
+    assert!(
+        row.detail.contains("could not tell whether"),
+        "{}",
+        row.detail
+    );
+    assert!(
+        !row.detail.contains("could not be decided") && !row.detail.contains("declined"),
+        "{}",
+        row.detail
+    );
+}
+
+#[tokio::test]
+async fn the_not_assessed_row_for_an_all_unsure_rule_reads_in_the_operators_words() {
+    let (all, set) = synthetic_set(3, 0);
+    let stub = StubJudge::answering("unsure", "");
+    let mut cache = VerdictCache::default();
+    let outcome =
+        judge_clone_candidates(Some(&stub), request(&all, set), &mut cache, None, None).await;
     let row = &outcome.not_assessed[0];
     let Some(FindingKind::NotAssessed(kind)) = row.kind.clone() else {
         panic!("a not_assessed row");
@@ -76,7 +103,7 @@ async fn the_not_assessed_row_for_an_unsure_answer_reads_in_the_operators_words(
     assert_eq!(kind.reason, NotAssessedReason::ModelDeclined);
     assert_eq!(
         kind.reason_detail,
-        "the model was unsure about 1 of 3 candidates; 2 judged"
+        "the model was unsure about 3 of 3 candidates; 0 judged"
     );
     assert!(
         !row.detail.contains("could not be decided") && !row.detail.contains("declined"),
