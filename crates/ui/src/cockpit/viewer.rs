@@ -5513,6 +5513,43 @@ mod host_tests {
         );
     }
 
+    /// With commit ids recorded, the next file in the group still loads ahead of the key press,
+    /// and the move to it then paints from the cache without asking again.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn with_commits_the_next_file_is_prefetched_and_the_move_needs_no_new_request() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        SECOND_PATH.with(|p| *p.borrow_mut() = "src/other.rs".to_string());
+        SHA.with(|s| *s.borrow_mut() = "a".repeat(40));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        let ahead = source_requests(&server).await;
+        assert!(
+            ahead.iter().any(|(p, a)| p == "src/other.rs" && a == "9"),
+            "the next file was requested before any key press: {ahead:?}"
+        );
+
+        keydown(&vdom, panel, "}", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        SECOND_PATH.with(|p| *p.borrow_mut() = "src/x.rs".to_string());
+        SHA.with(|s| s.borrow_mut().clear());
+        assert!(page.contains("<span>there 1</span>"), "{page}");
+        let after = source_requests(&server).await;
+        assert_eq!(
+            after.len(),
+            ahead.len(),
+            "the cached file needed no second request: {after:?}"
+        );
+    }
+
     /// The numbers of the lines the page marks as inside the finding's block.
     fn band_lines(page: &str) -> Vec<usize> {
         let mut out = Vec::new();
