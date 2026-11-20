@@ -100,23 +100,28 @@ const SITES: &[Site] = &[
             ("redact_conversation", "model_input::redact_json_for_model("),
         ],
     },
-    // The governed agent drivers hand the task to a CLI as an argument.
+    // The governed agent drivers hand the task to a CLI: `claude` on stdin (`stdin_prompt`), a
+    // generic third-party CLI as an argument (`build_args`).
     Site {
         file: "crates/agent/src/lib.rs",
-        builders: &[("build_args", "model_input::redact_for_model(")],
+        builders: &[("stdin_prompt", "model_input::redact_for_model(")],
     },
     Site {
         file: "crates/agent/src/generic.rs",
         builders: &[("build_args", "model_input::redact_for_model(")],
     },
-    // The intake lead engineer and refinement reviewer.
+    // The intake lead engineer and refinement reviewer send their prompt on stdin: the one
+    // function that writes it redacts it first, and both callers go through that function.
     Site {
         file: "crates/intake/src/engine.rs",
-        builders: &[("build_command", "model_input::redact_for_model(")],
+        builders: &[
+            ("stdin_prompt", "model_input::redact_for_model("),
+            ("output_with_prompt", "stdin_prompt("),
+        ],
     },
     Site {
         file: "crates/intake/src/review.rs",
-        builders: &[("build_command", "model_input::redact_for_model(")],
+        builders: &[("review", "output_with_prompt(")],
     },
 ];
 

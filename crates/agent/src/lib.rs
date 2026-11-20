@@ -991,10 +991,7 @@ mod tests {
         assert_eq!(args[i + 1], "claude-sonnet-5");
         // A blank model id is ignored (CLI default).
         let blank = ClaudeCliDriver::new("/tmp/mcp.json").with_model("   ");
-        assert!(!blank
-            .build_args(&role())
-            .iter()
-            .any(|a| a == "--model"));
+        assert!(!blank.build_args(&role()).iter().any(|a| a == "--model"));
     }
 
     #[test]

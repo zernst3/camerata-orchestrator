@@ -53,7 +53,12 @@ printf '%s\n' '{"session_id":"s1","result":"DONE","total_cost_usd":0.01,"permiss
     assert!(!args.contains("FIRST-LINE-OF-THE-TASK"));
     let lines: Vec<&str> = args.lines().collect();
     assert_eq!(lines.first(), Some(&"-p"), "{lines:?}");
-    for flag in ["--strict-mcp-config", "--mcp-config", "--allowedTools", "--output-format"] {
+    for flag in [
+        "--strict-mcp-config",
+        "--mcp-config",
+        "--allowedTools",
+        "--output-format",
+    ] {
         assert!(lines.contains(&flag), "{flag} is unchanged: {lines:?}");
     }
 }

@@ -24,8 +24,7 @@ impl StubClaude {
         let mut f = std::fs::File::create(&bin).expect("create stub");
         f.write_all(script.as_bytes()).expect("write stub");
         drop(f);
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod stub");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
         Self { dir }
     }
 }
@@ -101,7 +100,11 @@ async fn a_prompt_larger_than_the_os_argument_limit_reaches_the_cli_on_stdin() {
     );
     assert!(!args.contains("FIRST-LINE-OF-THE-PROMPT"));
     let lines: Vec<&str> = args.lines().collect();
-    assert_eq!(lines.first(), Some(&"-p"), "the print flag leads: {lines:?}");
+    assert_eq!(
+        lines.first(),
+        Some(&"-p"),
+        "the print flag leads: {lines:?}"
+    );
     assert!(
         lines.contains(&"--model") && lines.contains(&"claude-sonnet-5-5"),
         "the other flags are unchanged: {lines:?}"
