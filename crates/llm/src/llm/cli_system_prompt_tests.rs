@@ -218,22 +218,26 @@ fn the_shutdown_hook_removes_the_system_prompt_file_of_a_call_in_flight() {
 }
 
 /// A child that exits without reading its stdin, with something else still holding the pipe open,
-/// leaves the prompt writer stuck on a full pipe. The call must not wait on it for long.
+/// leaves the prompt writer stuck on a full pipe. The call must not wait on it for long, and it
+/// fails: the child cannot have read the whole prompt, so its answer is not the answer.
 #[tokio::test]
 #[serial_test::serial(process_env)]
-async fn a_writer_stuck_after_the_child_exited_is_given_a_short_time_then_aborted() {
+async fn a_writer_stuck_after_the_child_exited_is_given_a_short_time_then_the_call_fails() {
     let stub = Stub::with_script("lingering", LINGERING_STUB);
     let _path = patched_path(&stub.dir);
     let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", stub.dir.join("state"));
     // Well over the pipe buffer, so the write cannot complete into it.
     let prompt = "a line of prompt text that nobody reads\n".repeat(100_000);
     let started = std::time::Instant::now();
-    let resp = cli_llm()
+    let outcome = cli_llm()
         .complete(LlmRequest::new(prompt).with_model("claude-sonnet-5-5"))
-        .await
-        .expect("the child answered and exited");
-    assert_eq!(resp.text, "OK");
+        .await;
     let took = started.elapsed();
+    let err = outcome.expect_err("the prompt was not fully written, so the call fails");
+    assert!(
+        err.to_string().contains("not fully written"),
+        "the error says why: {err}"
+    );
     assert!(
         took < std::time::Duration::from_secs(6),
         "the call waited on a stuck writer for {took:?}"

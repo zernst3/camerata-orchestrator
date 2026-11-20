@@ -173,19 +173,29 @@ impl PromptWriter {
     /// exited: a writer still unfinished then is stuck (something else, such as a grandchild the
     /// child left running, holds the pipe open) and is aborted rather than waited on forever.
     ///
-    /// `Ok` when it completed, the child closed its input early (broken pipe) or it was aborted
-    /// here; `Err` for any other write failure.
+    /// `Ok` when it completed, or the child closed its input early (broken pipe, logged: its exit
+    /// status says why). `Err` for any other write failure, and when the grace expires with the
+    /// write unfinished (the child has exited, so it cannot have read the whole prompt).
     pub async fn finish(mut self) -> std::io::Result<()> {
         let Some(mut handle) = self.handle.take() else {
             return Ok(());
         };
         match tokio::time::timeout(PROMPT_WRITE_GRACE, &mut handle).await {
-            Ok(Ok(Err(e))) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
-            // Completed, broken pipe, or the task was cancelled (nothing was left to finish).
+            Ok(Ok(Err(e))) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                eprintln!(
+                    "[camerata] the claude CLI closed its input before the whole prompt was written: {e}"
+                );
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => Err(e),
+            // Completed, or the task was cancelled (nothing was left to finish).
             Ok(_) => Ok(()),
             Err(_) => {
                 handle.abort();
-                Ok(())
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the prompt was not fully written before the CLI exited",
+                ))
             }
         }
     }
@@ -232,6 +242,15 @@ fn create_private_dir_all(dir: &std::path::Path) -> std::io::Result<()> {
     builder.create(dir)
 }
 
+/// Create the one directory `dir` (its parent must exist), private to the owner where the
+/// platform has modes. Fails if anything is already at that path.
+fn create_private_leaf(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
 /// A private copy of a system prompt on disk, for `claude --system-prompt-file`.
 ///
 /// A system prompt can be as large as the prompt (the chat's carries the whole manuals), and
@@ -268,7 +287,9 @@ impl SystemPromptFile {
             std::process::id(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        create_private_dir_all(&dir)?;
+        // The leaf is created on its own, never recursively: it fails if the name exists (a
+        // planted directory or a symlink included) instead of using it.
+        create_private_leaf(&dir)?;
         let file = dir.join("system-prompt.txt");
         // Owned (and so registered and removed on drop) from here on, a failed write included.
         let this = Self { dir, file };
@@ -558,6 +579,26 @@ mod tests {
         drop(file);
         assert!(!path.exists(), "the file is removed on drop");
         assert!(!dir.exists(), "so is its private directory");
+    }
+
+    /// The per-call directory is created fresh: a name that already exists (a directory, or a
+    /// symlink someone planted) makes creation fail instead of being used.
+    #[cfg(unix)]
+    #[test]
+    fn a_leaf_name_that_already_exists_makes_creation_fail_and_is_left_alone() {
+        let _registry = registry_lock();
+        let root = Root::new("leaf");
+        std::fs::create_dir_all(&root.0).unwrap();
+        let existing = root.0.join("existing");
+        std::fs::create_dir_all(&existing).unwrap();
+        assert!(create_private_leaf(&existing).is_err());
+        let target = root.0.join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = root.0.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(create_private_leaf(&link).is_err());
+        assert!(target.exists(), "what the link points at is untouched");
+        assert!(create_private_leaf(&root.0.join("fresh")).is_ok());
     }
 
     #[test]
