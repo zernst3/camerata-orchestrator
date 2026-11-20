@@ -423,6 +423,9 @@ pub fn kill_inflight_claude() {
             kill_pid(Some(pid));
         }
     }
+    // The shutdown path ends the process with `process::exit`, which runs no destructors: the
+    // in-flight calls' system prompt files (client data) are removed here, not by their guards.
+    camerata_api_types::claude_cli::remove_live_system_prompts();
 }
 
 /// Best-effort SIGKILL by pid. Shared by every "the subprocess must not be leaked" path:

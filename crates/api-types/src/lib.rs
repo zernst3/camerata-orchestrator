@@ -79,6 +79,7 @@ pub mod rewrite_advisory;
 pub mod run;
 pub mod site_key;
 pub mod snippet;
+pub mod state_dir;
 pub mod stories;
 pub mod symbol;
 pub mod uow;

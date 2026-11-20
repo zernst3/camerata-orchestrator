@@ -169,19 +169,31 @@ impl PromptWriter {
         }
     }
 
-    /// Wait for the write to end. `Ok` when it completed or the child closed its input early
-    /// (broken pipe); `Err` for any other write failure.
+    /// Wait for the write to end, for at most [`PROMPT_WRITE_GRACE`]. Call it once the child has
+    /// exited: a writer still unfinished then is stuck (something else, such as a grandchild the
+    /// child left running, holds the pipe open) and is aborted rather than waited on forever.
+    ///
+    /// `Ok` when it completed, the child closed its input early (broken pipe) or it was aborted
+    /// here; `Err` for any other write failure.
     pub async fn finish(mut self) -> std::io::Result<()> {
-        let Some(handle) = self.handle.take() else {
+        let Some(mut handle) = self.handle.take() else {
             return Ok(());
         };
-        match handle.await {
-            Ok(Err(e)) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
+        match tokio::time::timeout(PROMPT_WRITE_GRACE, &mut handle).await {
+            Ok(Ok(Err(e))) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
             // Completed, broken pipe, or the task was cancelled (nothing was left to finish).
-            _ => Ok(()),
+            Ok(_) => Ok(()),
+            Err(_) => {
+                handle.abort();
+                Ok(())
+            }
         }
     }
 }
+
+/// How long [`PromptWriter::finish`] waits for a writer that is still running after the child has
+/// exited.
+pub const PROMPT_WRITE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Drop for PromptWriter {
     fn drop(&mut self) {
@@ -191,48 +203,85 @@ impl Drop for PromptWriter {
     }
 }
 
+/// The engine-owned folder the per-call system prompt files live in:
+/// `<Camerata state dir>/tmp/system-prompts/` ([`crate::state_dir::dir`]), never `$TMPDIR`.
+///
+/// Each call's file is client data (the chat's carries project layers), so it must not sit in a
+/// shared temp folder, and a quit that skips destructors (`process::exit`, SIGKILL, a crash) must
+/// not leave it behind for good: [`remove_live_system_prompts`] runs from the shutdown handler and
+/// [`sweep_leftover_system_prompts`] at server start.
+pub fn system_prompt_root() -> std::path::PathBuf {
+    crate::state_dir::dir().join("tmp").join("system-prompts")
+}
+
+/// The directories of the system prompt files whose calls are in flight in this process.
+fn live_system_prompts() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>
+{
+    static LIVE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    LIVE.get_or_init(Default::default)
+}
+
+/// Create `dir` and its missing parents, private to the owner where the platform has modes.
+fn create_private_dir_all(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
 /// A private copy of a system prompt on disk, for `claude --system-prompt-file`.
 ///
 /// A system prompt can be as large as the prompt (the chat's carries the whole manuals), and
 /// `--system-prompt <text>` puts it in the argument list, which the OS caps. The file is created
-/// in a fresh private directory (mode 0700), is readable by its owner alone (0600), and is
-/// removed with its directory when this value is dropped: on success, error, timeout or kill,
-/// whichever way the call ends. It is a file and not stdin because the flag REPLACES the Claude
-/// Code scaffolding, which folding the text into the prompt would not do.
+/// in its own private directory (mode 0700) under [`system_prompt_root`], is readable by its owner
+/// alone (0600), is registered as live, and is removed with its directory when this value is
+/// dropped: on success, error, timeout or kill, whichever way the call ends. A quit that runs no
+/// destructors is covered by [`remove_live_system_prompts`] (shutdown) and
+/// [`sweep_leftover_system_prompts`] (start). It is a file and not stdin because the flag REPLACES
+/// the Claude Code scaffolding, which folding the text into the prompt would not do.
 pub struct SystemPromptFile {
     dir: std::path::PathBuf,
     file: std::path::PathBuf,
 }
 
 impl SystemPromptFile {
-    /// Write `text` to a new private file under the system temp directory.
+    /// Write `text` to a new private file under [`system_prompt_root`].
     pub fn create(text: &str) -> std::io::Result<Self> {
-        Self::create_in(&std::env::temp_dir(), text)
+        Self::create_in(&system_prompt_root(), text)
     }
 
-    /// As [`Self::create`], under `parent`.
-    pub fn create_in(parent: &std::path::Path, text: &str) -> std::io::Result<Self> {
+    /// As [`Self::create`], under `root`.
+    pub fn create_in(root: &std::path::Path, text: &str) -> std::io::Result<Self> {
         use std::io::Write;
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
-        let dir = parent.join(format!(
-            "camerata-system-prompt-{}-{}-{nanos}",
+        create_private_dir_all(root)?;
+        // `<pid>-<n>-<nanos>`: the leading pid is what the start-up sweep reads to tell a dead
+        // process's leftovers from a live one's.
+        let dir = root.join(format!(
+            "{}-{}-{nanos}",
             std::process::id(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        create_private_dir_all(&dir)?;
         let file = dir.join("system-prompt.txt");
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&file)
-            .and_then(|mut f| f.write_all(text.as_bytes()));
+        // Owned (and so registered and removed on drop) from here on, a failed write included.
         let this = Self { dir, file };
-        written?;
+        if let Ok(mut live) = live_system_prompts().lock() {
+            live.insert(this.dir.clone());
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options
+            .open(&this.file)
+            .and_then(|mut f| f.write_all(text.as_bytes()))?;
         Ok(this)
     }
 
@@ -244,9 +293,77 @@ impl SystemPromptFile {
 
 impl Drop for SystemPromptFile {
     fn drop(&mut self) {
+        if let Ok(mut live) = live_system_prompts().lock() {
+            live.remove(&self.dir);
+        }
         let _ = std::fs::remove_file(&self.file);
         let _ = std::fs::remove_dir(&self.dir);
     }
+}
+
+/// Remove the system prompt files of every call in flight in this process. For the shutdown
+/// handler, which ends the process with `process::exit` (no destructors run).
+pub fn remove_live_system_prompts() {
+    if let Ok(mut live) = live_system_prompts().lock() {
+        for dir in live.drain() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// Whether a process with this id exists (`kill -0`). Without a way to ask, it is assumed to.
+fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_or(true, |s| s.success())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// At start, remove the system prompt directories under `root` left by a process that is gone
+/// (a SIGKILL, a crash, a power cut), and any of this process's own that are not in flight.
+/// A directory of ANOTHER live process (the CLI running beside the server) is left alone. Returns
+/// how many were removed.
+pub fn sweep_leftover_system_prompts_in(root: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let own = std::process::id();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let pid = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.split('-').next())
+            .and_then(|p| p.parse::<u32>().ok());
+        let stale = match pid {
+            Some(pid) if pid == own => !live_system_prompts()
+                .lock()
+                .map_or(false, |live| live.contains(&path)),
+            Some(pid) => !process_alive(pid),
+            // Not a name this module made: not ours to judge.
+            None => false,
+        };
+        if stale && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// [`sweep_leftover_system_prompts_in`] over [`system_prompt_root`].
+pub fn sweep_leftover_system_prompts() -> usize {
+    sweep_leftover_system_prompts_in(&system_prompt_root())
 }
 
 #[cfg(test)]
@@ -414,20 +531,114 @@ mod tests {
         .expect("the stuck writer task was aborted");
     }
 
+    /// The live-directory registry is process-wide, and the shutdown cleanup empties it: the tests
+    /// that create files hold this so one's cleanup never removes another's file mid-test.
+    fn registry_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A fresh private root for one test, removed when it drops.
+    struct Root(std::path::PathBuf);
+    impl Root {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "camerata-api-types-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            Self(p)
+        }
+    }
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn the_system_prompt_file_is_private_holds_the_text_and_goes_when_dropped() {
+        let _registry = registry_lock();
         use std::os::unix::fs::PermissionsExt;
-        let parent = std::env::temp_dir();
+        let root = Root::new("private");
         let text = "line one\nline two\n".repeat(100_000);
-        let file = SystemPromptFile::create_in(&parent, &text).unwrap();
+        let file = SystemPromptFile::create_in(&root.0, &text).unwrap();
         let path = file.path().to_path_buf();
         let dir = path.parent().unwrap().to_path_buf();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&root.0), 0o700);
         drop(file);
         assert!(!path.exists(), "the file is removed on drop");
         assert!(!dir.exists(), "so is its private directory");
+    }
+
+    #[test]
+    fn the_root_is_the_engine_state_folder_and_not_the_temp_folder() {
+        let root = system_prompt_root();
+        assert!(root.ends_with("tmp/system-prompts"), "{root:?}");
+        assert!(root.starts_with(crate::state_dir::dir()), "{root:?}");
+    }
+
+    /// A process that is gone leaves its directory behind; the next start removes it, and leaves
+    /// a live process's and this one's in-flight directories alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_directory_of_a_dead_process_is_removed_at_start() {
+        let _registry = registry_lock();
+        let root = Root::new("sweep");
+        std::fs::create_dir_all(&root.0).unwrap();
+        // A pid that is certainly gone: a child that has exited and been reaped.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        let leftover = root.0.join(format!("{dead}-0-1"));
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("system-prompt.txt"), "client data").unwrap();
+        // Another live process's (the parent shell of the test run is alive).
+        let live_other = root
+            .0
+            .join(format!("{}-0-1", std::os::unix::process::parent_id()));
+        std::fs::create_dir_all(&live_other).unwrap();
+        // This process, in flight.
+        let in_flight = SystemPromptFile::create_in(&root.0, "now").unwrap();
+        // This process, but no longer in flight (a previous life with the same pid).
+        let own_stale = root.0.join(format!("{}-999-1", std::process::id()));
+        std::fs::create_dir_all(&own_stale).unwrap();
+        // Not one of ours.
+        let foreign = root.0.join("notes");
+        std::fs::create_dir_all(&foreign).unwrap();
+
+        let removed = sweep_leftover_system_prompts_in(&root.0);
+        assert_eq!(removed, 2);
+        assert!(!leftover.exists(), "the dead process's directory is gone");
+        assert!(!own_stale.exists());
+        assert!(live_other.exists(), "a live process's is left alone");
+        assert!(
+            in_flight.path().exists(),
+            "an in-flight call's is left alone"
+        );
+        assert!(
+            foreign.exists(),
+            "a name this module did not make is left alone"
+        );
+    }
+
+    /// The shutdown handler ends the process without destructors: it removes what is in flight.
+    #[test]
+    fn the_shutdown_cleanup_removes_a_live_registered_directory() {
+        let _registry = registry_lock();
+        let root = Root::new("shutdown");
+        let file = SystemPromptFile::create_in(&root.0, "client data").unwrap();
+        let path = file.path().to_path_buf();
+        assert!(path.exists());
+        remove_live_system_prompts();
+        assert!(!path.exists(), "removed by the shutdown cleanup");
+        drop(file); // a later drop is a harmless no-op
     }
 }

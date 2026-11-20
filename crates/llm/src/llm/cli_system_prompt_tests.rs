@@ -31,8 +31,21 @@ struct Stub {
     dir: std::path::PathBuf,
 }
 
+/// Exits at once without reading its stdin, but leaves a background `sleep` holding the read end
+/// of that pipe open (and its output redirected away so the call still sees the end of the
+/// stream): the prompt writer is stuck on a full pipe after the child has exited.
+const LINGERING_STUB: &str = r#"#!/bin/sh
+sleep 8 <&0 >/dev/null 2>&1 &
+printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+exit 0
+"#;
+
 impl Stub {
     fn new(tag: &str) -> Self {
+        Self::with_script(tag, STUB)
+    }
+
+    fn with_script(tag: &str, script: &str) -> Self {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "camerata-llm-system-claude-{}-{tag}",
@@ -41,7 +54,7 @@ impl Stub {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create stub dir");
         let bin = dir.join("claude");
-        std::fs::write(&bin, STUB).expect("write stub");
+        std::fs::write(&bin, script).expect("write stub");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         Self { dir }
     }
@@ -82,6 +95,7 @@ fn read(stub: &Stub, name: &str) -> String {
 async fn a_system_prompt_over_the_os_limit_arrives_intact_and_redacted_in_a_private_file() {
     let stub = Stub::new("big");
     let _path = patched_path(&stub.dir);
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", stub.dir.join("state"));
     let secret = planted(SecretShape::StripeLiveSecretKey);
     let mut system = String::from("FIRST-LINE-OF-THE-SYSTEM-PROMPT\n");
     let filler = "a line of the technical manual that stands in for the real one\n";
@@ -128,6 +142,13 @@ async fn a_system_prompt_over_the_os_limit_arrives_intact_and_redacted_in_a_priv
         !std::path::Path::new(path.trim()).exists(),
         "the file is gone once the call is over: {path}"
     );
+    // It lived in the engine's own folder under the state dir, not in the temp folder.
+    assert!(
+        path.trim()
+            .starts_with(stub.dir.join("state").to_str().unwrap()),
+        "{path}"
+    );
+    assert!(path.contains("tmp/system-prompts/"), "{path}");
 }
 
 #[tokio::test]
@@ -135,6 +156,7 @@ async fn a_system_prompt_over_the_os_limit_arrives_intact_and_redacted_in_a_priv
 async fn the_system_prompt_file_is_removed_when_the_call_fails() {
     let stub = Stub::new("fail");
     let _path = patched_path(&stub.dir);
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", stub.dir.join("state"));
     let _exit = camerata_test_env::EnvGuard::set("FAKE_EXIT", "1");
 
     let outcome = cli_llm()
@@ -173,4 +195,47 @@ fn the_command_line_names_the_system_prompt_file_and_never_the_text() {
     assert!(std::path::Path::new(&args[at + 1]).is_file());
     assert!(!args.iter().any(|a| a.contains("SYSTEM-TEXT")), "{args:?}");
     assert!(!args.iter().any(|a| a == "--system-prompt"));
+}
+
+/// The quit path runs no destructors: the shutdown hook removes the file of a call in flight.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_shutdown_hook_removes_the_system_prompt_file_of_a_call_in_flight() {
+    let state = std::env::temp_dir().join(format!("camerata-llm-shutdown-{}", std::process::id()));
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &state);
+    let call = build_cli_command(
+        &LlmRequest::new("q").with_system("client project layers"),
+        "claude-haiku-4-5",
+        "sid",
+    )
+    .unwrap();
+    let path = call.system_file.as_ref().unwrap().path().to_path_buf();
+    assert!(path.is_file());
+    kill_inflight_claude();
+    assert!(!path.exists(), "removed by the shutdown hook");
+    drop(call);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// A child that exits without reading its stdin, with something else still holding the pipe open,
+/// leaves the prompt writer stuck on a full pipe. The call must not wait on it for long.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_writer_stuck_after_the_child_exited_is_given_a_short_time_then_aborted() {
+    let stub = Stub::with_script("lingering", LINGERING_STUB);
+    let _path = patched_path(&stub.dir);
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", stub.dir.join("state"));
+    // Well over the pipe buffer, so the write cannot complete into it.
+    let prompt = "a line of prompt text that nobody reads\n".repeat(100_000);
+    let started = std::time::Instant::now();
+    let resp = cli_llm()
+        .complete(LlmRequest::new(prompt).with_model("claude-sonnet-5-5"))
+        .await
+        .expect("the child answered and exited");
+    assert_eq!(resp.text, "OK");
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(6),
+        "the call waited on a stuck writer for {took:?}"
+    );
 }
