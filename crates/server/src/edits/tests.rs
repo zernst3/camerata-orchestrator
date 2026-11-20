@@ -618,3 +618,13 @@ async fn an_added_finding_is_checked_against_the_source_of_an_onboarding_project
         "{held}"
     );
 }
+
+/// Review round 1, item 6: the same severity in another case is no change.
+#[test]
+fn a_severity_in_another_case_is_no_change() {
+    let store = EditStore::new();
+    assert!(matches!(
+        store.record_edit("p", draft("k", EditField::Severity, "high", "High"), ctx()),
+        Err(EditStoreError::NoChange)
+    ));
+}

@@ -554,7 +554,12 @@ fn validate_draft(d: &EditDraft) -> Result<(), EditStoreError> {
         ));
     }
     validate_value(d.field, &d.new)?;
-    if d.old == d.new {
+    let same = if d.field == EditField::Severity {
+        d.old.trim().eq_ignore_ascii_case(d.new.trim())
+    } else {
+        d.old == d.new
+    };
+    if same {
         return Err(EditStoreError::NoChange);
     }
     Ok(())

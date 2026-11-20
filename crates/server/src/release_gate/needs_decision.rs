@@ -21,6 +21,9 @@
 //!   held or information-only bucket (no published standard backs it, or it reads as a convention)
 //!   was not marked unsure by a review and is not forced: the wording says "marked unsure".
 //!
+//! A severity edit the reviewer made on the row itself counts as the row's decision, whichever way
+//! the severity moved; an edit of any other field does not.
+//!
 //! A decision made only as part of a group does not count for a critical or an unsure row: the
 //! effective record must be the row's own (`inherited_from` empty), and every such row is kept out
 //! of group decisions ([`super::holds`]), decided or not, so a later group decision cannot
@@ -53,10 +56,20 @@ pub fn why(f: &Finding) -> Option<Why> {
 }
 
 /// Whether the reviewer decided `f` in person: the effective record for the row (the latest
-/// live one) is its own, not one inherited from a group decision. A group record that came after
-/// the reviewer's own overwrites it, and then the row is undecided again. With no record at all
-/// (an older client's request dispositions) the row's own disposition counts.
+/// live one) is its own, not one inherited from a group decision, or the reviewer changed the
+/// row's severity themselves. A severity edit is the reviewer's decision whichever way the
+/// severity moved (Zach, 2026-11-20: "If I manually update the severity at all, that is my
+/// decision regardless."); an edit of the wording or the location is not. The edit is on THIS
+/// row's own record, so it counts beside a group record. A group record that came after the
+/// reviewer's own overwrites it, and then the row is undecided again. With no record at all (an
+/// older client's request dispositions) the row's own disposition counts.
 fn decided_in_person(f: &Finding, reviewed: &ReviewedReport) -> bool {
+    if crate::report_export::overlay::reviewer_edited_field(
+        f,
+        camerata_api_types::edits::EditField::Severity,
+    ) {
+        return true;
+    }
     let effective = camerata_api_types::decisions::effective_by_key(reviewed.records());
     match effective.get(f.site_key.as_str()) {
         Some(record) => record.inherited_from.is_none(),
@@ -116,7 +129,7 @@ pub fn critical_or_unsure_without_decision(
                 format!("{} line {}", f.path, f.line),
                 format!(
                     "{what}, and no reviewer decision is recorded for it. Open it, then confirm \
-                     it, correct it or mark it a false positive"
+                     it, mark it a false positive or set its severity"
                 ),
                 Some(f.rule_id.clone()),
             )

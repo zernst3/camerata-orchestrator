@@ -602,6 +602,33 @@ pub(crate) fn row_waiting_reason(
     )
 }
 
+/// The disposition label of a row as the exports print it: a merged row's pointer, else a row the
+/// reviewer decided by changing its severity themselves ("Severity set by the reviewer"), else
+/// [`disposition_label`]. A severity edit is the row's decision (Zach, 2026-11-20), so it must not
+/// read "Open". A row held for unverified evidence, junk text or a put-back cannot ship without a decision record, so
+/// the label never hides those holds from the gate.
+pub(crate) fn row_disposition_label(
+    f: &Finding,
+    disposition: Disposition,
+    reason: &str,
+    bucket: &str,
+    confirmed_by_client: bool,
+) -> String {
+    if let Some(label) = overlay::merged_label(f) {
+        return label.to_string();
+    }
+    if disposition == Disposition::Unresolved
+        && overlay::reviewer_edited_field(f, camerata_api_types::edits::EditField::Severity)
+    {
+        return format!(
+            "{} (recommended: {})",
+            crate::xlsx_export::vocabulary::SEVERITY_SET_BY_REVIEWER,
+            bucket_title(bucket)
+        );
+    }
+    disposition_label(disposition, reason, bucket, confirmed_by_client)
+}
+
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
 pub(crate) fn disposition_label(
     disposition: Disposition,
@@ -1172,8 +1199,12 @@ pub fn build_report_json_with_counts(
                     // "held for a human reviewer's judgment call" framing instead of printing
                     // "high"/blank next to a row that is, by construction, not curated.
                     confidence: hedge_confidence(f, bucket),
-                    disposition: overlay::merged_label(f).map(str::to_string).unwrap_or_else(
-                        || disposition_label(*disposition, reason, bucket, confirmed_by_client),
+                    disposition: row_disposition_label(
+                        f,
+                        *disposition,
+                        reason,
+                        bucket,
+                        confirmed_by_client,
                     ),
                     bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),

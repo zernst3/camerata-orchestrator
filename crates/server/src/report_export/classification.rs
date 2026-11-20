@@ -576,6 +576,16 @@ pub(crate) const STANCE_LAYER_DOMAINS: &[&str] = &[
     "integration",
 ];
 
+/// Whether the calibrator or the finder doubts the row (`needs_review` or a needs-review
+/// confidence) and the reviewer has not ruled on it by editing the row's severity themselves.
+/// Used only to decide whether the row is HELD ([`is_held_for_review`]): the doubt itself stays
+/// the engine's statement in every export (`needs_review`, the confidence), as on a Confirmed
+/// row, and the reviewer's ruling is carried by the label, Decision so far and the record.
+fn calibration_doubt(f: &Finding) -> bool {
+    (f.needs_review || f.confidence.as_deref() == Some("needs-review"))
+        && !super::overlay::reviewer_edited_field(f, camerata_api_types::edits::EditField::Severity)
+}
+
 /// C5-4: whether a finding is HELD for a human reviewer's judgment call, INDEPENDENT of its own
 /// severity — the calibrator's own hedge (`needs_review` / `confidence == "needs-review"`),
 /// applied only to an OPEN (`Unresolved`) row (an auditor's explicit disposition — accepted /
@@ -604,8 +614,10 @@ pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) ->
     // decides it; the release gate also refuses to export it without that decision.
     // M4: a row whose text is real junk (an empty or placeholder explanation, the model's own
     // refusal, a JSON fragment) is held the same way, until the reviewer decides it.
-    finding.needs_review
-        || finding.confidence.as_deref() == Some("needs-review")
+    // The reviewer's own severity edit decides the doubt (Zach, 2026-11-20): it lifts the
+    // calibration hedge, and only that. Unverified evidence, junk text and a put-back row below
+    // stay held until they are ruled on.
+    calibration_doubt(finding)
         || finding
             .captures
             .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)

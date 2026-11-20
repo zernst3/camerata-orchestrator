@@ -428,6 +428,9 @@ pub const DECIDED: &str = "decided";
 pub const WAITING: &str = "Waiting";
 /// What a confirmed problem reads as in a Decision so far cell.
 pub const CONFIRMED_BY_REVIEWER: &str = "Confirmed by the reviewer";
+/// What a problem reads as in a Decision so far cell when the reviewer decided it by changing its
+/// severity themselves.
+pub const SEVERITY_SET_BY_REVIEWER: &str = "Severity set by the reviewer";
 /// What a kind of group is on How problems were grouped.
 pub const LEVEL_AREA: &str = "Area";
 pub const LEVEL_RULE: &str = "Rule";

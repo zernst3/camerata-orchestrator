@@ -624,21 +624,18 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
         .page_text()
         .contains("The corrected version is what ships."));
     // The correction answered the Engine Check's No: that hold is gone. It also raised the row to
-    // critical, and a critical row needs a reviewer's own decision (release gate check 12, commit
-    // 7ca2bdea): an edit is not a decision, so the gate now holds the row for THAT reason alone.
-    let still: Vec<Value> = stack
-        .gate_held()
-        .into_iter()
-        .filter(|h| h["key"] == key.as_str())
-        .collect();
-    assert_eq!(still.len(), 1, "one hold on the row remains: {still:?}");
-    assert_eq!(still[0]["reason"], "critical_without_decision", "{still:?}");
-    assert_eq!(still[0]["path"], site["path"], "{still:?}");
-    assert_eq!(still[0]["line"], site["line"], "{still:?}");
+    // critical, and a severity edit the reviewer made on the row is their decision (Zach,
+    // 2026-11-20: "If I manually update the severity at all, that is my decision regardless."), so
+    // the critical check is met too: the gate holds nothing on the row.
+    assert!(
+        !stack.gate_held().iter().any(|h| h["key"] == key.as_str()),
+        "the severity correction releases the row from both holds: {:?}",
+        stack.gate_held()
+    );
     assert_eq!(
         stack.gate_held().len(),
-        7,
-        "the row moved from one hold to the other: the gate holds as many rows as before"
+        6,
+        "the row left the gate's holds: one fewer than before"
     );
 
     // The correction is a real severity edit on that row, with the reason, and the verdict names it.
@@ -661,30 +658,25 @@ fn engine_check_no_wrong_severity_change_it_and_the_row_is_no_longer_held() {
     assert_eq!(verdict["wrong"], "wrong_severity", "{verdict}");
     assert_eq!(verdict["correction"]["edit"], edit["id"], "{verdict}");
 
-    // Decide the row in person in Review (one click on Confirmed): that clears the last hold, the
-    // gate holds one row fewer and the export panel counts it out.
+    // Review shows the row as decided by the edit: no held line, and the export panel counts it out.
     stack.click(".triage-tab", "Tree");
     open_site(&stack, "cat:injection", "SEC-NO-RAW-SQL-CONCAT-1", &place);
     let detail = stack.text(".site-detail");
     assert!(
-        detail.contains("Held from export: critical, no decision. Decide it to release."),
-        "Review says why the row is held: {detail}"
+        !detail.contains("Held from export"),
+        "Review no longer holds the row after its severity edit: {detail}"
     );
-    stack.click(".site-detail-actions .pane-dispose", "Confirmed");
     stack.wait_for(
-        "the gate to release the row",
+        "the export panel to count the row out",
         "T.text('.export-blocked-head').includes('6 held rows')",
-    );
-    assert!(
-        !stack.gate_held().iter().any(|h| h["key"] == key.as_str()),
-        "a decision in person clears the critical hold"
     );
     let gate_text = stack.js_string("T.text('.export-blocked-head')");
     assert!(gate_text.contains("6 held rows"), "{gate_text}");
 
+    // A severity edit is not a decision record: the strip's decision counts do not move, only the
+    // held count does.
     let mut after = BASE;
     after.held = 6;
-    after.shift(None, "confirmed");
     stack.assert_shell_counts(&after);
     stack.assert_no_model_calls();
 }
@@ -1556,10 +1548,9 @@ fn held_count_rises_and_falls_through_the_engine_check_and_the_export_panel_door
         "",
         "this one is a real finding, just a medium one",
     );
-    // Not critical: a row corrected to critical is also held until it is decided in person (release
-    // gate check 12), which the wrong-severity test above covers. This test is about the Engine
-    // Check hold falling, so the correction picks a severity the row does not already have, below
-    // critical (the row's own severity is read from the form).
+    // The correction picks a severity the row does not already have, below critical (the row's
+    // own severity is read from the form). Any severity edit is the reviewer's decision on the
+    // row, so this test is about the Engine Check hold falling whichever way it goes.
     let current = stack.js_string("T.find('.engine-correction select').value");
     let chosen = if current == "medium" { "low" } else { "medium" };
     stack.js(&format!("(() => {{ const s = T.find('.engine-correction select'); s.value = '{chosen}'; s.dispatchEvent(new Event('change', {{ bubbles: true }})); return s.value; }})()"));

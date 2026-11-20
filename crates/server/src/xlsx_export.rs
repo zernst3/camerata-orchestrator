@@ -79,8 +79,8 @@ use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
     category_for, category_for_finding, citation_for_finding, classify, client_headline_and_detail,
-    disposition_label, effective_bucket, effort_hours_bounds, finding_key, hedge_confidence,
-    is_hedged, normalize_severity, provenance_tier_rank, resolve_citation, resolve_effort,
+    effective_bucket, effort_hours_bounds, finding_key, hedge_confidence, is_hedged,
+    normalize_severity, provenance_tier_rank, resolve_citation, resolve_effort,
     sanitize_report_findings, title_for_finding, Disposition, ReportOptions, ReviewedReport,
 };
 
@@ -606,9 +606,13 @@ fn partition_rows_for(
             );
             let confirmed = wire.map(|d| d.confirmed_by_client).unwrap_or(false);
             // A merged row exports with a pointer to the row it was merged into.
-            let label = crate::report_export::overlay::merged_label(f)
-                .map(str::to_string)
-                .unwrap_or_else(|| disposition_label(disposition, &reason, bucket, confirmed));
+            let label = crate::report_export::row_disposition_label(
+                f,
+                disposition,
+                &reason,
+                bucket,
+                confirmed,
+            );
             let why_waiting = crate::report_export::row_waiting_reason(
                 f,
                 disposition,
@@ -788,11 +792,7 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
         .collect();
     let decided = flagged
         .iter()
-        .filter(|r| {
-            r.is_fp
-                || r.disposition_kind
-                    .is_some_and(|d| d != Disposition::Unresolved)
-        })
+        .filter(|r| r.is_fp || sheets::row_is_decided(r))
         .count();
     (flagged.len(), decided)
 }
@@ -803,9 +803,7 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
 fn possible_duplicate_counts(rows: &[FindingRow]) -> (usize, usize) {
     let mut fixes: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
     for r in rows.iter().filter(|r| !r.possible_duplicate_of.is_empty()) {
-        let decided = r.is_fp
-            || r.disposition_kind
-                .is_some_and(|d| d != Disposition::Unresolved);
+        let decided = r.is_fp || sheets::row_is_decided(r);
         let all = fixes.entry(r.facts.fix_id.as_str()).or_insert(true);
         *all &= decided;
     }
