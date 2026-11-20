@@ -349,7 +349,7 @@ pub fn sweep_leftover_system_prompts_in(root: &std::path::Path) -> usize {
         let stale = match pid {
             Some(pid) if pid == own => !live_system_prompts()
                 .lock()
-                .map_or(false, |live| live.contains(&path)),
+                .is_ok_and(|live| live.contains(&path)),
             Some(pid) => !process_alive(pid),
             // Not a name this module made: not ours to judge.
             None => false,
