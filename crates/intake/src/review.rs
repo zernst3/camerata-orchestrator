@@ -364,6 +364,12 @@ impl ClaudeRefinementReviewer {
         cmd
     }
 
+    /// Run the review call to completion with `prompt` on the child's stdin (redacted on the way,
+    /// see [`crate::engine::output_with_prompt`]).
+    async fn run_claude(&self, prompt: &str) -> std::io::Result<std::process::Output> {
+        crate::engine::output_with_prompt(self.build_command(), prompt).await
+    }
+
     /// Construct on the built-in [`DEFAULT_REVIEWER_MODEL`]; the environment is never read. Use
     /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
     /// from a per-project config or the server's `/api/models` catalog).
@@ -527,9 +533,7 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         form: &IntakeForm,
     ) -> Result<RefinementReview, ReviewError> {
         let prompt = Self::build_prompt(session, form, self.grounding.as_deref());
-        let out = crate::engine::output_with_prompt(self.build_command(), &prompt)
-            .await
-            .map_err(ReviewError::Spawn)?;
+        let out = self.run_claude(&prompt).await.map_err(ReviewError::Spawn)?;
         if !out.status.success() {
             return Err(ReviewError::NonZeroExit {
                 status: out.status.to_string(),

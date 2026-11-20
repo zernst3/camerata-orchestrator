@@ -121,7 +121,7 @@ const SITES: &[Site] = &[
     },
     Site {
         file: "crates/intake/src/review.rs",
-        builders: &[("review", "output_with_prompt(")],
+        builders: &[("run_claude", "output_with_prompt(")],
     },
 ];
 
