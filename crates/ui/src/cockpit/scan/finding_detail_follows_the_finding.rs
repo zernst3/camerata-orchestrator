@@ -45,18 +45,30 @@ async fn settle(vdom: &mut VirtualDom) {
 }
 
 async fn serve() -> MockServer {
+    serve_with_delay(std::time::Duration::ZERO).await
+}
+
+/// The fixture server; the SECOND finding's answers (line 9, RULE-B) arrive after `delay`.
+async fn serve_with_delay(delay: std::time::Duration) -> MockServer {
     let server = MockServer::start().await;
-    let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+    let reply = |body: serde_json::Value, wait: bool| {
+        let r = ResponseTemplate::new(200).set_body_json(body);
+        if wait {
+            r.set_delay(delay)
+        } else {
+            r
+        }
+    };
     for (line, text) in [("4", "alpha_code"), ("9", "beta_code")] {
         Mock::given(method("GET"))
             .and(path("/api/onboard/finding-context"))
             .and(query_param("line", line))
-            .respond_with(ok(serde_json::json!({
+            .respond_with(reply(serde_json::json!({
                 "status": "ok", "lines": [text], "start_line": line.parse::<usize>().unwrap(),
                 "violation_line": line.parse::<usize>().unwrap(), "kind": "function",
                 "matches_snippet": true, "source": "git",
                 "commit": "a".repeat(40), "head_differs": false
-            })))
+            }), line == "9"))
             .mount(&server)
             .await;
     }
@@ -64,7 +76,7 @@ async fn serve() -> MockServer {
         Mock::given(method("GET"))
             .and(path("/api/onboard/finding-fix"))
             .and(query_param("rule_id", rule))
-            .respond_with(ok(serde_json::json!({"fix": fix})))
+            .respond_with(reply(serde_json::json!({"fix": fix}), rule == "RULE-B"))
             .mount(&server)
             .await;
     }
@@ -101,4 +113,37 @@ async fn changing_the_finding_replaces_the_code_context_and_the_recommended_fix(
         html.contains("fix for B") && !html.contains("fix for A"),
         "the second rule's fix replaces the first's: {html}"
     );
+}
+
+/// While the second finding's answer is still pending, the first finding's code and fix are not
+/// on screen: the loading words are (a re-run resource keeps its previous value otherwise).
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn while_the_next_answer_is_pending_the_previous_findings_text_is_gone() {
+    let server = serve_with_delay(std::time::Duration::from_millis(600)).await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    settle(&mut vdom).await;
+    assert!(dioxus_ssr::render(&vdom).contains("alpha_code"));
+
+    let shown = SHOWN.with(|s| s.borrow().expect("the harness ran"));
+    vdom.in_runtime(|| {
+        let mut shown = shown;
+        shown.set((9, "RULE-B".to_string()));
+    });
+    let _ = vdom.render_immediate_to_vec();
+    settle(&mut vdom).await;
+    let html = dioxus_ssr::render(&vdom);
+    assert!(
+        !html.contains("alpha_code") && !html.contains("fix for A"),
+        "the first finding's text is gone while the second loads: {html}"
+    );
+    assert!(html.contains("loading"), "{html}");
+
+    for _ in 0..6 {
+        settle(&mut vdom).await;
+    }
+    let html = dioxus_ssr::render(&vdom);
+    assert!(html.contains("beta_code") && html.contains("fix for B"), "{html}");
 }
