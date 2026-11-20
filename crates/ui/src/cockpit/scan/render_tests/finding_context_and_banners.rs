@@ -230,6 +230,34 @@ fn the_existing_degraded_reasons_still_render_one_line() {
     assert!(html.contains("file not found"));
 }
 
+#[test]
+fn an_unlinked_repo_says_so_in_plain_words_never_file_not_found() {
+    // The server's own reason is shown as sent; an empty one gets the UI's words.
+    for (reason, expected) in [
+        (
+            "acme/app is not linked to this project, so its code cannot be shown.",
+            "acme/app is not linked to this project, so its code cannot be shown.",
+        ),
+        (
+            "acme/app has no local folder at /work/acme/app. Set its folder in Settings.",
+            "acme/app has no local folder at /work/acme/app. Set its folder in Settings.",
+        ),
+        (
+            "",
+            "This repo is not linked to this project, or it has no local folder.",
+        ),
+    ] {
+        let html = render_context(serde_json::json!({
+            "status": "repo_unlinked",
+            "reason": reason,
+        }));
+        assert!(html.contains("finding-ctx-degraded"), "{html}");
+        assert!(html.contains(expected), "{reason:?}: {html}");
+        assert!(!html.contains("file not found"), "{reason:?}: {html}");
+        assert!(!html.contains("changed since scan"), "{reason:?}: {html}");
+    }
+}
+
 // ── Tier-1 render: DeterministicProgress (props-only, no context) ──────────
 // Mirrors the live_run.rs render-test pattern: a harness root mounts the component
 // inside the VirtualDom runtime so its hooks run, then dioxus_ssr renders static HTML.

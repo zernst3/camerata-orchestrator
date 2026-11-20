@@ -494,6 +494,7 @@ mod tests {
             "commit_unavailable",
             "source_deleted",
             "file_missing",
+            "repo_unlinked",
             "not_utf8",
             "too_large",
             "line_gone",

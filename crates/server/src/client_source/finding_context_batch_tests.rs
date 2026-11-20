@@ -189,8 +189,8 @@ async fn one_request_mixes_repos_and_every_status_in_the_shared_vocabulary() {
             "not_utf8",
             "too_large",
             "commit_unavailable",
-            "file_missing",
-            "file_missing",
+            "repo_unlinked",
+            "repo_unlinked",
         ],
         "{json}"
     );

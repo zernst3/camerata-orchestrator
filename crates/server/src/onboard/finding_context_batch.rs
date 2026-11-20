@@ -132,8 +132,10 @@ impl Source {
                 deleted_at,
                 record_id,
             }),
-            // Not linked / not on disk: indistinguishable from "file missing" to the UI.
-            SourceRead::Unresolved { .. } => Source::Closed(FindingContextOutcome::FileMissing),
+            // Not linked / no local folder: its own status and reason, never "file missing".
+            SourceRead::Unresolved { reason } => {
+                Source::Closed(FindingContextOutcome::RepoUnlinked { reason })
+            }
             SourceRead::WorkingTree { dir } => Source::WorkingTree { dir },
             SourceRead::Git {
                 dir,

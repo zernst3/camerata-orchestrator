@@ -68,6 +68,11 @@ pub enum FindingContextOutcome {
         deleted_at: String,
         record_id: String,
     },
+    /// The repo is not linked to the project, or has no local folder: nothing was looked for in
+    /// any file. Distinct from [`FileMissing`](FindingContextOutcome::FileMissing), which is a
+    /// file really absent at a resolved folder. `reason` is in plain words (it names the folder
+    /// that was looked for when there is one).
+    RepoUnlinked { reason: String },
     /// A search could not run at all (git missing, not a repository, an error exit). Nothing was
     /// searched, so no answer, empty or otherwise, may be drawn from it.
     SearchFailed,
@@ -103,6 +108,10 @@ impl FindingContextOutcome {
             FindingContextOutcome::FileMissing => serde_json::json!({
                 "status": "file_missing",
                 "reason": "file not found — changed since scan?",
+            }),
+            FindingContextOutcome::RepoUnlinked { reason } => serde_json::json!({
+                "status": "repo_unlinked",
+                "reason": reason,
             }),
             FindingContextOutcome::NotUtf8 => serde_json::json!({
                 "status": "not_utf8",

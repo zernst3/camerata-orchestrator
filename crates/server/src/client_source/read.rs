@@ -103,11 +103,12 @@ pub async fn finding_context(state: &AppState, params: FindingContextParams) -> 
             }
             .to_json(),
         ),
-        // Not linked / not on disk: indistinguishable from "file missing" to the UI, which falls
-        // back to the stored snippet (design 5).
-        SourceRead::Unresolved { .. } => {
-            (StatusCode::OK, FindingContextOutcome::FileMissing.to_json())
-        }
+        // Not linked / no local folder: its own status, with the reason in plain words. The UI
+        // keeps `file_missing` for a file really absent at a resolved folder.
+        SourceRead::Unresolved { reason } => (
+            StatusCode::OK,
+            FindingContextOutcome::RepoUnlinked { reason }.to_json(),
+        ),
         SourceRead::WorkingTree { dir } => {
             let outcome =
                 lookup_at(Origin::WorkingTree(&dir), &params.path, params.line, expect).await;
@@ -188,18 +189,31 @@ pub enum SourceRead {
     Unresolved { reason: String },
 }
 
-/// The project that owns `repo` for a read: the named one, else the active project if it has the
-/// repo, else the first project that does.
+/// Whether `project` owns `repo` for reading its code: the repo is in `project.repos`, or one of
+/// the project's own saved inspections audited it. Onboarding adds a repo to `project.repos` only
+/// when the rules are applied, which is after triage, so a project still in onboarding owns its
+/// repos through its inspections. The ONE ownership test every code-reading endpoint uses.
+pub(crate) fn project_owns_repo(
+    state: &AppState,
+    project: &crate::project::Project,
+    repo: &str,
+) -> bool {
+    project.repos.iter().any(|r| r.eq_ignore_ascii_case(repo))
+        || state.inspections.any_audits(&project.id, repo)
+}
+
+/// The project that owns `repo` for a read: the named one (and only that one), else the active
+/// project if it owns the repo, else the first project that does. See [`project_owns_repo`].
 fn owning_project(state: &AppState, project_hint: Option<&str>, repo: &str) -> Option<String> {
-    let has = |p: &crate::project::Project| p.repos.iter().any(|r| r.eq_ignore_ascii_case(repo));
+    let owns = |p: &crate::project::Project| project_owns_repo(state, p, repo);
     if let Some(id) = project_hint {
-        return state.projects.get(id).filter(|p| has(p)).map(|p| p.id);
+        return state.projects.get(id).filter(|p| owns(p)).map(|p| p.id);
     }
     state
         .projects
         .active()
-        .filter(|p| has(p))
-        .or_else(|| state.projects.list().into_iter().find(|p| has(p)))
+        .filter(|p| owns(p))
+        .or_else(|| state.projects.list().into_iter().find(|p| owns(p)))
         .map(|p| p.id)
 }
 
@@ -249,11 +263,19 @@ pub async fn source_for_read(
     // that a project owns. A traversal ("../../etc"), an absolute path or a repo no project has
     // is refused here, before any directory is built or any file is read: the path jail of the
     // readers is relative to the directory this resolves, so it cannot catch this itself.
-    let project_id = match owning_project(state, project_hint, repo) {
-        Some(id) if is_owner_name(repo) => id,
-        _ => {
+    // The name is checked first, so a junk name never triggers the inspection scan.
+    let owner = if is_owner_name(repo) {
+        owning_project(state, project_hint, repo)
+    } else {
+        None
+    };
+    let project_id = match owner {
+        Some(id) => id,
+        None => {
             return Ok(SourceRead::Unresolved {
-                reason: "no project owns a repo with that name".to_string(),
+                reason: format!(
+                    "{repo} is not linked to this project, so its code cannot be shown."
+                ),
             })
         }
     };
@@ -268,12 +290,17 @@ pub async fn source_for_read(
 
     let Some(dir) = resolve_dir(state, repo) else {
         return Ok(SourceRead::Unresolved {
-            reason: "no local folder is recorded for this repo".to_string(),
+            reason: format!(
+                "{repo} has no local folder: no folder is set for it and no workspace folder is configured. Set its folder in Settings."
+            ),
         });
     };
     if !dir.is_dir() {
         return Ok(SourceRead::Unresolved {
-            reason: format!("{} does not exist", dir.display()),
+            reason: format!(
+                "{repo} has no local folder at {}. Set its folder in Settings or fetch the repo again.",
+                dir.display()
+            ),
         });
     }
 

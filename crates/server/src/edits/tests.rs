@@ -547,3 +547,74 @@ async fn a_summary_edit_of_a_node_that_is_not_in_the_tree_is_refused() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["code"], "unknown_node", "{body}");
 }
+
+// ── an added finding in a project still in onboarding (2026-11-20) ───────────────────────────
+
+/// A project that has not applied its rules yet lists no repos; its saved inspection audited
+/// `acme/app` from a folder with no commit. The evidence check of a reviewer-added finding reads
+/// that source: a matching snippet is verified, a non-matching one is still held.
+#[tokio::test]
+async fn an_added_finding_is_checked_against_the_source_of_an_onboarding_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("app");
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::write(
+        folder.join("src/n.rs"),
+        "fn a() {}\nfn danger() {\n    unsafe_call();\n}\n",
+    )
+    .unwrap();
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    state
+        .settings
+        .set_repo_path("acme/app", Some(folder.to_string_lossy().into_owned()));
+    let project = state.projects.create("Acme", Vec::new()).unwrap();
+    assert!(project.repos.is_empty(), "onboarding: no repos listed yet");
+    let pid = project.id;
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.provenance.audited_refs = vec![crate::onboard::AuditedRef {
+        repo: "acme/app".to_string(),
+        sha: None,
+        branch: None,
+        origin_url: None,
+        default_branch: None,
+        dirty: false,
+    }];
+    report.provenance.started_at = "2026-11-02T10:00:00Z".to_string();
+    report.provenance.finished_at = "2026-11-02T10:00:00Z".to_string();
+    state
+        .inspections
+        .append(InspectionEntry::from_report(
+            &pid,
+            report,
+            InspectionKind::Full,
+        ))
+        .unwrap();
+    let app = router(state);
+    let uri = format!("/api/projects/{pid}/added-findings");
+    let body = |snippet: &str, line: u32| {
+        serde_json::json!({
+            "repo": "acme/app", "path": "src/n.rs", "line": line, "rule_id": "SEC-9",
+            "severity": "high", "snippet": snippet, "headline": "h", "detail": "d",
+            "kind": { "kind": "defect" }, "reason": "r"
+        })
+    };
+
+    let (status, found) = call(&app, "POST", &uri, Some(body("unsafe_call();", 3))).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["evidence_verified"], true, "{found}");
+
+    let (status, held) = call(
+        &app,
+        "POST",
+        &uri,
+        Some(body("this text is nowhere in the file();", 3)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{held}");
+    assert_eq!(held["evidence_verified"], false, "{held}");
+    assert!(
+        !held["evidence_note"].as_str().unwrap().is_empty(),
+        "{held}"
+    );
+}
