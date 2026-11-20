@@ -1986,10 +1986,10 @@ async fn finding_context_refuses_path_traversal() {
     assert_eq!(json["status"], "path_traversal");
 }
 
-/// A repo with no local path set at all (never linked) degrades to `file_missing` — the
-/// SAME shape the UI already handles, never a 500 or a distinct error surface.
+/// A repo no project owns (never linked) degrades to `repo_unlinked` with plain words, never a
+/// 500 and never `file_missing` (no file was looked for).
 #[tokio::test]
-async fn finding_context_unresolved_repo_degrades_to_file_missing() {
+async fn finding_context_unresolved_repo_degrades_to_repo_unlinked() {
     let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
     let app = router(state);
     let resp = app
@@ -2003,7 +2003,7 @@ async fn finding_context_unresolved_repo_degrades_to_file_missing() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["status"], "file_missing");
+    assert_eq!(json["status"], "repo_unlinked", "{json}");
 }
 
 /// A file over the `MAX_FILE_BYTES` cap degrades to `too_large` rather than reading it.
@@ -2034,6 +2034,11 @@ async fn finding_context_missing_file_degrades_gracefully() {
     state
         .settings
         .set_repo_path("me/api", Some(tmp.path().to_string_lossy().into_owned()));
+    // The shared code resolver only reads repos a project owns.
+    state
+        .projects
+        .create("Missing file fixture", vec!["me/api".to_string()])
+        .expect("project");
     let app = router(state);
     let resp = app
         .oneshot(
