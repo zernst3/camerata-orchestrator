@@ -199,6 +199,7 @@ impl Rig {
 LOG="{d}/log"
 n=$(( $(ls "$LOG" | grep -c '^args-') + 1 ))
 printf '%s\n' "$@" > "$LOG/args-$n.txt"
+cat > "$LOG/stdin-$n.txt"
 printf '%s\n' "$CLAUDE_CODE_DISABLE_CLAUDE_MDS" > "$LOG/mds-$n.txt"
 pwd -P > "$LOG/cwd-$n.txt"
 find . -type f | sort > "$LOG/files-$n.txt"
@@ -308,8 +309,9 @@ async fn outputs_and_trace_come_back_as_scripted() {
     assert_eq!(run.outputs["_camerata/out/card.md"], "a card");
     assert!(run.usage.iter().map(|u| u.input_tokens).sum::<u64>() > 0);
     assert!(run.usage.iter().filter_map(|u| u.cost_usd).sum::<f64>() > 0.0);
-    // The brief is what the program was asked.
-    assert!(rig.log("args-1.txt").lines().any(|l| l == "THE BRIEF"));
+    // The brief is what the program was asked: on its stdin, never in its argument list.
+    assert!(rig.log("stdin-1.txt").lines().any(|l| l == "THE BRIEF"));
+    assert!(!rig.log("args-1.txt").contains("THE BRIEF"));
 }
 
 #[tokio::test]
@@ -539,7 +541,7 @@ async fn send_again_is_a_second_call_on_a_room_holding_only_the_unread_files() {
     );
     // The file went to the model in full, in the message.
     assert_eq!(again.shown_in_full, vec!["src/b.rs".to_string()]);
-    assert!(rig.log("args-2.txt").contains("// b line 3"));
+    assert!(rig.log("stdin-2.txt").contains("// b line 3"));
     assert_ne!(first.conversation, again.conversation);
 }
 
@@ -798,9 +800,11 @@ async fn the_agent_is_told_where_the_files_are() {
         .run(&room, "THE BRIEF", &limits())
         .await
         .unwrap();
+    let prompt = rig.log("stdin-1.txt");
+    assert!(prompt.contains("THE BRIEF"), "{prompt}");
+    assert!(prompt.contains("`code/`"), "{prompt}");
     let args = rig.log("args-1.txt");
-    assert!(args.contains("THE BRIEF"), "{args}");
-    assert!(args.contains("`code/`"), "{args}");
+    assert!(!args.contains("THE BRIEF"), "the brief is not in argv: {args}");
 }
 
 #[tokio::test]
