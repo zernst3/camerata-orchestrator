@@ -1054,8 +1054,8 @@ the evidence check held it: ... It stays out of every export until you decide it
 reasons, in the gate's words: evidence unverified (the quoted code was not found near the cited
 line); junk text (a placeholder, a refusal or an untranslated fragment); put back after the engine
 threw it out, no decision; split out of a ruled-out problem, no decision; merged with no decision
-record; Engine Check said No, no correction yet. A held row is never covered by a batch decision.
-Decide it by name to release it. When the gate refuses an export, the export area shows the list
+record; Engine Check said No, no correction yet; shown at critical severity, or marked unsure, with no decision. A held row is never covered by a batch decision.
+Decide it by name to release it. Changing a row's severity yourself (in Review, or as an Engine Check correction) is a decision: the row is released whichever way the severity moved, and the exports read "Severity set by the reviewer" on it. Editing its wording or location is not. When the gate refuses an export, the export area shows the list
 ("Export blocked: N rows need a decision before the package can be built.") with one line per row
 (the word `held`, the place, the rule, the reason) and an **open** button that jumps to the row. A
 group decision that is missing records for some of its sites shows as a `group` line: "the decision

@@ -286,6 +286,10 @@ fn EngineCardView(
             "engine-state corrected",
             Some(("mark-edited", "\u{2713} corrected")),
         ),
+        CardState::CorrectedHeld { .. } => (
+            "engine-state held",
+            Some(("mark-held", "\u{1f512} corrected, held until you decide it")),
+        ),
     };
     let summary_lines = correction_lines(&card);
     let edited_chips: Vec<_> = marker_chips(&card.site)

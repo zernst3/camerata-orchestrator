@@ -97,6 +97,10 @@ pub enum CardState {
     ThrownOutConfirmed { error: Option<EngineCheckError> },
     /// A No, and a correction or a later decision or edit stands behind it.
     Corrected { error: Option<EngineCheckError> },
+    /// A No that a correction answered, on a row the gate still holds for a decision of its own
+    /// (critical or unsure, and the correction was not a severity edit): the corrected version
+    /// does not ship yet.
+    CorrectedHeld { error: Option<EngineCheckError> },
 }
 
 /// Whether `later` is strictly after `earlier` (RFC 3339), the rule the release gate uses: a time
@@ -168,6 +172,13 @@ pub fn card_state(card: &EngineCheckCard) -> CardState {
             match card.site.held {
                 Some(HoldReason::EngineCheckNoWithoutCorrection) => held(v.wrong),
                 Some(HoldReason::RestoredWithoutDecision) => CardState::Restored,
+                // The No is answered, but the row is critical or unsure and nothing the reviewer
+                // did on it is a decision (a severity edit is one): it is still held.
+                Some(HoldReason::CriticalWithoutDecision | HoldReason::UnsureWithoutDecision)
+                    if !thrown_out && corrected_since(card, v) =>
+                {
+                    CardState::CorrectedHeld { error: v.wrong }
+                }
                 // A decision stands behind the No. On a row that is still thrown out it confirms
                 // the throw-out; on a row that was put back it is the ruling the row ships under.
                 _ if corrected_since(card, v) => {
@@ -228,6 +239,10 @@ pub fn card_state_text(state: &CardState) -> String {
         CardState::Corrected { error } => {
             with_error("No, corrected: the corrected version is what ships", *error)
         }
+        CardState::CorrectedHeld { error } => with_error(
+            "No: corrected, but held from export until you set its severity, confirm it or mark it a false positive",
+            *error,
+        ),
     }
 }
 

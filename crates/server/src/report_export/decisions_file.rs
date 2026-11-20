@@ -27,7 +27,8 @@ pub struct DecisionRowJson {
     /// The tree node a group decision was made on; empty on a site record.
     pub node_id: String,
     /// `confirmed`, `ignored`, `false_positive`, `tech_debt_now`, `tech_debt_later`,
-    /// `merged_into` or `engine_restored`.
+    /// `merged_into`, `engine_restored` or `severity_set` (the reviewer changed the row's
+    /// severity themselves; the edit is the row's decision).
     pub state: String,
     /// The [`site_id`] of the row a merge points to; empty for any other state.
     pub merged_into: String,
@@ -95,10 +96,37 @@ fn row_of(d: &Decision) -> DecisionRowJson {
     }
 }
 
+/// The state a severity edit is recorded under.
+pub const SEVERITY_SET: &str = "severity_set";
+
+/// A severity edit the reviewer made on a row, as the package records it: the row's decision.
+fn severity_edit_row(n: usize, e: &super::AppliedEdit) -> DecisionRowJson {
+    DecisionRowJson {
+        // Edit ids are structured data of the findings files only, never of the decisions file:
+        // the record is numbered in its own series.
+        id: format!("severity-set-{n:06}"),
+        scope: "site".to_string(),
+        site_id: site_id(&e.key),
+        state: SEVERITY_SET.to_string(),
+        has_reason: e.has_reason,
+        ..DecisionRowJson::default()
+    }
+}
+
 /// Every record `reviewed` was reviewed with, revoked ones included, in the order they were
-/// written.
+/// written, then one record per severity edit the reviewer made on a row: the edit is that row's
+/// decision (Zach, 2026-11-20), so the package says so. The reason stays in the store.
 pub fn decision_rows(reviewed: &ReviewedReport) -> Vec<DecisionRowJson> {
-    reviewed.all_records().iter().map(row_of).collect()
+    let mut rows: Vec<DecisionRowJson> = reviewed.all_records().iter().map(row_of).collect();
+    rows.extend(
+        reviewed
+            .applied_edits()
+            .iter()
+            .filter(|e| e.field == camerata_api_types::edits::EditField::Severity)
+            .enumerate()
+            .map(|(i, e)| severity_edit_row(i + 1, e)),
+    );
+    rows
 }
 
 /// The file's path in the package.

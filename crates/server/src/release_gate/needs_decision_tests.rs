@@ -432,3 +432,275 @@ fn a_needs_review_confidence_alone_makes_a_row_unsure() {
     let package = package_with(report_with(row), &HashMap::new());
     assert_eq!(package.critical_or_unsure_without_decision.len(), 1);
 }
+
+// ── a severity edit on the row is the reviewer's decision (Zach, 2026-11-20: "If I manually update
+// the severity at all, that is my decision regardless.") ─────────────────────────────────────────
+
+use camerata_api_types::edits::{Edit, EditField};
+use camerata_api_types::review_view::{CorrectionRef, EngineCheckError, EngineCheckVerdict};
+
+const EDIT_AT: &str = "2026-11-20T10:00:00Z";
+const CHECK_RUN: &str = "insp-1";
+
+fn edit_on(n: usize, f: &Finding, field: EditField, old: &str, new: &str) -> Edit {
+    Edit {
+        id: format!("edit-{n:06}"),
+        key: f.site_key.clone(),
+        field,
+        old: old.to_string(),
+        new: new.to_string(),
+        reason: "the reviewer judged it".to_string(),
+        by: "reviewer".to_string(),
+        at: EDIT_AT.to_string(),
+        run_id: CHECK_RUN.to_string(),
+        fingerprint_at_edit: camerata_api_types::fingerprint::fingerprint(&f.rule_id, &f.snippet),
+        stale: false,
+        discarded_at: None,
+        reapplied_from: None,
+    }
+}
+
+fn sealed_row(sealed: &crate::onboard::SealedReport, path: &str) -> Finding {
+    sealed
+        .findings
+        .iter()
+        .find(|f| f.path == path)
+        .unwrap_or_else(|| panic!("no row in {path}"))
+        .clone()
+}
+
+fn package_of_reviewed(reviewed: &crate::report_export::ReviewedReport) -> ProductPackage {
+    let options = client_options();
+    let json = build_report_json(reviewed, None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    assemble_package(
+        reviewed,
+        None,
+        &options,
+        "acme-inspection",
+        (json, data, b"%PDF-1.7 stand-in for the gate tests".to_vec()),
+    )
+    .expect("the package assembles")
+}
+
+/// The base report's high row at src/db.rs, with an edit applied to it.
+fn base_row_edited(
+    field: EditField,
+    old: &str,
+    new: &str,
+) -> (
+    crate::onboard::SealedReport,
+    crate::report_export::ReviewedReport,
+    Edit,
+) {
+    let sealed = scan_report().seal();
+    let row = sealed_row(&sealed, "src/db.rs");
+    let edit = edit_on(1, &row, field, old, new);
+    let reviewed =
+        crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+    (sealed, reviewed, edit)
+}
+
+/// Review door: a high row the reviewer raised to critical in Review is decided by that edit.
+#[test]
+fn a_review_severity_edit_to_critical_releases_the_row() {
+    let (_, reviewed, _) = base_row_edited(EditField::Severity, "high", "critical");
+    let row = sealed_row(reviewed.report(), "src/db.rs");
+    assert_eq!(row.severity, "critical", "the edit is applied");
+    assert!(
+        needs_decision::undecided(&reviewed.report().findings, &reviewed)
+            .next()
+            .is_none(),
+        "the reviewer's own severity edit is the decision"
+    );
+    let package = package_of_reviewed(&reviewed);
+    assert!(
+        package.critical_or_unsure_without_decision.is_empty(),
+        "{:?}",
+        package.critical_or_unsure_without_decision
+    );
+    let released = release(package);
+    assert!(released.is_ok(), "{:?}", released.err());
+}
+
+/// Whatever the direction: an unsure row the reviewer moved up or down is decided too.
+#[test]
+fn a_severity_edit_in_either_direction_decides_an_unsure_row() {
+    for (old, new) in [("medium", "high"), ("medium", "low")] {
+        let sealed = report_with(unsure_medium()).seal();
+        let row = sealed_row(&sealed, "src/cache.rs");
+        let edit = edit_on(1, &row, EditField::Severity, old, new);
+        let reviewed =
+            crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+        let package = package_of_reviewed(&reviewed);
+        assert!(
+            package.critical_or_unsure_without_decision.is_empty(),
+            "{old} to {new}: {:?}",
+            package.critical_or_unsure_without_decision
+        );
+    }
+}
+
+/// An edit to wording or location is not a severity decision.
+#[test]
+fn an_edit_of_another_field_is_not_a_decision() {
+    for (field, old, new) in [
+        (EditField::Headline, "", "A new headline"),
+        (EditField::Detail, "", "A new explanation"),
+        (EditField::Fix, "", "A new fix"),
+    ] {
+        let sealed = report_with(critical_below_the_line()).seal();
+        let row = sealed_row(&sealed, "src/admin.rs");
+        let edit = edit_on(1, &row, field, old, new);
+        let reviewed =
+            crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[]);
+        let package = package_of_reviewed(&reviewed);
+        assert_eq!(
+            package.critical_or_unsure_without_decision.len(),
+            1,
+            "{field:?} edit must not decide the critical"
+        );
+    }
+}
+
+/// A discarded severity edit is not applied, so it decides nothing.
+#[test]
+fn a_discarded_severity_edit_is_not_a_decision() {
+    let sealed = scan_report().seal();
+    let row = sealed_row(&sealed, "src/db.rs");
+    let mut edit = edit_on(1, &row, EditField::Severity, "high", "critical");
+    edit.discarded_at = Some(EDIT_AT.to_string());
+    let reviewed = crate::report_export::apply_overlay(&sealed, &[], &[edit], &[]);
+    // The row is still high, and still not forced.
+    assert!(
+        needs_decision::undecided(&reviewed.report().findings, &reviewed)
+            .next()
+            .is_none()
+    );
+    assert_eq!(sealed_row(reviewed.report(), "src/db.rs").severity, "high");
+}
+
+/// Engine Check door: the correction the verdict names is a severity edit, and it decides the row
+/// as well as answering the No.
+#[test]
+fn an_engine_check_severity_correction_to_critical_releases_the_row() {
+    let (sealed, _, edit) = base_row_edited(EditField::Severity, "high", "critical");
+    let row = sealed_row(&sealed, "src/db.rs");
+    let verdict = EngineCheckVerdict {
+        key: row.site_key.clone(),
+        run_id: CHECK_RUN.to_string(),
+        right: false,
+        wrong: Some(EngineCheckError::WrongSeverity),
+        correction: Some(CorrectionRef::Edit(edit.id.clone())),
+        by: "reviewer".to_string(),
+        at: "2026-11-20T09:00:00Z".to_string(),
+        carried_from: None,
+    };
+    let reviewed =
+        crate::report_export::apply_overlay(&sealed, &[], std::slice::from_ref(&edit), &[])
+            .with_engine_check(crate::engine_check::EngineCheckEvidence::Recorded {
+                run_id: CHECK_RUN.to_string(),
+                verdicts: vec![verdict],
+                edits: vec![edit],
+            });
+    assert!(
+        crate::release_gate::holds::gate_holds(&reviewed)
+            .held
+            .is_empty(),
+        "{:?}",
+        crate::release_gate::holds::gate_holds(&reviewed).held
+    );
+    let released = release(package_of_reviewed(&reviewed));
+    assert!(released.is_ok(), "{:?}", released.err());
+}
+
+/// A group decision on the row is not the reviewer's own; their own severity edit on the same row is.
+#[test]
+fn an_own_severity_edit_counts_beside_an_inherited_group_record() {
+    use camerata_api_types::decisions::{DecisionState, Scope};
+    let sealed = report_with(unsure_medium()).seal();
+    let row = sealed_row(&sealed, "src/cache.rs");
+    let key = row.site_key.clone();
+    let mut node = node_record("", DecisionState::Confirmed, "dec-0", None);
+    node.scope = Scope::Node("n".to_string());
+    node.applies_to = vec![key.clone()];
+    let group = node_record(&key, DecisionState::Confirmed, "dec-2", Some("dec-0"));
+    let records = [node, group];
+    let without_edit = crate::report_export::apply_overlay(&sealed, &records, &[], &[]);
+    assert_eq!(
+        needs_decision::undecided(&without_edit.report().findings, &without_edit).count(),
+        1,
+        "a group record alone is not a decision in person"
+    );
+    let edit = edit_on(1, &row, EditField::Severity, "medium", "low");
+    let with_edit = crate::report_export::apply_overlay(&sealed, &records, &[edit], &[]);
+    assert_eq!(
+        needs_decision::undecided(&with_edit.report().findings, &with_edit).count(),
+        0
+    );
+}
+
+/// The gate's text must be true for every hold it is shown on: it names only what releases the row.
+#[test]
+fn the_problem_text_names_only_ways_that_release_the_row() {
+    for row in [critical_below_the_line(), unsure_medium()] {
+        let package = package_with(report_with(row), &HashMap::new());
+        let message = package.critical_or_unsure_without_decision[0]
+            .message
+            .clone();
+        assert!(
+            message.contains("confirm it, mark it a false positive or set its severity"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("correct it"),
+            "an edit of the wording does not release the row: {message}"
+        );
+    }
+}
+
+/// The exports record the row as decided by the severity edit.
+#[test]
+fn the_exports_record_a_severity_edit_as_the_decision() {
+    let (_, reviewed, edit) = base_row_edited(EditField::Severity, "high", "critical");
+    let package = package_of_reviewed(&reviewed);
+    let decisions: serde_json::Value = serde_json::from_slice(
+        &crate::report_export::decisions_file::decisions_json(&reviewed).unwrap(),
+    )
+    .unwrap();
+    let rows = decisions["decisions"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["id"], "severity-set-000001");
+    assert!(
+        !rows[0].to_string().contains(&edit.id),
+        "edit ids stay out of decisions.json"
+    );
+    assert_eq!(rows[0]["scope"], "site");
+    assert_eq!(rows[0]["state"], "severity_set");
+    assert_eq!(rows[0]["has_reason"], true);
+    assert_eq!(rows[0]["reason"], "", "reviewer text stays in the store");
+    let label = "Severity set by the reviewer";
+    // The report's rows (the PDF's summary reads their counts, and the CSV and the workbook print
+    // them) say who decided; the PDF's own review line counts the place as read in person.
+    let report_text = serde_json::to_string(&package.report_json).unwrap();
+    assert!(
+        report_text.contains(label),
+        "the report rows say who decided"
+    );
+    assert!(
+        package
+            .report_json
+            .escalations
+            .review_line
+            .starts_with("1 place was reviewed in person."),
+        "{}",
+        package.report_json.escalations.review_line
+    );
+    let cells = xlsx_strings(&package.xlsx).expect("the workbook strings");
+    assert!(
+        cells.iter().any(|c| c.contains(label)),
+        "the workbook says who decided"
+    );
+    // No em or en dashes, no serial commas in the words.
+    assert!(!label.contains('\u{2014}') && !label.contains('\u{2013}'));
+}

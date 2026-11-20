@@ -411,6 +411,15 @@ pub(super) fn decision_so_far(row: &FindingRow) -> String {
         return row.disposition_label.clone();
     }
     match row.disposition_kind {
+        // A severity the reviewer set is their decision, though the row carries no record (the
+        // label is [`crate::report_export::row_disposition_label`]'s).
+        Some(Disposition::Unresolved)
+            if row
+                .disposition_label
+                .starts_with(v::SEVERITY_SET_BY_REVIEWER) =>
+        {
+            v::SEVERITY_SET_BY_REVIEWER.to_string()
+        }
         None | Some(Disposition::Unresolved) => String::new(),
         Some(Disposition::Confirmed) => v::CONFIRMED_BY_REVIEWER.to_string(),
         Some(_) => row.disposition_label.clone(),

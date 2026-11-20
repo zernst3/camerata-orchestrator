@@ -86,6 +86,8 @@ pub struct AppliedEdit {
     pub id: String,
     pub key: String,
     pub field: EditField,
+    /// The reviewer wrote a reason with the edit. The reason itself stays in the store.
+    pub has_reason: bool,
 }
 
 /// One edit that was not applied because its site is gone or changed.
@@ -620,6 +622,7 @@ fn apply_edits(rows: &mut [Finding], edits: &[&Edit]) -> EditOutcome {
             id: e.id.clone(),
             key: e.key.clone(),
             field: e.field,
+            has_reason: !e.reason.trim().is_empty(),
         });
     }
     for (i, edit_ids) in ids {
@@ -708,6 +711,7 @@ fn apply_summary_edits(
                 id: e.id.clone(),
                 key: e.key.clone(),
                 field: e.field,
+                has_reason: !e.reason.trim().is_empty(),
             });
         }
     }

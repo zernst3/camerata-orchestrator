@@ -1354,6 +1354,7 @@ fn every_state() -> Vec<CardState> {
         CardState::Restored,
         CardState::ThrownOutConfirmed { error },
         CardState::Corrected { error },
+        CardState::CorrectedHeld { error },
     ]
 }
 
@@ -1380,4 +1381,33 @@ fn only_the_corrected_state_opens_with_no_corrected() {
             "{state:?}: {text}"
         );
     }
+}
+
+/// "The corrected version is what ships" is true only when nothing else holds the row. A No that
+/// was corrected with an edit that is not a severity edit leaves a critical or unsure row held for
+/// a decision of its own: the card says so instead.
+#[test]
+fn a_corrected_no_on_a_row_still_held_for_a_decision_does_not_say_it_ships() {
+    use camerata_api_types::review_view::HoldReason;
+    for hold in [
+        HoldReason::CriticalWithoutDecision,
+        HoldReason::UnsureWithoutDecision,
+    ] {
+        let mut card = no_card(Some(CorrectionRef::Edit("edit-000001".to_string())));
+        card.site.held = Some(hold);
+        let state = card_state(&card);
+        assert!(
+            matches!(state, CardState::CorrectedHeld { .. }),
+            "{hold:?}: {state:?}"
+        );
+        let text = card_state_text(&state);
+        assert!(!text.contains("what ships"), "{text}");
+        assert!(
+            text.contains("held from export until you set its severity, confirm it or mark it a false positive"),
+            "{text}"
+        );
+    }
+    // With nothing holding the row, the corrected version is what ships.
+    let card = no_card(Some(CorrectionRef::Edit("edit-000001".to_string())));
+    assert!(matches!(card_state(&card), CardState::Corrected { .. }));
 }
