@@ -247,6 +247,7 @@ pub(super) fn degraded_context_reason(status: &str, reason: &str) -> String {
     }
     match status {
         "file_missing" => "file not found — changed since scan?",
+        "repo_unlinked" => camerata_ui_core::viewer::REPO_UNLINKED_WORDS,
         "line_gone" => "file changed since scan",
         "not_utf8" => "file is not valid UTF-8 (binary?)",
         "too_large" => "file too large to load",

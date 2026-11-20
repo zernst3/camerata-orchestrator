@@ -988,6 +988,7 @@ pub(super) fn CodeViewer(
                         },
                         (_, Some(SourceOutcome::NotUtf8(text)))
                         | (_, Some(SourceOutcome::FileMissing(text)))
+                        | (_, Some(SourceOutcome::RepoUnlinked(text)))
                         | (_, Some(SourceOutcome::Unavailable(text))) => rsx! {
                             {note_body(text, floor, false, on_open_modal)}
                         },
@@ -5188,5 +5189,99 @@ mod host_tests {
     fn the_hub_gives_focus_to_the_viewer_exactly_when_it_is_open() {
         assert_eq!(hub_close_focus(true), FocusReturn::Viewer);
         assert_eq!(hub_close_focus(false), FocusReturn::Pane);
+    }
+
+    /// A mounted viewer on the finding `me/api` `src/x.rs`, its source-file answer being `body`
+    /// (and its finding-context answer too).
+    async fn mounted_with_answer(body: serde_json::Value) -> (VirtualDom, MockServer) {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = MockServer::start().await;
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("repo", "me/api"))
+            .respond_with(ok(body.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .respond_with(ok(body))
+            .mount(&server)
+            .await;
+        (VirtualDom::new(app), server)
+    }
+
+    /// The bug (2026-11-20): a project still in onboarding does not list its repo yet, so the
+    /// server answers `repo_unlinked`. The viewer must say so in plain words, never "file not
+    /// found, changed since scan?".
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_finding_whose_repo_is_unlinked_says_so_in_plain_words() {
+        // Both shapes: the server's own reason, and an older or empty one (the UI's words).
+        for (reason, expected) in [
+            (
+                "me/api is not linked to this project, so its code cannot be shown.",
+                "me/api is not linked to this project, so its code cannot be shown.",
+            ),
+            (
+                "me/api has no local folder at /work/me/api. Set its folder in Settings.",
+                "me/api has no local folder at /work/me/api. Set its folder in Settings.",
+            ),
+            (
+                "",
+                "This repo is not linked to this project, or it has no local folder.",
+            ),
+        ] {
+            let (mut vdom, server) = mounted_with_answer(
+                serde_json::json!({"status": "repo_unlinked", "reason": reason}),
+            )
+            .await;
+            let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+            let mut seen = Listeners::default();
+            seen.take(&vdom.rebuild_to_vec());
+            settle(&mut vdom, &mut seen).await;
+            let page = html(&vdom);
+            assert!(page.contains(expected), "{reason:?}: {page}");
+            assert!(!page.contains("file not found"), "{reason:?}: {page}");
+            assert!(!page.contains("changed since scan"), "{reason:?}: {page}");
+            assert!(!page.contains("could not be loaded"), "{reason:?}: {page}");
+            assert!(!page.contains("cv-line"), "no code is shown: {page}");
+        }
+    }
+
+    /// The other path the operator takes: the file is present at the resolved folder.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_finding_whose_file_is_present_shows_its_code_not_a_note() {
+        let (mut vdom, server) =
+            mounted_with_answer(file_body("here", 14, &[(4, "    let q = build_sql(x);")])).await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("build_sql(x)") && page.contains("here 1"),
+            "{page}"
+        );
+        assert!(!page.contains("not linked to this project"), "{page}");
+        assert!(!page.contains("no local folder"), "{page}");
+    }
+
+    /// A file really absent at a resolved folder keeps its own words.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_file_really_absent_keeps_the_file_missing_words() {
+        let (mut vdom, server) = mounted_with_answer(serde_json::json!({
+            "status": "file_missing", "reason": "file not found \u{2014} changed since scan?"
+        }))
+        .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("file not found"), "{page}");
+        assert!(!page.contains("not linked to this project"), "{page}");
     }
 }

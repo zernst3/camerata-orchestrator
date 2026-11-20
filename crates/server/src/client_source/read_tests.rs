@@ -401,8 +401,10 @@ async fn a_repo_in_no_project_and_no_inspection_is_still_refused() {
 async fn an_inspection_naming_a_traversal_repo_does_not_make_it_readable() {
     let fx = fixture();
     // A saved inspection that (wrongly) names a non owner/name repo must not open a path.
-    fx.state
-        .set_last_scan(fx.project_id.clone(), super::test_support::report_at("../../etc", &fx.head));
+    fx.state.set_last_scan(
+        fx.project_id.clone(),
+        super::test_support::report_at("../../etc", &fx.head),
+    );
     let read = source_for_read(&fx.state, Some(&fx.project_id), "../../etc", None)
         .await
         .unwrap();

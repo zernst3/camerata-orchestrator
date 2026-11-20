@@ -271,7 +271,9 @@ pub async fn source_for_read(
         Some(id) if is_owner_name(repo) => id,
         _ => {
             return Ok(SourceRead::Unresolved {
-                reason: format!("{repo} is not linked to this project, so its code cannot be shown."),
+                reason: format!(
+                    "{repo} is not linked to this project, so its code cannot be shown."
+                ),
             })
         }
     };
