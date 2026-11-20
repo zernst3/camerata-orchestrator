@@ -139,6 +139,11 @@ mod held_rows_tests;
 #[cfg(test)]
 mod client_name_setup_follows_the_project;
 
+/// The finding-detail modal's code context and recommended fix follow the finding they are given
+/// (a lone `key:` on a plain child does not remount it).
+#[cfg(test)]
+mod finding_detail_follows_the_finding;
+
 #[cfg(test)]
 mod tests;
 

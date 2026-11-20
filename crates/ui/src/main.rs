@@ -240,3 +240,6 @@ fn AppShell() -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod key_semantics_tests;
