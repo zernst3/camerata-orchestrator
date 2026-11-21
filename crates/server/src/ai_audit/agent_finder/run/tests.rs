@@ -227,6 +227,7 @@ mod activity;
 mod checklist_outcomes;
 mod checkpoint;
 mod contract;
+mod convention_model;
 mod conventions;
 mod coverage;
 mod downstream;

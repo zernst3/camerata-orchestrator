@@ -6,12 +6,20 @@
 //! (`apply_alternative_decision`, `assign_deviation_kinds`, `conventions_observed_findings`,
 //! `no_convention_findings`) run unchanged on it.
 //!
-//! The listed places of an option that is not the convention become departures: one problem for
-//! each place, from the agent's own listing and checked against the file here.
+//! One [`RuleConvention`] record is built for each rule with options (convention model design,
+//! section 5): the options, the places the agent listed for each (checked against the file here),
+//! and the standard (the observed two thirds convention, else none; a rule with a correct default
+//! falls back to it). The departure rows follow from the record and the finder's own rows
+//! ([`departure_and_held_rows`]); the conventions module works out which places depart.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::super::checklist::{combine_for_unit, Effective, EffectiveAnswer, Place};
+use camerata_api_types::audit::{
+    CensusPlace, OptionCensus, PlaceStatus, Proposal, ProposalBasis, RuleConvention,
+    StandardSource, StandardState,
+};
+
 use crate::ai_audit::{RuleAlternatives, RuleRecommendation};
 use crate::onboard::Finding;
 use crate::scan_routing::AuditRule;
@@ -20,10 +28,8 @@ use crate::scan_routing::AuditRule;
 #[derive(Debug, Default)]
 pub(super) struct ConventionResult {
     pub recommendations: Vec<RuleRecommendation>,
-    /// One problem for each listed place of an option that is not the convention.
-    pub departures: Vec<Finding>,
-    /// A problem needing a decision for each listed place that could not be checked.
-    pub undecided: Vec<Finding>,
+    /// One convention record for each rule with options that was counted.
+    pub records: Vec<RuleConvention>,
     /// The defect problem of a rule whose majority option is marked `violates`.
     pub violates: Vec<Finding>,
     /// Operator-only remarks (a listed place that could not be checked).
@@ -50,11 +56,11 @@ pub(super) fn checked_place(
 }
 
 /// The problem needing a decision for a listed place that could not be checked against the file.
-fn held_row(repo: &str, rule: &str, title: &str, option_label: &str, place: &Place) -> Finding {
+fn held_row(repo: &str, rule: &str, title: &str, option_label: &str, place: &CensusPlace) -> Finding {
     Finding {
         repo: repo.to_string(),
         path: place.path.trim_start_matches("./").to_string(),
-        line: place.line.unwrap_or(0),
+        line: place.line,
         rule_id: "AI-OPEN-QUESTION".to_string(),
         severity: "low".to_string(),
         snippet: "A listed place could not be checked".to_string(),
@@ -152,14 +158,13 @@ pub(super) fn conventions_from_answers(
             }
         }
     }
-    // A rule whose answer cites a problem the model wrote: that problem is the report of it, so
-    // the engine adds no row of its own; the rule's option places are census only.
+    // A rule whose answer cites a problem the model wrote: that problem is a finder row of the
+    // rule. Only a problem that has a row can carry the places; with none, the engine's own rows
+    // stand so no place vanishes.
     let mut cited_by_rule: HashSet<String> = HashSet::new();
     for (i, answers) in filtered.iter().enumerate() {
         for a in answers {
             if let Effective::Problems(nums) = &a.state {
-                // Only a problem that has a row can carry the places; with none, the engine's
-                // own rows stand so no place vanishes.
                 if nums.iter().any(|n| problem_rows.contains(&(i, *n))) {
                     cited_by_rule.insert(a.rule.to_ascii_uppercase());
                 }
@@ -184,6 +189,9 @@ pub(super) fn conventions_from_answers(
                 .map_or_else(|| id.to_string(), |o| o.label.clone())
         };
         let decision = alt.kind == Some(camerata_rules::RuleKind::Decision);
+        let default_option = corpus
+            .get_by_id(&uc.rule)
+            .and_then(|r| r.default_option.clone());
         let plurality = uc
             .counts
             .iter()
@@ -199,28 +207,93 @@ pub(super) fn conventions_from_answers(
                 sites: Some(*n),
             })
             .collect();
-        // The option the rule is judged against: the two thirds majority, else (for a rule that
-        // has a correct default) the project's chosen option or the most common one.
-        let chosen: Option<String> = match &uc.convention {
-            Some(id) => Some(id.clone()),
-            None if decision => None,
-            None => alt.selected_option_id.clone().or(plurality.clone()),
+        // The standard (D1, A4): the observed two thirds option, else none. A rule that is not a
+        // pure decision has a correct default, so with no observed option it falls back to the
+        // project's chosen option, else the most common one, and is never "no convention".
+        let (standard_id, source) = match &uc.convention {
+            Some(id) => (Some(id.clone()), StandardSource::Observed),
+            None if decision => (None, StandardSource::None),
+            None => (
+                alt.selected_option_id.clone().or(plurality.clone()),
+                StandardSource::RuleDefault,
+            ),
         };
+        let mut record = RuleConvention {
+            repo: repo.to_string(),
+            rule_id: uc.rule.clone(),
+            default_option_id: default_option.clone(),
+            // What the finder's directive was: the project's chosen option, else the default. A
+            // rule that is not a pure decision is judged against its standard.
+            judged_option_id: if decision {
+                alt.selected_option_id.clone()
+            } else {
+                standard_id.clone()
+            },
+            observed_option_id: uc.convention.clone(),
+            assessed_places: Some(uc.total),
+            places_recorded: true,
+            options: alt
+                .options
+                .iter()
+                .map(|o| OptionCensus {
+                    option_id: o.id.clone(),
+                    label: o.label.clone(),
+                    violates: o.violates,
+                    count: Some(uc.counts.get(&o.id).copied().unwrap_or(0)),
+                    places: places
+                        .get(&(uc.rule.clone(), o.id.clone()))
+                        .map(|list| {
+                            list.iter()
+                                .map(|p| census_place(&by_path, p))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect(),
+            standard: StandardState {
+                option_id: standard_id.clone(),
+                source,
+                differs_from_default: standard_id
+                    .as_deref()
+                    .zip(default_option.as_deref())
+                    .filter(|(s, d)| s != d)
+                    .map(|(_, d)| label_of(d)),
+                proposal: if standard_id.is_none() {
+                    let chosen_earlier = alt
+                        .selected_option_id
+                        .clone()
+                        .filter(|c| Some(c) != default_option.as_ref());
+                    match (chosen_earlier, default_option.clone()) {
+                        (Some(c), _) => Some(Proposal {
+                            option_id: c,
+                            basis: ProposalBasis::EarlierChoice,
+                        }),
+                        (None, Some(d)) => Some(Proposal {
+                            option_id: d,
+                            basis: ProposalBasis::RuleDefault,
+                        }),
+                        (None, None) => None,
+                    }
+                } else {
+                    None
+                },
+                ..StandardState::default()
+            },
+            finder_rows: Vec::new(),
+        };
+        // Everything the agent listed is kept honestly: the total is the sum of the counts.
         let first_place = |option: &str| -> Option<(String, usize, String)> {
             places
                 .get(&(uc.rule.clone(), option.to_string()))
                 .and_then(|list| list.iter().find_map(|p| checked_place(&by_path, p)))
         };
-        let Some(chosen) = chosen else {
-            // No convention on a decision rule: one information row, no departures.
+        let Some(chosen) = standard_id else {
+            // No convention on a decision rule: one information row, no departures. The
+            // recommendation names no option (the proposal lives in the record).
             result.recommendations.push(RuleRecommendation {
                 repo: repo.to_string(),
                 rule_id: uc.rule.clone(),
-                recommended_option_id: alt
-                    .selected_option_id
-                    .clone()
-                    .or_else(|| alt.options.first().map(|o| o.id.clone()))
-                    .unwrap_or_default(),
+                recommended_option_id: String::new(),
                 recommendation_reasoning: format!(
                     "The {} places checked are split between the options, and no option holds \
                      two thirds of them.",
@@ -231,6 +304,7 @@ pub(super) fn conventions_from_answers(
                 assessed_sites: Some(uc.total),
                 ..RuleRecommendation::default()
             });
+            result.records.push(record);
             continue;
         };
         let count = uc.counts.get(&chosen).copied().unwrap_or(0);
@@ -252,52 +326,26 @@ pub(super) fn conventions_from_answers(
             ..RuleRecommendation::default()
         });
         let Some(opt) = alt.options.iter().find(|o| o.id == chosen) else {
+            result.records.push(record);
             continue;
         };
-        let title = corpus
-            .get_by_id(&uc.rule)
-            .map_or_else(|| uc.rule.clone(), |r| r.title.clone());
-        if cited_by_rule.contains(&uc.rule) {
-            // A problem the model wrote is the report of this rule. The option places are census
-            // only (the counts above): they never become rows, so none takes that problem's
-            // headline, rule or severity. Each place dropped is left as an operator note.
-            for ((rule, option), listed) in &places {
-                if rule != &uc.rule || (option == &chosen) != opt.violates {
-                    continue;
-                }
-                for place in listed {
-                    let at = format!(
-                        "{}{}",
-                        place.path,
-                        place.line.map_or(String::new(), |l| format!(":{l}"))
-                    );
-                    let state = if checked_place(&by_path, place).is_some() {
-                        "checked against the file"
-                    } else {
-                        "could not be checked against the file"
-                    };
-                    result.notes.push(format!(
-                        "{}: a listed place of the option \"{}\" (id {option}) at {at} {state}; \
-                         the rule is cited by a problem the model wrote, so it makes no row",
-                        uc.rule,
-                        label_of(option),
-                    ));
-                }
-            }
-            continue;
-        }
         if opt.violates {
-            // The codebase follows the rule's own named defect: one defect problem.
-            if let Some(f) = crate::ai_audit::routing::apply_alternative_decision(
-                &mut effective_selected,
-                repo,
-                &uc.rule,
-                opt,
-                &reasoning,
-                evidence.as_deref(),
-            ) {
-                result.violates.push(f);
+            // The codebase follows the rule's own named defect: one defect problem, unless a
+            // problem the model wrote already reports the rule.
+            if !cited_by_rule.contains(&uc.rule) {
+                if let Some(f) = crate::ai_audit::routing::apply_alternative_decision(
+                    &mut effective_selected,
+                    repo,
+                    &uc.rule,
+                    opt,
+                    &reasoning,
+                    evidence.as_deref(),
+                ) {
+                    result.violates.push(f);
+                }
             }
+            record.standard.proposal = None;
+            result.records.push(record);
             continue;
         }
         crate::ai_audit::routing::apply_alternative_decision(
@@ -308,43 +356,68 @@ pub(super) fn conventions_from_answers(
             &reasoning,
             evidence.as_deref(),
         );
-        for ((rule, option), listed) in &places {
-            if rule != &uc.rule || option == &chosen {
+        result.records.push(record);
+    }
+    result
+}
+
+/// A place the agent listed, checked against the repository: the line of code redacted and capped
+/// at 200 characters, or unchecked when the file or line is not there.
+fn census_place(files: &HashMap<&str, Vec<&str>>, place: &Place) -> CensusPlace {
+    match checked_place(files, place) {
+        Some((path, line, text)) => CensusPlace {
+            path,
+            line,
+            text: crate::onboard::redact::snippet_from_line(&text, 200),
+            checked: true,
+            status: PlaceStatus::NoStandard,
+        },
+        None => CensusPlace {
+            path: place.path.trim_start_matches("./").to_string(),
+            line: place.line.unwrap_or(0),
+            text: String::new(),
+            checked: false,
+            status: PlaceStatus::NoStandard,
+        },
+    }
+}
+
+/// The rows the records ask for beside the finder's own: a departure row for each place of an
+/// option that departs from the standard (unless a finder row covers it), and a problem needing a
+/// decision for each such place that could not be checked. `rows` are all rows so far.
+pub(super) fn departure_and_held_rows(
+    records: &[RuleConvention],
+    rows: &[Finding],
+    corpus: &camerata_rules::RuleSet,
+) -> (Vec<Finding>, Vec<Finding>, Vec<String>) {
+    let mut departures = Vec::new();
+    let mut held = Vec::new();
+    let mut notes = Vec::new();
+    for c in records {
+        departures.extend(crate::conventions::departure_rows(c, rows));
+        if c.standard.option_id.is_none() {
+            continue;
+        }
+        let title = corpus
+            .get_by_id(&c.rule_id)
+            .map_or_else(|| c.rule_id.clone(), |r| r.title.clone());
+        for o in &c.options {
+            if crate::conventions::option_status(c, &c.standard, &o.option_id) != PlaceStatus::Departs {
                 continue;
             }
-            for place in listed {
-                let Some((path, line, text)) = checked_place(&by_path, place) else {
-                    result.notes.push(format!(
-                        "{}: a listed place of the option \"{}\" ({}{}) could not be checked against the file",
-                        uc.rule,
-                        label_of(option),
-                        place.path,
-                        place.line.map_or(String::new(), |l| format!(":{l}")),
-                    ));
-                    let mut held = held_row(repo, &uc.rule, &title, &label_of(option), place);
-                    crate::onboard::redact::redact_finding(&mut held);
-                    result.undecided.push(held);
-                    continue;
-                };
-                let mut finding = Finding {
-                    repo: repo.to_string(),
-                    path,
-                    line,
-                    rule_id: uc.rule.clone(),
-                    severity: "low".to_string(),
-                    snippet: text.trim().to_string(),
-                    detail: format!(
-                        "This place uses \"{}\" for {title}. The rest of the codebase follows \"{}\".",
-                        label_of(option),
-                        label_of(&chosen)
-                    ),
-                    located: true,
-                    ..Finding::default()
-                };
-                crate::onboard::redact::redact_finding(&mut finding);
-                result.departures.push(finding);
+            for p in o.places.iter().filter(|p| !p.checked) {
+                notes.push(format!(
+                    "{}: a listed place of the option \"{}\" ({}{}) could not be checked against the file",
+                    c.rule_id,
+                    o.label,
+                    p.path,
+                    if p.line > 0 { format!(":{p}", p = p.line) } else { String::new() },
+                ));
+                let mut row = held_row(&c.repo, &c.rule_id, &title, &o.label, p);
+                crate::onboard::redact::redact_finding(&mut row);
+                held.push(row);
             }
         }
     }
-    result
+    (departures, held, notes)
 }

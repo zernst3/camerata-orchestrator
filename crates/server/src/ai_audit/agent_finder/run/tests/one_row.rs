@@ -108,7 +108,9 @@ fn fix_ids_of(
 }
 
 #[tokio::test]
-async fn a_cited_rules_option_places_are_census_only_and_make_no_rows() {
+async fn a_cited_rules_departing_option_places_make_a_row_each_beside_the_problem() {
+    // Convention model design section 3: every departing recorded place has a row unless a
+    // finder row covers it. The old census-only rule for a cited rule is gone.
     let (rows, _, _, failed, _, _) = run_cited(
         cited_script(
             json!([
@@ -125,14 +127,12 @@ async fn a_cited_rules_option_places_are_census_only_and_make_no_rows() {
     let layer = layer_rows(&rows);
     assert_eq!(
         places_of(&layer),
-        vec![("src/a.rs".to_string(), 4)],
-        "only the model's own problem; option places are census: {rows:?}"
-    );
-    assert!(
-        layer
-            .iter()
-            .all(|f| !f.detail.contains("The rest of the codebase follows")),
-        "no engine departure text"
+        vec![
+            ("src/a.rs".to_string(), 2),
+            ("src/a.rs".to_string(), 4),
+            ("src/b.rs".to_string(), 3)
+        ],
+        "the model's problem and one row for each departing place: {rows:?}"
     );
     assert!(rows.iter().all(|f| f.also_locations.is_empty()), "A11");
 }
@@ -160,8 +160,12 @@ async fn a_cited_problems_own_places_still_become_sibling_rows_beside_the_census
     assert!(failed.is_empty(), "{failed:?}");
     assert_eq!(
         places_of(&layer_rows(&rows)),
-        vec![("src/a.rs".to_string(), 4), ("src/b.rs".to_string(), 3)],
-        "{rows:?}"
+        vec![
+            ("src/a.rs".to_string(), 2),
+            ("src/a.rs".to_string(), 4),
+            ("src/b.rs".to_string(), 3)
+        ],
+        "the problem, its own place, and the departing option place (design section 3): {rows:?}"
     );
 }
 
@@ -279,7 +283,9 @@ async fn a_problem_listing_six_places_is_six_rows_in_one_fix() {
 }
 
 #[tokio::test]
-async fn a_cited_rules_unchecked_option_place_makes_no_row() {
+async fn a_cited_rules_unchecked_option_place_is_held_as_a_question() {
+    // Convention model design section 3: the checked place makes a row; the unchecked one is a
+    // problem needing a decision, as for a rule no problem cites.
     let (rows, _, _, failed, _, extras) = run_cited(
         cited_script(
             json!([
@@ -298,15 +304,12 @@ async fn a_cited_rules_unchecked_option_place_makes_no_row() {
         "{:?}",
         extras.notes
     );
-    assert!(
-        extras.notes.iter().any(|n| n.contains("src/a.rs:2")),
-        "{:?}",
-        extras.notes
-    );
-    assert!(
-        rows.iter().all(|f| f.path != "src/missing.rs"),
-        "census only, no row: {rows:?}"
-    );
+    let held = rows
+        .iter()
+        .find(|f| f.path == "src/missing.rs")
+        .unwrap_or_else(|| panic!("the unchecked place needs a decision: {rows:?}"));
+    assert!(held.needs_review);
+    assert!(rows.iter().any(|f| f.path == "src/a.rs" && f.line == 2));
 }
 
 #[test]
@@ -352,24 +355,20 @@ fn a_problems_answer_whose_cited_problem_has_no_row_keeps_its_places_as_engine_r
             &have,
         )
     };
-    let missing = run(&[]);
-    assert_eq!(
-        missing.departures.len(),
-        2,
-        "no row to carry the places, so the engine rows stand"
-    );
-    let present = run(&[(0, 7)]);
-    assert!(present.departures.is_empty());
-    assert!(missing.notes.is_empty(), "{:?}", missing.notes);
-    for place in ["src/a.rs:2", "src/b.rs:3"] {
-        assert!(
-            present
-                .notes
-                .iter()
-                .any(|n| n.contains(place) && n.contains("direct")),
-            "{place}: {:?}",
-            present.notes
+    // Convention model design section 3: the record keeps both options' places, and the
+    // departing option's two places are the departure rows, with or without a cited problem.
+    for have in [&[][..], &[(0, 7)][..]] {
+        let result = run(have);
+        assert_eq!(result.records.len(), 1);
+        let direct = &result.records[0].options[1];
+        assert_eq!(direct.places.len(), 2);
+        let (departures, held, notes) = super::super::conventions::departure_and_held_rows(
+            &result.records,
+            &[],
+            &corpus,
         );
+        assert_eq!(departures.len(), 2, "{departures:?}");
+        assert!(held.is_empty() && notes.is_empty(), "{notes:?}");
     }
 }
 
@@ -769,5 +768,5 @@ async fn a_cited_placeholder_problem_does_not_carry_the_rules_places() {
     );
     assert!(live
         .iter()
-        .all(|f| f.detail.contains("The rest of the codebase follows")));
+        .all(|f| f.detail.contains("This place uses \"Direct queries\"")));
 }

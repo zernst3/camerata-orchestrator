@@ -34,6 +34,7 @@ use crate::checkpoint::AbsorbedLine;
 use crate::cost_cap::RunControls;
 use crate::onboard::{Finding, ProposedRule};
 use crate::scan_ledger::{ScanLedger, StageAccounting, StageSample};
+use camerata_api_types::audit::RuleConvention;
 use crate::scan_routing::AuditRule;
 use crate::stage_telemetry::Stage;
 pub use activity::FinderActivity;
@@ -103,6 +104,8 @@ pub struct FinderExtras {
     /// Every rule an accepted `problems` answer or a citation names, whichever rule the merged
     /// row of its problem ended up under. A rule here has a problem and never reads clean.
     pub rules_with_problems: Vec<String>,
+    /// One convention record for each rule with options the finder judged for this repo.
+    pub conventions: Vec<RuleConvention>,
 }
 
 impl FinderExtras {
@@ -510,21 +513,41 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
     }
 }
 
-/// Move each agent problem keyed by a rule with no convention off that rule: to the next rule it
-/// was cited to that has a convention, else to the `AI-` id of its own label. `findings` and
-/// `problems` are in the same order.
-fn rekey_no_convention(
+/// Whether a finder row keyed to `rule` is not a departure from the rule's standard, so it does
+/// not belong under the rule (convention model design, A1). A rule with no record keeps its
+/// rows, and so does a rule whose standard is its own named defect.
+fn leaves_rule(f: &Finding, rule: &str, records: &[RuleConvention]) -> bool {
+    let Some(c) = records
+        .iter()
+        .find(|c| c.rule_id.eq_ignore_ascii_case(rule))
+    else {
+        return false;
+    };
+    if let Some(id) = &c.standard.option_id {
+        if c.options.iter().any(|o| &o.option_id == id && o.violates) {
+            return false;
+        }
+    }
+    let (option, _) = crate::conventions::option_of_row(f, c);
+    crate::conventions::finder_status(c, &c.standard, option.as_deref())
+        != camerata_api_types::audit::PlaceStatus::Departs
+}
+
+/// Move each agent problem that is not a departure from the standard of the rule it is keyed to
+/// off that rule: to the next rule it was cited to that it belongs under, else to the `AI-` id of
+/// its own label. A problem is never thrown out. `findings` and `problems` are in the same order.
+fn rekey_non_departing(
     findings: &mut [Finding],
     problems: &[Problem],
-    no_convention: &HashSet<String>,
+    records: &[RuleConvention],
     adopted: &HashSet<String>,
 ) {
-    if findings.len() != problems.len() {
+    if findings.len() != problems.len() || records.is_empty() {
         return;
     }
     for (f, p) in findings.iter_mut().zip(problems) {
         if !f.captures.contains_key(FINDER_PROBLEM_CAPTURE)
-            || !no_convention.contains(&f.rule_id.to_ascii_uppercase())
+            || !leaves_rule(f, &f.rule_id.to_ascii_uppercase(), records)
         {
             continue;
         }
@@ -534,7 +557,7 @@ fn rekey_no_convention(
             .into_iter()
             .flat_map(|c| c.split(','))
             .map(|r| r.trim().to_ascii_uppercase())
-            .find(|r| adopted.contains(r) && !no_convention.contains(r));
+            .find(|r| adopted.contains(r) && !leaves_rule(f, r, records));
         match next {
             Some(rule) => {
                 f.also_matches.retain(|r| *r != rule);
@@ -552,8 +575,13 @@ fn rekey_no_convention(
                 );
             }
         }
-        f.also_matches
-            .retain(|r| !no_convention.contains(&r.to_ascii_uppercase()));
+        let keep: Vec<String> = f
+            .also_matches
+            .iter()
+            .filter(|r| !leaves_rule(f, &r.to_ascii_uppercase(), records))
+            .cloned()
+            .collect();
+        f.also_matches = keep;
     }
 }
 
@@ -919,30 +947,18 @@ pub async fn find_repo(
         extras.notes.push(format!("{repo}: {note}"));
     }
 
-    // A problem cited to a rule with no convention is never thrown out: it moves to the next rule
-    // it was cited to that has one, else to its own label.
-    let no_convention_rules: HashSet<String> = conv
-        .recommendations
-        .iter()
-        .filter(|r| r.no_convention)
-        .map(|r| r.rule_id.to_ascii_uppercase())
-        .collect();
-    if !no_convention_rules.is_empty() {
-        for r in &mut reports {
-            rekey_no_convention(
-                &mut r.findings,
-                &r.problems,
-                &no_convention_rules,
-                &adopted_all,
-            );
-        }
-        rekey_no_convention(
-            &mut joints_findings,
-            &joints_problems,
-            &no_convention_rules,
-            &adopted_all,
-        );
+    // A problem that is not a departure from the standard of the rule it was cited to is never
+    // thrown out: it moves to the next rule it was cited to that it belongs under, else to its
+    // own label. It stays listed on the rule's conforming places.
+    for r in &mut reports {
+        rekey_non_departing(&mut r.findings, &r.problems, &conv.records, &adopted_all);
     }
+    rekey_non_departing(
+        &mut joints_findings,
+        &joints_problems,
+        &conv.records,
+        &adopted_all,
+    );
 
     // Every further place of a problem is a sibling row of it, from the model's own `places` (a
     // cited rule's option places are census only). No producer writes
@@ -976,8 +992,11 @@ pub async fn find_repo(
         .count();
     rows.extend(siblings);
     rows.extend(unresolved);
-    rows.extend(conv.departures);
-    rows.extend(conv.undecided);
+    let (departures, held_places, place_notes) =
+        conventions::departure_and_held_rows(&conv.records, &rows, corpus);
+    extras.notes.extend(place_notes);
+    rows.extend(departures);
+    rows.extend(held_places);
     // The deterministic backstop: a reviewer-addressed phrase in the code is a row of its own, so
     // the plant is seen even when the model obeyed it and reported nothing (the same checker the
     // floor runs when the rule is armed; the combined set collapses the same place later).
@@ -1104,7 +1123,9 @@ pub async fn find_repo(
         }
     }
     // Kinds, then the three information rows, as the engine writes them.
-    crate::ai_audit::assign_deviation_kinds(&mut verified, &recs, &alternatives);
+    let mut records = conv.records;
+    crate::conventions::tag(&mut verified, &mut records);
+    extras.conventions = records;
     let mut skipped_rules: Vec<(String, String)> = Vec::new();
     {
         let plan =

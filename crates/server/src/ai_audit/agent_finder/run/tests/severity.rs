@@ -267,9 +267,12 @@ async fn a_security_fault_under_a_departure_is_a_defect_not_a_deviation() {
         "an objective fault stays a defect: {:?}",
         fault.kind
     );
-    // The rule's answer cites the problem, so the departure is census only: no row at all.
+    // Convention model design section 3: the listed departing place is a row of its own, and the
+    // objective fault stays a defect beside it.
     assert!(
-        rows.iter().all(|f| !(f.path == "src/b.rs" && f.line == 3)),
+        rows.iter().any(|f| f.path == "src/b.rs"
+            && f.line == 3
+            && matches!(f.kind, Some(FindingKind::Deviation(_)))),
         "{rows:?}"
     );
     assert!(fault.also_locations.is_empty());
