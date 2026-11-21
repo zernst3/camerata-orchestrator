@@ -688,9 +688,10 @@ fn open_question_row(c: &RuleConvention) -> Finding {
     f
 }
 
-/// How many rules are split with no standard and no choice yet (A3). One function, so the export
-/// dialog's soft count and a future hard hold read the same thing.
-pub fn split_rules_without_choice(conventions: &[RuleConvention]) -> usize {
+/// The rules that are split with no standard and no choice yet (A3, which Zach ruled a hard
+/// hold on 2026-11-20). One function, so the export dialog's count, the release gate's hold and
+/// the problem text all read the same set.
+pub fn split_rules_without_choice(conventions: &[RuleConvention]) -> Vec<&RuleConvention> {
     conventions
         .iter()
         .filter(|c| {
@@ -698,7 +699,7 @@ pub fn split_rules_without_choice(conventions: &[RuleConvention]) -> usize {
                 && !c.standard.left_to_client
                 && c.options.iter().filter(|o| o.count.unwrap_or(0) > 0).count() >= 2
         })
-        .count()
+        .collect()
 }
 
 /// Build the records of a report saved before the convention model from what it has (section 9),
@@ -1159,9 +1160,9 @@ mod tests {
     #[test]
     fn a_split_with_no_choice_is_counted_once_by_the_shared_function() {
         let split = vec![trigger_env(), hearth(false)];
-        assert_eq!(split_rules_without_choice(&split), 1);
+        assert_eq!(split_rules_without_choice(&split).len(), 1);
         let mut left = trigger_env();
         left.standard.left_to_client = true;
-        assert_eq!(split_rules_without_choice(&[left]), 0);
+        assert!(split_rules_without_choice(&[left]).is_empty());
     }
 }

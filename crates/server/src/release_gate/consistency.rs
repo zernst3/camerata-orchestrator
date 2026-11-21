@@ -642,9 +642,13 @@ fn conventions_sheet_tally(xlsx: &[u8]) -> Result<BTreeMap<String, usize>, Strin
         if cell.is_empty() {
             continue;
         }
-        let kind = if cell == crate::xlsx_export::CONVENTION_STATUS_FOLLOWED {
+        let kind = if cell == crate::xlsx_export::CONVENTION_STATUS_FOLLOWED
+            || cell == crate::xlsx_export::CONVENTION_STATUS_SET_BY_REVIEWER
+        {
             "convention_observed"
-        } else if cell == crate::xlsx_export::CONVENTION_STATUS_NONE_ADOPTED {
+        } else if cell == crate::xlsx_export::CONVENTION_STATUS_NONE_ADOPTED
+            || cell == crate::xlsx_export::CONVENTION_STATUS_OPEN_QUESTION
+        {
             "no_convention"
         } else {
             "unrecognised status"

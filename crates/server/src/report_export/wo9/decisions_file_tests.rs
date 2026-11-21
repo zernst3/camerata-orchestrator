@@ -169,3 +169,51 @@ fn a_revoked_false_positive_prints_no_reason() {
         "a live ruling's reason prints"
     );
 }
+
+/// Convention model design section 11, test 21: decisions.json carries a live ruling on a
+/// standard, with the rule and the option's label, and a withdrawn one is not printed.
+#[test]
+fn decisions_json_carries_a_standard_ruling_and_not_a_withdrawn_one() {
+    use camerata_api_types::audit::{OptionCensus, RuleConvention};
+    use camerata_api_types::decisions::{StandardChoice, StandardRuling};
+    let mut report = crate::onboard::ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    report.conventions = vec![RuleConvention {
+        repo: "acme/app".into(),
+        rule_id: "ARCH-X-1".into(),
+        options: vec![OptionCensus {
+            option_id: "a".into(),
+            label: "Option A".into(),
+            ..OptionCensus::default()
+        }],
+        ..RuleConvention::default()
+    }];
+    let sealed = report.seal();
+    let ruling = |id: &str, choice: StandardChoice, revoked: bool| StandardRuling {
+        id: id.into(),
+        repo: "acme/app".into(),
+        rule_id: "ARCH-X-1".into(),
+        choice,
+        reason: "r".into(),
+        decided_by: "SECRET-REVIEWER".into(),
+        decided_at: "2026-11-20T00:00:00Z".into(),
+        run_id: "run".into(),
+        engine_version: "0".into(),
+        revoked_at: revoked.then(|| "t".to_string()),
+    };
+    let rulings = [
+        ruling("std-1", StandardChoice::Accept { option_id: "a".into() }, false),
+        ruling("std-2", StandardChoice::LeaveToClient, true),
+    ];
+    let reviewed =
+        crate::report_export::apply_overlay_with_standards(&sealed, &[], &[], &[], &rulings);
+    let bytes = crate::report_export::decisions_file::decisions_json(&reviewed).unwrap();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let file: Value = serde_json::from_slice(&bytes).unwrap();
+    let rows = file["decisions"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{text}");
+    assert_eq!(rows[0]["state"], "standard_set");
+    assert_eq!(rows[0]["rule_id"], "ARCH-X-1");
+    assert_eq!(rows[0]["option_label"], "Option A");
+    assert!(!text.contains("SECRET-REVIEWER"), "{text}");
+}

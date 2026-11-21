@@ -44,7 +44,18 @@ pub struct DecisionRowJson {
     /// The record was undone. It stays in the file: the record that was undone is part of the
     /// history of the ruling.
     pub revoked: bool,
+    /// A ruling on the standard of a rule with options: the rule. Empty on every other record.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rule_id: String,
+    /// A ruling that set a standard: the option's label. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub option_label: String,
 }
+
+/// The state of a ruling that set the convention of a rule.
+pub const STANDARD_SET: &str = "standard_set";
+/// The state of a ruling that left a rule's choice to the client.
+pub const STANDARD_LEFT_TO_CLIENT: &str = "left_to_client";
 
 /// The state's name in the file.
 pub fn state_name(state: &DecisionState) -> &'static str {
@@ -93,6 +104,41 @@ fn row_of(d: &Decision) -> DecisionRowJson {
         },
         confirmed_by_client,
         revoked: !d.is_active(),
+        rule_id: String::new(),
+        option_label: String::new(),
+    }
+}
+
+/// One live ruling on a standard as the package prints it (convention model design, section 5):
+/// the rule and the option's label. The reviewer's name and the time are not printed, like every
+/// other record of this file.
+fn standard_row(
+    r: &camerata_api_types::decisions::StandardRuling,
+    reviewed: &ReviewedReport,
+) -> DecisionRowJson {
+    use camerata_api_types::decisions::StandardChoice;
+    let (state, label) = match &r.choice {
+        StandardChoice::Accept { option_id } => (
+            STANDARD_SET,
+            reviewed
+                .report()
+                .conventions
+                .iter()
+                .filter(|c| c.repo == r.repo && c.rule_id.eq_ignore_ascii_case(&r.rule_id))
+                .flat_map(|c| c.options.iter())
+                .find(|o| &o.option_id == option_id)
+                .map_or_else(|| option_id.clone(), |o| o.label.clone()),
+        ),
+        StandardChoice::LeaveToClient => (STANDARD_LEFT_TO_CLIENT, String::new()),
+    };
+    DecisionRowJson {
+        id: r.id.clone(),
+        scope: "rule".to_string(),
+        state: state.to_string(),
+        has_reason: !r.reason.trim().is_empty(),
+        rule_id: r.rule_id.clone(),
+        option_label: label,
+        ..DecisionRowJson::default()
     }
 }
 
@@ -125,6 +171,12 @@ pub fn decision_rows(reviewed: &ReviewedReport) -> Vec<DecisionRowJson> {
             .filter(|e| e.field == camerata_api_types::edits::EditField::Severity)
             .enumerate()
             .map(|(i, e)| severity_edit_row(i + 1, e)),
+    );
+    rows.extend(
+        reviewed
+            .standards()
+            .iter()
+            .map(|r| standard_row(r, reviewed)),
     );
     rows
 }

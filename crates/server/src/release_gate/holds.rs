@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use camerata_api_types::review_view::{ExportGateView, HeldRow, HoldReason, NodeDecisionGap};
 
-use super::{engine_check, evidence, held, junk, needs_decision};
+use super::{engine_check, evidence, held, junk, needs_decision, split_rules};
 use crate::onboard::Finding;
 use crate::report_export::decisions_file::decision_rows;
 use crate::report_export::overlay::merged_target;
@@ -203,5 +203,9 @@ pub fn gate_holds(reviewed: &ReviewedReport) -> ExportGateView {
         held: rows,
         merged_without_decision,
         node_decisions_missing_members: gaps,
+        split_rules: split_rules::split_rules(reviewed)
+            .into_iter()
+            .map(|(repo, rule_id)| camerata_api_types::review_view::SplitRuleHold { repo, rule_id })
+            .collect(),
     }
 }

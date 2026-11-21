@@ -33,6 +33,7 @@ pub mod needs_decision;
 mod operator_only;
 mod report;
 mod secrets;
+pub mod split_rules;
 mod text_style;
 pub mod tool_claim;
 pub mod unsynced;
@@ -94,6 +95,8 @@ pub struct ProductPackage {
     /// Sites the Engine Check said No to that carry no correction, one problem each, and one
     /// problem when the Engine Check file cannot be read (design A2b).
     pub engine_check_no_without_correction: Vec<Problem>,
+    /// A rule split between options with no decision (Zach, 2026-11-20).
+    pub split_rules_without_decision: Vec<Problem>,
     /// M4: the rows marked as junk (`junk_finding::JUNK_CONTENT_CAPTURE`) that carry no reviewer
     /// decision in the export request, one problem each. Worked out beside the evidence check, for
     /// the same reason, and recorded by [`release`] under the content check.
@@ -293,6 +296,7 @@ pub(crate) fn assemble_package(
         unsynced_reviewer_changes: unsynced::problems(&report.findings, &options.unsynced_changes),
         restored_without_decision: held::restored_without_decision(&report.findings, reviewed),
         split_out_without_decision: held::split_out_without_decision(&report.findings, reviewed),
+        split_rules_without_decision: split_rules::problems(reviewed),
         engine_check_no_without_correction: engine_check::problems(
             &report.findings,
             &report.discarded,
@@ -772,6 +776,14 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
             Vec::new()
         } else {
             package.critical_or_unsure_without_decision.clone()
+        },
+    );
+    report.record(
+        CheckId::SplitRuleWithoutDecision,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.split_rules_without_decision.clone()
         },
     );
     report.record(

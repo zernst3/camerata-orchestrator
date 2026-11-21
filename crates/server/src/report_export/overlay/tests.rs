@@ -916,4 +916,19 @@ mod standards {
         let withdrawn = apply_overlay(&sealed, std::slice::from_ref(&d), &[], &[]);
         assert!(!withdrawn.report().findings.iter().any(|f| f.site_key == key));
     }
+
+    /// Test 20: the departures a ruling makes are Unresolved (no decision, so no disposition) and
+    /// are not held by the gate.
+    #[test]
+    fn departures_made_from_a_ruling_are_unresolved_and_not_held() {
+        let sealed = hearth_sealed();
+        let reviewed = apply_overlay_with_standards(&sealed, &[], &[], &[], &[accept("par")]);
+        let holds = crate::release_gate::holds::hold_set(&reviewed);
+        for d in departures(&reviewed) {
+            assert!(!reviewed.dispositions().contains_key(&d.site_key), "Unresolved");
+            assert!(!holds.awaiting_a_ruling.contains(&d.site_key), "not held");
+            assert!(crate::release_gate::needs_decision::why(&d).is_none(), "not unsure");
+            assert_eq!(d.severity, "low");
+        }
+    }
 }
