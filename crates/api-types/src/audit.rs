@@ -220,10 +220,10 @@ pub struct DeviationKind {
     pub convention_label: String,
     /// Where the standard these rows depart from came from (design section 4). `None` reads
     /// as observed, which is what every report saved before the convention model means.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standard_source: Option<StandardSource>,
     /// The rule's default option label when the standard is a different option.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub differs_from_default: Option<String>,
 }
 
@@ -237,10 +237,10 @@ pub struct ConventionObservedKind {
     /// The authored option's human label (corpus text, never model prose).
     pub convention_label: String,
     /// Where the standard came from. `None` reads as observed.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standard_source: Option<StandardSource>,
     /// The rule's default option label when the standard is a different option.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub differs_from_default: Option<String>,
 }
 
@@ -267,7 +267,7 @@ pub struct NoConventionKind {
     /// when available.
     pub observed_options: Vec<ObservedOptionUsage>,
     /// The reviewer chose "No recommendation, leave it to the client" for this rule.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub left_to_client: bool,
 }
 

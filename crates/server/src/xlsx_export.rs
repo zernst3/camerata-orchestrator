@@ -1484,7 +1484,7 @@ struct DeviationGroupRow {
     fix_type: String,
     /// Where the convention came from (observed, set by the reviewer), in the words of the
     /// convention model design, section 7.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(skip)]
     standard_note: String,
     /// Where the convention came from, as the payload states it. Not exported.
     #[serde(skip)]
@@ -6471,10 +6471,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            cell_by_header(&bytes, "Departures", "Convention", 1),
+            cell_by_header(&bytes, "Departures", "Convention", 1)
+                .lines()
+                .next()
+                .unwrap_or_default(),
             "URI-versioned endpoints",
             "the convention the codebase follows is its own column, verbatim from the \
-             authored corpus option"
+             authored corpus option (its first line; the next line says where it came from, \
+             convention model design section 7)"
         );
         assert_eq!(
             number_by_header(&bytes, "Departures", "Places departing", 1),

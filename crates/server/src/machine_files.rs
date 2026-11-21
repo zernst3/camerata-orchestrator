@@ -26,7 +26,7 @@ const FINDING_DATASETS: [&str; 2] = ["all-findings", "false-positives"];
 /// The columns of `all-findings` and `false-positives` (one row shape), in the order the rows
 /// write them. A row of a deviation, a convention, a missing convention or a rule that could not be
 /// assessed adds its own payload columns at the end.
-const FINDING_COLUMNS: [&str; 54] = [
+const FINDING_COLUMNS: [&str; 57] = [
     "severity",
     "headline",
     "repo",
@@ -78,7 +78,10 @@ const FINDING_COLUMNS: [&str; 54] = [
     "assessed_sites",
     "convention_option_id",
     "convention_label",
+    "standard_source",
+    "differs_from_default",
     "observed_options",
+    "left_to_client",
     "reason",
     "reason_detail",
 ];

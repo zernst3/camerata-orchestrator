@@ -24,7 +24,7 @@ use crate::ai_audit::agent_finder::reply::{
 use crate::onboard::Finding;
 
 /// The capture an engine departure row carries: the option id of the place it stands for. A
-/// remainder row (places that were counted but not listed) carries `option#K`. A bookkeeping key
+/// remainder row (places that were counted but not listed) carries `option~K`. A bookkeeping key
 /// (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`) and an overlay key
 /// (`report_export::overlay::OVERLAY_CAPTURE_KEYS`).
 pub const CONVENTION_PLACE_CAPTURE: &str = "convention-place";
@@ -76,7 +76,7 @@ fn row_range(f: &Finding) -> (usize, usize) {
 /// number of places it stands for.
 fn place_capture(f: &Finding) -> Option<(&str, Option<usize>)> {
     let v = f.captures.get(CONVENTION_PLACE_CAPTURE)?;
-    match v.split_once('#') {
+    match v.split_once('~') {
         Some((option, k)) => Some((option, k.parse().ok())),
         None => Some((v.as_str(), None)),
     }
@@ -264,7 +264,7 @@ fn remainder_row(
     };
     f.captures.insert(
         CONVENTION_PLACE_CAPTURE.to_string(),
-        format!("{}#{k}", option.option_id),
+        format!("{}~{k}", option.option_id),
     );
     f
 }

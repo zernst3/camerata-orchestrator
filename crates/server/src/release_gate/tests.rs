@@ -442,6 +442,7 @@ fn release_passes_a_clean_package_and_reports_sixteen_checks() {
             "manifest",
             "provenance",
             "unsynced reviewer changes",
+            "reviewer decision on split rules",
             "one fix per row",
             "client text style",
             "internal notes kept out"
@@ -1258,7 +1259,8 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
              merged rows, reviewer decision on restored findings, reviewer decision on split-out problems, reviewer correction on \
              flagged findings, reviewer decision on critical and unsure findings, \
              confidentiality marking, manifest, provenance, unsynced \
-             reviewer changes, one fix per row, client text style, internal notes kept out"
+             reviewer changes, reviewer decision on split rules, one fix per row, client text \
+             style, internal notes kept out"
         )
     );
 }

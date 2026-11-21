@@ -991,7 +991,7 @@ async fn uncorrected_engine_check_no_is_refused_through_every_loader() {
     // the same statement. A new loader that skips it fails here.
     let mut found = 0;
     for (file, text) in source_files() {
-        for (at, _) in text.match_indices("apply_overlay(") {
+        for (at, _) in text.match_indices("apply_overlay_with_standards(") {
             if text[..at].ends_with("fn ") || file == "report_export/overlay.rs" {
                 continue;
             }
