@@ -200,6 +200,7 @@ To regenerate it: `UPDATE_CLIENT_PACKAGE_DOC=1 cargo test -p camerata-server cli
 | How consistently | Whether your code follows the convention everywhere we looked. | Your conventions |
 | Places looked at | How many places we looked at to see the convention. | Your conventions |
 | More detail | The longer explanation behind a row. | All problems; Your conventions; Not checked |
+| Where the convention came from | Whether your code follows the convention or the reviewer set it, with the number of places that depart. | Departures |
 | Places departing | How many places depart from the convention. | Departures |
 | Places checked | How many places we checked against the convention. | Departures |
 | Worst severity | The highest severity among the departing places. | Departures |

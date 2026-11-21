@@ -1044,7 +1044,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     ),
     e(
         "Where the convention came from",
-        "Whether your code follows the convention, or the reviewer set it, and how many places depart.",
+        "Whether your code follows the convention or the reviewer set it, with the number of places that depart.",
         "Departures",
     ),
     e(
