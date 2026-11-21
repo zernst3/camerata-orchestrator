@@ -34,10 +34,10 @@ use crate::checkpoint::AbsorbedLine;
 use crate::cost_cap::RunControls;
 use crate::onboard::{Finding, ProposedRule};
 use crate::scan_ledger::{ScanLedger, StageAccounting, StageSample};
-use camerata_api_types::audit::RuleConvention;
 use crate::scan_routing::AuditRule;
 use crate::stage_telemetry::Stage;
 pub use activity::FinderActivity;
+use camerata_api_types::audit::RuleConvention;
 use piece::{PieceReport, Shared, StoredPiece};
 
 /// Settings of one finder run that are not on [`RunControls`].

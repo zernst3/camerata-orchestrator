@@ -769,10 +769,14 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // own rows by core's `rule_hub`. A request for a rule with no rows in that repo resolves
     // to `None` and the modal simply does not mount — the hub describes what a scan FOUND, and
     // an empty strip would be a dead affordance.
-    let open_hub: Option<RuleHubView> = hub_open
-        .read()
-        .as_ref()
-        .and_then(|r| rule_hub(&findings, &r.repo, &r.rule_id));
+    let open_hub: Option<RuleHubView> = hub_open.read().as_ref().and_then(|r| {
+        camerata_ui_core::triage::rule_hub_with_conventions(
+            &findings,
+            &report.conventions,
+            &r.repo,
+            &r.rule_id,
+        )
+    });
 
     // THE ALTERNATIVES CONTEXT for the open hub (design §9.1): the Evaluated-against line and
     // the Why? answer, at the surface every rule id already opens. `None` unless the rule is
@@ -926,6 +930,30 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                     hub_open.set(None);
                 }),
                 on_close: Callback::new(move |()| hub_open.set(None)),
+                // The reviewer's ruling on the standard: accept an option, leave it to the
+                // client or withdraw. Saved on the server; the review is read again after.
+                on_ruling: {
+                    let project_id = project_id.clone();
+                    Some(Callback::new(move |action: super::queue_table::RulingAction| {
+                        let Some(req) = hub_open.peek().clone() else {
+                            return;
+                        };
+                        let project_id = project_id.clone();
+                        spawn(async move {
+                            match super::wire::post_ruling(&project_id, &req.repo, &req.rule_id, &action).await {
+                                Ok(()) => {
+                                    review_refresh += 1;
+                                    hub_open.set(None);
+                                }
+                                Err(msg) => crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    msg,
+                                ),
+                            }
+                        });
+                    }))
+                },
             }
         }
         // THE COMMIT DIALOG (Q4's gate). Hosted at the results-subtree root for the same
@@ -1808,6 +1836,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 repos: report.repos.clone(),
                                 recommendations,
                                 audit,
+                                conventions: report.conventions.clone(),
                             }
                         }
                     }
@@ -1863,9 +1892,17 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         busy: committing(),
                         only_unopened: unopened_only(),
                         on_clear_filter: Callback::new(move |()| unopened_only.set(false)),
-                        on_toggle: Callback::new(move |key: String| {
-                            adoption.write().toggle_adopted(&key);
-                        }),
+                        on_toggle: {
+                            let rows = findings.clone();
+                            Callback::new(move |key: String| {
+                                // A convention that differs from the rule's default is off until
+                                // ticked, so the toggle goes through the convention itself.
+                                match adoptable_conventions(&rows).into_iter().find(|c| c.key() == key) {
+                                    Some(c) => adoption.write().toggle_adopted_for(&c),
+                                    None => adoption.write().toggle_adopted(&key),
+                                }
+                            })
+                        },
                         // THE ONE WRITER of the openness record. Nothing else in this file
                         // calls `mark_opened`, which is what makes the dialog's "not opened"
                         // count a record of a gesture rather than an inference.

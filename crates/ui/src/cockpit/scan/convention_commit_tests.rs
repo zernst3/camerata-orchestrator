@@ -687,9 +687,21 @@ fn req_pass2_14_the_no_convention_pick_defaults_to_leave_and_says_it_is_governan
         html.contains("AGENTS.md"),
         "and name where it lands; html=\n{html}"
     );
+    // Convention model design section 8 (test 24): "Leave as reported" became "No recommendation,
+    // leave it to the client", with its effect text.
     assert!(
-        html.contains("Leave as reported"),
+        html.contains("No recommendation, leave it to the client"),
         "the default option is present; html=\n{html}"
+    );
+    assert!(
+        html.contains(
+            "The report lists the options and the places that follow each, with none suggested."
+        ),
+        "and says what it does; html=\n{html}"
+    );
+    assert!(
+        !html.contains("Leave as reported"),
+        "the old words are gone; html=\n{html}"
     );
     assert_eq!(
         html.matches("adopt-state off").count(),

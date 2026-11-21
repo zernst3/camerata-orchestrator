@@ -202,7 +202,13 @@ fn decisions_json_carries_a_standard_ruling_and_not_a_withdrawn_one() {
         revoked_at: revoked.then(|| "t".to_string()),
     };
     let rulings = [
-        ruling("std-1", StandardChoice::Accept { option_id: "a".into() }, false),
+        ruling(
+            "std-1",
+            StandardChoice::Accept {
+                option_id: "a".into(),
+            },
+            false,
+        ),
         ruling("std-2", StandardChoice::LeaveToClient, true),
     ];
     let reviewed =

@@ -91,12 +91,32 @@ pub struct AdoptableConvention {
     /// How many sites deviate from this convention right now. **Context, never a gate.**
     /// Zero for a `ConventionObserved` row.
     pub deviating_sites: usize,
+    /// Where the standard came from (`None` reads as observed). A convention the reviewer set is
+    /// pre-selected for adoption.
+    pub standard_source: Option<camerata_api_types::audit::StandardSource>,
+    /// The rule's default option label, when the convention is a different option. An observed
+    /// convention that differs from the default is NOT pre-selected: adopting it is opt in.
+    pub differs_from_default: Option<String>,
 }
 
 impl AdoptableConvention {
     /// This convention's [`adoption_key`].
     pub fn key(&self) -> String {
         adoption_key(&self.repo, &self.rule_id)
+    }
+
+    /// Whether the convention is selected for adoption before the curator touches it: set by the
+    /// reviewer, or observed and equal to the rule's default.
+    pub fn default_selected(&self) -> bool {
+        self.standard_source == Some(camerata_api_types::audit::StandardSource::Reviewer)
+            || self.differs_from_default.is_none()
+    }
+
+    /// The line the panel prints for a convention that differs from the rule's default.
+    pub fn default_line(&self) -> Option<String> {
+        self.differs_from_default
+            .as_ref()
+            .map(|d| format!("Differs from the rule's default: {d}"))
     }
 
     /// Whether this convention can be written at all.
@@ -159,6 +179,8 @@ pub fn adoptable_conventions(findings: &[FindingView]) -> Vec<AdoptableConventio
                 option_id: d.convention_option_id.clone(),
                 label: d.convention_label.clone(),
                 deviating_sites: d.deviating_sites,
+                standard_source: d.standard_source,
+                differs_from_default: d.differs_from_default.clone(),
             });
         // Every deviating row of a rule repeats the same group-level counts verbatim
         // (`DeviationKind`'s own doc), so later rows agree with the first and this is a no-op.
@@ -176,9 +198,13 @@ pub fn adoptable_conventions(findings: &[FindingView]) -> Vec<AdoptableConventio
                     option_id: Some(c.convention_option_id.clone()),
                     label: c.convention_label.clone(),
                     deviating_sites: 0,
+                    standard_source: c.standard_source,
+                    differs_from_default: c.differs_from_default.clone(),
                 });
             e.option_id = Some(c.convention_option_id.clone());
             e.label = c.convention_label.clone();
+            e.standard_source = c.standard_source;
+            e.differs_from_default = c.differs_from_default.clone();
         }
     }
     out.into_values().collect()
@@ -274,6 +300,9 @@ pub struct AdoptionModel {
     opened: BTreeSet<String>,
     /// `NoConvention` picks: key -> chosen option id. Absence means "leave as reported".
     recommended: BTreeMap<String, String>,
+    /// Conventions that are off by default (observed, and different from the rule's default)
+    /// and that the curator ticked. Absence means they stay off.
+    opted_in: BTreeSet<String>,
 }
 
 impl AdoptionModel {
@@ -295,6 +324,36 @@ impl AdoptionModel {
         } else {
             self.skipped.insert(key.to_string());
         }
+    }
+
+    /// Whether `c` will be written: a convention selected by default is adopted unless skipped;
+    /// one that is off by default (observed, differs from the rule's default) only when the
+    /// curator opted in.
+    pub fn is_adopted_for(&self, c: &AdoptableConvention) -> bool {
+        let key = c.key();
+        if c.default_selected() {
+            self.is_adopted(&key)
+        } else {
+            self.opted_in.contains(&key)
+        }
+    }
+
+    /// Set `c`'s adopt state, through the right set for how it is selected by default.
+    pub fn set_adopted_for(&mut self, c: &AdoptableConvention, adopt: bool) {
+        let key = c.key();
+        if c.default_selected() {
+            self.set_adopted(&key, adopt);
+        } else if adopt {
+            self.opted_in.insert(key);
+        } else {
+            self.opted_in.remove(&key);
+        }
+    }
+
+    /// Flip `c`'s adopt state (see [`Self::is_adopted_for`]).
+    pub fn toggle_adopted_for(&mut self, c: &AdoptableConvention) {
+        let now = self.is_adopted_for(c);
+        self.set_adopted_for(c, !now);
     }
 
     /// Flip adopt/skip.
@@ -477,7 +536,7 @@ impl CommitPlan {
         let mut skipped = 0usize;
         for c in &mine {
             let key = c.key();
-            if !model.is_adopted(&key) {
+            if !model.is_adopted_for(c) {
                 skipped += 1;
                 continue;
             }
@@ -1572,5 +1631,55 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(merge_adoptions(&current, "me/api", &[]), current);
+    }
+
+    /// Convention model design section 8 and test 27: an observed convention that differs from the
+    /// rule's default is off until ticked; one equal to the default is pre-selected; one the
+    /// reviewer set is pre-selected.
+    #[test]
+    fn a_convention_that_differs_from_the_rule_default_is_off_until_ticked() {
+        let observed_differs = kinded(
+            "me/api",
+            "RULE-A-1",
+            serde_json::json!({
+                "kind": "convention_observed", "convention_option_id": "seq",
+                "convention_label": "Sequential", "differs_from_default": "Parallel"
+            }),
+        );
+        let observed_equal = convention("me/api", "RULE-B-1", "x", "X");
+        let by_reviewer = kinded(
+            "me/api",
+            "RULE-C-1",
+            serde_json::json!({
+                "kind": "convention_observed", "convention_option_id": "y",
+                "convention_label": "Y", "standard_source": "reviewer",
+                "differs_from_default": "Z"
+            }),
+        );
+        let all = adoptable_conventions(&[observed_differs, observed_equal, by_reviewer]);
+        let a = all.iter().find(|c| c.rule_id == "RULE-A-1").unwrap();
+        let b = all.iter().find(|c| c.rule_id == "RULE-B-1").unwrap();
+        let c = all.iter().find(|c| c.rule_id == "RULE-C-1").unwrap();
+        assert_eq!(a.differs_from_default.as_deref(), Some("Parallel"));
+        let mut model = AdoptionModel::new();
+        assert!(!model.is_adopted_for(a), "off until ticked");
+        assert!(model.is_adopted_for(b));
+        assert!(model.is_adopted_for(c), "set by the reviewer");
+        let plan = CommitPlan::conventions(&all, &model, "me/api");
+        let rules: Vec<&str> = plan.adopted.iter().map(|r| r.rule_id.as_str()).collect();
+        assert_eq!(rules, vec!["RULE-B-1", "RULE-C-1"]);
+        assert_eq!(plan.skipped, 1);
+        model.set_adopted_for(a, true);
+        assert!(model.is_adopted_for(a));
+        assert!(CommitPlan::conventions(&all, &model, "me/api")
+            .adopted
+            .iter()
+            .any(|r| r.rule_id == "RULE-A-1"));
+        model.set_adopted_for(a, false);
+        assert!(!model.is_adopted_for(a));
+        assert_eq!(
+            a.default_line().as_deref(),
+            Some("Differs from the rule's default: Parallel")
+        );
     }
 }

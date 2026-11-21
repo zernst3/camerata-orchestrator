@@ -590,6 +590,62 @@ pub(in crate::cockpit) struct ScanReportView {
     /// patterns_across_services`; empty (no tab) for a project of one repo.
     #[serde(default)]
     pub patterns_across_services: camerata_ui_core::patterns::PatternsView,
+    /// One convention record for each rule with options the agent finder judged (convention
+    /// model design 2026-11-20). Empty for a report saved before the model.
+    #[serde(default)]
+    pub conventions: Vec<camerata_api_types::audit::RuleConvention>,
+}
+
+/// `POST /api/projects/:id/standards` or the revoke route: the reviewer's ruling on the standard of
+/// one rule. `Err` carries the server's reason for a refusal, or why it could not be reached.
+pub(in crate::cockpit) async fn post_ruling(
+    project_id: &str,
+    repo: &str,
+    rule_id: &str,
+    action: &super::queue_table::RulingAction,
+) -> Result<(), String> {
+    use super::queue_table::RulingAction;
+    use camerata_api_types::decisions::{PostStandardReq, StandardChoice};
+    let base = crate::bff_base();
+    let client = reqwest::Client::new();
+    let resp = match action {
+        RulingAction::Withdraw(id) => {
+            client
+                .post(format!(
+                    "{base}/api/projects/{project_id}/standards/{id}/revoke"
+                ))
+                .send()
+                .await
+        }
+        other => {
+            let choice = match other {
+                RulingAction::Accept(option_id) => StandardChoice::Accept {
+                    option_id: option_id.clone(),
+                },
+                _ => StandardChoice::LeaveToClient,
+            };
+            client
+                .post(format!("{base}/api/projects/{project_id}/standards"))
+                .json(&PostStandardReq {
+                    repo: repo.to_string(),
+                    rule_id: rule_id.to_string(),
+                    choice,
+                    reason: String::new(),
+                })
+                .send()
+                .await
+        }
+    }
+    .map_err(|e| format!("The ruling could not be saved: {e}"))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let v: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(v["message"]
+            .as_str()
+            .unwrap_or("The ruling was refused.")
+            .to_string())
+    }
 }
 
 pub(in crate::cockpit) async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {

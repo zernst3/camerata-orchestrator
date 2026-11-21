@@ -1609,7 +1609,11 @@ mod split_rules {
         let reviewed = apply_overlay(&sealed, &[], &[], &[]);
         let problems = split_problems(&reviewed, false);
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].message.contains(SPLIT_RULE), "{:?}", problems[0]);
+        assert!(
+            problems[0].message.contains(SPLIT_RULE),
+            "{:?}",
+            problems[0]
+        );
         assert!(
             problems[0].message.contains("Recommend an option")
                 && problems[0].message.contains("leave it to the client"),
@@ -1626,7 +1630,9 @@ mod split_rules {
     fn accepting_an_option_or_leaving_it_to_the_client_clears_the_hold() {
         let sealed = report_with_a_split_rule().seal();
         for choice in [
-            StandardChoice::Accept { option_id: "a".into() },
+            StandardChoice::Accept {
+                option_id: "a".into(),
+            },
             StandardChoice::LeaveToClient,
         ] {
             let reviewed = crate::report_export::apply_overlay_with_standards(

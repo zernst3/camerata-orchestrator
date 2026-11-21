@@ -1024,8 +1024,20 @@ pub(in crate::cockpit) fn RuleHubStrip(
     /// that the hub offers exactly ONE control — keep compiling and asserting unchanged.
     #[props(default)]
     alternatives: Option<AlternativeControlsRow>,
+    /// A ruling on the standard of this rule (convention model, design section 8): accept an
+    /// option, leave it to the client, or withdraw the ruling. `None` renders the model's lists
+    /// with no controls.
+    #[props(default)]
+    on_ruling: Option<Callback<RulingAction>>,
+    /// Open the code viewer on a place (a finding row's key, when the place is one).
+    #[props(default)]
+    on_open_place: Option<Callback<PlaceOpen>>,
 ) -> Element {
     let (kind_class, kind_label, kind_tip) = kind_chip_parts(hub.kind_tag);
+    let model = hub
+        .convention
+        .as_ref()
+        .map(camerata_ui_core::convention_view::convention_view);
     let jump = hub.jump;
     let jump_label = match jump {
         KindSurface::Queue => "Show in the Queue, filtered to this rule".to_string(),
@@ -1111,14 +1123,124 @@ pub(in crate::cockpit) fn RuleHubStrip(
                     // and a curator reading "Override, pending rescan" with no way to act on
                     // it needs to be told where the control is rather than left to hunt.
                     p { class: "rule-hub-alt-where",
-                        "Change this, or rescan a staged override, in \u{201c}Rule alternatives\u{201d} above the Queue."
+                        if hub.convention.is_some() {
+                            "Rule on this with the controls below, or in \u{201c}Rule alternatives\u{201d} above the Queue."
+                        } else {
+                            "Change this, or rescan a staged override, in \u{201c}Rule alternatives\u{201d} above the Queue."
+                        }
                     }
                 }
             }
             // COUNTS ONLY, and the sentence says why. Offering a link here would be inventing
             // a data set: the pipeline reports deviating sites and a total, never the
             // conforming set.
-            if let Some(c) = hub.conforming {
+            // The convention model: what the engine found, where the standard came from, the places
+            // by status (each opens the viewer) and the controls that rule on it.
+            if let Some(m) = model.clone() {
+                div { class: "rule-hub-model",
+                    p { class: "rule-hub-model-found", "{m.engine_line}" }
+                    p { class: "rule-hub-model-origin", "Standard: {m.origin}" }
+                    if let Some(d) = m.differs_line.clone() {
+                        p { class: "rule-hub-model-differs", "{d}" }
+                    }
+                    for g in m.groups.iter() {
+                        div { class: "rule-hub-places",
+                            p { class: "rule-hub-places-h", "{g.title}" }
+                            ul {
+                                for pl in g.places.iter() {
+                                    {
+                                        let open = PlaceOpen {
+                                            repo: pl.repo.clone(),
+                                            path: pl.path.clone(),
+                                            line: pl.line,
+                                        };
+                                        rsx! {
+                                            li { key: "{pl.path}:{pl.line}",
+                                                button {
+                                                    class: "rule-hub-link rule-hub-place",
+                                                    onclick: move |_| {
+                                                        if let Some(cb) = on_open_place {
+                                                            cb.call(open.clone());
+                                                        }
+                                                    },
+                                                    "{pl.path}:{pl.line}"
+                                                }
+                                                if !pl.note.is_empty() {
+                                                    span { class: "rule-hub-place-note", " {pl.note}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(msg) = m.not_recorded {
+                        p { class: "rule-hub-not-recorded", "{msg}" }
+                    }
+                    if on_ruling.is_some() {
+                        div { class: "rule-hub-rulings",
+                            if let Some(a) = m.accept.clone() {
+                                {
+                                    let id = a.option_id.clone().unwrap_or_default();
+                                    rsx! {
+                                        button {
+                                            class: "btn-edit-sm rule-hub-accept",
+                                            onclick: move |_| {
+                                                if let Some(cb) = on_ruling {
+                                                    cb.call(RulingAction::Accept(id.clone()));
+                                                }
+                                            },
+                                            "{a.label}"
+                                        }
+                                        p { class: "rule-hub-effect", "{a.effect}" }
+                                    }
+                                }
+                            }
+                            if !m.others.is_empty() {
+                                select {
+                                    class: "rule-hub-other-option",
+                                    onchange: move |e| {
+                                        let v = e.value();
+                                        if !v.is_empty() {
+                                            if let Some(cb) = on_ruling {
+                                                cb.call(RulingAction::Accept(v));
+                                            }
+                                        }
+                                    },
+                                    option { value: "", "Choose another option" }
+                                    for o in m.others.iter() {
+                                        option { value: "{o.option_id.clone().unwrap_or_default()}", "{o.label}" }
+                                    }
+                                }
+                                p { class: "rule-hub-effect", "{ACCEPT_EFFECT_TEXT}" }
+                            }
+                            button {
+                                class: "btn-ghost rule-hub-leave",
+                                onclick: move |_| {
+                                    if let Some(cb) = on_ruling {
+                                        cb.call(RulingAction::Leave);
+                                    }
+                                },
+                                "{m.leave.label}"
+                            }
+                            p { class: "rule-hub-effect", "{m.leave.effect}" }
+                            if let Some(id) = m.withdraw.clone() {
+                                button {
+                                    class: "btn-ghost rule-hub-withdraw",
+                                    onclick: move |_| {
+                                        if let Some(cb) = on_ruling {
+                                            cb.call(RulingAction::Withdraw(id.clone()));
+                                        }
+                                    },
+                                    "Withdraw"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(c) = hub.conforming.filter(|_| hub.convention.is_none()) {
                 p { class: "rule-hub-conforming",
                     "{c.conforming} of {c.assessed} assessed sites conform. The conforming sites are not in the scan data \u{2014} only the counts \u{2014} so there is nothing here to open."
                 }
@@ -1147,6 +1269,27 @@ pub(in crate::cockpit) fn RuleHubStrip(
     }
 }
 
+/// What the reviewer asked of the standard of a rule with options.
+#[derive(Clone, PartialEq, Debug)]
+pub(in crate::cockpit) enum RulingAction {
+    /// Set this option as the convention.
+    Accept(String),
+    /// No recommendation, leave it to the client.
+    Leave,
+    /// Withdraw the ruling with this id.
+    Withdraw(String),
+}
+
+/// A place the reviewer asked to open in the code viewer.
+#[derive(Clone, PartialEq, Debug)]
+pub(in crate::cockpit) struct PlaceOpen {
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+}
+
+const ACCEPT_EFFECT_TEXT: &str = camerata_ui_core::convention_view::ACCEPT_EFFECT;
+
 /// THE RULE HUB MODAL: the strip in an overlay, reachable from every surface that shows a
 /// rule id.
 ///
@@ -1172,6 +1315,8 @@ pub(in crate::cockpit) fn RuleHubModal(
     /// See [`RuleHubStrip`]'s `alternatives`. Passed straight through.
     #[props(default)]
     alternatives: Option<AlternativeControlsRow>,
+    #[props(default)] on_ruling: Option<Callback<RulingAction>>,
+    #[props(default)] on_open_place: Option<Callback<PlaceOpen>>,
 ) -> Element {
     rsx! {
         div { class: "rule-modal-overlay", onclick: move |_| on_close.call(()),
@@ -1203,7 +1348,7 @@ pub(in crate::cockpit) fn RuleHubModal(
                         "\u{2715}"
                     }
                 }
-                RuleHubStrip { hub, on_jump, alternatives }
+                RuleHubStrip { hub, on_jump, alternatives, on_ruling, on_open_place }
             }
         }
     }

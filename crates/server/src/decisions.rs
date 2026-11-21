@@ -525,7 +525,10 @@ impl DecisionStore {
     }
 
     /// Every ruling on a standard of a project (withdrawn ones too), in the order written.
-    pub fn standards(&self, project_id: &str) -> Vec<camerata_api_types::decisions::StandardRuling> {
+    pub fn standards(
+        &self,
+        project_id: &str,
+    ) -> Vec<camerata_api_types::decisions::StandardRuling> {
         self.lock()
             .get(project_id)
             .map(|p| p.standards.clone())

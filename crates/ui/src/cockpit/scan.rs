@@ -40,7 +40,9 @@ pub(super) use camerata_ui_core::triage::{
 // about one (repo, rule) — and `RuleHubView` is already the flat owned props shape, so the
 // strip that renders it needs no second DTO. The conforming count comes through as two
 // integers deliberately: the conforming sites are not in the data, only the counts.
-pub(super) use camerata_ui_core::triage::{rule_hub, RuleHubView};
+#[cfg(test)]
+pub(super) use camerata_ui_core::triage::rule_hub;
+pub(super) use camerata_ui_core::triage::RuleHubView;
 
 // Pass 2 step 2: the MANUAL column sort over the curated default. `severity_sort_value` is the
 // Severity column's cell value — the authored severity carrying its calibrated ladder position,

@@ -213,6 +213,27 @@ pub struct BlockedLine {
     pub review_door: Option<Door>,
 }
 
+/// The sentence about rules split with no decision (Zach's ruling on A3): the count and the rule
+/// ids, and the two ways to decide. Empty when none is held. The set is the gate's own
+/// (`split_rules_without_choice` on the server), never recomputed here.
+fn split_rules_sentence(split: &[camerata_api_types::review_view::SplitRuleHold]) -> String {
+    if split.is_empty() {
+        return String::new();
+    }
+    let mut ids: Vec<&str> = split.iter().map(|s| s.rule_id.as_str()).collect();
+    ids.dedup();
+    let n = split.len();
+    let (noun, verb, each) = if n == 1 {
+        ("split rule", "needs", "for it")
+    } else {
+        ("split rules", "need", "for each")
+    };
+    format!(
+        " {n} {noun} {verb} a decision: {}. Accept an option {each}, or leave it to the client.",
+        ids.join(", ")
+    )
+}
+
 /// The panel's line, or `None` when the gate is open and the export button stays. `table_keys` is
 /// the site keys the triage table holds (`None`: no table is on screen, so every row is in
 /// Review). The count and the set of held rows are the gate's alone; the table only says which of
@@ -245,13 +266,15 @@ pub fn blocked_line(
                 .first()
                 .map(|g| gap_row(g).door)
         });
+    let mut text = crate::export_panel::blocked_line(
+        rows,
+        in_review_rows,
+        gate.node_decisions_missing_members.len(),
+        gap_sites,
+    );
+    text.push_str(&split_rules_sentence(&gate.split_rules));
     Some(BlockedLine {
-        text: crate::export_panel::blocked_line(
-            rows,
-            in_review_rows,
-            gate.node_decisions_missing_members.len(),
-            gap_sites,
-        ),
+        text,
         in_table,
         in_review: in_review_rows + gate.node_decisions_missing_members.len(),
         review_door,
@@ -474,5 +497,37 @@ mod tests {
         let rows = gate_rows(&gate);
         assert_eq!(rows[0].reason, h.reason.phrase());
         assert_eq!(rows[0].kind.word(), "held");
+    }
+
+    /// Zach's ruling on amendment A3 (2026-11-20): the export dialog shows how many rules are split
+    /// with no decision and names them, and the gate is blocked by them alone.
+    #[test]
+    fn the_line_counts_and_names_the_split_rules_with_no_decision() {
+        use camerata_api_types::review_view::SplitRuleHold;
+        let split = |rule: &str| SplitRuleHold {
+            repo: "acme/app".into(),
+            rule_id: rule.into(),
+        };
+        let mut gate = ExportGateView {
+            split_rules: vec![split("ARCH-A-1"), split("ARCH-B-1")],
+            ..ExportGateView::default()
+        };
+        let line = blocked_line(&gate, None).expect("split rules block the export");
+        assert_eq!(
+            line.text,
+            "Export blocked: 2 split rules need a decision: ARCH-A-1, ARCH-B-1. Accept an option for each, or leave it to the client."
+        );
+        gate.split_rules.truncate(1);
+        assert_eq!(
+            blocked_line(&gate, None).unwrap().text,
+            "Export blocked: 1 split rule needs a decision: ARCH-A-1. Accept an option for it, or leave it to the client."
+        );
+        // Beside held rows the sentence is added to the line.
+        gate.held.push(data().gate.held[0].clone());
+        let text = blocked_line(&gate, None).unwrap().text;
+        assert!(
+            text.contains("held row") && text.ends_with("or leave it to the client."),
+            "{text}"
+        );
     }
 }

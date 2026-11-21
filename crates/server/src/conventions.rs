@@ -12,9 +12,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use camerata_api_types::audit::{
-    CensusPlace, ConventionObservedKind, DeviationKind, FinderRowRef, FindingKind, NoConventionKind,
-    ObservedOptionUsage, OptionBasis, OptionCensus, PlaceStatus, Proposal, ProposalBasis,
-    RuleConvention, StandardSource, StandardState,
+    CensusPlace, ConventionObservedKind, DeviationKind, FinderRowRef, FindingKind,
+    NoConventionKind, ObservedOptionUsage, OptionBasis, OptionCensus, PlaceStatus, Proposal,
+    ProposalBasis, RuleConvention, StandardSource, StandardState,
 };
 use camerata_api_types::decisions::{StandardChoice, StandardRuling};
 
@@ -120,8 +120,7 @@ pub fn option_status(c: &RuleConvention, s: &StandardState, option: &str) -> Pla
     };
     if option == standard {
         PlaceStatus::Conforms
-    } else if s.source == StandardSource::Observed
-        && c.default_option_id.as_deref() == Some(option)
+    } else if s.source == StandardSource::Observed && c.default_option_id.as_deref() == Some(option)
     {
         PlaceStatus::FollowsRuleDefault
     } else {
@@ -132,11 +131,7 @@ pub fn option_status(c: &RuleConvention, s: &StandardState, option: &str) -> Pla
 /// Whether a finder row citing the rule departs from the standard. A row whose option is not
 /// known is never a departure unless the standard IS the judged option (then it broke it by
 /// definition): it is the finder's own problem.
-pub fn finder_status(
-    c: &RuleConvention,
-    s: &StandardState,
-    option: Option<&str>,
-) -> PlaceStatus {
+pub fn finder_status(c: &RuleConvention, s: &StandardState, option: Option<&str>) -> PlaceStatus {
     let Some(standard) = &s.option_id else {
         return PlaceStatus::NoStandard;
     };
@@ -241,7 +236,12 @@ fn departure_row_at_finder(
 }
 
 /// The one row with no location for places that were counted but not listed.
-fn remainder_row(c: &RuleConvention, option: &OptionCensus, k: usize, standard_label: &str) -> Finding {
+fn remainder_row(
+    c: &RuleConvention,
+    option: &OptionCensus,
+    k: usize,
+    standard_label: &str,
+) -> Finding {
     let places = if k == 1 { "place" } else { "places" };
     let verb = if k == 1 { "follows" } else { "follow" };
     let mut f = Finding {
@@ -307,9 +307,9 @@ pub fn departure_rows(c: &RuleConvention, rows: &[Finding]) -> Vec<Finding> {
                 .find(|x| &x.option_id == o)
                 .is_some_and(|x| {
                     let (lo, hi) = row_range(row);
-                    x.places
-                        .iter()
-                        .any(|p| plain_path(&p.path) == plain_path(&row.path) && p.line >= lo && p.line <= hi)
+                    x.places.iter().any(|p| {
+                        plain_path(&p.path) == plain_path(&row.path) && p.line >= lo && p.line <= hi
+                    })
                 });
             if !listed {
                 *finder_by_option.entry(o.clone()).or_default() += 1;
@@ -317,7 +317,12 @@ pub fn departure_rows(c: &RuleConvention, rows: &[Finding]) -> Vec<Finding> {
         }
         if !same_rule(&row.rule_id, &c.rule_id) {
             let f = departure_row_at_finder(c, row, option.as_deref(), &standard_label);
-            out.push((option.clone().unwrap_or_default(), f.path.clone(), f.line, f));
+            out.push((
+                option.clone().unwrap_or_default(),
+                f.path.clone(),
+                f.line,
+                f,
+            ));
         }
     }
     // Recorded places that depart and no finder row covers.
@@ -351,7 +356,8 @@ pub fn departure_rows(c: &RuleConvention, rows: &[Finding]) -> Vec<Finding> {
         // Places counted but not listed (over the cap, or an old report): one row with no
         // location for each option, so nothing departs out of sight.
         if let Some(n) = o.count {
-            let accounted = o.places.len() + finder_by_option.get(&o.option_id).copied().unwrap_or(0);
+            let accounted =
+                o.places.len() + finder_by_option.get(&o.option_id).copied().unwrap_or(0);
             let k = n.saturating_sub(accounted);
             if k > 0 {
                 let f = remainder_row(c, o, k, &standard_label);
@@ -491,7 +497,7 @@ pub fn effective_ruling<'a>(
 }
 
 /// The rulings of one inspection: a ruling never applies to another.
-pub fn rulings_for_run<'a>(rulings: &'a [StandardRuling], run_id: &str) -> Vec<StandardRuling> {
+pub fn rulings_for_run(rulings: &[StandardRuling], run_id: &str) -> Vec<StandardRuling> {
     rulings
         .iter()
         .filter(|r| r.is_active() && r.run_id == run_id)
@@ -502,7 +508,9 @@ pub fn rulings_for_run<'a>(rulings: &'a [StandardRuling], run_id: &str) -> Vec<S
 fn site_key_free(f: &Finding, taken: &HashSet<String>) -> String {
     (0..)
         .map(|ordinal| {
-            camerata_api_types::site_key::site_key(&f.repo, &f.path, &f.rule_id, &f.snippet, ordinal)
+            camerata_api_types::site_key::site_key(
+                &f.repo, &f.path, &f.rule_id, &f.snippet, ordinal,
+            )
         })
         .find(|k| !taken.contains(k))
         .unwrap_or_default()
@@ -608,7 +616,8 @@ fn has_departing_finder_row(c: &RuleConvention, rows: &[Finding]) -> bool {
         is_finder_row(r)
             && r.repo == c.repo
             && same_rule(&r.rule_id, &c.rule_id)
-            && finder_status(c, &c.standard, option_of_row(r, c).0.as_deref()) == PlaceStatus::Departs
+            && finder_status(c, &c.standard, option_of_row(r, c).0.as_deref())
+                == PlaceStatus::Departs
     })
 }
 
@@ -697,7 +706,11 @@ pub fn split_rules_without_choice(conventions: &[RuleConvention]) -> Vec<&RuleCo
         .filter(|c| {
             c.standard.option_id.is_none()
                 && !c.standard.left_to_client
-                && c.options.iter().filter(|o| o.count.unwrap_or(0) > 0).count() >= 2
+                && c.options
+                    .iter()
+                    .filter(|o| o.count.unwrap_or(0) > 0)
+                    .count()
+                    >= 2
         })
         .collect()
 }
@@ -709,13 +722,14 @@ pub fn upgrade(report: &mut crate::onboard::ScanReport) {
     if !report.conventions.is_empty() {
         return;
     }
-    let recs: Vec<crate::ai_audit::RuleRecommendation> = if report.recommendations_by_repo.is_empty() {
-        let mut v: Vec<_> = report.recommendations.values().cloned().collect();
-        v.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
-        v
-    } else {
-        report.recommendations_by_repo.clone()
-    };
+    let recs: Vec<crate::ai_audit::RuleRecommendation> =
+        if report.recommendations_by_repo.is_empty() {
+            let mut v: Vec<_> = report.recommendations.values().cloned().collect();
+            v.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+            v
+        } else {
+            report.recommendations_by_repo.clone()
+        };
     if recs.is_empty() {
         return;
     }
@@ -855,7 +869,8 @@ mod tests {
             located: true,
             ..Finding::default()
         };
-        f.captures.insert(FINDER_PROBLEM_CAPTURE.into(), n.to_string());
+        f.captures
+            .insert(FINDER_PROBLEM_CAPTURE.into(), n.to_string());
         f.captures
             .insert(FINDER_RULES_CAPTURE.into(), format!("{RULE},{keyed}"));
         f.site_key = camerata_api_types::site_key::site_key(REPO, path, keyed, &f.snippet, 0);
@@ -887,7 +902,9 @@ mod tests {
     }
 
     fn accept(id: &str) -> StandardRuling {
-        ruling(StandardChoice::Accept { option_id: id.into() })
+        ruling(StandardChoice::Accept {
+            option_id: id.into(),
+        })
     }
 
     fn departures(rows: &[Finding]) -> Vec<&Finding> {
@@ -901,8 +918,12 @@ mod tests {
         let mut c = hearth(true);
         c.options[1].places = opt("seq", "s", Some(4), &[("a.ts", 10)]).places;
         let mut row = finder("a.ts", 9, "X", 1);
-        row.captures.insert(FINDER_END_LINE_CAPTURE.into(), "11".into());
-        assert_eq!(option_of_row(&row, &c), (Some("seq".into()), OptionBasis::Listed));
+        row.captures
+            .insert(FINDER_END_LINE_CAPTURE.into(), "11".into());
+        assert_eq!(
+            option_of_row(&row, &c),
+            (Some("seq".into()), OptionBasis::Listed)
+        );
         let elsewhere = finder("b.ts", 3, "X", 2);
         assert_eq!(
             option_of_row(&elsewhere, &c),
@@ -920,24 +941,32 @@ mod tests {
         tag(&mut rows, &mut c);
         assert!(departures(&rows).is_empty());
         assert_eq!(c[0].finder_rows.len(), 4);
-        assert!(c[0]
-            .finder_rows
-            .iter()
-            .all(|r| r.status == PlaceStatus::Conforms && r.option_basis == OptionBasis::OnlyOther));
+        assert!(
+            c[0].finder_rows
+                .iter()
+                .all(|r| r.status == PlaceStatus::Conforms
+                    && r.option_basis == OptionBasis::OnlyOther)
+        );
         assert!(departure_rows(&c[0], &rows).is_empty());
     }
 
     #[test]
-    fn a_place_following_the_rule_default_is_never_a_departure_while_the_standard_is_only_observed() {
+    fn a_place_following_the_rule_default_is_never_a_departure_while_the_standard_is_only_observed()
+    {
         let mut c = hearth(true);
         c.options[0].places = opt("par", "p", Some(1), &[("a.ts", 1)]).places;
         c.options[1].places = opt("seq", "s", Some(4), &[("b.ts", 2)]).places;
         let mut cs = vec![c];
         let mut rows = Vec::new();
         tag(&mut rows, &mut cs);
-        assert_eq!(cs[0].options[0].places[0].status, PlaceStatus::FollowsRuleDefault);
+        assert_eq!(
+            cs[0].options[0].places[0].status,
+            PlaceStatus::FollowsRuleDefault
+        );
         assert_eq!(cs[0].options[1].places[0].status, PlaceStatus::Conforms);
-        assert!(departure_rows(&cs[0], &rows).iter().all(|r| r.path != "a.ts"));
+        assert!(departure_rows(&cs[0], &rows)
+            .iter()
+            .all(|r| r.path != "a.ts"));
         // Once the reviewer accepts "seq", the default departs.
         let mut rows = Vec::new();
         resolve(&mut rows, &mut cs, &[accept("seq")]);
@@ -955,18 +984,26 @@ mod tests {
         let dep = departures(&rows);
         assert_eq!(dep.len(), 4, "{rows:?}");
         for d in &dep {
-            let FindingKind::Deviation(k) = d.kind.clone().unwrap() else { panic!() };
+            let FindingKind::Deviation(k) = d.kind.clone().unwrap() else {
+                panic!()
+            };
             assert_eq!(k.standard_source, Some(StandardSource::Reviewer));
             assert_eq!(k.convention_label, "Run in parallel");
             assert_eq!((k.deviating_sites, k.assessed_sites), (4, Some(5)));
         }
         // The four finder rows are unchanged.
-        assert!(rows.iter().filter(|f| f.rule_id == "SPIRIT-OPTIMIZE-1").count() == 4);
+        assert!(
+            rows.iter()
+                .filter(|f| f.rule_id == "SPIRIT-OPTIMIZE-1")
+                .count()
+                == 4
+        );
         // Applying twice gives the same keys.
         let mut again = four_rows();
         let mut cs2 = vec![hearth(false)];
         resolve(&mut again, &mut cs2, &[accept("par")]);
-        let keys = |r: &[Finding]| -> Vec<String> { r.iter().map(|f| f.site_key.clone()).collect() };
+        let keys =
+            |r: &[Finding]| -> Vec<String> { r.iter().map(|f| f.site_key.clone()).collect() };
         assert_eq!(keys(&rows), keys(&again));
     }
 
@@ -1009,7 +1046,8 @@ mod tests {
     }
 
     #[test]
-    fn accepting_on_a_split_swaps_the_open_row_for_one_departure_and_leave_to_client_keeps_one_question() {
+    fn accepting_on_a_split_swaps_the_open_row_for_one_departure_and_leave_to_client_keeps_one_question(
+    ) {
         let mut no_conv = Finding {
             repo: REPO.into(),
             rule_id: "ARCH-TRIGGER-ENV-1".into(),
@@ -1027,7 +1065,9 @@ mod tests {
         let mut r = accept("git-ref");
         r.rule_id = "ARCH-TRIGGER-ENV-1".into();
         resolve(&mut rows, &mut cs, &[r]);
-        assert!(!rows.iter().any(|f| matches!(f.kind, Some(FindingKind::NoConvention(_)))));
+        assert!(!rows
+            .iter()
+            .any(|f| matches!(f.kind, Some(FindingKind::NoConvention(_)))));
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].path, "deploy.yml");
         assert_eq!(cs[0].standard.conforming_places, 1);
@@ -1047,14 +1087,34 @@ mod tests {
     #[test]
     fn places_counted_but_not_listed_become_one_row_with_no_location() {
         let mut c = hearth(true);
-        c.options[1] = opt("seq", "Sequential", Some(15), &[("a.ts", 1), ("a.ts", 2), ("a.ts", 3), ("a.ts", 4), ("a.ts", 5), ("a.ts", 6), ("a.ts", 7), ("a.ts", 8), ("a.ts", 9), ("a.ts", 10)]);
+        c.options[1] = opt(
+            "seq",
+            "Sequential",
+            Some(15),
+            &[
+                ("a.ts", 1),
+                ("a.ts", 2),
+                ("a.ts", 3),
+                ("a.ts", 4),
+                ("a.ts", 5),
+                ("a.ts", 6),
+                ("a.ts", 7),
+                ("a.ts", 8),
+                ("a.ts", 9),
+                ("a.ts", 10),
+            ],
+        );
         c.assessed_places = Some(16);
         let mut cs = vec![c];
         let mut rows = Vec::new();
         resolve(&mut rows, &mut cs, &[accept("par")]);
         let rem: Vec<_> = rows.iter().filter(|f| f.path.is_empty()).collect();
         assert_eq!(rem.len(), 1);
-        assert!(rem[0].snippet.starts_with("5 more places follow"), "{}", rem[0].snippet);
+        assert!(
+            rem[0].snippet.starts_with("5 more places follow"),
+            "{}",
+            rem[0].snippet
+        );
         assert_eq!(cs[0].standard.departing_places, 15);
     }
 
@@ -1074,8 +1134,19 @@ mod tests {
             pr.options = opts;
             report.proposed_rules.push(pr);
         };
-        p(RULE, "par", vec![view("par", "Run in parallel"), view("seq", "Sequential awaits by default")]);
-        p("ARCH-TRIGGER-ENV-1", "git-ref", vec![view("git-ref", "Git ref"), view("manual", "Manual")]);
+        p(
+            RULE,
+            "par",
+            vec![
+                view("par", "Run in parallel"),
+                view("seq", "Sequential awaits by default"),
+            ],
+        );
+        p(
+            "ARCH-TRIGGER-ENV-1",
+            "git-ref",
+            vec![view("git-ref", "Git ref"), view("manual", "Manual")],
+        );
         report.recommendations_by_repo = vec![
             crate::ai_audit::RuleRecommendation {
                 rule_id: RULE.into(),
@@ -1091,8 +1162,16 @@ mod tests {
                 no_convention: true,
                 assessed_sites: Some(2),
                 observed_options: vec![
-                    ObservedOptionUsage { option_id: "git-ref".into(), label: "Git ref".into(), sites: Some(1) },
-                    ObservedOptionUsage { option_id: "manual".into(), label: "Manual".into(), sites: Some(1) },
+                    ObservedOptionUsage {
+                        option_id: "git-ref".into(),
+                        label: "Git ref".into(),
+                        sites: Some(1),
+                    },
+                    ObservedOptionUsage {
+                        option_id: "manual".into(),
+                        label: "Manual".into(),
+                        sites: Some(1),
+                    },
                 ],
                 ..crate::ai_audit::RuleRecommendation::default()
             },
@@ -1121,12 +1200,36 @@ mod tests {
         upgrade(&mut report);
         assert_eq!(report.conventions.len(), 2);
         assert!(report.conventions.iter().all(|c| !c.places_recorded));
-        assert_eq!(keys, report.findings.iter().map(|f| f.site_key.clone()).collect::<Vec<_>>());
-        assert!(report.findings.iter().all(|f| f.kind == Some(FindingKind::Defect)));
-        let hearth = report.conventions.iter().find(|c| c.rule_id == RULE).unwrap();
-        assert!(hearth.finder_rows.iter().all(|r| r.option_basis == OptionBasis::Unknown));
-        let env = report.conventions.iter().find(|c| c.rule_id == "ARCH-TRIGGER-ENV-1").unwrap();
-        assert_eq!(env.standard.proposal.as_ref().unwrap().basis, ProposalBasis::RuleDefault);
+        assert_eq!(
+            keys,
+            report
+                .findings
+                .iter()
+                .map(|f| f.site_key.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(report
+            .findings
+            .iter()
+            .all(|f| f.kind == Some(FindingKind::Defect)));
+        let hearth = report
+            .conventions
+            .iter()
+            .find(|c| c.rule_id == RULE)
+            .unwrap();
+        assert!(hearth
+            .finder_rows
+            .iter()
+            .all(|r| r.option_basis == OptionBasis::Unknown));
+        let env = report
+            .conventions
+            .iter()
+            .find(|c| c.rule_id == "ARCH-TRIGGER-ENV-1")
+            .unwrap();
+        assert_eq!(
+            env.standard.proposal.as_ref().unwrap().basis,
+            ProposalBasis::RuleDefault
+        );
     }
 
     #[test]
@@ -1136,7 +1239,10 @@ mod tests {
         upgrade(&mut report);
         let mut rows = report.findings.clone();
         resolve(&mut rows, &mut report.conventions, &[accept("par")]);
-        let dep: Vec<String> = departures(&rows).iter().map(|f| f.site_key.clone()).collect();
+        let dep: Vec<String> = departures(&rows)
+            .iter()
+            .map(|f| f.site_key.clone())
+            .collect();
         assert_eq!(dep.len(), 4);
         for k in &keys {
             assert!(dep.contains(k), "{k}");
@@ -1154,7 +1260,9 @@ mod tests {
         resolve(&mut rows, &mut report.conventions, &[r]);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(rows[0].path.is_empty());
-        assert!(rows[0].snippet.starts_with("1 more place follows \"Manual\""));
+        assert!(rows[0]
+            .snippet
+            .starts_with("1 more place follows \"Manual\""));
     }
 
     #[test]

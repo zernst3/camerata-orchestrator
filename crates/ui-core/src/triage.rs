@@ -586,6 +586,9 @@ pub struct RuleHubView {
     /// Where "take me to this rule" goes: the Queue (filtered to the rule) or the panel that
     /// holds it. Exactly one destination, because the rule has exactly one surface.
     pub jump: KindSurface,
+    /// The convention record of this rule with options, when the scan has one (convention model
+    /// design, section 8). A rule with a record has a hub even with no rows.
+    pub convention: Option<camerata_api_types::audit::RuleConvention>,
 }
 
 /// Build the hub for one `(repo, rule_id)` out of the scan's rows.
@@ -599,12 +602,45 @@ pub struct RuleHubView {
 /// rule it never touched has nothing to describe. (That is also why there is no "0 findings"
 /// hub — an empty strip is a dead affordance.)
 pub fn rule_hub(findings: &[FindingView], repo: &str, rule_id: &str) -> Option<RuleHubView> {
+    rule_hub_with_conventions(findings, &[], repo, rule_id)
+}
+
+/// [`rule_hub`] with the scan's convention records: the hub carries the record of the rule, and
+/// a rule that has a record has a hub even with no rows (its places, standard and controls are
+/// worth showing on their own).
+pub fn rule_hub_with_conventions(
+    findings: &[FindingView],
+    conventions: &[camerata_api_types::audit::RuleConvention],
+    repo: &str,
+    rule_id: &str,
+) -> Option<RuleHubView> {
     use camerata_api_types::audit::FindingKind;
+    let convention = conventions
+        .iter()
+        .find(|c| c.repo == repo && c.rule_id == rule_id)
+        .cloned();
     let rows: Vec<&FindingView> = findings
         .iter()
         .filter(|f| f.repo == repo && f.rule_id == rule_id)
         .collect();
-    let first = *rows.first()?;
+    let Some(first) = rows.first().copied() else {
+        let c = convention?;
+        return Some(RuleHubView {
+            repo: repo.to_string(),
+            rule_id: rule_id.to_string(),
+            surface: KindSurface::Conventions,
+            kind_tag: "convention_observed",
+            outcome: crate::convention_view::engine_line(&c),
+            row_count: 0,
+            site_count: 0,
+            convention_label: None,
+            evaluated_option_id: None,
+            conforming: None,
+            conflict_surfaces: Vec::new(),
+            jump: KindSurface::Conventions,
+            convention: Some(c),
+        });
+    };
     let surface = kind_surface(first);
     let conflict_surfaces = rules_on_multiple_surfaces(findings)
         .into_iter()
@@ -678,6 +714,7 @@ pub fn rule_hub(findings: &[FindingView], repo: &str, rule_id: &str) -> Option<R
         conforming: headline.as_ref().and_then(DeviationHeadline::conforming),
         conflict_surfaces,
         jump: surface,
+        convention,
     })
 }
 

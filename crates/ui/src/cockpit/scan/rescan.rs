@@ -130,6 +130,23 @@ pub(in crate::cockpit) struct AlternativeControlsRow {
     pub hallucinated: bool,
 }
 
+/// The badge for a rule that has a convention record (convention model design, section 8): where
+/// the standard came from, in words. "AI recommended" is never one of them.
+pub(in crate::cockpit) fn convention_badge(
+    c: &camerata_api_types::audit::RuleConvention,
+) -> (&'static str, &'static str) {
+    use camerata_api_types::audit::StandardSource;
+    if c.standard.left_to_client {
+        return ("rec-badge", "Left to the client");
+    }
+    match (&c.standard.option_id, c.standard.source) {
+        (Some(_), StandardSource::Reviewer) => ("rec-badge rec-badge-yours", "Set by you"),
+        (Some(_), StandardSource::RuleDefault) => ("rec-badge", "The rule's default"),
+        (Some(_), _) => ("rec-badge", "Observed in the code"),
+        (None, _) => ("rec-badge rec-badge-pending", "Proposal, no convention yet"),
+    }
+}
+
 /// Build one rule's control line out of the scan's three sources. PURE, so the priority order
 /// below is unit-testable rather than buried in a render body.
 ///
@@ -383,8 +400,13 @@ pub(in crate::cockpit) fn RuleAlternativesPanel(
     repos: Vec<String>,
     recommendations: std::collections::HashMap<String, RuleRecommendationView>,
     audit: Signal<Option<ScanReportView>>,
+    /// The scan's convention records. A rule with one is ruled on through the standards routes:
+    /// the Change select saves a ruling and no override is staged for a rescan.
+    #[props(default)]
+    conventions: Vec<camerata_api_types::audit::RuleConvention>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let shell_refresh = try_use_context::<crate::cockpit::tree::ShellRefresh>();
     // The architect's per-repo alternative choices (ScanResults provides this via context) —
     // updated here too after a successful rescan, so Arm's directive resolution matches the
     // operator's forced choice rather than the pre-override default.
@@ -475,12 +497,39 @@ pub(in crate::cockpit) fn RuleAlternativesPanel(
                             accepted_ids.read().contains(&rid),
                         );
                         let evaluated_id = row.evaluated_option_id.clone();
+                        // A rule with a convention record is ruled on, not staged for a rescan.
+                        let record = conventions.iter().find(|c| c.rule_id.eq_ignore_ascii_case(&rid)).cloned();
+                        let mut row = row;
+                        if let Some(c) = &record {
+                            (row.badge_class, row.badge_text) = convention_badge(c);
+                            row.staged = false;
+                        }
+                        let pid_for_pick = project_id.clone();
                         rsx! {
                             RuleAlternativeControls {
                                 key: "{rid}",
                                 row,
                                 on_why: Callback::new(move |()| why_open.set(Some(rid_for_why.clone()))),
                                 on_pick: Callback::new(move |picked: String| {
+                                    if let Some(c) = record.clone() {
+                                        let pid = pid_for_pick.clone();
+                                        spawn(async move {
+                                            let action = super::queue_table::RulingAction::Accept(picked);
+                                            match super::wire::post_ruling(&pid, &c.repo, &c.rule_id, &action).await {
+                                                Ok(()) => {
+                                                    if let Some(mut r) = shell_refresh {
+                                                        r.0 += 1;
+                                                    }
+                                                }
+                                                Err(msg) => crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Error,
+                                                    msg,
+                                                ),
+                                            }
+                                        });
+                                        return;
+                                    }
                                     stage_or_clear_override(
                                         &mut pending.write(),
                                         &rid_for_select,

@@ -47,12 +47,12 @@ pub mod client_text;
 pub mod connections;
 /// H5: the three-pass consensus option (off by default).
 pub mod consensus;
+pub mod conventions;
 mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
 /// resulting Camerata project. See the module doc comment for the full flow.
 pub mod create_app;
-pub mod conventions;
 pub mod decisions;
 pub mod decompose;
 pub mod dep_audit;

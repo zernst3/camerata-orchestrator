@@ -926,8 +926,16 @@ mod convention_wording {
                 "",
                 FindingKind::NoConvention(NoConventionKind {
                     observed_options: vec![
-                        ObservedOptionUsage { option_id: "a".into(), label: "Option A".into(), sites: Some(3) },
-                        ObservedOptionUsage { option_id: "b".into(), label: "Option B".into(), sites: Some(1) },
+                        ObservedOptionUsage {
+                            option_id: "a".into(),
+                            label: "Option A".into(),
+                            sites: Some(3),
+                        },
+                        ObservedOptionUsage {
+                            option_id: "b".into(),
+                            label: "Option B".into(),
+                            sites: Some(1),
+                        },
                     ],
                     left_to_client: true,
                 }),
@@ -947,12 +955,21 @@ mod convention_wording {
             "{obs}"
         );
         let rev = departures_cell(&xlsx, "ARCH-REV-1");
-        assert!(rev.contains("Convention set by the reviewer: Option A. 2 places depart."), "{rev}");
+        assert!(
+            rev.contains("Convention set by the reviewer: Option A. 2 places depart."),
+            "{rev}"
+        );
         let (status, _) = conventions_row(&xlsx, "ARCH-SETREV-1");
-        assert_eq!(status, crate::xlsx_export::CONVENTION_STATUS_SET_BY_REVIEWER);
+        assert_eq!(
+            status,
+            crate::xlsx_export::CONVENTION_STATUS_SET_BY_REVIEWER
+        );
         let (status, what) = conventions_row(&xlsx, "ARCH-OPEN-1");
         assert_eq!(status, crate::xlsx_export::CONVENTION_STATUS_OPEN_QUESTION);
-        assert!(what.contains("Option A (3 places)") && what.contains("Option B (1 place)"), "{what}");
+        assert!(
+            what.contains("Option A (3 places)") && what.contains("Option B (1 place)"),
+            "{what}"
+        );
         let (status, _) = conventions_row(&xlsx, "ARCH-SPLIT-1");
         assert_eq!(status, crate::xlsx_export::CONVENTION_STATUS_NONE_ADOPTED);
     }
@@ -979,7 +996,10 @@ mod convention_wording {
         let mut corpus = camerata_rules::RuleSet::default();
         corpus.push(rule);
         let mut report = mixed_sealed().into_inner();
-        report.provenance.audited_rule_ids.push("ARCH-OPEN-1".into());
+        report
+            .provenance
+            .audited_rule_ids
+            .push("ARCH-OPEN-1".into());
         report.findings.push(rule_row(
             "ARCH-OPEN-1",
             "",
@@ -993,17 +1013,24 @@ mod convention_wording {
             }),
         ));
         let reviewed = apply_overlay(&report.seal(), &[], &[], &[]);
-        let options = ReportOptions { internal: false, ..client_options() };
+        let options = ReportOptions {
+            internal: false,
+            ..client_options()
+        };
         let xlsx = crate::xlsx_export::build_workbook(&reviewed, Some(&corpus), &options).unwrap();
         let (_, what) = conventions_row(&xlsx, "ARCH-OPEN-1");
         assert!(
             what.contains("Option A: Use Option A. Why: Option A is simpler. (3 places)"),
             "{what}"
         );
-        assert!(what.contains("Option B: Use Option B. Why: Option B is simpler."), "{what}");
+        assert!(
+            what.contains("Option B: Use Option B. Why: Option B is simpler."),
+            "{what}"
+        );
         let t = table(&xlsx, v::YOUR_CONVENTIONS);
-        let at = (1..t.len()).find(|r| cell_of(&t, *r, v::H_RULE_ID) == "ARCH-OPEN-1").unwrap();
+        let at = (1..t.len())
+            .find(|r| cell_of(&t, *r, v::H_RULE_ID) == "ARCH-OPEN-1")
+            .unwrap();
         assert!(!cell_of(&t, at, v::H_HOW_CONSISTENTLY).contains("recommend"));
     }
 }
-

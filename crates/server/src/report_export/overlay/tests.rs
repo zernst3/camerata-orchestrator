@@ -757,9 +757,12 @@ mod standards {
     fn finder_row(path: &str, line: usize, n: u32) -> Finding {
         let mut f = row("SPIRIT-OPTIMIZE-1", path, line, &format!("problem {n}"));
         f.severity = "medium".into();
-        f.captures.insert(FINDER_PROBLEM_CAPTURE.into(), n.to_string());
         f.captures
-            .insert(FINDER_RULES_CAPTURE.into(), format!("{RULE},SPIRIT-OPTIMIZE-1"));
+            .insert(FINDER_PROBLEM_CAPTURE.into(), n.to_string());
+        f.captures.insert(
+            FINDER_RULES_CAPTURE.into(),
+            format!("{RULE},SPIRIT-OPTIMIZE-1"),
+        );
         f
     }
 
@@ -792,7 +795,10 @@ mod standards {
             observed_option_id: Some("seq".into()),
             assessed_places: Some(5),
             places_recorded: true,
-            options: vec![opt("par", "Run in parallel", 1), opt("seq", "Sequential awaits", 4)],
+            options: vec![
+                opt("par", "Run in parallel", 1),
+                opt("seq", "Sequential awaits", 4),
+            ],
             standard: StandardState {
                 option_id: Some("seq".into()),
                 source: StandardSource::Observed,
@@ -843,7 +849,9 @@ mod standards {
         let dep = departures(&a);
         assert_eq!(dep.len(), 4, "{dep:?}");
         for d in &dep {
-            let Some(FindingKind::Deviation(k)) = &d.kind else { panic!() };
+            let Some(FindingKind::Deviation(k)) = &d.kind else {
+                panic!()
+            };
             assert_eq!(k.standard_source, Some(StandardSource::Reviewer));
             assert_eq!((k.deviating_sites, k.assessed_sites), (4, Some(5)));
             assert_eq!(k.convention_label, "Run in parallel");
@@ -863,8 +871,14 @@ mod standards {
             .collect();
         assert_eq!(finder_after.len(), 4);
         // The record shows the reviewer's standard on the copy.
-        assert_eq!(a.report().conventions[0].standard.source, StandardSource::Reviewer);
-        assert_eq!(sealed.conventions[0].standard.source, StandardSource::Observed);
+        assert_eq!(
+            a.report().conventions[0].standard.source,
+            StandardSource::Reviewer
+        );
+        assert_eq!(
+            sealed.conventions[0].standard.source,
+            StandardSource::Observed
+        );
     }
 
     /// Tests 9 and 12: a withdrawn ruling (or none) leaves the report as the sealed one reads.
@@ -910,11 +924,16 @@ mod standards {
             revoked_at: None,
         };
         d.reason = "ok".into();
-        let again = apply_overlay_with_standards(&sealed, std::slice::from_ref(&d), &[], &[], &rulings);
+        let again =
+            apply_overlay_with_standards(&sealed, std::slice::from_ref(&d), &[], &[], &rulings);
         assert!(again.dispositions().contains_key(&key));
         assert!(again.report().findings.iter().any(|f| f.site_key == key));
         let withdrawn = apply_overlay(&sealed, std::slice::from_ref(&d), &[], &[]);
-        assert!(!withdrawn.report().findings.iter().any(|f| f.site_key == key));
+        assert!(!withdrawn
+            .report()
+            .findings
+            .iter()
+            .any(|f| f.site_key == key));
     }
 
     /// Test 20: the departures a ruling makes are Unresolved (no decision, so no disposition) and
@@ -925,9 +944,15 @@ mod standards {
         let reviewed = apply_overlay_with_standards(&sealed, &[], &[], &[], &[accept("par")]);
         let holds = crate::release_gate::holds::hold_set(&reviewed);
         for d in departures(&reviewed) {
-            assert!(!reviewed.dispositions().contains_key(&d.site_key), "Unresolved");
+            assert!(
+                !reviewed.dispositions().contains_key(&d.site_key),
+                "Unresolved"
+            );
             assert!(!holds.awaiting_a_ruling.contains(&d.site_key), "not held");
-            assert!(crate::release_gate::needs_decision::why(&d).is_none(), "not unsure");
+            assert!(
+                crate::release_gate::needs_decision::why(&d).is_none(),
+                "not unsure"
+            );
             assert_eq!(d.severity, "low");
         }
     }

@@ -529,7 +529,7 @@ pub(in crate::cockpit) fn ConventionsPanel(
                                 for c in shown.iter() {
                                     {
                                         let key = c.key();
-                                        let adopted = model.is_adopted(&key);
+                                        let adopted = model.is_adopted_for(c);
                                         let opened = model.was_opened(&key);
                                         let adoptable = c.is_adoptable();
                                         let req = RuleHubRequest {
@@ -560,6 +560,9 @@ pub(in crate::cockpit) fn ConventionsPanel(
                                                 }
                                                 span { class: "kind-panel-label", "{c.label}" }
                                                 span { class: "adopt-status", "{c.status_line()}" }
+                                                if let Some(line) = c.default_line() {
+                                                    span { class: "adopt-differs", "{line}" }
+                                                }
                                                 if !opened {
                                                     span { class: "adopt-unopened-flag", title: "You have not opened this one.", "not opened" }
                                                 }
@@ -901,7 +904,7 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                                 class: if picked.is_some() { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
                                                 span {
                                                     class: if picked.is_some() { "adopt-state on" } else { "adopt-state off" },
-                                                    if picked.is_some() { "Recommend" } else { "Leave as reported" }
+                                                    if picked.is_some() { "Recommend" } else { "No recommendation, leave it to the client" }
                                                 }
                                                 button {
                                                     class: "rule-hub-link kind-panel-rule",
@@ -937,7 +940,7 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                                                 option_id: if v.is_empty() { None } else { Some(v) },
                                                             });
                                                     },
-                                                    option { value: "", "Leave as reported" }
+                                                    option { value: "", "No recommendation, leave it to the client" }
                                                     for (id , label , sites) in options.iter() {
                                                         option { key: "{id}", value: "{id}",
                                                             if let Some(n) = sites {
@@ -948,6 +951,7 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                                         }
                                                     }
                                                 }
+                                                p { class: "adopt-effect", "{camerata_ui_core::convention_view::LEAVE_EFFECT}" }
                                                 if opened {
                                                     div { class: "adopt-detail",
                                                         p { class: "adopt-detail-line",

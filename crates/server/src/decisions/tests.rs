@@ -2208,7 +2208,11 @@ fn entry_with_rule(project: &str) -> InspectionEntry {
         rule_id: "ARCH-X-1".into(),
         default_option_id: Some("a".into()),
         judged_option_id: Some("a".into()),
-        options: vec![opt("a", "A", false), opt("b", "B", false), opt("bad", "Bad", true)],
+        options: vec![
+            opt("a", "A", false),
+            opt("b", "B", false),
+            opt("bad", "Bad", true),
+        ],
         ..RuleConvention::default()
     }];
     report.provenance.started_at = "2026-11-02T10:00:00Z".into();
@@ -2236,12 +2240,19 @@ async fn the_standards_routes_store_refuse_replace_and_withdraw_a_ruling() {
     let (_, second) = call(&app, "POST", &uri, Some(post("b"))).await;
     let all = state.decisions.standards(&pid);
     assert_eq!(all.len(), 2);
-    assert!(all[0].revoked_at.is_some(), "the earlier ruling is withdrawn");
+    assert!(
+        all[0].revoked_at.is_some(),
+        "the earlier ruling is withdrawn"
+    );
     assert!(all[1].is_active());
     let id = second["id"].as_str().unwrap();
     let (status, _) = call(&app, "POST", &format!("{uri}/{id}/revoke"), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(state.decisions.standards(&pid).iter().all(|r| !r.is_active()));
+    assert!(state
+        .decisions
+        .standards(&pid)
+        .iter()
+        .all(|r| !r.is_active()));
     let (status, _) = call(&app, "POST", &format!("{uri}/{id}/revoke"), None).await;
     assert_eq!(status, StatusCode::CONFLICT);
     let leave = serde_json::json!({"repo": "acme/app", "rule_id": "ARCH-X-1",

@@ -430,7 +430,11 @@ pub fn apply_overlay_with_standards(
         merges,
         levels,
         legacy: false,
-        standards: standards.iter().filter(|r| r.is_active()).cloned().collect(),
+        standards: standards
+            .iter()
+            .filter(|r| r.is_active())
+            .cloned()
+            .collect(),
         engine_check: crate::engine_check::EngineCheckEvidence::default(),
     }
 }

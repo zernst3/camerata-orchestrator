@@ -362,11 +362,8 @@ fn a_problems_answer_whose_cited_problem_has_no_row_keeps_its_places_as_engine_r
         assert_eq!(result.records.len(), 1);
         let direct = &result.records[0].options[1];
         assert_eq!(direct.places.len(), 2);
-        let (departures, held, notes) = super::super::conventions::departure_and_held_rows(
-            &result.records,
-            &[],
-            &corpus,
-        );
+        let (departures, held, notes) =
+            super::super::conventions::departure_and_held_rows(&result.records, &[], &corpus);
         assert_eq!(departures.len(), 2, "{departures:?}");
         assert!(held.is_empty() && notes.is_empty(), "{notes:?}");
     }

@@ -56,7 +56,13 @@ pub(super) fn checked_place(
 }
 
 /// The problem needing a decision for a listed place that could not be checked against the file.
-fn held_row(repo: &str, rule: &str, title: &str, option_label: &str, place: &CensusPlace) -> Finding {
+fn held_row(
+    repo: &str,
+    rule: &str,
+    title: &str,
+    option_label: &str,
+    place: &CensusPlace,
+) -> Finding {
     Finding {
         repo: repo.to_string(),
         path: place.path.trim_start_matches("./").to_string(),
@@ -402,7 +408,9 @@ pub(super) fn departure_and_held_rows(
             .get_by_id(&c.rule_id)
             .map_or_else(|| c.rule_id.clone(), |r| r.title.clone());
         for o in &c.options {
-            if crate::conventions::option_status(c, &c.standard, &o.option_id) != PlaceStatus::Departs {
+            if crate::conventions::option_status(c, &c.standard, &o.option_id)
+                != PlaceStatus::Departs
+            {
                 continue;
             }
             for p in o.places.iter().filter(|p| !p.checked) {

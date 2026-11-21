@@ -1601,7 +1601,8 @@ fn build_deviation_groups(
 pub(crate) const CONVENTION_STATUS_FOLLOWED: &str = "Followed consistently, no exceptions found";
 pub(crate) const CONVENTION_STATUS_NONE_ADOPTED: &str = "No single convention adopted";
 /// A convention the reviewer set (convention model design, section 7), followed with no exception.
-pub(crate) const CONVENTION_STATUS_SET_BY_REVIEWER: &str = "Set by the reviewer, no exceptions found";
+pub(crate) const CONVENTION_STATUS_SET_BY_REVIEWER: &str =
+    "Set by the reviewer, no exceptions found";
 /// A rule the reviewer left to the client: every option is listed and none is marked.
 pub(crate) const CONVENTION_STATUS_OPEN_QUESTION: &str = "Open question: left to you to decide";
 
@@ -1842,7 +1843,8 @@ fn build_convention_rows(
             let (rank, status, convention_label, patterns_in_use) = match &row.kind.0 {
                 Some(FindingKind::ConventionObserved(c)) => (
                     0u8,
-                    if c.standard_source == Some(camerata_api_types::audit::StandardSource::Reviewer)
+                    if c.standard_source
+                        == Some(camerata_api_types::audit::StandardSource::Reviewer)
                     {
                         CONVENTION_STATUS_SET_BY_REVIEWER.to_string()
                     } else {
@@ -1911,7 +1913,11 @@ fn build_convention_rows(
                             1u8,
                             CONVENTION_STATUS_NONE_ADOPTED.to_string(),
                             String::new(),
-                            n.observed_options.iter().map(usage).collect::<Vec<_>>().join("\n"),
+                            n.observed_options
+                                .iter()
+                                .map(usage)
+                                .collect::<Vec<_>>()
+                                .join("\n"),
                         )
                     }
                 }

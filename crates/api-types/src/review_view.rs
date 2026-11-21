@@ -1167,6 +1167,7 @@ mod tests {
             ],
             merged_without_decision: vec![row("k2", HoldReason::MergedWithoutDecision)],
             node_decisions_missing_members: Vec::new(),
+            split_rules: Vec::new(),
         };
         assert_eq!(view.rows_needing_a_decision(), 2);
     }

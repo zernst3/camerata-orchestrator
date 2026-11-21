@@ -1589,7 +1589,7 @@ fn convention_model_package() -> (ProductPackage, Vec<u8>) {
 
 #[test]
 fn the_counts_check_passes_the_reviewer_and_open_question_statuses_and_fails_an_unknown_one() {
-    let (package, bytes) = convention_model_package();
+    let (_package, bytes) = convention_model_package();
     let entries = read_zip_entries(&bytes).unwrap();
     let problems = super::consistency::count_reconciliation_problems(&entries);
     assert!(problems.is_empty(), "{}", messages(&problems));
@@ -1605,5 +1605,8 @@ fn the_counts_check_passes_the_reviewer_and_open_question_statuses_and_fails_an_
         }),
     );
     let problems = super::consistency::count_reconciliation_problems(&tampered);
-    assert!(!problems.is_empty(), "an unknown status must fail the check");
+    assert!(
+        !problems.is_empty(),
+        "an unknown status must fail the check"
+    );
 }

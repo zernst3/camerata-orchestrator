@@ -865,5 +865,8 @@ fn your_conventions_words_reviewer_conventions_and_open_questions() {
         c.departures_line,
         "1 departure from a convention set by the reviewer, in 1 area (2 places)."
     );
-    assert_eq!(c.none_adopted_line, "2 open questions left for you to decide.");
+    assert_eq!(
+        c.none_adopted_line,
+        "2 open questions left for you to decide."
+    );
 }

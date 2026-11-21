@@ -35,7 +35,10 @@ fn hearth_corpus() -> camerata_rules::RuleSet {
     let mut set = camerata_rules::RuleSet::default();
     set.push(decision(
         PAR,
-        &[("par", "Run in parallel"), ("seq", "Sequential awaits by default")],
+        &[
+            ("par", "Run in parallel"),
+            ("seq", "Sequential awaits by default"),
+        ],
         "par",
     ));
     set.push(camerata_rules::bare_rule("SPIRIT-OPTIMIZE-1", "universal"));
@@ -93,8 +96,20 @@ fn hearth_script(
 }
 
 fn hearth_problems() -> (Vec<Value>, Vec<Value>) {
-    let p1 = problem(1, "app/listings/page.tsx", 17, "medium", "fn item_17() { run(17); }");
-    let mut p2 = problem(2, "app/admin/page.tsx", 27, "medium", "fn item_27() { run(27); }");
+    let p1 = problem(
+        1,
+        "app/listings/page.tsx",
+        17,
+        "medium",
+        "fn item_17() { run(17); }",
+    );
+    let mut p2 = problem(
+        2,
+        "app/admin/page.tsx",
+        27,
+        "medium",
+        "fn item_27() { run(27); }",
+    );
     p2["places"] = json!([
         {"path": "app/bookings/[id]/page.tsx", "line": 24},
         {"path": "app/api/checkout/route.ts", "line": 16}
@@ -115,13 +130,28 @@ async fn hearth(par_answer: Value, with_problems: bool) -> FinderResult {
     } else {
         (vec![], vec![])
     };
-    let agent = ScriptedAgent::new(hearth_script(par_answer, problems, citations, with_problems));
-    run_with(&agent, &hearth_files(), &hearth_rules(), &hearth_corpus(), &options()).await
+    let agent = ScriptedAgent::new(hearth_script(
+        par_answer,
+        problems,
+        citations,
+        with_problems,
+    ));
+    run_with(
+        &agent,
+        &hearth_files(),
+        &hearth_rules(),
+        &hearth_corpus(),
+        &options(),
+    )
+    .await
 }
 
 fn finder_rows(rows: &[crate::onboard::Finding]) -> Vec<&crate::onboard::Finding> {
     rows.iter()
-        .filter(|f| f.captures.contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE))
+        .filter(|f| {
+            f.captures
+                .contains_key(crate::ai_audit::agent_finder::reply::FINDER_PROBLEM_CAPTURE)
+        })
         .collect()
 }
 
@@ -144,41 +174,65 @@ async fn hearth_parallel_rule_reports_are_not_departures_from_the_observed_seque
     let finder = finder_rows(&rows);
     assert_eq!(finder.len(), 4, "{rows:?}");
     for f in &finder {
-        assert!(!f.rule_id.eq_ignore_ascii_case(PAR), "keyed to the rule: {f:?}");
+        assert!(
+            !f.rule_id.eq_ignore_ascii_case(PAR),
+            "keyed to the rule: {f:?}"
+        );
         assert!(
             !matches!(f.kind, Some(FindingKind::Deviation(_))),
             "{:?}",
             f.kind
         );
-        assert!(!f.detail.contains("deviate from \"Sequential awaits by default\""));
+        assert!(!f
+            .detail
+            .contains("deviate from \"Sequential awaits by default\""));
     }
     assert!(
         kinds_of(&rows, PAR).iter().all(|k| *k != "deviation"),
         "{rows:?}"
     );
     assert_eq!(recs[0].recommended_option_id, "seq");
-    let c = extras.conventions.iter().find(|c| c.rule_id == PAR).unwrap();
+    let c = extras
+        .conventions
+        .iter()
+        .find(|c| c.rule_id == PAR)
+        .unwrap();
     assert_eq!(c.observed_option_id.as_deref(), Some("seq"));
     assert_eq!(c.assessed_places, Some(5));
     assert_eq!(c.standard.source, StandardSource::Observed);
-    assert_eq!(c.standard.differs_from_default.as_deref(), Some("Run in parallel"));
+    assert_eq!(
+        c.standard.differs_from_default.as_deref(),
+        Some("Run in parallel")
+    );
     assert_eq!(c.finder_rows.len(), 4, "{:?}", c.finder_rows);
     assert!(c
         .finder_rows
         .iter()
         .all(|r| r.option_basis == OptionBasis::OnlyOther && r.status == PlaceStatus::Conforms));
     // The ledger parts add up: departing, conforming and unknown.
-    let departs = c.finder_rows.iter().filter(|r| r.status == PlaceStatus::Departs).count();
+    let departs = c
+        .finder_rows
+        .iter()
+        .filter(|r| r.status == PlaceStatus::Departs)
+        .count();
     let conforms = c
         .finder_rows
         .iter()
-        .filter(|r| matches!(r.status, PlaceStatus::Conforms | PlaceStatus::FollowsRuleDefault))
+        .filter(|r| {
+            matches!(
+                r.status,
+                PlaceStatus::Conforms | PlaceStatus::FollowsRuleDefault
+            )
+        })
         .count();
     assert_eq!(departs + conforms, 4);
     let block = crate::scan_ledger::ConventionsBlock::from_records(&extras.conventions, &rows);
     assert!(block.reconciles(), "{block:?}");
     let entry = block.rules.iter().find(|r| r.rule_id == PAR).unwrap();
-    assert_eq!((entry.finder_rows, entry.conforming, entry.departures), (4, 4, 0));
+    assert_eq!(
+        (entry.finder_rows, entry.conforming, entry.departures),
+        (4, 4, 0)
+    );
 }
 
 /// Test 2: a clean answer with listed places. The one place of the rule's default is not a
@@ -204,8 +258,16 @@ async fn a_place_of_the_rule_default_is_not_a_departure_from_an_observed_standar
         rows.iter().all(|f| f.path != "app/api/checkout/route.ts"),
         "{rows:?}"
     );
-    assert_eq!(kinds_of(&rows, PAR), vec!["convention_observed"], "{rows:?}");
-    let c = extras.conventions.iter().find(|c| c.rule_id == PAR).unwrap();
+    assert_eq!(
+        kinds_of(&rows, PAR),
+        vec!["convention_observed"],
+        "{rows:?}"
+    );
+    let c = extras
+        .conventions
+        .iter()
+        .find(|c| c.rule_id == PAR)
+        .unwrap();
     let par = c.options.iter().find(|o| o.option_id == "par").unwrap();
     assert_eq!(par.places[0].status, PlaceStatus::FollowsRuleDefault);
     assert!(par.places[0].checked && !par.places[0].text.is_empty());
@@ -255,12 +317,19 @@ async fn env_run(chosen: Option<(&str, &str)>) -> FinderResult {
 async fn a_split_decision_rule_has_no_standard_and_proposes_the_rule_default() {
     let (rows, _, recs, failed, _, extras) = env_run(None).await;
     assert!(failed.is_empty(), "{failed:?}");
-    assert_eq!(kinds_of(&rows, "ARCH-TRIGGER-ENV-1"), vec!["no_convention"], "{rows:?}");
+    assert_eq!(
+        kinds_of(&rows, "ARCH-TRIGGER-ENV-1"),
+        vec!["no_convention"],
+        "{rows:?}"
+    );
     assert_eq!(recs[0].recommended_option_id, "");
     let c = &extras.conventions[0];
     assert_eq!(c.standard.option_id, None);
     let p = c.standard.proposal.as_ref().expect("a proposal");
-    assert_eq!((p.option_id.as_str(), p.basis), ("git-ref", ProposalBasis::RuleDefault));
+    assert_eq!(
+        (p.option_id.as_str(), p.basis),
+        ("git-ref", ProposalBasis::RuleDefault)
+    );
 }
 
 /// Test 4: the project's earlier choice is the proposal when it is not the rule's default.
@@ -271,7 +340,10 @@ async fn the_projects_earlier_choice_is_the_proposal_when_it_is_not_the_default(
     let c = &extras.conventions[0];
     assert_eq!(c.standard.option_id, None);
     let p = c.standard.proposal.as_ref().expect("a proposal");
-    assert_eq!((p.option_id.as_str(), p.basis), ("manual", ProposalBasis::EarlierChoice));
+    assert_eq!(
+        (p.option_id.as_str(), p.basis),
+        ("manual", ProposalBasis::EarlierChoice)
+    );
 }
 
 fn three_corpus() -> camerata_rules::RuleSet {
@@ -300,7 +372,13 @@ async fn three_run(judged_in_two_thirds: bool) -> FinderResult {
     };
     let agent = ScriptedAgent::new(full_script(
         &[("src/a.rs", 6)],
-        vec![problem(1, "src/a.rs", 5, "medium", "fn item_5() { run(5); }")],
+        vec![problem(
+            1,
+            "src/a.rs",
+            5,
+            "medium",
+            "fn item_5() { run(5); }",
+        )],
         vec![json!({"n": 1, "rule": "ARCH-LAYER-1"})],
         vec![json!({
             "rule": "ARCH-LAYER-1", "answer": "problems", "problems": [1],
@@ -309,7 +387,10 @@ async fn three_run(judged_in_two_thirds: bool) -> FinderResult {
     ));
     run_with(
         &agent,
-        &[("src/a.rs".to_string(), rust_file(6)), ("src/b.rs".to_string(), rust_file(4))],
+        &[
+            ("src/a.rs".to_string(), rust_file(6)),
+            ("src/b.rs".to_string(), rust_file(4)),
+        ],
         &[AuditRule::new("ARCH-LAYER-1", "Layer it.")],
         &three_corpus(),
         &options(),
@@ -325,8 +406,15 @@ async fn a_finder_row_against_the_judged_and_observed_option_is_a_deviation() {
     assert!(failed.is_empty(), "{failed:?}");
     let row = rows.iter().find(|f| f.line == 5).unwrap();
     assert_eq!(row.rule_id, "ARCH-LAYER-1");
-    assert!(matches!(row.kind, Some(FindingKind::Deviation(_))), "{:?}", row.kind);
-    assert_eq!(extras.conventions[0].finder_rows[0].status, PlaceStatus::Departs);
+    assert!(
+        matches!(row.kind, Some(FindingKind::Deviation(_))),
+        "{:?}",
+        row.kind
+    );
+    assert_eq!(
+        extras.conventions[0].finder_rows[0].status,
+        PlaceStatus::Departs
+    );
 }
 
 /// Test 6: three options in use, and a finder row at no listed place: its option is unknown, it
