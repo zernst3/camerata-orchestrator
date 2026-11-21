@@ -385,6 +385,9 @@
     ],
     "node_decisions_missing_members": [
       "empty"
+    ],
+    "split_rules": [
+      "empty"
     ]
   },
   "queue": {
@@ -702,6 +705,9 @@
         }
       ],
       "node_decisions_missing_members": [
+        "empty"
+      ],
+      "split_rules": [
         "empty"
       ]
     },

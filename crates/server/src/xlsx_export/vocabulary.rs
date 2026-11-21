@@ -294,6 +294,7 @@ pub const H_HOW_CONSISTENTLY: &str = "How consistently";
 pub const H_PLACES_LOOKED_AT: &str = "Places looked at";
 pub const H_MORE_DETAIL: &str = "More detail";
 pub const H_CONVENTION: &str = "Convention";
+pub const H_CONVENTION_SOURCE: &str = "Where the convention came from";
 pub const H_PLACES_DEPARTING: &str = "Places departing";
 pub const H_PLACES_CHECKED: &str = "Places checked";
 pub const H_WORST_SEVERITY: &str = "Worst severity";
@@ -1040,6 +1041,11 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
         "More detail",
         "The longer explanation behind a row.",
         "All problems; Your conventions; Not checked",
+    ),
+    e(
+        "Where the convention came from",
+        "Whether your code follows the convention, or the reviewer set it, and how many places depart.",
+        "Departures",
     ),
     e(
         "Places departing",

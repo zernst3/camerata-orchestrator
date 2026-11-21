@@ -6471,14 +6471,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            cell_by_header(&bytes, "Departures", "Convention", 1)
-                .lines()
-                .next()
-                .unwrap_or_default(),
+            cell_by_header(&bytes, "Departures", "Convention", 1),
             "URI-versioned endpoints",
             "the convention the codebase follows is its own column, verbatim from the \
-             authored corpus option (its first line; the next line says where it came from, \
-             convention model design section 7)"
+             authored corpus option"
         );
         assert_eq!(
             number_by_header(&bytes, "Departures", "Places departing", 1),

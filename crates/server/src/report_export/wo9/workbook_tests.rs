@@ -881,7 +881,7 @@ mod convention_wording {
         let at = (1..t.len())
             .find(|r| cell_of(&t, *r, v::H_RULE_ID) == rule)
             .unwrap_or_else(|| panic!("no departure row for {rule}: {t:?}"));
-        cell_of(&t, at, v::H_CONVENTION).to_string()
+        cell_of(&t, at, v::H_CONVENTION_SOURCE).to_string()
     }
 
     fn conventions_row(xlsx: &[u8], rule: &str) -> (String, String) {
