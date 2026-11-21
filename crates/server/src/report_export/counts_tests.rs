@@ -57,6 +57,8 @@ fn convention_rows_never_count_as_problems_needing_a_decision() {
     conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "x".to_string(),
         convention_label: "A convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     let c = counts_for(vec![conv]);
     assert_eq!(c.rows.convention, 1);
@@ -71,6 +73,8 @@ fn problems_plus_dependency_advisories_reconcile_to_source_rows() {
     conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "x".to_string(),
         convention_label: "A convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     let mut unchecked = finding("SYN-B-1", "src/u.rs", 0, "info");
     unchecked.kind = Some(FindingKind::NotAssessed(NotAssessedKind {

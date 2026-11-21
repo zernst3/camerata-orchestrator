@@ -58,6 +58,8 @@ fn convention(repo: &str) -> Finding {
             convention_option_id: "authorization-on-the-server-ui-renders-permission-hints"
                 .to_string(),
             convention_label: "Authorization on the server".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         })),
         ..problem(repo, "src/routes.ts", 1)
     }

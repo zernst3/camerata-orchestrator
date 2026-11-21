@@ -37,10 +37,14 @@ fn kinds_carrying(text: &str) -> Vec<FindingKind> {
             assessed_sites: Some(9),
             convention_option_id: None,
             convention_label: text.to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }),
         FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: "opt".to_string(),
             convention_label: text.to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }),
         FindingKind::NoConvention(NoConventionKind {
             observed_options: vec![ObservedOptionUsage {
@@ -48,6 +52,7 @@ fn kinds_carrying(text: &str) -> Vec<FindingKind> {
                 label: text.to_string(),
                 sites: Some(1),
             }],
+            left_to_client: false,
         }),
         FindingKind::NotAssessed(NotAssessedKind {
             reason: NotAssessedReason::ToolFailed,

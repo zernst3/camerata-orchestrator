@@ -332,6 +332,8 @@ fn mixed_report() -> crate::onboard::ScanReport {
     convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "x".to_string(),
         convention_label: "A convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     let mut unchecked = row("SYN-D-1", "src/u.rs", 0, "info");
     unchecked.kind = Some(FindingKind::NotAssessed(NotAssessedKind {
@@ -1052,6 +1054,8 @@ fn departure() -> camerata_api_types::audit::FindingKind {
         assessed_sites: Some(4),
         convention_option_id: None,
         convention_label: "the usual way".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     })
 }
 
@@ -1060,6 +1064,8 @@ fn convention() -> camerata_api_types::audit::FindingKind {
         camerata_api_types::audit::ConventionObservedKind {
             convention_option_id: "x".to_string(),
             convention_label: "the usual way".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         },
     )
 }

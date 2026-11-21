@@ -532,6 +532,8 @@ mod tests {
             Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "cursor".to_string(),
                 convention_label: "cursor pagination".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             })),
         ));
         ran(&mut r, "acme/c", RULE, 1);

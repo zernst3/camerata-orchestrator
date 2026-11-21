@@ -1132,6 +1132,8 @@ fn req_w7_kind_informational_row_never_fuses_with_a_defect_row_in_the_semantic_m
     conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "versioned".to_string(),
         convention_label: "URI-versioned endpoints".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     // Same rule id, same file, 2 lines apart: signal (d) fires, both deterministic
     // (same_rule_adjacent exempts the det+det guard), no objects to conflict — before
@@ -1174,6 +1176,7 @@ fn req_w7_kind_informational_row_never_fuses_with_a_defect_row_at_the_same_locat
     );
     nc.kind = Some(FindingKind::NoConvention(NoConventionKind {
         observed_options: vec![],
+        left_to_client: false,
     }));
     let out = collapse_located(vec![defect, nc], &files);
     assert_eq!(
@@ -1201,6 +1204,8 @@ fn req_w7_kind_primary_rank_never_lets_an_informational_row_outrank_a_defect() {
     conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "versioned".to_string(),
         convention_label: "URI-versioned endpoints".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     assert!(
         primary_rank(&defect, 2, 1) > primary_rank(&conv, 2, 0),

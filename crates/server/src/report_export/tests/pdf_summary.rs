@@ -459,6 +459,8 @@ fn the_scorecards_and_the_cover_count_the_places_all_problems_lists() {
         convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: String::new(),
             convention_label: "a habit".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }));
         rows.push(convention);
     }
@@ -520,12 +522,15 @@ fn your_conventions_is_counts_and_short_lines() {
         f.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: String::new(),
             convention_label: "a habit".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }));
         rows.push(f);
     }
     let mut none = finding("ARCH-NONE-1", "src/n.rs", 1, "low");
     none.kind = Some(FindingKind::NoConvention(NoConventionKind {
         observed_options: Vec::new(),
+        left_to_client: false,
     }));
     rows.push(none);
     for line in [3, 4] {
@@ -536,6 +541,8 @@ fn your_conventions_is_counts_and_short_lines() {
             assessed_sites: Some(5),
             convention_option_id: None,
             convention_label: "Handlers call services".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }));
         rows.push(f);
     }

@@ -559,6 +559,8 @@ fn convention_row(path: &str) -> Finding {
     f.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "monolith".to_string(),
         convention_label: "Monolith first".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     f
 }

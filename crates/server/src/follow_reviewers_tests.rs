@@ -230,6 +230,8 @@ fn deviation_row(rule: &str, stage1: &str, reason: Option<EscalationReason>) -> 
             assessed_sites: Some(9),
             convention_option_id: Some("handler-checks".to_string()),
             convention_label: "Handlers check access themselves".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         },
     ));
     f.review.escalation_reason = reason;

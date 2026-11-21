@@ -3966,13 +3966,18 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: String::new(),
+                standard_source: None,
+                differs_from_default: None,
             })),
             Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: String::new(),
                 convention_label: String::new(),
+                standard_source: None,
+                differs_from_default: None,
             })),
             Some(FindingKind::NoConvention(NoConventionKind {
                 observed_options: Vec::new(),
+                left_to_client: false,
             })),
             Some(FindingKind::NotAssessed(NotAssessedKind {
                 reason: NotAssessedReason::PassFailed,
@@ -4019,6 +4024,8 @@ mod tests {
                     assessed_sites: Some(47),
                     convention_option_id: Some("versioned".to_string()),
                     convention_label: "URI-versioned endpoints".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 }),
             ),
             kinded(
@@ -4026,6 +4033,8 @@ mod tests {
                 FindingKind::ConventionObserved(ConventionObservedKind {
                     convention_option_id: "cursor".to_string(),
                     convention_label: "Cursor pagination".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 }),
             ),
             kinded(
@@ -4043,6 +4052,7 @@ mod tests {
                             sites: Some(2),
                         },
                     ],
+                    left_to_client: false,
                 }),
             ),
             kinded(
@@ -4154,6 +4164,8 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: Some("default".to_string()),
                 convention_label: "Default".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         let defect = kinded(
@@ -4215,6 +4227,8 @@ mod tests {
                 assessed_sites: Some(5),
                 convention_option_id: None,
                 convention_label: "observed majority".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         let legacy = finding("LEGACY-1", "b.rs", 2, "high");
@@ -6117,6 +6131,8 @@ mod tests {
                     assessed_sites: Some(47),
                     convention_option_id: Some("versioned".to_string()),
                     convention_label: "URI-versioned endpoints".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 }),
             ),
             kinded(
@@ -6124,6 +6140,8 @@ mod tests {
                 FindingKind::ConventionObserved(ConventionObservedKind {
                     convention_option_id: "cursor".to_string(),
                     convention_label: "Cursor pagination".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 }),
             ),
             kinded(
@@ -6141,6 +6159,7 @@ mod tests {
                             sites: Some(1),
                         },
                     ],
+                    left_to_client: false,
                 }),
             ),
             kinded(
@@ -6331,6 +6350,8 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "the pattern used elsewhere in this codebase".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6379,6 +6400,8 @@ mod tests {
                 assessed_sites: Some(47),
                 convention_option_id: None,
                 convention_label: "URI-versioned endpoints".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6432,6 +6455,8 @@ mod tests {
                         assessed_sites: Some(3),
                         convention_option_id: None,
                         convention_label: "Typed path params".to_string(),
+                        standard_source: None,
+                        differs_from_default: None,
                     }),
                 )
             })
@@ -6467,6 +6492,8 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6517,6 +6544,8 @@ mod tests {
                 assessed_sites: Some(3),
                 convention_option_id: Some("typed-extraction".to_string()),
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
@@ -6578,6 +6607,8 @@ mod tests {
                 assessed_sites: Some(3),
                 convention_option_id: Some("typed-extraction".to_string()),
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
@@ -7090,6 +7121,8 @@ mod tests {
                 assessed_sites: Some(47),
                 convention_option_id: None,
                 convention_label: "URI-versioned endpoints".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         dev.also_locations = vec![loc(18, false), loc(31, true)];
@@ -7099,6 +7132,8 @@ mod tests {
             FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "cursor".to_string(),
                 convention_label: "Cursor pagination".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         conv.also_locations = vec![crate::onboard::MergedLocation::site(

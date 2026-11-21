@@ -1723,6 +1723,8 @@ fn mixed_scan_report() -> ScanReport {
             assessed_sites: Some(10),
             convention_option_id: Some("versioned".to_string()),
             convention_label: "URI-versioned endpoints".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         })
     };
     let rows: Vec<(&str, &str, Option<FindingKind>)> = vec![
@@ -1746,6 +1748,8 @@ fn mixed_scan_report() -> ScanReport {
             Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "cursor".to_string(),
                 convention_label: "Cursor pagination".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             })),
         ),
         (
@@ -1753,6 +1757,7 @@ fn mixed_scan_report() -> ScanReport {
             "info",
             Some(FindingKind::NoConvention(NoConventionKind {
                 observed_options: Vec::new(),
+                left_to_client: false,
             })),
         ),
         (
@@ -1924,6 +1929,8 @@ fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "x".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             },
         ),
     ));
@@ -1999,6 +2006,8 @@ fn the_gate_catches_a_rendered_finding_whose_kind_differs_from_the_matrix() {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "x".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             },
         ),
     ));

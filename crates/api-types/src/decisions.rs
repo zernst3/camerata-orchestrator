@@ -71,6 +71,53 @@ pub struct ClientAck {
     pub note: String,
 }
 
+/// The reviewer's ruling on the standard of one rule with options, for one inspection
+/// (convention model design section 4). Stored in the project file beside the decisions,
+/// never inside the sealed report. The overlay applies it at review and export time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandardRuling {
+    pub id: String,
+    pub repo: String,
+    pub rule_id: String,
+    pub choice: StandardChoice,
+    #[serde(default)]
+    pub reason: String,
+    pub decided_by: String,
+    pub decided_at: String,
+    /// The inspection the ruling was made against. A ruling never applies to another one.
+    pub run_id: String,
+    pub engine_version: String,
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+}
+
+impl StandardRuling {
+    /// A ruling that has not been withdrawn.
+    pub fn is_active(&self) -> bool {
+        self.revoked_at.is_none()
+    }
+}
+
+/// What the reviewer ruled for a rule with options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandardChoice {
+    /// This option is the convention for this inspection.
+    Accept { option_id: String },
+    /// No recommendation: the report lists the options and leaves the choice to the client.
+    LeaveToClient,
+}
+
+/// `POST /api/projects/:id/standards`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostStandardReq {
+    pub repo: String,
+    pub rule_id: String,
+    pub choice: StandardChoice,
+    #[serde(default)]
+    pub reason: String,
+}
+
 /// One stored decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Decision {
@@ -760,5 +807,36 @@ mod tests {
             serde_json::to_value(DecisionState::EngineRestored).unwrap(),
             serde_json::json!("engine_restored")
         );
+    }
+
+    /// Convention model design section 4 (step 1): the ruling wire shape.
+    #[test]
+    fn convention_model_standard_ruling_round_trips() {
+        let r = StandardRuling {
+            id: "std-000001".into(),
+            repo: "r".into(),
+            rule_id: "ARCH-X-1".into(),
+            choice: StandardChoice::Accept {
+                option_id: "par".into(),
+            },
+            reason: "we run in parallel".into(),
+            decided_by: "z".into(),
+            decided_at: "2026-11-20T00:00:00Z".into(),
+            run_id: "run-1".into(),
+            engine_version: "1".into(),
+            revoked_at: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["choice"]["accept"]["option_id"], "par");
+        let back: StandardRuling = serde_json::from_value(v).unwrap();
+        assert_eq!(back, r);
+        let left = serde_json::to_value(StandardChoice::LeaveToClient).unwrap();
+        assert_eq!(left, serde_json::json!("leave_to_client"));
+        assert!(r.is_active());
+        let req: PostStandardReq = serde_json::from_str(
+            r#"{"repo":"r","rule_id":"R","choice":"leave_to_client","reason":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.choice, StandardChoice::LeaveToClient);
     }
 }

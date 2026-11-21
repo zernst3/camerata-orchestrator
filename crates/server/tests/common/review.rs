@@ -211,6 +211,8 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
                     assessed_sites: Some(4),
                     convention_option_id: Some("session-cookie".to_string()),
                     convention_label: "Session cookie".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 },
             ));
         }

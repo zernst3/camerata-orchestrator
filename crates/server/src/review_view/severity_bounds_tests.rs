@@ -23,6 +23,8 @@ fn deviation() -> FindingKind {
         assessed_sites: Some(10),
         convention_option_id: None,
         convention_label: "the convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     })
 }
 

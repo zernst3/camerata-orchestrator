@@ -794,6 +794,8 @@ fn the_fix_plan_lists_only_fixes_and_rules_checked_never_calls_a_convention_a_pr
     convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "cursor".to_string(),
         convention_label: "Cursor pagination".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     report.findings.push(convention);
     report
