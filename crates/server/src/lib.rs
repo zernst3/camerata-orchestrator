@@ -52,6 +52,7 @@ mod corpus_freshness;
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
 /// resulting Camerata project. See the module doc comment for the full flow.
 pub mod create_app;
+pub mod conventions;
 pub mod decisions;
 pub mod decompose;
 pub mod dep_audit;

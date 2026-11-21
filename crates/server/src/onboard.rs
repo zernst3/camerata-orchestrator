@@ -1102,6 +1102,12 @@ pub struct ScanReport {
     /// report that speaks per repo reads. `#[serde(default)]` so an older report still loads.
     #[serde(default)]
     pub recommendations_by_repo: Vec<crate::ai_audit::RuleRecommendation>,
+    /// One convention record for each (repo, rule with options) the agent finder judged: the
+    /// options, the places recorded for each, the standard and the finder rows that cite the
+    /// rule (see [`crate::conventions`]). Empty for a report saved before the convention model;
+    /// [`crate::conventions::upgrade`] builds it from the recommendations when one is loaded.
+    #[serde(default)]
+    pub conventions: Vec<camerata_api_types::audit::RuleConvention>,
     /// Where services of one project differ on a rule: the rules violated in at least one repo
     /// and clean in at least one other, as an observation, never a finding (see
     /// [`patterns_matrix`]). Empty for a project of one repo. Rebuilt from the ledger and the
@@ -1332,6 +1338,7 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            conventions: Vec::new(),
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
@@ -1374,6 +1381,7 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            conventions: Vec::new(),
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
