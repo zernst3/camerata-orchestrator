@@ -175,6 +175,10 @@ async fn hearth_parallel_rule_reports_are_not_departures_from_the_observed_seque
         .filter(|r| matches!(r.status, PlaceStatus::Conforms | PlaceStatus::FollowsRuleDefault))
         .count();
     assert_eq!(departs + conforms, 4);
+    let block = crate::scan_ledger::ConventionsBlock::from_records(&extras.conventions, &rows);
+    assert!(block.reconciles(), "{block:?}");
+    let entry = block.rules.iter().find(|r| r.rule_id == PAR).unwrap();
+    assert_eq!((entry.finder_rows, entry.conforming, entry.departures), (4, 4, 0));
 }
 
 /// Test 2: a clean answer with listed places. The one place of the rule's default is not a

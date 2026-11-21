@@ -439,3 +439,86 @@ pub(crate) async fn set_needed_me(
         Err(e) => store_refusal(&e),
     }
 }
+
+/// `POST /api/projects/:id/standards`: the reviewer's ruling on the standard of one rule with
+/// options, for the latest inspection (convention model design, section 5). Refuses an option
+/// that is not on the rule or that describes the rule's own defect. Answers the stored ruling;
+/// the screen reads the refreshed report afterwards.
+pub(crate) async fn post_standard(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<camerata_api_types::decisions::PostStandardReq>,
+) -> Response {
+    use camerata_api_types::decisions::StandardChoice;
+    if state.projects.get(&id).is_none() {
+        return no_project();
+    }
+    if state.decisions.is_corrupt(&id) {
+        return corrupt_response();
+    }
+    let Some(latest) = state.inspections.latest(&id) else {
+        return no_inspection();
+    };
+    let mut report = latest.report.clone();
+    crate::conventions::upgrade(&mut report);
+    let Some(record) = report
+        .conventions
+        .iter()
+        .find(|c| c.repo == req.repo && c.rule_id.eq_ignore_ascii_case(&req.rule_id))
+    else {
+        return refusal(
+            StatusCode::NOT_FOUND,
+            "unknown_rule",
+            "This inspection has no rule with options by that name for that repository.",
+        );
+    };
+    if let StandardChoice::Accept { option_id } = &req.choice {
+        match record.options.iter().find(|o| &o.option_id == option_id) {
+            None => {
+                return refusal(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "unknown_option",
+                    "That option is not one of the rule's options.",
+                )
+            }
+            Some(o) if o.violates => {
+                return refusal(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "option_is_the_defect",
+                    "That option describes the rule's own defect, so it cannot be the convention.",
+                )
+            }
+            Some(_) => {}
+        }
+    }
+    let when = now();
+    let ctx = DecisionCtx {
+        run_id: &latest.id,
+        engine_version: env!("CARGO_PKG_VERSION"),
+        now: &when,
+    };
+    match state
+        .decisions
+        .record_standard(&id, &req, crate::decisions::DEFAULT_DECIDER, ctx)
+    {
+        Ok(ruling) => (StatusCode::OK, Json(ruling)).into_response(),
+        Err(e) => store_refusal(&e),
+    }
+}
+
+/// `POST /api/projects/:id/standards/:ruling_id/revoke`: withdraw a ruling.
+pub(crate) async fn revoke_standard(
+    State(state): State<AppState>,
+    Path((id, ruling_id)): Path<(String, String)>,
+) -> Response {
+    if state.projects.get(&id).is_none() {
+        return no_project();
+    }
+    if state.decisions.is_corrupt(&id) {
+        return corrupt_response();
+    }
+    match state.decisions.revoke_standard(&id, &ruling_id, &now()) {
+        Ok(ruling) => Json(ruling).into_response(),
+        Err(e) => store_refusal(&e),
+    }
+}

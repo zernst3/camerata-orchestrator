@@ -740,3 +740,180 @@ fn a_summary_edit_reaches_the_internal_tree_only_and_never_the_client_tree() {
     assert!(!client_json.contains("SECRET-REASON"));
     assert!(!client_json.contains("SECRET-REVIEWER"));
 }
+
+// ── the convention model's rulings (design 2026-11-20, section 11, tests 8, 9, 11 and 12) ──
+
+mod standards {
+    use camerata_api_types::audit::{
+        OptionCensus, PlaceStatus, RuleConvention, StandardSource, StandardState,
+    };
+    use camerata_api_types::decisions::{StandardChoice, StandardRuling};
+
+    use super::*;
+    use crate::ai_audit::agent_finder::reply::{FINDER_PROBLEM_CAPTURE, FINDER_RULES_CAPTURE};
+
+    const RULE: &str = "ARCH-PARALLEL-INDEPENDENT-1";
+
+    fn finder_row(path: &str, line: usize, n: u32) -> Finding {
+        let mut f = row("SPIRIT-OPTIMIZE-1", path, line, &format!("problem {n}"));
+        f.severity = "medium".into();
+        f.captures.insert(FINDER_PROBLEM_CAPTURE.into(), n.to_string());
+        f.captures
+            .insert(FINDER_RULES_CAPTURE.into(), format!("{RULE},SPIRIT-OPTIMIZE-1"));
+        f
+    }
+
+    fn opt(id: &str, label: &str, count: usize) -> OptionCensus {
+        OptionCensus {
+            option_id: id.into(),
+            label: label.into(),
+            violates: false,
+            count: Some(count),
+            places: vec![],
+        }
+    }
+
+    /// The sealed Hearth report: four finder rows cited to the rule and moved to another rule at
+    /// scan time, and the record of the rule (observed sequential, judged parallel).
+    fn hearth_sealed() -> SealedReport {
+        let mut report = ScanReport::gated(&["acme/app".to_string()]);
+        report.gated = false;
+        report.findings = vec![
+            finder_row("app/a.tsx", 17, 1),
+            finder_row("app/b.tsx", 27, 2),
+            finder_row("app/c.tsx", 24, 3),
+            finder_row("app/d.tsx", 16, 4),
+        ];
+        report.conventions = vec![RuleConvention {
+            repo: "acme/app".into(),
+            rule_id: RULE.into(),
+            default_option_id: Some("par".into()),
+            judged_option_id: Some("par".into()),
+            observed_option_id: Some("seq".into()),
+            assessed_places: Some(5),
+            places_recorded: true,
+            options: vec![opt("par", "Run in parallel", 1), opt("seq", "Sequential awaits", 4)],
+            standard: StandardState {
+                option_id: Some("seq".into()),
+                source: StandardSource::Observed,
+                differs_from_default: Some("Run in parallel".into()),
+                ..StandardState::default()
+            },
+            finder_rows: vec![],
+        }];
+        report.provenance.started_at = "2026-11-02T10:00:00Z".into();
+        report.provenance.finished_at = "2026-11-02T10:00:00Z".into();
+        report.seal()
+    }
+
+    fn accept(option: &str) -> StandardRuling {
+        StandardRuling {
+            id: "std-000001".into(),
+            repo: "acme/app".into(),
+            rule_id: RULE.into(),
+            choice: StandardChoice::Accept {
+                option_id: option.into(),
+            },
+            reason: String::new(),
+            decided_by: "z".into(),
+            decided_at: NOW.into(),
+            run_id: "insp-1".into(),
+            engine_version: "0".into(),
+            revoked_at: None,
+        }
+    }
+
+    fn departures(r: &ReviewedReport) -> Vec<Finding> {
+        r.report()
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == RULE && matches!(f.kind, Some(FindingKind::Deviation(_))))
+            .cloned()
+            .collect()
+    }
+
+    /// Test 8: accepting "run in parallel" makes the four places departures; applying twice gives
+    /// the same keys; the finder rows are unchanged.
+    #[test]
+    fn accepting_the_judged_option_adds_four_departures_with_stable_keys() {
+        let sealed = hearth_sealed();
+        let rulings = [accept("par")];
+        let a = apply_overlay_with_standards(&sealed, &[], &[], &[], &rulings);
+        let b = apply_overlay_with_standards(&sealed, &[], &[], &[], &rulings);
+        let dep = departures(&a);
+        assert_eq!(dep.len(), 4, "{dep:?}");
+        for d in &dep {
+            let Some(FindingKind::Deviation(k)) = &d.kind else { panic!() };
+            assert_eq!(k.standard_source, Some(StandardSource::Reviewer));
+            assert_eq!((k.deviating_sites, k.assessed_sites), (4, Some(5)));
+            assert_eq!(k.convention_label, "Run in parallel");
+            assert!(!d.site_key.is_empty());
+        }
+        let keys = |r: &ReviewedReport| -> Vec<String> {
+            let mut k: Vec<String> = departures(r).iter().map(|f| f.site_key.clone()).collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&a), keys(&b));
+        let finder_after: Vec<&Finding> = a
+            .report()
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "SPIRIT-OPTIMIZE-1")
+            .collect();
+        assert_eq!(finder_after.len(), 4);
+        // The record shows the reviewer's standard on the copy.
+        assert_eq!(a.report().conventions[0].standard.source, StandardSource::Reviewer);
+        assert_eq!(sealed.conventions[0].standard.source, StandardSource::Observed);
+    }
+
+    /// Tests 9 and 12: a withdrawn ruling (or none) leaves the report as the sealed one reads.
+    #[test]
+    fn no_ruling_and_a_withdrawn_ruling_leave_the_rows_as_they_were() {
+        let sealed = hearth_sealed();
+        let plain = apply_overlay(&sealed, &[], &[], &[]);
+        let mut withdrawn = accept("par");
+        withdrawn.revoked_at = Some(NOW.into());
+        let after = apply_overlay_with_standards(&sealed, &[], &[], &[], &[withdrawn]);
+        assert_eq!(plain.report().findings, after.report().findings);
+        assert_eq!(plain.report().findings, sealed.findings);
+        assert!(plain.report().conventions[0]
+            .finder_rows
+            .iter()
+            .all(|r| r.status != PlaceStatus::Departs));
+    }
+
+    /// Test 11: a decision made on a departure row survives a second overlay call; after the
+    /// ruling is withdrawn the row is gone, so the decision shows through the stale path.
+    #[test]
+    fn a_decision_on_a_departure_row_survives_and_goes_stale_when_the_ruling_is_withdrawn() {
+        let sealed = hearth_sealed();
+        let rulings = [accept("par")];
+        let first = apply_overlay_with_standards(&sealed, &[], &[], &[], &rulings);
+        let key = departures(&first)[0].site_key.clone();
+        let mut d = Decision {
+            id: "dec-000001".into(),
+            key: key.clone(),
+            state: DecisionState::Confirmed,
+            reason: String::new(),
+            scope: Scope::Site,
+            applies_to: vec![],
+            except: vec![],
+            inherited_from: None,
+            decided_by: "z".into(),
+            decided_at: NOW.into(),
+            run_id: "insp-1".into(),
+            engine_version: "0".into(),
+            needed_me: None,
+            sample_verdict: None,
+            confirmed_by_client: None,
+            revoked_at: None,
+        };
+        d.reason = "ok".into();
+        let again = apply_overlay_with_standards(&sealed, std::slice::from_ref(&d), &[], &[], &rulings);
+        assert!(again.dispositions().contains_key(&key));
+        assert!(again.report().findings.iter().any(|f| f.site_key == key));
+        let withdrawn = apply_overlay(&sealed, std::slice::from_ref(&d), &[], &[]);
+        assert!(!withdrawn.report().findings.iter().any(|f| f.site_key == key));
+    }
+}

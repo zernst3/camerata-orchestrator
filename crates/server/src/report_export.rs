@@ -2619,7 +2619,7 @@ pub mod row_facts;
 pub mod tree_view;
 pub mod unfold;
 pub use overlay::{
-    apply_overlay, edit_ids_of, is_reviewer_edited, key_for_added, re_mark_line,
+    apply_overlay, apply_overlay_with_standards, edit_ids_of, is_reviewer_edited, key_for_added, re_mark_line,
     summary_fingerprint, AppliedEdit, MergeNote, ReviewedReport, StaleEditNote, SupersededNote,
 };
 pub use row_facts::{internal_triage, site_id, InternalTriage, RowFacts, RowFactsIndex};

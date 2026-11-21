@@ -68,7 +68,7 @@ pub const MERGED_LABEL_CAPTURE: &str = "merged_into_label";
 
 /// Every capture the overlay writes. Listed once so the engine's merge stages treat them as
 /// bookkeeping (`ai_audit::BOOKKEEPING_CAPTURE_KEYS`) and the tests can check none leaks.
-pub const OVERLAY_CAPTURE_KEYS: [&str; 9] = [
+pub const OVERLAY_CAPTURE_KEYS: [&str; 10] = [
     REVIEWER_EDITED_CAPTURE,
     REVIEWER_FIELDS_CAPTURE,
     REVIEWER_HEADLINE_CAPTURE,
@@ -78,6 +78,7 @@ pub const OVERLAY_CAPTURE_KEYS: [&str; 9] = [
     MERGED_LABEL_CAPTURE,
     crate::engine_discard::ENGINE_RESTORED_CAPTURE,
     super::unfold::UNFOLDED_FROM_CAPTURE,
+    crate::conventions::CONVENTION_PLACE_CAPTURE,
 ];
 
 /// One edit that was applied.
@@ -306,6 +307,20 @@ pub fn apply_overlay(
     edits: &[Edit],
     added: &[AddedFinding],
 ) -> ReviewedReport {
+    apply_overlay_with_standards(sealed, decisions, edits, added, &[])
+}
+
+/// [`apply_overlay`] with the reviewer's rulings on the standard of rules with options (convention
+/// model design 2026-11-20, section 5). `standards` are the rulings of THIS inspection (see
+/// [`crate::conventions::rulings_for_run`]); a ruling never applies to another one. Only a rule
+/// that has a ruling is touched, so an inspection nobody ruled on is unchanged.
+pub fn apply_overlay_with_standards(
+    sealed: &SealedReport,
+    decisions: &[Decision],
+    edits: &[Edit],
+    added: &[AddedFinding],
+    standards: &[camerata_api_types::decisions::StandardRuling],
+) -> ReviewedReport {
     let records: Vec<Decision> = decisions
         .iter()
         .filter(|d| d.is_active())
@@ -331,6 +346,11 @@ pub fn apply_overlay(
                 .entry(crate::engine_discard::ENGINE_RESTORED_CAPTURE.to_string())
                 .or_insert_with(|| "restored by the reviewer".to_string());
         }
+        // The reviewer's rulings on a standard: the departure rows and information rows they ask
+        // for are made before the reviewer's own findings, so a key is never taken twice.
+        let mut conventions = std::mem::take(&mut r.conventions);
+        let ruled = crate::conventions::resolve(&mut r.findings, &mut conventions, standards);
+        r.conventions = conventions;
         let (added_rows, taken) = add_findings(&mut r.findings, added);
         superseded = taken;
         // A ruling on a row does not rule out the places of other rules it carries: each becomes
@@ -351,7 +371,7 @@ pub fn apply_overlay(
 
         // The tree is rebuilt only when a change could have moved a row: building it again for
         // an overlay of nothing would change a report the reviewer never touched.
-        if reinstated > 0 || added_rows > 0 || unfolded > 0 || outcome.moves_rows {
+        if reinstated > 0 || added_rows > 0 || unfolded > 0 || outcome.moves_rows || ruled.changed {
             r.attach_tree();
         }
         if !outcome.splits.is_empty() {

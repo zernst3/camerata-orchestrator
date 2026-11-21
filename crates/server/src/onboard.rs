@@ -2387,6 +2387,8 @@ pub async fn audit_repos_with_llm_controlled(
     > = std::collections::BTreeMap::new();
     // Repos the scan could not read: see `ScanReport::repos_not_inspected`.
     let mut repos_not_inspected: Vec<(String, String)> = Vec::new();
+    // The convention records of every repo the agent finder judged.
+    let mut all_conventions: Vec<camerata_api_types::audit::RuleConvention> = Vec::new();
     // How many repos had a whole-repo AI failure, beyond the first.
     let mut ai_error_repos = 0usize;
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
@@ -3375,6 +3377,7 @@ pub async fn audit_repos_with_llm_controlled(
                                 // complete (a rule with no answer, a file nobody reviewed): marked
                                 // partial now that their entries exist, so none reads clean.
                                 if let Some(extras) = &finder_extras {
+                                    all_conventions.extend(extras.conventions.iter().cloned());
                                     extras.note_after_rules(&mut pipeline_ledger, spec);
                                     for note in &extras.notes {
                                         meter.record_note(format!("{spec}: {note}"));
@@ -3805,6 +3808,9 @@ pub async fn audit_repos_with_llm_controlled(
         }
     }
     report.recommendations_by_repo = recommendations.into_values().collect();
+    let conventions_block =
+        crate::scan_ledger::ConventionsBlock::from_records(&all_conventions, &report.findings);
+    report.conventions = all_conventions;
     // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
     // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
     // refuses the export or drops a row; an unaccounted pipeline stage is recorded here so
@@ -3834,6 +3840,7 @@ pub async fn audit_repos_with_llm_controlled(
         }
     }
     report.ledger = pipeline_ledger;
+    report.ledger.record_conventions(conventions_block);
     if let Some(carry) = incremental_carry.finish() {
         report.ledger.record_incremental(carry);
     }

@@ -2189,3 +2189,63 @@ async fn ruling_out_a_batch_that_holds_a_flagged_row_without_a_reason_is_refused
         "node plus three sites"
     );
 }
+
+// ── the standard rulings (convention model design 2026-11-20, section 5) ──────────────────
+
+fn entry_with_rule(project: &str) -> InspectionEntry {
+    use camerata_api_types::audit::{OptionCensus, RuleConvention};
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.gated = false;
+    let opt = |id: &str, label: &str, violates: bool| OptionCensus {
+        option_id: id.into(),
+        label: label.into(),
+        violates,
+        count: Some(1),
+        places: vec![],
+    };
+    report.conventions = vec![RuleConvention {
+        repo: "acme/app".into(),
+        rule_id: "ARCH-X-1".into(),
+        default_option_id: Some("a".into()),
+        judged_option_id: Some("a".into()),
+        options: vec![opt("a", "A", false), opt("b", "B", false), opt("bad", "Bad", true)],
+        ..RuleConvention::default()
+    }];
+    report.provenance.started_at = "2026-11-02T10:00:00Z".into();
+    report.provenance.finished_at = "2026-11-02T10:00:00Z".into();
+    InspectionEntry::from_report(project, report, InspectionKind::Full)
+}
+
+#[tokio::test]
+async fn the_standards_routes_store_refuse_replace_and_withdraw_a_ruling() {
+    let (state, app, pid) = app_with_project();
+    let run = state.inspections.append(entry_with_rule(&pid)).unwrap().id;
+    let uri = format!("/api/projects/{pid}/standards");
+    let post = |option: &str| {
+        serde_json::json!({"repo": "acme/app", "rule_id": "arch-x-1",
+            "choice": {"accept": {"option_id": option}}, "reason": "ours"})
+    };
+    let (status, _) = call(&app, "POST", &uri, Some(post("zzz"))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, body) = call(&app, "POST", &uri, Some(post("bad"))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["code"], "option_is_the_defect");
+    let (status, first) = call(&app, "POST", &uri, Some(post("a"))).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["run_id"], run.as_str());
+    let (_, second) = call(&app, "POST", &uri, Some(post("b"))).await;
+    let all = state.decisions.standards(&pid);
+    assert_eq!(all.len(), 2);
+    assert!(all[0].revoked_at.is_some(), "the earlier ruling is withdrawn");
+    assert!(all[1].is_active());
+    let id = second["id"].as_str().unwrap();
+    let (status, _) = call(&app, "POST", &format!("{uri}/{id}/revoke"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.decisions.standards(&pid).iter().all(|r| !r.is_active()));
+    let (status, _) = call(&app, "POST", &format!("{uri}/{id}/revoke"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let leave = serde_json::json!({"repo": "acme/app", "rule_id": "ARCH-X-1",
+        "choice": "leave_to_client", "reason": ""});
+    let (status, _) = call(&app, "POST", &uri, Some(leave)).await;
+    assert_eq!(status, StatusCode::OK);
+}
