@@ -354,7 +354,7 @@ pub fn confirmed_findings(
                 snippet,
                 detail: detail.clone(),
                 // A deterministic-tier row: the facts are token comparisons, the judge only gates
-                // which candidates are shown. Never calibrated, never held for review.
+                // which candidates are shown. Never calibrated; held for review only when the judge was unsure ([`unsure_findings`]).
                 preview: true,
                 preview_tool: Some(ARCH_PREVIEW_TOOL.to_string()),
                 confidence: Some("high".to_string()),
@@ -374,6 +374,40 @@ pub fn confirmed_findings(
             finding
         })
         .collect()
+}
+
+/// The rows for a candidate the review looked at and answered "unsure" about, in a rule where
+/// other candidates were judged: one per site, like a confirmed candidate, but marked unsure
+/// (`needs_review` and a needs-review confidence, the same held state calibration uses), so the
+/// release gate holds each until the reviewer confirms it, rules it a false positive or edits its
+/// severity. The detail is the row's problem statement in the client files, so it states only
+/// what is true before and after that decision: what was found, where, and that the automated
+/// review could not tell whether the places share one mechanism. The prompt to decide lives in
+/// the "why waiting" text and the gate's message, never here.
+pub fn unsure_findings(repo: &str, c: &Candidate, files: &[(String, String)]) -> Vec<Finding> {
+    let sites: Vec<String> = c.facts.sites.iter().map(site_ref).collect();
+    let subject = match c.rule {
+        CloneRule::SingleSourceLogic => "one application decision written in more than one place",
+        CloneRule::NamingOneConcept => "one concept that goes by more than one name",
+        CloneRule::SharedPrimitive => "one UI mechanism written by hand in each place",
+    };
+    let detail = format!(
+        "The same {}-token block, apart from variable names, was found at {}. The automated \
+         review could not tell whether these places are {subject}. Verify by diffing the listed \
+         lines.",
+        c.facts.token_len,
+        join_and(&sites)
+    );
+    let mut rows = confirmed_findings(repo, c, "", files);
+    for row in &mut rows {
+        row.detail = detail.clone();
+        row.needs_review = true;
+        row.confidence = Some("needs-review".to_string());
+        row.captures
+            .insert("judge_verdict".to_string(), "unsure".to_string());
+        crate::onboard::redact::redact_finding(row);
+    }
+    rows
 }
 
 /// One `not_assessed` row for a rule that was armed and found candidates but could not decide

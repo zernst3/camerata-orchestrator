@@ -362,6 +362,18 @@ html, body {
 }
 .btn-quiet:hover { color: var(--ink); }
 
+/* ---- build guard: the app and its server come from different builds ---- */
+.build-guard-wait { padding: 48px; color: var(--ink-soft); }
+.build-guard-mismatch { max-width: 640px; margin: 12vh auto 0; position: relative; z-index: 2; }
+.build-guard-command {
+  font-family: "Courier Prime", ui-monospace, monospace;
+  background: var(--accent-wash);
+  border-radius: var(--r-md);
+  padding: 12px 16px;
+  margin: 12px 0 24px;
+  overflow-x: auto;
+}
+
 /* ---- clarify (hero) --------------------------------------------------- */
 .clarify {
   width: 100%;
@@ -1120,7 +1132,22 @@ html, body {
    row_class hook (replaces the old per-cell stripe). A red left border + faint red tint
    marks the security-floor rows unmistakably; selection background still composes over it. */
 .finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+/* Inside a chorale table only: chorale's inline separator on the first cell beats the plain rule,
+   so the edge there is !important and redraws the separator. Scoped to .chorale-root so the queue
+   and tree tables (which reuse the class) keep their own first-cell markers. */
+.chorale-root .finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b, inset 0 -1px 0 0 var(--chorale-separator-color, rgba(0, 0, 0, 0.25)) !important; }
+/* A row the release gate holds (work order E): a wider, darker edge and its own tint, so it reads
+   apart from the critical highlight even on a critical row. chorale gives the checkbox cell an
+   inline box-shadow (its row separator), which beats any stylesheet rule, so the edge is
+   !important and carries the separator itself, in the colour chorale sets on the row (so a
+   selected row keeps its divider colour). The critical edge needs the same. */
+.finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d; }
+.chorale-root .finding-row-held > td:first-child { box-shadow: inset 7px 0 0 0 #8f1d1d, inset 0 -1px 0 0 var(--chorale-separator-color, rgba(0, 0, 0, 0.25)) !important; }
+/* A row the release gate holds (work order E): the status cell is red AND says so in words. */
+.held-status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; background: #d4332b; white-space: nowrap; }
 .finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }
+/* After the critical tint, so a row that is both critical and held shows the held tint. */
+.finding-row-held > td { background: repeating-linear-gradient(135deg, rgba(220, 38, 38, 0.26) 0 6px, rgba(220, 38, 38, 0.10) 6px 12px); }
 
 /* Needs-a-choice row highlight (proposed-rules table): a SELECTED rule with alternatives but
    no chosen option. Amber tint + left border marks the rows that block audit/arm until the
@@ -1214,8 +1241,11 @@ html, body {
    scroll context so a merged row's site list cannot push the disposition controls off screen
    — the controls are the whole point of the surface. Below 1100px the split stacks, because
    two 420px columns in a 900px window is two unusable columns. */
-.queue-split { display: flex; align-items: flex-start; gap: 12px; }
-.queue-split-table { flex: 1 1 auto; min-width: 0; }
+/* The table and its pane fill the width they are given (the app root centres its children, which
+   cuts a table wider than the page off on BOTH sides), and the table scrolls inside its own
+   column from the left edge. */
+.queue-split { display: flex; align-items: flex-start; gap: 12px; width: 100%; min-width: 0; align-self: stretch; box-sizing: border-box; }
+.queue-split-table { flex: 1 1 auto; min-width: 0; overflow-x: auto; }
 .finding-pane {
   flex: 0 0 380px; align-self: flex-start; position: sticky; top: 8px;
   max-height: calc(100vh - 120px); overflow-y: auto;
@@ -1229,6 +1259,8 @@ html, body {
 @media (max-width: 1100px) {
   .queue-split { flex-direction: column; }
   .finding-pane { flex: 1 1 auto; width: 100%; position: static; max-height: none; }
+  /* Stacked under the table, a pane with no row would draw an empty box. */
+  .finding-pane-empty { display: none; }
 }
 .pane-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
 .pane-rule { font-weight: 700; color: var(--ink); }
@@ -2875,6 +2907,38 @@ html, body {
 .audit-model-select:hover:not(:disabled) { border-color: var(--accent); }
 .audit-model-select:disabled { opacity: .55; cursor: default; }
 .audit-model-hint { font-size: 11.5px; color: var(--ink-soft); }
+/* The Inspection screen's "This run" block: a control and its "?" button side by side. */
+.audit-run { margin: 6px 0 4px; }
+.audit-run-h { margin: 8px 0 2px; font-size: 13px; color: var(--ink); }
+.audit-run-control { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.audit-cost-range { margin: 2px 0 0; font-size: 12px; color: var(--ink-soft); }
+.audit-cost-unavailable { font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
+/* The shared help dialog: a small "?" button beside a heading or control, and the fixed overlay it
+   opens. The text is selectable and the body scrolls when it is long. */
+.help-button {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; margin-left: 6px; padding: 0; vertical-align: middle;
+  border: 1px solid var(--line); border-radius: 50%; background: var(--surface);
+  color: var(--ink-soft); font-size: 12px; font-weight: 700; line-height: 1; cursor: pointer;
+}
+.export-heading { display: flex; align-items: center; }
+.export-heading > p { margin: 0; }
+.help-button:hover, .help-button:focus-visible { border-color: var(--accent); color: var(--accent-ink); }
+.help-backdrop {
+  position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center;
+  justify-content: center; background: rgba(0,0,0,.55);
+}
+.help-dialog {
+  display: flex; flex-direction: column; width: min(560px, calc(100vw - 32px));
+  max-height: min(70vh, 640px); padding: 16px 18px; border: 1px solid var(--line);
+  border-radius: var(--r-lg); background: var(--paper); color: var(--ink);
+  box-shadow: var(--shadow-pop); user-select: text; -webkit-user-select: text;
+}
+.help-dialog:focus { outline: none; }
+.help-title { margin: 0 0 8px; font-size: 15px; font-weight: 700; }
+.help-body { flex: 1 1 auto; overflow-y: auto; font-size: 13px; line-height: 1.5; color: var(--ink-soft); }
+.help-body p { margin: 0 0 10px; }
+.help-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 /* Thorough-calibration checkbox (#51). */
 .audit-thorough-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink); cursor: pointer; }
 .audit-thorough-toggle input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
@@ -2926,6 +2990,7 @@ html, body {
   border: 1px solid var(--line); background: var(--surface); color: var(--ink);
   font: inherit; font-size: 13px; padding: 8px 11px; border-radius: 8px;
 }
+.audit-export-input:disabled { opacity: .55; cursor: not-allowed; }
 .audit-export-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
 /* The executive-summary override is a multi-sentence narrative that REPLACES a whole report
    section, not a short label — it needs real room, not the 2-row box it used to get. Sized
@@ -3198,6 +3263,7 @@ html, body {
 .ws-danger { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .ws-danger-summary { font-size: 12px; color: var(--ink-faint); cursor: pointer; }
 .ws-danger-text { font-size: 12px; color: var(--ink-faint); margin: 8px 0; }
+.pg-danger { flex: 1 0 100%; margin-top: 0; }
 .src-modal { max-width: 720px; }
 .src-plan { list-style: none; margin: 10px 0 4px; padding: 0; font-size: 12.5px; }
 .src-plan li { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--line); }
@@ -6206,6 +6272,8 @@ select:not([multiple]):not([size]):disabled {
   color: #fff;
   cursor: default;
 }
+.backend-toggle-locked { opacity: 0.5; border-style: dashed; }
+.backend-toggle-locked .backend-seg { cursor: not-allowed; }
 .backend-key-warning {
   margin-top: 8px;
   font-size: 13px;
@@ -6678,6 +6746,11 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
    panel had no dark-themed precedent to reuse verbatim. ── */
 .chat-context { padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--paper); font-size: 11px; }
 .chat-context-title { font-weight: 700; color: var(--ink-soft); margin-bottom: 4px; }
+.chat-context-project { color: var(--ink); font-weight: 600; margin-bottom: 4px; }
+.chat-context-blocked {
+  margin-top: 6px; padding: 4px 8px; border-radius: 6px; color: var(--ink);
+  background: var(--accent-wash); border: 1px solid rgba(202,138,4,0.35);
+}
 .chat-context-list { display: flex; flex-direction: column; gap: 2px; }
 .chat-context-row { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); }
 .chat-context-dot { color: var(--ink-faint); }
@@ -7318,7 +7391,8 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
   margin: 10px 0; padding: 10px 12px; border: 1px solid var(--danger-color); border-radius: 6px;
   background: rgba(220, 38, 38, 0.08);
 }
-.export-blocked-head { margin: 0 0 8px; font-weight: 700; color: var(--ink); }
+.export-blocked { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.export-blocked-head { flex: 1 1 100%; margin: 0 0 2px; font-weight: 700; color: var(--ink); }
 .gate-rows { display: flex; flex-direction: column; gap: 4px; }
 .gate-row {
   display: grid; grid-template-columns: 56px minmax(240px, 2fr) 90px 3fr auto;

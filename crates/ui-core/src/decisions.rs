@@ -234,6 +234,10 @@ pub struct DecisionBridge {
     stamps: HashMap<String, (Disposition, Stamp)>,
     refused: HashMap<String, RefusedAt>,
     run_id: String,
+    /// The old draft's entries waiting for a migration the server cannot run yet (no scan rows).
+    /// They are under untranslated keys: never planned as requests, never shown as refusals, kept
+    /// in the draft verbatim until a migration succeeds.
+    held_legacy: DraftQueue,
 }
 
 impl DecisionBridge {
@@ -294,6 +298,31 @@ impl DecisionBridge {
         }
     }
 
+    /// Hold the old draft's entries until the migration can run. See `held_legacy`.
+    pub fn hold_legacy(&mut self, queue: &DraftQueue) {
+        self.held_legacy = DraftQueue {
+            pending: queue.pending.clone(),
+            last_known: None,
+            stamps: queue.stamps.clone(),
+        };
+    }
+
+    /// The held entries as the screen now has them. A held key follows the screen: unchanged
+    /// keeps the held value, changed holds the new decided value, and undone (the table dropped
+    /// the key, or shows it Unresolved) drops it from the hold. The screen was drawn from the
+    /// held entries, so a key missing from it was removed by the reviewer. Still never planned.
+    fn held_now(&self, desired: &HashMap<String, Disposition>) -> HashMap<String, Disposition> {
+        self.held_legacy
+            .pending
+            .iter()
+            .filter_map(|(key, held)| match desired.get(key) {
+                Some(d) if d.state.is_decided() => Some((key.clone(), d.clone())),
+                Some(_) | None if !held.state.is_decided() => Some((key.clone(), held.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn availability(&self) -> Availability {
         self.availability
     }
@@ -334,6 +363,12 @@ impl DecisionBridge {
                 } => Some((key, disposition)),
                 BridgeOp::Revoke { .. } => None,
             })
+            // A held key the reviewer changed is a new decision: it is stamped now.
+            .chain(
+                self.held_now(desired)
+                    .into_iter()
+                    .filter(|(k, d)| self.held_legacy.pending.get(k) != Some(d)),
+            )
             .collect();
         self.stamps.retain(|k, (d, _)| pending.get(k) == Some(d));
         for (key, d) in pending {
@@ -374,6 +409,9 @@ impl DecisionBridge {
             let Some(state) = state_of(d) else {
                 continue;
             };
+            if self.held_legacy.pending.contains_key(key) {
+                continue;
+            }
             if self.synced.get(key).map(|s| &s.disposition) == Some(d) {
                 continue;
             }
@@ -408,6 +446,9 @@ impl DecisionBridge {
             });
         }
         for (key, synced) in &self.synced {
+            if self.held_legacy.pending.contains_key(key) {
+                continue;
+            }
             if desired.get(key).is_some_and(|d| d.state.is_decided()) {
                 continue;
             }
@@ -483,6 +524,7 @@ impl DecisionBridge {
     /// What the draft must keep: every change the store does not yet hold, refused ones
     /// included. A decided entry is a change to post; an Unresolved entry is an undo to revoke.
     pub fn pending(&self, desired: &HashMap<String, Disposition>) -> HashMap<String, Disposition> {
+        let held = self.held_now(desired);
         self.plan(desired, false)
             .into_iter()
             .map(|op| match op {
@@ -491,6 +533,7 @@ impl DecisionBridge {
                 } => (key, disposition),
                 BridgeOp::Revoke { key, .. } => (key, Disposition::default()),
             })
+            .chain(held)
             .collect()
     }
 
@@ -514,6 +557,16 @@ impl DecisionBridge {
             .iter()
             .filter(|(k, (d, _))| pending.get(*k) == Some(d))
             .map(|(k, (_, s))| (k.clone(), s.clone()))
+            .chain(
+                self.held_legacy
+                    .stamps
+                    .iter()
+                    .filter(|(k, _)| {
+                        pending.get(*k) == self.held_legacy.pending.get(*k)
+                            && !self.stamps.contains_key(*k)
+                    })
+                    .map(|(k, s)| (k.clone(), s.clone())),
+            )
             .collect();
         DraftQueue {
             pending,
@@ -537,6 +590,18 @@ impl DecisionBridge {
                     change: UnsyncedKind::Undo,
                 },
             })
+            .chain(
+                self.held_now(desired)
+                    .into_iter()
+                    .map(|(key, d)| UnsyncedChange {
+                        key,
+                        change: if d.state.is_decided() {
+                            UnsyncedKind::Decision
+                        } else {
+                            UnsyncedKind::Undo
+                        },
+                    }),
+            )
             .collect()
     }
 }

@@ -543,6 +543,7 @@ fn ctx<'a>(realtime: &'a dyn LlmPort, batch: Option<&'a dyn BatchApi>) -> StageC
         job: None,
         checkpoint: None,
         settings: settings(),
+        feedback: None,
     }
 }
 
@@ -2117,4 +2118,463 @@ async fn a_window_of_small_requests_under_the_limit_is_still_admitted() {
 
     assert!(out.is_complete(), "failed: {:?}", failed_ids(&out));
     assert_eq!(api.submit_calls.load(Ordering::SeqCst), 1);
+}
+
+// ── the spend limit's reserve is per request (Zach's hearth-sample run, 2026-11-18) ─────────────
+
+fn priced_reply(cost: f64) -> LlmResponse {
+    LlmResponse {
+        cost_usd: Some(cost),
+        ..reply_for("a past call")
+    }
+}
+
+/// A meter under a $20 limit that has already spent $7.02, $3.68 of it in ONE big finder call.
+fn meter_after_a_big_finder_call() -> UsageMeter {
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(20.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(3.68));
+    meter.record_stage(Stage::GroupReview, &priced_reply(3.34));
+    assert!((meter.spent_usd() - 7.02).abs() < 1e-6);
+    meter
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fix_stage_after_a_big_finder_call_is_not_stopped_by_a_limit_it_did_not_reach() {
+    let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
+    let meter = meter_after_a_big_finder_call();
+    let mut stage = Scripted::numbered(12);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 8 },
+        &c,
+    )
+    .await;
+
+    assert!(out.is_complete(), "failed: {:?}", out.failed);
+    assert_eq!(out.absorbed.len(), 12);
+    let record = meter.cost_cap_record().expect("a limit was set");
+    assert!(
+        record.not_run_stages.is_empty(),
+        "no stage is recorded as not run: {:?}",
+        record.not_run_stages
+    );
+    assert!(!record.stopped_the_run());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_limit_that_really_is_reached_still_refuses_the_stage_and_says_so() {
+    let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(5.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(5.5));
+    let mut stage = Scripted::numbered(3);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 2 },
+        &c,
+    )
+    .await;
+
+    assert_eq!(out.failed.len(), 3);
+    for f in &out.failed {
+        assert_eq!(f.class, FailureClass::SpendLimit);
+        assert!(
+            f.reason.contains("spend limit stopped the run"),
+            "{}",
+            f.reason
+        );
+    }
+    assert_eq!(meter.refusal_cause(), RefusalCause::LimitReached);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_checkpoint_stop_is_not_reported_as_the_spend_limit_being_reached() {
+    let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(20.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.seed_checkpoint_stop(&crate::cost_checkpoint::CostCheckpoint {
+        approved_usd: 10.0,
+        spent_usd: 1.0,
+        projected_usd: 15.0,
+        pieces_done: 1,
+        pieces_left: 3,
+        stopped: true,
+        new_estimate_usd: Some(15.0),
+        difference_usd: Some(5.0),
+        stopped_before: "agent finder".into(),
+        reserve_usd: 0.0,
+    });
+    let mut stage = Scripted::numbered(3);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 2 },
+        &c,
+    )
+    .await;
+
+    assert_eq!(meter.refusal_cause(), RefusalCause::CheckpointStop);
+    assert_eq!(out.failed.len(), 3);
+    for f in &out.failed {
+        assert!(!f.reason.contains("spend limit stopped"), "{}", f.reason);
+        assert!(f.reason.contains("checkpoint"), "{}", f.reason);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unknown_cost_is_not_reported_as_the_spend_limit_being_reached() {
+    let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(20.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    let mut unpriced = priced_reply(0.0);
+    unpriced.cost_usd = None;
+    unpriced.model = "claude-from-the-future".to_string();
+    meter.record_stage(Stage::Finder, &unpriced);
+    assert!(meter.cost_unknown());
+    let mut stage = Scripted::numbered(3);
+    let mut c = ctx(&rt, None);
+    c.meter = Some(&meter);
+
+    let out = run_stage(
+        STAGE,
+        &mut stage,
+        StageMode::Parallel { max_in_flight: 2 },
+        &c,
+    )
+    .await;
+
+    assert_eq!(meter.refusal_cause(), RefusalCause::CostUnknown);
+    assert_eq!(out.failed.len(), 3);
+    for f in &out.failed {
+        assert!(!f.reason.contains("spend limit stopped"), "{}", f.reason);
+        assert!(f.reason.contains("unknown"), "{}", f.reason);
+    }
+}
+
+// ── the meter itself ────────────────────────────────────────────────────────────────────────────
+
+fn cheap_request() -> LlmRequest {
+    LlmRequest::new("a small prompt")
+        .with_model("claude-sonnet-5-5")
+        .with_max_tokens(1_024)
+}
+
+#[tokio::test]
+async fn cheap_requests_are_admitted_together_after_one_big_call() {
+    let meter = meter_after_a_big_finder_call();
+    let req = cheap_request();
+    let mut permits = Vec::new();
+    for _ in 0..12 {
+        permits.push(
+            meter
+                .admit_for_request(&req, Stage::FixGeneration)
+                .await
+                .expect("a one-cent request fits under $20 with $7 spent"),
+        );
+    }
+    drop(permits);
+    // The reservations came back with the permits.
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn a_request_reserve_is_released_when_its_permit_drops_and_the_limit_still_bites() {
+    // $19.99 spent of $20 and one request in flight: the next is refused, then admitted again
+    // once the first finishes and the spend is still under the limit.
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(20.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(19.99));
+    let req = cheap_request();
+    let first = meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .expect("first");
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_err());
+    drop(first);
+    assert!(meter
+        .admit_for_request(&req, Stage::FixGeneration)
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn the_overshoot_stays_bounded_by_the_requests_own_ceilings() {
+    let cap = 10.0;
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(cap),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::ScanPass, &priced_reply(0.01));
+    let req = LlmRequest::new("x".repeat(3_000))
+        .with_model("claude-opus-5-5")
+        .with_max_tokens(128_000);
+    let ceiling = request_ceiling_usd(&req).unwrap();
+    let mut permits = Vec::new();
+    while let Ok(p) = meter.admit_for_request(&req, Stage::FixGeneration).await {
+        permits.push(p);
+        assert!(permits.len() < 100, "the limit never closed");
+    }
+    let worst = meter.spent_usd() + permits.len() as f64 * ceiling;
+    assert!(
+        worst <= cap + ceiling,
+        "{} permits: ${worst:.2}",
+        permits.len()
+    );
+    assert!(permits.len() >= 3);
+}
+
+#[tokio::test]
+async fn a_stage_whose_calls_cost_more_than_their_ceiling_reserves_what_they_really_cost() {
+    // On the CLI backend a call can cost more than its request's ceiling (the CLI's own overhead
+    // is not in the prompt). A request-scoped pass must reserve the larger of its ceiling and the
+    // largest real cost its stage has had, or the overshoot is no longer bounded.
+    let cap = 10.0;
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(cap),
+        ..crate::cost_cap::RunControls::default()
+    });
+    let req = cheap_request();
+    let ceiling = request_ceiling_usd(&req).unwrap();
+    assert!(
+        ceiling < 0.1,
+        "the request's own ceiling is small: {ceiling}"
+    );
+    // One fix call really cost $2.
+    meter.record_stage(Stage::FixGeneration, &priced_reply(2.0));
+    let mut permits = Vec::new();
+    while let Ok(p) = meter.admit_for_request(&req, Stage::FixGeneration).await {
+        permits.push(p);
+        assert!(
+            permits.len() < 50,
+            "the limit never closed: ceilings alone admit them all"
+        );
+    }
+    // spent $2 of $10, each in flight reserves $2: admitted while 2 + n*2 < 10 (n = 0 to 3).
+    assert_eq!(permits.len(), 4, "{}", permits.len());
+    // Another stage's calls do not inflate this stage's reserve.
+    drop(permits);
+    let other = meter.admit_for_request(&req, Stage::Calibration).await;
+    assert!(other.is_ok());
+}
+
+#[tokio::test]
+async fn a_refused_admission_carries_the_cause_it_was_refused_for() {
+    let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(5.0),
+        ..crate::cost_cap::RunControls::default()
+    });
+    meter.record_stage(Stage::Finder, &priced_reply(5.5));
+    let req = cheap_request();
+    let Err(cause) = meter.admit_for_request(&req, Stage::FixGeneration).await else {
+        panic!("the limit is reached");
+    };
+    assert_eq!(cause, RefusalCause::LimitReached);
+}
+
+// ── Agent activity rows ─────────────────────────────────────────────────────────────────────────
+
+mod activity_rows {
+    use super::*;
+    use crate::ai_audit::stage_batch::StageFeedback;
+    use crate::transcript::TranscriptStore;
+
+    const KEY: &str = "scan-key";
+
+    fn with_row<'a>(
+        mut c: StageCtx<'a>,
+        store: &'a TranscriptStore,
+        name: &'a str,
+    ) -> StageCtx<'a> {
+        c.feedback = Some(StageFeedback {
+            store,
+            key: KEY,
+            name,
+        });
+        c
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_shows_a_running_row_before_its_first_call_returns_and_a_done_row_after() {
+        let store = TranscriptStore::new();
+        let seen_during: Arc<Mutex<Vec<Vec<crate::transcript::AgentTranscript>>>> = Arc::default();
+        let (watch, sink) = (store.clone(), seen_during.clone());
+        let rt = Realtime::new(move |id, _| {
+            sink.lock().unwrap().push(watch.get(KEY));
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+        });
+        let mut stage = Scripted::new(&["a", "b"]);
+        let c = with_row(ctx(&rt, None), &store, "Group review");
+
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert!(out.failed.is_empty());
+
+        let during = seen_during.lock().unwrap().clone();
+        assert!(!during.is_empty(), "the model was called");
+        for view in &during {
+            assert_eq!(view.len(), 1, "{view:#?}");
+            assert_eq!(view[0].role, "Group review (acme/widgets)");
+            assert_eq!(
+                view[0].status, "running",
+                "the row is there while calls run"
+            );
+            assert!(
+                view[0].prompt.contains("ITEM=a;"),
+                "the generated prompt is shown: {}",
+                view[0].prompt
+            );
+            assert!(view[0].prompt.contains("2 calls in this stage"));
+        }
+        let after = store.get(KEY);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].status, "done");
+        assert!(
+            after[0].output.contains("Done: 2 of 2 calls answered."),
+            "{}",
+            after[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_with_a_call_that_had_no_answer_shows_blocked_with_the_reason() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::new(|id, _| {
+            if id == "b" {
+                (
+                    Duration::from_secs(1),
+                    Err(content_error("the model refused this request")),
+                )
+            } else {
+                (Duration::from_secs(1), Ok(reply_for(&prompt_for(id))))
+            }
+        });
+        let mut stage = Scripted::new(&["a", "b"]);
+        let c = with_row(ctx(&rt, None), &store, "Fix");
+
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert_eq!(failed_ids(&out), ids(&["b"]));
+
+        let rows = store.get(KEY);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].status, "blocked");
+        assert!(
+            rows[0].output.contains("1 of 2 calls had no answer")
+                && rows[0].output.contains("the model refused this request"),
+            "{}",
+            rows[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_stage_shows_a_blocked_row_saying_how_far_it_got() {
+        let store = TranscriptStore::new();
+        let jobs = Arc::new(JobStore::new());
+        let id = jobs.create("audit", None);
+        let (j2, i2) = (jobs.clone(), id.clone());
+        let rt = Realtime::new(move |item, nth| {
+            if item == "item-010" && nth == 0 {
+                j2.cancel(&i2);
+            }
+            (Duration::from_secs(1), Ok(reply_for(&prompt_for(item))))
+        });
+        let mut stage = Scripted::numbered(40);
+        let mut c = with_row(ctx(&rt, None), &store, "Group review");
+        c.job = Some((&jobs, &id));
+        let out = run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 2 },
+            &c,
+        )
+        .await;
+        assert!(out.cancelled.is_some());
+        let rows = store.get(KEY);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].status, "blocked");
+        assert!(
+            rows[0].output.contains("Stopped before the end:") && rows[0].output.contains("of 40"),
+            "{}",
+            rows[0].output
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_round_of_the_same_stage_gets_its_own_row() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::ok_after(Duration::from_secs(1));
+        for _ in 0..2 {
+            let mut stage = Scripted::new(&["a"]);
+            let c = with_row(ctx(&rt, None), &store, "Fix");
+            run_stage(
+                STAGE,
+                &mut stage,
+                StageMode::Parallel { max_in_flight: 1 },
+                &c,
+            )
+            .await;
+        }
+        let rows = store.get(KEY);
+        let roles: Vec<&str> = rows.iter().map(|r| r.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            ["Fix (acme/widgets)", "Fix, round 2 (acme/widgets)"],
+            "{rows:#?}"
+        );
+        assert!(rows.iter().all(|r| r.status == "done"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_with_no_activity_panel_shows_nothing() {
+        let store = TranscriptStore::new();
+        let rt = Realtime::ok_after(Duration::from_secs(1));
+        let mut stage = Scripted::new(&["a"]);
+        let c = ctx(&rt, None);
+        run_stage(
+            STAGE,
+            &mut stage,
+            StageMode::Parallel { max_in_flight: 1 },
+            &c,
+        )
+        .await;
+        assert!(store.get(KEY).is_empty());
+    }
 }

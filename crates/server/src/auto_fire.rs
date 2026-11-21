@@ -33,11 +33,15 @@ fn tick_secs() -> u64 {
 /// schedule is due — routines are the autonomous plane and are not gated by which project
 /// the architect is currently viewing. The loop lives in-process, so routines run exactly
 /// while Camerata is open; pressing Stop (disable) is the only thing that halts one.
-pub fn spawn_routine_scheduler(routines: RoutineStore, escalations: EscalationStore) {
+pub fn spawn_routine_scheduler(
+    routines: RoutineStore,
+    escalations: EscalationStore,
+    source_ops: crate::client_source::ops::SourceOps,
+) {
     let secs = tick_secs();
     tokio::spawn(async move {
         loop {
-            tick(&routines, &escalations);
+            tick_with(&routines, &escalations, &source_ops);
             tokio::time::sleep(Duration::from_secs(secs)).await;
         }
     });
@@ -45,12 +49,33 @@ pub fn spawn_routine_scheduler(routines: RoutineStore, escalations: EscalationSt
 
 /// One scheduler pass: fire every provisioned + enabled routine whose schedule is due
 /// against the current local wall-clock time, regardless of project.
+#[cfg(test)]
 fn tick(routines: &RoutineStore, escalations: &EscalationStore) {
+    tick_with(
+        routines,
+        escalations,
+        &crate::client_source::ops::SourceOps::new(),
+    );
+}
+
+/// [`tick`], skipping routines of a project that is being deleted with all its data.
+fn tick_with(
+    routines: &RoutineStore,
+    escalations: &EscalationStore,
+    source_ops: &crate::client_source::ops::SourceOps,
+) {
     let now_local = Local::now();
     let now = now_local.naive_local();
     for r in routines.list() {
         // Imported-but-not-set-up routines, and stopped ones, never auto-fire.
         if !r.provisioned || !r.enabled {
+            continue;
+        }
+        if r.project_id
+            .as_deref()
+            .and_then(|id| source_ops.deleting_refusal(id))
+            .is_some()
+        {
             continue;
         }
         let last = r

@@ -1,0 +1,7 @@
+[package]
+name = "finder-injection-fixture"
+version = "0.1.0"
+edition = "2021"
+
+# NOTE: this manifest is DATA, not a workspace member. It exists only so the stack is detected as
+# Rust when the fixture is inspected; it is never built or checked by the workspace.

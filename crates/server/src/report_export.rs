@@ -98,12 +98,6 @@ pub struct ReportOptions {
     /// provenance. Server-populated, never client-supplied (`serde(skip)`).
     #[serde(skip)]
     pub model: Option<crate::ModelRecord>,
-    /// H4: also export the triage log (per rule, what the AI pass proposed, what review kept
-    /// and threw out, and why) as a workbook sheet and `csv/triage-log.csv`. OFF by default:
-    /// the export dialog (or `camerata inspect` via [`EXPORT_TRIAGE_LOG_ENV`]) asks for it.
-    /// See `xlsx_export::triage_log`.
-    #[serde(default)]
-    pub triage_log: bool,
     /// Every repo the project holds, in the project's order. Server-populated from the project,
     /// never client-supplied (`serde(skip)`). The package assembly refuses a report that covers
     /// fewer repos than this ([`require_all_repos`]); empty means the caller names no project
@@ -124,8 +118,9 @@ pub struct ReportOptions {
     pub internal: bool,
 }
 
-/// Env var that turns the optional triage log on for an export when set to `1` or `true`
-/// (folded in by [`ReportOptions::apply_env_defaults`], like the brand). Unset means off.
+/// Env var that makes `camerata inspect` write the operator's triage log beside the export zip
+/// when set to `1` or `true`. It never adds anything to the package: the client package carries no
+/// triage log, whatever is set (see `xlsx_export::triage_log`). Unset means no file.
 pub const EXPORT_TRIAGE_LOG_ENV: &str = "CAMERATA_EXPORT_TRIAGE_LOG";
 
 /// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog
@@ -212,14 +207,12 @@ impl ReportOptions {
             .unwrap_or_default();
         self.prepared_by =
             resolve_prepared_by(self, std::env::var(REPORT_PREPARED_BY_ENV).ok().as_deref());
-        self.triage_log = self.triage_log
-            || triage_log_env_on(std::env::var(EXPORT_TRIAGE_LOG_ENV).ok().as_deref());
     }
 }
 
-/// Whether the [`EXPORT_TRIAGE_LOG_ENV`] value turns the triage log on: `1` or `true` (any
-/// case), nothing else. Split out so it is testable without touching the process environment.
-pub(crate) fn triage_log_env_on(value: Option<&str>) -> bool {
+/// Whether the [`EXPORT_TRIAGE_LOG_ENV`] value asks for the operator's triage log file: `1` or
+/// `true` (any case), nothing else. Split out so it is testable without touching the process environment.
+pub fn triage_log_env_on(value: Option<&str>) -> bool {
     value.is_some_and(|v| {
         let v = v.trim();
         v == "1" || v.eq_ignore_ascii_case("true")
@@ -609,6 +602,33 @@ pub(crate) fn row_waiting_reason(
     )
 }
 
+/// The disposition label of a row as the exports print it: a merged row's pointer, else a row the
+/// reviewer decided by changing its severity themselves ("Severity set by the reviewer"), else
+/// [`disposition_label`]. A severity edit is the row's decision (Zach, 2026-11-20), so it must not
+/// read "Open". A row held for unverified evidence, junk text or a put-back cannot ship without a decision record, so
+/// the label never hides those holds from the gate.
+pub(crate) fn row_disposition_label(
+    f: &Finding,
+    disposition: Disposition,
+    reason: &str,
+    bucket: &str,
+    confirmed_by_client: bool,
+) -> String {
+    if let Some(label) = overlay::merged_label(f) {
+        return label.to_string();
+    }
+    if disposition == Disposition::Unresolved
+        && overlay::reviewer_edited_field(f, camerata_api_types::edits::EditField::Severity)
+    {
+        return format!(
+            "{} (recommended: {})",
+            crate::xlsx_export::vocabulary::SEVERITY_SET_BY_REVIEWER,
+            bucket_title(bucket)
+        );
+    }
+    disposition_label(disposition, reason, bucket, confirmed_by_client)
+}
+
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
 pub(crate) fn disposition_label(
     disposition: Disposition,
@@ -744,7 +764,7 @@ mod marking;
 
 pub use citations_fixes::*;
 pub use classification::*;
-pub use counts::{report_counts, ReportCounts};
+pub use counts::{report_counts, ReportCounts, ReviewCounts};
 pub use json_types::*;
 pub use marking::*;
 
@@ -1179,8 +1199,12 @@ pub fn build_report_json_with_counts(
                     // "held for a human reviewer's judgment call" framing instead of printing
                     // "high"/blank next to a row that is, by construction, not curated.
                     confidence: hedge_confidence(f, bucket),
-                    disposition: overlay::merged_label(f).map(str::to_string).unwrap_or_else(
-                        || disposition_label(*disposition, reason, bucket, confirmed_by_client),
+                    disposition: row_disposition_label(
+                        f,
+                        *disposition,
+                        reason,
+                        bucket,
+                        confirmed_by_client,
                     ),
                     bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),
@@ -2014,22 +2038,24 @@ pub fn build_report_json_with_counts(
     // A project of several repos is several independent services, so the prose that speaks of
     // "the repository" or "the codebase" speaks of the repositories and the services instead.
     let multi_repo = report.repos.len() > 1;
+    // Which finder ran, from the run record, and what a person read, from the review store (the
+    // counts): the method text says only what happened.
+    let method_facts = MethodFacts {
+        finder: finder_of(report),
+        review: counts.review.clone(),
+    };
     let methodology = MethodologyJson {
         reconciliation: counts_prose::methodology_line(counts, review_state),
         candidates_reviewed: counts.rows.total,
         excluded_false_positive: counts.rows.ruled_out,
         held_for_review: held_for_review_total,
         next_steps: counts_prose::next_steps(counts, multi_repo, review_state),
-        deterministic_note:
-            "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
-             SAST rules plus a migration-timeline replay for Supabase Row Level Security) \
-             produces findings that either hold or do not, with no model judgment. These are \
-             labeled deterministic in the report."
-                .to_string(),
+        deterministic_note: deterministic_note_for(method_facts.finder),
         ai_tier_note: ai_tier_note_for(
             review_state,
             coverage_gaps::repos_without_ai_review(report).len(),
             report.repos.len(),
+            &method_facts,
         ),
         citation_note: RELATED_STANDARD_NOTE.to_string(),
         not_done: vec![
@@ -2058,14 +2084,9 @@ pub fn build_report_json_with_counts(
             "No review of organizational controls, identity and access management or \
              infrastructure configuration."
                 .to_string(),
+            NOT_ASSESSED_LINE.to_string(),
         ],
-        severity_scale_note:
-            "Severity is bimodal by design. Deterministic floor findings are proven defects \
-             rated by impact; advisory findings are rated by likely impact together with \
-             calibrated confidence. There is deliberately no single numeric score or letter \
-             grade: a grade hides which specific object is exposed, which is exactly what a \
-             remediation team needs to know."
-                .to_string(),
+        severity_scale_note: severity_scale_note_for(method_facts.finder),
         failed_passes: failed_pass_notes,
         failed_passes_more_line,
     };
@@ -2122,6 +2143,7 @@ pub fn build_report_json_with_counts(
                 },
                 crate::xlsx_export::vocabulary::ALL_PROBLEMS
             ),
+            review_line: crate::xlsx_export::vocabulary::review_line(&counts.review),
         },
         other_fixes,
         conventions,
@@ -2671,6 +2693,9 @@ mod fn_batch_c_dep_tests;
 
 #[cfg(test)]
 mod fn_batch_c_followup_tests;
+
+#[cfg(test)]
+mod method_truth_tests;
 
 #[cfg(test)]
 mod fn_batch_c_incremental_tests;

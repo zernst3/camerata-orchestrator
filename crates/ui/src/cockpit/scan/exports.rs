@@ -167,7 +167,13 @@ pub(in crate::cockpit) async fn export_product_zip(
 /// prints it in the confidentiality line, and the export refuses while it is blank, so the
 /// field says so until it is filled.
 #[component]
-pub(in crate::cockpit) fn ClientNameSetup(project_id: String, initial: String) -> Element {
+pub(in crate::cockpit) fn ClientNameSetup(
+    project_id: String,
+    initial: String,
+    /// Locked while a run is in flight (the field is shown but cannot be edited).
+    #[props(default)]
+    disabled: bool,
+) -> Element {
     // The field keeps its own text while it is on screen, so it is keyed by the project it is
     // for and by the name that project has saved. Switching projects (or the saved name
     // changing under it) builds a fresh field, so one project's text can never be shown against
@@ -182,13 +188,18 @@ pub(in crate::cockpit) fn ClientNameSetup(project_id: String, initial: String) -
                 key: "{key}",
                 project_id: project_id.clone(),
                 initial: initial.clone(),
+                disabled,
             }
         }
     }
 }
 
 #[component]
-pub(super) fn ClientNameField(project_id: String, initial: String) -> Element {
+pub(super) fn ClientNameField(
+    project_id: String,
+    initial: String,
+    #[props(default)] disabled: bool,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut name = use_signal(|| initial.clone());
     let blank = name().trim().is_empty();
@@ -202,6 +213,7 @@ pub(super) fn ClientNameField(project_id: String, initial: String) -> Element {
                 class: "audit-export-input",
                 placeholder: "Required before export",
                 value: "{name}",
+                disabled,
                 oninput: move |e| name.set(e.value()),
                 onchange: move |_| {
                     let pid = project_id.clone();
@@ -223,40 +235,99 @@ pub(super) fn ClientNameField(project_id: String, initial: String) -> Element {
     }
 }
 
-/// The product-export panel: client-editable report framing (all optional) + a single
-/// export button. POSTs the CURRENT triage state (`dispositions.read()`, whatever it is
-/// right now — including any still-Unresolved findings; a draft mid-engagement report is
-/// legitimate, so this is never gated on triage completeness) and saves the returned ZIP
-/// (curated PDF + full Excel workbook + README) via the same native-save-dialog idiom
-/// `save_csv`/the deep-report panel use.
+/// Fetch the operator's triage log from `GET /api/projects/:id/triage-log.csv`: the CSV text on
+/// success, else the server's message for a toast.
+pub(in crate::cockpit) async fn fetch_triage_log(project_id: &str) -> Result<String, String> {
+    let url = format!(
+        "{}/api/projects/{}/triage-log.csv",
+        crate::bff_base(),
+        project_id,
+    );
+    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        return resp.text().await.map_err(|e| e.to_string());
+    }
+    Err(resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| "The triage log could not be downloaded.".to_string()))
+}
+
+/// The operator's files: working files for the person running the inspection, written outside the
+/// client package. Today that is the triage log (per rule, what the AI pass proposed, what review
+/// kept, held or threw out, and why). Internal working notes, not reviewed, not for the client.
+#[component]
+fn OperatorFiles(project_id: String) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut loading = use_signal(|| false);
+    rsx! {
+        div { class: "operator-files",
+            p { class: "section-label", "Operator files (internal, not part of the client package)" }
+            button {
+                class: "btn-edit-sm",
+                disabled: loading(),
+                onclick: move |_| {
+                    let pid = project_id.clone();
+                    loading.set(true);
+                    spawn(async move {
+                        let _guard = crate::loading::LoadingGuard::new();
+                        match fetch_triage_log(&pid).await {
+                            Ok(csv) => {
+                                if save_csv("camerata-triage-log-INTERNAL.csv", csv).await {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Info,
+                                        "Triage log saved.",
+                                    );
+                                }
+                            }
+                            Err(msg) => crate::toast::push_toast(
+                                toasts,
+                                crate::toast::ToastKind::Error,
+                                msg,
+                            ),
+                        }
+                        loading.set(false);
+                    });
+                },
+                if loading() { "Downloading\u{2026}" } else { "Download triage log" }
+            }
+        }
+    }
+}
+
+/// The product-export panel: client-editable report framing (all optional) + a single export
+/// button. The export reads the decisions stored for the project and the release gate refuses it
+/// while any row needs a decision; the panel then shows one line and a button instead (see
+/// `export_gate`), and the rows are marked in the triage table. The returned ZIP (curated PDF +
+/// full Excel workbook + README) is saved via the same native-save-dialog idiom
+/// `save_csv`/the deep-report panel use. What the package holds is explained in the panel's help
+/// dialog, whose text is built from `camerata_ui_core::export_panel`.
 ///
 /// Placed in the Onboard view right after the triage Process step, above the deep-tier
-/// panel — see `ScanResults`.
+/// panel; see `ScanResults`.
 #[component]
 pub(in crate::cockpit) fn AuditReportExportPanel(
     project_id: String,
     dispositions: Signal<std::collections::HashMap<String, Disposition>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let heading = camerata_ui_core::export_panel::HEADING;
+    let operator_project = project_id.clone();
     let mut loading = use_signal(|| false);
     let mut project_title = use_signal(String::new);
     let mut prepared_by = use_signal(String::new);
     let mut summary_override = use_signal(String::new);
-    let mut triage_log = use_signal(|| false);
 
     rsx! {
         div { class: "audit-export-panel",
-            p { class: "section-label", "Export product (ZIP: PDF + Excel + JSON)" }
-            p { class: "section-hint",
-                "One ZIP, three artifacts from the same scan: a board-forwardable PDF (cover, \
-                 executive summary, category scorecard, severity\u{00d7}effort matrix, \
-                 curated findings with citations and recommended fixes, what's healthy, \
-                 dependency/CVE snapshot, methodology), a fully-formatted Excel workbook — \
-                 every finding, one row each, sortable and filterable, with a per-category \
-                 sheet and a False Positives sheet (nothing silently dropped) — and a raw \
-                 JSON export of the full report for machine consumption, plus a README \
-                 explaining each file. Uses your CURRENT triage — a draft mid-engagement \
-                 export (some findings still Unresolved) is fine."
+            div { class: "export-heading",
+                p { class: "section-label", "{heading}" }
+                crate::cockpit::help::HelpButton {
+                    topic: camerata_ui_core::help::export::export_topic(),
+                }
             }
             div { class: "audit-export-fields",
                 div { class: "audit-model-row",
@@ -288,21 +359,8 @@ pub(in crate::cockpit) fn AuditReportExportPanel(
                     }
                 }
             }
-            div { class: "audit-model-row",
-                label { class: "audit-model-label", r#for: "export-triage-log", "Triage log" }
-                input {
-                    id: "export-triage-log",
-                    r#type: "checkbox",
-                    checked: triage_log(),
-                    onchange: move |e| triage_log.set(e.checked()),
-                }
-                span { class: "section-hint",
-                    "Also export, per rule, what the AI pass proposed, what review kept and threw \
-                     out, and why: a Triage Log sheet in the workbook and csv/triage-log.csv. Off by default."
-                }
-            }
             // The release gate refuses a package while a row needs a decision. When it does, the
-            // button gives way to the list of those rows, each with a door to it (spec section 10).
+            // button gives way to one line and a button; the rows are marked in the triage table.
             crate::cockpit::export_gate::ExportGateHost { project_id: project_id.clone(),
                 button {
                     class: "btn-run",
@@ -315,7 +373,6 @@ pub(in crate::cockpit) fn AuditReportExportPanel(
                         let pt = project_title();
                         let pb = prepared_by();
                         let so = summary_override();
-                        let log = triage_log();
                         loading.set(true);
                         spawn(async move {
                             let _guard = crate::loading::LoadingGuard::new();
@@ -344,7 +401,6 @@ pub(in crate::cockpit) fn AuditReportExportPanel(
                                 project_title: pt,
                                 prepared_by: pb,
                                 executive_summary_override: override_opt,
-                                triage_log: log,
                                 unsynced_changes: unsynced,
                             };
                             match export_product_zip(&pid, &disp_snapshot, &options).await {
@@ -358,9 +414,10 @@ pub(in crate::cockpit) fn AuditReportExportPanel(
                             loading.set(false);
                         });
                     },
-                    if loading() { "Exporting\u{2026}" } else { "Export product (ZIP: PDF + Excel + JSON)" }
+                    if loading() { "Exporting\u{2026}" } else { "{heading}" }
                 }
             }
+            OperatorFiles { project_id: operator_project }
         }
     }
 }

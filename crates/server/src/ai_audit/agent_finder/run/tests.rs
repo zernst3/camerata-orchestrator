@@ -223,12 +223,14 @@ impl PieceAgent for ByPiece {
     }
 }
 
+mod activity;
 mod checklist_outcomes;
 mod checkpoint;
 mod contract;
 mod conventions;
 mod coverage;
 mod downstream;
+mod injection_backstop;
 mod join_follow_ups;
 mod joints;
 mod ledger;

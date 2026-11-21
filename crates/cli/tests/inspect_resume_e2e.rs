@@ -234,7 +234,40 @@ fn typst_available(test: &str) -> bool {
     camerata_test_env::typst_on_path_for(test)
 }
 
+/// The fixture repo with its deliberate plants (a secret, a secret in a URL, a SQL concatenation)
+/// made harmless: these tests are about resume mechanics, and a planted critical problem has no
+/// reviewer decision, which the release gate rightly refuses for a client package. The files keep
+/// their names and first lines.
 fn stage_fixture(dest: &Path) {
+    stage_fixture_planted(dest);
+    for (file, text) in [
+        ("src/config.rs", "pub const RETRIES: u32 = 3;\n"),
+        (
+            "src/client.rs",
+            "pub fn base_url() -> &'static str {\n    \"https://example.com/\"\n}\n",
+        ),
+        (
+            "src/db.rs",
+            "pub fn table_name() -> &'static str {\n    \"users\"\n}\n",
+        ),
+    ] {
+        std::fs::write(dest.join(file), text).unwrap();
+    }
+    let g = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dest)
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    g(&["add", "."]);
+    g(&["commit", "-q", "-m", "harmless"]);
+}
+
+fn stage_fixture_planted(dest: &Path) {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/tests/fixtures/e2e_report_repo");
     fn copy(src: &Path, dest: &Path) {
@@ -649,6 +682,40 @@ async fn a_fabricated_quote_refuses_the_release_with_exit_3_and_names_the_row() 
     assert!(model.sent_of(PartKind::Scan) > 0);
     assert!(model.sent_of(PartKind::Calibration) > 0);
     assert!(model.sent_of(PartKind::Fix) > 0);
+}
+
+/// The gate is pinned on the resume path: a client resume export of a run whose fixture carries
+/// planted critical problems with no reviewer decision is refused with the gate's sentence.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_client_resume_export_with_an_undecided_critical_is_refused_by_the_gate() {
+    if !typst_available("a_client_resume_export_with_an_undecided_critical") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture_planted(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let model = Scripted::new(Outage {
+        fix_stage: true,
+        ..Outage::default()
+    });
+    let err = run(&model, &[repo.path()], &["acme/one"], &export)
+        .await
+        .expect_err("a run with a failed part is refused");
+    let run_id = the_run_id(&err);
+    model.set(Outage::default());
+    let err = resume(&model, &run_id, Some(export.clone()))
+        .await
+        .expect_err("the undecided critical problems refuse the resumed client export");
+    assert_eq!(err.exit_code(), EXIT_RELEASE_BLOCKED);
+    let text = err.to_string();
+    assert!(
+        text.contains("shown at critical severity") && text.contains("no reviewer decision"),
+        "{text}"
+    );
+    assert!(!export.exists(), "no zip is written");
 }
 
 /// One repo, the fix stage down: the export is refused, nothing is written; after the provider is
@@ -1261,6 +1328,7 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
                 resolved: true,
                 group_review: String::new(),
                 finder: String::new(),
+                finder_model: String::new(),
             },
             ai_scan_key: camerata_server::scan_cache::AiScanKey::new("m", Some("m"), &[]),
             // The cockpit's scan request, not the command line's flags.
@@ -1399,7 +1467,7 @@ async fn resume_with_preflight(
 }
 
 /// A run that started on Fable 5.1 and is resumed with no model flag (the built-in default is
-/// Fable 5.2 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
+/// Opus 5.5 now) asks Fable 5.1 for its remaining group review, and the resume pre-flight says so
 /// in one line.
 #[tokio::test]
 #[serial_test::serial(process_env)]

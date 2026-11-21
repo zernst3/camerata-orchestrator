@@ -12,7 +12,11 @@
 //! never assumed.
 //!
 //! The cli backend is internal only: a client engagement is refused here, before a room is
-//! written, because the session data would hold the client's code.
+//! written, because the session data would hold the client's code. For that reason its tool
+//! results and send-again text are not fenced under a frame token (the API transport's `serve`
+//! does, in `api_agent.rs`): the files it serves are the operator's own fixtures. It shares no
+//! `serve` with the API transport, and a client engagement never reaches it
+//! (`a_client_engagement_is_refused_before_a_room_is_written_or_the_program_started` pins that).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};

@@ -217,7 +217,7 @@ async fn a_deleted_source_reports_the_date_and_reads_nothing() {
 }
 
 #[tokio::test]
-async fn an_unlinked_repo_is_file_missing() {
+async fn an_unlinked_repo_is_repo_unlinked_not_file_missing() {
     let fx = fixture();
     let (status, _, json) = get(
         &fx,
@@ -225,7 +225,11 @@ async fn an_unlinked_repo_is_file_missing() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["status"], "file_missing");
+    assert_eq!(json["status"], "repo_unlinked", "{json}");
+    assert!(json["reason"]
+        .as_str()
+        .unwrap()
+        .contains("not linked to this project"));
 }
 
 #[tokio::test]
@@ -510,7 +514,7 @@ async fn a_repo_that_escapes_the_workspace_is_refused_on_both_endpoints() {
             ] {
                 let (status, _, json) = get(&fx, &endpoint).await;
                 assert_eq!(status, StatusCode::OK, "{endpoint}: {json}");
-                assert_eq!(json["status"], "file_missing", "{endpoint}: {json}");
+                assert_eq!(json["status"], "repo_unlinked", "{endpoint}: {json}");
                 assert!(json.get("lines").is_none(), "{endpoint}: {json}");
             }
         }

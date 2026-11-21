@@ -21,15 +21,15 @@ pub(in crate::cockpit) fn audit_rules_json(rules: &[SelectedAuditRule]) -> Vec<s
         .collect()
 }
 
-/// The body of an audit request, shared by the synchronous and the background-job routes. The
+/// The body of an inspection request, shared by the synchronous and the background-job routes. The
 /// retired `thorough` option is not part of it: calibration runs one pass per site whatever a
-/// client sends, so nothing in the request can change that.
+/// client sends, so nothing in the request can change that. It carries no model either: every
+/// model is the project's (Inspection settings), which the server resolves when the request names
+/// none.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::cockpit) fn audit_request_json(
     repos: &[String],
     rules: &[SelectedAuditRule],
-    model: &str,
-    calibration_model: &str,
     mode: &str,
     incremental: bool,
     deep: bool,
@@ -40,8 +40,6 @@ pub(in crate::cockpit) fn audit_request_json(
     serde_json::json!({
         "repos": repos,
         "rules": audit_rules_json(rules),
-        "model": model,
-        "calibration_model": calibration_model,
         "mode": mode,
         "incremental": incremental,
         "deep": deep,
@@ -54,12 +52,14 @@ pub(in crate::cockpit) fn audit_request_json(
 /// Phase 2 — audit the repos against the selected rules (each carrying its repo binding).
 /// When `deep` is true, the server also runs the three deep-tier lenses (SOC-2 gap,
 /// deep security, threat model) and attaches the results to `report.deep`.
+///
+/// Only tests call this now: the screen runs every scan as a saved job ([`audit_job_start`]), the
+/// one path whose run can be resumed.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::cockpit) async fn audit_against(
     repos: &[String],
     rules: &[SelectedAuditRule],
-    model: &str,
-    calibration_model: &str,
     mode: &str,
     incremental: bool,
     deep: bool,
@@ -72,8 +72,6 @@ pub(in crate::cockpit) async fn audit_against(
     let body = audit_request_json(
         repos,
         rules,
-        model,
-        calibration_model,
         mode,
         incremental,
         deep,
@@ -421,6 +419,9 @@ pub(in crate::cockpit) struct RepoSizeView {
 #[derive(Clone, PartialEq, serde::Deserialize)]
 pub(in crate::cockpit) struct AgentFinderSizeView {
     pub pieces: usize,
+    /// The extra calls across the pieces: one for a repository cut into two or more.
+    #[serde(default)]
+    pub joints_calls: usize,
     pub expected_usd: f64,
     pub low_usd: f64,
     pub high_usd: f64,
@@ -605,6 +606,18 @@ pub(in crate::cockpit) struct JobStatusEnvelope {
     pub cancel_requested: bool,
 }
 
+/// The execution mode a scan job is started with for the picked scan mode. "Background job" is
+/// the server's default (`auto`); every other pick is kept, because it decides how the model is
+/// called. EVERY pick runs as a saved job (see `ScanResults`): the plain request path saved no
+/// run, so its incomplete result could not be resumed.
+pub(in crate::cockpit) fn job_exec_mode(picked: &str) -> String {
+    if picked == "job" {
+        "auto".to_string()
+    } else {
+        picked.to_string()
+    }
+}
+
 /// Mode 3: START an async audit job, returning its id (the request returns immediately).
 /// `deep` forwards the opt-in deep compliance & security tier (#55); the server
 /// runs the three lenses after the standard audit completes and attaches the result
@@ -613,8 +626,6 @@ pub(in crate::cockpit) struct JobStatusEnvelope {
 pub(in crate::cockpit) async fn audit_job_start(
     repos: &[String],
     rules: &[SelectedAuditRule],
-    model: &str,
-    calibration_model: &str,
     exec_mode: &str,
     incremental: bool,
     deep: bool,
@@ -625,8 +636,6 @@ pub(in crate::cockpit) async fn audit_job_start(
     let body = audit_request_json(
         repos,
         rules,
-        model,
-        calibration_model,
         exec_mode,
         incremental,
         deep,
@@ -755,18 +764,43 @@ where
     Ok(())
 }
 
-pub(in crate::cockpit) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
-    reqwest::get(format!(
+/// What one poll of a job came back with.
+pub(in crate::cockpit) enum PollAnswer {
+    /// The job's state.
+    Status(Box<JobStatusEnvelope>),
+    /// A definite answer that the server does not know this job (a 200 with null: the server
+    /// restarted, so the job is certainly not running).
+    Unknown,
+    /// No usable answer (a network error, a bad status, a body that is not a job): the job may be
+    /// fine.
+    NoAnswer,
+}
+
+pub(in crate::cockpit) async fn audit_job_poll_answer(job_id: &str) -> PollAnswer {
+    let Ok(resp) = reqwest::get(format!(
         "{}/api/onboard/audit/job/{}",
         crate::bff_base(),
         job_id
     ))
     .await
-    .ok()?
-    .json::<Option<JobStatusEnvelope>>()
-    .await
-    .ok()
-    .flatten()
+    else {
+        return PollAnswer::NoAnswer;
+    };
+    if !resp.status().is_success() {
+        return PollAnswer::NoAnswer;
+    }
+    match resp.json::<Option<JobStatusEnvelope>>().await {
+        Ok(Some(env)) => PollAnswer::Status(Box::new(env)),
+        Ok(None) => PollAnswer::Unknown,
+        Err(_) => PollAnswer::NoAnswer,
+    }
+}
+
+pub(in crate::cockpit) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
+    match audit_job_poll_answer(job_id).await {
+        PollAnswer::Status(env) => Some(*env),
+        PollAnswer::Unknown | PollAnswer::NoAnswer => None,
+    }
 }
 
 /// Drive an async audit job to completion: poll every ~1.5s, update progress + (on done) the
@@ -817,8 +851,19 @@ pub(in crate::cockpit) async fn poll_job(
     let mut misses = 0u32;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        match audit_job_poll(&jid).await {
-            Some(js) => {
+        let answer = audit_job_poll_answer(&jid).await;
+        match answer {
+            PollAnswer::Unknown => {
+                // The server answered, and it does not know the job: it restarted, so the job is
+                // certainly not running. Nothing to wait for and nothing to keep.
+                job_failed_message.set(Some(JOB_GONE_MESSAGE.to_string()));
+                auditing.set(false);
+                job_progress.set(None);
+                det_progress.set(None);
+                active_audit_job.set(None);
+                break;
+            }
+            PollAnswer::Status(js) => {
                 misses = 0;
                 scan_idle_ms.set(js.idle_ms);
                 job_progress.set(Some((
@@ -864,24 +909,31 @@ pub(in crate::cockpit) async fn poll_job(
                     _ => {}
                 }
             }
-            None => {
+            PollAnswer::NoAnswer => {
                 misses += 1;
                 if misses >= 3 {
-                    job_failed_message.set(Some(
-                        "Lost contact with the running scan (the server may have restarted \
-                         or the job was lost). Please retry."
-                            .to_string(),
-                    ));
+                    // Every scan is a saved job, so three failed polls prove nothing about the
+                    // job: it may well still be running (and paying) on the server. The job id is
+                    // KEPT (a later mount picks the job up from it) and the message never invites
+                    // a second paid run.
+                    job_failed_message.set(Some(LOST_CONTACT_MESSAGE.to_string()));
                     auditing.set(false);
                     job_progress.set(None);
                     det_progress.set(None);
-                    active_audit_job.set(None);
                     break;
                 }
             }
         }
     }
 }
+
+/// What the screen says when the server answers that it does not know the scan's job: it was
+/// restarted, so the job is certainly dead. The scan itself is saved.
+pub(in crate::cockpit) const JOB_GONE_MESSAGE: &str = "The scan is no longer running: the server was restarted and lost the job. It is saved. Open it from the saved inspections and use Run what remains.";
+
+/// What the screen says when the scan's status cannot be read three times in a row. The scan is
+/// saved and may still be running on the server, so it must not be started again.
+pub(in crate::cockpit) const LOST_CONTACT_MESSAGE: &str = "Lost contact with the scan. It may still be running on the server, and it is saved, so do not start it again: wait a few minutes and reopen this inspection to see where it stands.";
 
 /// The "Deterministic scan" progress component — rendered ABOVE the AI agent-activity drawer.
 /// Shows the deterministic pass's per-tool state (start/run/done + findings count) and an

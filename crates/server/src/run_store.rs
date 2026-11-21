@@ -246,7 +246,16 @@ pub struct ModelsRecord {
     /// older runs still resume: [`Self::hold_finder`] keeps it.
     #[serde(default)]
     pub finder: String,
+    /// The agent finder's resolved model id when the run's finder is the agent finder, so a resume
+    /// finishes the remaining pieces on the model the run started on even after the built-in
+    /// default moves. Empty for an engine run and for a run saved before it was recorded.
+    /// Not part of [`Self::matches_for_resume`]: [`Self::hold_finder_model`] keeps it.
+    #[serde(default)]
+    pub finder_model: String,
 }
+
+/// The agent finder's default model when a run saved without a recorded finder model started.
+const LEGACY_FINDER_MODEL: &str = "claude-fable-5-2";
 
 /// The word a finder is recorded as.
 fn finder_word(finder: crate::ai_audit::agent_finder::FinderChoice) -> &'static str {
@@ -281,7 +290,58 @@ impl ModelsRecord {
             resolved: true,
             group_review: controls.group_review_model_for(),
             finder: finder_word(controls.finder).to_string(),
+            finder_model: if controls.finder == crate::ai_audit::agent_finder::FinderChoice::Agent {
+                controls.finder_model_for()
+            } else {
+                String::new()
+            },
         }
+    }
+
+    /// Hold a resumed agent finder run to the finder model it started with, and return the one
+    /// line the resume pre-flight prints about it. An engine run has no finder model (`None`).
+    /// A model the resume names itself (a flag or a project pick, not the built-in default) that
+    /// differs from the recorded one is refused: the stored pieces came from the recorded model.
+    /// A run saved before the model was recorded keeps the current pick, and the line says so.
+    pub fn hold_finder_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Result<Option<String>, String> {
+        if controls.finder != crate::ai_audit::agent_finder::FinderChoice::Agent {
+            return Ok(None);
+        }
+        let recorded = self.finder_model.trim();
+        let explicit = controls
+            .finder_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty());
+        if recorded.is_empty() {
+            // A run saved before the model was recorded started on the default of that time,
+            // Fable 5.2. With no explicit pick it keeps that model; an explicit pick stands.
+            if explicit.is_some() {
+                return Ok(Some(format!(
+                    "The finder runs on {}: this run did not record a finder model.",
+                    controls.finder_model_for()
+                )));
+            }
+            controls.finder_model = Some(LEGACY_FINDER_MODEL.to_string());
+            return Ok(Some(format!(
+                "The finder stays on {LEGACY_FINDER_MODEL}, the model this run started on (it \
+                 recorded none, and this was the default then)."
+            )));
+        }
+        if let Some(pick) = explicit.filter(|m| *m != recorded) {
+            return Err(format!(
+                "this run's finder is on {recorded}, and this resume asks for {pick}. The stored \
+                 finder pieces came from {recorded}, so resume it with the same model, or start \
+                 a new run"
+            ));
+        }
+        controls.finder_model = Some(recorded.to_string());
+        Ok(Some(format!(
+            "The finder stays on {recorded}, the model this run started with."
+        )))
     }
 
     /// Hold a resumed run to the finder it started with, and return the run note when that
@@ -1025,6 +1085,14 @@ impl RunStore {
         models.hold_group_review_model(controls, explicit)
     }
 
+    /// [`ModelsRecord::hold_finder_model`] for this run.
+    pub fn hold_finder_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Result<Option<String>, String> {
+        self.record().models.hold_finder_model(controls)
+    }
+
     /// [`ModelsRecord::hold_finder`] for this run.
     pub fn hold_finder(&self, controls: &mut crate::cost_cap::RunControls) -> Option<String> {
         self.record().models.hold_finder(controls)
@@ -1734,6 +1802,68 @@ pub fn runs_covering(runs_root: &Path, checkout: &Path) -> Vec<PathBuf> {
         })
         .collect();
     out.sort();
+    out
+}
+
+/// The saved runs that belong to one cockpit project, sorted into what may go with it and what
+/// may not. See [`runs_of_project`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectRuns {
+    /// Run folders that belong to the project alone: deleted with it.
+    pub mine: Vec<PathBuf>,
+    /// Command line runs (no project recorded) that cover one of the project's checkouts AND a
+    /// checkout of another project: they hold the other project's answers too, so they stay.
+    pub shared: Vec<PathBuf>,
+    /// Run ids of the project's runs a live process is working on right now.
+    pub live: Vec<String>,
+}
+
+/// The saved runs under `runs_root` that belong to `project_id`: a cockpit run records its
+/// project and belongs to it and to no other, whatever repos two projects share; a command line
+/// run (no project recorded) belongs to the project when it covers one of `own_dirs`, unless it
+/// also covers one of `other_dirs` (another project's checkout), when it is `shared` and kept.
+pub fn runs_of_project(
+    runs_root: &Path,
+    project_id: &str,
+    own_dirs: &[PathBuf],
+    other_dirs: &[PathBuf],
+) -> ProjectRuns {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let own: Vec<PathBuf> = own_dirs.iter().map(|d| canon(d)).collect();
+    let others: Vec<PathBuf> = other_dirs.iter().map(|d| canon(d)).collect();
+    let mut out = ProjectRuns::default();
+    let Ok(entries) = std::fs::read_dir(runs_root) else {
+        return out;
+    };
+    let mut dirs: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    dirs.sort();
+    for dir in dirs {
+        let Ok(record) = load_record(&dir) else {
+            continue;
+        };
+        let covered: Vec<PathBuf> = record
+            .repos
+            .iter()
+            .map(|r| canon(Path::new(&r.dir)))
+            .collect();
+        match &record.project_id {
+            Some(owner) if owner == project_id => {}
+            Some(_) => continue,
+            None => {
+                if !covered.iter().any(|c| own.contains(c)) {
+                    continue;
+                }
+                if covered.iter().any(|c| others.contains(c)) {
+                    out.shared.push(dir);
+                    continue;
+                }
+            }
+        }
+        if liveness_of(&dir) == Liveness::Live {
+            out.live.push(record.run_id.clone());
+        }
+        out.mine.push(dir);
+    }
     out
 }
 

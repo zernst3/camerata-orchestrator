@@ -24,7 +24,7 @@ fn sealed_report() -> SealedReport {
     scan_report().seal()
 }
 
-pub(super) fn scan_report() -> ScanReport {
+pub(crate) fn scan_report() -> ScanReport {
     let findings = vec![Finding {
         repo: "acme/portal".to_string(),
         path: "src/db.rs".to_string(),
@@ -436,6 +436,7 @@ fn release_passes_a_clean_package_and_reports_sixteen_checks() {
             "reviewer decision on restored findings",
             "reviewer decision on split-out problems",
             "reviewer correction on flagged findings",
+            "reviewer decision on critical and unsure findings",
             "confidentiality marking",
             "manifest",
             "provenance",
@@ -458,7 +459,8 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
             "Release checks: secrets, dataset set, dataset parity, row parity, severity and \
              kind counts, finding content, reviewer decision on unverified evidence, \
              decision records behind merged rows, reviewer decision on restored findings, \
-             reviewer decision on split-out problems, reviewer correction on flagged findings, confidentiality marking, manifest, \
+             reviewer decision on split-out problems, reviewer correction on flagged findings, \
+             reviewer decision on critical and unsure findings, confidentiality marking, manifest, \
              provenance, unsynced reviewer changes, one fix per row, client text style, internal \
              notes kept out (all passed)"
         ),
@@ -1253,7 +1255,8 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
             "secrets, dataset set, dataset parity, row parity, severity and kind counts, \
              finding content, reviewer decision on unverified evidence, decision records behind \
              merged rows, reviewer decision on restored findings, reviewer decision on split-out problems, reviewer correction on \
-             flagged findings, confidentiality marking, manifest, provenance, unsynced \
+             flagged findings, reviewer decision on critical and unsure findings, \
+             confidentiality marking, manifest, provenance, unsynced \
              reviewer changes, one fix per row, client text style, internal notes kept out"
         )
     );
@@ -1781,16 +1784,34 @@ fn mixed_scan_report() -> ScanReport {
 }
 
 pub(super) fn mixed_package() -> ProductPackage {
-    let sealed = mixed_scan_report().seal();
+    let report = mixed_scan_report();
+    // The gate refuses a critical row with no decision of its own, so the fixture's critical rows
+    // carry one; every other row stays as it was.
+    let decided: HashMap<String, crate::report_export::DispositionWire> = report
+        .findings
+        .iter()
+        .filter(|f| f.severity == "critical" || f.needs_review)
+        .map(|f| {
+            (
+                crate::report_export::finding_key(f),
+                crate::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    reason: "read in person".to_string(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let sealed = report.seal();
     let options = client_options();
     let json = build_report_json(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &decided),
         None,
         &options,
     );
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
-        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &decided),
         None,
         &options,
         STEM,

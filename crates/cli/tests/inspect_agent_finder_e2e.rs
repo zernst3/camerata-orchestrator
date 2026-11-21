@@ -13,7 +13,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use camerata::inspect_cmd::finder::FinderArgs;
@@ -361,7 +361,10 @@ fn the_agent_finders_package_passes_the_release_gate() {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let agent = Arc::new(Reviewer::new(vec![real_problem()]));
         let calls = agent.calls.clone();
-        let run = run_agent(agent, true, |_| {}).await;
+        // The operator's own (internal) package: the fixture's three critical problems have no
+        // reviewer decision, which refuses a client package (the test below), and the headless
+        // command has no way to record one.
+        let run = run_agent(agent, false, |_| {}).await;
         let outcome = run.result.expect("the agent finder's package is released");
         assert!(
             outcome.release_gate.starts_with("release gate: passed"),
@@ -395,6 +398,33 @@ fn the_agent_finders_package_passes_the_release_gate() {
             "the agent's problem is in the package"
         );
         assert!(!findings.contains("finder-run") && !findings.contains("finder-piece"));
+    })
+}
+
+/// The release gate refuses a client package while a critical problem has no reviewer decision,
+/// naming the places. The headless command records no decision, so a run with a critical problem
+/// is exported as an internal package, or reviewed and exported from the cockpit.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_agent_finders_client_package_is_refused_while_a_critical_problem_has_no_decision() {
+    on_a_big_stack(async {
+        if !typst_available("the_agent_finders_client_package_is_refused_while_a_critical") {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let agent = Arc::new(Reviewer::new(vec![real_problem()]));
+        let run = run_agent(agent, true, |_| {}).await;
+        let err = run
+            .result
+            .expect_err("a client package with an undecided critical problem is refused");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("CriticalOrUnsureWithoutDecision") && text.contains("src/db.rs line 9"),
+            "{text}"
+        );
+        assert!(!run.export.exists(), "nothing is written");
     })
 }
 
@@ -636,5 +666,87 @@ fn settings_that_cannot_go_together_are_refused_before_the_agent_or_the_model_is
             "refused before any call"
         );
         assert!(!export.exists());
+    })
+}
+
+/// Outside review Part 1 item 3: under the agent finder the pre-flight prints the agent finder's
+/// estimate, never the engine's scan figure.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_agent_finder_prints_its_own_estimate_never_the_engines() {
+    on_a_big_stack(async {
+        let state = tempfile::tempdir().unwrap();
+        let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let repo = tempfile::tempdir().unwrap();
+        stage_fixture(repo.path());
+        let out = tempfile::tempdir().unwrap();
+        let export = out.path().join("inspect.zip");
+        let seen: Mutex<String> = Mutex::new(String::new());
+        let llm = Scripted {
+            calls: AtomicUsize::new(0),
+        };
+        let agent = Arc::new(Reviewer::new(vec![real_problem()]));
+        let _ = Box::pin(with_agent_override(
+            agent,
+            run_inspect_pipeline_with(
+                args(repo.path(), &export, false),
+                true,
+                &camerata_server::credentials::MemoryCredentialStore::new(),
+                Seams {
+                    resume: None,
+                    llm: Some(&llm),
+                    preflight_sink: &|text| seen.lock().unwrap().push_str(text),
+                },
+            ),
+        ))
+        .await;
+        let text = seen.lock().unwrap().clone();
+        assert!(text.contains("PRE-FLIGHT ESTIMATE"), "{text}");
+        assert!(
+            text.contains("finder: agent. Estimated cost of the finder stage only"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("estimated cost: about"),
+            "the engine's figure must not print under the agent finder: {text}"
+        );
+    })
+}
+
+/// Outside review Part 1 item 4: a rule file that does not parse stops an agent run before
+/// the estimate, the agent and any model call, and names the rule, the file and the reason.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_corrupt_rule_file_stops_every_agent_run_before_any_spend() {
+    on_a_big_stack(async {
+        let state = tempfile::tempdir().unwrap();
+        let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let corpus = tempfile::tempdir().unwrap();
+        let dir = corpus.path().join("sec");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("sec-corrupt-1.toml"),
+            "id = \"SEC-CORRUPT-1\"\n[[[ not toml",
+        )
+        .unwrap();
+        let _corpus = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", corpus.path());
+        // Client and internal runs alike: graded evidence must not come from a broken rule set.
+        for client in [true, false] {
+            let agent = Arc::new(Reviewer::new(vec![real_problem()]));
+            let calls = agent.calls.clone();
+            let run = run_agent(agent, client, |_| {}).await;
+            let why = run
+                .result
+                .expect_err("an agent run must not go on with a rule file missing")
+                .to_string();
+            assert!(
+                why.contains("SEC-CORRUPT-1") && why.contains("sec-corrupt-1.toml"),
+                "{why}"
+            );
+            assert_eq!((calls.load(Ordering::SeqCst), run.model_calls), (0, 0));
+            assert!(!run.export.exists());
+        }
     })
 }

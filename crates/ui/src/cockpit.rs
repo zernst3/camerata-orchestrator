@@ -60,7 +60,7 @@ struct RulesetView {
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-struct ProjectView {
+pub(crate) struct ProjectView {
     id: String,
     name: String,
     #[serde(default)]
@@ -1764,7 +1764,7 @@ pub(crate) enum CockpitView {
 /// A project CONTAINS everything (repos, ruleset, baseline, workspace), so nothing in
 /// the cockpit is reachable until you open one.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CockpitScreen {
+pub(crate) enum CockpitScreen {
     /// The projects home: pick one to open, create a new one, or import.
     Projects,
     /// Inside the active project (the cockpit tabs).
@@ -1790,8 +1790,17 @@ enum HomeView {
 /// can navigate back to the projects list.
 #[component]
 pub fn CockpitShell() -> Element {
-    let screen = use_signal(|| CockpitScreen::Projects);
-    use_context_provider(|| screen);
+    // Which screen is showing. Lifted to App (main.rs) so the chat bubble, a sibling of this shell,
+    // knows whether a project is open on screen; this shell provides its own signal only when
+    // mounted without an App parent (the same pattern as the ask-a-finding signal).
+    let own = use_signal(|| CockpitScreen::Projects);
+    let screen = match try_consume_context::<Signal<CockpitScreen>>() {
+        Some(existing) => existing,
+        None => {
+            use_context_provider(|| own);
+            own
+        }
+    };
     // The inspection walkthrough's state (shared by the switch, the offer, the Help menu and the
     // palette), and its popup host. The host draws nothing while the walkthrough is off.
     crate::walkthrough::provide_tour();
@@ -1866,14 +1875,24 @@ enum ImportResult {
     Cancelled,
 }
 
-/// Delete a project by id. Returns true on success.
-async fn delete_project(id: &str) -> bool {
-    reqwest::Client::new()
+/// Remove a project from the list by id. This does not delete its data: the server refuses
+/// while the project still holds any, and `Err` carries the server's sentence for that (or a
+/// generic one when the server could not be reached).
+async fn delete_project(id: &str) -> Result<(), String> {
+    let resp = reqwest::Client::new()
         .delete(format!("{}/api/projects/{}", crate::bff_base(), id))
         .send()
         .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+        .map_err(|_| "Could not reach the Camerata server.".to_string())?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    Err(body
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("Could not remove the project from the list.")
+        .to_string())
 }
 
 /// Clear a project's onboarded marker (keeping its repos and ruleset) so it can be
@@ -2103,6 +2122,10 @@ fn ProjectsHome() -> Element {
 
         // Resume-onboarding prompt — shown when an opened project has an in-progress draft.
         if resume_prompt() {
+            {
+                // A variable, not a literal, so the attribute is set at run time (tests find it).
+                let continue_mark = "continue-onboarding";
+                rsx! {
             div { class: "rule-modal-overlay",
                 div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
                     div { class: "rule-modal-head",
@@ -2128,6 +2151,7 @@ fn ProjectsHome() -> Element {
                         }
                         button {
                             class: "btn-run",
+                            "data-test": continue_mark,
                             onclick: move |_| {
                                 // Keep the draft; OnboardView restores it when opened.
                                 resume_prompt.set(false);
@@ -2136,6 +2160,8 @@ fn ProjectsHome() -> Element {
                             "Continue where you left off"
                         }
                     }
+                }
+            }
                 }
             }
         }
@@ -2166,6 +2192,8 @@ fn ProjectsHome() -> Element {
                                 let id_reset = p.id.clone();
                                 let has_onboarded = !p.onboarded.is_empty();
                                 let is_pending = pending_delete().as_deref() == Some(p.id.as_str());
+                                let remove_mark = "remove-from-list";
+                                let open_mark = "open-project";
                                 let is_pending_reset = pending_reset().as_deref() == Some(p.id.as_str());
                                 rsx! {
                                     div { class: "pg-card", key: "{p.id}",
@@ -2226,29 +2254,34 @@ fn ProjectsHome() -> Element {
                                             }
                                             button {
                                                 class: if is_pending { "pg-btn-danger confirm" } else { "pg-btn-danger" },
+                                                "data-test": remove_mark,
                                                 onclick: move |_| {
                                                     let id = id_del.clone();
                                                     if pending_delete().as_deref() == Some(id.as_str()) {
                                                         // Second click — delete.
                                                         pending_delete.set(None);
                                                         spawn(async move {
-                                                            if delete_project(&id).await {
-                                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Project deleted.");
-                                                                refresh += 1;
-                                                            } else {
-                                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not delete the project.");
+                                                            match delete_project(&id).await {
+                                                                Ok(()) => {
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Project removed from the list.");
+                                                                    refresh += 1;
+                                                                }
+                                                                Err(message) => {
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message);
+                                                                }
                                                             }
                                                         });
                                                     } else {
                                                         // First click — warn + arm the confirm.
                                                         pending_delete.set(Some(id));
-                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Click Confirm to permanently delete \u{201c}{name_del}\u{201d}. This can't be undone."));
+                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Click Confirm to remove \u{201c}{name_del}\u{201d} from the list. This does not delete its data on this machine."));
                                                     }
                                                 },
-                                                if is_pending { "Confirm delete" } else { "Delete" }
+                                                if is_pending { "Confirm remove" } else { "Remove from list" }
                                             }
                                             button {
                                                 class: "btn-run",
+                                                "data-test": open_mark,
                                                 onclick: move |_| {
                                                     let id = id_open.clone();
                                                     spawn(async move {
@@ -2257,10 +2290,16 @@ fn ProjectsHome() -> Element {
                                                             // draft (server scopes the draft to the now-active
                                                             // project), ask before entering instead of silently
                                                             // resuming. Otherwise go straight in.
-                                                            if load_onboarding_draft().await.is_some() {
-                                                                resume_prompt.set(true);
-                                                            } else {
-                                                                screen.set(CockpitScreen::InProject);
+                                                            match load_onboarding_draft().await {
+                                                                Ok(Some(_)) => resume_prompt.set(true),
+                                                                Ok(None) => screen.set(CockpitScreen::InProject),
+                                                                Err(message) => {
+                                                                    // A draft that cannot be read is said out
+                                                                    // loud, then the project opens as it would
+                                                                    // with none; the file is left as it is.
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, message.message);
+                                                                    screen.set(CockpitScreen::InProject);
+                                                                }
                                                             }
                                                         } else {
                                                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not open the project.");
@@ -2269,6 +2308,11 @@ fn ProjectsHome() -> Element {
                                                 },
                                                 "Open"
                                             }
+                                        }
+                                        crate::delete_project_ui::ProjectDangerZone {
+                                            project_id: p.id.clone(),
+                                            project_name: p.name.clone(),
+                                            on_changed: move |_| refresh += 1,
                                         }
                                     }
                                 }
@@ -2362,7 +2406,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 class: cls(CockpitView::Onboard),
                 "data-tour": camerata_ui_core::walkthrough::target::NAV_ONBOARD,
                 onclick: move |_| view.set(CockpitView::Onboard),
-                "Onboard repos"
+                "Inspection"
             }
             button {
                 class: cls(CockpitView::Stories),
@@ -2993,6 +3037,15 @@ async fn save_app_chat_model(model: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The value the Chat assistant setting's select shows: `chosen` when it is one of the registry's
+/// `ids`, otherwise the empty string (the "(not set)" option). Pure so it is unit-tested.
+fn chat_model_setting_value(ids: Option<&[&str]>, chosen: Option<&str>) -> String {
+    match (ids, chosen) {
+        (Some(ids), Some(c)) if ids.contains(&c) => c.to_string(),
+        _ => String::new(),
+    }
+}
+
 /// Cross-project chat-assistant model selector. The in-app chat is a GLOBAL assistant, so its
 /// model is an APP-LEVEL setting (applies to every project). Reads/writes the app-level
 /// `chat_model` via `GET /api/settings` + `POST /api/settings/chat-model`, using the same
@@ -3007,18 +3060,19 @@ fn ChatModelSetting() -> Element {
     let app_model = use_resource(fetch_app_chat_model);
     let app_model = app_model.read().clone().flatten();
 
-    let mut selected = use_signal(String::new);
+    // The operator's pick this session (None until they choose).
+    let mut picked = use_signal(|| Option::<String>::None);
     let mut saving = use_signal(|| false);
-    // Seed once: prefer the persisted app-level chat model, else the registry default.
-    if selected().is_empty() {
-        if let Some(m) = &app_model {
-            selected.set(m.clone());
-        } else if let Some(m) = &models {
-            if !m.default.is_empty() {
-                selected.set(m.default.clone());
-            }
-        }
-    }
+    // What the select shows: the operator's pick, else the saved model, but ONLY when it is a
+    // model in the registry. A saved value that is not (or nothing saved) shows the "(not set)"
+    // option selected: the select must never tick a model that is not actually set.
+    let selected = chat_model_setting_value(
+        models
+            .as_ref()
+            .map(|m| m.models.iter().map(|o| o.id.as_str()).collect::<Vec<_>>())
+            .as_deref(),
+        picked().as_deref().or(app_model.as_deref()),
+    );
 
     rsx! {
         div { class: "tier-map-editor step-models-editor",
@@ -3039,7 +3093,11 @@ fn ChatModelSetting() -> Element {
                             disabled: saving(),
                             onchange: move |e| {
                                 let model = e.value();
-                                selected.set(model.clone());
+                                // "(not set)" is not a model: picking it saves nothing.
+                                if model.trim().is_empty() {
+                                    return;
+                                }
+                                picked.set(Some(model.clone()));
                                 saving.set(true);
                                 spawn(async move {
                                     if save_app_chat_model(&model).await {
@@ -3050,12 +3108,13 @@ fn ChatModelSetting() -> Element {
                                     saving.set(false);
                                 });
                             },
+                            option { value: "", selected: selected.is_empty(), "(not set)" }
                             for (group_label , opts) in m.grouped().into_iter() {
                                 optgroup { label: "{group_label}",
                                     for opt in opts.into_iter() {
                                         option {
                                             value: "{opt.id}",
-                                            selected: selected() == opt.id,
+                                            selected: selected == opt.id,
                                             "{opt.label}"
                                         }
                                     }
@@ -3123,18 +3182,21 @@ fn SettingsView(global_only: bool) -> Element {
                 Some(p) => {
                     let p_owned = p.clone();
                     rsx! {
-                        // ── Backend (per-project) ──────────────────────────────
-                        // Placed first: this is the setting that governs which chain (CLI
-                        // subscription vs. Anthropic API) every project-scoped AI call on this
-                        // project runs on. See docs/design/2026-09-22_per-project-backend.md.
-                        p { class: "section-label settings-label", "Backend" }
-                        rules::BackendEditor { project: p_owned.clone() }
-
-                        // ── Client engagement (per-project) ────────────────────
-                        // Right after the backend: it decides which backends and models this
-                        // project may use at all, and whether its own tooling may run.
-                        p { class: "section-label settings-label", "Client engagement" }
-                        rules::ClientEngagementEditor { project: p_owned.clone() }
+                        // ── Inspection settings (per-project) ──────────────────
+                        // The one shared component (finder, models, backend, client engagement,
+                        // client name), the same one the inspection start screen and Review >
+                        // Settings mount. It reads the project, so the three cannot disagree.
+                        p { class: "section-label settings-label", "Inspection settings" }
+                        // A key is only honoured among siblings in a list, so the host is
+                        // rendered as a list of one: another project is a fresh host.
+                        for project_id in [p_owned.id.clone()] {
+                            inspection_settings::InspectionSettingsHost {
+                                key: "{project_id}",
+                                project_id: project_id.clone(),
+                                run_in_flight: try_use_context::<Signal<Option<String>>>()
+                                    .is_some_and(|job| job.read().is_some()),
+                            }
+                        }
 
                         // ── Loop guard ────────────────────────────────────────
                         LoopGuardControl {}
@@ -3193,7 +3255,7 @@ fn CockpitNotice(kind: String) -> Element {
         ),
         _ => (
             "No stories yet — clean slate",
-            "Nothing is seeded. Connect GitHub, then onboard one or more repos (the \u{201c}Onboard repos\u{201d} tab) or adopt a tracker issue to bring real stories into the spine.",
+            "Nothing is seeded. Connect GitHub, then onboard one or more repos (the \u{201c}Inspection\u{201d} tab) or adopt a tracker issue to bring real stories into the spine.",
         ),
     };
     rsx! {
@@ -3435,6 +3497,8 @@ mod decision_cards;
 pub(crate) mod engine_check;
 pub(crate) mod export_gate;
 mod freshness;
+pub(crate) mod help;
+pub(crate) mod inspection_settings;
 pub mod live_run;
 #[cfg(feature = "liveview-review")]
 #[path = "liveview.rs"]
@@ -3472,6 +3536,7 @@ mod tests {
         JobStateView, JobStatusEnvelope, ProjectBackend, RunGateEvent, RunView,
         StallThresholdsView, TierMapView,
     };
+    use dioxus::prelude::*;
 
     /// The job-state view deserializes the server's `deterministic` progress section
     /// (per-tool rows + done/total). An old server omitting the field defaults to empty.
@@ -5247,7 +5312,7 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_project("p-9").await;
 
-        assert!(ok);
+        assert!(ok.is_ok());
     }
 
     /// `fetch_provider` GETs /api/provider and parses the connection view.
@@ -6463,4 +6528,210 @@ mod tests {
         let ok = super::set_hierarchy_schema("p-9", &schema).await;
         assert!(ok, "the helper POSTs the schema graph and reports success");
     }
+
+    // ── Settings > Chat assistant tells the truth about what is set ──────────────────
+    #[component]
+    fn ChatModelSettingHarness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! { super::ChatModelSetting {} }
+    }
+
+    async fn render_chat_model_setting(saved: serde_json::Value, ready: &str) -> String {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "id": "claude-haiku-4-5", "display": "Haiku", "provider": "claude" },
+                    { "id": "claude-opus-5", "display": "Opus", "provider": "claude" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(saved))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(ChatModelSettingHarness);
+        vdom.rebuild_in_place();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(200), vdom.wait_for_work())
+                    .await;
+            vdom.render_immediate(&mut dioxus::core::NoOpMutations);
+            let html = dioxus_ssr::render(&vdom);
+            if html.contains(ready) || tokio::time::Instant::now() >= deadline {
+                return html;
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn chat_assistant_setting_shows_not_set_when_saved_value_is_not_a_registry_model() {
+        for saved in [
+            serde_json::json!({ "chat_model": "default" }),
+            serde_json::json!({ "chat_model": null }),
+            serde_json::json!({}),
+        ] {
+            let html = render_chat_model_setting(saved.clone(), "(not set)").await;
+            assert!(html.contains("(not set)"), "saved {saved}; html=\n{html}");
+            assert!(
+                html.contains("value=\"\" selected=true"),
+                "(not set) must be the selected option; saved {saved}; html=\n{html}"
+            );
+            assert!(
+                !html.contains("value=\"claude-haiku-4-5\" selected=true"),
+                "no model may look ticked; saved {saved}; html=\n{html}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn chat_assistant_setting_ticks_a_saved_registry_model() {
+        let html = render_chat_model_setting(
+            serde_json::json!({ "chat_model": "claude-opus-5" }),
+            "value=\"claude-opus-5\" selected=true",
+        )
+        .await;
+        assert!(
+            html.contains("value=\"claude-opus-5\" selected=true"),
+            "html=\n{html}"
+        );
+        assert!(!html.contains("value=\"\" selected=true"), "html=\n{html}");
+    }
+
+    /// The operator's real action on the real Settings control: pick in the select. The stub
+    /// server records what is saved; the screen must keep telling the truth afterwards.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn picking_in_the_chat_assistant_select_saves_a_real_model_and_not_the_not_set_option() {
+        use dioxus::dioxus_core::Mutation;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "id": "claude-haiku-4-5", "display": "Haiku", "provider": "claude" },
+                    { "id": "claude-opus-5", "display": "Opus", "provider": "claude" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "chat_model": "default" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/chat-model"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let mut vdom = VirtualDom::new(ChatModelSettingHarness);
+        let mut change = None;
+        let mut take = |m: &dioxus::dioxus_core::Mutations| {
+            for e in &m.edits {
+                if let Mutation::NewEventListener { name, id } = e {
+                    if name == "change" {
+                        change = Some(*id);
+                    }
+                }
+            }
+        };
+        take(&vdom.rebuild_to_vec());
+        for _ in 0..30 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            take(&vdom.render_immediate_to_vec());
+        }
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("(not set)"), "{html}");
+        assert!(html.contains("value=\"\" selected=true"), "{html}");
+        let select = change.expect("the select registered a change listener");
+        let runtime = vdom.runtime();
+        let pick = |value: &str| {
+            let data: std::rc::Rc<dyn std::any::Any> =
+                std::rc::Rc::new(dioxus::html::PlatformEventData::new(Box::new(
+                    dioxus::html::SerializedFormData::new(value.to_string(), Vec::new()),
+                )));
+            runtime.handle_event(
+                "change",
+                dioxus::dioxus_core::Event::new(data, true),
+                select,
+            );
+        };
+        // Picking "(not set)" saves nothing.
+        pick("");
+        for _ in 0..10 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            vdom.render_immediate_to_vec();
+        }
+        let posts = || async {
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .filter(|r| {
+                    r.method.as_str() == "POST" && r.url.path() == "/api/settings/chat-model"
+                })
+                .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            posts().await.is_empty(),
+            "(not set) is not a model and is not saved"
+        );
+        // Picking a real model saves it.
+        pick("claude-opus-5");
+        for _ in 0..20 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), vdom.wait_for_work())
+                    .await;
+            vdom.render_immediate_to_vec();
+        }
+        assert_eq!(
+            posts().await,
+            vec![serde_json::json!({ "model": "claude-opus-5" })]
+        );
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("value=\"claude-opus-5\" selected=true"),
+            "{html}"
+        );
+        assert!(!html.contains("value=\"\" selected=true"), "{html}");
+    }
+
+    #[test]
+    fn chat_model_setting_value_only_returns_registry_ids() {
+        use super::chat_model_setting_value as v;
+        let ids = ["a", "b"];
+        assert_eq!(v(Some(&ids), Some("a")), "a");
+        assert_eq!(v(Some(&ids), Some("default")), "");
+        assert_eq!(v(Some(&ids), None), "");
+        assert_eq!(v(None, Some("a")), "");
+    }
 }
+
+#[cfg(test)]
+mod project_home_tests;
+
+#[cfg(test)]
+mod continue_restore_tests;

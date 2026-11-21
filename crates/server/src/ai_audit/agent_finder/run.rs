@@ -8,6 +8,7 @@
 //! Coverage is read from the tool trace only ([`super::coverage`]); nothing the model says about
 //! its own work changes a state.
 
+mod activity;
 mod conventions;
 mod joints;
 mod piece;
@@ -35,6 +36,7 @@ use crate::onboard::{Finding, ProposedRule};
 use crate::scan_ledger::{ScanLedger, StageAccounting, StageSample};
 use crate::scan_routing::AuditRule;
 use crate::stage_telemetry::Stage;
+pub use activity::FinderActivity;
 use piece::{PieceReport, Shared, StoredPiece};
 
 /// Settings of one finder run that are not on [`RunControls`].
@@ -198,18 +200,47 @@ pub fn refuse_unsupported_finder_settings(
     if controls.consensus {
         return Err(
             "--finder agent cannot be combined with --consensus. The agent finder reviews each part \
-             once; the consensus option repeats the scan passes it replaces."
+             once; the consensus option repeats the scan passes it replaces. Pass --finder engine \
+             to use --consensus."
                 .to_string(),
         );
     }
     if incremental {
         return Err(
             "--finder agent needs a full inspection; it cannot re-inspect only the files that \
-             changed. Pass --full to inspect everything."
+             changed. Pass --full to inspect everything. Pass --finder engine to re-inspect \
+             only the changed files."
                 .to_string(),
         );
     }
     Ok(())
+}
+
+/// Outside review Part 1 item 4: a rule file that did not parse never reaches the agent finder's
+/// checklist, so an agent finder run, client or internal, stops before any spend when one failed
+/// to load (a run with a rule silently missing would read as clean for that rule, and graded
+/// evidence must not come from a broken rule set). The message names each rule id and the file
+/// with the parser's reason, for the operator. The same failures are also recorded in the run's
+/// ledger, coverage notes and integrity gate by `record_corpus_load_failures`. `ai_review` is
+/// whether the AI review (and so the finder) runs at all: a deterministic-only scan is not stopped.
+pub fn refuse_unloadable_rules(
+    controls: &RunControls,
+    ai_review: bool,
+    failures: &[crate::CorpusLoadFailure],
+) -> Result<(), String> {
+    if controls.finder != super::FinderChoice::Agent || !ai_review || failures.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<String> = failures
+        .iter()
+        .map(|f| format!("{} ({}: {})", f.rule_id, f.path.display(), f.error))
+        .collect();
+    Err(format!(
+        "{} rule file(s) did not load, so the agent finder would run without those rules and \
+         report nothing for them: {}. Fix the rule files and run again. Nothing was spent.",
+        failures.len(),
+        lines.join("; ")
+    ))
 }
 
 /// One unit of work: a piece to run, a piece to replay or a piece that cannot be tried again.
@@ -675,6 +706,7 @@ pub async fn find_repo(
         options,
         meter,
         n_pieces: works.len(),
+        activity: FINDER_ACTIVITY.try_with(Clone::clone).ok(),
     };
 
     // Run the pieces, a few at a time, keeping their order.
@@ -946,6 +978,25 @@ pub async fn find_repo(
     rows.extend(unresolved);
     rows.extend(conv.departures);
     rows.extend(conv.undecided);
+    // The deterministic backstop: a reviewer-addressed phrase in the code is a row of its own, so
+    // the plant is seen even when the model obeyed it and reported nothing (the same checker the
+    // floor runs when the rule is armed; the combined set collapses the same place later).
+    let planted = crate::onboard::audit_architectural(
+        repo,
+        &model_files,
+        &HashSet::from([
+            camerata_checks::ai_reviewer_injection_checker::RULE_AI_REVIEWER_INSTRUCTIONS,
+        ]),
+    );
+    for row in planted {
+        let already = rows.iter().any(|f| {
+            f.rule_id.eq_ignore_ascii_case(&row.rule_id)
+                && (f.path.as_str(), f.line) == (row.path.as_str(), row.line)
+        });
+        if !already {
+            rows.push(row);
+        }
+    }
     let mut seen = HashSet::new();
     proposed.retain(|p| seen.insert(p.id.clone()));
 
@@ -1139,6 +1190,22 @@ pub async fn find_repo(
         .map(|(rule, _)| rule)
         .collect();
     Ok((verified, proposed, recs, failed, stage_samples, extras))
+}
+
+tokio::task_local! {
+    static FINDER_ACTIVITY: FinderActivity;
+}
+
+/// Run `fut` with the finder's model calls shown in Agent activity when `activity` is `Some`,
+/// carried with the future like the finder setup: never global.
+pub async fn with_finder_activity<F: std::future::Future>(
+    activity: Option<FinderActivity>,
+    fut: F,
+) -> F::Output {
+    match activity {
+        Some(a) => FINDER_ACTIVITY.scope(a, fut).await,
+        None => fut.await,
+    }
 }
 
 tokio::task_local! {

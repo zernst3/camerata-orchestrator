@@ -576,6 +576,16 @@ pub(crate) const STANCE_LAYER_DOMAINS: &[&str] = &[
     "integration",
 ];
 
+/// Whether the calibrator or the finder doubts the row (`needs_review` or a needs-review
+/// confidence) and the reviewer has not ruled on it by editing the row's severity themselves.
+/// Used only to decide whether the row is HELD ([`is_held_for_review`]): the doubt itself stays
+/// the engine's statement in every export (`needs_review`, the confidence), as on a Confirmed
+/// row, and the reviewer's ruling is carried by the label, Decision so far and the record.
+fn calibration_doubt(f: &Finding) -> bool {
+    (f.needs_review || f.confidence.as_deref() == Some("needs-review"))
+        && !super::overlay::reviewer_edited_field(f, camerata_api_types::edits::EditField::Severity)
+}
+
 /// C5-4: whether a finding is HELD for a human reviewer's judgment call, INDEPENDENT of its own
 /// severity — the calibrator's own hedge (`needs_review` / `confidence == "needs-review"`),
 /// applied only to an OPEN (`Unresolved`) row (an auditor's explicit disposition — accepted /
@@ -604,8 +614,10 @@ pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) ->
     // decides it; the release gate also refuses to export it without that decision.
     // M4: a row whose text is real junk (an empty or placeholder explanation, the model's own
     // refusal, a JSON fragment) is held the same way, until the reviewer decides it.
-    finding.needs_review
-        || finding.confidence.as_deref() == Some("needs-review")
+    // The reviewer's own severity edit decides the doubt (Zach, 2026-11-20): it lifts the
+    // calibration hedge, and only that. Unverified evidence, junk text and a put-back row below
+    // stay held until they are ruled on.
+    calibration_doubt(finding)
         || finding
             .captures
             .contains_key(crate::onboard::evidence_check::EVIDENCE_UNVERIFIED_CAPTURE)
@@ -948,16 +960,111 @@ pub(crate) fn ends_with_known_abbreviation(prefix: &str) -> bool {
     SENTENCE_ABBREVIATIONS.iter().any(|a| lower.ends_with(a))
 }
 
-/// P5: the AI-tier Methodology paragraph must never claim a human already reviewed advisory
-/// findings when this export is [`ReviewState::Raw`] — the paragraph used to unconditionally
-/// say "Every advisory finding is reviewed and dispositioned by a human reviewer before it
-/// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
-/// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
-/// reviewer" in the `Raw` case — grep-tested alongside the narrative's own gate.
+/// Which finder produced the report's findings, from the run record. The agent finder records its
+/// coverage block (one entry for each repository it read); the engine finder never does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum FinderRan {
+    #[default]
+    Engine,
+    Agent,
+}
+
+/// The finder that ran for `report`.
+pub(crate) fn finder_of(report: &crate::onboard::ScanReport) -> FinderRan {
+    if report.ledger.finder_coverage().is_empty() {
+        FinderRan::Engine
+    } else {
+        FinderRan::Agent
+    }
+}
+
+/// What the method text states about the run: the finder that ran and what a person read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MethodFacts {
+    pub finder: FinderRan,
+    pub review: ReviewCounts,
+}
+
+/// The line every method text ends its list of what was not done with: what an inspection of the
+/// code does not cover.
+pub(crate) const NOT_ASSESSED_LINE: &str =
+    "Team, process and roadmap were not assessed; this inspection reads the code.";
+
+/// The first method paragraph, for the finder that ran.
+pub(crate) fn deterministic_note_for(finder: FinderRan) -> String {
+    match finder {
+        FinderRan::Engine => "Camerata runs a two-tier engine. A deterministic security floor \
+             (proven-defect SAST rules plus a migration-timeline replay for Supabase Row Level \
+             Security) produces findings that either hold or do not, with no model judgment. \
+             These are labeled deterministic in the report."
+            .to_string(),
+        FinderRan::Agent => "Camerata first runs deterministic checks: proven-defect rules over \
+             the code and, for Supabase, a replay of the migration history for Row Level \
+             Security. Each of these either holds or does not, with no model judgment. They are \
+             labeled deterministic in the report."
+            .to_string(),
+    }
+}
+
+/// The severity paragraph, for the finder that ran.
+pub(crate) fn severity_scale_note_for(finder: FinderRan) -> String {
+    match finder {
+        FinderRan::Engine => "Severity is bimodal by design. Deterministic floor findings are \
+             proven defects rated by impact; advisory findings are rated by likely impact \
+             together with calibrated confidence. There is deliberately no single numeric score \
+             or letter grade: a grade hides which specific object is exposed, which is exactly \
+             what a remediation team needs to know."
+            .to_string(),
+        FinderRan::Agent => {
+            "Severity is rated by likely impact, and a rule's own floor or ceiling \
+             holds where it sets one. Problems the model was unsure of are marked, and a person \
+             decides them. There is deliberately no single numeric score or letter grade: a \
+             grade hides which specific object is exposed, which is exactly what a remediation \
+             team needs to know."
+                .to_string()
+        }
+    }
+}
+
+/// What a person read, in the first person of the signed report, from the review store's counts.
+/// The clause about every critical and unsure finding is printed only when the release gate
+/// guarantees it ([`ReviewCounts::every_critical_and_unsure_decided`]).
+fn read_in_person_sentence(review: &ReviewCounts) -> String {
+    use crate::xlsx_export::vocabulary as v;
+    let n = review.reviewed_in_person;
+    if n == 0 {
+        return "I did not review any place in person; every place was checked by the engine \
+                against the code."
+            .to_string();
+    }
+    let clause = if review.every_critical_and_unsure_decided {
+        ", including every critical problem and every problem the review marked unsure"
+    } else {
+        ""
+    };
+    format!(
+        "I reviewed {n} {} in person{clause}. The rest were checked by the engine against the \
+         code; the {} column of the {} sheet shows which.",
+        v::places_word(n),
+        v::H_REVIEWED_IN_PERSON,
+        v::ALL_PROBLEMS
+    )
+}
+
+/// P5: the AI-tier Methodology paragraph must never claim a human reviewed what no human reviewed.
+/// A [`ReviewState::Raw`] export has had no human triage pass, and a reviewed one says how many
+/// places a person read (outside review item 2b), never that every finding was reviewed: the
+/// review budget leaves places below the line to the engine. Neither branch contains the literal
+/// phrases "reviewed by a human reviewer" or "dispositioned by a human reviewer".
+///
+/// The paragraph describes the finder that ran (outside review item 5b): the agent finder's
+/// model reads every in-scope file against the rules that apply, with coverage taken from the
+/// record of what it opened; the engine finder's two tiers are described as before.
 pub(crate) fn ai_tier_note_for(
     review_state: ReviewState,
     repos_not_run: usize,
     total_repos: usize,
+    facts: &MethodFacts,
 ) -> String {
     let repos = |n: usize| {
         if n == 1 {
@@ -966,34 +1073,65 @@ pub(crate) fn ai_tier_note_for(
             format!("{n} repos")
         }
     };
+    let agent = facts.finder == FinderRan::Agent;
     if repos_not_run > 0 && repos_not_run >= total_repos {
-        // The tier ran nowhere: say so, and make no claim about a review that did not happen.
-        return format!(
-            "The advisory language-model tier did not run for {}; see the {} sheet. Every finding \
-             produced in this run came from the deterministic tier.",
-            repos(repos_not_run),
-            crate::xlsx_export::vocabulary::NOT_CHECKED
-        );
+        // The model ran nowhere: say so, and make no claim about a review that did not happen.
+        return if agent {
+            format!(
+                "The model did not read the code of {}; see the {} sheet. Every problem \
+                 produced in this run came from the deterministic checks.",
+                repos(repos_not_run),
+                crate::xlsx_export::vocabulary::NOT_CHECKED
+            )
+        } else {
+            format!(
+                "The advisory language-model tier did not run for {}; see the {} sheet. Every \
+                 finding produced in this run came from the deterministic tier.",
+                repos(repos_not_run),
+                crate::xlsx_export::vocabulary::NOT_CHECKED
+            )
+        };
     }
-    let ran = match review_state {
-        ReviewState::Reviewed => {
+    let ran = match (agent, review_state) {
+        (false, ReviewState::Reviewed) => format!(
             "A second, advisory tier uses a calibrated language-model review for findings that \
-             require semantic judgment. Every advisory finding in this export has been \
-             reviewed and dispositioned by a human reviewer; lower-confidence items are marked \
-             needs-review."
-                .to_string()
-        }
-        ReviewState::Raw => {
-            "A second, advisory tier uses a calibrated language-model review for findings that \
-             require semantic judgment. This export has not yet had a human triage pass: every \
-             advisory finding here is the engine's own calibrated output, awaiting a human \
-             reviewer's judgment before any is accepted, marked tech debt or ruled out. \
-             Lower-confidence items are marked needs-review."
-                .to_string()
-        }
+             require semantic judgment. {} Lower-confidence items are marked needs-review.",
+            read_in_person_sentence(&facts.review)
+        ),
+        (false, ReviewState::Raw) => "A second, advisory tier uses a calibrated language-model \
+             review for findings that require semantic judgment. This export has not yet had a \
+             human triage pass: every advisory finding here is the engine's own calibrated \
+             output, awaiting a human reviewer's judgment before any is accepted, marked tech \
+             debt or ruled out. Lower-confidence items are marked needs-review."
+            .to_string(),
+        (true, ReviewState::Reviewed) => format!(
+            "A model then reads every in-scope file against the rules that apply to it. What it \
+             read is taken from the record of the files it opened, not from what it said it \
+             read; the {} sheet lists any file it did not read. A group review then sorts what \
+             it found and picks the places that most need a person. {} Lower-confidence items \
+             are marked needs-review.",
+            crate::xlsx_export::vocabulary::NOT_CHECKED,
+            read_in_person_sentence(&facts.review)
+        ),
+        (true, ReviewState::Raw) => format!(
+            "A model then reads every in-scope file against the rules that apply to it. What it \
+             read is taken from the record of the files it opened, not from what it said it \
+             read; the {} sheet lists any file it did not read. A group review then sorts what \
+             it found and picks the places that most need a person. This export has not yet had \
+             a person's review: every problem here is the model's own, awaiting a person's \
+             judgment before any is accepted, marked tech debt or ruled out. Lower-confidence \
+             items are marked needs-review.",
+            crate::xlsx_export::vocabulary::NOT_CHECKED
+        ),
     };
     if repos_not_run == 0 {
         ran
+    } else if agent {
+        format!(
+            "{ran} The model did not read the code of {}; see the {} sheet.",
+            repos(repos_not_run),
+            crate::xlsx_export::vocabulary::NOT_CHECKED
+        )
     } else {
         format!(
             "{ran} The advisory language-model tier did not run for {}; see the {} sheet.",

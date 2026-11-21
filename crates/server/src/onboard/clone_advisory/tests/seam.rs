@@ -218,16 +218,11 @@ async fn a_failed_batch_loses_only_that_batch() {
         48,
         "24 candidates of two sites each"
     );
-    assert_eq!(
-        outcome.not_assessed.len(),
-        1,
-        "one row for the whole remainder"
-    );
-    assert!(
-        outcome.not_assessed[0].detail.contains("16 of the 40"),
-        "{}",
-        outcome.not_assessed[0].detail
-    );
+    // One rule, one surface: the lost batch is a gap the ledger discloses, never held rows (the
+    // model did not look at it) and never a not_assessed row beside the confirmed ones.
+    assert!(outcome.findings.iter().all(|f| !f.needs_review));
+    assert!(outcome.not_assessed.is_empty());
+    assert_eq!(outcome.failed.len(), 1);
 }
 
 #[tokio::test]
@@ -403,12 +398,22 @@ async fn over_cap_candidates_are_counted_and_disclosed_not_judged() {
         64,
         "32 candidates of two sites each"
     );
-    // Disclosed: one row, with the count and the limit.
-    assert_eq!(outcome.not_assessed.len(), 1);
-    let row = &outcome.not_assessed[0];
-    assert!(row.detail.contains("7 of the 39"), "{}", row.detail);
-    assert!(row.detail.contains("limit of 160"), "{}", row.detail);
+    // Disclosed in the ledger, not as a second surface: the rule has judged candidates, so it
+    // carries no not_assessed row, and the partial-rule note says how many were not assessed.
+    assert!(outcome.not_assessed.is_empty());
     assert!(!c.fully_assessed());
+    let mut ledger = crate::scan_ledger::ScanLedger::default();
+    record_in_ledger(&mut ledger, "acme/shop", &outcome);
+    let entry = ledger.rule(RULE.id()).expect("the rule is in the ledger");
+    assert!(!entry.ran);
+    assert!(
+        entry
+            .skip_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("7 of 39")),
+        "{:?}",
+        entry.skip_reason
+    );
 }
 
 #[tokio::test]

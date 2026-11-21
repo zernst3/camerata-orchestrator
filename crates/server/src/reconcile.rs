@@ -140,7 +140,9 @@ pub async fn reconcile_repos(repos: &[String], token: &str) -> Vec<AppliedRule> 
     // Load the corpus once (the rule-bank source).
     let corpus_path = camerata_rules::corpus_path();
     let set = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };
@@ -182,7 +184,9 @@ pub async fn reconcile_repos_local(
 ) -> Vec<AppliedRule> {
     let corpus_path = camerata_rules::corpus_path();
     let set = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };

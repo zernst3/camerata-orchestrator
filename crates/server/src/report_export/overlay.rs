@@ -86,6 +86,8 @@ pub struct AppliedEdit {
     pub id: String,
     pub key: String,
     pub field: EditField,
+    /// The reviewer wrote a reason with the edit. The reason itself stays in the store.
+    pub has_reason: bool,
 }
 
 /// One edit that was not applied because its site is gone or changed.
@@ -575,6 +577,13 @@ fn apply_edits(rows: &mut [Finding], edits: &[&Edit]) -> EditOutcome {
     };
     let mut ids: HashMap<usize, Vec<String>> = HashMap::new();
     let mut fields: HashMap<usize, Vec<&'static str>> = HashMap::new();
+    // Only an edit applied here may leave the marks that say a row was edited: the release gate
+    // reads them as the reviewer's decision, so a mark a sealed row already carries (forged, or
+    // copied from another row by a merge) must never count.
+    for f in rows.iter_mut() {
+        f.captures.remove(REVIEWER_EDITED_CAPTURE);
+        f.captures.remove(REVIEWER_FIELDS_CAPTURE);
+    }
 
     for e in edits {
         let hit = index
@@ -620,6 +629,7 @@ fn apply_edits(rows: &mut [Finding], edits: &[&Edit]) -> EditOutcome {
             id: e.id.clone(),
             key: e.key.clone(),
             field: e.field,
+            has_reason: !e.reason.trim().is_empty(),
         });
     }
     for (i, edit_ids) in ids {
@@ -708,6 +718,7 @@ fn apply_summary_edits(
                 id: e.id.clone(),
                 key: e.key.clone(),
                 field: e.field,
+                has_reason: !e.reason.trim().is_empty(),
             });
         }
     }

@@ -2891,7 +2891,7 @@ mod tests {
             None,
         )
         .expect("session prepares");
-        let args = spawn.driver.build_args(&role, "implement");
+        let args = spawn.driver.build_args(&role);
 
         // cwd + --add-dir bound to the worktree → on-demand read of the whole repo.
         let add_idx = args

@@ -101,6 +101,11 @@ pub struct SourceFileView {
     pub requested_around: Option<usize>,
 }
 
+/// What the UI says for a `repo_unlinked` answer that carries no reason of its own. Never "file
+/// not found": no file was looked for.
+pub const REPO_UNLINKED_WORDS: &str =
+    "This repo is not linked to this project, or it has no local folder.";
+
 /// What a response means for the viewer's body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceOutcome {
@@ -112,6 +117,9 @@ pub enum SourceOutcome {
     TooLarge(String),
     NotUtf8(String),
     FileMissing(String),
+    /// The repo is not linked to the project, or has no local folder: no file was looked for.
+    /// The text is ready to show (the server's reason, else [`REPO_UNLINKED_WORDS`]).
+    RepoUnlinked(String),
     /// Anything else (path refused, an unknown status).
     Unavailable(String),
 }
@@ -214,6 +222,7 @@ impl SourceFileView {
             "too_large" => SourceOutcome::TooLarge(self.reason_or("File is too large to view")),
             "not_utf8" => SourceOutcome::NotUtf8(self.reason_or("File is not valid UTF-8")),
             "file_missing" => SourceOutcome::FileMissing(self.reason_or("File not found")),
+            "repo_unlinked" => SourceOutcome::RepoUnlinked(self.reason_or(REPO_UNLINKED_WORDS)),
             "path_traversal" => {
                 SourceOutcome::Unavailable(self.reason_or("This file path was refused"))
             }
@@ -1498,6 +1507,14 @@ mod tests {
         assert_eq!(
             o("file_missing", "gone"),
             SourceOutcome::FileMissing("gone".into())
+        );
+        assert_eq!(
+            o("repo_unlinked", "not linked here"),
+            SourceOutcome::RepoUnlinked("not linked here".into())
+        );
+        assert_eq!(
+            o("repo_unlinked", ""),
+            SourceOutcome::RepoUnlinked(REPO_UNLINKED_WORDS.into())
         );
         assert_eq!(
             o("path_traversal", "no"),

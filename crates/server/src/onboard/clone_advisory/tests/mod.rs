@@ -15,12 +15,14 @@ use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 mod cache;
 mod injection;
 mod ledger;
+mod not_settled;
 mod other_rules;
 mod redaction;
 mod repros;
 mod rows;
 mod seam;
 mod size_check;
+mod unsure_rows;
 
 type Script = Box<dyn FnMut(&LlmRequest, usize) -> anyhow::Result<String> + Send>;
 

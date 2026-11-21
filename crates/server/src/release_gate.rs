@@ -11,7 +11,8 @@
 //! `build_product_zip(` or `compile_pdf_from_data(`.
 //!
 //! The checks, in order: secrets, dataset set, dataset parity, row parity, severity and kind
-//! counts, finding content, reviewer decision on unverified evidence, confidentiality marking,
+//! counts, finding content, reviewer decision on unverified evidence, reviewer decision on every
+//! critical and every unsure finding, confidentiality marking,
 //! manifest, provenance
 //! (see [`CheckId`]). The comparison logic lives in [`consistency`]; the export tests call those
 //! same functions, so the test and the runtime check cannot drift.
@@ -28,6 +29,7 @@ pub mod evidence;
 pub mod held;
 pub mod holds;
 pub mod junk;
+pub mod needs_decision;
 mod operator_only;
 mod report;
 mod secrets;
@@ -96,6 +98,9 @@ pub struct ProductPackage {
     /// decision in the export request, one problem each. Worked out beside the evidence check, for
     /// the same reason, and recorded by [`release`] under the content check.
     pub undecided_junk_content: Vec<Problem>,
+    /// Outside review item 2: the rows shown at critical severity, and the rows the finder was
+    /// unsure of, that carry no reviewer decision in the export request, one problem each.
+    pub critical_or_unsure_without_decision: Vec<Problem>,
     /// Where the summary's claim about missing preview tools and the ledger disagree
     /// ([`tool_claim::problems`]). Checked for every package, an internal one too: the claim is
     /// false whoever reads it. Recorded under the content check.
@@ -263,6 +268,12 @@ pub(crate) fn assemble_package(
     }
 
     let tool_claim_problems = tool_claim::problems(report, &report_json);
+    // Outside review item 2: read before the findings export moves into the package.
+    let critical_or_unsure_without_decision = needs_decision::critical_or_unsure_without_decision(
+        &report.findings,
+        reviewed,
+        &findings_export.shown_critical_site_ids(),
+    );
 
     Ok(ProductPackage {
         stem: stem.to_string(),
@@ -289,6 +300,7 @@ pub(crate) fn assemble_package(
         ),
         undecided_junk_content: junk::junk_without_decision(&report.findings, reviewed),
         tool_claim_problems,
+        critical_or_unsure_without_decision,
         internal: options.internal,
     })
 }
@@ -755,6 +767,14 @@ fn gate_report(package: &ProductPackage, bytes: &[u8], allow_incomplete: bool) -
         },
     );
     report.record(
+        CheckId::CriticalOrUnsureWithoutDecision,
+        if allow_incomplete {
+            Vec::new()
+        } else {
+            package.critical_or_unsure_without_decision.clone()
+        },
+    );
+    report.record(
         CheckId::UnsyncedReviewerChanges,
         package.unsynced_reviewer_changes.clone(),
     );
@@ -785,7 +805,10 @@ pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+mod panel_names_tests;
 
 #[cfg(test)]
 mod triage_log_tests;
@@ -840,6 +863,9 @@ mod junk_content_tests;
 
 #[cfg(test)]
 mod evidence_tests;
+
+#[cfg(test)]
+pub(crate) mod needs_decision_tests;
 
 #[cfg(test)]
 mod tool_claim_tests;

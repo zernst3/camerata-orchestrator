@@ -120,6 +120,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
             resolved: true,
             group_review: String::new(),
             finder: String::new(),
+            finder_model: String::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: "claude-a".to_string(),
@@ -600,6 +601,7 @@ mod batches {
                 job: None,
                 checkpoint: Some(&cp),
                 settings: StageSettings::default(),
+                feedback: None,
             };
             let out = run_stage(Stage::Calibration, &mut first, StageMode::Batch, &ctx).await;
             assert_eq!(out.absorbed.len(), 3, "the first attempt reads the batch");
@@ -629,6 +631,7 @@ mod batches {
                 job: None,
                 checkpoint: Some(&cp),
                 settings: StageSettings::default(),
+                feedback: None,
             };
             let out = run_stage(Stage::Calibration, &mut second, StageMode::Batch, &ctx).await;
             assert_eq!(out.resumed.len(), 3, "every stored item is replayed");

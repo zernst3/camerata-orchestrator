@@ -31,6 +31,33 @@ pub fn sealed_of(n: usize) -> SealedReport {
     report.seal()
 }
 
+/// `records`, and a site decision for every row the release gate wants decided in person (shown at
+/// critical severity, or marked unsure) that none of them decides already. A fixture about
+/// something else (places, fixes) clears the gate with these.
+pub fn with_critical_and_unsure_decided(
+    sealed: &SealedReport,
+    records: &[Decision],
+) -> Vec<Decision> {
+    let mut all = records.to_vec();
+    for (i, f) in sealed.findings.iter().enumerate() {
+        if crate::release_gate::needs_decision::why(f).is_none() {
+            continue;
+        }
+        let decided = records
+            .iter()
+            .any(|d| d.key == f.site_key || d.applies_to.contains(&f.site_key));
+        if !decided {
+            all.push(decision(
+                &format!("dec-gate-{i}"),
+                &f.site_key,
+                DecisionState::Confirmed,
+                "read in person",
+            ));
+        }
+    }
+    all
+}
+
 pub fn decision(id: &str, key: &str, state: DecisionState, reason: &str) -> Decision {
     Decision {
         id: id.to_string(),

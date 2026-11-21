@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use camerata_api_types::review::{DisagreementField, EscalationReason, OutlierReason};
 
-use super::stage_batch::{run_stage, ItemReject, StageCtx, StageItems, StageMode, StageSettings};
+use super::stage_batch::{
+    run_stage, ItemReject, StageCtx, StageFeedback, StageItems, StageMode, StageSettings,
+};
 use super::*;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 use crate::onboard::{Finding, ScanReport};
@@ -1796,6 +1798,8 @@ pub struct GroupReviewConfig<'a> {
     pub cli_backend: bool,
     /// The job the stage reports to: its activity is touched and its progress set as calls end.
     pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
+    /// Where the stage shows in Agent activity: the transcript store and the key the panel reads.
+    pub feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
 }
 
 /// What a group review run came to.
@@ -1885,6 +1889,23 @@ fn summary_prompt(
     p
 }
 
+/// Every text the group reviewer's prompts frame for `findings`: the path, detail and snippet, and
+/// the whole site line (it adds the per-site reviewer's reason, the effort and the flags). The
+/// run's frame token is drawn to occur in none of them.
+pub(super) fn texts_to_frame(findings: &[Finding]) -> Vec<String> {
+    findings
+        .iter()
+        .flat_map(|f| {
+            [
+                f.path.clone(),
+                f.detail.clone(),
+                f.snippet.clone(),
+                member_line(f, 0, true),
+            ]
+        })
+        .collect()
+}
+
 /// Run the group reviewer over `report`'s tree: one call per rule group (more for a big one),
 /// then the escalation formula over what they asked for. Writes the summaries, sub-groups,
 /// outliers, escalation candidates and the rows' columns, records the stage and the escalation
@@ -1907,11 +1928,7 @@ pub async fn review_groups(
     }
 
     // One delimiter token for every call of the run, drawn so it occurs in no text it frames.
-    let texts: Vec<String> = report
-        .findings
-        .iter()
-        .flat_map(|f| [f.path.clone(), f.detail.clone(), f.snippet.clone()])
-        .collect();
+    let texts = texts_to_frame(&report.findings);
     let avoid: Vec<&str> = texts.iter().map(String::as_str).collect();
     let nonce = crate::prompt_frame::FrameNonce::generate_avoiding(&avoid);
     let repo_label = report.repos.join(", ");
@@ -1966,6 +1983,11 @@ pub async fn review_groups(
         job: cfg.job,
         checkpoint: chunk_checkpoint.as_ref(),
         settings: StageSettings::default(),
+        feedback: cfg.feedback.map(|(store, key)| StageFeedback {
+            store,
+            key,
+            name: "Group review",
+        }),
     };
     let mode = StageMode::Parallel {
         max_in_flight: cfg.max_in_flight.max(1),
@@ -2056,6 +2078,11 @@ pub async fn review_groups(
         let summary_ctx = StageCtx {
             checkpoint: summary_checkpoint.as_ref(),
             settings: stage_ctx.settings.clone(),
+            feedback: cfg.feedback.map(|(store, key)| StageFeedback {
+                store,
+                key,
+                name: "Group review, rule summaries",
+            }),
             ..stage_ctx
         };
         Some(run_stage(Stage::GroupReview, &mut summaries, mode, &summary_ctx).await)
@@ -2392,6 +2419,7 @@ pub async fn review_groups_metered(
 /// Last, the severities and kinds follow what the reviewers said
 /// ([`crate::follow_reviewers::follow_reviewers`], owner ruling R-7): `corpus` is the run's rule
 /// set, the one its severity bounds were applied with.
+#[allow(clippy::too_many_arguments)]
 pub async fn review_scan_report(
     report: &mut ScanReport,
     llm: &dyn LlmPort,
@@ -2399,6 +2427,7 @@ pub async fn review_scan_report(
     rules: &[(String, String)],
     cli_backend: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Option<GroupReviewOutcome> {
     if report.findings.is_empty() {
@@ -2429,6 +2458,7 @@ pub async fn review_scan_report(
         },
         cli_backend,
         job,
+        feedback,
     };
     let outcome = review_groups_metered(report, llm, &cfg, controls).await;
     report.provenance.group_review_model = Some(model);

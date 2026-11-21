@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Every id this module can build, in the order of the spec's section 12.
-pub const FIXTURE_IDS: [&str; 75] = [
+pub const FIXTURE_IDS: [&str; 78] = [
     "shell/empty",
     "shell/loading",
     "shell/error",
@@ -93,6 +93,9 @@ pub const FIXTURE_IDS: [&str; 75] = [
     "export/clear",
     "export/blocked",
     "export/one-line-two-reasons",
+    "export/blocked-many",
+    "findings/held-rows",
+    "findings/held-filter-on",
 ];
 
 fn params(f: impl FnOnce(&mut Params)) -> Params {
@@ -1190,7 +1193,9 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
                 }),
             }
         }
-        "export/blocked" => {
+        // The triage table with held rows (work order E): the page builds its own findings and
+        // gate; the fixture names the state and carries the base shell.
+        "export/blocked" | "findings/held-rows" | "findings/held-filter-on" => {
             let ds = base();
             StateFixture {
                 shell: shell_of(&ds),
@@ -1222,6 +1227,43 @@ pub fn fixture(id: &str) -> Option<StateFixture> {
             }
             StateFixture {
                 shell: shell_of(&ds),
+                body: Body::Export(ExportBody { gate }),
+            }
+        }
+        "export/blocked-many" => {
+            // A run with many held rows (work order E): forty rows need a decision. The panel is
+            // still one line, whatever the count; the rows are marked in the triage table.
+            let ds = base();
+            let mut gate = ds.gate.clone();
+            let template = gate.held.first().cloned().unwrap_or_else(|| HeldRow {
+                key: String::new(),
+                path: String::new(),
+                line: 1,
+                rule_id: "AI-DATA-LEAK-1".to_string(),
+                reason: HoldReason::EvidenceUnverified,
+                detail: String::new(),
+                node_id: String::new(),
+            });
+            gate.held = (0..40usize)
+                .map(|i| HeldRow {
+                    key: format!(
+                        "acme/portal\0src/handlers/h{i:02}.ts\0{:016x}\0{i}",
+                        0xA11C_E000_u64 + i as u64
+                    ),
+                    path: format!("src/handlers/h{i:02}.ts"),
+                    line: 10 + i,
+                    detail: String::new(),
+                    ..template.clone()
+                })
+                .collect();
+            gate.merged_without_decision.clear();
+            gate.node_decisions_missing_members.clear();
+            // The shell's strip counts the same rows the line does.
+            let mut shell = ds.shell.clone();
+            shell.counts.held = gate.rows_needing_a_decision();
+            shell.export_gate = gate.clone();
+            StateFixture {
+                shell: Loaded::Ready(shell),
                 body: Body::Export(ExportBody { gate }),
             }
         }

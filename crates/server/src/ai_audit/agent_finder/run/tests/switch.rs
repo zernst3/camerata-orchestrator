@@ -91,3 +91,31 @@ fn the_refusal_messages_use_no_dashes_or_serial_commas() {
         assert!(!why.contains(", and ") && !why.contains(", or "), "{why}");
     }
 }
+
+fn broken_rule() -> Vec<crate::CorpusLoadFailure> {
+    vec![crate::CorpusLoadFailure {
+        rule_id: "SEC-EXAMPLE-1".to_string(),
+        path: std::path::PathBuf::from("corpus/sec/sec-example-1.toml"),
+        error: "unknown variant `typo`".to_string(),
+    }]
+}
+
+/// Item 4: an agent finder run, client or internal, stops before any spend when a rule file did
+/// not load; the message names the rule, the file and the reason. An engine run goes on (the
+/// failure is recorded in the ledger and the integrity gate).
+#[test]
+fn a_rule_file_that_did_not_load_stops_every_agent_run() {
+    let why = super::super::refuse_unloadable_rules(&agent_controls(), true, &broken_rule())
+        .expect_err("an agent run must not go on with a rule missing");
+    assert!(why.contains("SEC-EXAMPLE-1"), "{why}");
+    assert!(why.contains("sec-example-1.toml"), "{why}");
+    assert!(why.contains("unknown variant"), "{why}");
+    assert!(why.contains("Nothing was spent"), "{why}");
+    let ok = |c: &RunControls, ai: bool, f: &[crate::CorpusLoadFailure]| {
+        super::super::refuse_unloadable_rules(c, ai, f)
+    };
+    assert_eq!(ok(&RunControls::default(), true, &broken_rule()), Ok(()));
+    // A deterministic-only scan runs no finder, so it is not stopped.
+    assert_eq!(ok(&agent_controls(), false, &broken_rule()), Ok(()));
+    assert_eq!(ok(&agent_controls(), true, &[]), Ok(()));
+}

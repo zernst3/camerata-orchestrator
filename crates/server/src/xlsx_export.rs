@@ -79,8 +79,8 @@ use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
     category_for, category_for_finding, citation_for_finding, classify, client_headline_and_detail,
-    disposition_label, effective_bucket, effort_hours_bounds, finding_key, hedge_confidence,
-    is_hedged, normalize_severity, provenance_tier_rank, resolve_citation, resolve_effort,
+    effective_bucket, effort_hours_bounds, finding_key, hedge_confidence, is_hedged,
+    normalize_severity, provenance_tier_rank, resolve_citation, resolve_effort,
     sanitize_report_findings, title_for_finding, Disposition, ReportOptions, ReviewedReport,
 };
 
@@ -606,9 +606,13 @@ fn partition_rows_for(
             );
             let confirmed = wire.map(|d| d.confirmed_by_client).unwrap_or(false);
             // A merged row exports with a pointer to the row it was merged into.
-            let label = crate::report_export::overlay::merged_label(f)
-                .map(str::to_string)
-                .unwrap_or_else(|| disposition_label(disposition, &reason, bucket, confirmed));
+            let label = crate::report_export::row_disposition_label(
+                f,
+                disposition,
+                &reason,
+                bucket,
+                confirmed,
+            );
             let why_waiting = crate::report_export::row_waiting_reason(
                 f,
                 disposition,
@@ -788,11 +792,7 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
         .collect();
     let decided = flagged
         .iter()
-        .filter(|r| {
-            r.is_fp
-                || r.disposition_kind
-                    .is_some_and(|d| d != Disposition::Unresolved)
-        })
+        .filter(|r| r.is_fp || sheets::row_is_decided(r))
         .count();
     (flagged.len(), decided)
 }
@@ -803,9 +803,7 @@ fn possible_false_positive_counts(rows: &[FindingRow]) -> (usize, usize) {
 fn possible_duplicate_counts(rows: &[FindingRow]) -> (usize, usize) {
     let mut fixes: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
     for r in rows.iter().filter(|r| !r.possible_duplicate_of.is_empty()) {
-        let decided = r.is_fp
-            || r.disposition_kind
-                .is_some_and(|d| d != Disposition::Unresolved);
+        let decided = r.is_fp || sheets::row_is_decided(r);
         let all = fixes.entry(r.facts.fix_id.as_str()).or_insert(true);
         *all &= decided;
     }
@@ -1275,6 +1273,8 @@ pub(crate) struct CountRow {
     pub kind: CountKind,
     pub tool_preview: bool,
     pub escalated: bool,
+    /// A person read this row (its review level is `personally_reviewed`).
+    pub reviewed_in_person: bool,
     pub rule_id: String,
 }
 
@@ -1344,6 +1344,7 @@ pub(crate) fn counting_view(
             },
             tool_preview: r.provenance.starts_with("Preview:"),
             escalated: r.facts.escalated,
+            reviewed_in_person: r.facts.review_level == "personally_reviewed",
             rule_id: r.rule_id.clone(),
         })
         .collect();
@@ -2351,13 +2352,6 @@ pub fn build_workbook_with_counts(
         tables::write_table(&mut wb, &fmts, table)
             .with_context(|| format!("writing the {} sheet", table.name))?;
     }
-    // H4: the optional triage log, last so every existing sheet keeps its position. Off by
-    // default; see `triage_log`.
-    if triage_log::wanted(opts) {
-        let log = triage_log::build_triage_log(reviewed, corpus, &opts.chosen_options);
-        triage_log::write_triage_log_sheet(&mut wb, &log, report.ledger.deduped_total(), &fmts)
-            .context("writing the Triage Log sheet")?;
-    }
 
     // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
     // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,
@@ -2433,6 +2427,20 @@ pub struct FindingsExport {
     /// The Fixes: the rule groups whose places are one change, with every place and rule of each
     /// (item #1). Every row's `fix_id` names one of these.
     pub fixes: Vec<crate::review_tree::FixNode>,
+}
+
+impl FindingsExport {
+    /// The Place ids ([`crate::report_export::RowFacts::site_id`]) of the rows shown at critical
+    /// severity: the severity the PDF and the workbook print, with every bound applied. The release
+    /// gate holds each of these to a reviewer's decision
+    /// ([`crate::release_gate::needs_decision`]).
+    pub(crate) fn shown_critical_site_ids(&self) -> std::collections::HashSet<&str> {
+        self.findings
+            .iter()
+            .filter(|r| r.severity == "critical")
+            .map(|r| r.facts.site_id.as_str())
+            .collect()
+    }
 }
 
 /// The `summary` of findings.json: the executive summary's sentence and its tallies, every tally
@@ -2748,15 +2756,6 @@ pub fn build_csv_exports(
         tickets::TICKETS_CSV.to_string(),
         tickets::tickets_csv(reviewed, corpus, &opts.chosen_options)?,
     ));
-    // H4: the optional triage log's CSV, only when asked for (it has no `json/` sibling and is
-    // not one of the eight `DATASETS`; the release gate admits it as an optional member).
-    if triage_log::wanted(opts) {
-        let log = triage_log::build_triage_log(reviewed, corpus, &opts.chosen_options);
-        csv.push((
-            triage_log::TRIAGE_LOG_CSV.to_string(),
-            triage_log::triage_log_csv(&log)?,
-        ));
-    }
     Ok(csv)
 }
 

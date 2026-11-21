@@ -44,6 +44,10 @@ pub struct ProjectStore {
 /// The group review model a project seeded before Fable 5.2 became the default.
 const PREVIOUS_STAGE2_DEFAULT_MODEL: &str = "claude-fable-5-1";
 
+/// The model a saved Fable 5.1 group review pick moves to. It stays Fable 5.2 after the built-in
+/// default became Opus 5.5: a saved project keeps its saved model family.
+const MOVED_STAGE2_MODEL: &str = "claude-fable-5-2";
+
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     projects: Vec<Project>,
@@ -80,13 +84,11 @@ impl ProjectStore {
         let mut moved = false;
         for project in &mut state.projects {
             if project.review.group_review_model.trim() == PREVIOUS_STAGE2_DEFAULT_MODEL {
-                project.review.group_review_model =
-                    camerata_api_types::project::STAGE2_DEFAULT_MODEL.to_string();
+                project.review.group_review_model = MOVED_STAGE2_MODEL.to_string();
                 tracing::info!(
                     "project {}: the group review model {PREVIOUS_STAGE2_DEFAULT_MODEL} moved to \
-                     {}; a run already started keeps the model it began on",
+                     {MOVED_STAGE2_MODEL}; a run already started keeps the model it began on",
                     project.name,
-                    camerata_api_types::project::STAGE2_DEFAULT_MODEL
                 );
                 moved = true;
             }
@@ -188,11 +190,7 @@ impl ProjectStore {
                 client_tooling_opt_in: false,
                 dev_run_spend_limit_cents: None,
                 // Stage 2 has a default of its own too; a new project seeds it (A15).
-                review: ReviewSettings {
-                    group_review_model: camerata_api_types::project::STAGE2_DEFAULT_MODEL
-                        .to_string(),
-                    ..ReviewSettings::default()
-                },
+                review: ReviewSettings::for_new_project(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -341,6 +339,35 @@ impl ProjectStore {
             self.save();
         }
         ok
+    }
+
+    /// Delete a project like [`Self::delete`] but write the file first: when the write fails
+    /// nothing is removed and the error is returned. `Ok(false)` when there is no such project.
+    pub fn delete_checked(&self, id: &str) -> std::io::Result<bool> {
+        let mut s = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("project store mutex poisoned"))?;
+        if !s.projects.iter().any(|p| p.id == id) {
+            return Ok(false);
+        }
+        let projects: Vec<Project> = s.projects.iter().filter(|p| p.id != id).cloned().collect();
+        let active = if s.active.as_deref() == Some(id) {
+            projects.first().map(|p| p.id.clone())
+        } else {
+            s.active.clone()
+        };
+        let next = State {
+            projects,
+            active,
+            counter: s.counter,
+        };
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string_pretty(&next).map_err(std::io::Error::other)?;
+            std::fs::write(path.as_path(), json)?;
+        }
+        *s = next;
+        Ok(true)
     }
 
     /// Set the active project.
@@ -918,7 +945,7 @@ mod tests {
         let p = store.create("Stages", vec![]).unwrap();
         // Stage 1 is the calibration step; stage 2 is the review settings' group review model.
         assert_eq!(p.step_models.calibration, "claude-opus-5-5");
-        assert_eq!(p.review.group_review_model, "claude-fable-5-2");
+        assert_eq!(p.review.group_review_model, "claude-opus-5-5");
         // The scan keeps its own default.
         assert_eq!(p.step_models.audit, DEFAULT_MODEL);
         // The rest of the review settings are the design values.
@@ -1032,14 +1059,14 @@ mod tests {
             let b = store.create("B", vec![]).unwrap();
             // A new project carries the design values, and stage 2's own default model.
             let seeded = ReviewSettings {
-                group_review_model: "claude-fable-5-2".to_string(),
+                group_review_model: "claude-opus-5-5".to_string(),
                 ..ReviewSettings::default()
             };
             assert_eq!(a.review, seeded);
             let set = ReviewSettings {
                 escalation_rate_per_kloc: 0.5,
                 escalation_floor: 7,
-                group_review_model: "claude-opus-5-5".to_string(),
+                group_review_model: "claude-fable-5-2".to_string(),
                 ..ReviewSettings::default()
             };
             let updated = store
@@ -1070,10 +1097,10 @@ mod tests {
         let reloaded = ProjectStore::load_or_new(path);
         let a = reloaded.get(&a_id).unwrap();
         assert_eq!(a.review.escalation_floor, 7);
-        assert_eq!(a.review.group_review_model, "claude-opus-5-5");
+        assert_eq!(a.review.group_review_model, "claude-fable-5-2");
         assert_eq!(
             reloaded.get(&b_id).unwrap().review.group_review_model,
-            "claude-fable-5-2"
+            "claude-opus-5-5"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1331,8 +1358,50 @@ mod finder_setting_tests {
     use super::*;
     use camerata_api_types::project::ProjectFinder;
 
+    /// Outside review Part 1 item 3: a new project runs the agent finder on Opus 5.5 for both the
+    /// finder and the group review; a project saved before the setting existed, and one that saved
+    /// Engine, stay Engine.
     #[test]
-    fn the_finder_setting_defaults_to_engine_and_survives_a_reload() {
+    fn a_new_project_defaults_to_the_agent_finder_on_opus_5_5() {
+        let store = ProjectStore::new();
+        let p = store.create("Defaults", vec![]).unwrap();
+        assert_eq!(p.review.finder, ProjectFinder::Agent);
+        let controls = crate::cost_cap::RunControls {
+            review: p.review.clone(),
+            finder: p.review.finder.into(),
+            ..crate::cost_cap::RunControls::default()
+        };
+        assert_eq!(
+            controls.finder,
+            crate::ai_audit::agent_finder::FinderChoice::Agent
+        );
+        assert_eq!(controls.finder_model_for(), "claude-opus-5-5");
+        assert_eq!(controls.group_review_model_for(), "claude-opus-5-5");
+        assert_eq!(p.review.group_review_model, "claude-opus-5-5");
+    }
+
+    #[test]
+    fn a_saved_project_keeps_its_saved_finder() {
+        // Saved before the finder setting existed: Engine, as it has always loaded.
+        let legacy: Project =
+            serde_json::from_value(serde_json::json!({ "id": "old", "name": "Old" })).unwrap();
+        assert_eq!(legacy.review.finder, ProjectFinder::Engine);
+        // Saved with Engine chosen: stays Engine.
+        let saved: Project = serde_json::from_value(serde_json::json!({
+            "id": "e", "name": "E", "review": { "finder": "engine" },
+        }))
+        .unwrap();
+        assert_eq!(saved.review.finder, ProjectFinder::Engine);
+        // Saved with a review block that has no finder key: Engine too.
+        let partial: Project = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "review": { "escalation_floor": 7 },
+        }))
+        .unwrap();
+        assert_eq!(partial.review.finder, ProjectFinder::Engine);
+    }
+
+    #[test]
+    fn the_finder_setting_defaults_to_agent_and_survives_a_reload() {
         let dir = std::env::temp_dir().join(format!(
             "camerata-finder-setting-{}",
             std::time::SystemTime::now()
@@ -1344,9 +1413,9 @@ mod finder_setting_tests {
         let id = {
             let store = ProjectStore::load_or_new(path.clone());
             let p = store.create("A", vec![]).unwrap();
-            assert_eq!(p.review.finder, ProjectFinder::Engine);
+            assert_eq!(p.review.finder, ProjectFinder::Agent);
             let settings = ReviewSettings {
-                finder: ProjectFinder::Agent,
+                finder: ProjectFinder::Engine,
                 ..p.review
             };
             store.set_review_settings(&p.id, settings).unwrap().unwrap();
@@ -1355,7 +1424,7 @@ mod finder_setting_tests {
         let reloaded = ProjectStore::load_or_new(path);
         assert_eq!(
             reloaded.get(&id).unwrap().review.finder,
-            ProjectFinder::Agent
+            ProjectFinder::Engine
         );
     }
 }

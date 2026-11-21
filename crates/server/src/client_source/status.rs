@@ -134,11 +134,7 @@ pub(crate) fn inspected_entry(
     project_id: &str,
     repo: &str,
 ) -> Option<crate::inspections::InspectionEntry> {
-    state
-        .inspections
-        .list(project_id)
-        .into_iter()
-        .find(|e| e.sha_for(repo).is_some())
+    state.inspections.newest_with_sha(project_id, repo)
 }
 
 /// The deletion record that still stands, i.e. the newest deletion unless a re-fetch is newer.

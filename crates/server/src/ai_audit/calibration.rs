@@ -1275,6 +1275,7 @@ pub async fn verify_findings(
             per_item_usd: site_input_usd(&model),
             ..StageSettings::default()
         },
+        feedback: None,
     };
     let outcome = run_stage(Stage::Calibration, &mut run, mode, &ctx).await;
 

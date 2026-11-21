@@ -3,6 +3,8 @@
 
 use camerata_api_types::project::ProjectBackend;
 
+pub mod inspection_run;
+
 /// Human-readable token count by magnitude (900 -> "900", 2_000 -> "2k", 2_000_000 -> "2.0M").
 pub fn human_tokens(t: u64) -> String {
     if t >= 1_000_000 {
@@ -1590,7 +1592,7 @@ pub fn repo_estimate_line(
     let dollars = if row.dollars < 0.01 {
         "<$0.01".to_string()
     } else {
-        format!("~${:.2}", row.dollars)
+        format!("about ${:.2}", row.dollars)
     };
     format!(
         "{repo}: {code_chars} characters in {files} file(s), {dollars} ({} model calls)",
@@ -1765,7 +1767,7 @@ mod tests {
         };
         assert_eq!(
             repo_estimate_line("acme/api", 41, 360_000, &row),
-            "acme/api: 360000 characters in 41 file(s), ~$1.23 (4 model calls)"
+            "acme/api: 360000 characters in 41 file(s), about $1.23 (4 model calls)"
         );
         let cheap = RepoEstimate {
             dollars: 0.001,

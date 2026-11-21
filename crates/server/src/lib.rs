@@ -496,17 +496,27 @@ impl AppState {
     }
 
     /// The client-engagement lock for a step whose model id comes from the request (the routine
-    /// prompt draft, the escalation review chat, the chat), checked against the ACTIVE project.
+    /// prompt draft, the escalation review chat), checked against the ACTIVE project.
     /// [`AppState::llm_for_project`] is handed no model and so cannot check one: without this a
     /// non-Anthropic id would be routed to OpenRouter by `build_completer`. A blank id is the
     /// server default (a Claude model) and passes; with no active project there is no client
     /// code in the step's context and nothing is refused.
     pub fn client_lock_step_model_refusal(&self, model: &str) -> Option<String> {
+        self.client_lock_model_refusal_for(self.projects.active().as_ref(), model)
+    }
+
+    /// [`AppState::client_lock_step_model_refusal`] for an explicit project (`None` = no project,
+    /// nothing refused). The chat uses this with the project its request names.
+    pub fn client_lock_model_refusal_for(
+        &self,
+        project: Option<&crate::project::Project>,
+        model: &str,
+    ) -> Option<String> {
         let model = model.trim();
         if model.is_empty() {
             return None;
         }
-        let p = self.projects.active()?;
+        let p = project?;
         crate::client_lock::refusal(
             p.client_engagement,
             p.backend,
@@ -515,14 +525,23 @@ impl AppState {
         .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
     }
 
-    /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
-    /// project, so `settings.chat_backend` decides.
-    ///
-    /// When the ACTIVE project is a client engagement, the chat backend setting must pass the
-    /// client-engagement lock too (a `cli` chat is refused with the lock's message): the chat can
-    /// carry that project's context, and the setting is global, not the project's own.
+    /// The `Llm` for the CHAT assistant when it is NOT tied to a project (home screen): the Chat
+    /// backend setting decides and no client lock applies, because the request carries no
+    /// project data. Same as `chat_llm_for(None)`.
     pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
-        if let Some(p) = self.projects.active() {
+        self.chat_llm_for(None)
+    }
+
+    /// The `Llm` for the chat assistant, locked by ONE project: the project the chat request
+    /// names (its `project_id`), NOT the server's last active project. With `Some(project)` a
+    /// client engagement refuses a `cli` chat with the lock's message; with `None` the chat runs
+    /// on the Chat backend setting and nothing is locked (the chat then carries no project
+    /// layer).
+    pub fn chat_llm_for(
+        &self,
+        project: Option<&crate::project::Project>,
+    ) -> Result<crate::llm::Llm, String> {
+        if let Some(p) = project {
             let backend = self.settings.chat_backend();
             if let Some(why) = crate::client_lock::refusal(p.client_engagement, backend, &[]) {
                 return Err(format!(
@@ -1093,6 +1112,30 @@ impl AppState {
     pub(crate) fn get_recent_scan(&self) -> Option<crate::onboard::ScanReport> {
         let guard = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.clone()
+    }
+
+    /// Drop the in-memory copies of a project's last completed scan: its entry in `last_scan`,
+    /// and the project-agnostic `recent_scan` when that scan covered one of the project's repos
+    /// (it may be this project's). Returns how many copies were dropped. Used when a project and
+    /// all its data are deleted; the persisted inspections are removed by the caller.
+    pub(crate) fn forget_project_scans(&self, project_id: &str, repos: &[String]) -> usize {
+        let mut dropped = 0;
+        let mut last = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
+        if last.remove(project_id).is_some() {
+            dropped += 1;
+        }
+        drop(last);
+        let mut recent = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
+        let covers_project = recent.as_ref().is_some_and(|r| {
+            r.repos
+                .iter()
+                .any(|scanned| repos.iter().any(|own| own.eq_ignore_ascii_case(scanned)))
+        });
+        if covers_project {
+            *recent = None;
+            dropped += 1;
+        }
+        dropped
     }
 
     /// Build state seeded with the representative spine + seeded open clarifications,
@@ -1709,6 +1752,14 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/repos/:repo/source/delete",
             post(crate::client_source::delete::delete),
         )
+        .route(
+            "/api/projects/:id/delete-all-preview",
+            post(crate::client_source::delete_project::delete_all_preview),
+        )
+        .route(
+            "/api/projects/:id/delete-all",
+            post(crate::client_source::delete_project::delete_all_handler),
+        )
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
         .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))
         .route("/api/projects/:id/branch", post(checkout_branch))
@@ -1882,6 +1933,8 @@ pub fn router(state: AppState) -> Router {
         )
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
+        // ── Triage log (the operator's file, never in the client package) ─────
+        .route("/api/projects/:id/triage-log.csv", get(export_triage_log))
         // ── Audit-report (PDF) export ─────────────────────────────────────────
         .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
@@ -2037,6 +2090,15 @@ fn trigger_anthropic_refresh_if_needed(
 /// provider is selected from the environment, so setting the GitHub vars switches the
 /// whole BFF onto a real repo with no code change.
 pub async fn serve(addr: &str) -> anyhow::Result<()> {
+    // A `claude` call's system prompt file is removed when the call ends, or at shutdown
+    // (`kill_inflight_claude`). A SIGKILL, a crash or a power cut skips both: remove what a dead
+    // process left, so client data never outlives the process that wrote it. It is per call, so
+    // this and the shutdown removal are the whole lifecycle: deleting a project's client source
+    // or the project itself has no such file to find (none is kept between calls).
+    let swept = camerata_api_types::claude_cli::sweep_leftover_system_prompts();
+    if swept > 0 {
+        println!("removed {swept} leftover system prompt folder(s) from an earlier run");
+    }
     let state = AppState::from_env();
 
     // OpenRouter model-registry refresh, trigger 1 of 3 (startup). The other two are the
@@ -2070,7 +2132,11 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
     // comes due. Spawned here (not in `router`) so tests that build the router don't
     // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
-    crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
+    crate::auto_fire::spawn_routine_scheduler(
+        state.routines.clone(),
+        state.escalations.clone(),
+        state.source_ops.clone(),
+    );
 
     // Stall sweep (LIFECYCLE-6): periodically auto-cancel AUTONOMOUS runs that have stalled
     // (no activity past the active project's routine threshold). Watched runs stay alert-only.
@@ -2272,6 +2338,14 @@ async fn onboard_audit(
             return Json(r);
         }
     };
+    // A project being deleted with all its data starts nothing.
+    if let Some(why) = state
+        .projects
+        .active()
+        .and_then(|p| state.source_ops.deleting_refusal(&p.id))
+    {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // The client-engagement lock, before any repository is located or read.
     if let Some(why) = client_lock_refusal_for_scan(
         state.projects.active().as_ref(),
@@ -2342,6 +2416,8 @@ async fn onboard_audit(
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
+    // However this scan ends, no row of it stays "running".
+    let _sweep = crate::transcript::SweepOnDrop::new(state.transcripts.clone(), SCAN_AUDIT_KEY);
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
     let active_project = state.projects.active();
     let project_id = active_project.as_ref().map(|p| p.id.clone());
@@ -2350,7 +2426,7 @@ async fn onboard_audit(
     let _scan_claim = project_id
         .as_deref()
         .map(|id| state.source_ops.begin_scan(id));
-    let prior = if req.incremental {
+    let prior = if uses_prior_manifest(req.incremental, run_controls.review.finder) {
         project_id
             .as_deref()
             .and_then(|id| state.scan_cache.get(id))
@@ -2409,6 +2485,19 @@ async fn onboard_audit(
         crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
         _ => crate::llm::Backend::Cli,
     };
+    // An agent finder run stops, before any spend, when a rule file did not load (the rule would
+    // silently not be checked).
+    if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
+        &run_controls,
+        run_ai_review && !ai_review_blocked,
+        &corpus_load_failures,
+    ) {
+        let mut r = crate::onboard::ScanReport::gated(&repos);
+        r.gated = false;
+        r.ai_error = Some(why.clone());
+        r.message = Some(why);
+        return Json(r);
+    }
     // The agent finder's setup, built by the one function the command line uses (this request has
     // no run folder of its own, so the rooms go under the per-user state folder).
     let finder_setup = match crate::ai_audit::agent_finder::run::finder_setup_for_run(
@@ -2593,6 +2682,7 @@ async fn onboard_audit(
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
                 corpus.as_ref(),
             )
             .await;
@@ -2603,6 +2693,7 @@ async fn onboard_audit(
                 &review_controls,
                 review_backend == crate::llm::Backend::Cli,
                 None,
+                Some((&state.transcripts, SCAN_AUDIT_KEY)),
             )
             .await;
         }
@@ -2650,6 +2741,12 @@ async fn onboard_audit(
     };
 
     Json(report)
+}
+
+/// True when a finished audit job records its enforcement catches: a fresh full scan only (see
+/// the call in [`start_audit_job`]).
+pub(crate) fn captures_enforcement_catches(is_resume: bool, is_delta_retest: bool) -> bool {
+    !is_resume && !is_delta_retest
 }
 
 /// Start the audit job for `req` and return its id. The asynchronous body of
@@ -2722,6 +2819,15 @@ pub(crate) async fn start_audit_job(
     // The job is stamped with its project (ROUTES-5, so a project's deep-report export finds ITS
     // OWN latest deep report) AND it seeds the incremental-scan manifest lookup below.
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // A project being deleted with all its data starts nothing: the job fails at once.
+    if let Some(why) = project_id
+        .as_deref()
+        .and_then(|id| state.source_ops.deleting_refusal(id))
+    {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
     // The client-engagement lock, before any repository is located or read: the job fails at
     // once with the reason, and nothing is spawned.
     if let Some(why) = client_lock_refusal_for_scan(
@@ -2781,8 +2887,10 @@ pub(crate) async fn start_audit_job(
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
+    // The Agent finder inspects every file (the command line refuses an incremental Agent run), so
+    // an Agent run that asks for an incremental one runs in full instead: no prior manifest.
     let prior = options.prior_override.or_else(|| {
-        if req.incremental {
+        if uses_prior_manifest(req.incremental, run_controls.review.finder) {
             project_id
                 .as_deref()
                 .and_then(|id| state.scan_cache.get(id))
@@ -2807,7 +2915,10 @@ pub(crate) async fn start_audit_job(
         // never got to handle.
         let body_jobs = jobs.clone();
         let body_jid = jid.clone();
+        let sweep = crate::transcript::SweepOnDrop::new(transcripts.clone(), SCAN_AUDIT_KEY);
         run_job_body_with_panic_guard(&jobs, &jid, async move {
+            // Held to the end of the body (normal end, cancel, panic): closes any row left running.
+            let _sweep = sweep;
             if sources.is_empty() {
                 body_jobs.fail(
                     &body_jid,
@@ -2981,6 +3092,17 @@ pub(crate) async fn start_audit_job(
                                 return;
                             }
                         }
+                        // The agent finder finishes on the finder model it started with.
+                        match store.hold_finder_model(&mut run_controls) {
+                            Ok(Some(line)) => {
+                                store.add_note(&line);
+                            }
+                            Ok(None) => {}
+                            Err(why) => {
+                                body_jobs.fail(&body_jid, why);
+                                return;
+                            }
+                        }
                         // The kept model was not part of the pick the lock checked before the
                         // job started: check every model the resumed run will call, before any
                         // call.
@@ -3078,6 +3200,16 @@ pub(crate) async fn start_audit_job(
                 &backend_resolution,
                 crate::llm::BackendResolution::Blocked { .. }
             );
+            // An agent finder run stops, before any spend, when a rule file did not load (the rule
+            // would silently not be checked).
+            if let Err(why) = crate::ai_audit::agent_finder::run::refuse_unloadable_rules(
+                &run_controls,
+                run_ai_review && !ai_review_blocked,
+                &corpus_load_failures,
+            ) {
+                body_jobs.fail(&body_jid, why);
+                return;
+            }
             // The agent finder's setup, built by the one function the command line uses: the
             // rooms folder inside the run's own folder, the saved key, the project's engagement
             // kind. A missing key stops the run before the first call.
@@ -3280,6 +3412,7 @@ pub(crate) async fn start_audit_job(
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                             corpus.as_ref(),
                         )
                         .await;
@@ -3291,6 +3424,7 @@ pub(crate) async fn start_audit_job(
                             &review_controls,
                             llm_backend == crate::llm::Backend::Cli,
                             Some((&body_jobs, &body_jid)),
+                            Some((&transcripts, SCAN_AUDIT_KEY)),
                         )
                         .await;
                     }),
@@ -3311,10 +3445,20 @@ pub(crate) async fn start_audit_job(
                 crate::run_store::note_report(store, &mut report);
             }
 
-            // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
-            // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
-            // handler. If you add ledger capture here in the future, follow the same
-            // background-spawn pattern used there.)
+            // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
+            // The cockpit runs every scan as this job, so the capture the synchronous
+            // `onboard_audit` handler makes runs here too. Same background-spawn pattern,
+            // best-effort: a failed write is logged and swallowed.
+            // Only a fresh full scan: a resume re-opens a run whose earlier attempt may already
+            // have recorded its catches, and a delta retest re-reads files an earlier scan
+            // recorded; the capture has no dedup, so either would record them twice.
+            if captures_enforcement_catches(resume_run.is_some(), delta.is_some()) {
+                let ledger = state.enforcement_ledger.clone();
+                let all_findings = report.findings.clone();
+                tokio::spawn(async move {
+                    crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
+                });
+            }
 
             // ── Write last_scan + recent_scan (async job path) ──────────────────────────
             // Store the completed report before finishing the job so any concurrent chat
@@ -3355,7 +3499,21 @@ pub(crate) async fn start_audit_job(
                     }
                     scan_state.set_last_scan_in_memory(id.clone(), report.clone());
                 }
-                (Some(id), None) => scan_state.set_last_scan(id.clone(), report.clone()),
+                (Some(id), None) => {
+                    scan_state.set_last_scan(id.clone(), report.clone());
+                    // The review this run produced goes into the project's onboarding draft
+                    // (when it has one for these repos) even if no screen is mounted to
+                    // receive it: a run finished while the screen was closed must still be
+                    // reopenable with "Continue where you left off".
+                    if let Some(stored) = state.get_last_scan(id) {
+                        state.draft.adopt_audit(
+                            id,
+                            &stored.repos,
+                            &stored.provenance.finished_at,
+                            || serde_json::to_value(&stored).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                }
                 // No project: only the project-agnostic fallback can hold it, and there is no
                 // project to key a persisted inspection to.
                 (None, _) => scan_state.set_recent_scan(report.clone()),
@@ -3512,6 +3670,80 @@ async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String
         .into_response()
 }
 
+/// `GET /api/projects/:id/triage-log.csv` — the operator's triage log: per rule, what the AI pass
+/// proposed, what review kept, held or set aside and threw out, and why. The first line marks it
+/// internal. It is written outside the client package and is not gated, because no client reads
+/// it; the client package never carries it. 404 when the project or its scan results are missing.
+async fn export_triage_log(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Some(project) = state.projects.get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    };
+    // The reviewer's work is read exactly as the exports read it; a damaged file means it is
+    // unknown, so nothing is written from guesses.
+    if state.decisions.is_corrupt(&id) {
+        return crate::decisions::routes::corrupt_response();
+    }
+    if state.edits.is_corrupt(&id) {
+        return crate::edits::routes::corrupt_response();
+    }
+    let Some(report) = state.get_last_scan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No scan results available for this project. Run an inspection first."
+            })),
+        )
+            .into_response();
+    };
+    let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
+        &state.decisions.active(&id),
+    ));
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+    let reviewed = reviewed_for_export(&state, &id, &report, &std::collections::HashMap::new());
+    let csv = match xlsx_export::triage_log::operator_csv(
+        &reviewed,
+        corpus.as_ref(),
+        &project_chosen_options(&project),
+    ) {
+        Ok(csv) => csv,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": format!("{e:#}") })),
+            )
+                .into_response();
+        }
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}\"",
+                    xlsx_export::triage_log::INTERNAL_FILE_NAME
+                ),
+            ),
+        ],
+        csv,
+    )
+        .into_response()
+}
+
 /// The deep report as Markdown for the operator: the lens prose is model-written text read back
 /// from the job store, so it is redacted here, at the export, whatever path stored it. It is
 /// labelled as the operator's working notes ([`DEEP_REPORT_OPERATOR_LABEL`]); it is not a client
@@ -3642,7 +3874,9 @@ async fn export_audit_report(
     // model-inferred." rather than failing the export.
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };
@@ -3969,7 +4203,9 @@ async fn export_product(
 
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        crate::log_corpus_load_errors("rule citations", &errs);
+        Some(set)
     } else {
         None
     };
@@ -4588,6 +4824,13 @@ impl ManifestProvenance {
 /// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
 pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
 
+/// Whether the tree had uncommitted changes when this binary was built (`build.rs`). Reported on
+/// `/api/health` for information; the app compares commits only.
+pub const ENGINE_DIRTY: bool = match option_env!("CAMERATA_GIT_DIRTY") {
+    Some(flag) => flag.len() == 1 && flag.as_bytes()[0] == b'1',
+    None => false,
+};
+
 /// The README line of an internal package made from a run that did not complete.
 pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this inspection did not \
      run to completion and is not for a client.";
@@ -4847,7 +5090,49 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
+/// Whether a run reuses the project's prior manifest (an incremental run). The Agent finder
+/// inspects every file and the command line refuses an incremental Agent run, so an Agent run
+/// that asks for one runs in full: the request is never the only thing that decides it.
+pub(crate) fn uses_prior_manifest(
+    incremental: bool,
+    finder: camerata_api_types::project::ProjectFinder,
+) -> bool {
+    incremental && finder != camerata_api_types::project::ProjectFinder::Agent
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod uses_prior_manifest_tests {
+    use super::uses_prior_manifest;
+    use camerata_api_types::project::ProjectFinder::{Agent, Engine};
+
+    #[test]
+    fn an_agent_run_that_asks_for_an_incremental_one_runs_in_full() {
+        assert!(!uses_prior_manifest(true, Agent));
+        assert!(!uses_prior_manifest(false, Agent));
+        assert!(uses_prior_manifest(true, Engine));
+        assert!(!uses_prior_manifest(false, Engine));
+    }
+}
+
+#[cfg(test)]
+mod enforcement_capture_tests {
+    use super::captures_enforcement_catches;
+
+    #[test]
+    fn only_a_fresh_full_scan_records_enforcement_catches() {
+        assert!(captures_enforcement_catches(false, false));
+        assert!(
+            !captures_enforcement_catches(true, false),
+            "a resume would record twice"
+        );
+        assert!(
+            !captures_enforcement_catches(false, true),
+            "a delta retest would record twice"
+        );
+    }
+}
 
 #[cfg(test)]
 mod lib_multirepo_tests;
@@ -4866,6 +5151,9 @@ mod model_input_chat_tests;
 
 #[cfg(test)]
 mod site_key_paths_tests;
+
+#[cfg(test)]
+mod draft_tests;
 
 #[cfg(test)]
 mod tests;

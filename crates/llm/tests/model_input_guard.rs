@@ -88,6 +88,8 @@ const SITES: &[Site] = &[
             ("build_batch_item", "model_input::guarded("),
             ("build_openrouter_chat_body", "model_input::guarded("),
             ("build_cli_command", "model_input::guarded("),
+            // The system prompt's private file is written from the same redacted copy.
+            ("build_cli_command", "SystemPromptFile::create("),
             ("batch_submit_body", "model_input::redact_json_for_model("),
         ],
     },
@@ -100,23 +102,32 @@ const SITES: &[Site] = &[
             ("redact_conversation", "model_input::redact_json_for_model("),
         ],
     },
-    // The governed agent drivers hand the task to a CLI as an argument.
+    // The governed agent drivers hand the task to a CLI: `claude` on stdin (`stdin_prompt`), a
+    // generic third-party CLI as an argument (`build_args`).
     Site {
         file: "crates/agent/src/lib.rs",
-        builders: &[("build_args", "model_input::redact_for_model(")],
+        builders: &[
+            ("stdin_prompt", "model_input::redact_for_model("),
+            // The one place the task is sent goes through that function.
+            ("run", "stdin_prompt("),
+        ],
     },
     Site {
         file: "crates/agent/src/generic.rs",
         builders: &[("build_args", "model_input::redact_for_model(")],
     },
-    // The intake lead engineer and refinement reviewer.
+    // The intake lead engineer and refinement reviewer send their prompt on stdin: the one
+    // function that writes it redacts it first, and both callers go through that function.
     Site {
         file: "crates/intake/src/engine.rs",
-        builders: &[("build_command", "model_input::redact_for_model(")],
+        builders: &[
+            ("stdin_prompt", "model_input::redact_for_model("),
+            ("output_with_prompt", "stdin_prompt("),
+        ],
     },
     Site {
         file: "crates/intake/src/review.rs",
-        builders: &[("build_command", "model_input::redact_for_model(")],
+        builders: &[("run_claude", "output_with_prompt(")],
     },
 ];
 

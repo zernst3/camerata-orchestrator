@@ -268,6 +268,7 @@ async fn run_stage_once(stage: Stage, llm: &Counting, meter: &UsageMeter) {
                 max_in_flight: 4,
                 cli_backend: false,
                 job: None,
+                feedback: None,
             };
             let _ = group_review::review_groups(&mut report, llm, &cfg, Some(meter)).await;
         }
@@ -327,6 +328,7 @@ async fn run_stage_once(stage: Stage, llm: &Counting, meter: &UsageMeter) {
                 "claude-sonnet-5-5",
                 &candidates,
                 false,
+                None,
                 None,
             )
             .await;

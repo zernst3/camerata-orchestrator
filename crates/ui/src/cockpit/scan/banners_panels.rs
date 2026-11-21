@@ -18,15 +18,20 @@ use super::*;
 pub(in crate::cockpit) fn ScanJobFailedBanner(message: Option<String>) -> Element {
     rsx! {
         if let Some(msg) = message {
-            div {
-                class: "onboard-gate scan-job-failed-banner",
-                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
-                span { class: "onboard-gate-dot" }
-                div {
-                    p { class: "onboard-gate-h", "Scan failed" }
-                    p { class: "onboard-gate-b", "{msg}" }
-                    p { class: "onboard-gate-hint",
-                        "The background scan stopped before it could finish. Check your project's backend setup (Claude CLI on PATH, or an Anthropic API key), then retry the scan."
+            {
+                let kind = job_failure_kind(&msg);
+                rsx! {
+                    div {
+                        class: "onboard-gate scan-job-failed-banner",
+                        "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
+                        span { class: "onboard-gate-dot" }
+                        div {
+                            p { class: "onboard-gate-h", "{kind.heading()}" }
+                            p { class: "onboard-gate-b", "{msg}" }
+                            if let Some(hint) = kind.hint() {
+                                p { class: "onboard-gate-hint", "{hint}" }
+                            }
+                        }
                     }
                 }
             }
@@ -34,16 +39,128 @@ pub(in crate::cockpit) fn ScanJobFailedBanner(message: Option<String>) -> Elemen
     }
 }
 
-/// The progress line under the bar. Passes the spend limit refused are named on their own and
-/// are NOT in `done`, so a stopped scan never reads as complete.
+/// What kind of stop a job failure message is, which decides the heading and the hint under it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::cockpit) enum JobFailureKind {
+    /// The server refused the scan for a client engagement (its own text says why).
+    ClientLock,
+    /// The scan's status could not be read; it may still be running.
+    LostContact,
+    /// The server answered that it no longer knows the job (it restarted): the scan is dead and
+    /// saved.
+    Gone,
+    /// The job failed on the backend setup (no API key, no Claude CLI, a CLI too old).
+    Failed,
+    /// Any other refusal or failure: the server's own text, with no guess at the cause.
+    Other,
+}
+
+impl JobFailureKind {
+    pub(in crate::cockpit) fn heading(self) -> &'static str {
+        match self {
+            Self::ClientLock => "Refused for a client engagement",
+            Self::LostContact => "Lost contact with the scan",
+            Self::Gone => "Scan no longer running",
+            Self::Failed | Self::Other => "Scan failed",
+        }
+    }
+
+    pub(in crate::cockpit) fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::ClientLock => Some(
+                "Set this project to the Anthropic API with Anthropic models in its settings, then run the scan again.",
+            ),
+            Self::LostContact | Self::Gone | Self::Other => None,
+            Self::Failed => Some(
+                "The background scan stopped before it could finish. Check your project's backend setup (Claude CLI on PATH, or an Anthropic API key), then retry the scan.",
+            ),
+        }
+    }
+}
+
+/// How every client-lock refusal of a scan begins (`camerata_server::client_lock::refusal`; a
+/// server test pins it). The screen matches it to show the server's text under its own heading.
+const CLIENT_LOCK_PREFIX: &str = "This is a client engagement";
+
+/// True when a failure is about the backend setup, the only case the setup hint is true for.
+fn mentions_backend_setup(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    ["api key", "claude cli", "claude code", "on path"]
+        .iter()
+        .any(|needle| m.contains(needle))
+}
+
+pub(in crate::cockpit) fn job_failure_kind(message: &str) -> JobFailureKind {
+    if message == super::LOST_CONTACT_MESSAGE {
+        JobFailureKind::LostContact
+    } else if message == super::JOB_GONE_MESSAGE {
+        JobFailureKind::Gone
+    } else if message.starts_with(CLIENT_LOCK_PREFIX) {
+        JobFailureKind::ClientLock
+    } else if mentions_backend_setup(message) {
+        JobFailureKind::Failed
+    } else {
+        JobFailureKind::Other
+    }
+}
+
+/// The sentence under the incomplete banner's heading, from what really stopped the run (the
+/// words of the server's own cause), or `None` for failures that are not a stop. A pause at a cost
+/// checkpoint and a limit that could not be enforced are not "the spend limit".
+pub(in crate::cockpit) fn stop_line_for(failed: &[FailedPassView]) -> Option<&'static str> {
+    let any = |needle: &str| failed.iter().any(|f| f.reason.contains(needle));
+    if any("could not be enforced") {
+        Some("The spend limit could not be enforced, so the run stopped. The findings below cover only the part of the code and the rules that did run.")
+    } else if any("paused because its projected cost") {
+        Some("Paused at a cost checkpoint. The findings below cover only the part of the code and the rules that did run.")
+    } else if any("spend limit") {
+        Some("Stopped by the spend limit. The findings below cover only the part of the code and the rules that did run.")
+    } else {
+        None
+    }
+}
+
+/// The progress line under the bar. Passes that did not run are named on their own and are NOT in
+/// `done`, so a stopped scan never reads as complete. `paused` is true when the run stopped at a
+/// cost checkpoint; with passes not run and no known cause the line says "NOT RUN" alone, never a
+/// cause it cannot know.
+#[cfg(test)]
 pub(in crate::cockpit) fn job_progress_label(
     done: usize,
     total: usize,
     findings: usize,
     not_run: usize,
 ) -> String {
+    job_progress_label_for(done, total, findings, not_run, NotRunCause::SpendLimit)
+}
+
+/// What is known about why passes did not run, for the live progress line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::cockpit) enum NotRunCause {
+    /// The spend limit was reached (known to the caller; the live screen cannot tell it from an
+    /// unknown cost, so only the pinned wording uses it).
+    #[cfg_attr(not(test), allow(dead_code))]
+    SpendLimit,
+    /// The run paused at a cost checkpoint.
+    Checkpoint,
+    /// The poll does not say (the limit, an unknown cost, an outage): no cause is claimed.
+    Unknown,
+}
+
+pub(in crate::cockpit) fn job_progress_label_for(
+    done: usize,
+    total: usize,
+    findings: usize,
+    not_run: usize,
+    cause: NotRunCause,
+) -> String {
     if not_run > 0 {
-        format!("{done}/{total} passes \u{b7} {not_run} NOT RUN (spend limit) \u{b7} {findings} finding(s) so far")
+        let why = match cause {
+            NotRunCause::SpendLimit => " (spend limit)",
+            NotRunCause::Checkpoint => " (paused at a cost checkpoint)",
+            NotRunCause::Unknown => "",
+        };
+        format!("{done}/{total} passes \u{b7} {not_run} NOT RUN{why} \u{b7} {findings} finding(s) so far")
     } else {
         format!("{done}/{total} passes \u{b7} {findings} finding(s) so far")
     }
@@ -74,9 +191,7 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
         return rsx! {};
     }
     let n = failed_passes.len();
-    let stopped_by_limit = failed_passes
-        .iter()
-        .any(|f| f.reason.contains("spend limit"));
+    let stop_line = stop_line_for(&failed_passes);
     if compact {
         return rsx! {
             div { class: "onboard-gate scan-incomplete-banner scan-incomplete-compact",
@@ -92,10 +207,8 @@ pub(in crate::cockpit) fn IncompletePassesBanner(
             span { class: "onboard-gate-dot" }
             div {
                 p { class: "onboard-gate-h", "Incomplete: {n} pass(es) or stage(s) did not run" }
-                if stopped_by_limit {
-                    p { class: "onboard-gate-b",
-                        "Stopped by the spend limit. The findings below cover only the part of the code and the rules that did run."
-                    }
+                if let Some(line) = stop_line {
+                    p { class: "onboard-gate-b", "{line}" }
                 }
                 ul { class: "scan-incomplete-list",
                     for (i , f) in failed_passes.iter().enumerate() {
@@ -890,7 +1003,7 @@ pub(in crate::cockpit) fn NotAssessedPanel(
         Default::default();
     for f in &findings {
         let reason = match &f.kind {
-            Some(FindingKind::NotAssessed(na)) => na.reason.as_str(),
+            Some(FindingKind::NotAssessed(na)) => na.reason.heading(),
             _ => "unknown",
         };
         by_reason.entry(reason).or_default().push(f.clone());

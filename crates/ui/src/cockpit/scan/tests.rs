@@ -998,11 +998,11 @@ fn the_audit_request_carries_no_thorough_option() {
         repos: vec!["owner/repo".to_string()],
     }];
     let repos = vec!["owner/repo".to_string()];
-    let body = super::audit_request_json(
-        &repos, &rules, "m", "c", "auto", true, false, true, true, None,
-    );
+    let body = super::audit_request_json(&repos, &rules, "auto", true, false, true, true, None);
     assert!(body.get("thorough").is_none(), "{body}");
-    assert_eq!(body["calibration_model"], "c");
+    // The request names no model: every model is the project's (Inspection settings).
+    assert!(body.get("model").is_none(), "{body}");
+    assert!(body.get("calibration_model").is_none(), "{body}");
     assert_eq!(body["rules"][0]["id"], "ARCH-1");
 }
 
@@ -1213,7 +1213,9 @@ async fn load_onboarding_draft_parses_present_draft() {
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let draft = super::load_onboarding_draft().await;
 
-    let draft = draft.expect("a present draft parses");
+    let draft = draft
+        .expect("a present draft loads")
+        .expect("a present draft parses");
     assert_eq!(draft.scan.files_scanned, 3);
     assert_eq!(draft.viewed_repo, "owner/a");
 }
@@ -1234,7 +1236,10 @@ async fn load_onboarding_draft_none_when_null() {
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let draft = super::load_onboarding_draft().await;
 
-    assert!(draft.is_none(), "a null body means no draft in progress");
+    assert!(
+        draft.expect("a null body loads").is_none(),
+        "a null body means no draft in progress"
+    );
 }
 
 #[tokio::test]
@@ -1312,8 +1317,6 @@ async fn audit_against_posts_full_request_body() {
         .and(body_json(serde_json::json!({
             "repos": ["owner/a"],
             "rules": [ { "id": "R1", "directive": "do it", "repos": ["owner/a"] } ],
-            "model": "claude-opus-5",
-            "calibration_model": "claude-sonnet-4",
             "mode": "parallel",
             "incremental": true,
             "deep": false,
@@ -1338,8 +1341,6 @@ async fn audit_against_posts_full_request_body() {
     let report = super::audit_against(
         &["owner/a".to_string()],
         &rules,
-        "claude-opus-5",
-        "claude-sonnet-4",
         "parallel",
         true,
         false,
@@ -1408,8 +1409,6 @@ async fn audit_job_start_returns_job_id() {
         .and(body_json(serde_json::json!({
             "repos": ["owner/a"],
             "rules": [ { "id": "R1", "directive": "d", "repos": [] } ],
-            "model": "m",
-            "calibration_model": "c",
             "mode": "job",
             "incremental": false,
             "deep": false,
@@ -1434,8 +1433,6 @@ async fn audit_job_start_returns_job_id() {
     let jid = super::audit_job_start(
         &["owner/a".to_string()],
         &rules,
-        "m",
-        "c",
         "job",
         false,
         false,

@@ -21,6 +21,28 @@ use camerata_server::report_export::{
 };
 use serde_json::Value;
 
+/// The release gate refuses a critical or unsure finding with no decision of its own. These
+/// fixtures are about the PDF's text, so each such finding carries the reviewer's decision.
+fn decided_for_the_gate(
+    sealed: &SealedReport,
+) -> HashMap<String, camerata_server::report_export::DispositionWire> {
+    sealed
+        .findings
+        .iter()
+        .filter(|f| camerata_server::release_gate::needs_decision::why(f).is_some())
+        .map(|f| {
+            (
+                camerata_server::report_export::finding_key(f),
+                camerata_server::report_export::DispositionWire {
+                    state: "Confirmed".to_string(),
+                    reason: "read in person".to_string(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect()
+}
+
 fn typst_on_path() -> bool {
     camerata_test_env::typst_on_path()
 }
@@ -136,7 +158,10 @@ async fn pdf_text_contains_the_redacted_form_and_never_the_value() {
     }
     let sealed = report_with_one_finding_per_shape();
     let package = build_product_package(
-        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &sealed,
+            &decided_for_the_gate(&sealed),
+        ),
         None,
         &client_options(),
     )
@@ -257,8 +282,9 @@ async fn the_rendered_pdf_text_names_no_review_time_data() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
+    let decided = decided_for_the_gate(&sealed);
     let package = build_product_package(
-        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &decided),
         None,
         &client_options(),
     )
@@ -314,7 +340,10 @@ async fn every_rendered_page_carries_the_confidentiality_line() {
     }
     let sealed = report_with_one_finding_per_shape();
     let package = build_product_package(
-        &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        &camerata_server::report_export::ReviewedReport::unreviewed(
+            &sealed,
+            &decided_for_the_gate(&sealed),
+        ),
         None,
         &client_options(),
     )

@@ -1625,11 +1625,15 @@ impl AuditReq {
             .map(super::projects::clone_judge_model_of)
             .filter(|m| !m.is_empty());
         let mut controls = self.run_controls(fix_model, judge);
-        if let Some(project) = project {
-            controls.review = project.review.clone();
-            controls.finder = project.review.finder.into();
-            controls.fill_models_from_project(&project.review);
-        }
+        // With no project the run is a new project's: the agent finder on Opus 5.5, not the
+        // library's engine default (the routes treat no project as a client engagement).
+        let review = project
+            .map_or_else(camerata_api_types::project::ReviewSettings::default, |p| {
+                p.review.clone()
+            });
+        controls.review = review.clone();
+        controls.finder = review.finder.into();
+        controls.fill_models_from_project(&review);
         controls
     }
 }

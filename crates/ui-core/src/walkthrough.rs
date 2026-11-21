@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 pub mod target {
     /// The "Create a project" block on the projects home.
     pub const PROJECT_NEW: &str = "project-new";
-    /// The "Onboard repos" tab, present only inside an open project.
+    /// The "Inspection" tab, present only inside an open project.
     pub const NAV_ONBOARD: &str = "nav-onboard";
     /// The button that browses for the client repository.
     pub const REPO_ADD: &str = "repo-add";
@@ -94,7 +94,7 @@ pub enum Screen {
     Projects,
     /// The top bar inside an open project.
     ProjectNav,
-    /// The Onboard repos tab before a scan.
+    /// The Inspection tab before rules are proposed.
     Onboard,
     /// The scan result: proposed rules, the audit controls, the Queue, the export.
     Scan,
@@ -150,7 +150,7 @@ pub const STEPS: [Step; 12] = [
         screen: Screen::Onboard,
         title: "Add the client repository",
         body: "Browse to the local copy of the client's repository, which Camerata only reads. That copy is deleted after delivery.",
-        how_to_get_there: "Open the project, press Onboard repos in the top bar, and choose Brownfield.",
+        how_to_get_there: "Open the project, press Inspection in the top bar, and choose Brownfield.",
         advance: Advance::Click,
         focus_on_exit: ExitFocus::Control,
     },
@@ -180,7 +180,7 @@ pub const STEPS: [Step; 12] = [
         screen: Screen::Scan,
         title: "Stack rules",
         body: "These rules were picked for the stack Camerata found, and each one says why. Leave the defaults unless you have a reason.",
-        how_to_get_there: "Open Onboard repos and scan the repository to see the proposed rules.",
+        how_to_get_there: "Open Inspection and press Propose rules to see the proposed rules.",
         advance: Advance::Next,
         focus_on_exit: ExitFocus::Control,
     },
@@ -200,7 +200,7 @@ pub const STEPS: [Step; 12] = [
         screen: Screen::Scan,
         title: "Run the inspection",
         body: "Press the highlighted button to start. The progress view shows each pass, and the run can go unattended.",
-        how_to_get_there: "Open Onboard repos and scan the repository. The run button is under the proposed rules.",
+        how_to_get_there: "Open Inspection and press Propose rules. The run button is under the proposed rules.",
         advance: Advance::Click,
         focus_on_exit: ExitFocus::Block,
     },

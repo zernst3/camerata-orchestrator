@@ -16,8 +16,9 @@
 //!
 //! The viewer never has a "current finding" of its own. [`CodeViewerHost`] is handed the
 //! finding the Queue's `RowCursor` is on, and every navigation writes to that cursor. The host
-//! is keyed by the finding's key, so a new finding is a fresh host: scroll, prompts and the
-//! fetch all start clean, and a cached file paints on the first frame.
+//! is keyed by the finding's key AND rendered as a list of one (Dioxus honours `key` only among
+//! the children of a list), so a new finding is a fresh host: scroll, prompts and the fetch all
+//! start clean, and a cached file paints on the first frame.
 //!
 //! ## One disposition path
 //!
@@ -988,6 +989,7 @@ pub(super) fn CodeViewer(
                         },
                         (_, Some(SourceOutcome::NotUtf8(text)))
                         | (_, Some(SourceOutcome::FileMissing(text)))
+                        | (_, Some(SourceOutcome::RepoUnlinked(text)))
                         | (_, Some(SourceOutcome::Unavailable(text))) => rsx! {
                             {note_body(text, floor, false, on_open_modal)}
                         },
@@ -1412,7 +1414,8 @@ pub(super) fn ViewerUndoBar(
 
 /// The viewer's host at the results root. Renders nothing until the Queue has registered a link
 /// and opened the viewer; then it resolves the finding the cursor is on and mounts
-/// [`CodeViewerHost`] on it, keyed by that finding.
+/// [`CodeViewerHost`] on it, keyed by that finding inside a list of one (a lone `key` is
+/// ignored by the differ).
 #[component]
 pub(super) fn ViewerRoot() -> Element {
     let slot = try_use_context::<ViewerSlot>();
@@ -1461,18 +1464,24 @@ pub(super) fn ViewerRoot() -> Element {
             }
         };
     };
+    // `key` is honoured only when the differ compares the children of a list, so the host is
+    // rendered as a list of one: another finding is then a new host, not the old one re-run
+    // with new props (which would keep the first finding's fetch, block and scroll).
+    let host_key = dom_key(&finding_key(&finding));
     rsx! {
-        CodeViewerHost {
-            key: "{dom_key(&finding_key(&finding))}",
-            finding,
-            link,
-            cache,
-            session,
-            history,
-            status,
-            help,
-            hub,
-            on_close,
+        for host_key in [host_key] {
+            CodeViewerHost {
+                key: "{host_key}",
+                finding: finding.clone(),
+                link: link.clone(),
+                cache,
+                session,
+                history,
+                status,
+                help,
+                hub,
+                on_close,
+            }
         }
     }
 }
@@ -1512,7 +1521,8 @@ fn reference_path(finding_path: &str, viewing: Option<&String>) -> Option<String
     viewing.filter(|p| p.as_str() != finding_path).cloned()
 }
 
-/// THE STATEFUL VIEWER. Mounted while the viewer is open, keyed by the focused finding's key.
+/// THE STATEFUL VIEWER. Mounted while the viewer is open, keyed by the focused finding's key in
+/// a list of one (see `ViewerRoot`).
 #[component]
 #[allow(clippy::too_many_lines)]
 pub(super) fn CodeViewerHost(
@@ -1555,8 +1565,8 @@ pub(super) fn CodeViewerHost(
     let mut help = help;
     let toasts = try_use_context::<Signal<Vec<crate::toast::Toast>>>();
 
-    // Per-finding state. The host is keyed by the finding, so all of this starts clean when
-    // the cursor moves.
+    // Per-finding state. `ViewerRoot` mounts a new host (a keyed list of one) for each finding,
+    // so all of this starts clean when the cursor moves.
     let initial_top = scroll_top_for_line(
         violation_line,
         CODE_LINE_H_PX,
@@ -4352,11 +4362,21 @@ mod host_tests {
 
     thread_local! {
         static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
+        /// The project id the mounted viewer's link carries (empty by default).
+        static PROJECT: RefCell<String> = const { RefCell::new(String::new()) };
+        /// The path of the harness's second finding (the first is always `src/x.rs`).
+        static SECOND_PATH: RefCell<String> = RefCell::new("src/x.rs".to_string());
+        /// The commit the harness records for `me/api` (empty: none, so nothing is prefetched).
+        static SHA: RefCell<String> = const { RefCell::new(String::new()) };
     }
 
     fn finding(line: usize) -> FindingView {
+        finding_in("src/x.rs", line)
+    }
+
+    fn finding_in(file: &str, line: usize) -> FindingView {
         serde_json::from_value(serde_json::json!({
-            "repo": "me/api", "path": "src/x.rs", "line": line, "rule_id": "SQL-INJECTION-1",
+            "repo": "me/api", "path": file, "line": line, "rule_id": "SQL-INJECTION-1",
             "severity": "high", "snippet": format!("s{line}"), "detail": "d",
             "status": "active", "kind": "defect"
         }))
@@ -4364,7 +4384,8 @@ mod host_tests {
     }
 
     fn app() -> Element {
-        let all = vec![finding(4), finding(9)];
+        let second = SECOND_PATH.with(|p| p.borrow().clone());
+        let all = vec![finding(4), finding_in(&second, 9)];
         let table_rows: Vec<_> = all
             .iter()
             .map(|f| (chorale_core::RowId::new(), f.clone()))
@@ -4404,9 +4425,16 @@ mod host_tests {
             visible_keys,
             dispositions,
             all_findings: Arc::new(all.clone()),
-            shas: Arc::new(HashMap::new()),
+            shas: Arc::new({
+                let sha = SHA.with(|s| s.borrow().clone());
+                if sha.is_empty() {
+                    HashMap::new()
+                } else {
+                    HashMap::from([("me/api".to_string(), sha)])
+                }
+            }),
             sha_conflicts: Arc::new(HashSet::new()),
-            project_id: String::new(),
+            project_id: PROJECT.with(|p| p.borrow().clone()),
             open,
             undo_entry: use_signal(|| None),
             now_ms: use_signal(|| 0),
@@ -5188,5 +5216,359 @@ mod host_tests {
     fn the_hub_gives_focus_to_the_viewer_exactly_when_it_is_open() {
         assert_eq!(hub_close_focus(true), FocusReturn::Viewer);
         assert_eq!(hub_close_focus(false), FocusReturn::Pane);
+    }
+
+    /// A mounted viewer on the finding `me/api` `src/x.rs`, its source-file answer being `body`
+    /// (and its finding-context answer too).
+    async fn mounted_with_answer(body: serde_json::Value) -> (VirtualDom, MockServer) {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = MockServer::start().await;
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("repo", "me/api"))
+            .respond_with(ok(body.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .respond_with(ok(body))
+            .mount(&server)
+            .await;
+        (VirtualDom::new(app), server)
+    }
+
+    /// The bug (2026-11-20): a project still in onboarding does not list its repo yet, so the
+    /// server answers `repo_unlinked`. The viewer must say so in plain words, never "file not
+    /// found, changed since scan?".
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_finding_whose_repo_is_unlinked_says_so_in_plain_words() {
+        // Both shapes: the server's own reason, and an older or empty one (the UI's words).
+        for (reason, expected) in [
+            (
+                "me/api is not linked to this project, so its code cannot be shown.",
+                "me/api is not linked to this project, so its code cannot be shown.",
+            ),
+            (
+                "me/api has no local folder at /work/me/api. Set its folder in Settings.",
+                "me/api has no local folder at /work/me/api. Set its folder in Settings.",
+            ),
+            (
+                "",
+                "This repo is not linked to this project, or it has no local folder.",
+            ),
+        ] {
+            let (mut vdom, server) = mounted_with_answer(
+                serde_json::json!({"status": "repo_unlinked", "reason": reason}),
+            )
+            .await;
+            let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+            let mut seen = Listeners::default();
+            seen.take(&vdom.rebuild_to_vec());
+            settle(&mut vdom, &mut seen).await;
+            let page = html(&vdom);
+            assert!(page.contains(expected), "{reason:?}: {page}");
+            assert!(!page.contains("file not found"), "{reason:?}: {page}");
+            assert!(!page.contains("changed since scan"), "{reason:?}: {page}");
+            assert!(!page.contains("could not be loaded"), "{reason:?}: {page}");
+            assert!(!page.contains("cv-line"), "no code is shown: {page}");
+        }
+    }
+
+    /// The other path the operator takes: the file is present at the resolved folder.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_finding_whose_file_is_present_shows_its_code_not_a_note() {
+        let (mut vdom, server) =
+            mounted_with_answer(file_body("here", 14, &[(4, "    let q = build_sql(x);")])).await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("build_sql(x)") && page.contains("here 1"),
+            "{page}"
+        );
+        assert!(!page.contains("not linked to this project"), "{page}");
+        assert!(!page.contains("no local folder"), "{page}");
+    }
+
+    /// A file really absent at a resolved folder keeps its own words.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_file_really_absent_keeps_the_file_missing_words() {
+        let (mut vdom, server) = mounted_with_answer(serde_json::json!({
+            "status": "file_missing", "reason": "file not found \u{2014} changed since scan?"
+        }))
+        .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("file not found"), "{page}");
+        assert!(!page.contains("not linked to this project"), "{page}");
+    }
+
+    /// The path the bug lived on: the operator is in a project (a non-empty id). Real key presses
+    /// (`S`, Enter in the prompt, Enter on the hit) open another file of the same repo, which the
+    /// server says is not linked. The request carries the project hint (the mock answers only
+    /// for `project=proj-7`) and the viewer shows the pinned words.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_real_key_press_reaches_the_unlinked_words_through_the_project_hint() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        PROJECT.with(|p| *p.borrow_mut() = "proj-7".to_string());
+        let server = MockServer::start().await;
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("path", "src/x.rs"))
+            .and(query_param("project", "proj-7"))
+            .respond_with(ok(file_body(
+                "here",
+                14,
+                &[(4, "    let q = build_sql(x);")],
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("path", "src/other.rs"))
+            .and(query_param("project", "proj-7"))
+            .respond_with(ok(serde_json::json!({
+                "status": "repo_unlinked",
+                "reason": "me/api is not linked to this project, so its code cannot be shown."
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .respond_with(ok(serde_json::json!({"status": "file_missing"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .respond_with(ok(serde_json::json!({
+                "status": "ok", "source": "git", "symbol": "build_sql", "more": false,
+                "hits": [{"path": "src/other.rs", "line": 3, "text": "build_sql(y)"}]
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        let page = html(&vdom);
+        assert!(page.contains("here 1"), "the first file shows code: {page}");
+        assert!(!page.contains("not linked to this project"), "{page}");
+
+        keydown(&vdom, panel, "s", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, seen.last("keydown"), "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, panel, "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("me/api is not linked to this project, so its code cannot be shown."),
+            "{page}"
+        );
+        assert!(!page.contains("file not found"), "{page}");
+        assert!(!page.contains("changed since scan"), "{page}");
+        // Every request carried the project hint (the mocks above answer nothing without it).
+        let urls: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/api/onboard/source-file")
+            .map(|r| r.url.to_string())
+            .collect();
+        assert!(urls.len() >= 2, "{urls:?}");
+        assert!(
+            urls.iter().all(|u| u.contains("project=proj-7")),
+            "{urls:?}"
+        );
+
+        PROJECT.with(|p| p.borrow_mut().clear());
+    }
+
+    /// The source-file requests the mock saw, as `path` + `around` query pairs.
+    async fn source_requests(server: &MockServer) -> Vec<(String, String)> {
+        let q = |r: &wiremock::Request, k: &str| {
+            r.url
+                .query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_default()
+        };
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .filter(|r| r.url.path() == "/api/onboard/source-file")
+            .map(|r| (q(r, "path"), q(r, "around")))
+            .collect()
+    }
+
+    /// The bug (2026-11-20): `ViewerRoot` keyed the host by the finding, but Dioxus 0.7 reads
+    /// `key` only when diffing a list, so the host kept the first finding's state. Moving with
+    /// `}` to a finding in another file fired no fetch and the viewer sat on "Loading" forever.
+    /// No commit is recorded, so the prefetch cannot paper over it: only the host's own fetch
+    /// can show the second file.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn moving_to_a_finding_in_another_file_fetches_and_shows_that_file() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        SECOND_PATH.with(|p| *p.borrow_mut() = "src/other.rs".to_string());
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        let page = html(&vdom);
+        assert!(page.contains("here 1"), "the first file shows: {page}");
+        assert_eq!(source_requests(&server).await.len(), 1);
+
+        keydown(&vdom, panel, "}", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        SECOND_PATH.with(|p| *p.borrow_mut() = "src/x.rs".to_string());
+        assert!(
+            page.contains("<span>there 1</span>") && !page.contains("<span>here 1</span>"),
+            "the second file's code is shown: {page}"
+        );
+        assert!(!page.contains("Loading"), "{page}");
+        let reqs = source_requests(&server).await;
+        assert!(
+            reqs.iter().any(|(p, a)| p == "src/other.rs" && a == "9"),
+            "a source-file request was made for the second file: {reqs:?}"
+        );
+    }
+
+    /// The same-file move: the second finding's block and position are shown, not the first's.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn moving_within_a_file_shows_the_new_findings_block_and_position() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = MockServer::start().await;
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("around", "4"))
+            .respond_with(ok({
+                let mut b = file_body("here", 14, &[]);
+                b["block"] =
+                    serde_json::json!({"start_line": 2, "end_line": 4, "kind": "function"});
+                b
+            }))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("around", "9"))
+            .respond_with(ok({
+                let mut b = file_body("here", 14, &[]);
+                b["block"] =
+                    serde_json::json!({"start_line": 8, "end_line": 10, "kind": "function"});
+                b
+            }))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .respond_with(ok(serde_json::json!({
+                "status": "ok", "start_line": 8, "kind": "function",
+                "lines": ["a", "b", "c"]
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        let page = html(&vdom);
+        assert!(page.contains("finding 1 of 2 in this file"), "{page}");
+        assert!(band_lines(&page).contains(&2), "{page}");
+
+        keydown(&vdom, panel, "]", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("finding 2 of 2 in this file"), "{page}");
+        let band = band_lines(&page);
+        assert!(
+            band.contains(&9) && !band.contains(&3),
+            "the second finding's block (8 to 10) is banded, not the first's: {band:?}"
+        );
+    }
+
+    /// With commit ids recorded, the next file in the group still loads ahead of the key press,
+    /// and the move to it then paints from the cache without asking again.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn with_commits_the_next_file_is_prefetched_and_the_move_needs_no_new_request() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        SECOND_PATH.with(|p| *p.borrow_mut() = "src/other.rs".to_string());
+        SHA.with(|s| *s.borrow_mut() = "a".repeat(40));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        let ahead = source_requests(&server).await;
+        assert!(
+            ahead.iter().any(|(p, a)| p == "src/other.rs" && a == "9"),
+            "the next file was requested before any key press: {ahead:?}"
+        );
+
+        keydown(&vdom, panel, "}", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        SECOND_PATH.with(|p| *p.borrow_mut() = "src/x.rs".to_string());
+        SHA.with(|s| s.borrow_mut().clear());
+        assert!(page.contains("<span>there 1</span>"), "{page}");
+        let after = source_requests(&server).await;
+        assert_eq!(
+            after.len(),
+            ahead.len(),
+            "the cached file needed no second request: {after:?}"
+        );
+    }
+
+    /// The numbers of the lines the page marks as inside the finding's block.
+    fn band_lines(page: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        for chunk in page.split("<div class=\"cv-line").skip(1) {
+            let head = chunk.split('>').next().unwrap_or("");
+            if head.contains("cv-line-band") {
+                if let Some(i) = chunk.find("here ") {
+                    let n: String = chunk[i + 5..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    if let Ok(n) = n.parse() {
+                        out.push(n);
+                    }
+                }
+            }
+        }
+        out
     }
 }

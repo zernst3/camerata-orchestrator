@@ -1130,6 +1130,7 @@ impl AlternativesAsk<'_> {
             job: route.job,
             checkpoint: checkpoint.as_ref(),
             settings: stage_batch::StageSettings::default(),
+            feedback: None,
         };
         let outcome = stage_batch::run_stage(Stage::Alternatives, &mut call, mode, &ctx).await;
         if let Some((store, skey)) = feedback {

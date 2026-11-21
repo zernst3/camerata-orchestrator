@@ -213,6 +213,110 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
     );
 }
 
+/// The inspect arguments of a floor-only run (the compliance gate blocks the AI review, so no
+/// model is called) over `repo`, writing its zip to `export`.
+fn floor_only_args(repo: &Path, export: &Path) -> InspectArgs {
+    InspectArgs {
+        repo: repo.to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
+        export: export.to_path_buf(),
+        backend: ProjectBackend::Api,
+        batch: false,
+        realtime: false,
+        model: None,
+        calibration_model: None,
+        fix_model: None,
+        clone_judge_model: None,
+        group_review_model: None,
+        dup_check_model: None,
+        escalation_rate: None,
+        escalation_floor: None,
+        full: true,
+        verbose: false,
+        max_cost_usd: None,
+        efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
+        client_engagement: false,
+        run_client_tooling: false,
+        consensus: false,
+        finder: Default::default(),
+    }
+}
+
+fn zip_names(path: &Path) -> Vec<String> {
+    let bytes = std::fs::read(path).expect("read the export zip");
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("the export is a valid zip");
+    (0..archive.len())
+        .map(|i| {
+            archive
+                .by_index(i)
+                .expect("entry")
+                .name()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+/// `CAMERATA_EXPORT_TRIAGE_LOG` no longer adds anything to the package: with it set, the zip has
+/// no triage log and the operator's file is beside it, marked internal. With it unset there is no
+/// such file. Runs the real inspect pipeline (no model call).
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_triage_log_variable_writes_the_operator_file_beside_the_zip_and_never_inside_it() {
+    let _no_dep_audit = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+    if !typst_on_path() {
+        eprintln!("skipping the triage log variable test: typst not on PATH");
+        return;
+    }
+    let beside = |dir: &Path| dir.join("inspect-triage-log-INTERNAL.csv");
+
+    // Set: the file appears beside the zip, the zip carries no log.
+    {
+        let _log = camerata_test_env::EnvGuard::set("CAMERATA_EXPORT_TRIAGE_LOG", "1");
+        let repo = tempfile::tempdir().expect("repo dir");
+        stage_fixture_as_git_repo(repo.path());
+        let out = tempfile::tempdir().expect("export dir");
+        let zip = out.path().join("inspect.zip");
+        run_inspect_with_key_presence(floor_only_args(repo.path(), &zip), false)
+            .await
+            .expect("a floor-only inspection succeeds");
+        let names = zip_names(&zip);
+        assert!(
+            names.iter().all(|n| !n.contains("triage")),
+            "no triage log inside the zip: {names:?}"
+        );
+        let text = std::fs::read_to_string(beside(out.path()))
+            .expect("the operator's triage log is beside the zip");
+        let mut lines = text.lines();
+        assert!(
+            lines
+                .next()
+                .unwrap_or_default()
+                .starts_with(camerata_server::xlsx_export::triage_log::INTERNAL_MARK),
+            "{text}"
+        );
+        assert!(
+            lines.next().unwrap_or_default().starts_with("Rule ID,"),
+            "{text}"
+        );
+    }
+    // Unset: no such file.
+    {
+        let _unset = camerata_test_env::EnvGuard::remove("CAMERATA_EXPORT_TRIAGE_LOG");
+        let repo = tempfile::tempdir().expect("repo dir");
+        stage_fixture_as_git_repo(repo.path());
+        let out = tempfile::tempdir().expect("export dir");
+        let zip = out.path().join("inspect.zip");
+        run_inspect_with_key_presence(floor_only_args(repo.path(), &zip), false)
+            .await
+            .expect("a floor-only inspection succeeds");
+        assert!(!beside(out.path()).exists(), "no log unless asked for");
+    }
+}
+
 /// A bare-minimum synthetic git repo: no planted findings, no SQL-concat pattern anywhere —
 /// unlike `e2e_report_repo` (whose `src/db.rs` deliberately plants a `SEC-NO-RAW-SQL-CONCAT-1`
 /// hit via the gateway REGEX backstop), this fixture must produce ZERO real evidence for that

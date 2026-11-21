@@ -2400,6 +2400,7 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
                 resolved: true,
                 group_review: String::new(),
                 finder: String::new(),
+                finder_model: String::new(),
             },
             ai_scan_key: crate::scan_cache::AiScanKey {
                 audit_model: "claude-a".to_string(),
@@ -3156,6 +3157,22 @@ mod batch_route {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_detail_rewrite_round_shows_a_row_in_agent_activity() {
+        let store = crate::transcript::TranscriptStore::new();
+        let llm = RoleLlm::new("{}", Regen::Writes);
+        let route = StageRoute {
+            batch: false,
+            job: None,
+            feedback: Some((&store, "scan-key")),
+        };
+        let _ = run(&llm, route, None).await;
+        let rows = store.get("scan-key");
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].role, format!("Detail rewrite ({REPO})"));
+        assert_eq!(rows[0].status, "done", "{rows:#?}");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_batch_run_sends_the_detail_rewrites_as_a_batch_and_absorbs_them_as_in_real_time() {
         let real_time = RoleLlm::new("{}", Regen::Writes);
         let (expected, expected_failed) = run(&real_time, StageRoute::default(), None).await;
@@ -3166,6 +3183,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, None).await;
 
@@ -3209,6 +3227,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, None).await;
 
@@ -3241,6 +3260,7 @@ mod batch_route {
         let route = StageRoute {
             batch: true,
             job: None,
+            feedback: None,
         };
         let (out, failed) = run(&seam, route, Some(&meter)).await;
 
@@ -3292,6 +3312,7 @@ mod resume_by_member {
     const BATCH: StageRoute<'static> = StageRoute {
         batch: true,
         job: None,
+        feedback: None,
     };
 
     fn at(line: usize) -> Finding {

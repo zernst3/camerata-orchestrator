@@ -462,7 +462,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      list) and picks the places the architect should read in person, each with one reason from a
      closed list. It never removes a place, never overwrites stage 1's answer (a disagreement is
      stored beside it) and never writes a count: the numbers come from the tree. The review screens call a place a "site". Its model is
-     Claude Fable 5.2 by default, changed only by `--group-review-model` or the project's review
+     Claude Opus 5.5 by default, changed only by `--group-review-model` or the project's review
      settings. In a client engagement it must be an Anthropic API model like every other stage.
    - **Tree.** The operator works through areas (categories), rules and rule groups. A node is either
      an escalation node (it holds a security-class place or a critical or high one, so the operator expects
@@ -1054,8 +1054,12 @@ the evidence check held it: ... It stays out of every export until you decide it
 reasons, in the gate's words: evidence unverified (the quoted code was not found near the cited
 line); junk text (a placeholder, a refusal or an untranslated fragment); put back after the engine
 threw it out, no decision; split out of a ruled-out problem, no decision; merged with no decision
-record; Engine Check said No, no correction yet. A held row is never covered by a batch decision.
-Decide it by name to release it. When the gate refuses an export, the export area shows the list
+record; Engine Check said No, no correction yet; shown at critical severity or marked unsure, with no
+decision. A held row is never covered by a batch decision. Decide it by name to release it.
+Changing a row's severity yourself (in Review, or as an Engine Check correction) is a decision:
+the row is released whichever way the severity moved. The workbook's Decision so far column reads
+"Severity set by the reviewer" for it, and the Reviewer decisions sheet records it. Editing its
+wording or location is not a decision. When the gate refuses an export, the export area shows the list
 ("Export blocked: N rows need a decision before the package can be built.") with one line per row
 (the word `held`, the place, the rule, the reason) and an **open** button that jumps to the row. A
 group decision that is missing records for some of its sites shows as a `group` line: "the decision
@@ -1249,7 +1253,7 @@ Everything after the finder is the same for both: the possible-duplicate check, 
   is picked, and it can be changed only while no run is in flight. The **Review** button appears once a
   scan has produced a result. A deterministic-only scan (untick **AI architectural review**) calls no
   model, so it can be used to get to the Review screen before the first paid scan.
-- **On the command line:** `camerata inspect --finder agent` (the default is `engine`). `--finder-model
+- **On the command line:** `camerata inspect` (the default finder is `agent`; `--finder engine` picks the scan passes instead). `--finder-model
   <ID>` sets its model. The command line refuses `--finder agent` together with `--consensus`, and
   refuses an incremental re-inspection ("--finder agent needs a full inspection ... Pass --full"), so
   add `--full` when an earlier inspection of the same code exists. The app does not show that refusal;
@@ -1387,9 +1391,9 @@ automatically.
 |---|---|---|---|
 | **Scan model** | The engine finder's scan passes. With the agent finder it is not used for finding. | Claude Sonnet 5.5 | no (always set) |
 | **Calibration (stage 1)** | Rates each place: real or not, severity, effort, a reason. Note: "per site, batched". Engine finder only. | Claude Opus 5.5 | no |
-| **Group review (stage 2)** | The group reviewer above. Note: "one call per rule group, real time". | Claude Fable 5.2 | no |
+| **Group review (stage 2)** | The group reviewer above. Note: "one call per rule group, real time". | Claude Opus 5.5 | no |
 | **Fix model** | Writes the fix for each problem after review. | Claude Haiku 5.5 (or the calibration model when the `fix_on_haiku` measure is off) | yes |
-| **Finder model** | The agent finder's model. Note: "used when the finder is agent". | Claude Fable 5.2 | yes: "not set: Claude Fable 5.2" |
+| **Finder model** | The agent finder's model. Note: "used when the finder is agent". | Claude Opus 5.5 | yes: "not set: Claude Opus 5.5" |
 | **Duplicate check** | The model that checks each candidate pair of problems for the Possible duplicate hint (is it the same flaw written twice?). | Claude Sonnet 5.5 | yes: "not set: Claude Sonnet 5.5" |
 | **Clone judge** | The duplicate-code checker, which judges code the clone rules flagged. It runs only when a clone rule is selected. | The project's fast model band (Claude Haiku 5.5 unless changed) | yes: "not set: the project's fast tier model" |
 
@@ -1433,7 +1437,7 @@ OpenRouter id cannot slip through when a model list is empty.
 
 **The same run for an internal session (the operator's own development).** Project **Settings**:
 **Backend** CLI and **Client engagement** off. Pieces run one at a time on the CLI, so it is slower.
-Claude Code must be new enough for the models named (`claude-fable-5-2` needs 2.1.290 or newer; see §22).
+Claude Code must be new enough for the models a run calls (a model such as `claude-fable-5-2` needs 2.1.290 or newer; see §22). The built-in defaults are Opus 5.5 and Sonnet 5.5.
 Then Review > Settings: **Finder** Agent, **Finder model** and **Group review (stage 2)** Claude Opus
 5.5, then tick **Full scan** and run.
 
@@ -2569,7 +2573,7 @@ Which `claude` the cli backend runs: every cli call launches the program named b
 `claude` found on `PATH`. Set it when the copy on `PATH` is old or when several copies are installed.
 Before the first model call on the cli backend, the run reads that program's version
 (`<program> --version`) and checks it against the models the run will call. Some models need a
-newer Claude Code than others: `claude-fable-5-2`, the default group review model, needs 2.1.290 or
+newer Claude Code than others: `claude-fable-5-2`, a model a project can pick, needs 2.1.290 or
 newer. If the version found is too old, the run is refused before any model call, and the message
 names the version found, the version needed, the model and the fix: update Claude Code, or set
 `CAMERATA_CLAUDE_PROGRAM` to a newer binary. If the version cannot be read (the program is missing,
@@ -3313,10 +3317,10 @@ or `--finder-model`), else the project's settings in the app, else the built-in 
 nowhere else: no environment variable and no `.env` file picks a model, so a stray line in a local
 file cannot change which model a run uses or what it costs. In the app there are no flags, so the
 project's setting, else the built-in default, applies. The built-in defaults are Claude Sonnet 5.5 for the
-scan, Claude Opus 5.5 for calibration (stage 1), Claude Fable 5.2 for the group reviewer (stage 2) and
+scan, Claude Opus 5.5 for calibration (stage 1), Claude Opus 5.5 for the group reviewer (stage 2) and
 for the agent finder, Claude Sonnet 5.5 for the possible-duplicate check, Claude Haiku 5.5 for the fix
 wording (unless the `fix_on_haiku` measure is off) and, for the duplicate-code judge (the clone judge),
-the project's fast model band (Claude Haiku 5.5 unless the project's fast band says otherwise). A project saved before a model setting existed opens with these built-in defaults.
+the project's fast model band (Claude Haiku 5.5 unless the project's fast band says otherwise). A project saved before a model setting existed opens with these built-in defaults, except the finder: a project saved before the finder setting existed stays on Engine, and a new project starts on Agent.
 The review screen's Settings lane shows every one of these rows (§3a, "The Settings lane").
 
 #### L3 AI code review

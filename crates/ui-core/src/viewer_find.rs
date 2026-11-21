@@ -358,6 +358,9 @@ impl SymbolRefsView {
                 RefsOutcome::Note(self.reason_or("Source deleted, re-fetch to view"))
             }
             "file_missing" => RefsOutcome::Note(self.reason_or("The repo was not found")),
+            "repo_unlinked" => {
+                RefsOutcome::Note(self.reason_or(crate::viewer::REPO_UNLINKED_WORDS))
+            }
             "too_large" => RefsOutcome::Note(self.reason_or("The search took too long")),
             "unavailable" => RefsOutcome::Note(self.reason_or("The search could not run")),
             _ => RefsOutcome::Note(self.reason_or("The references could not be loaded")),
