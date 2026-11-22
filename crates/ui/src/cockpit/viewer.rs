@@ -3988,6 +3988,31 @@ mod network_tests {
 
     #[tokio::test]
     #[serial_test::serial(process_env)]
+    async fn a_missing_repo_with_a_deletion_record_is_said_deleted_with_its_date() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "file_missing", "symbol": "gone",
+                "deleted_at": "2026-10-24T17:40:19Z", "hits": [], "more": false
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let got = fetch_symbol_refs("acme/app", "gone", None, None)
+            .await
+            .unwrap();
+        match got.outcome() {
+            RefsOutcome::Note(t) => {
+                assert!(t.contains("deleted") && t.contains("24 Oct 2026"), "{t}");
+                assert!(!t.contains("was not found"), "{t}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn a_symbol_search_the_server_does_not_answer_is_none() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))

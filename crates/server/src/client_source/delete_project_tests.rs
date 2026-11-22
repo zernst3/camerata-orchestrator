@@ -783,7 +783,6 @@ async fn a_failed_session_removal_is_found_again_by_the_retry() {
 async fn a_write_that_fails_is_reported_failed_not_removed_and_a_retry_succeeds() {
     for (file, category) in [
         ("scan-cache.json", "scan cache entry"),
-        ("onboarding-draft.json", "onboarding draft"),
         ("uow.json", "development console record"),
         ("projects.json", "project record"),
     ] {
@@ -1274,18 +1273,23 @@ async fn a_set_aside_unreadable_draft_is_listed_as_a_leftover_and_never_removed(
 }
 
 #[tokio::test]
-async fn a_cleared_projects_deletion_leaves_its_id_nowhere_in_the_draft_file_or_its_bak() {
+async fn a_cleared_projects_deletion_leaves_nothing_of_it_in_the_draft_folder() {
     let w = world().await;
     let fx = &w.fx;
     // The architect started over: no draft, but a discard stamp for the project.
     fx.state
         .draft
         .save(&fx.project_id, serde_json::json!({"scan": 1}));
+    fx.state.draft.save(&fx.project_id, serde_json::json!({"scan": 2}));
     fx.state.draft.clear(&fx.project_id);
     fx.state
         .draft
         .save("other-project", serde_json::json!({"scan": 2}));
-    let file = fx.root.join("data").join("onboarding-draft.json");
+    let file = fx
+        .state
+        .draft
+        .project_file(&fx.project_id)
+        .expect("a data folder");
     assert!(
         std::fs::read_to_string(&file)
             .unwrap()
@@ -1298,18 +1302,62 @@ async fn a_cleared_projects_deletion_leaves_its_id_nowhere_in_the_draft_file_or_
         .unwrap();
     assert!(!out.partial, "{:?}", out.record.items);
 
-    for f in ["onboarding-draft.json", "onboarding-draft.json.bak"] {
-        let text = std::fs::read_to_string(fx.root.join("data").join(f)).unwrap_or_default();
-        assert!(
-            !text.contains(&fx.project_id),
-            "{f} still names the project: {text}"
-        );
-    }
-    let text = std::fs::read_to_string(&file).unwrap();
+    let left: Vec<String> = std::fs::read_dir(fx.root.join("data"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with("onboarding-draft") && n.contains(&fx.project_id))
+        .collect();
+    assert!(left.is_empty(), "draft files of the project remain: {left:?}");
+    let other = fx
+        .state
+        .draft
+        .project_file("other-project")
+        .expect("a data folder");
     assert!(
-        text.contains("other-project"),
+        std::fs::read_to_string(other).unwrap().contains("other-project"),
         "another project's draft is kept"
     );
+}
+
+#[tokio::test]
+async fn a_set_aside_draft_of_the_project_is_removed_with_it_and_a_failure_is_retried() {
+    let w = world().await;
+    let fx = &w.fx;
+    let file = fx
+        .state
+        .draft
+        .project_file(&fx.project_id)
+        .expect("a data folder");
+    let mut aside = file.clone().into_os_string();
+    aside.push(".unreadable-1700000000");
+    let aside = PathBuf::from(aside);
+    std::fs::write(&aside, "{ torn, this project's").unwrap();
+    // A second set-aside name that cannot be removed as a file: the draft step fails, and
+    // nothing of the draft is reported removed.
+    let mut stuck = file.clone().into_os_string();
+    stuck.push(".unreadable-1700000001");
+    let stuck = PathBuf::from(stuck);
+    std::fs::create_dir(&stuck).unwrap();
+
+    let first = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+    assert!(first.partial, "{:?}", first.record.items);
+    assert!(
+        first.record.items.iter().any(|i| i.category == "onboarding draft"
+            && matches!(i.outcome, super::PurgeOutcome::Failed { .. })),
+        "{:?}",
+        first.record.items
+    );
+    assert!(fx.state.projects.get(&fx.project_id).is_some());
+
+    std::fs::remove_dir(&stuck).unwrap();
+    let second = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+    assert!(!second.partial, "{:?}", second.record.items);
+    assert!(!aside.exists() && !file.exists(), "every draft file is gone");
 }
 
 // ── a checkout is used by a project through its repos OR through its inspections ────────────

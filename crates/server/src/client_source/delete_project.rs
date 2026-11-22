@@ -609,42 +609,69 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         );
     }
     let draft_bytes = state.draft.stored_bytes(&project.id);
-    if draft_bytes > 0 || state.draft.holds_project(&project.id) || in_file("onboarding-draft.json")
-    {
+    let draft_files = state.draft.files_of(&project.id);
+    if draft_bytes > 0 || state.draft.holds_project(&project.id) || !draft_files.is_empty() {
+        let source = state
+            .draft
+            .project_file(&project.id)
+            .map_or_else(
+                || format!("onboarding-draft.json#{}", project.id),
+                |f| f.display().to_string(),
+            );
         add(
             &mut extras,
             step(
                 "onboarding draft",
-                format!("onboarding-draft.json#{}", project.id),
-                0,
+                source,
+                draft_files.len() as u64,
                 draft_bytes,
                 Action::Draft,
             ),
         );
     }
 
-    // Draft files set aside because they could not be read: they name no project, so Camerata
-    // cannot tell whose they are. They are never removed here; each is listed as a leftover that
-    // may hold this project's data.
+    // Each project's draft has its own file, removed above with its `.bak` and set-aside copies.
+    // What stays are the shared files from before that split: the shared file and its `.bak`
+    // (when a start has not migrated them yet), the one-time backup a migration keeps, and any
+    // shared file set aside because it could not be read. A shared file that cannot be split by
+    // project is never removed here; each is listed as a leftover when it may hold this
+    // project's data.
     if let Ok(read) = std::fs::read_dir(&data) {
-        let mut aside: Vec<PathBuf> = read
+        let mut shared: Vec<PathBuf> = read
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
                 p.file_name().is_some_and(|n| {
-                    n.to_string_lossy()
-                        .starts_with("onboarding-draft.json.unreadable-")
+                    let n = n.to_string_lossy();
+                    n == "onboarding-draft.json"
+                        || n == "onboarding-draft.json.bak"
+                        || n.starts_with("onboarding-draft.json.shared-backup")
+                        || n.starts_with("onboarding-draft.json.unreadable-")
                 })
             })
             .collect();
-        aside.sort();
-        for p in aside {
+        shared.sort();
+        for p in shared {
+            let unreadable = p
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().contains(".unreadable-"));
+            let names_project = std::fs::read(&p)
+                .map_or(true, |bytes| String::from_utf8_lossy(&bytes).contains(&project.id));
+            if !unreadable && !names_project {
+                continue;
+            }
+            let why = if unreadable {
+                "an onboarding draft file Camerata could not read and set aside; it names no \
+                 project, so it may include this project's data. It is not deleted: check it by \
+                 hand"
+            } else {
+                "a shared onboarding draft file from before each project had its own draft \
+                 file (kept as the one-time backup of that change); it holds this project's \
+                 draft. It is not deleted: check it by hand"
+            };
             kept.push(KeptItem {
                 what: p.display().to_string(),
-                why: "an onboarding draft file Camerata could not read and set aside; it names \
-                      no project, so it may include this project's data. It is not deleted: \
-                      check it by hand"
-                    .to_string(),
+                why: why.to_string(),
             });
         }
     }
@@ -1157,7 +1184,13 @@ pub async fn delete_all(
             Action::Draft => {
                 item.outcome = match state.draft.clear_checked(&project.id) {
                     Ok(()) => PurgeOutcome::Removed,
-                    Err(e) => failed(&data.join("onboarding-draft.json"), &e),
+                    Err(e) => failed(
+                        &state
+                            .draft
+                            .project_file(&project.id)
+                            .unwrap_or_else(|| data.join("onboarding-draft.json")),
+                        &e,
+                    ),
                 };
             }
             Action::Dev(dev, ids) => {
