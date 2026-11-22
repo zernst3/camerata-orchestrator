@@ -649,8 +649,10 @@ pub(super) fn apply_repo_scope(
 /// `crates/server/src/onboard/propose.rs::propose_rules`.
 /// Pure, so it is unit-testable without a Dioxus context.
 pub(super) fn is_inline_only_rule_id(rule_id: &str) -> bool {
-    rule_id.starts_with("SEC-")
-        || rule_id == "ARCH-NO-SECRETS-IN-URL-1"
+    // A bare `SEC-` prefix is not enough: model-read security rules such as
+    // SEC-NO-UNSAFE-HTML-SINK-1 are real corpus rules. The floor ids live in ui-core and the
+    // server pins them equal to `onboard::AUDIT_RULES`.
+    camerata_ui_core::rules::INLINE_AUDIT_RULE_IDS.contains(&rule_id)
         || rule_id == "INTEGRATION-API-CONTRACT-1"
         || rule_id == "PROCESS-CONVENTIONAL-COMMIT-1"
 }
@@ -1192,9 +1194,9 @@ pub(super) fn ProjectRulesTable(
                     //
                     // When `row.corpus` is None we are in one of two cases, distinguished
                     // by `is_inline_only_rule_id`:
-                    //   * a TRULY inline rule (SEC-*, ARCH-NO-SECRETS-IN-URL-1,
+                    //   * a TRULY inline rule (the AUDIT_RULES floor ids, ARCH-NO-SECRETS-IN-URL-1,
                     //     INTEGRATION-API-CONTRACT-1, PROCESS-CONVENTIONAL-COMMIT-1) that has
-                    //     no corpus TOML by design — a single-variant stub is correct;
+                    //     joined as a single-variant stub when the corpus is absent;
                     //   * a real corpus rule whose corpus simply hasn't loaded yet — we must
                     //     NOT pretend it is a single-variant rule. Surface a clear "still
                     //     loading" title with no fabricated decision so the architect knows
@@ -5978,11 +5980,20 @@ mod tests {
 
     #[test]
     fn inline_only_true_for_security_floor_rules() {
-        // Every AUDIT_RULES id is inline (no corpus TOML by design).
+        // Every AUDIT_RULES id is inline (joined as a single-variant stub when the corpus is absent).
         assert!(is_inline_only_rule_id("SEC-NO-HARDCODED-SECRETS-1"));
         assert!(is_inline_only_rule_id("SEC-NO-RAW-SQL-CONCAT-1"));
         assert!(is_inline_only_rule_id("SEC-NO-UNSAFE-DESERIALIZATION-1"));
         assert!(is_inline_only_rule_id("ARCH-NO-SECRETS-IN-URL-1"));
+    }
+
+    #[test]
+    fn inline_only_false_for_model_read_sec_rules_that_live_in_the_corpus() {
+        // A `SEC-` prefix does not make a rule inline: these are real corpus TOML files read
+        // by the model, so a missing corpus join means the corpus has not loaded yet.
+        assert!(!is_inline_only_rule_id("SEC-NO-UNSAFE-HTML-SINK-1"));
+        assert!(!is_inline_only_rule_id("SEC-CSRF-SERVER-RENDERED-FORMS-1"));
+        assert!(!is_inline_only_rule_id("SEC-NO-OPEN-REDIRECT-1"));
     }
 
     #[test]

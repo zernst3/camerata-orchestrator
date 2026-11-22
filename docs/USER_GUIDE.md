@@ -1577,7 +1577,7 @@ Two tables:
 - **Project rules**: the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules**: the full corpus (**446 rules across 22 domains** as of 2026-11-15: Rust,
+- **All rules**: the full corpus (**447 rules across 22 domains** as of 2026-11-15: Rust,
   Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
   always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
   shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
@@ -1610,7 +1610,7 @@ meant a client report could open its healthy list with a rule about how *Camerat
 agents, presented as a verified property of *their* codebase.
 
 Those rules now carry a flag (`inspectable = false`) that separates the two roles. **28 of the
-446 corpus rules are emit-only.** For the operator, that means:
+447 corpus rules are emit-only.** For the operator, that means:
 
 - They are still proposed, still selectable and still written verbatim into the repo's
   `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.

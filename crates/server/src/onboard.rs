@@ -4117,6 +4117,17 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
 mod tests {
     use super::*;
 
+    /// The rules table in the UI keeps its own copy of the floor ids so it can tell an inline
+    /// floor rule from a corpus rule that has not loaded. The two lists must stay equal.
+    #[test]
+    fn the_ui_inline_floor_ids_equal_the_audit_rules() {
+        assert_eq!(
+            camerata_ui_core::rules::INLINE_AUDIT_RULE_IDS,
+            AUDIT_RULES,
+            "update camerata_ui_core::rules::INLINE_AUDIT_RULE_IDS to match onboard::AUDIT_RULES"
+        );
+    }
+
     /// A batch the provider lost, or a submission it may have accepted and orphaned, is spend the
     /// ledger cannot count. The notes about it reach the ledger whether or not a limit was set.
     #[test]
