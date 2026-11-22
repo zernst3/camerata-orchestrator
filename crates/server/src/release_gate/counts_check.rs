@@ -634,11 +634,19 @@ pub(super) fn counts_problems_with(
     }
     let next_steps = &report.methodology.next_steps;
     let expected = counts_prose::decision_sentence(want);
-    if !next_steps.contains(&expected) {
+    if counts_prose::states_decision_count(want, report.review_state) {
+        if !next_steps.contains(&expected) {
+            problems.push(problem(
+                "PDF data",
+                "methodology.next_steps",
+                format!("the next steps do not state {expected:?}; they read {next_steps:?}"),
+            ));
+        }
+    } else if next_steps.contains("reviewer's decision") || next_steps.contains("so far") {
         problems.push(problem(
             "PDF data",
             "methodology.next_steps",
-            format!("the next steps do not state {expected:?}; they read {next_steps:?}"),
+            format!("a released package's next steps must not state a decision count or say \"so far\"; they read {next_steps:?}"),
         ));
     }
 
