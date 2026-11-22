@@ -14,6 +14,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // Phase 2 audit result (findings against the selected rules); None until the
     // architect picks rules and runs the audit.
     let mut audit = use_signal(|| Option::<ScanReportView>::None);
+    // The inspection this screen shows, for what has to replace it from outside the screen's own
+    // flow (the click tests swap it, as a new inspection does).
+    use_context_provider(|| InspectionSignal(audit));
     let mut auditing = use_signal(|| false);
     // The model registry: prices for the Engine finder's estimate. The inspection's models are
     // the PROJECT's (Inspection settings); this screen picks none of them.
@@ -468,6 +471,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // ruling (the review counter), so a reload never loses one.
     let rulings_res = {
         use_resource(move || {
+            // A new inspection in this screen has its own rulings: read them again.
+            let _ = audit.read().as_ref().and_then(|a| a.run_id.clone());
             let _ = review_refresh.read();
             // Read inside the resource, so it runs again once the project is known.
             let pid = live_project
@@ -477,13 +482,15 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 .unwrap_or_default();
             async move {
                 if pid.is_empty() {
-                    None
+                    Some(Vec::new())
                 } else {
                     super::wire::fetch_rulings(&pid).await
                 }
             }
         })
     };
+    // The server could not be asked for the rulings: the panel says so, not "No choice yet".
+    let rulings_unread = matches!(&*rulings_res.read(), Some(None));
     // The INSPECTION's convention records (the scan report this screen opened on is the phase-1
     // scan, which holds none) with those rulings shown on them.
     let convention_records: Vec<camerata_api_types::audit::RuleConvention> = {
@@ -1982,6 +1989,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                     NoConventionPanel {
                         findings: findings_on_surface(&findings, KindSurface::NoConvention),
                         conventions: convention_records.clone(),
+                        rulings_unread,
                         on_ruling: {
                             let project_id = project_id.clone();
                             Callback::new(move |(repo, rule, action): (String, String, super::queue_table::RulingAction)| {
@@ -2301,3 +2309,7 @@ async fn rule_on(
     refresh += 1;
     Ok(())
 }
+
+/// The screen's inspection signal, shared as context.
+#[derive(Clone, Copy)]
+pub(in crate::cockpit) struct InspectionSignal(pub Signal<Option<ScanReportView>>);

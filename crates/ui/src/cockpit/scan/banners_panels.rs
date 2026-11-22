@@ -804,6 +804,9 @@ pub(in crate::cockpit) struct RecommendationPick {
     pub option_id: Option<String>,
 }
 
+/// What a row says when the server could not be asked what stands.
+const RULINGS_UNREAD: &str = "Rulings could not be read. Reload to try again.";
+
 /// What a split row with no convention record says: it cannot be ruled on from here.
 const NO_RECORD_NOTE: &str =
     "This scan holds no record of this rule's options, so it cannot be ruled on here.";
@@ -853,6 +856,9 @@ pub(in crate::cockpit) fn NoConventionPanel(
     /// is ruled on through the standards routes, not by a local pick that records nothing.
     #[props(default)]
     conventions: Vec<camerata_api_types::audit::RuleConvention>,
+    /// The server could not be asked for the rulings, so no row can say what stands.
+    #[props(default)]
+    rulings_unread: bool,
     /// The reviewer ruled on a rule: (repo, rule id, what they asked).
     #[props(default)]
     on_ruling: Callback<(String, String, super::queue_table::RulingAction)>,
@@ -927,7 +933,7 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                                     span {
                                                         class: if state.is_decided() { "adopt-state on" } else { "adopt-state off" },
                                                         "data-control": "state",
-                                                        "{state.text()}"
+                                                        if rulings_unread { "{RULINGS_UNREAD}" } else { "{state.text()}" }
                                                     }
                                                     button {
                                                         class: "rule-hub-link kind-panel-rule",
@@ -987,7 +993,7 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                                             "Withdraw"
                                                         }
                                                     }
-                                                    if !state.is_decided() {
+                                                    if !state.is_decided() && !rulings_unread {
                                                         p { class: "adopt-effect", "{camerata_ui_core::convention_view::NEEDS_DECISION}" }
                                                     }
                                                 }

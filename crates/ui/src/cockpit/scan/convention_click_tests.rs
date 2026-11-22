@@ -305,7 +305,13 @@ impl wiremock::Respond for RulingPost {
     }
 }
 
+/// Set by a test to make the server fail every read of the rulings.
+static RULINGS_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn rulings_get(_: &Request) -> ResponseTemplate {
+    if RULINGS_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+        return ResponseTemplate::new(500);
+    }
     let all = RULINGS.lock().expect("rulings").clone();
     ResponseTemplate::new(200).set_body_json(all)
 }
@@ -847,7 +853,7 @@ fn split_record() -> RuleConvention {
 fn split_report_json() -> Value {
     json!({
         "repos": ["me/api"], "files_scanned": 1, "proposed_rules": [],
-        "gated": false,
+        "gated": false, "run_id": "insp-1",
         "provenance": { "audited_refs": [{ "repo": "me/api", "sha": SHA }] },
         "findings": [{
             "repo": "me/api", "path": "", "line": 0, "rule_id": "ARCH-PAR-1",
@@ -1117,4 +1123,66 @@ async fn a_split_row_with_no_record_is_read_only_and_claims_no_choice() {
         "no control and no claim of a choice: {html}"
     );
     assert!(!html.contains("Left to the client"), "{html}");
+}
+
+/// Round 3 item 2: a new inspection in the same mounted screen has its own rulings; the ruling of
+/// the first is not shown on the second.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn a_new_inspection_in_the_same_screen_does_not_show_the_old_ruling() {
+    let server = stub_server().await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    set_inspection(split_report_json());
+    *RULINGS.lock().expect("rulings") = vec![ruling_json(
+        "std-000001",
+        "me/api",
+        "ARCH-PAR-1",
+        json!({"accept": {"option_id": "seq"}}),
+    )];
+    let mut m = Mounted::mount(screen);
+    m.pump(700).await;
+    m.click("data-kind=No convention");
+    m.until("the first inspection's ruling shows", |h| {
+        h.contains("Accepted: Sequential")
+    })
+    .await;
+    // A second inspection replaces it, and the server holds no ruling for it.
+    RULINGS.lock().expect("rulings").clear();
+    let mut second = split_report_json();
+    second["run_id"] = json!("insp-2");
+    let second: ScanReportView = serde_json::from_value(second).expect("the inspection");
+    let audit = m.context::<InspectionSignal>();
+    m.vdom.in_runtime(|| {
+        let mut sig = audit.0;
+        sig.set(Some(second));
+    });
+    let html = m
+        .until("the old ruling is gone", |h| h.contains("No choice yet"))
+        .await;
+    assert!(!html.contains("Accepted: Sequential"), "{html}");
+}
+
+/// Round 3 item 4: when the rulings cannot be read, the panel says so and does not claim "No choice
+/// yet".
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn when_the_rulings_cannot_be_read_the_panel_says_so_and_claims_no_choice() {
+    let server = stub_server().await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    set_inspection(split_report_json());
+    RULINGS_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut m = Mounted::mount(screen);
+    m.pump(700).await;
+    m.click("data-kind=No convention");
+    let html = m
+        .until("the panel says it could not read", |h| {
+            h.contains("Rulings could not be read. Reload to try again.")
+        })
+        .await;
+    RULINGS_DOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        !html.contains("No choice yet")
+            && !html.contains("needs a decision before a client package"),
+        "{html}"
+    );
 }

@@ -325,7 +325,7 @@ fn remainder_row(
 /// belongs to that place and option: a decision on it never moves to another place after the
 /// reviewer rules again.
 fn held_place_snippet(rule: &str, option_label: &str, line: usize) -> String {
-    format!("A listed place could not be checked: {rule}, \"{option_label}\", line {line}")
+    format!("This listed place could not be checked for {rule} (option \"{option_label}\", line {line}).")
 }
 
 /// The problem needing a decision for a listed place that could not be checked against the file.
@@ -469,13 +469,13 @@ pub fn set_aside_rows(c: &RuleConvention, rows: &[Finding], discarded: &[Finding
                 rule_id: "AI-OPEN-QUESTION".to_string(),
                 severity: "low".to_string(),
                 snippet: format!(
-                    "An engine finding at this place was set aside: {}, line {}",
+                    "An automatic check found a problem at this place ({}, line {}). It was held for review because the rule had no convention yet.",
                     c.rule_id, d.line
                 ),
                 detail: format!(
-                    "An engine check found something at this place under {}{}The scan set it aside because the rule had no convention. The reviewer has since chosen \"{}\", and this place was not counted, so it needs a decision.",
-                    c.rule_id,
+                    "An automatic check found a problem at this place{}It was held for review because {} had no convention yet. The convention is now \"{}\", and this place was not counted, so it needs a decision.",
                     crate::ai_audit::HEADLINE_SEP,
+                    c.rule_id,
                     standard.label
                 ),
                 needs_review: true,
@@ -486,7 +486,8 @@ pub fn set_aside_rows(c: &RuleConvention, rows: &[Finding], discarded: &[Finding
             f
         };
         let dup = out.iter().chain(rows).any(|r| {
-            (&r.repo, &r.path, r.line, &r.snippet) == (&row.repo, &row.path, row.line, &row.snippet)
+            (&r.repo, &r.path, r.line, &r.snippet, &r.rule_id)
+                == (&row.repo, &row.path, row.line, &row.snippet, &row.rule_id)
         });
         if !dup {
             out.push(row);
@@ -1760,6 +1761,23 @@ mod tests {
         let back = at(&rows, "elsewhere.yml");
         assert_eq!(back.len(), 1, "{rows:?}");
         assert!(back[0].captures.contains_key(CONVENTION_PLACE_CAPTURE));
+        // Round 3 item 1: another rule's row at the same place and snippet is not this row.
+        let other = Finding {
+            repo: REPO.into(),
+            path: "elsewhere.yml".into(),
+            line: 20,
+            rule_id: "OTHER-1".into(),
+            snippet: "detector row at elsewhere.yml:20".into(),
+            ..Finding::default()
+        };
+        let (mut rows2, mut cs2) = (vec![other], vec![trigger_env()]);
+        resolve_with_discarded(&mut rows2, &mut cs2, &[accept_env("git-ref")], &aside);
+        assert!(
+            rows2
+                .iter()
+                .any(|f| f.rule_id == "ARCH-TRIGGER-ENV-1" && f.path == "elsewhere.yml"),
+            "the departure is not dropped as a duplicate of another rule's row: {rows2:?}"
+        );
         assert!(
             matches!(back[0].kind, Some(FindingKind::Deviation(_))),
             "{:?}",
@@ -1774,6 +1792,17 @@ mod tests {
         assert_eq!(back.len(), 1, "{rows:?}");
         assert_eq!(back[0].rule_id, "AI-OPEN-QUESTION");
         assert!(back[0].needs_review);
+        assert!(
+            back[0]
+                .snippet
+                .starts_with("An automatic check found a problem at this place (")
+                && back[0]
+                    .snippet
+                    .ends_with("It was held for review because the rule had no convention yet."),
+            "{}",
+            back[0].snippet
+        );
+        assert!(!back[0].detail.contains("set aside") && !back[0].snippet.contains("set aside"));
         assert!(!back[0].site_key.is_empty() || !rows.iter().any(|r| !r.site_key.is_empty()));
     }
 
@@ -1799,6 +1828,13 @@ mod tests {
                 .map(|f| f.site_key.clone())
         };
         // Accept git-ref: the place at line 9 (manual) is held. Accept manual: the place at line 12.
+        let held = held_place_rows(&c, &[], "");
+        assert!(
+            held.iter().any(|(_, f)| f.snippet
+                == "This listed place could not be checked for ARCH-TRIGGER-ENV-1 (option \"Manual\", line 9)."),
+            "{:?}",
+            held.iter().map(|(_, f)| f.snippet.clone()).collect::<Vec<_>>()
+        );
         let nine = key_at("git-ref", 9).expect("held at 9");
         let twelve = key_at("manual", 12).expect("held at 12");
         assert_ne!(nine, twelve, "different places never share a key");
