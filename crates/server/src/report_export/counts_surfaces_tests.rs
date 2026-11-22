@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::tests::{empty_opts, finding, report_with};
+use super::tests::{empty_opts, finding, report_with, wire};
 use super::*;
 
 fn json_of(findings: Vec<crate::onboard::Finding>) -> AuditReportJson {
@@ -357,4 +357,47 @@ fn the_more_line_scan_catches_a_planted_line_and_passes_the_allowed_two() {
             .to_string(),
     )];
     assert!(more_line_offenders(&allowed).is_empty());
+}
+
+/// The grid holds as many problems as the counts call for action, with a reviewer's confirmed
+/// info row (the shape that used to drop out of the grid) and with none.
+#[test]
+fn the_grid_total_equals_the_for_action_count_with_and_without_a_confirmed_info_row() {
+    let grid_total = |json: &AuditReportJson| -> usize {
+        json.priority_grid
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter())
+            .map(|c| c.count)
+            .sum()
+    };
+    // No info row: a medium and a high problem.
+    let plain = json_of(vec![
+        finding("SYN-A-1", "src/a.rs", 5, "medium"),
+        finding("SYN-A-1", "src/b.rs", 5, "high"),
+    ]);
+    assert_eq!(plain.counts.problems.for_action, 2, "anti-vacuity");
+    assert_eq!(grid_total(&plain), plain.counts.problems.for_action);
+
+    // A confirmed info row: the counts call it for action (low), so the grid must hold it.
+    let info = finding("SYN-A-1", "src/c.rs", 5, "info");
+    let mut dispositions = HashMap::new();
+    dispositions.insert(finding_key(&info), wire("Confirmed", "", ""));
+    let sealed = report_with(
+        vec![finding("SYN-A-1", "src/a.rs", 5, "medium"), info],
+        vec!["SYN-A-1", "SYN-B-1"],
+    )
+    .seal();
+    let json = build_report_json(
+        &ReviewedReport::unreviewed(&sealed, &dispositions),
+        None,
+        &empty_opts(),
+    );
+    assert_eq!(
+        json.counts.problems.for_action, 2,
+        "anti-vacuity: the confirmed info row is for action: {:?}",
+        json.counts.problems
+    );
+    assert_eq!(json.counts.problems.by_severity.low, 1, "counted as low");
+    assert_eq!(grid_total(&json), json.counts.problems.for_action);
 }

@@ -519,7 +519,11 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson, counts: &ReportCounts) ->
     let present_severities: Vec<&str> = SEVERITY_ORDER
         .iter()
         .copied()
-        .filter(|sev| action_findings.iter().any(|f| f.severity == *sev))
+        .filter(|sev| {
+            action_findings
+                .iter()
+                .any(|f| super::counts::tier_of(&f.severity) == *sev)
+        })
         .collect();
     let present_efforts: Vec<&str> = EFFORT_ORDER
         .iter()
@@ -540,7 +544,8 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson, counts: &ReportCounts) ->
                     let mut findings: Vec<GridTagJson> = action_findings
                         .iter()
                         .filter(|f| {
-                            f.severity == *sev && grid_effort_key(f.effort.as_deref()) == *eff
+                            super::counts::tier_of(&f.severity) == *sev
+                                && grid_effort_key(f.effort.as_deref()) == *eff
                         })
                         .map(|f| GridTagJson {
                             rule_id: f.rule_id.clone(),

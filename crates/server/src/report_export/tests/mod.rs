@@ -96,7 +96,7 @@ pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -
     }
 }
 
-fn wire(state: &str, reason: &str, bucket: &str) -> DispositionWire {
+pub(super) fn wire(state: &str, reason: &str, bucket: &str) -> DispositionWire {
     DispositionWire {
         state: state.to_string(),
         reason: reason.to_string(),
