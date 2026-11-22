@@ -29,7 +29,7 @@ why = """
 SQL-AUDIT-COLUMNS-1 already covers WHO created or last touched an ordinary row (created_by/modified_by-style
 columns), but a column on the mutated row only ever holds the CURRENT state and the LAST writer. For a genuinely
 privileged action (granting a role, changing a permission, adjusting a financial balance, an admin override that
-bypasses a user's own normal constraints) that is not enough: if the row is overwritten again (or deleted), the
+bypasses a user's own normal constraints), that is not enough: if the row is overwritten again (or deleted), the
 fact that the privileged action ever happened, who performed it, what the value was immediately before, and what it
 became, is gone. This is CWE-778 (Insufficient Logging) applied to exactly the class of action where after-the-fact
 accountability matters most: an incident investigation, a dispute over a financial adjustment, or a security review

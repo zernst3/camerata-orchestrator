@@ -41,7 +41,7 @@ bounds the leaked credential's useful life at all. Extending `jwt_expiry` well b
 related effect: it widens the window during which a stolen access token keeps working even after the legitimate
 session would otherwise be forced to re-authenticate.
 
-Neither knob has a single universally-correct value, a low-sensitivity consumer app and a project handling
+Neither knob has a single universally-correct value. A low-sensitivity consumer app and a project handling
 financial or health data have different legitimate risk tolerances, which is why this rule does not assert a hard
 numeric ceiling on `jwt_expiry`. What it asserts is that rotation stays on (there is no legitimate reason to turn it
 off; it exists purely as a security improvement with no functional downside) and that an unusually long

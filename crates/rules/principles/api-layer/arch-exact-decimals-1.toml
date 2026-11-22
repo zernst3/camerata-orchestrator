@@ -44,7 +44,7 @@ why = "Using floating-point everywhere silently loses precision: the failure mod
 id = "monetary-values-are-represented-in-code-as-integ"
 label = "Use integer minor-units"
 directive = "monetary values are represented in code as integer-cents (or minor-unit integers) rather than as the language's exact-decimal type"
-why = "Integer minor-units avoid floating-point imprecision just as well as a decimal type does, integer arithmetic is exact by construction, and are simpler and more wire-compact, at the cost of less readable arithmetic (percentage/division operations need care to avoid re-introducing rounding bugs), no native currency-math support, and friction with multiple minor-unit conventions or sub-cent intermediate calculations. It's a legitimate, currency-specific choice, distinct from (not a violation of) the broader 'use exact decimal types for anything requiring precision' principle, which still applies to non-monetary exact-precision values."
+why = "Integer minor-units avoid floating-point imprecision just as well as a decimal type does (integer arithmetic is exact by construction) and are simpler and more wire-compact, at the cost of less readable arithmetic (percentage/division operations need care to avoid re-introducing rounding bugs), no native currency-math support, and friction with multiple minor-unit conventions or sub-cent intermediate calculations. It's a legitimate, currency-specific choice, distinct from (not a violation of) the broader 'use exact decimal types for anything requiring precision' principle, which still applies to non-monetary exact-precision values."
 
 [[option]]
 id = "monetary-and-quantity-values-are-represented-as"

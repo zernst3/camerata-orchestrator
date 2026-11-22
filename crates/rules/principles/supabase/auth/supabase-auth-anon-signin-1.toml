@@ -35,7 +35,7 @@ you sign up, start a session before committing to an account) but never updates 
 policies to check `is_anonymous` has, often without realizing it, silently extended every one of those policies to
 disposable sessions as well. For capabilities the product genuinely wants restricted to a verified, permanent
 identity (posting under a persistent profile, anything financial, anything the product would be unhappy to see an
-attacker spin up thousands of throwaway sessions to abuse) that is CWE-863 (Incorrect Authorization): the
+attacker spin up thousands of throwaway sessions to abuse), that is CWE-863 (Incorrect Authorization): the
 disposable session receives authorization the design intended only for the permanent one.
 
 Supabase's own recommended fix is exactly this: add a RESTRICTIVE policy (not permissive, since permissive policies

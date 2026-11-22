@@ -41,8 +41,7 @@ project there) can craft a login link that authenticates the victim normally and
 session straight to the attacker's page, which is session/token exfiltration, not merely a confusing bounce to the
 wrong site.
 
-The fix is not to avoid wildcards entirely, a project legitimately needs every preview-deploy URL to work, but to
-scope the wildcard to a domain only the project itself can create subdomains under (a project-owned domain with
+The fix is not to avoid wildcards entirely (a project legitimately needs every preview-deploy URL to work) but to scope the wildcard to a domain only the project itself can create subdomains under (a project-owned domain with
 DNS the project controls), never a shared hosting domain where unrelated accounts can register sibling subdomains,
 and to prefer exact URLs for anything that doesn't genuinely need wildcard coverage.
 """

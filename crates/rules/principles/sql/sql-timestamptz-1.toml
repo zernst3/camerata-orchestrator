@@ -28,7 +28,7 @@ default = "event-timestamps-are-timestamptz"
 why = """
 `timestamp without time zone` stores a date and a wall-clock time with no information about which time zone that
 clock reading was taken in. For a column meant to record WHEN something happened (a row's creation, an order's
-completion, a token's expiry) this is a structural ambiguity, not a minor style issue: the same stored value means
+completion, a token's expiry), this is a structural ambiguity, not a minor style issue: the same stored value means
 a different absolute instant depending on which server's session time zone later reads it back, a team spanning
 multiple time zones (or a server whose configured zone ever changes) can silently compute wrong deltas ('3 hours
 ago' becomes wrong by however many hours separate the writer's and reader's assumed zones), and any comparison

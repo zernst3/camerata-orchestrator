@@ -39,8 +39,7 @@ RAW, unparsed request body. Most frameworks' default body-parsing middleware (JS
 reproduce the exact byte sequence the signature was computed over, which is why this is a common integration bug
 even on teams that intend to verify: the raw-body requirement has to be wired explicitly for the webhook route, and
 a handler that reads `req.body` already parsed by generic middleware cannot verify correctly even if it tries. The
-check belongs at the very top of the handler, before ANY business logic touches the payload, verifying after
-already crediting the account defeats the purpose of verifying at all.
+check belongs at the very top of the handler, before ANY business logic touches the payload. Verifying after already crediting the account defeats the purpose of verifying at all.
 """
 
 [[option]]

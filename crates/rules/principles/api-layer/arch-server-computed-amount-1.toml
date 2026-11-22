@@ -38,8 +38,7 @@ to the endpoint. The fix is the one Stripe's own integration docs describe for a
 authoritative price for each selected product/SKU from its own database or price list, recomputes the total from
 server-held quantities and that authoritative price, independently validates and applies any discount/coupon code
 against server-held rules (expiry, eligibility, stacking limits), and passes ONLY that server-computed number to the
-payment provider's charge/PaymentIntent call. The client-supplied amount, if any arrives, is never read for this
-purpose, at most it is a non-authoritative value the server *compares against* its own computation to abort with a
+payment provider's charge/PaymentIntent call. The client-supplied amount, if any arrives, is never read for this purpose. At most it is a non-authoritative value the server *compares against* its own computation to abort with a
 clear error on mismatch (catching integration bugs), never a value it uses.
 """
 

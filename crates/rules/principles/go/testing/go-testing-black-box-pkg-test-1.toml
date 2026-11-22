@@ -30,7 +30,7 @@ linter = "golangci-lint: testpackage"
 [decision]
 question = "Which package declaration do _test.go files use: package foo or package foo_test?"
 default = "black-box-by-default"
-why = "Using package foo_test for tests exercises only the exported (public) API, which is the contract callers depend on. This prevents tests from coupling to unexported implementation details that may legitimately change during refactoring. When a test needs to reach private state (for example, to validate an internal cache) package foo is acceptable, but this should be deliberate, not the default. The testpackage golangci-lint linter can enforce the black-box preference and require explicit justification for white-box tests."
+why = "Using package foo_test for tests exercises only the exported (public) API, which is the contract callers depend on. This prevents tests from coupling to unexported implementation details that may legitimately change during refactoring. When a test needs to reach private state (for example, to validate an internal cache), package foo is acceptable, but this should be deliberate, not the default. The testpackage golangci-lint linter can enforce the black-box preference and require explicit justification for white-box tests."
 
 [[option]]
 id = "black-box-by-default"

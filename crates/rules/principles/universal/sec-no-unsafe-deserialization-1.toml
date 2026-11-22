@@ -91,7 +91,7 @@ Certain deserializers reconstruct objects in a way that can execute attacker-con
 why = """
 Every unsafe deserializer in the match-set reconstructs an arbitrary object graph from the
 byte stream, executing code during reconstruction. There is no safe way to call them on
-untrusted input regardless of input validation upstream, by the time the attack payload
+untrusted input regardless of input validation upstream. By the time the attack payload
 reaches the deserializer, the execution has already begun. The safe alternatives (json,
 yaml.safe_load, protobuf) impose a schema that prevents arbitrary code paths from being
 invoked. The gate enforces the safe default and requires the code author to document a

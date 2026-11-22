@@ -35,7 +35,7 @@ DELIVERED the token or a user's PII sitting in a shared machine's browser disk c
 person to use that machine, or cached at a CDN edge node if the response's caching headers do not say otherwise.
 
 Browsers and intermediate caches are permitted to cache ANY response with no explicit instruction not to, and the
-specific defaults vary by browser, proxy, and CDN configuration, relying on 'probably nothing caches this by
+specific defaults vary by browser, proxy and CDN configuration. Relying on 'probably nothing caches this by
 default' is relying on an assumption the application has no control over and cannot verify held at every layer the
 response passes through. `no-store` is the one directive that unambiguously means what it says: no cache of any
 kind, private or shared, may retain the response at all. Any login response, token-refresh response, password-reset

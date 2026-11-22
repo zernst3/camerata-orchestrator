@@ -42,7 +42,7 @@ secret (an API key, a password, a session token, an Authorization header, a priv
 sink hands a reader of that log line a LIVE, reusable credential. It is a direct path to full account
 or system compromise, independent of any other control, so it is HIGH. Regulated PII (an SSN, a full
 credit-card/PAN number) reaching a log sink is a real exposure and a compliance violation, but it is not
-itself a reusable credential, a reader of the log cannot authenticate AS anyone with it alone, so it
+itself a reusable credential (a reader of the log cannot authenticate AS anyone with it alone), so it
 is calibrated MEDIUM; treating it as HIGH would inflate it past genuinely credential-bearing findings
 and dull the signal those carry. Both severities fall out of the SAME mechanical defect shape (a
 sensitive-identity value flowing, unredacted, into a logging call) and both are closed the same way: a

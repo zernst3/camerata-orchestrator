@@ -57,7 +57,7 @@ that would otherwise constrain the caller directly. That is precisely the shape 
 Authorization) describes: a privileged operation performed without a server-side check that the
 requester is entitled to perform it. When such a function is additionally GRANTed EXECUTE to
 `anon`, `public`, or `authenticated` (Supabase/PostgREST's own broad, unauthenticated-or-any-
-authenticated-caller roles) it is reachable directly over the PostgREST RPC endpoint by any
+authenticated-caller roles), it is reachable directly over the PostgREST RPC endpoint by any
 caller matching that grant. A mutating SECURITY DEFINER function with no identity/role/ownership
 check inside its own body is therefore a privilege-escalation primitive: the row-level security
 policies that would normally gate a write never run (the DEFINER's privileges bypass them), and

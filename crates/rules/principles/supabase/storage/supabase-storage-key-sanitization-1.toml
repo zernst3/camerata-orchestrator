@@ -29,7 +29,7 @@ default = "server-generates-the-key-rejects-traversal"
 why = """
 A client-supplied filename is attacker-controlled input the moment it reaches a storage path argument. Two distinct
 failure modes follow from trusting it directly: path traversal (a filename containing `../` or an absolute path
-segment resolves to a location in the bucket's key-space the uploader was never meant to reach, in Supabase Storage
+segment resolves to a location in the bucket's key-space the uploader was never meant to reach. In Supabase Storage
 this typically means overwriting or shadowing another user's object if the policy scoping is any looser than
 perfectly precise) and collision/overwrite (two uploads of a file literally named `invoice.pdf` silently clobber each
 other, or an enumerable/predictable key lets one user guess another user's object path even when no traversal

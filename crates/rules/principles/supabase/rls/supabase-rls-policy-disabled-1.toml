@@ -33,8 +33,7 @@ linter = "splinter: policy_exists_rls_disabled"
 question = "Does any table carry CREATE POLICY statements while Row Level Security itself is left disabled?"
 default = "flag-policy-exists-rls-disabled"
 why = """
-This is a more dangerous variant of SUPABASE-RLS-ENABLED-1: the codebase LOOKS protected, a
-developer wrote CREATE POLICY statements that read as access control, but because RLS itself was
+This is a more dangerous variant of SUPABASE-RLS-ENABLED-1: the codebase LOOKS protected: a developer wrote CREATE POLICY statements that read as access control, but because RLS itself was
 never enabled (or was disabled after the policies were written), Postgres never evaluates those
 policies at all. The table is fully open in production while the code review and the migration
 diff both show what appears to be a security control. This exact shape is Splinter's
