@@ -3505,6 +3505,7 @@ pub mod live_run;
 pub(crate) mod liveview;
 mod palette;
 mod pane_context;
+mod place_viewer;
 pub(crate) mod queue;
 mod remediation;
 mod review;

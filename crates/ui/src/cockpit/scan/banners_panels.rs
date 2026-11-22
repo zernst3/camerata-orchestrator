@@ -529,15 +529,15 @@ pub(in crate::cockpit) fn ConventionsPanel(
                                 for c in shown.iter() {
                                     {
                                         let key = c.key();
-                                        let adopted = model.is_adopted(&key);
-                                        let opened = model.was_opened(&key);
+                                        let adopted = model.is_adopted_for(c);
                                         let adoptable = c.is_adoptable();
                                         let req = RuleHubRequest {
                                             repo: c.repo.clone(),
                                             rule_id: c.rule_id.clone(),
                                         };
-                                        let toggle_key = key.clone();
+                                        let opened = model.was_opened(&key);
                                         let open_key = key.clone();
+                                        let toggle_key = key.clone();
                                         rsx! {
                                             li {
                                                 key: "{key}",
@@ -560,6 +560,9 @@ pub(in crate::cockpit) fn ConventionsPanel(
                                                 }
                                                 span { class: "kind-panel-label", "{c.label}" }
                                                 span { class: "adopt-status", "{c.status_line()}" }
+                                                if let Some(line) = c.default_line() {
+                                                    span { class: "adopt-differs", "{line}" }
+                                                }
                                                 if !opened {
                                                     span { class: "adopt-unopened-flag", title: "You have not opened this one.", "not opened" }
                                                 }
@@ -801,6 +804,13 @@ pub(in crate::cockpit) struct RecommendationPick {
     pub option_id: Option<String>,
 }
 
+/// What a row says when the server could not be asked what stands.
+const RULINGS_UNREAD: &str = "Rulings could not be read. Reload to try again.";
+
+/// What a split row with no convention record says: it cannot be ruled on from here.
+const NO_RECORD_NOTE: &str =
+    "This scan holds no record of this rule's options, so it cannot be ruled on here.";
+
 /// NO CONVENTION panel — `NoConvention` rows: the codebase is inconsistent with no clear
 /// majority. Exactly one row per rule (A5.3), listing the options actually observed with their
 /// site counts where the producer could count them.
@@ -842,6 +852,16 @@ pub(in crate::cockpit) fn NoConventionPanel(
     /// A commit is in flight.
     #[props(default)]
     busy: bool,
+    /// The scan's convention records (with the reviewer's rulings applied). A rule with a record
+    /// is ruled on through the standards routes, not by a local pick that records nothing.
+    #[props(default)]
+    conventions: Vec<camerata_api_types::audit::RuleConvention>,
+    /// The server could not be asked for the rulings, so no row can say what stands.
+    #[props(default)]
+    rulings_unread: bool,
+    /// The reviewer ruled on a rule: (repo, rule id, what they asked).
+    #[props(default)]
+    on_ruling: Callback<(String, String, super::queue_table::RulingAction)>,
 ) -> Element {
     let all = split_rules(&findings);
     if all.is_empty() {
@@ -868,7 +888,7 @@ pub(in crate::cockpit) fn NoConventionPanel(
     rsx! {
         div { class: "kind-panel",
             p { class: "kind-panel-sub",
-                "Rules where the codebase is split with no clear majority. Recommending an option is a CLIENT-FACING governance act, not a note to yourself: it is written into that repository's AGENTS.md and governs how future AI agents work on the code. The default is to leave the split as reported and write nothing."
+                "Rules where the codebase is split with no clear majority. Accept an option, or leave the rule to the client: either is a ruling the report carries, and a client package cannot be exported while a split has neither."
             }
             for (repo , rows) in by_repo.iter() {
                 {
@@ -880,14 +900,10 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                 for r in rows.iter() {
                                     {
                                         let key = r.key();
-                                        let picked = model.recommendation(&key).map(str::to_string);
-                                        let opened = model.was_opened(&key);
                                         let req = RuleHubRequest {
                                             repo: r.repo.clone(),
                                             rule_id: r.rule_id.clone(),
                                         };
-                                        let open_key = key.clone();
-                                        let pick_key = key.clone();
                                         let options = r.options.clone();
                                         let summary: Vec<String> = r
                                             .options
@@ -895,68 +911,111 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                             .filter_map(|(id, _, _)| r.option_line(id))
                                             .collect();
                                         let detail = detail_of.get(&key).cloned().unwrap_or_default();
+                                        // A rule with a record is ruled on, so its state is the record's.
+                                        let record = conventions
+                                            .iter()
+                                            .find(|c| c.repo == r.repo && c.rule_id.eq_ignore_ascii_case(&r.rule_id))
+                                            .cloned();
+                                        let ruling = record.as_ref().map(|c| {
+                                            (
+                                                camerata_ui_core::convention_view::split_state(c),
+                                                c.standard.ruling_id.clone(),
+                                                c.standard.option_id.clone(),
+                                            )
+                                        });
+                                        let (repo_for_ruling, rule_for_ruling) = (r.repo.clone(), r.rule_id.clone());
                                         rsx! {
-                                            li {
-                                                key: "{key}",
-                                                class: if picked.is_some() { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
-                                                span {
-                                                    class: if picked.is_some() { "adopt-state on" } else { "adopt-state off" },
-                                                    if picked.is_some() { "Recommend" } else { "Leave as reported" }
-                                                }
-                                                button {
-                                                    class: "rule-hub-link kind-panel-rule",
-                                                    title: "Everything this scan knows about {r.rule_id}.",
-                                                    onclick: move |_| on_open_hub.call(req.clone()),
-                                                    "{r.rule_id}"
-                                                }
-                                                if summary.is_empty() {
-                                                    span { class: "kind-panel-label", "{detail}" }
-                                                } else {
-                                                    span { class: "kind-panel-label", "{summary.join(\" \u{00b7} \")}" }
-                                                }
-                                                if picked.is_some() && !opened {
-                                                    span { class: "adopt-unopened-flag", title: "You have not opened this one.", "not opened" }
-                                                }
-                                                span { class: "kind-panel-repo", "{r.repo}" }
-                                                button {
-                                                    class: "btn-ghost adopt-open",
-                                                    onclick: move |_| on_open.call(open_key.clone()),
-                                                    if opened { "Opened" } else { "Open" }
-                                                }
-                                                select {
-                                                    class: "adopt-pick",
-                                                    // "Leave as reported" is the first entry AND the
-                                                    // default, so the keyboard-first gesture on an
-                                                    // untouched row changes nothing.
-                                                    value: picked.clone().unwrap_or_default(),
-                                                    onchange: move |e| {
-                                                        let v = e.value();
-                                                        on_recommend
-                                                            .call(RecommendationPick {
-                                                                key: pick_key.clone(),
-                                                                option_id: if v.is_empty() { None } else { Some(v) },
-                                                            });
-                                                    },
-                                                    option { value: "", "Leave as reported" }
-                                                    for (id , label , sites) in options.iter() {
-                                                        option { key: "{id}", value: "{id}",
-                                                            if let Some(n) = sites {
-                                                                "Recommend: {label} ({n} sites)"
-                                                            } else {
-                                                                "Recommend: {label}"
+                                            if let Some((state, ruling_id, chosen)) = ruling {
+                                                li {
+                                                    key: "{key}",
+                                                    class: if state.is_decided() { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
+                                                    "data-rule": "{r.rule_id}",
+                                                    span {
+                                                        class: if state.is_decided() { "adopt-state on" } else { "adopt-state off" },
+                                                        "data-control": "state",
+                                                        if rulings_unread { "{RULINGS_UNREAD}" } else { "{state.text()}" }
+                                                    }
+                                                    button {
+                                                        class: "rule-hub-link kind-panel-rule",
+                                                        title: "Everything this scan knows about {r.rule_id}.",
+                                                        onclick: move |_| on_open_hub.call(req.clone()),
+                                                        "{r.rule_id}"
+                                                    }
+                                                    if summary.is_empty() {
+                                                        span { class: "kind-panel-label", "{detail}" }
+                                                    } else {
+                                                        span { class: "kind-panel-label", "{summary.join(\" \u{00b7} \")}" }
+                                                    }
+                                                    span { class: "kind-panel-repo", "{r.repo}" }
+                                                    select {
+                                                        class: "adopt-pick",
+                                                        "data-control": super::queue_table::CTRL_ACCEPT,
+                                                        value: chosen.clone().unwrap_or_default(),
+                                                        onchange: {
+                                                            let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                            move |e| {
+                                                                let v = e.value();
+                                                                if !v.is_empty() {
+                                                                    on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Accept(v)));
+                                                                }
+                                                            }
+                                                        },
+                                                        option { value: "", "Choose an option to accept" }
+                                                        for (id , label , sites) in options.iter() {
+                                                            option { key: "{id}", value: "{id}",
+                                                                if let Some(n) = sites {
+                                                                    "Accept: {label} ({n} sites)"
+                                                                } else {
+                                                                    "Accept: {label}"
+                                                                }
                                                             }
                                                         }
                                                     }
-                                                }
-                                                if opened {
-                                                    div { class: "adopt-detail",
-                                                        p { class: "adopt-detail-line",
-                                                            "Nothing is written for this rule unless you recommend an option. A recommendation becomes {r.repo}'s stated position on {r.rule_id} in its AGENTS.md."
-                                                        }
-                                                        if !detail.is_empty() {
-                                                            p { class: "adopt-detail-line", "{detail}" }
+                                                    p { class: "adopt-effect", "{camerata_ui_core::convention_view::ACCEPT_EFFECT}" }
+                                                    button {
+                                                        class: "btn-ghost rule-hub-leave",
+                                                        "data-control": super::queue_table::CTRL_LEAVE,
+                                                        onclick: {
+                                                            let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                            move |_| on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Leave))
+                                                        },
+                                                        "{camerata_ui_core::convention_view::LEAVE_LABEL}"
+                                                    }
+                                                    p { class: "adopt-effect", "{camerata_ui_core::convention_view::LEAVE_EFFECT}" }
+                                                    if let Some(id) = ruling_id {
+                                                        button {
+                                                            class: "btn-ghost rule-hub-withdraw",
+                                                            "data-control": super::queue_table::CTRL_WITHDRAW,
+                                                            onclick: {
+                                                                let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                                move |_| on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Withdraw(id.clone())))
+                                                            },
+                                                            "Withdraw"
                                                         }
                                                     }
+                                                    if !state.is_decided() && !rulings_unread {
+                                                        p { class: "adopt-effect", "{camerata_ui_core::convention_view::NEEDS_DECISION}" }
+                                                    }
+                                                }
+                                            } else {
+                                                // No record of this rule's options: nothing can be ruled on, and
+                                                // nothing here claims a choice. Read-only.
+                                                li {
+                                                    key: "{key}",
+                                                    class: "kind-panel-row adopt-row skipped",
+                                                    button {
+                                                        class: "rule-hub-link kind-panel-rule",
+                                                        title: "Everything this scan knows about {r.rule_id}.",
+                                                        onclick: move |_| on_open_hub.call(req.clone()),
+                                                        "{r.rule_id}"
+                                                    }
+                                                    if summary.is_empty() {
+                                                        span { class: "kind-panel-label", "{detail}" }
+                                                    } else {
+                                                        span { class: "kind-panel-label", "{summary.join(\" \u{00b7} \")}" }
+                                                    }
+                                                    span { class: "kind-panel-repo", "{r.repo}" }
+                                                    p { class: "adopt-effect", "{NO_RECORD_NOTE}" }
                                                 }
                                             }
                                         }

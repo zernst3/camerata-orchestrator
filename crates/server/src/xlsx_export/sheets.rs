@@ -1094,6 +1094,7 @@ pub(super) fn departures_table(groups: &[DeviationGroupRow], lay: &Layout) -> Ta
     let mut cols = vec![
         Col::plain(v::H_AREA, 18.0),
         Col::plain(v::H_CONVENTION, 44.0),
+        Col::plain(v::H_CONVENTION_SOURCE, 44.0),
         Col::plain(v::H_PLACES_DEPARTING, 14.0),
         Col::plain(v::H_PLACES_CHECKED, 14.0),
         Col::plain(v::H_WORST_SEVERITY, 16.0),
@@ -1112,6 +1113,7 @@ pub(super) fn departures_table(groups: &[DeviationGroupRow], lay: &Layout) -> Ta
         let mut c = RowCells::default();
         c.put(v::H_AREA, Cell::text(&g.category))
             .put(v::H_CONVENTION, Cell::wrap(&g.convention_label))
+            .put(v::H_CONVENTION_SOURCE, Cell::wrap(&g.standard_note))
             .put(v::H_PLACES_DEPARTING, Cell::Num(g.deviating_sites as f64))
             .put(
                 v::H_PLACES_CHECKED,

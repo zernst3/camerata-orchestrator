@@ -1102,6 +1102,12 @@ pub struct ScanReport {
     /// report that speaks per repo reads. `#[serde(default)]` so an older report still loads.
     #[serde(default)]
     pub recommendations_by_repo: Vec<crate::ai_audit::RuleRecommendation>,
+    /// One convention record for each (repo, rule with options) the agent finder judged: the
+    /// options, the places recorded for each, the standard and the finder rows that cite the
+    /// rule (see [`crate::conventions`]). Empty for a report saved before the convention model;
+    /// [`crate::conventions::upgrade`] builds it from the recommendations when one is loaded.
+    #[serde(default)]
+    pub conventions: Vec<camerata_api_types::audit::RuleConvention>,
     /// Where services of one project differ on a rule: the rules violated in at least one repo
     /// and clean in at least one other, as an observation, never a finding (see
     /// [`patterns_matrix`]). Empty for a project of one repo. Rebuilt from the ledger and the
@@ -1332,6 +1338,7 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            conventions: Vec::new(),
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
@@ -1374,6 +1381,7 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            conventions: Vec::new(),
             patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
             volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
@@ -2379,6 +2387,8 @@ pub async fn audit_repos_with_llm_controlled(
     > = std::collections::BTreeMap::new();
     // Repos the scan could not read: see `ScanReport::repos_not_inspected`.
     let mut repos_not_inspected: Vec<(String, String)> = Vec::new();
+    // The convention records of every repo the agent finder judged.
+    let mut all_conventions: Vec<camerata_api_types::audit::RuleConvention> = Vec::new();
     // How many repos had a whole-repo AI failure, beyond the first.
     let mut ai_error_repos = 0usize;
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
@@ -3367,6 +3377,7 @@ pub async fn audit_repos_with_llm_controlled(
                                 // complete (a rule with no answer, a file nobody reviewed): marked
                                 // partial now that their entries exist, so none reads clean.
                                 if let Some(extras) = &finder_extras {
+                                    all_conventions.extend(extras.conventions.iter().cloned());
                                     extras.note_after_rules(&mut pipeline_ledger, spec);
                                     for note in &extras.notes {
                                         meter.record_note(format!("{spec}: {note}"));
@@ -3797,6 +3808,16 @@ pub async fn audit_repos_with_llm_controlled(
         }
     }
     report.recommendations_by_repo = recommendations.into_values().collect();
+    let mut conventions_block =
+        crate::scan_ledger::ConventionsBlock::from_records(&all_conventions, &report.findings);
+    // The independent check: a finder row the records counted must still be a row, an absorbed
+    // place or a set-aside row. A gap is disclosed, never silent (no open violations).
+    let lost_finder_rows = conventions_block.check_finder_rows_kept(
+        &all_conventions,
+        &report.findings,
+        &report.discarded,
+    );
+    report.conventions = all_conventions;
     // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
     // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
     // refuses the export or drops a row; an unaccounted pipeline stage is recorded here so
@@ -3818,6 +3839,25 @@ pub async fn audit_repos_with_llm_controlled(
     // ("N rules could not be mechanically checked...") directly from the ledger instead of
     // from a pile of per-rule `FailedPass` entries.
     let repo_label = report.repos.join(", ");
+    if !lost_finder_rows.is_empty() {
+        all_failed_passes.push(crate::ai_audit::FailedPass {
+            repo: repo_label.clone(),
+            pass: "pipeline integrity (convention accounting)".to_string(),
+            reason: format!(
+                "{} finder row(s) counted for rules with options are in neither the final rows nor \
+                 the rows set aside (first: {} at {}:{})",
+                lost_finder_rows.len(),
+                lost_finder_rows[0].0,
+                lost_finder_rows[0].1,
+                lost_finder_rows[0].2,
+            ),
+            files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
+        });
+    }
     for stage in pipeline_ledger.stages() {
         // A stage that ran over one repo is disclosed against that repo, not the whole project.
         let label = stage.disclosure_label(&repo_label);
@@ -3826,6 +3866,7 @@ pub async fn audit_repos_with_llm_controlled(
         }
     }
     report.ledger = pipeline_ledger;
+    report.ledger.record_conventions(conventions_block);
     if let Some(carry) = incremental_carry.finish() {
         report.ledger.record_incremental(carry);
     }

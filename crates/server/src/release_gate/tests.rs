@@ -41,6 +41,7 @@ pub(crate) fn scan_report() -> ScanReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/portal".to_string()],
@@ -441,6 +442,7 @@ fn release_passes_a_clean_package_and_reports_sixteen_checks() {
             "manifest",
             "provenance",
             "unsynced reviewer changes",
+            "reviewer decision on split rules",
             "one fix per row",
             "client text style",
             "internal notes kept out"
@@ -461,8 +463,8 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
              decision records behind merged rows, reviewer decision on restored findings, \
              reviewer decision on split-out problems, reviewer correction on flagged findings, \
              reviewer decision on critical and unsure findings, confidentiality marking, manifest, \
-             provenance, unsynced reviewer changes, one fix per row, client text style, internal \
-             notes kept out (all passed)"
+             provenance, unsynced reviewer changes, reviewer decision on split rules, one fix per \
+             row, client text style, internal notes kept out (all passed)"
         ),
         "{readme}"
     );
@@ -1257,7 +1259,8 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
              merged rows, reviewer decision on restored findings, reviewer decision on split-out problems, reviewer correction on \
              flagged findings, reviewer decision on critical and unsure findings, \
              confidentiality marking, manifest, provenance, unsynced \
-             reviewer changes, one fix per row, client text style, internal notes kept out"
+             reviewer changes, reviewer decision on split rules, one fix per row, client text \
+             style, internal notes kept out"
         )
     );
 }
@@ -1723,6 +1726,9 @@ fn mixed_scan_report() -> ScanReport {
             assessed_sites: Some(10),
             convention_option_id: Some("versioned".to_string()),
             convention_label: "URI-versioned endpoints".to_string(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         })
     };
     let rows: Vec<(&str, &str, Option<FindingKind>)> = vec![
@@ -1746,6 +1752,8 @@ fn mixed_scan_report() -> ScanReport {
             Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "cursor".to_string(),
                 convention_label: "Cursor pagination".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             })),
         ),
         (
@@ -1753,6 +1761,7 @@ fn mixed_scan_report() -> ScanReport {
             "info",
             Some(FindingKind::NoConvention(NoConventionKind {
                 observed_options: Vec::new(),
+                left_to_client: false,
             })),
         ),
         (
@@ -1924,6 +1933,9 @@ fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "x".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             },
         ),
     ));
@@ -1999,6 +2011,9 @@ fn the_gate_catches_a_rendered_finding_whose_kind_differs_from_the_matrix() {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "x".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             },
         ),
     ));

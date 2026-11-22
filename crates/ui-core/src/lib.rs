@@ -9,6 +9,7 @@
 
 pub mod adopt;
 pub mod backend;
+pub mod convention_view;
 pub mod decision_memory;
 pub mod decision_sync;
 pub mod decisions;

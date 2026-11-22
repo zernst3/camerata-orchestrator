@@ -99,9 +99,12 @@ fn convention_rows_with_no_confidence_are_not_tallied_as_deterministic() {
         FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: "opt".to_string(),
             convention_label: "Option".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         }),
         FindingKind::NoConvention(NoConventionKind {
             observed_options: Vec::new(),
+            left_to_client: false,
         }),
         FindingKind::NotAssessed(NotAssessedKind {
             reason: NotAssessedReason::ToolFailed,

@@ -689,6 +689,9 @@ fn deviation_finding(rule_id: &str, path: &str, line: usize, severity: &str) -> 
         assessed_sites: Some(47),
         convention_option_id: Some("default".to_string()),
         convention_label: "Default".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     }));
     f
 }
@@ -1117,6 +1120,8 @@ fn req_w8_the_floor_never_applies_to_an_informational_kind() {
     observed.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "default".to_string(),
         convention_label: "Default".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     assert_eq!(
         raise_to_rule_min_severity("info".to_string(), &observed, Some(&corpus)),

@@ -572,6 +572,11 @@ pub struct ScanLedger {
     /// carrying removes no row. `None` for a ledger written before places existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     place_merge: Option<crate::review_tree::PlaceMergeBlock>,
+    /// The convention model's accounting (design 2026-11-20, section 5 step 6): for each rule
+    /// with options, the finder rows citing it split into departures, conforming and unknown,
+    /// plus the places recorded and the departure rows made. `None` for a ledger written before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conventions: Option<ConventionsBlock>,
     /// The run's sites and groups for the estimate's fit; see [`GroupReviewCounts`]. Set with the
     /// escalation block. `None` until the group reviewer has run, and for a ledger written
     /// before the record existed.
@@ -873,6 +878,138 @@ pub struct IncrementalCarry {
     /// The commit of the earlier inspection the carried findings came from, when known.
     #[serde(default)]
     pub prior_sha: Option<String>,
+}
+
+/// One rule's convention accounting: the finder rows citing it, split into three parts that add
+/// up to the total, and the recorded places with the departure rows made from them.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ConventionLedgerRule {
+    pub repo: String,
+    pub rule_id: String,
+    /// Finder rows citing the rule.
+    pub finder_rows: usize,
+    /// Of those, departures from the standard.
+    pub departures: usize,
+    /// Of those, conforming (including places that follow the rule's default).
+    pub conforming: usize,
+    /// Of those, with no standard or an option that could not be worked out.
+    pub unknown: usize,
+    /// Places the scan recorded across the rule's options.
+    pub recorded_places: usize,
+    /// Departure rows the standard asked for beside the finder's own.
+    pub departure_rows: usize,
+}
+
+impl ConventionLedgerRule {
+    /// The three parts add up to the total.
+    pub fn reconciles(&self) -> bool {
+        self.departures + self.conforming + self.unknown == self.finder_rows
+    }
+}
+
+/// The convention accounting of a run, one entry per (repo, rule with options).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ConventionsBlock {
+    pub rules: Vec<ConventionLedgerRule>,
+    /// Finder rows the records counted that are in neither the final rows nor the rows set aside
+    /// (lost between tagging and the report). Worked out from the final rows by
+    /// [`Self::check_finder_rows_kept`]; zero until that check runs.
+    #[serde(default)]
+    pub lost_finder_rows: usize,
+}
+
+impl ConventionsBlock {
+    /// Built from the convention records and the rows they ask for.
+    pub fn from_records(
+        records: &[camerata_api_types::audit::RuleConvention],
+        rows: &[crate::onboard::Finding],
+    ) -> Self {
+        use camerata_api_types::audit::PlaceStatus;
+        let rules = records
+            .iter()
+            .map(|c| {
+                let count = |f: &dyn Fn(PlaceStatus) -> bool| {
+                    c.finder_rows.iter().filter(|r| f(r.status)).count()
+                };
+                ConventionLedgerRule {
+                    repo: c.repo.clone(),
+                    rule_id: c.rule_id.clone(),
+                    finder_rows: c.finder_rows.len(),
+                    departures: count(&|s| s == PlaceStatus::Departs),
+                    conforming: count(&|s| {
+                        matches!(s, PlaceStatus::Conforms | PlaceStatus::FollowsRuleDefault)
+                    }),
+                    unknown: count(&|s| s == PlaceStatus::NoStandard),
+                    recorded_places: c.options.iter().map(|o| o.places.len()).sum(),
+                    departure_rows: rows
+                        .iter()
+                        .filter(|f| {
+                            f.repo == c.repo
+                                && f.rule_id.eq_ignore_ascii_case(&c.rule_id)
+                                && f.captures
+                                    .contains_key(crate::conventions::CONVENTION_PLACE_CAPTURE)
+                        })
+                        .count(),
+                }
+            })
+            .collect();
+        Self {
+            rules,
+            lost_finder_rows: 0,
+        }
+    }
+
+    /// The independent check (design section 5, step 6): every finder row a record counted is
+    /// still in the final rows (as a row, or as a place absorbed into one) or in the rows set
+    /// aside. The three-part sum above is true by construction; this is what catches a row lost
+    /// in a merge or a dedup after it was tagged. Rows match by site key when they have one, else
+    /// by their place (repo, path, line). Returns the rows that are gone, and records how many.
+    pub fn check_finder_rows_kept(
+        &mut self,
+        records: &[camerata_api_types::audit::RuleConvention],
+        rows: &[crate::onboard::Finding],
+        discarded: &[crate::onboard::Finding],
+    ) -> Vec<(String, String, usize)> {
+        let keys: std::collections::HashSet<&str> = rows
+            .iter()
+            .chain(discarded)
+            .map(|f| f.site_key.as_str())
+            .filter(|k| !k.is_empty())
+            .collect();
+        let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+        let place = |repo: &str, path: &str, line: usize, rule: &str| {
+            let path = path.trim_start_matches("./");
+            rows.iter().chain(discarded).any(|f| {
+                (f.repo == repo
+                    && f.path.trim_start_matches("./") == path
+                    && f.line == line
+                    && same(&f.rule_id, rule))
+                    || f.also_locations.iter().any(|l| {
+                        l.repo == repo
+                            && l.path.trim_start_matches("./") == path
+                            && l.line == line
+                            && same(&l.rule_id, rule)
+                    })
+            })
+        };
+        let mut lost = Vec::new();
+        for c in records {
+            for r in &c.finder_rows {
+                let kept = (!r.site_key.is_empty() && keys.contains(r.site_key.as_str()))
+                    || place(&c.repo, &r.path, r.line, &r.keyed_rule_id);
+                if !kept {
+                    lost.push((c.rule_id.clone(), r.path.clone(), r.line));
+                }
+            }
+        }
+        self.lost_finder_rows = lost.len();
+        lost
+    }
+
+    /// Every rule's three parts add up to its total, and no finder row was lost.
+    pub fn reconciles(&self) -> bool {
+        self.lost_finder_rows == 0 && self.rules.iter().all(ConventionLedgerRule::reconciles)
+    }
 }
 
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
@@ -1617,6 +1754,16 @@ impl ScanLedger {
     /// Record the place merge, replacing an earlier one (the tree is built again after an edit).
     pub fn record_place_merge(&mut self, block: crate::review_tree::PlaceMergeBlock) {
         self.place_merge = Some(block);
+    }
+
+    /// Record the convention accounting, replacing an earlier one.
+    pub fn record_conventions(&mut self, block: ConventionsBlock) {
+        self.conventions = Some(block);
+    }
+
+    /// The convention accounting of the run.
+    pub fn conventions(&self) -> Option<&ConventionsBlock> {
+        self.conventions.as_ref()
     }
 
     /// The place merge of the run, once the tree has been built.

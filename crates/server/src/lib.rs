@@ -47,6 +47,7 @@ pub mod client_text;
 pub mod connections;
 /// H5: the three-pass consensus option (off by default).
 pub mod consensus;
+pub mod conventions;
 mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
@@ -1578,6 +1579,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/projects/:id/decisions/:decision_id/revoke",
             post(crate::decisions::routes::revoke_decision),
+        )
+        .route(
+            "/api/projects/:id/standards",
+            post(crate::decisions::routes::post_standard)
+                .get(crate::decisions::routes::get_standards),
+        )
+        .route(
+            "/api/projects/:id/standards/:ruling_id/revoke",
+            post(crate::decisions::routes::revoke_standard),
         )
         .route(
             "/api/projects/:id/decisions/:decision_id/needed-me",
@@ -4070,12 +4080,16 @@ fn reviewed_for_export(
         || sealed.clone(),
         |p| crate::report_export::re_mark_line(sealed, &p.review),
     );
+    // A report saved before the convention model gets its records from what it has, so the
+    // rows are tagged by the same rules as a new one (design section 9).
+    let marked = marked.overlaid(crate::conventions::upgrade);
     let sealed = &marked;
-    let reviewed = crate::report_export::apply_overlay(
+    let reviewed = crate::report_export::apply_overlay_with_standards(
         sealed,
         &state.decisions.list(project_id),
         &state.edits.list(project_id),
         &state.edits.added(project_id),
+        &crate::conventions::rulings_for_run(&state.decisions.standards(project_id), &run_id),
     )
     .with_engine_check(state.engine_check.evidence_for(
         project_id,

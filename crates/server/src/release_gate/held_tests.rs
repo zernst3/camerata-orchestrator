@@ -1532,3 +1532,132 @@ fn a_package_with_a_decided_split_out_problem_goes_through_the_gate_and_builds_t
     );
     assert!(!text.contains(crate::report_export::unfold::UNFOLDED_FROM_CAPTURE));
 }
+
+// ── a split rule with no decision (Zach's ruling on amendment A3, 2026-11-20) ─────────────
+
+mod split_rules {
+    use camerata_api_types::audit::{OptionCensus, RuleConvention, StandardState};
+    use camerata_api_types::decisions::{StandardChoice, StandardRuling};
+
+    use super::*;
+
+    const SPLIT_RULE: &str = "ARCH-TRIGGER-ENV-1";
+
+    fn report_with_a_split_rule() -> ScanReport {
+        let mut report = scan_report();
+        let opt = |id: &str, label: &str| OptionCensus {
+            option_id: id.into(),
+            label: label.into(),
+            count: Some(1),
+            ..OptionCensus::default()
+        };
+        report.conventions = vec![RuleConvention {
+            repo: "acme/portal".into(),
+            rule_id: SPLIT_RULE.into(),
+            default_option_id: Some("a".into()),
+            judged_option_id: Some("a".into()),
+            assessed_places: Some(2),
+            places_recorded: true,
+            options: vec![opt("a", "Option A"), opt("b", "Option B")],
+            standard: StandardState::default(),
+            ..RuleConvention::default()
+        }];
+        report
+    }
+
+    fn ruling(choice: StandardChoice) -> StandardRuling {
+        StandardRuling {
+            id: "std-000001".into(),
+            repo: "acme/portal".into(),
+            rule_id: SPLIT_RULE.into(),
+            choice,
+            reason: String::new(),
+            decided_by: "z".into(),
+            decided_at: NOW.into(),
+            run_id: "insp-1".into(),
+            engine_version: "0".into(),
+            revoked_at: None,
+        }
+    }
+
+    fn split_problems(reviewed: &ReviewedReport, internal: bool) -> Vec<Problem> {
+        let mut options = client_options();
+        options.internal = internal;
+        let json = build_report_json(reviewed, None, &options);
+        let data = render_data_json(&json).expect("data.json renders");
+        let package = assemble_package(
+            reviewed,
+            None,
+            &options,
+            "acme-inspection",
+            (json, data, b"%PDF-1.7 stand-in for the gate tests".to_vec()),
+        )
+        .expect("the package assembles");
+        let released = if internal {
+            release_internal(package)
+        } else {
+            release(package)
+        };
+        match released {
+            Ok(_) => Vec::new(),
+            Err(ReleaseError::Blocked(failure)) => {
+                check_problems(&failure, CheckId::SplitRuleWithoutDecision)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            }
+            Err(other) => panic!("the package must assemble: {other}"),
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_client_package_while_a_split_rule_has_no_decision() {
+        let sealed = report_with_a_split_rule().seal();
+        let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+        let problems = split_problems(&reviewed, false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].message.contains(SPLIT_RULE),
+            "{:?}",
+            problems[0]
+        );
+        assert!(
+            problems[0].message.contains("Accept an option")
+                && problems[0].message.contains("leave it to the client"),
+            "{:?}",
+            problems[0]
+        );
+        let view = crate::release_gate::holds::gate_holds(&reviewed);
+        assert!(view.is_blocked());
+        assert_eq!(view.split_rules.len(), 1);
+        assert_eq!(view.split_rules[0].rule_id, SPLIT_RULE);
+    }
+
+    #[test]
+    fn accepting_an_option_or_leaving_it_to_the_client_clears_the_hold() {
+        let sealed = report_with_a_split_rule().seal();
+        for choice in [
+            StandardChoice::Accept {
+                option_id: "a".into(),
+            },
+            StandardChoice::LeaveToClient,
+        ] {
+            let reviewed = crate::report_export::apply_overlay_with_standards(
+                &sealed,
+                &[],
+                &[],
+                &[],
+                &[ruling(choice)],
+            );
+            assert!(split_problems(&reviewed, false).is_empty());
+            assert!(!crate::release_gate::holds::gate_holds(&reviewed).is_blocked());
+        }
+    }
+
+    #[test]
+    fn an_internal_package_keeps_shipping_with_a_split_rule_undecided() {
+        let sealed = report_with_a_split_rule().seal();
+        let reviewed = apply_overlay(&sealed, &[], &[], &[]);
+        assert!(split_problems(&reviewed, true).is_empty());
+    }
+}

@@ -963,6 +963,17 @@ pub struct ExportGateView {
     pub held: Vec<HeldRow>,
     pub merged_without_decision: Vec<HeldRow>,
     pub node_decisions_missing_members: Vec<NodeDecisionGap>,
+    /// Rules split between options with no convention and no ruling: the reviewer accepts an
+    /// option or leaves the rule to the client before a client package can be built.
+    #[serde(default)]
+    pub split_rules: Vec<SplitRuleHold>,
+}
+
+/// A rule the release gate holds because it is split with no decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitRuleHold {
+    pub repo: String,
+    pub rule_id: String,
 }
 
 impl ExportGateView {
@@ -971,6 +982,7 @@ impl ExportGateView {
         !self.held.is_empty()
             || !self.merged_without_decision.is_empty()
             || !self.node_decisions_missing_members.is_empty()
+            || !self.split_rules.is_empty()
     }
 
     /// How many rows need a decision ("3 rows need a decision before the package can be built").
@@ -1155,6 +1167,7 @@ mod tests {
             ],
             merged_without_decision: vec![row("k2", HoldReason::MergedWithoutDecision)],
             node_decisions_missing_members: Vec::new(),
+            split_rules: Vec::new(),
         };
         assert_eq!(view.rows_needing_a_decision(), 2);
     }

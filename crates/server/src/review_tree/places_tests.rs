@@ -159,6 +159,8 @@ fn conventions_not_assessed_false_positives_and_thrown_out_rows_never_carry_or_g
     convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "o".to_string(),
         convention_label: "l".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     let mut not_assessed = row("NA-1", "low", "src/a.ts", 5);
     not_assessed.kind = Some(FindingKind::NotAssessed(NotAssessedKind {

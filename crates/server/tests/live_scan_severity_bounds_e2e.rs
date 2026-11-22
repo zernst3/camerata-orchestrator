@@ -83,6 +83,9 @@ fn deviation() -> FindingKind {
         assessed_sites: Some(5),
         convention_option_id: None,
         convention_label: "the observed convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     })
 }
 
@@ -94,6 +97,7 @@ fn report_with(findings: Vec<Finding>) -> ScanReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["owner/repo".to_string()],

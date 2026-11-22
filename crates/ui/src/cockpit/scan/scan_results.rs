@@ -14,6 +14,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // Phase 2 audit result (findings against the selected rules); None until the
     // architect picks rules and runs the audit.
     let mut audit = use_signal(|| Option::<ScanReportView>::None);
+    // The inspection this screen shows, for what has to replace it from outside the screen's own
+    // flow (the click tests swap it, as a new inspection does).
+    use_context_provider(|| InspectionSignal(audit));
     let mut auditing = use_signal(|| false);
     // The model registry: prices for the Engine finder's estimate. The inspection's models are
     // the PROJECT's (Inspection settings); this screen picks none of them.
@@ -461,6 +464,46 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // Closing it gives the keyboard back to where it was opened from: the viewer (which does
     // that itself) or the detail pane.
     super::viewer::use_hub_focus_return(hub_open, try_use_context::<super::viewer::ViewerSlot>());
+    // The place a reviewer opened from the hub (a place that follows a standard has no row). The
+    // viewer for it is drawn above the hub, so closing it leaves the hub as it was.
+    let mut place_open = use_signal(|| Option::<super::queue_table::PlaceOpen>::None);
+    // The reviewer's active rulings, as the server holds them: read on load and again after every
+    // ruling (the review counter), so a reload never loses one.
+    let rulings_res = {
+        use_resource(move || {
+            // A new inspection in this screen has its own rulings: read them again.
+            let _ = audit.read().as_ref().and_then(|a| a.run_id.clone());
+            let _ = review_refresh.read();
+            // Read inside the resource, so it runs again once the project is known.
+            let pid = live_project
+                .and_then(|l| l.0.read().clone())
+                .or_else(|| active_project_res.read().clone().flatten())
+                .map(|p| p.id)
+                .unwrap_or_default();
+            async move {
+                if pid.is_empty() {
+                    Some(Vec::new())
+                } else {
+                    super::wire::fetch_rulings(&pid).await
+                }
+            }
+        })
+    };
+    // The server could not be asked for the rulings: the panel says so, not "No choice yet".
+    let rulings_unread = matches!(&*rulings_res.read(), Some(None));
+    // The INSPECTION's convention records (the scan report this screen opened on is the phase-1
+    // scan, which holds none) with those rulings shown on them.
+    let convention_records: Vec<camerata_api_types::audit::RuleConvention> = {
+        let rulings = rulings_res.read().clone().flatten().unwrap_or_default();
+        super::queue_table::with_rulings(
+            &audit
+                .read()
+                .as_ref()
+                .map(|a| a.conventions.clone())
+                .unwrap_or_default(),
+            &rulings,
+        )
+    };
     let mut queue_rule_filter = use_signal(|| Option::<String>::None);
     let mut processing = use_signal(|| false);
     // ── THE GATED CONVENTION COMMIT (design §3; Q3 + Q4) ──────────────────────
@@ -769,10 +812,14 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // own rows by core's `rule_hub`. A request for a rule with no rows in that repo resolves
     // to `None` and the modal simply does not mount — the hub describes what a scan FOUND, and
     // an empty strip would be a dead affordance.
-    let open_hub: Option<RuleHubView> = hub_open
-        .read()
-        .as_ref()
-        .and_then(|r| rule_hub(&findings, &r.repo, &r.rule_id));
+    let open_hub: Option<RuleHubView> = hub_open.read().as_ref().and_then(|r| {
+        camerata_ui_core::triage::rule_hub_with_conventions(
+            &findings,
+            &convention_records,
+            &r.repo,
+            &r.rule_id,
+        )
+    });
 
     // THE ALTERNATIVES CONTEXT for the open hub (design §9.1): the Evaluated-against line and
     // the Why? answer, at the surface every rule id already opens. `None` unless the rule is
@@ -926,6 +973,47 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                     hub_open.set(None);
                 }),
                 on_close: Callback::new(move |()| hub_open.set(None)),
+                on_open_place: Some(Callback::new(move |p: super::queue_table::PlaceOpen| {
+                    place_open.set(Some(p));
+                })),
+                // The reviewer's ruling on the standard: accept an option, leave it to the
+                // client or withdraw. Saved on the server; the review is read again after.
+                on_ruling: {
+                    let project_id = project_id.clone();
+                    Some(Callback::new(move |action: super::queue_table::RulingAction| {
+                        let Some(req) = hub_open.peek().clone() else {
+                            return;
+                        };
+                        let project_id = project_id.clone();
+                        spawn(async move {
+                            match rule_on(&project_id, &req.repo, &req.rule_id, &action, review_refresh).await {
+                                Ok(()) => {
+                                    hub_open.set(None);
+                                }
+                                Err(msg) => crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    msg,
+                                ),
+                            }
+                        });
+                    }))
+                },
+            }
+        }
+        // THE PLACE VIEWER, above the hub: the code viewer on one place the hub listed.
+        if let Some(place) = place_open.read().clone() {
+            {
+                let choice = audited_shas(&report, audited.as_ref());
+                rsx! {
+                    super::super::place_viewer::PlaceViewer {
+                        sha: choice.shas.get(&place.repo).cloned().unwrap_or_default(),
+                        sha_conflict: choice.conflicts.contains(&place.repo),
+                        project_id: project_id.clone(),
+                        on_close: Callback::new(move |()| place_open.set(None)),
+                        place,
+                    }
+                }
             }
         }
         // THE COMMIT DIALOG (Q4's gate). Hosted at the results-subtree root for the same
@@ -1675,6 +1763,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 button {
                                     key: "{surface.label()}",
                                     class: if active { "kind-tab active" } else { "kind-tab" },
+                                    "data-kind": "{surface.label()}",
                                     onclick: move |_| {
                                         patterns_open.set(false);
                                         review_open.set(false);
@@ -1808,6 +1897,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 repos: report.repos.clone(),
                                 recommendations,
                                 audit,
+                                conventions: convention_records.clone(),
                             }
                         }
                     }
@@ -1863,9 +1953,17 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         busy: committing(),
                         only_unopened: unopened_only(),
                         on_clear_filter: Callback::new(move |()| unopened_only.set(false)),
-                        on_toggle: Callback::new(move |key: String| {
-                            adoption.write().toggle_adopted(&key);
-                        }),
+                        on_toggle: {
+                            let rows = findings.clone();
+                            Callback::new(move |key: String| {
+                                // A convention that differs from the rule's default is off until
+                                // ticked, so the toggle goes through the convention itself.
+                                match adoptable_conventions(&rows).into_iter().find(|c| c.key() == key) {
+                                    Some(c) => adoption.write().toggle_adopted_for(&c),
+                                    None => adoption.write().toggle_adopted(&key),
+                                }
+                            })
+                        },
                         // THE ONE WRITER of the openness record. Nothing else in this file
                         // calls `mark_opened`, which is what makes the dialog's "not opened"
                         // count a record of a gesture rather than an inference.
@@ -1890,6 +1988,19 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 } else if kind_view() == KindSurface::NoConvention {
                     NoConventionPanel {
                         findings: findings_on_surface(&findings, KindSurface::NoConvention),
+                        conventions: convention_records.clone(),
+                        rulings_unread,
+                        on_ruling: {
+                            let project_id = project_id.clone();
+                            Callback::new(move |(repo, rule, action): (String, String, super::queue_table::RulingAction)| {
+                                let project_id = project_id.clone();
+                                spawn(async move {
+                                    if let Err(msg) = rule_on(&project_id, &repo, &rule, &action, review_refresh).await {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, msg);
+                                    }
+                                });
+                            })
+                        },
                         on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
                         model: adoption(),
                         busy: committing(),
@@ -2183,3 +2294,24 @@ pub(super) fn QueueIntro() -> Element {
         }
     }
 }
+
+/// Ask the server to record a ruling on the standard of one rule, then read the review and the
+/// rulings again (the Queue, the tree, the export line and the controls follow it). `Err` is the
+/// server's reason, for a toast.
+async fn rule_on(
+    project_id: &str,
+    repo: &str,
+    rule_id: &str,
+    action: &super::queue_table::RulingAction,
+    mut refresh: Signal<u32>,
+) -> Result<(), String> {
+    super::wire::post_ruling(project_id, repo, rule_id, action).await?;
+    refresh += 1;
+    Ok(())
+}
+
+/// The screen's inspection signal, shared as context.
+/// Only the click tests read it.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::cockpit) struct InspectionSignal(pub Signal<Option<ScanReportView>>);

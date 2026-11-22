@@ -113,12 +113,17 @@ fn a_deviation_group_and_a_convention_with_thousands_of_sites_do_not_abort() {
         assessed_sites: Some(5_000),
         convention_option_id: None,
         convention_label: "URI-versioned endpoints".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     }));
     dev.also_locations = (0..3_999).map(site).collect();
     let mut conv = finding("ARCH-PAGINATION-1", "src/api/list.rs", 7, "info");
     conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "cursor".to_string(),
         convention_label: "Cursor pagination".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     conv.also_locations = (0..4_000).map(site).collect();
 

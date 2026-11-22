@@ -332,6 +332,8 @@ fn mixed_report() -> crate::onboard::ScanReport {
     convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "x".to_string(),
         convention_label: "A convention".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     let mut unchecked = row("SYN-D-1", "src/u.rs", 0, "info");
     unchecked.kind = Some(FindingKind::NotAssessed(NotAssessedKind {
@@ -1052,6 +1054,9 @@ fn departure() -> camerata_api_types::audit::FindingKind {
         assessed_sites: Some(4),
         convention_option_id: None,
         convention_label: "the usual way".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     })
 }
 
@@ -1060,6 +1065,8 @@ fn convention() -> camerata_api_types::audit::FindingKind {
         camerata_api_types::audit::ConventionObservedKind {
             convention_option_id: "x".to_string(),
             convention_label: "the usual way".to_string(),
+            standard_source: None,
+            differs_from_default: None,
         },
     )
 }
@@ -1536,6 +1543,73 @@ fn the_order_check_pushes_a_problem_for_a_missing_column() {
             messages(&found)
         );
     }
+}
+
+// ── the convention model's status texts (design 2026-11-20, test 19) ──────────────────────
+
+fn convention_model_package() -> (ProductPackage, Vec<u8>) {
+    use camerata_api_types::audit::{
+        ConventionObservedKind, FindingKind, NoConventionKind, StandardSource,
+    };
+    let row = |rule: &str, path: &str, kind: FindingKind| Finding {
+        repo: "acme/portal".to_string(),
+        path: path.to_string(),
+        line: 1,
+        rule_id: rule.to_string(),
+        severity: "info".to_string(),
+        snippet: format!("let x = {rule};"),
+        detail: format!("detail {rule}"),
+        kind: Some(kind),
+        ..Finding::default()
+    };
+    let mut report = scan_report();
+    report.findings = vec![
+        row(
+            "SYN-REV-1",
+            "src/r.rs",
+            FindingKind::ConventionObserved(ConventionObservedKind {
+                convention_option_id: "a".to_string(),
+                convention_label: "Option A".to_string(),
+                standard_source: Some(StandardSource::Reviewer),
+                differs_from_default: None,
+            }),
+        ),
+        row(
+            "SYN-OPEN-1",
+            "",
+            FindingKind::NoConvention(NoConventionKind {
+                observed_options: Vec::new(),
+                left_to_client: true,
+            }),
+        ),
+    ];
+    let package = package_for(report);
+    let bytes = super::zip_package(&package, b"%PDF-1.7 stand-in for the gate tests").unwrap();
+    (package, bytes)
+}
+
+#[test]
+fn the_counts_check_passes_the_reviewer_and_open_question_statuses_and_fails_an_unknown_one() {
+    let (_package, bytes) = convention_model_package();
+    let entries = read_zip_entries(&bytes).unwrap();
+    let problems = super::consistency::count_reconciliation_problems(&entries);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+    // An edited status cell is not one of the known wordings: it shows up as a disagreement.
+    let mut tampered = entries.clone();
+    let name = xlsx_name();
+    tampered.insert(
+        name.clone(),
+        rewrite_xlsx_part(&entries[&name], "xl/sharedStrings.xml", |xml| {
+            let open = crate::xlsx_export::CONVENTION_STATUS_OPEN_QUESTION;
+            assert!(xml.contains(open), "anti-vacuity");
+            xml.replace(open, "Something else entirely")
+        }),
+    );
+    let problems = super::consistency::count_reconciliation_problems(&tampered);
+    assert!(
+        !problems.is_empty(),
+        "an unknown status must fail the check"
+    );
 }
 
 // A released client package: reviewed, not internal.

@@ -32,6 +32,9 @@ fn deviation_row() -> SiteRow {
             assessed_sites: Some(40),
             convention_option_id: None,
             convention_label: "URI versioning".into(),
+            standard_source: None,
+            differs_from_default: None,
+            following_sites: None,
         },
     ));
     row

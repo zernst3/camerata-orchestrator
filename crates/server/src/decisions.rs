@@ -137,6 +137,10 @@ struct ProjectDecisions {
     /// When the UI draft's dispositions were migrated into this file (once, ever).
     #[serde(default)]
     migrated_from_draft_at: Option<String>,
+    /// The reviewer's rulings on the standard of rules with options (convention model design
+    /// 2026-11-20, section 5). No file version bump: an older file reads with none.
+    #[serde(default)]
+    standards: Vec<camerata_api_types::decisions::StandardRuling>,
 }
 
 /// File-backed store of decisions, one file per project. `Clone` is a shallow handle.
@@ -516,6 +520,72 @@ impl DecisionStore {
                 ));
             }
             target.needed_me = Some(needed_me);
+            Ok(target.clone())
+        })
+    }
+
+    /// Every ruling on a standard of a project (withdrawn ones too), in the order written.
+    pub fn standards(
+        &self,
+        project_id: &str,
+    ) -> Vec<camerata_api_types::decisions::StandardRuling> {
+        self.lock()
+            .get(project_id)
+            .map(|p| p.standards.clone())
+            .unwrap_or_default()
+    }
+
+    /// Record the reviewer's ruling on the standard of one rule. A new ruling for the same
+    /// (repo, rule, inspection) withdraws the earlier one. Option validity is the caller's check
+    /// (it holds the report).
+    pub fn record_standard(
+        &self,
+        project_id: &str,
+        req: &camerata_api_types::decisions::PostStandardReq,
+        decided_by: &str,
+        ctx: DecisionCtx<'_>,
+    ) -> Result<camerata_api_types::decisions::StandardRuling, DecisionStoreError> {
+        self.mutate(project_id, |pd| {
+            for earlier in pd.standards.iter_mut().filter(|r| {
+                r.is_active()
+                    && r.repo == req.repo
+                    && r.rule_id.eq_ignore_ascii_case(&req.rule_id)
+                    && r.run_id == ctx.run_id
+            }) {
+                earlier.revoked_at = Some(ctx.now.to_string());
+            }
+            let ruling = camerata_api_types::decisions::StandardRuling {
+                id: format!("std-{:06}", pd.standards.len() + 1),
+                repo: req.repo.clone(),
+                rule_id: req.rule_id.to_ascii_uppercase(),
+                choice: req.choice.clone(),
+                reason: req.reason.trim().to_string(),
+                decided_by: decider(decided_by),
+                decided_at: ctx.now.to_string(),
+                run_id: ctx.run_id.to_string(),
+                engine_version: ctx.engine_version.to_string(),
+                revoked_at: None,
+            };
+            pd.standards.push(ruling.clone());
+            Ok(ruling)
+        })
+    }
+
+    /// Withdraw a ruling. The record stays, marked.
+    pub fn revoke_standard(
+        &self,
+        project_id: &str,
+        ruling_id: &str,
+        now: &str,
+    ) -> Result<camerata_api_types::decisions::StandardRuling, DecisionStoreError> {
+        self.mutate(project_id, |pd| {
+            let Some(target) = pd.standards.iter_mut().find(|r| r.id == ruling_id) else {
+                return Err(DecisionStoreError::NotFound(ruling_id.to_string()));
+            };
+            if target.revoked_at.is_some() {
+                return Err(DecisionStoreError::AlreadyRevoked(ruling_id.to_string()));
+            }
+            target.revoked_at = Some(now.to_string());
             Ok(target.clone())
         })
     }

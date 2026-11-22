@@ -113,6 +113,9 @@ pub fn two_repo_report() -> ScanReport {
         assessed_sites: Some(4),
         convention_option_id: Some("cursor".to_string()),
         convention_label: "cursor pagination".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     }));
     let logging = finding(WEB, LOGGING_RULE, "src/log.ts", 1, "medium");
 
@@ -132,6 +135,7 @@ pub fn two_repo_report() -> ScanReport {
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: vec![
             RepoVolume {

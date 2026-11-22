@@ -153,6 +153,8 @@ fn every_exempt_kind_is_left_alone_and_none_is_counted_as_checked() {
     convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "repo".to_string(),
         convention_label: "Repository layer".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     let mut not_assessed = row(6, "the model declined");
     not_assessed.kind = Some(FindingKind::NotAssessed(NotAssessedKind {
@@ -441,6 +443,8 @@ fn every_absorbed_site_is_checked_or_exempt_and_the_two_add_up() {
     convention.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
         convention_option_id: "x".to_string(),
         convention_label: "X".to_string(),
+        standard_source: None,
+        differs_from_default: None,
     }));
     convention.also_locations = vec![site("src/app.ts", 6, REAL), site("src/app.ts", 6, REAL)];
     let total_sites = f.also_locations.len() + convention.also_locations.len();

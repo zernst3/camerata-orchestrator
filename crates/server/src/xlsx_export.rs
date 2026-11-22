@@ -1494,6 +1494,13 @@ struct DeviationGroupRow {
     /// D8: the label for `recommended_fix`. It is always the rule's own guidance, so
     /// `"Standard fix"`; empty when the rule has no authored remediation.
     fix_type: String,
+    /// Where the convention came from (observed, set by the reviewer), in the words of the
+    /// convention model design, section 7.
+    #[serde(skip)]
+    standard_note: String,
+    /// Where the convention came from, as the payload states it. Not exported.
+    #[serde(skip)]
+    standard_source: Option<camerata_api_types::audit::StandardSource>,
 }
 
 /// Group the Deviation rows by rule into the `Deviations` sheet's rows. Sorted worst-severity
@@ -1525,8 +1532,16 @@ fn build_deviation_groups(
             let mut declared_numerator = 0usize;
             let mut assessed_sites: Option<usize> = None;
             let mut convention_label = String::new();
+            let mut source = None;
+            let mut differs: Option<String> = None;
+            let mut following: Option<usize> = None;
             for row in &group {
                 if let Some(FindingKind::Deviation(d)) = &row.kind.0 {
+                    source = source.or(d.standard_source);
+                    following = following.or(d.following_sites);
+                    if differs.is_none() {
+                        differs = d.differs_from_default.clone();
+                    }
                     declared_numerator = declared_numerator.max(d.deviating_sites);
                     if assessed_sites.is_none() {
                         assessed_sites = d.assessed_sites;
@@ -1547,7 +1562,17 @@ fn build_deviation_groups(
                 crate::report_export::STANDARD_FIX_LABEL.to_string()
             };
             let deviating_sites = declared_numerator.max(sites_represented);
+            let note = standard_note(
+                source,
+                &convention_label,
+                deviating_sites,
+                assessed_sites.map(|a| a.max(deviating_sites)),
+                following,
+                differs.as_deref(),
+            );
             DeviationGroupRow {
+                standard_note: note,
+                standard_source: source,
                 repo,
                 category: group[0].category.clone(),
                 rule_title: rule_title(&rule_id, corpus),
@@ -1590,6 +1615,67 @@ fn build_deviation_groups(
 /// them from here, so the gate counts exactly the cells written.
 pub(crate) const CONVENTION_STATUS_FOLLOWED: &str = "Followed consistently, no exceptions found";
 pub(crate) const CONVENTION_STATUS_NONE_ADOPTED: &str = "No single convention adopted";
+/// A convention the reviewer set (convention model design, section 7), followed with no exception.
+pub(crate) const CONVENTION_STATUS_SET_BY_REVIEWER: &str =
+    "Set by the reviewer, no exceptions found";
+/// A rule the reviewer left to the client: every option is listed and none is marked.
+pub(crate) const CONVENTION_STATUS_OPEN_QUESTION: &str = "Open question: left to you to decide";
+
+/// "N place(s)" with the right number word.
+fn n_places(n: usize) -> String {
+    if n == 1 {
+        "1 place".to_string()
+    } else {
+        format!("{n} places")
+    }
+}
+
+/// The sentence a Departures row states about where its convention came from (section 7).
+fn standard_note(
+    source: Option<camerata_api_types::audit::StandardSource>,
+    label: &str,
+    departing: usize,
+    assessed: Option<usize>,
+    following: Option<usize>,
+    differs: Option<&str>,
+) -> String {
+    use camerata_api_types::audit::StandardSource;
+    let departs = if departing == 1 {
+        "1 place departs.".to_string()
+    } else {
+        format!("{departing} places depart.")
+    };
+    match source {
+        Some(StandardSource::Reviewer) => {
+            format!("Convention set by the reviewer: {label}. {departs}")
+        }
+        Some(StandardSource::RuleDefault) => {
+            format!("Convention taken from the rule's default: {label}. {departs}")
+        }
+        Some(StandardSource::EarlierChoice) => {
+            format!(
+                "Convention taken from the option your project chose earlier: {label}. {departs}"
+            )
+        }
+        Some(StandardSource::MostCommon) => {
+            format!("Convention taken from the option most places follow: {label}. {departs}")
+        }
+        _ => {
+            // "N of M" counts the places of the standard's own option: a place of a third option,
+            // or of the rule's default while the standard is only observed, does not follow it.
+            let follow = match (following, assessed) {
+                (Some(n), Some(m)) => {
+                    format!("Observed in your code: {n} of {m} places follow it.")
+                }
+                _ => "Observed in your code.".to_string(),
+            };
+            let differs = differs
+                .map(|d| format!(" Differs from the rule's default: {d}."))
+                .unwrap_or_default();
+            format!("{follow} {departs}{differs}")
+        }
+    }
+}
 
 /// "Your conventions" as the PDF states it: how many conventions the code follows consistently,
 /// where it has settled on none, and where it departs from the ones it follows. Counts and a few
@@ -1613,7 +1699,8 @@ pub(crate) fn pdf_conventions_of(
     let convention_rows = build_convention_rows(&conventions, corpus);
     let departures = build_deviation_groups(&others, corpus);
     let followed: Vec<&ConventionRow> = convention_rows.iter().filter(|c| c.rank == 0).collect();
-    let none_adopted = convention_rows.len() - followed.len();
+    let open_questions = convention_rows.iter().filter(|c| c.open_question).count();
+    let none_adopted = convention_rows.len() - followed.len() - open_questions;
     let areas = |names: Vec<&str>| -> usize {
         names
             .into_iter()
@@ -1634,7 +1721,7 @@ pub(crate) fn pdf_conventions_of(
             )
         )
     };
-    let none_adopted_line = if none_adopted == 0 {
+    let split_line = if none_adopted == 0 {
         String::new()
     } else {
         format!(
@@ -1642,21 +1729,54 @@ pub(crate) fn pdf_conventions_of(
             word(none_adopted, "rule", "rules")
         )
     };
-    let departing_places: usize = departures.iter().map(|d| d.deviating_sites).sum();
-    let departures_line = if departures.is_empty() {
+    let open_line = if open_questions == 0 {
         String::new()
     } else {
         format!(
-            "{} from a convention your code mostly follows, in {} ({}).",
-            word(departures.len(), "departure", "departures"),
+            "{} left for you to decide.",
+            word(open_questions, "open question", "open questions")
+        )
+    };
+    let none_adopted_line = [split_line, open_line]
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Departures from a convention the code mostly follows, and from one the reviewer set (the
+    // convention model's wording, section 7), each counted on its own.
+    let by_reviewer = |d: &&DeviationGroupRow| {
+        d.standard_source == Some(camerata_api_types::audit::StandardSource::Reviewer)
+    };
+    let departure_line = |group: Vec<&DeviationGroupRow>, from: &str| -> String {
+        if group.is_empty() {
+            return String::new();
+        }
+        let places: usize = group.iter().map(|d| d.deviating_sites).sum();
+        format!(
+            "{} from {from}, in {} ({}).",
+            word(group.len(), "departure", "departures"),
             word(
-                areas(departures.iter().map(|d| d.category.as_str()).collect()),
+                areas(group.iter().map(|d| d.category.as_str()).collect()),
                 "area",
                 "areas"
             ),
-            vocabulary::places_count(departing_places)
+            vocabulary::places_count(places)
         )
     };
+    let departures_line = [
+        departure_line(
+            departures.iter().filter(|d| !by_reviewer(d)).collect(),
+            "a convention your code mostly follows",
+        ),
+        departure_line(
+            departures.iter().filter(by_reviewer).collect(),
+            "a convention set by the reviewer",
+        ),
+    ]
+    .into_iter()
+    .filter(|l| !l.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ");
     let lines: Vec<String> = departures
         .iter()
         .take(PDF_MAX_DEPARTURES)
@@ -1706,6 +1826,9 @@ struct ConventionRow {
     /// block first, because that is this sheet's headline job.
     #[serde(skip)]
     rank: u8,
+    /// The reviewer left the rule to the client: an open question, not a split.
+    #[serde(skip)]
+    open_question: bool,
     /// The service this convention is about, set only when the project has several repos: a
     /// convention one service follows is not stated for another.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -1745,24 +1868,84 @@ fn build_convention_rows(
             let (rank, status, convention_label, patterns_in_use) = match &row.kind.0 {
                 Some(FindingKind::ConventionObserved(c)) => (
                     0u8,
-                    CONVENTION_STATUS_FOLLOWED.to_string(),
-                    c.convention_label.clone(),
+                    if c.standard_source
+                        == Some(camerata_api_types::audit::StandardSource::Reviewer)
+                    {
+                        CONVENTION_STATUS_SET_BY_REVIEWER.to_string()
+                    } else {
+                        CONVENTION_STATUS_FOLLOWED.to_string()
+                    },
+                    match &c.differs_from_default {
+                        Some(d) => format!(
+                            "{}\nDiffers from the rule's default: {d}.",
+                            c.convention_label
+                        ),
+                        None => c.convention_label.clone(),
+                    },
                     String::new(),
                 ),
-                Some(FindingKind::NoConvention(n)) => (
-                    1u8,
-                    CONVENTION_STATUS_NONE_ADOPTED.to_string(),
-                    String::new(),
-                    n.observed_options
-                        .iter()
-                        .map(|o| match o.sites {
-                            Some(1) => format!("{} (1 place)", o.label),
-                            Some(n) => format!("{} ({n} places)", o.label),
-                            None => o.label.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
+                Some(FindingKind::NoConvention(n)) => {
+                    let usage = |o: &camerata_api_types::audit::ObservedOptionUsage| match o.sites {
+                        Some(1) => format!("{} (1 place)", o.label),
+                        Some(n) => format!("{} ({n} places)", o.label),
+                        None => o.label.clone(),
+                    };
+                    if n.left_to_client {
+                        // Every option of the rule from the corpus, none marked.
+                        let from_corpus: Vec<String> = corpus
+                            .and_then(|c| c.get_by_id(&row.rule_id))
+                            .map(|r| {
+                                r.options
+                                    .iter()
+                                    .map(|o| {
+                                        let places = n
+                                            .observed_options
+                                            .iter()
+                                            .find(|u| u.option_id == o.id)
+                                            .and_then(|u| u.sites)
+                                            .map(n_places)
+                                            .unwrap_or_default();
+                                        format!(
+                                            "{}: {} Why: {} {}",
+                                            o.label,
+                                            o.directive.trim(),
+                                            o.why.trim(),
+                                            if places.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!("({places})")
+                                            }
+                                        )
+                                        .trim_end()
+                                        .to_string()
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let lines = if from_corpus.is_empty() {
+                            n.observed_options.iter().map(usage).collect()
+                        } else {
+                            from_corpus
+                        };
+                        (
+                            1u8,
+                            CONVENTION_STATUS_OPEN_QUESTION.to_string(),
+                            String::new(),
+                            lines.join("\n"),
+                        )
+                    } else {
+                        (
+                            1u8,
+                            CONVENTION_STATUS_NONE_ADOPTED.to_string(),
+                            String::new(),
+                            n.observed_options
+                                .iter()
+                                .map(usage)
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
+                    }
+                }
                 _ => return None,
             };
             let also_found_items: Vec<String> = site_locations(row)
@@ -1772,6 +1955,7 @@ fn build_convention_rows(
                 .collect();
             Some(ConventionRow {
                 rank,
+                open_question: status == CONVENTION_STATUS_OPEN_QUESTION,
                 repo: if row.multi_repo {
                     row.repo.clone()
                 } else {
@@ -2803,6 +2987,7 @@ mod tests {
             discarded: Vec::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            conventions: Vec::new(),
             patterns_across_services: Default::default(),
             volume_by_repo: Default::default(),
             repos: vec!["owner/repo".to_string()],
@@ -3968,13 +4153,19 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: String::new(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             })),
             Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: String::new(),
                 convention_label: String::new(),
+                standard_source: None,
+                differs_from_default: None,
             })),
             Some(FindingKind::NoConvention(NoConventionKind {
                 observed_options: Vec::new(),
+                left_to_client: false,
             })),
             Some(FindingKind::NotAssessed(NotAssessedKind {
                 reason: NotAssessedReason::PassFailed,
@@ -4021,6 +4212,9 @@ mod tests {
                     assessed_sites: Some(47),
                     convention_option_id: Some("versioned".to_string()),
                     convention_label: "URI-versioned endpoints".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
+                    following_sites: None,
                 }),
             ),
             kinded(
@@ -4028,6 +4222,8 @@ mod tests {
                 FindingKind::ConventionObserved(ConventionObservedKind {
                     convention_option_id: "cursor".to_string(),
                     convention_label: "Cursor pagination".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 }),
             ),
             kinded(
@@ -4045,6 +4241,7 @@ mod tests {
                             sites: Some(2),
                         },
                     ],
+                    left_to_client: false,
                 }),
             ),
             kinded(
@@ -4156,6 +4353,9 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: Some("default".to_string()),
                 convention_label: "Default".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let defect = kinded(
@@ -4217,6 +4417,9 @@ mod tests {
                 assessed_sites: Some(5),
                 convention_option_id: None,
                 convention_label: "observed majority".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let legacy = finding("LEGACY-1", "b.rs", 2, "high");
@@ -6121,6 +6324,9 @@ mod tests {
                     assessed_sites: Some(47),
                     convention_option_id: Some("versioned".to_string()),
                     convention_label: "URI-versioned endpoints".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
+                    following_sites: None,
                 }),
             ),
             kinded(
@@ -6128,6 +6334,8 @@ mod tests {
                 FindingKind::ConventionObserved(ConventionObservedKind {
                     convention_option_id: "cursor".to_string(),
                     convention_label: "Cursor pagination".to_string(),
+                    standard_source: None,
+                    differs_from_default: None,
                 }),
             ),
             kinded(
@@ -6145,6 +6353,7 @@ mod tests {
                             sites: Some(1),
                         },
                     ],
+                    left_to_client: false,
                 }),
             ),
             kinded(
@@ -6335,6 +6544,9 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "the pattern used elsewhere in this codebase".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6383,6 +6595,9 @@ mod tests {
                 assessed_sites: Some(47),
                 convention_option_id: None,
                 convention_label: "URI-versioned endpoints".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6436,6 +6651,9 @@ mod tests {
                         assessed_sites: Some(3),
                         convention_option_id: None,
                         convention_label: "Typed path params".to_string(),
+                        standard_source: None,
+                        differs_from_default: None,
+                        following_sites: None,
                     }),
                 )
             })
@@ -6471,6 +6689,9 @@ mod tests {
                 assessed_sites: None,
                 convention_option_id: None,
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6521,6 +6742,9 @@ mod tests {
                 assessed_sites: Some(3),
                 convention_option_id: Some("typed-extraction".to_string()),
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
@@ -6582,6 +6806,9 @@ mod tests {
                 assessed_sites: Some(3),
                 convention_option_id: Some("typed-extraction".to_string()),
                 convention_label: "Typed path params".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
@@ -7094,6 +7321,9 @@ mod tests {
                 assessed_sites: Some(47),
                 convention_option_id: None,
                 convention_label: "URI-versioned endpoints".to_string(),
+                standard_source: None,
+                differs_from_default: None,
+                following_sites: None,
             }),
         );
         dev.also_locations = vec![loc(18, false), loc(31, true)];
@@ -7103,6 +7333,8 @@ mod tests {
             FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "cursor".to_string(),
                 convention_label: "Cursor pagination".to_string(),
+                standard_source: None,
+                differs_from_default: None,
             }),
         );
         conv.also_locations = vec![crate::onboard::MergedLocation::site(

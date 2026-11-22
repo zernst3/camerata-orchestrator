@@ -56,7 +56,7 @@ pub(super) async fn run_with(
     corpus: &camerata_rules::RuleSet,
     options: &FinderOptions,
 ) -> FinderResult {
-    find_repo(
+    let result = find_repo(
         agent,
         REPO,
         files,
@@ -67,7 +67,18 @@ pub(super) async fn run_with(
         None,
     )
     .await
-    .expect("the finder returns a result")
+    .expect("the finder returns a result");
+    // Every scripted scenario that carries finder rows is also a fixture for the ledger's
+    // independent check: no finder row a record counted may be missing from the rows (the run
+    // sets nothing aside here), so the check never raises a false \"convention accounting\" gap.
+    let mut block =
+        crate::scan_ledger::ConventionsBlock::from_records(&result.5.conventions, &result.0);
+    let lost = block.check_finder_rows_kept(&result.5.conventions, &result.0, &[]);
+    assert!(
+        lost.is_empty(),
+        "the convention ledger lost finder rows in a scripted run: {lost:?}"
+    );
+    result
 }
 
 pub(super) async fn run(agent: &dyn PieceAgent) -> FinderResult {
@@ -227,6 +238,7 @@ mod activity;
 mod checklist_outcomes;
 mod checkpoint;
 mod contract;
+mod convention_model;
 mod conventions;
 mod coverage;
 mod downstream;

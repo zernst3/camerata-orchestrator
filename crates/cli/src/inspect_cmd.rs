@@ -481,11 +481,39 @@ impl InspectError {
     }
 }
 
+/// What to tell the operator when the gate refused because a rule is split between options with no
+/// decision: the rules are named, and the decision is made in the desktop app, then exported.
+/// `camerata inspect` cannot make it (convention model design, ruling A3).
+fn split_rule_hint(failure: &camerata_server::release_gate::GateFailure) -> Option<String> {
+    use camerata_server::release_gate::CheckId;
+    let rules: Vec<&str> = failure
+        .report
+        .problems()
+        .filter(|(check, _)| *check == CheckId::SplitRuleWithoutDecision)
+        .map(|(_, p)| p.location.as_str())
+        .collect();
+    if rules.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "A client package cannot be exported while a rule is split between options with no \
+         decision: {}. Decide each split in the desktop app (accept an option, or leave it to the \
+         client), then export from there. `camerata inspect` cannot make that decision.",
+        rules.join(", ")
+    ))
+}
+
 impl std::fmt::Display for InspectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InspectError::Failed(message) => write!(f, "{message}"),
-            InspectError::ReleaseBlocked(failure) => write!(f, "{failure}"),
+            InspectError::ReleaseBlocked(failure) => {
+                write!(f, "{failure}")?;
+                if let Some(hint) = split_rule_hint(failure) {
+                    write!(f, "\n{hint}")?;
+                }
+                Ok(())
+            }
             InspectError::Incomplete(refusal) => write!(f, "{refusal}"),
             InspectError::IncompleteRun(run) => write!(
                 f,
@@ -2300,6 +2328,30 @@ mod finder_tests;
 mod tests {
     use super::*;
     use camerata_server::scan_ledger::StageAccounting;
+
+    /// A refusal for a split rule names the rule and says where it is decided.
+    #[test]
+    fn a_split_rule_refusal_names_the_rule_and_points_to_the_desktop_app() {
+        use camerata_server::release_gate::{CheckId, GateFailure, GateReport, Problem};
+        let mut report = GateReport::default();
+        report.record(
+            CheckId::SplitRuleWithoutDecision,
+            vec![Problem::new(
+                "json/all-findings.json",
+                "acme/app ARCH-TRIGGER-ENV-1",
+                "the rule ARCH-TRIGGER-ENV-1 is split between options and has no decision.",
+                None,
+            )],
+        );
+        let shown = InspectError::ReleaseBlocked(GateFailure {
+            stem: "acme-app".into(),
+            report,
+        })
+        .to_string();
+        assert!(shown.contains("ARCH-TRIGGER-ENV-1"), "{shown}");
+        assert!(shown.contains("desktop app"), "{shown}");
+        assert!(shown.contains("then export"), "{shown}");
+    }
 
     #[test]
     fn the_triage_log_is_named_for_the_zip_and_marked_internal_in_its_folder() {

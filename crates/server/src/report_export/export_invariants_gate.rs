@@ -153,6 +153,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["demo/portal".to_string()],
@@ -1773,6 +1774,9 @@ async fn req_c2_the_sites_vs_rows_check_is_gone_because_a_sub_groups_members_are
         assessed_sites: Some(47),
         convention_option_id: Some("versioned".to_string()),
         convention_label: "URI-versioned endpoints".to_string(),
+        standard_source: None,
+        differs_from_default: None,
+        following_sites: None,
     }));
     let mut report = report_with(vec![f], vec!["ARCH-API-VERSIONING-1"]);
     let rows_before = report.findings.len();

@@ -670,39 +670,33 @@ fn split_row(repo: &str, rule_id: &str) -> FindingView {
     )
 }
 
-/// req_pass2_14 (Q3): the `NoConvention` pick DEFAULTS to "leave as reported", states its
-/// client-facing governance nature in the UI, and offers the authored options as the only
-/// alternatives.
+/// Round 2 (design 2026-11-20, section 8 and ruling A3; this replaces the Q3 local pick): a split
+/// row with no convention record is read-only. It offers no pick and claims no choice, and says why
+/// it cannot be ruled on here. Rows with a record are ruled on through the standards routes (the
+/// click tests).
 #[test]
-fn req_pass2_14_the_no_convention_pick_defaults_to_leave_and_says_it_is_governance() {
+fn req_pass2_14_a_split_row_with_no_record_is_read_only_and_claims_no_choice() {
     let html = render_no_convention(
         vec![split_row("me/api", "ERROR-HANDLING-1")],
         AdoptionModel::new(),
     );
     assert!(
-        html.contains("CLIENT-FACING governance act"),
-        "Q3: it must SAY SO; html=\n{html}"
+        html.contains("cannot be ruled on here"),
+        "it says why there is no control; html=\n{html}"
     );
     assert!(
-        html.contains("AGENTS.md"),
-        "and name where it lands; html=\n{html}"
+        !html.contains("adopt-pick") && !html.contains("<select"),
+        "no pick; html=\n{html}"
     );
     assert!(
-        html.contains("Leave as reported"),
-        "the default option is present; html=\n{html}"
-    );
-    assert_eq!(
-        html.matches("adopt-state off").count(),
-        1,
-        "and the row reads as left-as-reported; html=\n{html}"
+        !html.contains("No recommendation, leave it to the client")
+            && !html.contains("Leave as reported")
+            && !html.contains("adopt-state on"),
+        "and no claim of a choice; html=\n{html}"
     );
     assert!(
-        html.contains("Nothing selected to write"),
-        "so the commit bar has nothing; html=\n{html}"
-    );
-    assert!(
-        html.contains("Recommend: Result types (9 sites)") && html.contains("Recommend: Panics"),
-        "the authored options, with counts only where the producer counted; html=\n{html}"
+        html.contains("Result types (9 sites)") && html.contains("Panics"),
+        "the options are still listed, counted only where the producer counted; html=\n{html}"
     );
     assert!(
         !html.contains("Panics (0 sites)"),
@@ -719,10 +713,6 @@ fn req_pass2_14_a_no_convention_pick_inherits_the_same_typed_gate() {
         &adoption_key("me/api", "ERROR-HANDLING-1"),
         Some("result".to_string()),
     );
-
-    let panel = render_no_convention(findings.clone(), model.clone());
-    assert!(panel.contains("Write 1 into me/api"), "html=\n{panel}");
-    assert_eq!(panel.matches("adopt-state on").count(), 1, "html=\n{panel}");
 
     let plan = CommitPlan::recommendations(&split_rules(&findings), &model, "me/api");
     assert!(

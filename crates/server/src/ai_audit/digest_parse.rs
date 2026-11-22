@@ -218,7 +218,10 @@ pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::Fra
 /// 6: untrusted-content fencing (outside review item 1). The untrusted-content clause now reads
 /// "in the user message and tool results", so a reply cached under version 5 answers an older
 /// question.
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 6;
+///
+/// 7: convention model. The agent finder's checklist asks for the counts and up to ten places
+/// under options on every answer, `problems` included.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 7;
 
 /// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
 /// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).

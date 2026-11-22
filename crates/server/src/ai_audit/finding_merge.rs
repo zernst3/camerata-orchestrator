@@ -1022,6 +1022,8 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::ai_audit::agent_finder::reply::FINDER_RULES_CAPTURE,
     // The note on a place unfolded from a ruled-out row: it names the host row's key.
     crate::report_export::unfold::UNFOLDED_FROM_CAPTURE,
+    // The convention model's departure rows name the option of the place they stand for.
+    crate::conventions::CONVENTION_PLACE_CAPTURE,
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.

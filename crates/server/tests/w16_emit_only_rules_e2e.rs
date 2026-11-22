@@ -105,6 +105,7 @@ fn minimal_report(ledger: ScanLedger, audited_rule_ids: Vec<String>) -> ScanRepo
         discarded: Vec::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        conventions: Vec::new(),
         patterns_across_services: Default::default(),
         volume_by_repo: Default::default(),
         repos: vec!["acme/api".to_string()],

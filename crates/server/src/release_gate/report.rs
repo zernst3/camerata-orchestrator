@@ -57,6 +57,10 @@ pub enum CheckId {
     /// The review screen holds no change the decision store has not accepted. An undo whose
     /// revoke has not landed would export the decision the reviewer took back.
     UnsyncedReviewerChanges,
+    /// Every rule split between options with no convention carries the reviewer's decision (an
+    /// option accepted, or the rule left to the client) before a client package leaves (Zach,
+    /// 2026-11-20).
+    SplitRuleWithoutDecision,
     /// One fix, one row (item #1): every row has a Fix, the tickets and the Fix plan list the same
     /// Fixes once each, the PDF's escalation list has one entry for each escalated place, and its
     /// top three are three distinct Fixes.
@@ -72,7 +76,7 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 19] = [
+    pub const ALL: [CheckId; 20] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
@@ -89,6 +93,7 @@ impl CheckId {
         CheckId::Manifest,
         CheckId::Provenance,
         CheckId::UnsyncedReviewerChanges,
+        CheckId::SplitRuleWithoutDecision,
         CheckId::FixParity,
         CheckId::ClientTextStyle,
         CheckId::InternalNotes,
@@ -115,6 +120,7 @@ impl CheckId {
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",
             CheckId::UnsyncedReviewerChanges => "unsynced reviewer changes",
+            CheckId::SplitRuleWithoutDecision => "reviewer decision on split rules",
             CheckId::FixParity => "one fix per row",
             CheckId::ClientTextStyle => "client text style",
             CheckId::InternalNotes => "internal notes kept out",
