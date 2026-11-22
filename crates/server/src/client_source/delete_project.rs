@@ -267,6 +267,9 @@ fn path_step(category: &str, path: PathBuf) -> Step {
 struct Built {
     project: Project,
     targets: Vec<(GuardedTarget, super::purge::PurgePlan)>,
+    /// Every repo the project owns (its repos and the ones its inspections audited), read before
+    /// anything is removed.
+    owned: Vec<String>,
     _claims: Vec<OpGuard>,
     extras: Vec<Step>,
     /// Repos whose checkout the guard refused: reported as failed items.
@@ -384,7 +387,12 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     let mut blocked_repos: HashSet<String> = HashSet::new();
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
-    for repo in &project.repos {
+    let owned = super::read::owned_repos(state, &project);
+    let other_owned: Vec<String> = others
+        .iter()
+        .flat_map(|p| super::read::owned_repos(state, p))
+        .collect();
+    for repo in &owned {
         if let Some(refusal) = run_in_flight_refusal(state, &project.id, repo) {
             return Err(refusal);
         }
@@ -464,15 +472,13 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     // Folders of this project's repos, and of every other project's.
     // (A repo whose folder the guard refused is not trusted to be this project's: its folder
     // counts for nothing below.)
-    let own_dirs: Vec<PathBuf> = project
-        .repos
+    let own_dirs: Vec<PathBuf> = owned
         .iter()
         .filter(|r| !blocked_repos.contains(&r.to_ascii_lowercase()))
         .filter_map(|r| resolve_dir(state, r))
         .collect();
-    let other_dirs: Vec<PathBuf> = others
+    let other_dirs: Vec<PathBuf> = other_owned
         .iter()
-        .flat_map(|p| p.repos.iter())
         .filter_map(|r| resolve_dir(state, r))
         .collect();
     let shared_repo = |repo: &str| shared_with(repo).is_some();
@@ -488,8 +494,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         // Per-checkout bookkeeping that is not already in a repo plan.
         let canon = |p: &Path| crate::onboard::finding_context::canonicalize_existing_prefix(p);
         let other_canon: Vec<PathBuf> = other_dirs.iter().map(|d| canon(d)).collect();
-        for repo in project
-            .repos
+        for repo in owned
             .iter()
             .filter(|r| !shared_repo(r) && !blocked_repos.contains(&r.to_ascii_lowercase()))
         {
@@ -752,6 +757,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     );
     Ok(Built {
         project,
+        owned,
         targets,
         _claims: claims,
         extras,
@@ -810,11 +816,14 @@ async fn dev_rows(
         Foreign,
     }
     let lower = |r: &String| r.to_ascii_lowercase();
-    let own: HashSet<String> = project.repos.iter().map(lower).collect();
+    let own: HashSet<String> = super::read::owned_repos(state, project)
+        .iter()
+        .map(lower)
+        .collect();
     let other: HashSet<String> = others
         .iter()
-        .flat_map(|p| p.repos.iter())
-        .map(lower)
+        .flat_map(|p| super::read::owned_repos(state, p))
+        .map(|r| r.to_ascii_lowercase())
         .collect();
     let classify = |repos: &[String]| -> Who {
         let repos: Vec<String> = repos.iter().map(lower).collect();
@@ -976,13 +985,13 @@ fn failed(file: &Path, e: &std::io::Error) -> PurgeOutcome {
 
 /// Forget the in-memory copies of the decision, edit and Engine Check stores, the scan
 /// transcripts, finished jobs and last scans of the project. (Inspections wait for the end.)
-fn forget_console_memory(state: &AppState, project: &Project) {
+fn forget_console_memory(state: &AppState, project: &Project, repos: &[String]) {
     state.decisions.forget_project(&project.id);
     state.edits.forget_project(&project.id);
     state.engine_check.forget_project(&project.id);
     state.transcripts.clear(crate::SCAN_AUDIT_KEY);
     state.jobs.remove_finished_for_project(&project.id);
-    state.forget_project_scans(&project.id, &project.repos);
+    state.forget_project_scans(&project.id, repos);
 }
 
 /// Remove one set of development console rows (the write is checked: on a failure nothing is
@@ -1087,7 +1096,7 @@ pub(crate) fn story_deleting_refusal(state: &AppState, story_id: &str) -> Option
             unit.project_id.as_deref() == Some(p.id.as_str())
                 || repo
                     .as_deref()
-                    .is_some_and(|r| p.repos.iter().any(|x| x.eq_ignore_ascii_case(r)))
+                    .is_some_and(|r| super::read::project_owns_repo(state, p, r))
         })
         .find_map(|p| state.source_ops.deleting_refusal(&p.id))
 }
@@ -1130,6 +1139,7 @@ pub async fn delete_all(
     let built = build(state, project_id, false).await?;
     let Built {
         project,
+        owned,
         targets,
         _claims,
         mut extras,
@@ -1169,7 +1179,7 @@ pub async fn delete_all(
                     "decision store" | "edit store" | "engine check store"
                 ) && !memory_forgotten
                 {
-                    forget_console_memory(state, &project);
+                    forget_console_memory(state, &project, &owned);
                     memory_forgotten = true;
                 }
                 item.outcome = run_blocking(move || remove_path(&path)).await;
@@ -1207,7 +1217,7 @@ pub async fn delete_all(
             }
             Action::Memory => {
                 if !memory_forgotten {
-                    forget_console_memory(state, &project);
+                    forget_console_memory(state, &project, &owned);
                     memory_forgotten = true;
                 }
                 item.outcome = PurgeOutcome::Removed;
@@ -1263,7 +1273,7 @@ pub async fn delete_all(
         project_id: project.id.clone(),
         project_name: project.name.clone(),
         client_name: project.client_name.clone(),
-        repos: project.repos.clone(),
+        repos: owned.clone(),
         requested_at,
         completed_at,
         camerata_build: build_id(),

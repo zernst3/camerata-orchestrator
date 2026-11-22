@@ -137,6 +137,24 @@ pub fn known_storage_locations(roots: &StorageRoots) -> Vec<KnownLocation> {
                 treatment: *treatment,
             });
         }
+        // Each project's draft has its own file (`onboarding-draft-<id>.json` with its `.bak`
+        // and set-aside copies), so they are found on disk, not named in the table. Kept, like
+        // the shared draft file they came from.
+        if let Ok(read) = std::fs::read_dir(data) {
+            let mut files: Vec<PathBuf> = read
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("onboarding-draft-"))
+                })
+                .collect();
+            files.sort();
+            out.extend(files.into_iter().map(|path| KnownLocation {
+                path,
+                treatment: Treatment::Kept,
+            }));
+        }
     }
     if let Some(cli) = &roots.cli_state_dir {
         out.push(KnownLocation {

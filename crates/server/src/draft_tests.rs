@@ -5,12 +5,17 @@
 
 use super::draft::DraftStore;
 
+/// The projects that exist in these tests.
+fn live() -> Vec<String> {
+    ["p1", "p2", "p3"].iter().map(|s| s.to_string()).collect()
+}
+
 #[test]
 fn a_rewrite_leaves_the_previous_content_as_a_bak() {
     let dir = tempfile::tempdir().unwrap();
     let shared = dir.path().join("onboarding-draft.json");
     let path = dir.path().join("onboarding-draft-p1.json");
-    let store = DraftStore::at(shared);
+    let store = DraftStore::at(shared, &live());
     store.save("p1", serde_json::json!({"scan": 1}));
     store.save("p1", serde_json::json!({"scan": 2}));
 
@@ -52,7 +57,7 @@ fn a_file_that_is_not_a_draft_map_is_kept_not_overwritten_and_the_last_good_bak_
     let torn = r#"{"p1": {"scan": {"repos": ["a/b"]}, "audit": {"findings": ["#;
     std::fs::write(&path, torn).unwrap();
 
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
     store.save("p1", serde_json::json!({"scan": 1}));
     store.save("p1", serde_json::json!({"scan": 2}));
 
@@ -83,7 +88,7 @@ fn the_good_bak_is_untouched_by_the_first_save_over_an_unreadable_file() {
     std::fs::write(&bak, good_bak).unwrap();
     std::fs::write(&path, "{ torn").unwrap();
 
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
     store.save("p1", serde_json::json!({"scan": 1}));
     assert_eq!(
         std::fs::read_to_string(&bak).unwrap(),
@@ -98,11 +103,11 @@ fn a_file_that_is_not_utf8_is_set_aside_too() {
     let path = dir.path().join("onboarding-draft-p1.json");
     let bytes: Vec<u8> = vec![0xff, 0xfe, 0x7b, 0x00, 0xc3, 0x28];
     std::fs::write(&path, &bytes).unwrap();
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
     let kept = aside_files(dir.path());
     assert_eq!(kept.len(), 1, "set aside, not treated as no file");
     assert_eq!(std::fs::read(&kept[0]).unwrap(), bytes);
-    assert!(store.take_unreadable_notice().is_some());
+    assert!(store.take_unreadable_notice("p1").is_some());
 }
 
 #[test]
@@ -110,14 +115,14 @@ fn the_notice_is_told_once_and_names_the_recovery_copy() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("onboarding-draft-p1.json");
     std::fs::write(&path, "{ torn").unwrap();
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
-    let notice = store.take_unreadable_notice().expect("told");
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
+    let notice = store.take_unreadable_notice("p1").expect("told");
     assert!(notice.contains("onboarding-draft-p1.json.bak"), "{notice}");
     assert!(
         notice.contains("onboarding-draft-p1.json.unreadable-"),
         "{notice}"
     );
-    assert!(store.take_unreadable_notice().is_none(), "told once");
+    assert!(store.take_unreadable_notice("p1").is_none(), "told once");
 }
 
 #[test]
@@ -128,10 +133,10 @@ fn a_write_that_failed_does_not_clear_the_notice_and_a_good_one_leaves_no_temp_f
     // The temp file's name is taken by a directory, so the write cannot happen.
     let tmp = dir.path().join("onboarding-draft-p1.json.tmp");
     std::fs::create_dir(&tmp).unwrap();
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
     store.save("p1", serde_json::json!({"scan": 1}));
     assert!(
-        store.take_unreadable_notice().is_some(),
+        store.take_unreadable_notice("p1").is_some(),
         "the notice stays while no write has succeeded"
     );
     assert_eq!(
@@ -141,10 +146,10 @@ fn a_write_that_failed_does_not_clear_the_notice_and_a_good_one_leaves_no_temp_f
     );
 
     std::fs::remove_dir(&tmp).unwrap();
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
     store.save("p1", serde_json::json!({"scan": 1}));
     assert!(
-        store.take_unreadable_notice().is_none(),
+        store.take_unreadable_notice("p1").is_none(),
         "a good write clears it"
     );
     assert!(!tmp.exists(), "the temp file was renamed into place");
@@ -156,7 +161,7 @@ fn a_write_that_failed_does_not_clear_the_notice_and_a_good_one_leaves_no_temp_f
 #[test]
 fn only_one_previous_copy_is_kept_and_a_projects_deletion_leaves_none() {
     let dir = tempfile::tempdir().unwrap();
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
     store.save("p1", serde_json::json!({"scan": 1}));
     store.save("p1", serde_json::json!({"scan": 2}));
     store.save("p1", serde_json::json!({"scan": 3}));
@@ -310,7 +315,7 @@ fn set_mode(path: &std::path::Path, mode: u32) {
 #[test]
 fn a_deletion_that_fails_part_way_leaves_memory_and_disk_agreeing() {
     let dir = tempfile::tempdir().unwrap();
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
     store.save("p1", serde_json::json!({"scan": 1}));
     store.save("p1", serde_json::json!({"scan": 2}));
     store.save("p2", serde_json::json!({"scan": 3}));
@@ -355,7 +360,7 @@ fn names_in(dir: &std::path::Path) -> Vec<String> {
 #[test]
 fn deleting_one_project_removes_exactly_its_draft_files_and_leaves_the_others() {
     let dir = tempfile::tempdir().unwrap();
-    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
     store.save("p1", serde_json::json!({"scan": 1}));
     store.save("p1", serde_json::json!({"scan": 2}));
     store.save("p2", serde_json::json!({"scan": 3}));
@@ -399,7 +404,7 @@ fn a_shared_draft_file_is_split_into_one_file_per_project_and_kept_as_the_backup
     let text = r#"{"p1":{"scan":1},"p2":{"scan":2},"_cleared_at":{"p1":"2026-11-19T10:00:00Z","p3":"2026-11-19T11:00:00Z"}}"#;
     std::fs::write(&shared, text).unwrap();
 
-    let store = DraftStore::at(shared.clone());
+    let store = DraftStore::at(shared.clone(), &live());
     assert_eq!(store.load("p1"), Some(serde_json::json!({"scan": 1})));
     assert_eq!(store.load("p2"), Some(serde_json::json!({"scan": 2})));
     let read = |f: &str| -> serde_json::Value {
@@ -427,7 +432,7 @@ fn a_shared_draft_file_is_split_into_one_file_per_project_and_kept_as_the_backup
     );
 
     let before = names_in(dir.path());
-    let again = DraftStore::at(shared);
+    let again = DraftStore::at(shared, &live());
     assert_eq!(
         names_in(dir.path()),
         before,
@@ -435,4 +440,130 @@ fn a_shared_draft_file_is_split_into_one_file_per_project_and_kept_as_the_backup
     );
     assert_eq!(again.load("p2"), Some(serde_json::json!({"scan": 2})));
     assert_eq!(std::fs::read_to_string(&backup).unwrap(), text);
+}
+
+// ── migration robustness, empty ids, per-project notices, the delete/write race ───────────
+
+fn ids(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn an_interrupted_migration_does_not_bring_back_a_project_deleted_in_between() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first start wrote p1's file and was cut off; the shared file is still here, and p2 was
+    // deleted before the next start.
+    std::fs::write(
+        dir.path().join("onboarding-draft-p1.json"),
+        r#"{"p1":{"scan":1}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("onboarding-draft.json"),
+        r#"{"p1":{"scan":1},"p2":{"scan":2}}"#,
+    )
+    .unwrap();
+
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &ids(&["p1"]));
+
+    let names = names_in(dir.path());
+    assert!(
+        !names.iter().any(|n| n.contains("p2")),
+        "no file was made for the deleted project: {names:?}"
+    );
+    assert!(store.load("p2").is_none());
+    assert_eq!(store.load("p1"), Some(serde_json::json!({"scan": 1})));
+}
+
+#[test]
+fn a_discard_stamp_in_the_projects_own_file_keeps_a_shared_draft_discarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let own = r#"{"_cleared_at":{"p1":"2026-11-19T10:00:00Z"}}"#;
+    std::fs::write(dir.path().join("onboarding-draft-p1.json"), own).unwrap();
+    std::fs::write(
+        dir.path().join("onboarding-draft.json"),
+        r#"{"p1":{"scan":9}}"#,
+    )
+    .unwrap();
+
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &ids(&["p1"]));
+
+    assert!(store.load("p1").is_none(), "the draft stays discarded");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("onboarding-draft-p1.json")).unwrap(),
+        own,
+        "its own file is authoritative and untouched"
+    );
+}
+
+#[test]
+fn an_unreadable_own_file_is_replaced_from_the_shared_file_with_the_torn_copy_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let own = dir.path().join("onboarding-draft-p1.json");
+    std::fs::write(&own, "{ torn").unwrap();
+    std::fs::write(
+        dir.path().join("onboarding-draft.json"),
+        r#"{"p1":{"scan":1}}"#,
+    )
+    .unwrap();
+
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &ids(&["p1"]));
+
+    assert_eq!(store.load("p1"), Some(serde_json::json!({"scan": 1})));
+    let now: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&own).unwrap()).unwrap();
+    assert_eq!(now, serde_json::json!({"p1": {"scan": 1}}), "written again");
+    let kept = aside_files(dir.path());
+    assert_eq!(kept.len(), 1, "the torn copy is kept");
+    assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), "{ torn");
+}
+
+#[test]
+fn an_empty_project_id_never_gets_a_file_named_with_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &[]);
+    store.save("", serde_json::json!({"scan": 1}));
+    let names = names_in(dir.path());
+    assert!(
+        !names.iter().any(|n| n == "onboarding-draft-.json"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn the_unreadable_notice_is_for_the_project_whose_file_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("onboarding-draft-p1.json"), "{ torn").unwrap();
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
+    assert!(
+        store.take_unreadable_notice("p2").is_none(),
+        "another project is not told"
+    );
+    assert!(store.take_unreadable_notice("p1").is_some());
+    assert!(store.take_unreadable_notice("p1").is_none(), "told once");
+}
+
+#[test]
+fn a_write_never_brings_back_a_draft_a_deletion_removed() {
+    for _ in 0..200 {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DraftStore::at(dir.path().join("onboarding-draft.json"), &live());
+        store.save("p1", serde_json::json!({"scan": 0}));
+        let writer = {
+            let s = store.clone();
+            std::thread::spawn(move || s.save("p1", serde_json::json!({"scan": 1})))
+        };
+        let deleter = {
+            let s = store.clone();
+            std::thread::spawn(move || s.clear_checked("p1").unwrap())
+        };
+        writer.join().unwrap();
+        deleter.join().unwrap();
+        let on_disk = dir.path().join("onboarding-draft-p1.json").exists();
+        assert_eq!(
+            on_disk,
+            store.load("p1").is_some(),
+            "disk and memory agree whether the draft exists"
+        );
+    }
 }

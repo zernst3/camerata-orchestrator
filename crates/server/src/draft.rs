@@ -106,7 +106,8 @@ impl DraftStore {
     /// then the shared file is renamed to `<path>.shared-backup`, never deleted. A shared file
     /// that cannot be read is moved to its `.unreadable-<seconds>` name instead, so a second
     /// start finds nothing to redo.
-    pub fn at(path: PathBuf) -> Self {
+    pub fn at(path: PathBuf, live_ids: &[String]) -> Self {
+        let _ = live_ids;
         let mut notice = None;
         let mut mem: HashMap<String, serde_json::Value> = HashMap::new();
         let store = Self {
@@ -350,7 +351,7 @@ impl DraftStore {
     /// Why no draft could be restored, when the draft file on disk was unreadable at start and
     /// nothing has been saved since. Taking it clears it: the operator is told once, and what
     /// they do next (start again, save) is not blocked by a message that keeps coming back.
-    pub fn take_unreadable_notice(&self) -> Option<String> {
+    pub fn take_unreadable_notice(&self, _project_id: &str) -> Option<String> {
         self.notice.lock().ok().and_then(|mut n| n.take())
     }
 

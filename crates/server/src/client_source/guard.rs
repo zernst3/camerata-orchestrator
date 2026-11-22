@@ -449,7 +449,7 @@ pub(crate) fn protected_reason(
 fn other_checkouts(state: &AppState, project_id: &str, repo: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for project in state.projects.list() {
-        for r in &project.repos {
+        for r in &super::read::owned_repos(state, &project) {
             if project.id == project_id && r.eq_ignore_ascii_case(repo) {
                 continue;
             }

@@ -855,7 +855,7 @@ pub(crate) async fn onboard_draft_get(State(state): State<AppState>) -> axum::re
     // instead of answering "no draft" as though nothing had ever been saved. Told once, so the
     // operator's next step (start again, save) is not blocked by the same message.
     if state.draft.load(&pid).is_none() {
-        if let Some(message) = state.draft.take_unreadable_notice() {
+        if let Some(message) = state.draft.take_unreadable_notice(&pid) {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({

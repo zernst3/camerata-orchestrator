@@ -230,6 +230,24 @@ fn owning_project(state: &AppState, project_hint: Option<&str>, repo: &str) -> O
         .map(|p| p.id.clone())
 }
 
+/// Every repo `project` owns: its own `repos` plus every repo its saved inspections audited
+/// (a plain `owner/name` only), without duplicates (case-insensitive). The ONE answer deletion
+/// uses for "this project's repos", matching [`project_owns_repo`].
+pub(crate) fn owned_repos(state: &AppState, project: &crate::project::Project) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in &project.repos {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(r)) {
+            out.push(r.clone());
+        }
+    }
+    for r in state.inspections.audited_repos(&project.id) {
+        if is_owner_name(&r) && !out.iter().any(|o| o.eq_ignore_ascii_case(&r)) {
+            out.push(r);
+        }
+    }
+    out
+}
+
 /// The OTHER projects that use `repo`: it is in their `repos` or one of their saved inspections
 /// audited it ([`project_owns_repo`]). A checkout any of them uses is not this project's to
 /// remove.

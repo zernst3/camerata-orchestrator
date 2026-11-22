@@ -306,6 +306,20 @@ impl InspectionStore {
             .is_some_and(|l| l.iter().any(|e| e.audited_ref(repo).is_some()))
     }
 
+    /// Every repo any entry of `project_id` audited, in first-seen order, one spelling each
+    /// (case-insensitive).
+    pub fn audited_repos(&self, project_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Some(list) = self.lock().get(project_id) {
+            for r in list.iter().flat_map(|e| e.repos.iter()) {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(&r.repo)) {
+                    out.push(r.repo.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// The spelling of `repo` that one of `project_id`'s entries audited (matched
     /// case-insensitively), when any did.
     pub fn audited_spelling(&self, project_id: &str, repo: &str) -> Option<String> {

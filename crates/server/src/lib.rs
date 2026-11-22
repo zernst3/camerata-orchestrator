@@ -1200,7 +1200,15 @@ impl AppState {
         // there is no `CAMERATA_LLM_BACKEND` env var to hydrate. Every project-scoped call
         // resolves its `Llm` from `project.backend` and the chat path from
         // `state.settings.chat_backend()`, both read directly at the call seam.
-        self.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
+        self.draft = crate::draft::DraftStore::at(
+            dir.join("onboarding-draft.json"),
+            &self
+                .projects
+                .list()
+                .into_iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+        );
         self.uow = crate::uow::UowStore::at(dir.join("uow.json"));
         // Clarifications persist too: every open structured question is a resumable
         // pause point, so the user can leave and come back to any unanswered question
