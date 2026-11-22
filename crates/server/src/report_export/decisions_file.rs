@@ -1,4 +1,4 @@
-//! The package's `decisions.json` and Decisions sheet (design 5.3 and WO9).
+//! The package's `json/decisions.json` and Decisions sheet (design 5.3 and WO9).
 //!
 //! Every decision record the report was reviewed with, as the client package states it: which
 //! site or tree node it is on, what was ruled, which sites a group decision covers and which
@@ -130,9 +130,9 @@ pub fn decision_rows(reviewed: &ReviewedReport) -> Vec<DecisionRowJson> {
 }
 
 /// The file's path in the package.
-pub const DECISIONS_FILE: &str = "decisions.json";
+pub use camerata_api_types::package_paths::DECISIONS_JSON as DECISIONS_FILE;
 
-/// The bytes of `decisions.json`.
+/// The bytes of `json/decisions.json`.
 pub fn decisions_json(reviewed: &ReviewedReport) -> anyhow::Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "decisions": decision_rows(reviewed),

@@ -910,9 +910,9 @@ async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
     let before = unzip(&before_zip);
     let before_findings = before
         .iter()
-        .find(|(name, _)| name.ends_with("findings.json"))
+        .find(|(name, _)| name.ends_with("json/inspection.json"))
         .map(|(_, bytes)| bytes.clone())
-        .expect("the package carries findings.json");
+        .expect("the package carries json/inspection.json");
     assert!(String::from_utf8_lossy(&before_findings).contains("src/leak.ts"));
 
     delete_over_http(fx).await;
@@ -935,9 +935,9 @@ async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
     let after = unzip(&after_zip);
     let after_findings = after
         .iter()
-        .find(|(name, _)| name.ends_with("findings.json"))
+        .find(|(name, _)| name.ends_with("json/inspection.json"))
         .map(|(_, bytes)| bytes.clone())
-        .expect("the regenerated package carries findings.json");
+        .expect("the regenerated package carries json/inspection.json");
     let strip_clock = |bytes: &[u8]| -> serde_json::Value {
         let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         if let Some(map) = value.as_object_mut() {

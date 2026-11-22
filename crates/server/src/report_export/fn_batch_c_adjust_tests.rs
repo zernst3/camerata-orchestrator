@@ -1,5 +1,5 @@
 //! False-negative audit, Batch C, M2/M8: a bound that moves a finding's severity says so in the
-//! PDF, the workbook, `findings.json` and the CSV, and never moves it silently.
+//! PDF, the workbook, `json/inspection.json` and the CSV, and never moves it silently.
 
 use std::collections::HashMap;
 

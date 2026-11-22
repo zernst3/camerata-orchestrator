@@ -10,7 +10,7 @@
 //!   paragraph break (normalised to exactly `"\n\n"`). Backtick spans survive, so the PDF
 //!   template (`fix_body` in `audit_report.typ`) can set them as inline mono.
 //! - [`plain`] is [`prepare`] plus the backticks of well-formed single-backtick spans removed,
-//!   for the plain-text artifacts (xlsx cells, CSV, findings.json) where backticks would read
+//!   for the plain-text artifacts (xlsx cells, CSV, json/inspection.json) where backticks would read
 //!   as stray punctuation.
 
 /// Join hard line wraps into spaces, keep blank-line paragraph breaks, trim the ends.

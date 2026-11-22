@@ -1,5 +1,5 @@
 //! H4 item 1: every failed AI pass and every skipped file reaches Coverage in the PDF data, the
-//! workbook and `findings.json`, from one computation.
+//! workbook and `json/inspection.json`, from one computation.
 
 use std::collections::HashMap;
 
@@ -476,7 +476,7 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
     assert!(data.contains("files were not scanned"), "{data}");
     assert!(data.contains("reached the 2-file limit"), "{data}");
 
-    // findings.json.
+    // json/inspection.json.
     let export = crate::xlsx_export::build_findings_export(
         &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         None,
@@ -559,7 +559,7 @@ fn coverage_says_how_many_absorbed_sites_were_not_checked() {
              no line."
         )
     );
-    // The PDF data, findings.json and the workbook carry it.
+    // The PDF data, json/inspection.json and the workbook carry it.
     let sealed = report.seal();
     let json = build_report_json(
         &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),

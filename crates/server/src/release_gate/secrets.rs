@@ -171,7 +171,7 @@ pub fn csv_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
                 // A nested list or object (the `also_locations` column) is JSON text. It is
                 // scanned BOTH ways, and the union is reported, so the check is never weaker
                 // than scanning the cell as one string was:
-                // 1. walked like `findings.json`, every string and key on its own (the same
+                // 1. walked like `json/inspection.json`, every string and key on its own (the same
                 //    detector, the same strictness), which also sees an unquoted `.env` line
                 //    inside a snippet that the one-string scan cannot (the line is not at a line
                 //    start there);

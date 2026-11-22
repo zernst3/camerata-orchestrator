@@ -119,7 +119,7 @@ async fn plain_postgres_repo_selects_both_rules_via_the_real_curated_selection()
 /// through `split_scannable_rules` + `audit_repos`'s `repo_selected_ids` gate, that their
 /// checkers (`SupabaseFnSearchPathChecker` / `SupabaseRlsChecker`) actually FIRE against the
 /// synthetic repo's real content, and that both findings reach the written product-export
-/// ZIP's `findings.json` with a grounded citation (never the bare "preview, not
+/// ZIP's `json/inspection.json` with a grounded citation (never the bare "preview, not
 /// corpus-documented" label an armed-but-uncited deterministic finding would carry) — this is
 /// exactly what the C3-3 real-path arming bug silently broke.
 #[tokio::test]
@@ -180,7 +180,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         export_path_is_zip(&outcome.export_path),
         "the export must be a real zip"
     );
-    let findings_json = read_zip_entry(&outcome.export_path, "findings.json");
+    let findings_json = read_zip_entry(&outcome.export_path, "json/inspection.json");
 
     for (rule_id, label) in [
         (RULE_SEARCH_PATH, "SUPABASE-FUNC-SEARCH-PATH-1"),
@@ -191,9 +191,9 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
     ] {
         assert!(
             findings_json.contains(rule_id),
-            "{label} must fire and reach findings.json for a plain-Postgres repo with its \
+            "{label} must fire and reach json/inspection.json for a plain-Postgres repo with its \
              planted defect — this is the C3-3 real-path arming regression this file guards. \
-             findings.json:\n{findings_json}"
+             json/inspection.json:\n{findings_json}"
         );
     }
     // Neither finding may carry the bare "preview, not corpus-documented" citation label an

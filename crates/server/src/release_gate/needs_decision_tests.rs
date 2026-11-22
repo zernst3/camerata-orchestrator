@@ -675,7 +675,7 @@ fn the_exports_record_a_severity_edit_as_the_decision() {
     assert_eq!(rows[0]["id"], "severity-set-000001");
     assert!(
         !rows[0].to_string().contains(&edit.id),
-        "edit ids stay out of decisions.json"
+        "edit ids stay out of json/decisions.json"
     );
     assert_eq!(rows[0]["scope"], "site");
     assert_eq!(rows[0]["state"], "severity_set");
@@ -739,13 +739,13 @@ fn all_problems_cell(zip: &[u8], path: &str, header: &str) -> String {
 
 fn findings_row(zip: &[u8], path: &str) -> serde_json::Value {
     let entries = read_zip_entries(zip).unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     v["findings"]
         .as_array()
         .unwrap()
         .iter()
         .find(|r| r["path"] == path)
-        .unwrap_or_else(|| panic!("no findings.json row for {path}"))
+        .unwrap_or_else(|| panic!("no json/inspection.json row for {path}"))
         .clone()
 }
 

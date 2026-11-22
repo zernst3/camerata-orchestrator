@@ -5,7 +5,7 @@
 //! * A client export of a run with a failed part, a part that did not run (spend limit or outage
 //!   stop), a fatal AI error or an uninspected repo is refused, and nothing is built.
 //! * An internal export of the same run is written, marked INTERNAL INCOMPLETE on the cover, in
-//!   `findings.json`, in the manifest and in the README.
+//!   `json/inspection.json`, in the manifest and in the README.
 //! * The release gate (and `camerata release-gate <zip>`) refuses any package that records such a
 //!   run, internal or not.
 //! * A complete run's output carries none of this.
@@ -147,12 +147,12 @@ fn an_internal_export_of_an_incomplete_run_is_marked_everywhere() {
         "the PDF's data carries it (the cover prints it)"
     );
     let findings: serde_json::Value =
-        serde_json::from_slice(&package.findings_json).expect("findings.json parses");
+        serde_json::from_slice(&package.findings_json).expect("json/inspection.json parses");
     assert!(
         findings["provenance"]["internal_incomplete"]
             .as_str()
             .is_some_and(|s| s.contains(marking)),
-        "findings.json carries it"
+        "json/inspection.json carries it"
     );
     assert!(
         package.readme.contains(marking),
@@ -205,7 +205,7 @@ fn a_complete_run_exports_exactly_as_before() {
     let findings = String::from_utf8(package.findings_json.clone()).unwrap();
     assert!(
         !findings.contains("internal_incomplete"),
-        "findings.json unchanged"
+        "json/inspection.json unchanged"
     );
     assert!(!package.readme.contains("INTERNAL INCOMPLETE"));
     assert!(package.provenance.incomplete.is_empty());
@@ -227,7 +227,7 @@ fn a_complete_run_exports_exactly_as_before() {
 }
 
 /// Laundering: an internal zip whose manifest flag is edited away still says INTERNAL
-/// INCOMPLETE in its README and findings.json, and the gate reads those too.
+/// INCOMPLETE in its README and json/inspection.json, and the gate reads those too.
 #[test]
 fn the_release_gate_refuses_an_internal_zip_whose_manifest_flag_was_edited_away() {
     let released = release_internal(internal_incomplete_package()).expect("internal release");
@@ -246,7 +246,7 @@ fn the_release_gate_refuses_an_internal_zip_whose_manifest_flag_was_edited_away(
         audit
             .problems()
             .any(|(_, p)| p.message.contains("did not run to completion")),
-        "the README and findings.json still record the incomplete run: {audit:?}"
+        "the README and json/inspection.json still record the incomplete run: {audit:?}"
     );
 }
 

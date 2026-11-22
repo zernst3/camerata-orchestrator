@@ -239,9 +239,10 @@ pub(super) fn ClientNameField(
 /// success, else the server's message for a toast.
 pub(in crate::cockpit) async fn fetch_triage_log(project_id: &str) -> Result<String, String> {
     let url = format!(
-        "{}/api/projects/{}/triage-log.csv",
+        "{}/api/projects/{}/{}",
         crate::bff_base(),
         project_id,
+        camerata_api_types::package_paths::TRIAGE_LOG_FILE,
     );
     let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
     if resp.status().is_success() {

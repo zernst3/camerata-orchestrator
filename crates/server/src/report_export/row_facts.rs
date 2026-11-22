@@ -1,7 +1,7 @@
 //! What every exported row says about its place in the review (design 3B items 2 and 3, amendment
 //! A5), worked out once from the [`ReviewedReport`] and written by every exporter.
 //!
-//! - [`RowFacts`] is on every row of every export: the findings sheets, `findings.json`, the
+//! - [`RowFacts`] is on every row of every export: the findings sheets, `json/inspection.json`, the
 //!   `csv/` and `json/` datasets, the Sites sheet and the dependency rows. It names the row
 //!   ([`site_id`]), how closely it was reviewed, the sub-group it sits in and that sub-group's
 //!   label and cause, and whether the group reviewer escalated it.

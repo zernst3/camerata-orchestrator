@@ -195,7 +195,7 @@ fn futures_lite_block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
 fn a_package_of_thirty_thousand_places_clears_the_release_gate() {
     let over = apply_overlay(&report_of_sites(30_001), &[], &[], &[]);
     let entries = released_entries(&over, &client_options());
-    assert!(entries.contains_key("findings.json"));
+    assert!(entries.contains_key("json/inspection.json"));
     let _ = Value::Null;
 }
 

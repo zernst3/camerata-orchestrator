@@ -2005,7 +2005,7 @@ fn a_place_with_two_rules_is_decided_once_a_rule_decided_alone_wins_and_the_gate
         let mut outer = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
         let mut data = String::new();
         outer
-            .by_name("findings.json")
+            .by_name("json/inspection.json")
             .unwrap()
             .read_to_string(&mut data)
             .unwrap();

@@ -5,7 +5,7 @@
 //! The scan stub reports the SAME line twice under different rule names, so the real merge folds
 //! one report into the other and the absorbed site lands in `also_locations`. The real production
 //! functions then run (`ai_audit::audit_repo` -> `ai_audit::group_semantic` -> the report,
-//! workbook, `findings.json` and dataset builders), and every client-visible surface is read: no
+//! workbook, `json/inspection.json` and dataset builders), and every client-visible surface is read: no
 //! surface may hold the key, and the merged row must really be there (anti-vacuity).
 //!
 //! ZERO API SPEND: the stub never makes a network call.
@@ -208,7 +208,7 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
         &HashMap::new(),
     );
     out.push((
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_string_pretty(&export).unwrap(),
     ));
     for (name, bytes) in xlsx_export::build_csv_exports(
@@ -260,8 +260,8 @@ async fn assert_redacted_everywhere(terse_output: bool) {
             "terse_output={terse_output}: the fixture must produce two rows: {merged:#?}"
         );
         assert!(
-            surfaces.iter().any(|(n, _)| n == "findings.json"),
-            "findings.json was not built"
+            surfaces.iter().any(|(n, _)| n == "json/inspection.json"),
+            "json/inspection.json was not built"
         );
         for (name, text) in &surfaces {
             assert!(

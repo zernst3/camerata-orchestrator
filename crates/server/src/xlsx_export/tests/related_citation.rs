@@ -1,7 +1,7 @@
 //! H5 item 1: a citation attached to an AI-tier finding by `classify_ai_finding`'s KEYWORD
 //! match is a "related standard", never presented as a rule Camerata checked. These tests pin
 //! both directions across every artifact (the report JSON the PDF is compiled from, the xlsx
-//! workbook and `findings.json`): a keyword-matched finding carries the "related" label, and a
+//! workbook and `json/inspection.json`): a keyword-matched finding carries the "related" label, and a
 //! finding whose OWN rule was checked keeps its plain citation.
 
 use super::*;
@@ -31,7 +31,7 @@ fn keyword_matched_ai_finding() -> Finding {
     f
 }
 
-/// `findings.json`'s one row, as the wire JSON a consumer reads (serialized, not the
+/// `json/inspection.json`'s one row, as the wire JSON a consumer reads (serialized, not the
 /// in-memory struct, so a `#[serde(skip)]` field can never make this test pass by accident).
 fn only_findings_json_row(
     report: &ScanReport,
@@ -48,7 +48,7 @@ fn only_findings_json_row(
         &json,
         &HashMap::new(),
     );
-    let value = serde_json::to_value(&export).expect("findings.json must serialize");
+    let value = serde_json::to_value(&export).expect("json/inspection.json must serialize");
     let rows = value["findings"]
         .as_array()
         .expect("findings array")
@@ -98,13 +98,13 @@ async fn keyword_matched_ai_finding_cites_a_related_standard_in_every_artifact()
     assert_eq!(group.citation.kind, "related");
     assert_eq!(group.sites[0].citation.kind, "related");
 
-    // findings.json: the label says related standard and provenance stays AI-advisory (it
+    // json/inspection.json: the label says related standard and provenance stays AI-advisory (it
     // used to read "Deterministic" because the borrowed citation was "grounded").
     let row = only_findings_json_row(&report, &corpus);
     let label = row["citation_label"].as_str().expect("citation_label");
     assert!(
         label.starts_with(RELATED_STANDARD_LABEL_PREFIX),
-        "findings.json citation_label must say related standard, got {label:?}"
+        "json/inspection.json citation_label must say related standard, got {label:?}"
     );
     assert_eq!(row["provenance"], "AI-advisory");
 

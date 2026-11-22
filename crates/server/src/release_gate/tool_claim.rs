@@ -10,6 +10,7 @@
 use super::Problem;
 use crate::onboard::ScanReport;
 use crate::report_export::{AuditReportJson, NO_PREVIEW_TOOL_LINE};
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// Whether the ledger leaves the rule named by an "unrouted" note unchecked: no entry of it ran.
 fn left_unchecked(report: &ScanReport, rule_id: &str) -> bool {
@@ -32,14 +33,14 @@ pub fn problems(report: &ScanReport, report_json: &AuditReportJson) -> Vec<Probl
         .any(|line| line == NO_PREVIEW_TOOL_LINE);
     match (claimed, unchecked.is_empty()) {
         (true, true) => vec![Problem::new(
-            "findings.json",
+            INSPECTION_JSON,
             "executive summary",
             "the summary says selected checks had no scan-time preview tool, but the ledger \
              shows every rule with no tool as run",
             None,
         )],
         (false, false) => vec![Problem::new(
-            "findings.json",
+            INSPECTION_JSON,
             "executive summary",
             format!(
                 "the ledger shows {} not run for want of a scan-time preview tool, and the \

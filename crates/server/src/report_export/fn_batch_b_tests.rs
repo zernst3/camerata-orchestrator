@@ -148,7 +148,9 @@ fn the_scope_sentence_promises_counts_not_file_lists() {
     let gaps = coverage_gaps(&scoped_scan());
     let note = gaps.scope_limited_note.as_deref().unwrap();
     assert!(
-        note.contains("The counts per rule are on the Rules checked sheet and in findings.json."),
+        note.contains(
+            "The counts per rule are on the Rules checked sheet and in json/inspection.json."
+        ),
         "{note}"
     );
     assert!(!note.contains("files each was checked against"), "{note}");

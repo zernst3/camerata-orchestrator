@@ -807,7 +807,7 @@ Not performed in this engagement:
 ]
 
 // H4: what this scan did not review, by pass and by path (`report_export::coverage_gaps`, the
-// same data the workbook's Not checked sheet and findings.json carry). A failed AI pass names how
+// same data the workbook's Not checked sheet and json/inspection.json carry). A failed AI pass names how
 // many files it did not review; a skipped file is listed by path, the first few only. The rest
 // are counted and the Not checked sheet lists them all.
 #let gaps = d.coverage_gaps

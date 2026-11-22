@@ -18,7 +18,7 @@
 //!   [`dep_audit`], `mechanical_gate` (private) and [`suppression`].
 //! - **The client deliverable.** [`report_export`] builds the PDF's JSON and owns the
 //!   severity choke-point; [`xlsx_export`] builds the kind-partitioned workbook and
-//!   `findings.json`. Both take `&onboard::SealedReport`, never `&ScanReport`, so the
+//!   `json/inspection.json`. Both take `&onboard::SealedReport`, never `&ScanReport`, so the
 //!   row set cannot be mutated after sealing. See `docs/TECHNICAL.md` section 6a.
 //! - **Self-measurement.** [`scan_ledger`] records what actually ran;
 //!   [`integrity_gate`] turns that into a verdict with an exit code. See
@@ -207,6 +207,10 @@ pub mod workspace;
 mod routes;
 pub use routes::*;
 
+use camerata_api_types::package_paths::{
+    self, ALL_FINDINGS_CSV, ALL_FINDINGS_JSON, CSV_DIR, DECISIONS_JSON, INSPECTION_JSON, JSON_DIR,
+    MANIFEST_JSON, README_TXT, TICKETS_CSV,
+};
 use std::sync::Arc;
 
 use axum::{
@@ -1942,7 +1946,13 @@ pub fn router(state: AppState) -> Router {
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
         // ── Triage log (the operator's file, never in the client package) ─────
-        .route("/api/projects/:id/triage-log.csv", get(export_triage_log))
+        .route(
+            concat!(
+                "/api/projects/:id/",
+                camerata_api_types::pkg_triage_log_file!()
+            ),
+            get(export_triage_log),
+        )
         // ── Audit-report (PDF) export ─────────────────────────────────────────
         .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
@@ -3907,7 +3917,7 @@ async fn export_audit_report(
     let stem = gated.released.stem;
     let pdf_bytes = gated.pdf;
 
-    let filename = format!("{stem}.pdf");
+    let filename = package_paths::pdf_name(&stem);
 
     (
         StatusCode::OK,
@@ -4204,7 +4214,7 @@ async fn export_product(
     };
     // Pass-1 W1 seal fix: see the identical comment in `export_audit_report` — this is the
     // "row set is final" point for every artifact this handler builds (PDF, xlsx,
-    // findings.json), all three now reading the SAME sealed set.
+    // json/inspection.json), all three now reading the SAME sealed set.
     let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
         &state.decisions.active(&id),
     ));
@@ -4375,10 +4385,11 @@ pub fn product_export_readme(
         format!(
             "{services}\n\
              \x20 Where the services of this project differ on a rule: the {services} sheet of the\n\
-             \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
+             \x20 workbook, a section in the PDF and a patterns_across_services key in {inspection}.\n\
              \x20 An observation, not a problem: it has no severity and is in no count.\n\
              \n",
             services = v::PATTERNS_ACROSS_SERVICES,
+            inspection = package_paths::INSPECTION_JSON,
         )
     } else {
         String::new()
@@ -4390,14 +4401,14 @@ pub fn product_export_readme(
          \n\
          This ZIP holds the files below. All of them come from the same inspection.\n\
          \n\
-         {stem}.pdf\n\
+         {pdf}\n\
          \x20 The report to read first. It has the cover, the executive summary, the scorecard by\n\
          \x20 area, the severity by effort matrix, the problems with their citations and fixes,\n\
          \x20 what is healthy, the dependency snapshot and how the inspection was done. It is\n\
          \x20 written for a board, a buyer or a decision maker. Problems ruled out are left out\n\
          \x20 and counted once, in the methodology section.\n\
          \n\
-         {stem}-findings.xlsx\n\
+         {workbook}\n\
          \x20 The complete working list for the engineers doing the fixes. Open the {start} sheet\n\
          \x20 first: it lists the sheets and says what each one holds, and the {glossary} sheet says\n\
          \x20 what every word and column means. The {fix_plan} sheet has one row for each fix, in the\n\
@@ -4412,27 +4423,29 @@ pub fn product_export_readme(
          \x20 silently. The last sheets are for reviewers: {source_rows}, {decisions} and\n\
          \x20 {grouped}.\n\
          \n\
-         findings.json\n\
-         \x20 Every row that was not ruled out, of every kind: the rows behind {all_problems},\n\
-         \x20 {conventions} and {not_checked} together, before the {all_problems} sheet shows each\n\
-         \x20 problem once. For scripts, CI and other tools: severity, area, repo, path and line,\n\
-         \x20 the code seen, the explanation, the fix, the decision so far, effort, confidence,\n\
-         \x20 citation and more, wrapped with the report's summary counts.\n\
+         {inspection}\n\
+         \x20 The whole inspection in one file. Every row that was not ruled out, of every kind: the\n\
+         \x20 rows behind {all_problems}, {conventions} and {not_checked} together, before the\n\
+         \x20 {all_problems} sheet shows each problem once. For scripts, CI and other tools:\n\
+         \x20 severity, area, repo, path and line, the code seen, the explanation, the fix, the\n\
+         \x20 decision so far, effort, confidence, citation and more, wrapped with the report's\n\
+         \x20 summary counts.\n\
          \n\
-         decisions.json\n\
+         {decisions_json}\n\
          \x20 Every decision record the report was reviewed with: what was ruled on which place or\n\
          \x20 group of places, and whether a reason was recorded. The {decisions} sheet of the\n\
          \x20 workbook is the same list.\n\
          \n\
-         csv/ and json/\n\
+         {csv_dir} and {json_dir}\n\
          \x20 One file for each table of the workbook, as CSV and as JSON, for tools that do not\n\
-         \x20 read Excel. The all-findings files are the exception: they hold the same rows as\n\
-         \x20 findings.json, as one flat table.\n\
+         \x20 read Excel. The all-findings files hold the same rows as {inspection}, as one\n\
+         \x20 flat table. The {json_dir} folder also holds {inspection} and {decisions_json}.\n\
          \n\
-         manifest.json\n\
-         \x20 The list of the files in this ZIP with a checksum for each.\n\
+         {manifest}\n\
+         \x20 The list of the files in this ZIP with a checksum for each. It stays at the top\n\
+         \x20 level because it describes the whole ZIP.\n\
          \n\
-         csv/tickets.csv\n\
+         {tickets_csv}\n\
          \x20 One ticket for each fix (one kind of problem with one cause) that still has places to\n\
          \x20 change. A place ruled out or accepted as a risk is on no ticket.\n\
          \x20 Columns: {title}, {description}, {priority}, {labels}, {estimate}, {group_id}, {places}\n\
@@ -4465,6 +4478,14 @@ pub fn product_export_readme(
         decisions = v::REVIEWER_DECISIONS,
         grouped = v::HOW_PROBLEMS_WERE_GROUPED,
         fix_id = v::H_FIX_ID,
+        pdf = package_paths::pdf_name(stem),
+        workbook = package_paths::workbook_name(stem),
+        inspection = package_paths::INSPECTION_JSON,
+        decisions_json = package_paths::DECISIONS_JSON,
+        manifest = package_paths::MANIFEST_JSON,
+        tickets_csv = package_paths::TICKETS_CSV,
+        csv_dir = package_paths::CSV_DIR,
+        json_dir = package_paths::JSON_DIR,
     );
     if !internal {
         return format!("{}\n", format!("{files}{patterns}").trim_end());
@@ -4829,7 +4850,7 @@ impl ManifestProvenance {
 /// The git commit this binary was built from, recorded by `build.rs` (`CAMERATA_GIT_COMMIT`).
 /// `None` for a build outside a git checkout: an honest absence, never a placeholder. Stated in
 /// [`ManifestProvenance::engine_version`] (README and `manifest.json`) and in the report cover
-/// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
+/// (`report_export::CoverJson::engine_commit`, which the PDF and `json/inspection.json` render).
 pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
 
 /// Whether the tree had uncommitted changes when this binary was built (`build.rs`). Reported on
@@ -4862,31 +4883,39 @@ fn manifest_file_facts(path: &str) -> (String, Option<String>) {
         "The report for a decision maker: the problems, their fixes and how the inspection was done."
     } else if path.ends_with(".xlsx") {
         "The complete working list, sheet by sheet, for the engineers doing the fixes."
-    } else if path == "findings.json" {
+    } else if path == INSPECTION_JSON {
         "Every row that was not ruled out, wrapped with the facts of the inspection and the summary counts, for tools."
-    } else if path == "README.txt" {
+    } else if path == README_TXT {
         "A plain-text guide to what each file is."
-    } else if path == "decisions.json" {
+    } else if path == DECISIONS_JSON {
         "Every decision record the report was reviewed with, for tools."
-    } else if path == "csv/tickets.csv" {
+    } else if path == TICKETS_CSV {
         "One ticket for each fix, for a Jira, Linear or GitHub Issues importer."
-    } else if path == "csv/all-findings.csv" {
-        "Every row that was not ruled out, the same rows as findings.json, as one CSV table for tools that do not read Excel."
-    } else if path == "json/all-findings.json" {
-        "Every row that was not ruled out, the same rows as findings.json, as one flat JSON list for tools."
-    } else if path.starts_with("csv/") {
+    } else if path == ALL_FINDINGS_CSV {
+        concat!(
+            "Every row that was not ruled out, the same rows as ",
+            camerata_api_types::pkg_inspection_json!(),
+            ", as one CSV table for tools that do not read Excel."
+        )
+    } else if path == ALL_FINDINGS_JSON {
+        concat!(
+            "Every row that was not ruled out, the same rows as ",
+            camerata_api_types::pkg_inspection_json!(),
+            ", as one flat JSON list for tools."
+        )
+    } else if path.starts_with(CSV_DIR) {
         "One table of the workbook as a CSV file, for tools that do not read Excel."
-    } else if path.starts_with("json/") {
+    } else if path.starts_with(JSON_DIR) {
         "One table of the workbook as a flat JSON list, for tools."
     } else {
         "A file of the inspection package."
     };
     // A data-contract schema id for the machine files; versioned per dataset, bumped on a
     // breaking column/key change.
-    let schema = if path.starts_with("csv/")
-        || path.starts_with("json/")
-        || path == "findings.json"
-        || path == "decisions.json"
+    let schema = if path.starts_with(CSV_DIR)
+        || path.starts_with(JSON_DIR)
+        || path == INSPECTION_JSON
+        || path == DECISIONS_JSON
     {
         let dataset = base.trim_end_matches(".csv").trim_end_matches(".json");
         Some(format!("{dataset}/1.0"))
@@ -4926,10 +4955,10 @@ pub fn build_manifest(
         })
     };
     let mut files = vec![
-        entry(format!("{stem}.pdf"), pdf_bytes),
-        entry(format!("{stem}-findings.xlsx"), xlsx_bytes),
-        entry("findings.json".to_string(), findings_json_bytes),
-        entry("README.txt".to_string(), readme.as_bytes()),
+        entry(package_paths::pdf_name(stem), pdf_bytes),
+        entry(package_paths::workbook_name(stem), xlsx_bytes),
+        entry(INSPECTION_JSON.to_string(), findings_json_bytes),
+        entry(README_TXT.to_string(), readme.as_bytes()),
     ];
     for (path, bytes) in extra_files {
         files.push(entry(path.clone(), bytes));
@@ -4946,7 +4975,7 @@ pub fn build_manifest(
     bytes
 }
 
-/// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
+/// Zip the PDF + xlsx + `json/inspection.json` + README.txt into one in-memory archive (Deflate
 /// compression) for the product-export response body. The ONLY I/O here is the in-memory
 /// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
 /// contract.
@@ -4974,16 +5003,16 @@ pub(crate) fn build_product_zip(
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip_now());
 
-    writer.start_file(format!("{stem}.pdf"), options)?;
+    writer.start_file(package_paths::pdf_name(stem), options)?;
     writer.write_all(pdf_bytes)?;
 
-    writer.start_file(format!("{stem}-findings.xlsx"), options)?;
+    writer.start_file(package_paths::workbook_name(stem), options)?;
     writer.write_all(xlsx_bytes)?;
 
-    writer.start_file("findings.json", options)?;
+    writer.start_file(INSPECTION_JSON, options)?;
     writer.write_all(findings_json_bytes)?;
 
-    writer.start_file("README.txt", options)?;
+    writer.start_file(README_TXT, options)?;
     writer.write_all(readme.as_bytes())?;
 
     // The per-dataset CSV/JSON tables (csv/*, json/*), written under their folders.
@@ -5003,7 +5032,7 @@ pub(crate) fn build_product_zip(
         extra_files,
         provenance,
     );
-    writer.start_file("manifest.json", options)?;
+    writer.start_file(MANIFEST_JSON, options)?;
     writer.write_all(&manifest)?;
 
     let cursor = writer.finish()?;

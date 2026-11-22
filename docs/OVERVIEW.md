@@ -89,7 +89,8 @@ repo ─▶ ONBOARD/DETECT        stack detection (languages, frameworks) → wh
           {stem}.pdf             narrative for a decision-maker (non-technical reader)
           {stem}-findings.xlsx   full workbook: All Findings, Deviations, Conventions,
                                  Dependencies, False Positives, Coverage (+ per-category)
-          findings.json          machine-readable All-Findings + provenance/summary
+          json/inspection.json   the whole inspection: all rows + provenance/summary
+          json/decisions.json    every reviewer decision record
           csv/ , json/           every data sheet as a flat table (one file per sheet)
           manifest.json          index + per-file sha256 + schema versions + provenance
           README.txt             the human manifest

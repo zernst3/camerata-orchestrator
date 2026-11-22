@@ -2,7 +2,7 @@
 //!
 //! Two jobs, both additive and neither removing a field:
 //!
-//! * **Numbers and lists beside prose.** A row of `findings.json` and of `json/all-findings.json`
+//! * **Numbers and lists beside prose.** A row of `json/inspection.json` and of `json/all-findings.json`
 //!   (and the same columns of `csv/all-findings.csv`) carries `citation_urls` as one text with a
 //!   line break between the URLs and `est_hours` as a sentence ("1 to 2 days (about 8 to 16
 //!   hours)"). Beside them it now carries `citation_url_list`, the URLs as an array, and
@@ -14,14 +14,18 @@
 //!   anything. A dataset with rows keeps the header it has always had.
 //!
 //! [`finish`] works on the bytes the workbook builders produced, in the assembly
-//! (`release_gate::assemble_package`), so `findings.json`, `json/` and `csv/` are changed the same
+//! (`release_gate::assemble_package`), so `json/inspection.json`, `json/` and `csv/` are changed the same
 //! way and the gate's parity checks still hold them equal.
 
 use anyhow::Context;
+use camerata_api_types::package_paths::{
+    CSV_DIR, DS_ALL_FINDINGS, DS_CONVENTIONS, DS_COVERAGE, DS_DEPENDENCIES, DS_DEVIATIONS,
+    DS_FALSE_POSITIVES, DS_NOT_ASSESSED, DS_RULES_APPLIED, JSON_DIR,
+};
 use serde_json::{json, Map, Value};
 
 /// The rows a FindingRow-shaped dataset holds, and so the datasets that get the added fields.
-const FINDING_DATASETS: [&str; 2] = ["all-findings", "false-positives"];
+const FINDING_DATASETS: [&str; 2] = [DS_ALL_FINDINGS, DS_FALSE_POSITIVES];
 
 /// The columns of `all-findings` and `false-positives` (one row shape), in the order the rows
 /// write them. A row of a deviation, a convention, a missing convention or a rule that could not be
@@ -87,8 +91,8 @@ const FINDING_COLUMNS: [&str; 54] = [
 /// same order. A test holds each list to the rows the builders really write.
 pub(crate) fn columns_of(dataset: &str) -> Option<Vec<&'static str>> {
     let columns: &[&str] = match dataset {
-        "all-findings" | "false-positives" => return Some(FINDING_COLUMNS.to_vec()),
-        "deviations" => &[
+        DS_ALL_FINDINGS | DS_FALSE_POSITIVES => return Some(FINDING_COLUMNS.to_vec()),
+        DS_DEVIATIONS => &[
             "category",
             "rule_title",
             "rule_id",
@@ -100,7 +104,7 @@ pub(crate) fn columns_of(dataset: &str) -> Option<Vec<&'static str>> {
             "recommended_fix",
             "fix_type",
         ],
-        "conventions" => &[
+        DS_CONVENTIONS => &[
             "category",
             "rule_title",
             "rule_id",
@@ -112,8 +116,8 @@ pub(crate) fn columns_of(dataset: &str) -> Option<Vec<&'static str>> {
             "sites",
             "also_found_at",
         ],
-        "not-assessed" => &["rule_title", "rule_id", "why", "headline", "detail"],
-        "dependencies" => &[
+        DS_NOT_ASSESSED => &["rule_title", "rule_id", "why", "headline", "detail"],
+        DS_DEPENDENCIES => &[
             "package",
             "path",
             "site_id",
@@ -134,7 +138,7 @@ pub(crate) fn columns_of(dataset: &str) -> Option<Vec<&'static str>> {
             "ownership",
             "action",
         ],
-        "coverage" => &[
+        DS_COVERAGE => &[
             "rule_id",
             "title",
             "category",
@@ -142,7 +146,7 @@ pub(crate) fn columns_of(dataset: &str) -> Option<Vec<&'static str>> {
             "citation_label",
             "findings_count",
         ],
-        "rules-applied" => &["rule_id", "chosen", "evidence", "applicable"],
+        DS_RULES_APPLIED => &["rule_id", "chosen", "evidence", "applicable"],
         _ => return None,
     };
     Some(columns.to_vec())
@@ -202,9 +206,12 @@ fn with_added_fields_in_rows(rows: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// `findings.json` with the added fields on every row of its `findings` array.
+/// `json/inspection.json` with the added fields on every row of its `findings` array.
 fn finish_findings_json(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut doc: Value = serde_json::from_slice(bytes).context("findings.json does not parse")?;
+    let mut doc: Value = serde_json::from_slice(bytes).context(concat!(
+        camerata_api_types::pkg_inspection_json!(),
+        " does not parse"
+    ))?;
     if let Some(rows) = doc.get("findings").and_then(Value::as_array) {
         let rows = with_added_fields_in_rows(rows);
         doc["findings"] = Value::Array(rows);
@@ -300,15 +307,15 @@ fn header_only_csv(columns: &[&str]) -> anyhow::Result<Vec<u8>> {
 
 /// The dataset a `csv/` or `json/` path names (`csv/all-findings.csv` is `all-findings`).
 fn dataset_of(path: &str) -> Option<&str> {
-    path.strip_prefix("csv/")
+    path.strip_prefix(CSV_DIR)
         .and_then(|p| p.strip_suffix(".csv"))
         .or_else(|| {
-            path.strip_prefix("json/")
+            path.strip_prefix(JSON_DIR)
                 .and_then(|p| p.strip_suffix(".json"))
         })
 }
 
-/// Finish the machine-readable files of a package: the added fields on `findings.json` and on the
+/// Finish the machine-readable files of a package: the added fields on `json/inspection.json` and on the
 /// finding datasets (JSON and CSV alike), and a header row on every empty CSV.
 pub fn finish(
     findings_json: &mut Vec<u8>,
@@ -320,9 +327,9 @@ pub fn finish(
             continue;
         };
         let is_finding_rows = FINDING_DATASETS.contains(&dataset);
-        if path.starts_with("json/") && is_finding_rows {
+        if path.starts_with(JSON_DIR) && is_finding_rows {
             *bytes = finish_json(bytes)?;
-        } else if path.starts_with("csv/") {
+        } else if path.starts_with(CSV_DIR) {
             if is_headerless_empty_csv(bytes) {
                 if let Some(columns) = columns_of(dataset) {
                     *bytes = header_only_csv(&columns)?;

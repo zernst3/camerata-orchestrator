@@ -112,7 +112,7 @@ pub struct ReportOptions {
     pub unsynced_changes: Vec<camerata_api_types::decisions::UnsyncedChange>,
     /// The export is for the operator's own review (the project is not a client engagement, or
     /// `camerata inspect --internal`). Only an internal export may be made from a run that did not
-    /// complete, and it is then marked INTERNAL INCOMPLETE on the cover and in `findings.json`.
+    /// complete, and it is then marked INTERNAL INCOMPLETE on the cover and in `json/inspection.json`.
     /// Server-populated, never client-supplied (`serde(skip)`).
     #[serde(skip)]
     pub internal: bool,
@@ -220,7 +220,7 @@ pub fn triage_log_env_on(value: Option<&str>) -> bool {
 }
 
 /// C4-R3: zero-width and byte-order-mark code points. None of these carry any visual
-/// information in ANY of the three report artifacts (the Typst-rendered PDF, `findings.json`,
+/// information in ANY of the three report artifacts (the Typst-rendered PDF, `json/inspection.json`,
 /// the xlsx workbook) — their only observable effect is to silently corrupt an otherwise
 /// identical-looking string for exact-match search/grep/diff/copy-paste. A scanned repo CAN
 /// legitimately contain one of these in a file name or a pasted snippet (adversarial or just
@@ -285,7 +285,7 @@ pub(crate) fn client_detail(detail: &str) -> String {
 
 /// Apply [`strip_zero_width`] (then secret redaction) to the [`Finding`]'s free-text fields that flow,
 /// verbatim or near-verbatim, into every report artifact: `path` (the PDF's `raw()` path
-/// rendering, the xlsx "Location" column, `findings.json`'s `path` field), `snippet` (the PDF's
+/// rendering, the xlsx "Location" column, `json/inspection.json`'s `path` field), `snippet` (the PDF's
 /// code block, and — for a dependency-advisory finding — the package name), `detail` (the
 /// curated-finding body), and every `captures` value (substituted into authored remediation
 /// text by [`instantiate_remediation`]). This is the ONE ingestion point both
@@ -360,7 +360,7 @@ pub fn finding_key(f: &Finding) -> String {
 /// module's doc comment.
 ///
 /// `Serialize`: so `xlsx_export::FindingRow` (whose `disposition_kind: Option<Disposition>`
-/// field feeds `findings.json`, the product export's machine-readable sibling of the
+/// field feeds `json/inspection.json`, the product export's machine-readable sibling of the
 /// workbook) can serialize this classification verbatim rather than re-deriving a string
 /// form for JSON specifically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1061,7 +1061,7 @@ pub fn build_report_json_with_counts(
     // `"held"` instead — a severity-unbounded bucket the "Held for review" PDF section (and the
     // cover/scorecard/xlsx counts, all of which tally `code_findings` directly) already expect
     // to see rendered. Skipping the row here left it counted in `matrix.held`, the cover severity
-    // strip, the category scorecard and `findings.json`/the workbook, while the PDF renderer
+    // strip, the category scorecard and `json/inspection.json`/the workbook, while the PDF renderer
     // never emitted it anywhere — not the matrix (expected: held is out of scope for the
     // severity x effort grid), not curated (expected: this gate's whole point), and NOT Held for
     // review either, because no site ever existed for it to render. Every `code_findings` row

@@ -381,10 +381,10 @@ fn every_open_row_has_a_fix_and_every_fix_member_exists() {
 
     // A row naming a Fix that is not in the list is refused.
     let mut tampered = entries.clone();
-    let mut findings = json_of(&entries, "findings.json");
+    let mut findings = json_of(&entries, "json/inspection.json");
     findings["findings"][0]["fix_id"] = serde_json::json!("not-a-fix");
     tampered.insert(
-        "findings.json".into(),
+        "json/inspection.json".into(),
         serde_json::to_vec(&findings).unwrap(),
     );
     let problems = crate::release_gate::fix_archive_problems(&tampered);
@@ -394,10 +394,10 @@ fn every_open_row_has_a_fix_and_every_fix_member_exists() {
     );
 
     // A row of a rule group with no Fix id is refused.
-    let mut findings = json_of(&entries, "findings.json");
+    let mut findings = json_of(&entries, "json/inspection.json");
     findings["findings"][0]["fix_id"] = serde_json::json!("");
     tampered.insert(
-        "findings.json".into(),
+        "json/inspection.json".into(),
         serde_json::to_vec(&findings).unwrap(),
     );
     let problems = crate::release_gate::fix_archive_problems(&tampered);
@@ -407,10 +407,10 @@ fn every_open_row_has_a_fix_and_every_fix_member_exists() {
     );
 
     // A Fix naming a rule group the tree does not have is refused.
-    let mut findings = json_of(&entries, "findings.json");
+    let mut findings = json_of(&entries, "json/inspection.json");
     findings["fixes"][0]["members"] = serde_json::json!(["sub:nowhere/0"]);
     tampered.insert(
-        "findings.json".into(),
+        "json/inspection.json".into(),
         serde_json::to_vec(&findings).unwrap(),
     );
     let problems = crate::release_gate::fix_archive_problems(&tampered);

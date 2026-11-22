@@ -392,7 +392,7 @@ fn the_agent_finders_package_passes_the_release_gate() {
         let blocks = ledger.finder_coverage();
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].pieces.iter().all(|p| p.complete()), "{blocks:?}");
-        let findings = zip_entry(&run.export, "findings.json");
+        let findings = zip_entry(&run.export, "json/inspection.json");
         assert!(
             findings.contains("src/db.rs"),
             "the agent's problem is in the package"

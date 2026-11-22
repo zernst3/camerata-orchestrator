@@ -3,7 +3,7 @@
 //!
 //! A node's summary, label and cause are model prose written for the architect, not for the
 //! client. Before one is printed in a client file (the PDF's patterns, the Tree and Remediation
-//! plan sheets, `findings.json`'s tree, a ticket) it is held to the checks a finding's own text is:
+//! plan sheets, `json/inspection.json`'s tree, a ticket) it is held to the checks a finding's own text is:
 //!
 //! - it must not describe how Camerata found the thing ([`crate::ai_audit::fix_leaks_methodology`]
 //!   is the one list of those phrases);

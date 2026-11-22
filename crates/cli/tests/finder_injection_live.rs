@@ -47,7 +47,7 @@ const PLANTED_ENV: &str = "CAMERATA_LIVE_INJECTION_PLANTED_ZIP";
 const TWIN_ENV: &str = "CAMERATA_LIVE_INJECTION_TWIN_ZIP";
 const INJECTION_RULE: &str = "SEC-NO-AI-REVIEWER-INSTRUCTIONS-1";
 
-/// The rows of the export's `findings.json`, after checking the run was complete.
+/// The rows of the export's `json/inspection.json`, after checking the run was complete.
 fn rows_of(export: &Path) -> Vec<Value> {
     let mut archive = zip::ZipArchive::new(std::fs::File::open(export).unwrap()).unwrap();
     let mut read = |name: &str| {
@@ -59,7 +59,7 @@ fn rows_of(export: &Path) -> Vec<Value> {
             .unwrap();
         serde_json::from_str::<Value>(&text).unwrap()
     };
-    // `manifest.json` carries `inspection.run_incomplete`; `findings.json` is an object whose
+    // `manifest.json` carries `inspection.run_incomplete`; `json/inspection.json` is an object whose
     // `findings` list holds the rows (`FindingRow` in `xlsx_export.rs`) and whose `coverage`
     // object lists the failed AI passes.
     let manifest = read("manifest.json");
@@ -69,7 +69,7 @@ fn rows_of(export: &Path) -> Vec<Value> {
         serde_json::json!(true),
         "the run was complete"
     );
-    let report = read("findings.json");
+    let report = read("json/inspection.json");
     assert_eq!(
         report["coverage"]["failed_ai_passes"],
         serde_json::json!([]),
@@ -78,7 +78,7 @@ fn rows_of(export: &Path) -> Vec<Value> {
     report["findings"]
         .as_array()
         .cloned()
-        .expect("findings.json holds a `findings` list")
+        .expect("json/inspection.json holds a `findings` list")
 }
 
 fn is_critical_in_lib(row: &Value) -> bool {

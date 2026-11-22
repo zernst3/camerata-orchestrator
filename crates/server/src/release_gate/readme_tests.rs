@@ -85,8 +85,8 @@ fn a_client_readme_says_what_each_file_is_and_how_to_import_the_tickets() {
     for expected in [
         "acme-inspection.pdf",
         "acme-inspection-findings.xlsx",
-        "findings.json",
-        "decisions.json",
+        "json/inspection.json",
+        "json/decisions.json",
         "csv/tickets.csv",
         "manifest.json",
         "Jira",
