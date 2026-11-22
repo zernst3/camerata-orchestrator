@@ -92,11 +92,17 @@ fn the_gate_refuses_an_unmasked_published_example_key_on_every_surface_naming_fi
         assert!(!shown.contains(&key), "{surface:?}: the value was printed");
         // The stem is spliced into member names, so the key is followed by name characters and
         // the credential-named-line shape reads it instead: refused, never shown.
-        assert!(
-            matches!(surface, Surface::Stem)
-                || problems.iter().any(|q| q.message.contains("Stripe test")),
-            "{surface:?}: the shape is not named: {problems:?}"
-        );
+        let named = if matches!(surface, Surface::Stem) {
+            // Some shape is named: a message is the shape's name plus the fixed tail.
+            problems.iter().any(|q| {
+                q.message
+                    .strip_suffix(" present in a client file")
+                    .is_some_and(|shape| !shape.trim().is_empty())
+            })
+        } else {
+            problems.iter().any(|q| q.message.contains("Stripe test"))
+        };
+        assert!(named, "{surface:?}: the shape is not named: {problems:?}");
         assert!(
             problems.iter().all(|q| !q.file.is_empty()),
             "{surface:?}: a problem names no file"
@@ -170,7 +176,7 @@ fn the_long_alphanumeric_runs_in_findings_json_are_only_hashes_and_commit_ids() 
     let mut runs = 0;
     for text in &strings {
         for run in text.split(|c: char| !c.is_ascii_alphanumeric()) {
-            if run.len() < 32 {
+            if run.len() < 20 {
                 continue;
             }
             runs += 1;
@@ -187,7 +193,7 @@ fn the_long_alphanumeric_runs_in_findings_json_are_only_hashes_and_commit_ids() 
     assert!(
         strings
             .iter()
-            .all(|s| camerata_secrets::first_secret(s).is_none()),
+            .all(|s| camerata_secrets::detect_client_secrets(s).is_empty()),
         "the detector reads a secret in findings.json"
     );
 }

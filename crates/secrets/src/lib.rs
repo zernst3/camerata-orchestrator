@@ -29,7 +29,8 @@ pub use detect::{
 };
 pub use json::{find_secret_hits_in_json, find_secrets_in_json, redact_json_values, JsonHit};
 pub use redact::{
-    redact, redact_for_client, redact_str, redact_str_for_client, Redacted, Redaction,
+    has_real_redaction_marker, is_published_example_mask, redact, redact_for_client, redact_str,
+    redact_str_for_client, Redacted, Redaction,
 };
 pub use shapes::{is_supabase_dsn, shapes_for_rule, SecretShape, URL_SECRET_PARAMS};
 pub use twins::{Twin, PLACEHOLDER_WORDS};

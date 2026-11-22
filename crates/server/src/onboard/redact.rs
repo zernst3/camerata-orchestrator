@@ -18,12 +18,23 @@ use super::{Finding, ScanReport};
 use crate::report_export::strip_zero_width;
 use camerata_api_types::audit::FindingKind;
 
+/// [`redact_visible`] for text a CLIENT receives: also masks a published documentation key
+/// (see `camerata_secrets::redact_str_for_client`). Never use it for model input.
+pub(crate) fn redact_visible_for_client(text: &str) -> Cow<'_, str> {
+    let clean = strip_zero_width(text);
+    match camerata_secrets::redact_str_for_client(&clean) {
+        Cow::Owned(redacted) => Cow::Owned(redacted),
+        Cow::Borrowed(_) => clean,
+    }
+}
+
 /// `text` with zero-width characters stripped, then with every secret value replaced by its
-/// redacted form. Stripping FIRST means a zero-width character inserted inside a key cannot hide
-/// it from the detector while a reader still sees the key. Borrows when nothing changed.
+/// redacted form. This is the MODEL-side redaction: a published documentation key stays readable.
+/// Stripping FIRST means a zero-width character inserted inside a key cannot hide it from the
+/// detector while a reader still sees the key. Borrows when nothing changed.
 pub(crate) fn redact_visible(text: &str) -> Cow<'_, str> {
     let clean = strip_zero_width(text);
-    let redacted = match camerata_secrets::redact_str_for_client(&clean) {
+    let redacted = match camerata_secrets::redact_str(&clean) {
         Cow::Owned(redacted) => Some(redacted),
         Cow::Borrowed(_) => None,
     };
@@ -87,7 +98,10 @@ pub(crate) fn redact_findings(findings: &mut [Finding]) -> usize {
 /// before the cap means a cap can never cut a secret in half and leave a prefix plus a partial
 /// body that neither the redactor nor the release gate could recognise.
 pub(crate) fn snippet_from_line(line: &str, max: usize) -> String {
-    redact_visible(line.trim()).chars().take(max).collect()
+    redact_visible_for_client(line.trim())
+        .chars()
+        .take(max)
+        .collect()
 }
 
 /// Redact every model-written string of a deep-tier report: the lens prose and error, the SOC-2

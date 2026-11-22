@@ -76,7 +76,7 @@ fn present_message(
     shape: camerata_secrets::SecretShape,
     twin: Option<&camerata_secrets::Twin>,
 ) -> String {
-    if twin.is_some() {
+    if matches!(twin, Some(camerata_secrets::Twin::PublishedExampleKey)) {
         format!(
             "{} (a published example key) present unmasked in a client file",
             shape.display_name()

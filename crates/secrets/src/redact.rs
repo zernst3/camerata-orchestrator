@@ -57,6 +57,30 @@ fn published_form(shape: SecretShape, value: &str) -> String {
     format!("{prefix}{ELLIPSIS} ({total} chars, published example)")
 }
 
+/// Whether `after_ellipsis` (the text right after a redaction ellipsis) is the rest of a
+/// published-example mask: ` (N chars, published example)`.
+fn is_published_mask_tail(after_ellipsis: &str) -> bool {
+    let Some(rest) = after_ellipsis.strip_prefix(" (") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && rest[digits..].starts_with(" chars, published example)")
+}
+
+/// Whether `text` holds the mask of a published documentation key (see [`redact_for_client`]).
+pub fn is_published_example_mask(text: &str) -> bool {
+    text.match_indices(ELLIPSIS)
+        .any(|(at, _)| is_published_mask_tail(&text[at + ELLIPSIS.len_utf8()..]))
+}
+
+/// Whether `text` holds a redaction ellipsis that marks a REAL value taken out: any ellipsis that
+/// is not the mask of a published documentation key (that one marks a public example, so a row
+/// holding only it cites no real secret).
+pub fn has_real_redaction_marker(text: &str) -> bool {
+    text.match_indices(ELLIPSIS)
+        .any(|(at, _)| !is_published_mask_tail(&text[at + ELLIPSIS.len_utf8()..]))
+}
+
 fn jwt_form(value: &str, role: Option<&str>) -> String {
     let total = value.chars().count();
     let tail = last_chars(value, TAIL_CHARS);

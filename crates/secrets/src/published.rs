@@ -48,11 +48,11 @@ pub const PUBLISHED_EXAMPLES: &[PublishedExample] = &[
         "3543c50b0cb9cea8e55eb1f529b79f043cb250d485fde7b66cabbb5183add7da",
         "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github",
     ),
-    // The Azure Storage emulator (Azurite) well-known development account key, which every
-    // local-development connection string uses.
+    // The Azure Storage emulator (Azurite) well-known development account key (88 characters,
+    // ending `==`), which every local-development connection string uses.
     key(
-        "8b5130ead464e35d5743246136340bfe7e022bfaf8bb42ff07000e2acc5994ee",
-        "https://learn.microsoft.com/azure/storage/common/storage-use-emulator",
+        "0011cc25eb4320717494d2703e8cba85743e71b500283c21c8b88147992f9059",
+        "https://learn.microsoft.com/azure/storage/common/storage-connect-azurite",
     ),
     // Supabase's documented `password_requirements` setting value, a config enum that reads as a
     // password on a `password`-named identifier. It is readable under that setting's name only:
