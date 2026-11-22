@@ -50,7 +50,7 @@ not belong to the caller's scope (expect rejection) and by attempting to refund 
 charge until the cumulative total exceeds the original amount (expect the excess rejected).
 """
 effort = "medium"
-why = "Both checks reuse data the refund flow already needs to look up (the charge record, its owner, its refund history), so the cost is wiring two guard clauses rather than building new infrastructure: against a failure mode (refund an arbitrary charge, or refund the same charge repeatedly) that moves real money."
+why = "Both checks reuse data the refund flow already needs to look up (the charge record, its owner, its refund history), so the cost is wiring two guard clauses rather than building new infrastructure. It guards against a failure mode (refund an arbitrary charge, or refund the same charge repeatedly) that moves real money."
 
 [[option]]
 id = "role-permission-check-only-no-amount-bound"

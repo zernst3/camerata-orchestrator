@@ -55,7 +55,7 @@ the initial charge call has already returned and confirming local order/payment 
 requiring a code deploy or manual intervention.
 """
 effort = "medium"
-why = "Payment providers ship both mechanisms (webhooks and a queryable status API) specifically to solve this problem, so the engineering cost is wiring an endpoint or a scheduled job against infrastructure that already exists, rather than building state-reconciliation logic from scratch: against a failure mode (local records silently drifting from the provider's authoritative state) that is otherwise invisible until a customer or support ticket surfaces it."
+why = "Payment providers ship both mechanisms (webhooks and a queryable status API) specifically to solve this problem, so the engineering cost is wiring an endpoint or a scheduled job against infrastructure that already exists, rather than building state-reconciliation logic from scratch. It guards against a failure mode (local records silently drifting from the provider's authoritative state) that is otherwise invisible until a customer or support ticket surfaces it."
 
 [[option]]
 id = "trust-the-synchronous-response-as-final"

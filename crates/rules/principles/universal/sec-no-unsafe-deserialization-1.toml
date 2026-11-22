@@ -34,27 +34,27 @@ influence the stream, they control what code runs.
 
 Match-set (gate-enforced):
   Python:
-    - yaml.load( without SafeLoader or FullLoader: the default YAML loader executes
+    - yaml.load( without SafeLoader or FullLoader. The default YAML loader executes
       arbitrary Python constructors (!!python/object). The carve-out is precise: a line
       containing SafeLoader or FullLoader alongside yaml.load( is safe and is NOT flagged.
-    - yaml.unsafe_load(: explicitly named unsafe; no safe variant.
-    - pickle.load( / pickle.loads(: Python's native serialisation; trivially weaponisable.
-    - cPickle.load( / cPickle.loads(: C-extension alias of pickle; same risk.
-    - _pickle.load(: CPython internal alias; same risk.
+    - yaml.unsafe_load( is explicitly named unsafe; no safe variant.
+    - pickle.load( / pickle.loads( is Python's native serialisation; trivially weaponisable.
+    - cPickle.load( / cPickle.loads( is a C-extension alias of pickle; same risk.
+    - _pickle.load( is a CPython internal alias; same risk.
   PHP:
-    - unserialize(: PHP's native object deserialisation. The PHP manual explicitly warns
+    - unserialize( is PHP's native object deserialisation. The PHP manual explicitly warns
       that it must never be called on untrusted input. No safe alternative exists; use JSON.
   Ruby:
-    - Marshal.load( / Marshal.restore(: Ruby's native serialisation; untrusted input can
+    - Marshal.load( / Marshal.restore( is Ruby's native serialisation; untrusted input can
       invoke arbitrary object methods during loading.
   .NET:
-    - BinaryFormatter, deprecated in .NET 5+ specifically because of this vulnerability.
-    - NetDataContractSerializer: same risk profile; same deprecation trajectory.
-    - LosFormatter: ASP.NET ViewState serialiser; the same object-graph reconstruction
+    - BinaryFormatter is deprecated in .NET 5+ specifically because of this vulnerability.
+    - NetDataContractSerializer has the same risk profile; same deprecation trajectory.
+    - LosFormatter is the ASP.NET ViewState serialiser; the same object-graph reconstruction
       vulnerability applies.
-    - ObjectStateFormatter: companion to LosFormatter; same risk.
+    - ObjectStateFormatter is a companion to LosFormatter; same risk.
 
-Known gap: Java:
+Known gap for Java:
   Java's ObjectInputStream.readObject() is the canonical unsafe-deser sink. However, it
   fires on virtually every Java framework that uses serialisation internally (Spring, Hibernate,
   RMI, Java EE containers), producing a false-positive rate that would block legitimate commits

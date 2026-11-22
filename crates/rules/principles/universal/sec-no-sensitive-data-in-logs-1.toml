@@ -34,17 +34,17 @@ default = "redact-sensitive-values-before-logging"
 why = """
 A log line is written for operability, not secrecy, and the pipeline it flows into (a log aggregator,
 an APM tool, a file on disk, a third-party log-shipping vendor) is almost never held to the same
-access-control standard as the primary datastore the value came from (more engineers, support staff,
+access-control standard as the primary datastore the value came from. More engineers, support staff,
 and integrations can read "the logs" than can read "the database." CWE-532 names this precisely:
 inserting sensitive information into a log file is itself the vulnerability, independent of whether the
-log store is later breached) the value is now sitting in a system that was never scoped or audited
+log store is later breached. The value is now sitting in a system that was never scoped or audited
 as a place to hold it. The blast radius differs by value class, which is why this rule's enforcement
 distinguishes two severities rather than treating every sensitive log line identically: a credential or
 secret (an API key, a password, a session token, an Authorization header, a private key) reaching a log
-sink hands a reader of that log line a LIVE, reusable credential: it is a direct path to full account
+sink hands a reader of that log line a LIVE, reusable credential. It is a direct path to full account
 or system compromise, independent of any other control, so it is HIGH. Regulated PII (an SSN, a full
 credit-card/PAN number) reaching a log sink is a real exposure and a compliance violation, but it is not
-itself a reusable credential, a reader of the log cannot authenticate AS anyone with it alone, so it
+itself a reusable credential (a reader of the log cannot authenticate AS anyone with it alone), so it
 is calibrated MEDIUM; treating it as HIGH would inflate it past genuinely credential-bearing findings
 and dull the signal those carry. Both severities fall out of the SAME mechanical defect shape (a
 sensitive-identity value flowing, unredacted, into a logging call) and both are closed the same way: a
