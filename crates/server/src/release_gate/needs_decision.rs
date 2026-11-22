@@ -29,6 +29,7 @@
 //! of group decisions ([`super::holds`]), decided or not, so a later group decision cannot
 //! overwrite a decision made in person.
 
+use camerata_api_types::package_paths::{INSPECTION_JSON};
 use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::onboard::Finding;
@@ -125,7 +126,7 @@ pub fn critical_or_unsure_without_decision(
                 Why::Unsure => "the finder was unsure this finding is a real problem",
             };
             Problem::new(
-                "findings.json",
+                INSPECTION_JSON,
                 format!("{} line {}", f.path, f.line),
                 format!(
                     "{what}, and no reviewer decision is recorded for it. Open it, then confirm \

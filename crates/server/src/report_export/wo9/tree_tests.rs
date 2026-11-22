@@ -63,7 +63,7 @@ fn client_text_of(package: crate::release_gate::ProductPackage) -> (String, Valu
             text.push_str(&String::from_utf8_lossy(bytes));
         }
     }
-    let findings = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     (text, findings)
 }
 
@@ -76,7 +76,7 @@ fn findings_json_carries_the_tree_with_counts_from_the_rows() {
     let (records, edits) = mixed_review(&sealed);
     let reviewed = apply_overlay(&sealed, &records, &edits, &[]);
     let entries = released_entries(&reviewed, &client_options());
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     let nodes = findings["tree"]["nodes"]
         .as_array()
         .expect("a tree in findings.json");
@@ -158,7 +158,7 @@ fn a_summary_with_a_methodology_leak_is_flagged_before_client_output() {
             !text.contains("LEAK-MARKER"),
             "{source:?}: a client file carries the text"
         );
-        let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+        let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
         let sub = findings["tree"]["nodes"]
             .as_array()
             .unwrap()

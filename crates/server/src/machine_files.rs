@@ -17,6 +17,7 @@
 //! (`release_gate::assemble_package`), so `findings.json`, `json/` and `csv/` are changed the same
 //! way and the gate's parity checks still hold them equal.
 
+use camerata_api_types::package_paths::{JSON_DIR, CSV_DIR};
 use anyhow::Context;
 use serde_json::{json, Map, Value};
 
@@ -204,7 +205,7 @@ fn with_added_fields_in_rows(rows: &[Value]) -> Vec<Value> {
 
 /// `findings.json` with the added fields on every row of its `findings` array.
 fn finish_findings_json(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut doc: Value = serde_json::from_slice(bytes).context("findings.json does not parse")?;
+    let mut doc: Value = serde_json::from_slice(bytes).context(concat!(camerata_api_types::pkg_inspection_json!(), " does not parse"))?;
     if let Some(rows) = doc.get("findings").and_then(Value::as_array) {
         let rows = with_added_fields_in_rows(rows);
         doc["findings"] = Value::Array(rows);
@@ -300,10 +301,10 @@ fn header_only_csv(columns: &[&str]) -> anyhow::Result<Vec<u8>> {
 
 /// The dataset a `csv/` or `json/` path names (`csv/all-findings.csv` is `all-findings`).
 fn dataset_of(path: &str) -> Option<&str> {
-    path.strip_prefix("csv/")
+    path.strip_prefix(CSV_DIR)
         .and_then(|p| p.strip_suffix(".csv"))
         .or_else(|| {
-            path.strip_prefix("json/")
+            path.strip_prefix(JSON_DIR)
                 .and_then(|p| p.strip_suffix(".json"))
         })
 }
@@ -320,9 +321,9 @@ pub fn finish(
             continue;
         };
         let is_finding_rows = FINDING_DATASETS.contains(&dataset);
-        if path.starts_with("json/") && is_finding_rows {
+        if path.starts_with(JSON_DIR) && is_finding_rows {
             *bytes = finish_json(bytes)?;
-        } else if path.starts_with("csv/") {
+        } else if path.starts_with(CSV_DIR) {
             if is_headerless_empty_csv(bytes) {
                 if let Some(columns) = columns_of(dataset) {
                     *bytes = header_only_csv(&columns)?;

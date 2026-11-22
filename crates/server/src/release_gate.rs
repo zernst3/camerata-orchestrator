@@ -37,6 +37,7 @@ mod text_style;
 pub mod tool_claim;
 pub mod unsynced;
 
+use camerata_api_types::package_paths::{MANIFEST_JSON, README_TXT, INSPECTION_JSON};
 use crate::report_export::{AuditReportJson, ReportOptions, ReviewedReport};
 use crate::xlsx_export::FindingsExport;
 use crate::ManifestProvenance;
@@ -221,7 +222,7 @@ pub(crate) fn assemble_package(
         &options.chosen_options,
     );
     let mut findings_json = serde_json::to_vec_pretty(&findings_export)
-        .map_err(|e| anyhow::anyhow!("could not serialize findings.json: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("could not serialize {INSPECTION_JSON}: {e}"))?;
 
     // The per-dataset machine-readable tables: the SAME `partition_rows` pass as the workbook
     // and findings.json, so every artifact agrees. CSV first, then JSON.
@@ -328,7 +329,7 @@ impl ReleasedZip {
             .collect();
         let manifest_json = read_zip_entries(&self.bytes)
             .ok()
-            .and_then(|entries| entries.get("manifest.json").cloned())
+            .and_then(|entries| entries.get(MANIFEST_JSON).cloned())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or(serde_json::Value::Null);
         crate::inspections::PackageRecord {
@@ -491,7 +492,7 @@ fn incomplete_run_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>
             .get(name)
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
     };
-    if let Some(manifest) = json_of("manifest.json") {
+    if let Some(manifest) = json_of(MANIFEST_JSON) {
         if manifest["inspection"]["run_incomplete"].as_bool() == Some(true) {
             let reasons = manifest["inspection"]["incomplete_reasons"]
                 .as_array()
@@ -502,20 +503,20 @@ fn incomplete_run_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>
                         .join("; ")
                 })
                 .unwrap_or_default();
-            problems.push(refusal("manifest.json", &reasons));
+            problems.push(refusal(MANIFEST_JSON, &reasons));
         }
     }
     if let Some(readme) = entries
-        .get("README.txt")
+        .get(README_TXT)
         .and_then(|b| std::str::from_utf8(b).ok())
     {
         if readme.contains(crate::INTERNAL_INCOMPLETE_README_LINE) {
-            problems.push(refusal("README.txt", "the README says INTERNAL INCOMPLETE"));
+            problems.push(refusal(README_TXT, "the README says INTERNAL INCOMPLETE"));
         }
     }
-    if let Some(findings) = json_of("findings.json") {
+    if let Some(findings) = json_of(INSPECTION_JSON) {
         if let Some(marking) = findings["provenance"]["internal_incomplete"].as_str() {
-            problems.push(refusal("findings.json", marking));
+            problems.push(refusal(INSPECTION_JSON, marking));
         }
     }
     problems
@@ -559,7 +560,7 @@ fn archive_secret_problems(
 /// Used by a standalone audit of a zip ([`audit_zip`]), which has no reviewer decisions. The
 /// release path holds junk rows by decision instead ([`junk::junk_without_decision`]).
 fn content_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
-    let Some(bytes) = entries.get("findings.json") else {
+    let Some(bytes) = entries.get(INSPECTION_JSON) else {
         // The dataset-set check reports the missing file.
         return Vec::new();
     };
@@ -582,7 +583,7 @@ fn content_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Ve
                     )
                     .map(|why| {
                         Problem::new(
-                            "findings.json",
+                            INSPECTION_JSON,
                             format!("findings[{i}]"),
                             format!("a finding the model invented is junk: {why}"),
                             Some(rule_id),
@@ -601,7 +602,7 @@ fn provenance_problems(
     entries: &std::collections::BTreeMap<String, Vec<u8>>,
     internal: bool,
 ) -> Vec<Problem> {
-    let (Some(readme), Some(manifest)) = (entries.get("README.txt"), entries.get("manifest.json"))
+    let (Some(readme), Some(manifest)) = (entries.get(README_TXT), entries.get(MANIFEST_JSON))
     else {
         // The dataset-set check reports the missing file.
         return Vec::new();
@@ -612,9 +613,9 @@ fn provenance_problems(
         }
         Ok(_) => client_readme_problems(&String::from_utf8_lossy(readme)),
         Err(_) => vec![Problem::new(
-            "manifest.json",
+            MANIFEST_JSON,
             "manifest",
-            "manifest.json does not parse",
+            concat!(camerata_api_types::pkg_manifest_json!(), " does not parse"),
             None,
         )],
     }
@@ -806,6 +807,9 @@ pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod package_layout_tests;
 
 #[cfg(test)]
 mod panel_names_tests;

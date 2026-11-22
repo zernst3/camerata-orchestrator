@@ -261,7 +261,7 @@ async fn a_capped_run_is_loud_incomplete_and_never_leaks_a_dollar_figure_into_th
     let readme = zip_entry(&export, "README.txt");
     assert!(readme.contains("Spend limit: reached"), "{readme}");
     assert!(readme.contains("INCOMPLETE"), "{readme}");
-    for name in ["manifest.json", "README.txt", "findings.json"] {
+    for name in ["manifest.json", "README.txt", "json/inspection.json"] {
         let text = zip_entry(&export, name);
         assert!(
             !text.contains("1.50") && !text.contains("max_cost") && !text.contains("cost_usd"),

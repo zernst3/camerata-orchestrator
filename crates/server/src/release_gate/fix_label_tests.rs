@@ -95,7 +95,7 @@ fn every_fix_is_labelled_in_findings_json_and_the_datasets_with_terse_output_on_
         let doc: Value = serde_json::from_slice(&package.findings_json).expect("parses");
         expect_labels(
             doc["findings"].as_array().expect("findings"),
-            "findings.json",
+            "json/inspection.json",
         );
 
         let datasets: BTreeMap<String, Vec<u8>> = package.datasets.iter().cloned().collect();
@@ -148,8 +148,8 @@ fn no_client_file_carries_the_rejection_reason_or_a_failure_word_about_the_fix()
     }
     for (name, text) in [
         (
-            "findings.json",
-            String::from_utf8_lossy(&entries["findings.json"]).into_owned(),
+            "json/inspection.json",
+            String::from_utf8_lossy(&entries["json/inspection.json"]).into_owned(),
         ),
         (
             "json/all-findings.json",
@@ -182,7 +182,7 @@ fn the_gate_refuses_an_unlabelled_or_misnamed_fix() {
         let mut tampered = entries.clone();
         // The same edit in findings.json and all-findings.json, so the parity check passes and
         // only the label check can notice.
-        let mut doc: Value = serde_json::from_slice(&tampered["findings.json"]).expect("parses");
+        let mut doc: Value = serde_json::from_slice(&tampered["json/inspection.json"]).expect("parses");
         let mut all: Vec<Value> =
             serde_json::from_slice(&tampered["json/all-findings.json"]).expect("parses");
         for rows in [doc["findings"].as_array_mut().unwrap(), &mut all] {
@@ -198,7 +198,7 @@ fn the_gate_refuses_an_unlabelled_or_misnamed_fix() {
             }
         }
         tampered.insert(
-            "findings.json".to_string(),
+            "json/inspection.json".to_string(),
             serde_json::to_vec_pretty(&doc).unwrap(),
         );
         tampered.insert(
@@ -209,7 +209,7 @@ fn the_gate_refuses_an_unlabelled_or_misnamed_fix() {
         assert!(
             problems
                 .iter()
-                .any(|q| q.file == "findings.json" && q.message.contains("fix")),
+                .any(|q| q.file == "json/inspection.json" && q.message.contains("fix")),
             "{problems:?}"
         );
     }

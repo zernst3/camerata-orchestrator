@@ -99,7 +99,7 @@ fn the_gate_records_the_problem_under_the_content_check() {
     .expect("the package assembles");
     assert!(package.tool_claim_problems.is_empty());
     package.tool_claim_problems = vec![Problem::new(
-        "findings.json",
+        "json/inspection.json",
         "executive summary",
         "x",
         None,

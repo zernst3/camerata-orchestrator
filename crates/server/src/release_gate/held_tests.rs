@@ -342,7 +342,7 @@ fn every_export_carries_reviewer_edited_and_the_edit_ids() {
     };
     // findings.json and the JSON dataset.
     for (name, rows) in [
-        ("findings.json", parse(&findings_json)["findings"].clone()),
+        ("json/inspection.json", parse(&findings_json)["findings"].clone()),
         (
             "json/all-findings.json",
             parse(&entries["json/all-findings.json"]),
@@ -500,7 +500,7 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     for (name, text) in &outputs {
         let data_file = matches!(
             name.as_str(),
-            "findings.json"
+            "json/inspection.json"
                 | "json/all-findings.json"
                 | "csv/all-findings.csv"
                 | "PDF data"
@@ -512,7 +512,7 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     }
     // The merged row says only where it points.
     let findings =
-        String::from_utf8_lossy(&read_zip_entries(&zip).unwrap()["findings.json"]).into_owned();
+        String::from_utf8_lossy(&read_zip_entries(&zip).unwrap()["json/inspection.json"]).into_owned();
     assert!(findings.contains("Merged into src/db.rs:12"), "{findings}");
     // The rows whose reasons are secret are in the package, so the secrets could have leaked: the
     // acknowledged Ignored row (as accepted risk, with the decision's own reason), the finding
@@ -557,8 +557,8 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
             String::from_utf8_lossy(&entries["csv/tickets.csv"]).into_owned(),
         ),
         (
-            "decisions.json",
-            String::from_utf8_lossy(&entries["decisions.json"]).into_owned(),
+            "json/decisions.json",
+            String::from_utf8_lossy(&entries["json/decisions.json"]).into_owned(),
         ),
         ("PDF patterns", pdf_data.clone()),
     ];
@@ -670,8 +670,8 @@ fn the_merge_check_refuses_a_package_whose_findings_or_decisions_file_is_unreada
     // A clean package raises nothing.
     assert!(merged_without_decision_in_archive(&clean_entries()).is_empty());
 
-    for file in ["findings.json", "decisions.json"] {
-        let key = if file == "findings.json" {
+    for file in ["json/inspection.json", "json/decisions.json"] {
+        let key = if file == "json/inspection.json" {
             "findings"
         } else {
             "decisions"
@@ -853,22 +853,22 @@ fn export_gate_view_equals_release_gate_refusals() {
     };
     assert_eq!(
         kind(HoldReason::EvidenceUnverified),
-        located_in(CheckId::EvidenceUnverified, "findings.json")
+        located_in(CheckId::EvidenceUnverified, "json/inspection.json")
     );
     assert_eq!(
         kind(HoldReason::JunkContent),
-        located_in(CheckId::Content, "findings.json")
+        located_in(CheckId::Content, "json/inspection.json")
     );
     assert_eq!(
         kind(HoldReason::RestoredWithoutDecision),
-        located_in(CheckId::RestoredWithoutDecision, "findings.json")
+        located_in(CheckId::RestoredWithoutDecision, "json/inspection.json")
     );
     // The Engine Check's kept row is a problem in findings.json; its thrown-out row is a problem
     // against the thrown-out findings, which the client package never carries.
     assert_eq!(
         kind(HoldReason::EngineCheckNoWithoutCorrection),
         sorted(
-            located_in(CheckId::EngineCheckNoWithoutCorrection, "findings.json")
+            located_in(CheckId::EngineCheckNoWithoutCorrection, "json/inspection.json")
                 .into_iter()
                 .chain(located_in(
                     CheckId::EngineCheckNoWithoutCorrection,
@@ -886,7 +886,7 @@ fn export_gate_view_equals_release_gate_refusals() {
     );
     assert_eq!(
         view_rows(&view.merged_without_decision),
-        located_in(CheckId::MergedWithoutDecision, "findings.json")
+        located_in(CheckId::MergedWithoutDecision, "json/inspection.json")
     );
     assert!(view
         .merged_without_decision

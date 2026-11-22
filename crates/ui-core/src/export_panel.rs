@@ -37,13 +37,7 @@ pub const NAMED_SHEETS: [&str; 7] = [
 ];
 
 /// The files besides the PDF and the workbook the panel names, by their path in the ZIP.
-pub const NAMED_FILES: [&str; 5] = [
-    "findings.json",
-    "decisions.json",
-    "csv/tickets.csv",
-    "manifest.json",
-    "README.txt",
-];
+pub const NAMED_FILES: [&str; 5] = camerata_api_types::package_paths::NAMED_FILES;
 
 /// The line the panel shows when the release gate refuses, with the table's and Review's share of
 /// the rows named. `rows` is how many rows need a decision, `in_review` how many of them are not

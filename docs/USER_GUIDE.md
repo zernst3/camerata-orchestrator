@@ -16,7 +16,7 @@ assistant that describes a feature that doesn't exist undercuts the whole point.
 > rule by rule scan, the current default) and the **agent finder** (one model reviews each part of
 > the code, section 3b). Both feed the same review stage (a tree, an escalation queue, an Engine
 > Check and a group reviewer, section 3a) and the same client package (PDF, Excel workbook,
-> `findings.json` and `csv/tickets.csv`). Each feature is described in the section where it applies.
+> `json/inspection.json` and `csv/tickets.csv`). Each feature is described in the section where it applies.
 > Sections 19 to 22 and the appendix are reference material: the keyboard shortcuts, a glossary of
 > the words on screen, a "how do I" index and troubleshooting.
 
@@ -693,7 +693,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    timer records how long the operator spent on each group and,
    for each finding the operator decides, that the local operator reviewed it and when. This is for the operator's own
    planning and pricing: it is saved in the operator's in-progress review, it is never in a report, a
-   workbook, `findings.json` or any other file a client receives and the **Review time** button
+   workbook, `json/inspection.json` or any other file a client receives and the **Review time** button
    beside the strip opens a plain stats view (hours per repo, per group type and per severity)
    with a **Save stats JSON** button. After 20 decisions the strip adds an estimate such as `about 3h 10m left`
    at the reviewer's pace (the median of the last 50 decisions' active time times the findings still undecided);
@@ -1539,7 +1539,7 @@ Every inspection is saved part by part; failed or unrun parts are retried, not s
   failed calls in a row, or a login or billing failure) stops and keeps its parts for later.
 - **A client export is refused** while any part failed or did not run. Nothing is written and the run
   stays resumable. With `--internal` an export is still written but is **marked INTERNAL INCOMPLETE**
-  (on the cover, in `findings.json` and in the README) and is **not for a client**. The release gate
+  (on the cover, in `json/inspection.json` and in the README) and is **not for a client**. The release gate
   refuses any package that carries that marking ("this package records an inspection that did not run
   to completion, so it is not for a client"), so an incomplete package cannot pass as a client one.
 - The scan screen shows an **Incomplete: N pass(es) or stage(s) did not run** banner (a compact line
@@ -2524,8 +2524,8 @@ The SOC-2 lens produces a **gap analysis**, a conversation-starter about what co
 ## 11a. The Codebase Inspection deliverable (PDF + Excel + JSON)
 
 This is a different artifact from the deep-report Markdown above. The **product export** is the
-client-facing deliverable: a ZIP holding a PDF summary, an Excel workbook, `findings.json`,
-`decisions.json`, CSV and JSON copies of the workbook's tables, the ticket file, `manifest.json` and
+client-facing deliverable: a ZIP holding a PDF summary, an Excel workbook, `json/inspection.json`,
+`json/decisions.json`, CSV and JSON copies of the workbook's tables, the ticket file, `manifest.json` and
 a `README.txt`. [`CLIENT_PACKAGE.md`](CLIENT_PACKAGE.md) lists every file, every sheet and every PDF
 section, with the glossary. Export it from the cockpit's export button after a scan, or produce the identical ZIP
 from the command line with no server and no UI at all:
@@ -2643,7 +2643,7 @@ generated and vendored files.
   a spreadsheet. It deliberately does not carry every row, and that is not a gap.
 - **The Excel workbook is the detail surface.** No sheet shows a problem more than once except All source rows, the raw record. A
   row missing here IS a problem.
-- **`findings.json` is the data.** It carries the whole set, every kind included, for anything
+- **`json/inspection.json` is the data.** It carries the whole set, every kind included, for anything
   programmatic downstream.
 
 ### Tailored fix and Standard fix
@@ -2654,7 +2654,7 @@ code, and it agrees with the problem). A Standard fix is the rule's own guidance
 file and names from the problem. A problem gets a Standard fix when no tailored fix passed the checks,
 or when no tailored fix was written for it. Both are real fixes; the label tells the operator which kind the operator
 are reading. The label is in the PDF beside the fix, in the workbook's **Fix type** column and in the
-`fix_type` field of `findings.json` and of the CSV and JSON files. A problem with no fix text has an
+`fix_type` field of `json/inspection.json` and of the CSV and JSON files. A problem with no fix text has an
 empty label. A problem that ships a Standard fix does not make the inspection incomplete.
 
 ### The workbook's sheets
@@ -3635,7 +3635,7 @@ glossary (`docs/CLIENT_PACKAGE.md`) defines the package columns.
 - **Run what remains**: resume a saved run, sending only what is not stored.
 - **Client engagement**: a project mode that allows only the Anthropic API and Anthropic models and
   never runs the client's own code unless the operator opts in.
-- **Package**: the client export (PDF, Excel workbook, `findings.json`, CSV, tickets, manifest, README).
+- **Package**: the client export (PDF, Excel workbook, `json/inspection.json`, CSV, tickets, manifest, README).
 - **Release gate**: the check that refuses a package with a held row, a secret, a mismatch or an
   incomplete run.
 - **Tailored fix** and **Standard fix**: the two labels on every fix (§11a).

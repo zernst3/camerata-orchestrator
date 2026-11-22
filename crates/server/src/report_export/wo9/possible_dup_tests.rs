@@ -87,7 +87,7 @@ fn workbook(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
 
 fn findings_rows(entries: &BTreeMap<String, Vec<u8>>) -> Vec<serde_json::Value> {
     let doc: serde_json::Value =
-        serde_json::from_slice(&entries["findings.json"]).expect("findings.json parses");
+        serde_json::from_slice(&entries["json/inspection.json"]).expect("findings.json parses");
     doc["findings"].as_array().expect("rows").clone()
 }
 

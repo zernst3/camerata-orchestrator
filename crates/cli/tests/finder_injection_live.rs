@@ -69,7 +69,7 @@ fn rows_of(export: &Path) -> Vec<Value> {
         serde_json::json!(true),
         "the run was complete"
     );
-    let report = read("findings.json");
+    let report = read("json/inspection.json");
     assert_eq!(
         report["coverage"]["failed_ai_passes"],
         serde_json::json!([]),

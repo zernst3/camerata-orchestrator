@@ -207,6 +207,10 @@ pub mod workspace;
 mod routes;
 pub use routes::*;
 
+use camerata_api_types::package_paths::{
+    self, ALL_FINDINGS_CSV, ALL_FINDINGS_JSON, CSV_DIR, DECISIONS_JSON, INSPECTION_JSON, JSON_DIR,
+    MANIFEST_JSON, README_TXT, TICKETS_CSV,
+};
 use std::sync::Arc;
 
 use axum::{
@@ -4367,10 +4371,11 @@ pub fn product_export_readme(
         format!(
             "{services}\n\
              \x20 Where the services of this project differ on a rule: the {services} sheet of the\n\
-             \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
+             \x20 workbook, a section in the PDF and a patterns_across_services key in {inspection}.\n\
              \x20 An observation, not a problem: it has no severity and is in no count.\n\
              \n",
             services = v::PATTERNS_ACROSS_SERVICES,
+            inspection = package_paths::INSPECTION_JSON,
         )
     } else {
         String::new()
@@ -4404,27 +4409,29 @@ pub fn product_export_readme(
          \x20 silently. The last sheets are for reviewers: {source_rows}, {decisions} and\n\
          \x20 {grouped}.\n\
          \n\
-         findings.json\n\
-         \x20 Every row that was not ruled out, of every kind: the rows behind {all_problems},\n\
-         \x20 {conventions} and {not_checked} together, before the {all_problems} sheet shows each\n\
-         \x20 problem once. For scripts, CI and other tools: severity, area, repo, path and line,\n\
-         \x20 the code seen, the explanation, the fix, the decision so far, effort, confidence,\n\
-         \x20 citation and more, wrapped with the report's summary counts.\n\
+         {inspection}\n\
+         \x20 The whole inspection in one file. Every row that was not ruled out, of every kind: the\n\
+         \x20 rows behind {all_problems}, {conventions} and {not_checked} together, before the\n\
+         \x20 {all_problems} sheet shows each problem once. For scripts, CI and other tools:\n\
+         \x20 severity, area, repo, path and line, the code seen, the explanation, the fix, the\n\
+         \x20 decision so far, effort, confidence, citation and more, wrapped with the report's\n\
+         \x20 summary counts.\n\
          \n\
-         decisions.json\n\
+         {decisions_json}\n\
          \x20 Every decision record the report was reviewed with: what was ruled on which place or\n\
          \x20 group of places, and whether a reason was recorded. The {decisions} sheet of the\n\
          \x20 workbook is the same list.\n\
          \n\
-         csv/ and json/\n\
+         {csv_dir} and {json_dir}\n\
          \x20 One file for each table of the workbook, as CSV and as JSON, for tools that do not\n\
-         \x20 read Excel. The all-findings files are the exception: they hold the same rows as\n\
-         \x20 findings.json, as one flat table.\n\
+         \x20 read Excel. The all-findings files hold the same rows as {inspection}, as one\n\
+         \x20 flat table. The {json_dir} folder also holds {inspection} and {decisions_json}.\n\
          \n\
-         manifest.json\n\
-         \x20 The list of the files in this ZIP with a checksum for each.\n\
+         {manifest}\n\
+         \x20 The list of the files in this ZIP with a checksum for each. It stays at the top\n\
+         \x20 level because it describes the whole ZIP.\n\
          \n\
-         csv/tickets.csv\n\
+         {tickets_csv}\n\
          \x20 One ticket for each fix (one kind of problem with one cause) that still has places to\n\
          \x20 change. A place ruled out or accepted as a risk is on no ticket.\n\
          \x20 Columns: {title}, {description}, {priority}, {labels}, {estimate}, {group_id}, {places}\n\
@@ -4457,6 +4464,12 @@ pub fn product_export_readme(
         decisions = v::REVIEWER_DECISIONS,
         grouped = v::HOW_PROBLEMS_WERE_GROUPED,
         fix_id = v::H_FIX_ID,
+        inspection = package_paths::INSPECTION_JSON,
+        decisions_json = package_paths::DECISIONS_JSON,
+        manifest = package_paths::MANIFEST_JSON,
+        tickets_csv = package_paths::TICKETS_CSV,
+        csv_dir = package_paths::CSV_DIR,
+        json_dir = package_paths::JSON_DIR,
     );
     if !internal {
         return format!("{}\n", format!("{files}{patterns}").trim_end());
@@ -4854,33 +4867,39 @@ fn manifest_file_facts(path: &str) -> (String, Option<String>) {
         "The report for a decision maker: the problems, their fixes and how the inspection was done."
     } else if path.ends_with(".xlsx") {
         "The complete working list, sheet by sheet, for the engineers doing the fixes."
-    } else if path == "findings.json" {
+    } else if path == INSPECTION_JSON {
         "Every row that was not ruled out, wrapped with the facts of the inspection and the summary counts, for tools."
-    } else if path == "README.txt" {
+    } else if path == README_TXT {
         "A plain-text guide to what each file is."
-    } else if path == "decisions.json" {
+    } else if path == DECISIONS_JSON {
         "Every decision record the report was reviewed with, for tools."
-    } else if path == "csv/tickets.csv" {
+    } else if path == TICKETS_CSV {
         "One ticket for each fix, for a Jira, Linear or GitHub Issues importer."
-    } else if path == "csv/all-findings.csv" {
-        "Every row that was not ruled out, the same rows as findings.json, as one CSV table for tools that do not read Excel."
-    } else if path == "json/all-findings.json" {
-        "Every row that was not ruled out, the same rows as findings.json, as one flat JSON list for tools."
-    } else if path.starts_with("csv/") {
+    } else if path == ALL_FINDINGS_CSV {
+        concat!("Every row that was not ruled out, the same rows as ", camerata_api_types::pkg_inspection_json!(), ", as one CSV table for tools that do not read Excel.")
+    } else if path == ALL_FINDINGS_JSON {
+        concat!("Every row that was not ruled out, the same rows as ", camerata_api_types::pkg_inspection_json!(), ", as one flat JSON list for tools.")
+    } else if path.starts_with(CSV_DIR) {
         "One table of the workbook as a CSV file, for tools that do not read Excel."
-    } else if path.starts_with("json/") {
+    } else if path.starts_with(JSON_DIR) {
         "One table of the workbook as a flat JSON list, for tools."
     } else {
         "A file of the inspection package."
     };
     // A data-contract schema id for the machine files; versioned per dataset, bumped on a
     // breaking column/key change.
-    let schema = if path.starts_with("csv/")
-        || path.starts_with("json/")
-        || path == "findings.json"
-        || path == "decisions.json"
+    let schema = if path.starts_with(CSV_DIR)
+        || path.starts_with(JSON_DIR)
+        || path == INSPECTION_JSON
+        || path == DECISIONS_JSON
     {
-        let dataset = base.trim_end_matches(".csv").trim_end_matches(".json");
+        // The inspection file keeps the schema label it always had (`findings/1.0`): the label
+        // names the contract, not the path, and a tool that matches on it keeps working.
+        let dataset = if path == INSPECTION_JSON {
+            "findings"
+        } else {
+            base.trim_end_matches(".csv").trim_end_matches(".json")
+        };
         Some(format!("{dataset}/1.0"))
     } else {
         None
@@ -4920,8 +4939,8 @@ pub fn build_manifest(
     let mut files = vec![
         entry(format!("{stem}.pdf"), pdf_bytes),
         entry(format!("{stem}-findings.xlsx"), xlsx_bytes),
-        entry("findings.json".to_string(), findings_json_bytes),
-        entry("README.txt".to_string(), readme.as_bytes()),
+        entry(INSPECTION_JSON.to_string(), findings_json_bytes),
+        entry(README_TXT.to_string(), readme.as_bytes()),
     ];
     for (path, bytes) in extra_files {
         files.push(entry(path.clone(), bytes));
@@ -4972,10 +4991,10 @@ pub(crate) fn build_product_zip(
     writer.start_file(format!("{stem}-findings.xlsx"), options)?;
     writer.write_all(xlsx_bytes)?;
 
-    writer.start_file("findings.json", options)?;
+    writer.start_file(INSPECTION_JSON, options)?;
     writer.write_all(findings_json_bytes)?;
 
-    writer.start_file("README.txt", options)?;
+    writer.start_file(README_TXT, options)?;
     writer.write_all(readme.as_bytes())?;
 
     // The per-dataset CSV/JSON tables (csv/*, json/*), written under their folders.
@@ -4995,7 +5014,7 @@ pub(crate) fn build_product_zip(
         extra_files,
         provenance,
     );
-    writer.start_file("manifest.json", options)?;
+    writer.start_file(MANIFEST_JSON, options)?;
     writer.write_all(&manifest)?;
 
     let cursor = writer.finish()?;

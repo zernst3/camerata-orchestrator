@@ -99,7 +99,7 @@ fn the_column_lists_agree_with_the_rows_the_builders_write() {
 #[test]
 fn findings_json_and_the_finding_datasets_carry_the_list_and_number_fields() {
     let package = mixed_package();
-    let doc: Value = serde_json::from_slice(&package.findings_json).expect("findings.json");
+    let doc: Value = serde_json::from_slice(&package.findings_json).expect("json/inspection.json");
     let findings = doc["findings"].as_array().expect("rows");
     assert!(!findings.is_empty());
     for row in findings {

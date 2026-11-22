@@ -189,7 +189,7 @@ async fn run(
     let mut findings_json = Vec::new();
     let mut archive = zip::ZipArchive::new(std::fs::File::open(&export).unwrap()).unwrap();
     archive
-        .by_name("findings.json")
+        .by_name("json/inspection.json")
         .unwrap()
         .read_to_end(&mut findings_json)
         .unwrap();

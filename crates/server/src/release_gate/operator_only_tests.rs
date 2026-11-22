@@ -121,7 +121,7 @@ fn a_planted_term_on_every_surface_makes_the_gate_refuse() {
             );
             let file = match surface {
                 Surface::DataJson => "PDF data (data.json)",
-                Surface::FindingsJson => "findings.json",
+                Surface::FindingsJson => "json/inspection.json",
                 Surface::DatasetJson => "json/deviations.json",
                 Surface::DatasetCsv => "csv/conventions.csv",
                 Surface::XlsxSharedString => "acme-inspection-findings.xlsx",

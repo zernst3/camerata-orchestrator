@@ -486,7 +486,7 @@ async fn a_held_package_that_also_has_a_secret_is_refused_naming_both() {
         assert!(
             named
                 .iter()
-                .any(|(c, f, _)| c == CheckId::Secrets.label() && f == "findings.json"),
+                .any(|(c, f, _)| c == CheckId::Secrets.label() && f == "json/inspection.json"),
             "{route}: the secret is found in every package file, findings.json among them: {body}"
         );
     }

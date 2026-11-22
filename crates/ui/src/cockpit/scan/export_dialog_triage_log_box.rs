@@ -29,7 +29,10 @@ fn the_panel_has_no_triage_log_checkbox() {
         !html.contains("Also export, per rule"),
         "the old checkbox hint is gone: {html}"
     );
-    assert!(!html.contains("csv/triage-log.csv"), "{html}");
+    assert!(
+        !html.contains(camerata_api_types::package_paths::TRIAGE_LOG_CSV),
+        "{html}"
+    );
 }
 
 #[test]

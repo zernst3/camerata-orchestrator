@@ -124,6 +124,7 @@
 //      phrase) stays healthy. STANDING (passes):
 //      `evidence_negating_rule_requirement_is_held_not_healthy_positive_twin_stays_healthy`.
 
+use camerata_api_types::package_paths::INSPECTION_JSON;
 use super::*;
 use crate::onboard::{AuditedRef, LanguageVolume, ScanProvenance};
 use crate::xlsx_export;
@@ -2023,7 +2024,7 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
     let problems = crate::release_gate::row_parity(&json, &findings_export);
     assert!(
         problems.is_empty(),
-        "the PDF and findings.json must render the IDENTICAL row-identity set: {problems:?} \
+        "the PDF and {INSPECTION_JSON} must render the IDENTICAL row-identity set: {problems:?} \
              (pdf={pdf_ids:#?}, findings_json={findings_json_ids:#?})"
     );
     // Both the evidence-gate-synthesized row and the external-tool-preview row must
@@ -2036,7 +2037,7 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
         findings_json_ids
             .iter()
             .any(|(rid, ..)| rid == "ARCH-EXPLICIT-TX-1"),
-        "the evidence-gate-synthesized row must reach findings.json: {findings_json_ids:#?}"
+        "the evidence-gate-synthesized row must reach {INSPECTION_JSON}: {findings_json_ids:#?}"
     );
     assert!(
         pdf_ids
@@ -2048,7 +2049,7 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
         findings_json_ids
             .iter()
             .any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
-        "the external-tool-preview row must reach findings.json: {findings_json_ids:#?}"
+        "the external-tool-preview row must reach {INSPECTION_JSON}: {findings_json_ids:#?}"
     );
 
     // The xlsx: proven via its shared-strings pool (the same technique invariants 1/2 at
@@ -2146,12 +2147,12 @@ async fn req_d2_candidates_reviewed_cover_totals_and_hedge_counts_reconcile_agai
     );
     assert_eq!(
         findings_export.summary.candidates_reviewed, total_rows,
-        "findings.json's summary must reconcile against the same sealed row count"
+        concat!(camerata_api_types::pkg_inspection_json!(), "'s summary must reconcile against the same sealed row count")
     );
     assert_eq!(
         findings_export.summary.held_for_review, held_for_review_total,
-        "findings.json's summary must report the SAME held-for-review count as the PDF, \
-             never its own independently-recomputed one"
+        concat!(camerata_api_types::pkg_inspection_json!(), "'s summary must report the SAME held-for-review count as the PDF, \
+             never its own independently-recomputed one")
     );
 }
 

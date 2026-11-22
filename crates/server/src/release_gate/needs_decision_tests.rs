@@ -739,7 +739,7 @@ fn all_problems_cell(zip: &[u8], path: &str, header: &str) -> String {
 
 fn findings_row(zip: &[u8], path: &str) -> serde_json::Value {
     let entries = read_zip_entries(zip).unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     v["findings"]
         .as_array()
         .unwrap()

@@ -21,6 +21,8 @@
 //! The merge check reads the package itself: the merged rows of `findings.json` and the records of
 //! `decisions.json`, so what is checked is what the client receives. They are mechanical and hard.
 
+use camerata_api_types::package_paths::DECISIONS_JSON;
+use camerata_api_types::package_paths::{INSPECTION_JSON};
 use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::engine_discard::ENGINE_RESTORED_CAPTURE;
@@ -49,20 +51,20 @@ pub fn merged_without_decision_in_archive(
             None,
         )
     };
-    let rows: Vec<serde_json::Value> = match entries.get("findings.json") {
+    let rows: Vec<serde_json::Value> = match entries.get(INSPECTION_JSON) {
         None => {
-            problems.push(unreadable("findings.json", "it is absent"));
+            problems.push(unreadable(INSPECTION_JSON, "it is absent"));
             Vec::new()
         }
         Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
             Err(_) => {
-                problems.push(unreadable("findings.json", "it does not parse"));
+                problems.push(unreadable(INSPECTION_JSON, "it does not parse"));
                 Vec::new()
             }
             Ok(v) => match v["findings"].as_array() {
                 Some(rows) => rows.clone(),
                 None => {
-                    problems.push(unreadable("findings.json", "its findings are not a list"));
+                    problems.push(unreadable(INSPECTION_JSON, "its findings are not a list"));
                     Vec::new()
                 }
             },
@@ -100,14 +102,14 @@ pub fn merged_without_decision_in_archive(
         let id = row["site_id"].as_str().unwrap_or_default();
         if !merge_is_backed(&records, id, target) {
             problems.push(Problem::new(
-                "findings.json",
+                INSPECTION_JSON,
                 format!(
                     "{} line {}",
                     row["path"].as_str().unwrap_or_default(),
                     row["line"]
                 ),
                 format!(
-                    "this finding exports as \"{}\" but decisions.json holds no merge decision \
+                    "this finding exports as \"{}\" but {DECISIONS_JSON} holds no merge decision \
                      with a reason for it. Merge it again, with the reason",
                     row["disposition_label"]
                         .as_str()
@@ -213,7 +215,7 @@ pub fn split_out_without_decision(
     undecided_split_out(findings, decisions)
         .map(|f| {
             Problem::new(
-                "findings.json",
+                INSPECTION_JSON,
                 format!("{} line {}", f.path, f.line),
                 "this problem was grouped with one the reviewer ruled out, so it was split out \
                  into a problem of its own, and no reviewer decision is recorded for it. Open it, \
@@ -233,7 +235,7 @@ pub fn restored_without_decision(
     undecided_restored(findings, decisions)
         .map(|f| {
             Problem::new(
-                "findings.json",
+                INSPECTION_JSON,
                 format!("{} line {}", f.path, f.line),
                 "the engine threw this finding out and the reviewer put it back, and no reviewer \
                  decision is recorded for it since. Open it, then confirm it, correct it or mark \

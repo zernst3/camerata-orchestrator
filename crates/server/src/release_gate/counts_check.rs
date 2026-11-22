@@ -17,6 +17,7 @@
 //! 6. (work order D, flag off, not built: it needs the status words D introduces.)
 //! 7. (work order D, flag off) Every folded row names its head in `carried_by`.
 
+use camerata_api_types::package_paths::{INSPECTION_JSON, ALL_FINDINGS_JSON, TICKETS_CSV, FALSE_POSITIVES_JSON, DEPENDENCIES_JSON};
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -114,30 +115,30 @@ pub(super) fn recount(
             Vec::new()
         }
     };
-    let live = take("json/all-findings.json");
-    let ruled_out = take("json/false-positives.json");
-    let deps = take("json/dependencies.json");
+    let live = take(ALL_FINDINGS_JSON);
+    let ruled_out = take(FALSE_POSITIVES_JSON);
+    let deps = take(DEPENDENCIES_JSON);
     let findings_json: Value = match entries
-        .get("findings.json")
+        .get(INSPECTION_JSON)
         .map(|b| serde_json::from_slice(b))
     {
         Some(Ok(v)) => v,
         Some(Err(e)) => {
             failures.push(cannot_recount(
-                "findings.json",
+                INSPECTION_JSON,
                 format!("the file does not parse ({e})"),
             ));
             Value::Null
         }
         None => {
-            failures.push(cannot_recount("findings.json", "the file is missing"));
+            failures.push(cannot_recount(INSPECTION_JSON, "the file is missing"));
             Value::Null
         }
     };
     let fixes = findings_json.get("fixes").and_then(Value::as_array);
     if fixes.is_none() && !findings_json.is_null() {
         failures.push(cannot_recount(
-            "findings.json",
+            INSPECTION_JSON,
             "it has no fixes array to count the fixes from",
         ));
     }
@@ -444,7 +445,7 @@ pub(super) fn counts_problems_with(
 
     // 1. The recount equals the object in findings.json, and the PDF data's object equals both.
     let findings_json: Option<Value> = entries
-        .get("findings.json")
+        .get(INSPECTION_JSON)
         .and_then(|b| serde_json::from_slice(b).ok());
     match findings_json
         .as_ref()
@@ -452,17 +453,17 @@ pub(super) fn counts_problems_with(
         .and_then(|c| serde_json::from_value::<ReportCounts>(c.clone()).ok())
     {
         None => problems.push(problem(
-            "findings.json",
+            INSPECTION_JSON,
             COUNTS,
-            "findings.json has no counts object",
+            concat!(camerata_api_types::pkg_inspection_json!(), " has no counts object"),
         )),
         Some(object) => {
             for (field, printed, want) in differences(&object, &recounted) {
                 problems.push(problem(
-                    "findings.json",
+                    INSPECTION_JSON,
                     &format!("counts.{field}"),
                     format!(
-                        "findings.json states {printed} and the files in the package give {want}"
+                        "{INSPECTION_JSON} states {printed} and the files in the package give {want}"
                     ),
                 ));
             }
@@ -470,7 +471,7 @@ pub(super) fn counts_problems_with(
                 problems.push(problem(
                     "PDF data",
                     &format!("counts.{field}"),
-                    format!("the PDF data states {pdf} and findings.json states {json}"),
+                    format!("the PDF data states {pdf} and {INSPECTION_JSON} states {json}"),
                 ));
             }
         }
@@ -482,7 +483,7 @@ pub(super) fn counts_problems_with(
 
     // 2. The identities, on the recount and on the object (the gate's own arithmetic).
     for failure in identity_failures(&recounted) {
-        problems.push(problem("json/all-findings.json", "identities", failure));
+        problems.push(problem(ALL_FINDINGS_JSON, "identities", failure));
     }
     if let Some(object) = findings_json
         .as_ref()
@@ -490,7 +491,7 @@ pub(super) fn counts_problems_with(
         .and_then(|c| serde_json::from_value::<ReportCounts>(c.clone()).ok())
     {
         for failure in identity_failures(&object) {
-            problems.push(problem("findings.json", "identities", failure));
+            problems.push(problem(INSPECTION_JSON, "identities", failure));
         }
     }
 
@@ -597,11 +598,11 @@ pub(super) fn counts_problems_with(
     }
     problems.extend(workbook_problems(entries, want));
     problems.extend(order_problems(entries, report, want));
-    if let Some(csv) = entries.get("csv/tickets.csv") {
+    if let Some(csv) = entries.get(TICKETS_CSV) {
         let tickets = csv::Reader::from_reader(csv.as_slice()).records().count();
         if tickets != want.fixes.to_do {
             problems.push(problem(
-                "csv/tickets.csv",
+                TICKETS_CSV,
                 "rows",
                 format!(
                     "the file lists {tickets} tickets and the counts give {} fixes to do",
@@ -611,7 +612,7 @@ pub(super) fn counts_problems_with(
         }
     } else {
         problems.push(problem(
-            "csv/tickets.csv",
+            TICKETS_CSV,
             "rows",
             "the tickets file is missing, so its rows cannot be counted",
         ));
@@ -893,9 +894,9 @@ fn more_line_problems(report: &AuditReportJson, want: &ReportCounts) -> Vec<Prob
 fn summary_problems(findings_json: Option<&Value>, want: &ReportCounts) -> Vec<Problem> {
     let Some(summary) = findings_json.and_then(|v| v.get("summary")) else {
         return vec![problem(
-            "findings.json",
+            INSPECTION_JSON,
             "summary",
-            "findings.json has no summary object",
+            concat!(camerata_api_types::pkg_inspection_json!(), " has no summary object"),
         )];
     };
     let mut out = Vec::new();
@@ -913,10 +914,10 @@ fn summary_problems(findings_json: Option<&Value>, want: &ReportCounts) -> Vec<P
         match summary.get(field).and_then(Value::as_u64) {
             Some(printed) if printed as usize == n => {}
             printed => out.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &format!("summary.{field}"),
                 format!(
-                    "findings.json summary states {} and the counts give {n}",
+                    "{INSPECTION_JSON} summary states {} and the counts give {n}",
                     printed.map_or("nothing".to_string(), |p| p.to_string())
                 ),
             )),
@@ -925,9 +926,9 @@ fn summary_problems(findings_json: Option<&Value>, want: &ReportCounts) -> Vec<P
     for retired in ["curated_total", "open"] {
         if summary.get(retired).is_some() {
             out.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &format!("summary.{retired}"),
-                "findings.json summary holds a retired row tally",
+                concat!(camerata_api_types::pkg_inspection_json!(), " summary holds a retired row tally"),
             ));
         }
     }
@@ -939,7 +940,7 @@ fn summary_problems(findings_json: Option<&Value>, want: &ReportCounts) -> Vec<P
 /// alone, which closes a problem without anyone ruling on it. The row's disposition says which:
 /// `BaselineAccepted` and `WaivedInline` are the dispositions with no decision behind them.
 fn accepted_rows_without_a_decision_problems(entries: &Entries) -> Vec<Problem> {
-    let Ok(live) = array_of(entries, "json/all-findings.json") else {
+    let Ok(live) = array_of(entries, ALL_FINDINGS_JSON) else {
         // The recount has already refused a package it cannot read.
         return Vec::new();
     };
@@ -957,7 +958,7 @@ fn accepted_rows_without_a_decision_problems(entries: &Entries) -> Vec<Problem> 
         })
         .map(|r| {
             problem(
-                "json/all-findings.json",
+                ALL_FINDINGS_JSON,
                 &format!("place {}:{}", text(r, "path"), text(r, "line")),
                 format!(
                     "{} is closed by {} and no reviewer has decided it this session",
@@ -976,7 +977,7 @@ fn accepted_rows_without_a_decision_problems(entries: &Entries) -> Vec<Problem> 
 /// Check 7: in every place with more than one problem row, all rows but the head carry
 /// `carried_by` naming the head's `site_id`.
 fn folded_rows_problems(entries: &Entries) -> Vec<Problem> {
-    let Ok(live) = array_of(entries, "json/all-findings.json") else {
+    let Ok(live) = array_of(entries, ALL_FINDINGS_JSON) else {
         // The recount has already refused a package it cannot read.
         return Vec::new();
     };
@@ -1000,7 +1001,7 @@ fn folded_rows_problems(entries: &Entries) -> Vec<Problem> {
         // One head, named by every other row.
         if heads.len() != 1 || uncarried != 1 {
             out.push(problem(
-                "json/all-findings.json",
+                ALL_FINDINGS_JSON,
                 &format!("place {}:{}", place.1, place.2),
                 format!(
                     "{} rows share this place and {} of them do not name the row that heads it",
@@ -1105,8 +1106,8 @@ fn order_problems(
 ) -> Vec<Problem> {
     let mut out = Vec::new();
     let (Ok(live), Ok(deps)) = (
-        array_of(entries, "json/all-findings.json"),
-        array_of(entries, "json/dependencies.json"),
+        array_of(entries, ALL_FINDINGS_JSON),
+        array_of(entries, DEPENDENCIES_JSON),
     ) else {
         // The recount has already refused a package it cannot read.
         return out;

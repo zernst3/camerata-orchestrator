@@ -59,7 +59,7 @@ fn entries() -> BTreeMap<String, Vec<u8>> {
 }
 
 fn findings_json(entries: &BTreeMap<String, Vec<u8>>) -> serde_json::Value {
-    serde_json::from_slice(&entries["findings.json"]).expect("findings.json")
+    serde_json::from_slice(&entries["json/inspection.json"]).expect("json/inspection.json")
 }
 
 fn text(row: &serde_json::Value, key: &str) -> String {
@@ -82,7 +82,7 @@ fn with_findings(
     edit(&mut findings);
     let mut out = entries.clone();
     out.insert(
-        "findings.json".into(),
+        "json/inspection.json".into(),
         serde_json::to_vec(&findings).unwrap(),
     );
     out

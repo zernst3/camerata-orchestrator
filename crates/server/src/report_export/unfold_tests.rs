@@ -273,7 +273,7 @@ fn the_internal_note_names_the_host_and_the_client_files_do_not() {
     let (json, findings) = exports(&reviewed);
     let data = render_data_json(&json).expect("data.json renders");
     for (name, text) in [
-        ("findings.json", findings.to_string()),
+        ("json/inspection.json", findings.to_string()),
         ("data.json", data.clone()),
     ] {
         assert!(

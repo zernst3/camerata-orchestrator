@@ -73,7 +73,7 @@ pub struct InspectArgs {
     /// [`camerata_api_types::uow::validate_repo_name`] and must be unique: the name tags every
     /// finding and keys the incremental cache, so two repos sharing one would merge.
     pub repo_names: Vec<String>,
-    /// Where to write the product-export ZIP (PDF + xlsx + findings.json + README.txt). Its
+    /// Where to write the product-export ZIP (the PDF, the workbook, the JSON and CSV files and the README). Its
     /// parent directory must already exist.
     pub export: PathBuf,
     /// The compliance-safety backend setting (`docs/design/2026-09-22_per-project-backend.md`)

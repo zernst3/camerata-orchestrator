@@ -154,7 +154,7 @@ async fn two_repos_with_the_same_path_are_one_project_one_report_one_cache() {
     // One export, one report: both repos are in it, under the names they were given.
     assert!(export.is_file());
     let readme = zip_entry(&export, "README.txt");
-    let findings = zip_entry(&export, "findings.json");
+    let findings = zip_entry(&export, "json/inspection.json");
     for name in ["acme/api", "acme/web"] {
         assert!(
             readme.contains(name) || findings.contains(name),

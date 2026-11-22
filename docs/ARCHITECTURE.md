@@ -129,7 +129,7 @@ boundary moved.
 >    product requirement has no test referencing it.
 > 5. **The Excel deliverable is partitioned by finding kind** (Index / All Findings / Deviations /
 >    Conventions / per-area / Dependencies / False Positives / Coverage) rather than being one flat
->    sheet. The PDF stays the summary and `findings.json` stays the whole data set.
+>    sheet. The PDF stays the summary and `json/inspection.json` stays the whole data set.
 
 ---
 

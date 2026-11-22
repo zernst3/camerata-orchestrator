@@ -10,6 +10,7 @@
 //!   20,000-file limit) is listed by repo and path, from the scan ledger's input facts
 //!   ([`crate::scan_ledger::ScanInputFacts::skipped_files`]).
 
+use camerata_api_types::package_paths::INSPECTION_JSON;
 use serde::Serialize;
 
 use crate::scan_ledger::{FileCapHit, SkipReason, SkippedTotals, SKIPPED_FILES_LISTED_PER_REASON};
@@ -125,7 +126,7 @@ pub(super) fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<S
     Some(format!(
         "{count} {} checked only against the files in {} scope, not every file in the \
          repositories (for example {}: {} of {}). The counts per rule are on the {} sheet and in \
-         findings.json.",
+         {INSPECTION_JSON}.",
         if count == 1 { "rule was" } else { "rules were" },
         if count == 1 { "its" } else { "their" },
         first.rule_id,

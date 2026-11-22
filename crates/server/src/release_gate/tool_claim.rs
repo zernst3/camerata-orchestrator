@@ -7,6 +7,7 @@
 //! the model and the ledger records it as run, so a summary that called it unchecked would
 //! understate the report, and a ledger gap that the summary never mentions would hide one.
 
+use camerata_api_types::package_paths::{INSPECTION_JSON};
 use super::Problem;
 use crate::onboard::ScanReport;
 use crate::report_export::{AuditReportJson, NO_PREVIEW_TOOL_LINE};
@@ -32,14 +33,14 @@ pub fn problems(report: &ScanReport, report_json: &AuditReportJson) -> Vec<Probl
         .any(|line| line == NO_PREVIEW_TOOL_LINE);
     match (claimed, unchecked.is_empty()) {
         (true, true) => vec![Problem::new(
-            "findings.json",
+            INSPECTION_JSON,
             "executive summary",
             "the summary says selected checks had no scan-time preview tool, but the ledger \
              shows every rule with no tool as run",
             None,
         )],
         (false, false) => vec![Problem::new(
-            "findings.json",
+            INSPECTION_JSON,
             "executive summary",
             format!(
                 "the ledger shows {} not run for want of a scan-time preview tool, and the \

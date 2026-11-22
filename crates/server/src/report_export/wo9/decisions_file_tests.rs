@@ -22,7 +22,7 @@ fn the_package_carries_decisions_json_and_a_decisions_sheet() {
     let reviewed = apply_overlay(&sealed, &records, &edits, &[]);
     let entries = released_entries(&reviewed, &client_options());
 
-    let file: Value = serde_json::from_slice(&entries["decisions.json"]).expect("decisions.json");
+    let file: Value = serde_json::from_slice(&entries["json/decisions.json"]).expect("json/decisions.json");
     let rows = file["decisions"].as_array().expect("a decisions array");
     // The group decision: its node record and one record for each site it covers; the false
     // positive.
@@ -52,7 +52,7 @@ fn the_package_carries_decisions_json_and_a_decisions_sheet() {
     // others are recorded as present and not printed; a reviewer's name never is.
     assert_eq!(fp["reason"], "the layer is allowed here");
     assert!(node["reason"].as_str().unwrap_or_default().is_empty());
-    let text = String::from_utf8_lossy(&entries["decisions.json"]).into_owned();
+    let text = String::from_utf8_lossy(&entries["json/decisions.json"]).into_owned();
     assert!(!text.contains("SECRET-REVIEWER"), "{text}");
     assert!(!text.contains("the same query helper"), "{text}");
 
@@ -103,7 +103,7 @@ fn merged_without_decision_reads_the_package_decisions_json() {
     // The record is struck from the file the client receives: the gate refuses the package.
     let mut stripped = package.datasets.clone();
     for (name, bytes) in &mut stripped {
-        if name == "decisions.json" {
+        if name == "json/decisions.json" {
             let mut file: Value = serde_json::from_slice(bytes).unwrap();
             file["decisions"] = Value::Array(Vec::new());
             *bytes = serde_json::to_vec_pretty(&file).unwrap();
@@ -118,7 +118,7 @@ fn merged_without_decision_reads_the_package_decisions_json() {
     // A record with no reason recorded does not count either.
     let mut unreasoned = package.datasets.clone();
     for (name, bytes) in &mut unreasoned {
-        if name == "decisions.json" {
+        if name == "json/decisions.json" {
             let mut file: Value = serde_json::from_slice(bytes).unwrap();
             for row in file["decisions"].as_array_mut().unwrap() {
                 row["has_reason"] = Value::Bool(false);
@@ -150,7 +150,7 @@ fn a_revoked_false_positive_prints_no_reason() {
     let reviewed = apply_overlay(&sealed, &[fp, live], &[], &[]);
     let entries = released_entries(&reviewed, &client_options());
 
-    let file: Value = serde_json::from_slice(&entries["decisions.json"]).unwrap();
+    let file: Value = serde_json::from_slice(&entries["json/decisions.json"]).unwrap();
     let rows = file["decisions"].as_array().unwrap();
     let revoked = rows.iter().find(|r| r["id"] == "dec-000001").unwrap();
     assert_eq!(revoked["revoked"], true);

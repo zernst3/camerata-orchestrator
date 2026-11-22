@@ -175,7 +175,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         names.iter().any(|n| n.ends_with("-findings.xlsx")),
         "{names:?}"
     );
-    assert!(names.contains(&"findings.json".to_string()), "{names:?}");
+    assert!(names.contains(&"json/inspection.json".to_string()), "{names:?}");
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
     // 22c: the manifest states the quote basis exactly as `camerata count` does (the same
@@ -461,7 +461,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
     {
         use std::io::Read;
         let mut f = archive
-            .by_name("findings.json")
+            .by_name("json/inspection.json")
             .expect("the export must contain findings.json");
         f.read_to_string(&mut findings_json)
             .expect("findings.json must be valid UTF-8");

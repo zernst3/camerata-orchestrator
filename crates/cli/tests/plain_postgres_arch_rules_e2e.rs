@@ -180,7 +180,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         export_path_is_zip(&outcome.export_path),
         "the export must be a real zip"
     );
-    let findings_json = read_zip_entry(&outcome.export_path, "findings.json");
+    let findings_json = read_zip_entry(&outcome.export_path, "json/inspection.json");
 
     for (rule_id, label) in [
         (RULE_SEARCH_PATH, "SUPABASE-FUNC-SEARCH-PATH-1"),

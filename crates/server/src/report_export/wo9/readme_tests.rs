@@ -214,7 +214,7 @@ fn the_readme_does_not_call_every_csv_and_json_file_a_table_of_the_workbook() {
             "{paragraph}"
         );
         assert!(paragraph.contains("all-findings"), "{paragraph}");
-        assert!(paragraph.contains("findings.json"), "{paragraph}");
+        assert!(paragraph.contains("json/inspection.json"), "{paragraph}");
     }
 }
 

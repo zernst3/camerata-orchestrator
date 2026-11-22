@@ -197,7 +197,7 @@ async fn surfaces() -> (Vec<(String, String)>, Vec<Finding>) {
         &HashMap::new(),
     );
     out.push((
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_string_pretty(&export).unwrap(),
     ));
     for (name, bytes) in xlsx_export::build_csv_exports(
@@ -244,7 +244,7 @@ async fn no_client_facing_output_carries_the_stage_1_reason() {
         .get(ai_audit::STAGE1_CAPTURE)
         .expect("the stage 1 verdict is kept on the row");
     assert!(kept.contains("ZEBRA-REASON-7731"), "{kept}");
-    for name in ["PDF data", "report json", "findings.json"] {
+    for name in ["PDF data", "report json", "json/inspection.json"] {
         assert!(
             surfaces.iter().any(|(n, _)| n == name),
             "{name} was not built"

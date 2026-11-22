@@ -91,7 +91,7 @@ fn every_export_renders_the_same_reviewed_row_set() {
     ]
     .concat();
     let findings_json: Vec<Value> = [
-        json_rows(&entries, "findings.json"),
+        json_rows(&entries, "json/inspection.json"),
         json_rows(&entries, "json/false-positives.json"),
         json_rows(&entries, "json/dependencies.json"),
     ]
@@ -105,7 +105,7 @@ fn every_export_renders_the_same_reviewed_row_set() {
     let sites = sites_sheet_rows(&entries);
 
     let outputs: [(&str, Vec<Value>); 4] = [
-        ("findings.json", of_json(findings_json)),
+        ("json/inspection.json", of_json(findings_json)),
         ("json datasets", json_all),
         ("csv datasets", csv_all),
         ("Sites sheet", sites),
@@ -140,7 +140,7 @@ fn every_export_renders_the_same_reviewed_row_set() {
     }
 
     // The tree in findings.json counts the same rows in each sub-group.
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     let nodes = findings["tree"]["nodes"].as_array().expect("the tree");
     let tree_groups: Tally = nodes
         .iter()
@@ -157,7 +157,7 @@ fn every_export_renders_the_same_reviewed_row_set() {
     // The PDF's patterns describe the sites that are not false positives, in the same
     // sub-groups and at the same review levels.
     let not_false_positive: Vec<Value> = [
-        json_rows(&entries, "findings.json"),
+        json_rows(&entries, "json/inspection.json"),
         json_rows(&entries, "json/dependencies.json"),
     ]
     .concat();

@@ -129,7 +129,7 @@ enum Command {
     },
 
     /// Headless brownfield inspection: runs the full cockpit scan pipeline over `--repo` and
-    /// writes the SAME product-export ZIP (PDF + xlsx + findings.json + README.txt) the UI's
+    /// writes the SAME product-export ZIP (the PDF, the workbook, the JSON and CSV files and the README) the UI's
     /// export button produces to `--export`. No BFF, no UI — see
     /// `camerata::inspect_cmd`'s module doc comment.
     Inspect {

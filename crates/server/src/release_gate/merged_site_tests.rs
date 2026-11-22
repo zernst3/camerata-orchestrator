@@ -59,7 +59,7 @@ fn every_surface(package: &ProductPackage) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     out.insert("PDF data".to_string(), package.data_json.clone());
     out.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         String::from_utf8_lossy(&package.findings_json).into_owned(),
     );
     for (name, bytes) in &package.datasets {

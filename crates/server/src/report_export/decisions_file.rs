@@ -130,7 +130,7 @@ pub fn decision_rows(reviewed: &ReviewedReport) -> Vec<DecisionRowJson> {
 }
 
 /// The file's path in the package.
-pub const DECISIONS_FILE: &str = "decisions.json";
+pub use camerata_api_types::package_paths::DECISIONS_JSON as DECISIONS_FILE;
 
 /// The bytes of `decisions.json`.
 pub fn decisions_json(reviewed: &ReviewedReport) -> anyhow::Result<Vec<u8>> {

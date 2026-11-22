@@ -10,6 +10,7 @@
 //! held is the export: it is refused until the row is put back (it then sits in its rule node,
 //! held as a restore until decided) or a correction confirms the throw-out was right.
 
+use camerata_api_types::package_paths::{INSPECTION_JSON};
 use std::collections::HashSet;
 
 use super::Problem;
@@ -71,7 +72,7 @@ pub fn problems(
     }
     problems.extend(uncorrected_no(findings, reviewed).into_iter().map(|f| {
         Problem::new(
-            "findings.json",
+            INSPECTION_JSON,
             format!("{} line {}", f.path, f.line),
             "the Engine Check said No to this finding and no correction, decision or later edit \
              is recorded for it. Correct it (mark it a false positive, change its severity or \

@@ -208,7 +208,7 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
         &HashMap::new(),
     );
     out.push((
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_string_pretty(&export).unwrap(),
     ));
     for (name, bytes) in xlsx_export::build_csv_exports(
@@ -260,7 +260,7 @@ async fn assert_redacted_everywhere(terse_output: bool) {
             "terse_output={terse_output}: the fixture must produce two rows: {merged:#?}"
         );
         assert!(
-            surfaces.iter().any(|(n, _)| n == "findings.json"),
+            surfaces.iter().any(|(n, _)| n == "json/inspection.json"),
             "findings.json was not built"
         );
         for (name, text) in &surfaces {

@@ -10,6 +10,7 @@
 //! not people, and renaming them would break whatever reads them. Everything a person reads is
 //! named from this module.
 
+use camerata_api_types::package_paths::{INSPECTION_JSON};
 use camerata_api_types::review::FpReason;
 
 /// Excel refuses a sheet name over this many characters.
@@ -693,7 +694,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     e(
         TERM_ALSO_MATCHES,
         "A rule that another problem at the same place also breaks. The problem that heads the place lists it, and each such rule keeps its own severity, kind and decision.",
-        "All problems; the Rules column; the also_matches field of findings.json",
+        concat!("All problems; the Rules column; the also_matches field of ", camerata_api_types::pkg_inspection_json!()),
     ),
     e(
         "Rule id",
@@ -1593,7 +1594,7 @@ pub fn banned_synonym_in(text: &str) -> Option<(&'static str, &'static str)> {
     let mut cleaned = text.to_string();
     for file in [
         "all-findings",
-        "findings.json",
+        INSPECTION_JSON,
         "findings.xlsx",
         "false-positives",
     ] {

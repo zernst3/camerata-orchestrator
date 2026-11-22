@@ -251,7 +251,7 @@ wrong for the other readers.
 
 Five audiences, in decreasing order of how expensive a wrong word is:
 
-1. **CLIENT-ARTIFACT** - verbatim text in a paid deliverable (PDF, xlsx, `findings.json`).
+1. **CLIENT-ARTIFACT** - verbatim text in a paid deliverable (PDF, xlsx, `json/inspection.json`).
 2. **CLIENT-REPO** - verbatim text emitted into the client repository's `AGENTS.md` /
    `CONVENTIONS.md` (`arm.rs::render_rule`: `### {id} - {title}` then the directive). Read by
    the client's own developers and agents as "conventions this project follows".
@@ -294,7 +294,7 @@ severity bounds - REF section 2).
 | `[decision].why` | OPERATOR + summary fallback #2 (can become the emitted directive) | - | 4.2 |
 | `[decision].default` | ENGINE | dangling id: loads fine, resolves nothing, remediation gate SKIPS the rule (gotcha 11) | 4.3 |
 | `layer`, `[[emits]]` | NOBODY (declared, parsed, discarded). Never add `tag` (deleted; build failure) | - | 3.18/3.19 |
-| option `id` | ENGINE (identity) + CLIENT-ARTIFACT as data (the flattened kind payloads: `convention_option_id`, `observed_options[].option_id` in `findings.json`/xlsx; `evaluated_option_id` itself stays engine-side) | required | 5.1, 6 |
+| option `id` | ENGINE (identity) + CLIENT-ARTIFACT as data (the flattened kind payloads: `convention_option_id`, `observed_options[].option_id` in `json/inspection.json`/xlsx; `evaluated_option_id` itself stays engine-side) | required | 5.1, 6 |
 | option `label` | CLIENT-ARTIFACT VERBATIM (kind payloads, "consistently follows" sentence, snippet fallback) + MODEL | required | 5.2 |
 | option `directive` | MODEL (scan + alternatives prompts) + CLIENT-REPO (emitted convention text). NEVER the report artifacts | empty string; summary/title fall in | 5.3 |
 | option `why` | MODEL + OPERATOR + CLIENT-ARTIFACT when a `violates` option is decided (interpolated into the defect detail) | empty string | 5.4 |
@@ -458,7 +458,7 @@ what/where/impact. Same placeholder machinery as `remediation`.
   checkable title of the external source, optionally with a clause on what it establishes -
   never an internal note (that is `relevance`, which reaches nobody).
 - Rule `id` and option `id` both appear in client artifacts (ids in citations/columns; option
-  ids as data fields in `findings.json`). Option ids are lowercase-kebab noun phrases naming
+  ids as data fields in `json/inspection.json`). Option ids are lowercase-kebab noun phrases naming
   the code state (`"one-shared-repository-error"`), subject to LABEL-3 like the label they
   identify - `"flag-getsession-in-server-paths"` is tool voice in id form. Both are FOREVER;
   wrongness includes any rename, and any rule-id prefix chosen without checking the
@@ -466,7 +466,7 @@ what/where/impact. Same placeholder machinery as `remediation`.
   cap + informational routing, `ORCH-/SPIRIT-/PROC-` alternatives exclusion - REF 3.1).
 - **Never truncate an option id mid-word.** An id may be shorter than the full label slug
   (a concise complete noun phrase is the house style), but it must end on a word boundary - a
-  client reading `convention_option_id: "…-persisten"` in `findings.json` sees a broken field.
+  client reading `convention_option_id: "…-persisten"` in `json/inspection.json` sees a broken field.
   There is no slug-length cap; write a complete phrase and stop at a natural clause end. The
   `w_group4_no_truncated_option_ids` gate fails any id that is a mid-word prefix of its label
   slug, so the historical 48-char truncation cannot recur.

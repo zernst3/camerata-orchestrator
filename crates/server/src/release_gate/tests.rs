@@ -487,7 +487,7 @@ fn release_blocks_a_secret_planted_in_every_surface_with_an_exact_problem() {
         assert!(!problems.is_empty(), "{surface:?}: no secrets problem");
         let (file, location) = match surface {
             Surface::DataJson => ("PDF data (data.json)", "a_field_added_tomorrow.note"),
-            Surface::FindingsJson => ("findings.json", "a_field_added_tomorrow"),
+            Surface::FindingsJson => ("json/inspection.json", "a_field_added_tomorrow"),
             Surface::DatasetJson => ("json/deviations.json", "$[0].snippet"),
             Surface::DatasetCsv => ("csv/conventions.csv", "row 1, column \"snippet\""),
             Surface::XlsxSharedString => ("acme-inspection-findings.xlsx", "shared string #"),
@@ -534,7 +534,7 @@ fn secrets_check_walks_also_locations_not_a_named_field_list() {
     let failure = blocked(pkg);
     let locations: Vec<&str> = secret_problems(&failure)
         .iter()
-        .filter(|q| q.file == "findings.json")
+        .filter(|q| q.file == "json/inspection.json")
         .map(|q| q.location.as_str())
         .collect();
     for expected in [
@@ -613,7 +613,7 @@ fn release_reports_every_problem_not_just_the_first() {
         .iter()
         .map(|q| q.file.as_str())
         .collect();
-    for expected in ["PDF data (data.json)", "findings.json", "README.txt"] {
+    for expected in ["PDF data (data.json)", "json/inspection.json", "README.txt"] {
         assert!(
             files.contains(expected),
             "{expected} missing from {files:?}"
@@ -702,12 +702,12 @@ fn dataset_set_check_flags_a_missing_and_an_extra_dataset() {
 fn dataset_set_check_flags_a_pdf_without_the_magic_and_an_empty_findings_json() {
     let mut entries = entries_of(&released());
     entries.insert(format!("{STEM}.pdf"), b"not a pdf".to_vec());
-    entries.insert("findings.json".to_string(), Vec::new());
+    entries.insert("json/inspection.json".to_string(), Vec::new());
     let problems = dataset_set_problems(&entries);
     assert!(problems.iter().any(|q| q.message.contains("%PDF-")));
     assert!(problems
         .iter()
-        .any(|q| q.file == "findings.json" && q.message.contains("empty")));
+        .any(|q| q.file == "json/inspection.json" && q.message.contains("empty")));
 }
 
 #[test]
@@ -732,17 +732,17 @@ fn dataset_parity_check_flags_a_cell_disagreement() {
 #[test]
 fn dataset_parity_check_flags_findings_json_disagreeing_with_all_findings() {
     let mut entries = entries_of(&released());
-    let mut doc: Value = serde_json::from_slice(&entries["findings.json"]).expect("parses");
+    let mut doc: Value = serde_json::from_slice(&entries["json/inspection.json"]).expect("parses");
     doc["findings"][0]["severity"] = json!("tampered");
     entries.insert(
-        "findings.json".to_string(),
+        "json/inspection.json".to_string(),
         serde_json::to_vec_pretty(&doc).expect("serializes"),
     );
     let problems = dataset_parity_problems(&entries);
     assert!(
         problems
             .iter()
-            .any(|q| q.file == "findings.json" && q.message.contains("all-findings")),
+            .any(|q| q.file == "json/inspection.json" && q.message.contains("all-findings")),
         "{problems:?}"
     );
 }

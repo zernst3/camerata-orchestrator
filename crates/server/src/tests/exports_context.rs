@@ -165,7 +165,7 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         names.iter().any(|n| n.ends_with("-findings.xlsx")),
         "{names:?}"
     );
-    assert!(names.contains(&"findings.json".to_string()), "{names:?}");
+    assert!(names.contains(&"json/inspection.json".to_string()), "{names:?}");
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
     let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
@@ -195,7 +195,7 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
 
     let mut findings_json_str = String::new();
     archive
-        .by_name("findings.json")
+        .by_name("json/inspection.json")
         .unwrap()
         .read_to_string(&mut findings_json_str)
         .unwrap();
@@ -227,7 +227,7 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         .unwrap();
     assert!(readme.contains(&pdf_name), "{readme}");
     assert!(readme.contains(&xlsx_name), "{readme}");
-    assert!(readme.contains("findings.json"), "{readme}");
+    assert!(readme.contains("json/inspection.json"), "{readme}");
     // P6 (2026-09-29): the product is "Codebase Inspection" — the README names it and
     // never says "audit"/"Audit" (the disclaimer paragraph it embeds verbatim is itself
     // audit-free per `report_export`'s own contract test).
@@ -350,9 +350,9 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
     for path in [
         "a-inspection.pdf",
         "a-inspection-findings.xlsx",
-        "findings.json",
+        "json/inspection.json",
         "README.txt",
-        "decisions.json",
+        "json/decisions.json",
         "csv/tickets.csv",
         "csv/all-findings.csv",
         "json/all-findings.json",
@@ -383,7 +383,7 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
                 && !purpose.to_lowercase().contains("xlsx"),
             "{path}: {purpose:?} calls it a workbook table"
         );
-        assert!(purpose.contains("findings.json"), "{path}: {purpose:?}");
+        assert!(purpose.contains("json/inspection.json"), "{path}: {purpose:?}");
     }
     for old in [
         "manifest",
@@ -1048,7 +1048,7 @@ fn manifest_lists_and_hashes_every_file_except_itself() {
     for expected in [
         "acme-audit.pdf",
         "acme-audit-findings.xlsx",
-        "findings.json",
+        "json/inspection.json",
         "README.txt",
         "csv/all-findings.csv",
         "json/all-findings.json",

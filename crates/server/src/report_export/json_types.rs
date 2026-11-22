@@ -1,6 +1,7 @@
 //! The serde shapes of the report JSON (cover, summary, matrix, sites, groups, methodology)
 //! and the small helpers that sit beside them.
 
+use camerata_api_types::package_paths::INSPECTION_JSON;
 use super::*;
 
 /// Real pluralization for a count + noun pair (`"1 site"` / `"3 sites"`), replacing the
@@ -1109,7 +1110,7 @@ impl PdfWordsJson {
             failed_passes_more: format!("more, listed on the {} sheet", v::NOT_CHECKED),
             skipped_files_cap: PDF_MAX_SKIPPED_FILES,
             skipped_files_more: format!(
-                "more skipped files, listed in full on the {} sheet and in findings.json",
+                "more skipped files, listed in full on the {} sheet and in {INSPECTION_JSON}",
                 v::NOT_CHECKED
             ),
         }

@@ -68,6 +68,7 @@
 //! headline to appear verbatim somewhere in the workbook, so a kind whose sheet forgot to
 //! render a headline column would be a PARITY FAULT, by name.
 
+use camerata_api_types::package_paths::{ALL_FINDINGS_JSON, JSON_DIR, json_path, csv_path};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
@@ -813,8 +814,8 @@ fn possible_duplicate_counts(rows: &[FindingRow]) -> (usize, usize) {
 /// What a cell ends with when prose (not a site list) had to be cut to fit. The full text is in
 /// `findings.json` and the `json/` and `csv/` files of the same export, none of which has a cell
 /// limit.
-const CELL_CUT_POINTER: &str = "\n[cut to fit Excel's 32,767-character cell limit: the full text \
-     is in findings.json and the json/ and csv/ files of this export]";
+const CELL_CUT_POINTER: &str = concat!("\n[cut to fit Excel's 32,767-character cell limit: the full text \
+     is in ", camerata_api_types::pkg_inspection_json!(), " and the files in ", camerata_api_types::pkg_json_dir!(), " and ", camerata_api_types::pkg_csv_dir!(), " of this export]");
 
 /// `text` as a cell may hold it: unchanged when it fits, otherwise cut on a character boundary
 /// with [`CELL_CUT_POINTER`] at the end. The last line of defence for every cell this module
@@ -2650,35 +2651,35 @@ pub fn build_json_exports(
     // One (path, bytes) per table; pretty-printed for a diffable, human-skimmable file.
     Ok(vec![
         (
-            "json/all-findings.json".to_string(),
+            ALL_FINDINGS_JSON.to_string(),
             serde_json::to_vec_pretty(&live_rows)?,
         ),
         (
-            "json/deviations.json".to_string(),
+            json_path("deviations"),
             serde_json::to_vec_pretty(&deviation_groups)?,
         ),
         (
-            "json/conventions.json".to_string(),
+            json_path("conventions"),
             serde_json::to_vec_pretty(&convention_rows)?,
         ),
         (
-            "json/not-assessed.json".to_string(),
+            json_path("not-assessed"),
             serde_json::to_vec_pretty(&not_assessed_rows)?,
         ),
         (
-            "json/dependencies.json".to_string(),
+            json_path("dependencies"),
             serde_json::to_vec_pretty(&dep_rows)?,
         ),
         (
-            "json/false-positives.json".to_string(),
+            json_path("false-positives"),
             serde_json::to_vec_pretty(&fp_rows)?,
         ),
         (
-            "json/coverage.json".to_string(),
+            json_path("coverage"),
             serde_json::to_vec_pretty(&coverage_rows)?,
         ),
         (
-            "json/rules-applied.json".to_string(),
+            json_path("rules-applied"),
             serde_json::to_vec_pretty(&rules_applied_rows)?,
         ),
     ])
@@ -2744,11 +2745,11 @@ pub fn build_csv_exports(
         .map(|(path, bytes)| {
             // json/foo.json -> csv/foo.csv
             let name = path
-                .strip_prefix("json/")
+                .strip_prefix(JSON_DIR)
                 .and_then(|s| s.strip_suffix(".json"))
                 .unwrap_or(&path);
             let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-            Ok((format!("csv/{name}.csv"), json_array_to_csv(&value)?))
+            Ok((csv_path(name), json_array_to_csv(&value)?))
         })
         .collect::<anyhow::Result<_>>()?;
     // WO9b: one ticket per sub-group, for a client's Jira, Linear or GitHub Issues importer.

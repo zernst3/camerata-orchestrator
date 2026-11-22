@@ -3,6 +3,7 @@
 //! production, and the export tests call these same functions and assert on what they return.
 //! A test that re-implemented a comparison would be testing its own copy.
 
+use camerata_api_types::package_paths::{MANIFEST_JSON, README_TXT, INSPECTION_JSON, DECISIONS_JSON, ALL_FINDINGS_JSON, ALL_FINDINGS_CSV, DEVIATIONS_JSON, FALSE_POSITIVES_JSON, json_path, csv_path};
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -54,16 +55,16 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
     expected.insert(pdf.clone());
     expected.insert(xlsx.clone());
     for fixed in [
-        "findings.json",
-        "decisions.json",
-        "README.txt",
-        "manifest.json",
+        INSPECTION_JSON,
+        DECISIONS_JSON,
+        README_TXT,
+        MANIFEST_JSON,
     ] {
         expected.insert(fixed.to_string());
     }
     for dataset in DATASETS {
-        expected.insert(format!("csv/{dataset}.csv"));
-        expected.insert(format!("json/{dataset}.json"));
+        expected.insert(csv_path(dataset));
+        expected.insert(json_path(dataset));
     }
     // The ticket file is a CSV with no JSON sibling (one ticket per sub-group, for an importer).
     expected.insert(crate::xlsx_export::tickets::TICKETS_CSV.to_string());
@@ -114,17 +115,17 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
         }
     }
     for fixed in [
-        "findings.json",
-        "decisions.json",
-        "README.txt",
-        "manifest.json",
+        INSPECTION_JSON,
+        DECISIONS_JSON,
+        README_TXT,
+        MANIFEST_JSON,
     ] {
         if entries.get(fixed).is_some_and(Vec::is_empty) {
             problems.push(problem(fixed, DATASET_SET, "the file is empty"));
         }
     }
     for dataset in DATASETS {
-        let json = format!("json/{dataset}.json");
+        let json = json_path(dataset);
         if entries.get(&json).is_some_and(Vec::is_empty) {
             problems.push(problem(&json, DATASET_SET, "the file is empty"));
         }
@@ -166,12 +167,12 @@ fn union_of_keys(rows: &[Value]) -> BTreeSet<String> {
 /// flattening. Parsed with the `csv` crate, so a quoting bug shows up as a different row or
 /// column count.
 pub fn compare_csv_to_json(dataset: &str, csv_bytes: &[u8], json_bytes: &[u8]) -> Vec<Problem> {
-    let file = format!("csv/{dataset}.csv");
+    let file = csv_path(dataset);
     let mut problems = Vec::new();
     let rows = match rows_of(json_bytes) {
         Ok(rows) => rows,
         Err(e) => {
-            problems.push(problem(&format!("json/{dataset}.json"), DATASET_PARITY, e));
+            problems.push(problem(&json_path(dataset), DATASET_PARITY, e));
             return problems;
         }
     };
@@ -249,16 +250,16 @@ pub fn dataset_parity_problems(entries: &Entries) -> Vec<Problem> {
     let mut problems = Vec::new();
     for dataset in DATASETS {
         let (Some(csv), Some(json)) = (
-            entries.get(&format!("csv/{dataset}.csv")),
-            entries.get(&format!("json/{dataset}.json")),
+            entries.get(&csv_path(dataset)),
+            entries.get(&json_path(dataset)),
         ) else {
             continue;
         };
         problems.extend(compare_csv_to_json(dataset, csv, json));
     }
     if let (Some(findings), Some(all)) = (
-        entries.get("findings.json"),
-        entries.get("json/all-findings.json"),
+        entries.get(INSPECTION_JSON),
+        entries.get(ALL_FINDINGS_JSON),
     ) {
         match (serde_json::from_slice::<Value>(findings), rows_of(all)) {
             (Ok(doc), Ok(all_rows)) => {
@@ -274,16 +275,16 @@ pub fn dataset_parity_problems(entries: &Entries) -> Vec<Problem> {
                         .position(|(a, b)| a != b)
                         .unwrap_or_else(|| findings_rows.len().min(all_rows.len()));
                     problems.push(problem(
-                        "findings.json",
+                        INSPECTION_JSON,
                         &format!("findings[{at}]"),
-                        "findings.json disagrees with json/all-findings.json",
+                        concat!(camerata_api_types::pkg_inspection_json!(), " disagrees with ", camerata_api_types::pkg_all_findings_json!()),
                     ));
                 }
             }
             _ => problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 DATASET_PARITY,
-                "findings.json or json/all-findings.json does not parse",
+                concat!(camerata_api_types::pkg_inspection_json!(), " or ", camerata_api_types::pkg_all_findings_json!(), " does not parse"),
             )),
         }
     }
@@ -328,7 +329,7 @@ fn fix_label_problems(entries: &Entries) -> Vec<Problem> {
         }
     };
     if let Some(Ok(doc)) = entries
-        .get("findings.json")
+        .get(INSPECTION_JSON)
         .map(|b| serde_json::from_slice::<Value>(b))
     {
         let rows = doc
@@ -336,16 +337,16 @@ fn fix_label_problems(entries: &Entries) -> Vec<Problem> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        check("findings.json", rows, &|i| format!("findings[{i}]"));
+        check(INSPECTION_JSON, rows, &|i| format!("findings[{i}]"));
     }
-    for file in ["json/all-findings.json", "json/deviations.json"] {
+    for file in [ALL_FINDINGS_JSON, DEVIATIONS_JSON] {
         if let Some(Ok(rows)) = entries.get(file).map(|b| rows_of(b)) {
             // A deviations row carries its fix as `recommended_fix`; read it under the same name.
             // A deviations row without that key is not a group row, so it has no fix to label.
             let rows: Vec<Value> = rows
                 .into_iter()
                 .filter_map(|mut row| {
-                    if file == "json/deviations.json" {
+                    if file == DEVIATIONS_JSON {
                         let fix = row.get("recommended_fix").cloned()?;
                         row["fix"] = fix;
                     }
@@ -398,16 +399,16 @@ pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Pr
     let mut problems = Vec::new();
     for row in pdf.difference(&json) {
         problems.push(problem(
-            "findings.json",
+            INSPECTION_JSON,
             &describe(row),
-            "a row the PDF renders is missing from findings.json",
+            concat!("a row the PDF renders is missing from ", camerata_api_types::pkg_inspection_json!()),
         ));
     }
     for row in json.difference(&pdf) {
         problems.push(problem(
             "PDF data",
             &describe(row),
-            "a row in findings.json is missing from the PDF",
+            concat!("a row in ", camerata_api_types::pkg_inspection_json!(), " is missing from the PDF"),
         ));
     }
     problems
@@ -453,7 +454,7 @@ fn by_kind(tally: &Tally) -> BTreeMap<String, usize> {
 /// Every `(severity, kind)` cell where `got` differs from `want`, one problem each, named by the
 /// cell and both counts (never row text).
 fn tally_differences(file: &str, what: &str, want: &Tally, got: &Tally) -> Vec<Problem> {
-    tally_differences_against(file, what, "json/all-findings.json", want, got)
+    tally_differences_against(file, what, ALL_FINDINGS_JSON, want, got)
 }
 
 /// [`tally_differences`] against a reference other than `json/all-findings.json`, named in the
@@ -485,7 +486,7 @@ fn tally_differences_against(
 
 /// `json/all-findings.json` by `(severity, kind)`: the reference every other artifact is held to.
 fn json_tally(entries: &Entries) -> Option<Result<Tally, Problem>> {
-    let bytes = entries.get("json/all-findings.json")?;
+    let bytes = entries.get(ALL_FINDINGS_JSON)?;
     Some(
         rows_of(bytes)
             .map(|rows| {
@@ -497,7 +498,7 @@ fn json_tally(entries: &Entries) -> Option<Result<Tally, Problem>> {
                 }
                 tally
             })
-            .map_err(|e| problem("json/all-findings.json", COUNTS, e)),
+            .map_err(|e| problem(ALL_FINDINGS_JSON, COUNTS, e)),
     )
 }
 
@@ -507,7 +508,7 @@ fn json_tally(entries: &Entries) -> Option<Result<Tally, Problem>> {
 fn places_tally(entries: &Entries, kinds: &[&str]) -> Tally {
     let mut tally = Tally::new();
     let Some(rows) = entries
-        .get("json/all-findings.json")
+        .get(ALL_FINDINGS_JSON)
         .and_then(|bytes| rows_of(bytes).ok())
     else {
         return tally;
@@ -726,15 +727,15 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
         Some(Ok(tally)) => tally,
     };
     let mut problems = Vec::new();
-    if let Some(csv) = entries.get("csv/all-findings.csv") {
+    if let Some(csv) = entries.get(ALL_FINDINGS_CSV) {
         match csv_tally(csv) {
             Ok(tally) => problems.extend(tally_differences(
-                "csv/all-findings.csv",
+                ALL_FINDINGS_CSV,
                 "the CSV",
                 &json,
                 &tally,
             )),
-            Err(e) => problems.push(problem("csv/all-findings.csv", COUNTS, e)),
+            Err(e) => problems.push(problem(ALL_FINDINGS_CSV, COUNTS, e)),
         }
     }
     let Some(stem) = package_stem(entries) else {
@@ -784,7 +785,7 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
             problems.push(problem(
                 &xlsx_name,
                 &format!("sheet \"{sheet}\" rows, kind {kind}"),
-                format!("the sheet lists {listed} rows and json/all-findings.json has {want}"),
+                format!("the sheet lists {listed} rows and {ALL_FINDINGS_JSON} has {want}"),
             ));
         }
     }
@@ -804,7 +805,7 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
                     problems.push(problem(
                         &xlsx_name,
                         &format!("sheet \"Start here\" row count, sheet {sheet}"),
-                        format!("Start here counts {g} and json/all-findings.json has {w}"),
+                        format!("Start here counts {g} and {ALL_FINDINGS_JSON} has {w}"),
                     ));
                 }
             }
@@ -815,7 +816,7 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
                     problems.push(problem(
                         &xlsx_name,
                         &format!("sheet \"Start here\" scorecard totals, severity {severity}"),
-                        format!("Start here counts {g} and json/all-findings.json has {w}"),
+                        format!("Start here counts {g} and {ALL_FINDINGS_JSON} has {w}"),
                     ));
                 }
             }
@@ -860,7 +861,7 @@ const PATTERNS: &str = "patterns across services";
 pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
     let mut problems = patterns_clean_cell_problems(entries, report);
     let findings_json: Option<Value> = entries
-        .get("findings.json")
+        .get(INSPECTION_JSON)
         .and_then(|bytes| serde_json::from_slice(bytes).ok());
     if let Some(value) = &findings_json {
         // The backstop for the unfold: a place of another rule that a ruled-out row still carries
@@ -873,7 +874,7 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
             .enumerate()
         {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &format!("open_beside_ruled_out[{i}]"),
                 format!(
                     "{} line {} in {} is a place of {} that a ruled-out row still carries and \
@@ -889,30 +890,30 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
         let section = value.get("patterns_across_services");
         match (&report.patterns_across_services, section) {
             (Some(_), None) => problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 PATTERNS,
-                "the report has a patterns section and findings.json has no patterns_across_services key",
+                concat!("the report has a patterns section and ", camerata_api_types::pkg_inspection_json!(), " has no patterns_across_services key"),
             )),
             (None, Some(_)) => problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 PATTERNS,
-                "findings.json has a patterns_across_services key and the report has no such section",
+                concat!(camerata_api_types::pkg_inspection_json!(), " has a patterns_across_services key and the report has no such section"),
             )),
             (Some(want), Some(got)) => {
                 let rows = got.get("rows").and_then(Value::as_array).map_or(0, Vec::len);
                 if rows != want.rows.len() {
                     problems.push(problem(
-                        "findings.json",
+                        INSPECTION_JSON,
                         PATTERNS,
                         format!(
-                            "findings.json lists {rows} pattern rows and the PDF's data has {}",
+                            "{INSPECTION_JSON} lists {rows} pattern rows and the PDF's data has {}",
                             want.rows.len()
                         ),
                     ));
                 }
                 if got.to_string().contains("\"severity\"") {
                     problems.push(problem(
-                        "findings.json",
+                        INSPECTION_JSON,
                         PATTERNS,
                         "the patterns section carries a severity; it is an observation and has none",
                     ));
@@ -929,7 +930,7 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
         {
             if row.get("cells").is_some() || row.get("statement").is_some() {
                 problems.push(problem(
-                    "findings.json",
+                    INSPECTION_JSON,
                     &format!("findings[{i}]"),
                     "a pattern row is inside the findings array; it would be counted as a finding",
                 ));
@@ -1137,7 +1138,7 @@ fn clean_beside_open_problem(file: &str, section: &Value, open: &OpenProblems) -
 /// does not parse is left to the checks that read it first.
 pub fn patterns_clean_cell_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
     let Some(findings_json) = entries
-        .get("findings.json")
+        .get(INSPECTION_JSON)
         .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
     else {
         return Vec::new();
@@ -1151,7 +1152,7 @@ pub fn patterns_clean_cell_problems(entries: &Entries, report: &AuditReportJson)
     open.add_sites(findings_json.get("open_beside_ruled_out"));
     let mut problems = Vec::new();
     if let Some(section) = findings_json.get("patterns_across_services") {
-        problems.extend(clean_beside_open_problem("findings.json", section, &open));
+        problems.extend(clean_beside_open_problem(INSPECTION_JSON, section, &open));
     }
     if let Some(section) = report
         .patterns_across_services
@@ -1236,7 +1237,7 @@ pub fn pdf_count_reconciliation_problems(
             problems.push(problem(
                 "PDF data",
                 &format!("cover.stats.{severity}"),
-                format!("the PDF summary counts {printed} and json/all-findings.json has {w}"),
+                format!("the PDF summary counts {printed} and {ALL_FINDINGS_JSON} has {w}"),
             ));
         }
     }
@@ -1393,18 +1394,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// file that is absent; a member the manifest does not list. The package verifier a recipient
 /// would run.
 pub fn verify_manifest(entries: &Entries) -> Vec<Problem> {
-    let Some(manifest_bytes) = entries.get("manifest.json") else {
+    let Some(manifest_bytes) = entries.get(MANIFEST_JSON) else {
         return vec![problem(
-            "manifest.json",
+            MANIFEST_JSON,
             "manifest",
-            "the package has no manifest.json",
+            concat!("the package has no ", camerata_api_types::pkg_manifest_json!()),
         )];
     };
     let Ok(manifest) = serde_json::from_slice::<Value>(manifest_bytes) else {
         return vec![problem(
-            "manifest.json",
+            MANIFEST_JSON,
             "manifest",
-            "manifest.json does not parse",
+            concat!(camerata_api_types::pkg_manifest_json!(), " does not parse"),
         )];
     };
     let mut problems = Vec::new();
@@ -1428,7 +1429,7 @@ pub fn verify_manifest(entries: &Entries) -> Vec<Problem> {
         listed.insert(path);
     }
     for name in entries.keys() {
-        if name != "manifest.json" && !listed.contains(name) {
+        if name != MANIFEST_JSON && !listed.contains(name) {
             problems.push(problem(
                 name,
                 "manifest",
@@ -1584,12 +1585,12 @@ pub fn client_readme_problems(readme: &str) -> Vec<Problem> {
             });
         if let Some(opening) = opening {
             problems.push(problem(
-                "README.txt",
+                README_TXT,
                 &format!("line {}", i + 1),
                 format!(
                     "a client README carries no provenance line, and this one opens with \
                      \"{}\": the models, the corpus, the engine commit and the release checks \
-                     are in manifest.json",
+                     are in {MANIFEST_JSON}",
                     opening.trim_end()
                 ),
             ));
@@ -1610,9 +1611,9 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
     let mut problems = Vec::new();
     let mut mismatch = |what: &str| {
         problems.push(problem(
-            "README.txt",
+            README_TXT,
             what,
-            "the README's provenance line disagrees with manifest.json",
+            concat!("the README's provenance line disagrees with ", camerata_api_types::pkg_manifest_json!()),
         ));
     };
     let parsed = parse_readme_provenance(readme);
@@ -1758,9 +1759,9 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
             for text in rendered {
                 if !readme.contains(&text) {
                     problems.push(problem(
-                        "README.txt",
+                        README_TXT,
                         &format!("inspection.{key}"),
-                        "a value in manifest.json is not in the README",
+                        concat!("a value in ", camerata_api_types::pkg_manifest_json!(), " is not in the README"),
                     ));
                 }
             }
@@ -1784,7 +1785,7 @@ pub fn fix_archive_problems(entries: &Entries) -> Vec<Problem> {
     use crate::xlsx_export::vocabulary as v;
     let mut problems = Vec::new();
     let Some(findings) = entries
-        .get("findings.json")
+        .get(INSPECTION_JSON)
         .and_then(|b| serde_json::from_slice::<Value>(b).ok())
     else {
         return problems;
@@ -1818,7 +1819,7 @@ pub fn fix_archive_problems(entries: &Entries) -> Vec<Problem> {
             .unwrap_or_default();
         if members.is_empty() {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &format!("fixes, Fix {id}"),
                 "a Fix has no rule group",
             ));
@@ -1826,7 +1827,7 @@ pub fn fix_archive_problems(entries: &Entries) -> Vec<Problem> {
         for member in members.iter().filter_map(Value::as_str) {
             if !groups.is_empty() && !groups.contains(member) {
                 problems.push(problem(
-                    "findings.json",
+                    INSPECTION_JSON,
                     &format!("fixes, Fix {id}"),
                     format!("the Fix names the rule group {member}, which is not in the tree"),
                 ));
@@ -1847,13 +1848,13 @@ pub fn fix_archive_problems(entries: &Entries) -> Vec<Problem> {
         let fix_id = cell_text(row, "fix_id");
         if fix_id.is_empty() && !cell_text(row, "group").is_empty() {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &format!("findings[{i}]"),
                 "a row in a rule group has no Fix id",
             ));
         } else if !fix_id.is_empty() && !fix_ids.contains(&fix_id) {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &format!("findings[{i}]"),
                 format!("the row names the Fix {fix_id}, which is not in the fixes list"),
             ));
@@ -1905,7 +1906,7 @@ pub fn fix_archive_problems(entries: &Entries) -> Vec<Problem> {
                 problems.push(problem(
                     "(package)",
                     FIX_PARITY,
-                    format!("{what} names the Fix {id}, which is not in findings.json"),
+                    format!("{what} names the Fix {id}, which is not in {INSPECTION_JSON}"),
                 ));
             }
         }
@@ -1940,7 +1941,7 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
     use crate::xlsx_export::vocabulary as v;
     let mut problems = Vec::new();
     let Some(findings) = entries
-        .get("findings.json")
+        .get(INSPECTION_JSON)
         .and_then(|b| serde_json::from_slice::<Value>(b).ok())
     else {
         return problems;
@@ -1961,7 +1962,7 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
     let place_of = super::counts_check::place_key_of;
     // Rows the reviewer ruled out are no problem: they neither carry nor are carried.
     let ruled_out: BTreeSet<String> = entries
-        .get("json/false-positives.json")
+        .get(FALSE_POSITIVES_JSON)
         .and_then(|b| rows_of(b).ok())
         .unwrap_or_default()
         .iter()
@@ -1977,7 +1978,7 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
         let at = format!("findings[{i}]");
         if ruled_out.contains(&carrier_id) {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &at,
                 format!("the row is carried by {carrier_id}, a ruled-out row: a false positive carries nothing"),
             ));
@@ -1985,29 +1986,29 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
         }
         if ruled_out.contains(&cell_text(row, "site_id")) {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &at,
                 "a false positive is carried by another row",
             ));
         }
         let Some(carrier) = by_id.get(&carrier_id) else {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &at,
-                format!("the row is carried by {carrier_id}, which is not a row of findings.json"),
+                format!("the row is carried by {carrier_id}, which is not a row of {INSPECTION_JSON}"),
             ));
             continue;
         };
         if place_of(carrier) != place_of(row) {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &at,
                 format!("the row is carried by {carrier_id}, a row at another place"),
             ));
         }
         if !cell_text(carrier, "carried_by").is_empty() {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &at,
                 format!(
                     "the row is carried by {carrier_id}, which is itself carried by another row"
@@ -2022,7 +2023,7 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
                 .any(|listed_rule| listed_rule.trim() == rule);
         if !names_it {
             problems.push(problem(
-                "findings.json",
+                INSPECTION_JSON,
                 &at,
                 format!(
                     "the row's carrier {carrier_id} does not list the rule {rule} in also_matches"
@@ -2069,7 +2070,7 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
             "(workbook)",
             &format!("sheet \"{}\"", v::ALL_PROBLEMS),
             format!(
-                "the sheet has {} rows and findings.json has {} places with a problem",
+                "the sheet has {} rows and {INSPECTION_JSON} has {} places with a problem",
                 shown.len(),
                 places.len()
             ),
@@ -2162,7 +2163,7 @@ pub fn fix_report_problems(report: &AuditReportJson, findings: &FindingsExport) 
             "PDF data",
             "escalations",
             format!(
-                "the escalation list has {} entries and findings.json has {} escalated places",
+                "the escalation list has {} entries and {INSPECTION_JSON} has {} escalated places",
                 entries.len(),
                 slots.len()
             ),
