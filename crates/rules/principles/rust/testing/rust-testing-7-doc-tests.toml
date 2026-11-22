@@ -1,5 +1,5 @@
 id = "RUST-TESTING-7"
-version = 5
+version = 4
 title = "Public API items have doc-tests in their /// comments that serve as runnable usage examples"
 domain = "rust:testing"
 layer = "language"

@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-DISABLED-NOT-RESTORED-1"
-version = 5
+version = 4
 title = "Row Level Security explicitly disabled on a table must be restored, never left off by omission"
 domain = "supabase:rls"
 # General Postgres, not just Supabase: an explicit `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`
@@ -31,7 +31,7 @@ applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/mig
 min_severity = "critical"
 default = true
 verification = "grounded"
-qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1, but over its OWN general-SQL timeline (**/*.sql, not scoped to supabase/migrations|schemas) so it also covers non-Supabase Postgres layouts: once a table's per-statement protection history is known, this rule flags a table whose CURRENT replayed end-state has RLS explicitly disabled (a real `DISABLE ROW LEVEL SECURITY` statement, not merely a table that never had RLS touched at all, that is SUPABASE-RLS-ENABLED-1's concern) and where the disable was never correctly restored, either no matching re-enable exists anywhere in the history, or the next re-enable statement in that migration targeted a DIFFERENT table (a copy-paste typo). Fires independent of supabase/config.toml exposure scoping and independent of any co-located rule's own severity: an explicit disable nobody restored is a security-relevant authoring defect in its own right, not a PostgREST-reachability question. Conformance holds when every table that is ever explicitly disabled is, by the end of the replayed timeline, correctly re-enabled on the SAME table. Carries the same repo-vs-production honesty caveat as SUPABASE-RLS-ENABLED-1: the migration history is what the repository can show, and a dashboard-only change is invisible to it, so live state is confirmed against production rather than asserted from the repo."
+qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1, but over its OWN general-SQL timeline (**/*.sql, not scoped to supabase/migrations|schemas) so it also covers non-Supabase Postgres layouts: once a table's per-statement protection history is known, this rule flags a table whose CURRENT replayed end-state has RLS explicitly disabled (a real `DISABLE ROW LEVEL SECURITY` statement, not merely a table that never had RLS touched at all, which is SUPABASE-RLS-ENABLED-1's concern) and where the disable was never correctly restored: either no matching re-enable exists anywhere in the history, or the next re-enable statement in that migration targeted a DIFFERENT table (a copy-paste typo). Fires independent of supabase/config.toml exposure scoping and independent of any co-located rule's own severity: an explicit disable nobody restored is a security-relevant authoring defect in its own right, not a PostgREST-reachability question. Conformance holds when every table that is ever explicitly disabled is, by the end of the replayed timeline, correctly re-enabled on the SAME table. Carries the same repo-vs-production honesty caveat as SUPABASE-RLS-ENABLED-1: the migration history is what the repository can show, and a dashboard-only change is invisible to it, so live state is confirmed against production rather than asserted from the repo."
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/sql-altertable.html"
@@ -53,8 +53,7 @@ A table that simply never had RLS touched (SUPABASE-RLS-ENABLED-1's plain case) 
 oversight: nobody ever thought about access control for it. A table whose RLS was
 EXPLICITLY disabled and never restored reads differently: something (a backfill script, a
 hotfix, a debugging session, an incomplete migration) deliberately turned protection off, and
-the matching re-enable was either never written or landed on the wrong object entirely: a
-realistic copy-paste failure mode when a migration disables/re-enables several tables in one
+the matching re-enable was either never written or landed on the wrong object entirely, a realistic copy-paste failure mode when a migration disables/re-enables several tables in one
 file. Both shapes leave the table just as exposed, but the explicit-disable-not-restored case
 is a stronger, more actionable signal: it names a concrete authoring defect (a missing or
 mistargeted statement) rather than a general absence.
@@ -66,7 +65,7 @@ authoring mistake independent of whether the schema is currently PostgREST-expos
 configuration can itself change later, and the mistargeted-statement failure mode is a defect
 in the migration's own logic, not a reachability question). It must also fire independent of
 whatever severity SUPABASE-RLS-ENABLED-1/SUPABASE-RLS-POLICY-DISABLED-1 compute for the same
-table in the same scan: this is always SEVERITY_CRITICAL, because a deliberate-but-unrestored
+table in the same scan. This is always SEVERITY_CRITICAL, because a deliberate-but-unrestored
 disable is unambiguous regardless of the exposure gate's own conclusion.
 
 Detection requires the same end-state replay used by the other RLS rules (a table's protection
@@ -108,7 +107,7 @@ in `psql`) shows `<table>` as RLS-enabled, and that an anon-key or otherwise-unt
 against it is now rejected.
 """
 effort = "low"
-why = "An explicit disable that is never restored is a distinct, higher-signal authoring defect from a table that simply never had RLS considered: it names a concrete missing or mistargeted statement, which changes both the remediation (restore forward, don't rewrite history) and the report's credibility. Firing independent of exposure scoping and of co-located rules' severity keeps this rule's signal from being silently absorbed into a lower-severity or non-exposed-schema demotion that would misrepresent a deliberate-but-unrestored disable as a routine oversight."
+why = "An explicit disable that is never restored is a distinct, higher-signal authoring defect from a table that simply never had RLS considered. It names a concrete missing or mistargeted statement, which changes both the remediation (restore forward, don't rewrite history) and the report's credibility. Firing independent of exposure scoping and of co-located rules' severity keeps this rule's signal from being silently absorbed into a lower-severity or non-exposed-schema demotion that would misrepresent a deliberate-but-unrestored disable as a routine oversight."
 
 [[option]]
 id = "table-rls-disabled-and-never-restored"

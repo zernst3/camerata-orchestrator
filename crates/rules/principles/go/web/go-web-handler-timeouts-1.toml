@@ -20,7 +20,7 @@ title = "Go Code Review Comments: Contexts"
 [decision]
 question = "How should timeouts be enforced on individual HTTP handlers?"
 default = "per-route-timeout-explicit-context"
-why = "A handler without a timeout can hang indefinitely if a downstream service is slow or stuck, blocking the handler goroutine and exhausting the server's goroutine pool. Long enough hangs starve the server of capacity to handle new requests. A per-route or per-group timeout ensures handlers are bounded; operations that exceed the timeout are cancelled via the context. Long-running operations (bulk imports, report generation, image processing) do not fit in a typical request-response timeout; they should be enqueued as background jobs that run outside the request cycle. A handler that spawns a background job returns immediately; the job runs asynchronously and the client is notified when it completes."
+why = "A handler without a timeout can hang indefinitely if a downstream service is slow or stuck, blocking the handler goroutine and exhausting the server's goroutine pool. Long enough hangs starve the server of capacity to handle new requests. A per-route or per-group timeout ensures handlers are bounded; operations that exceed the timeout are canceled via the context. Long-running operations (bulk imports, report generation, image processing) do not fit in a typical request-response timeout; they should be enqueued as background jobs that run outside the request cycle. A handler that spawns a background job returns immediately; the job runs asynchronously and the client is notified when it completes."
 
 [[option]]
 id = "per-route-timeout-explicit-context"

@@ -1,5 +1,5 @@
 id = "SQL-MONEY-FLOAT-1"
-version = 5
+version = 4
 title = "Money and currency amounts are stored as numeric/decimal, never as a floating-point type"
 domain = "sql"
 layer = "universal"
@@ -68,7 +68,7 @@ Verify by summing a set of known decimal amounts in the new column type and conf
 expected value, including a case that would have exposed floating-point drift in the old type.
 """
 effort = "medium"
-why = "PostgreSQL's own documentation names numeric as the correct type for monetary amounts specifically because real/double precision are inexact by design: there is no legitimate case for a money column to use a type whose own documentation warns it may not even compare equal to itself after a round trip."
+why = "PostgreSQL's own documentation names numeric as the correct type for monetary amounts specifically because real/double precision are inexact by design. There is no legitimate case for a money column to use a type whose own documentation warns it may not even compare equal to itself after a round trip."
 
 [[option]]
 id = "use-floating-point-for-money-and-round-at-display-time"

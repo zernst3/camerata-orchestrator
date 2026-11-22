@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1"
-version = 4
+version = 3
 title = "A handler that signs or downloads a client-supplied object path must verify the caller is entitled to that specific object first"
 domain = "supabase:storage"
 layer = "platform"
@@ -35,7 +35,7 @@ id in the request (an IDOR, CWE-639's Authorization Bypass Through User-Controll
 then downloads someone else's file. This is especially easy to miss when the handler constructs its storage client
 with a service_role key (common for 'the backend fetches the file for the user' patterns): service_role bypasses
 RLS entirely, so there is no RLS-level backstop on that call at all, and the handler's own logic IS the complete
-access-control layer for that request: exactly the shape SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1 covers generically,
+access-control layer for that request. Exactly the shape SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1 covers generically,
 specialized here to the download/signed-URL call site specifically because it is the single highest-frequency
 instance of that general pattern in a Supabase app, and because the fix (a WHERE clause tying the object to its
 owner before signing) is concrete enough to state directly rather than leaving it to the generic rule's broader

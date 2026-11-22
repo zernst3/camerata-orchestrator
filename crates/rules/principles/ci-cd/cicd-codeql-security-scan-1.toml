@@ -1,5 +1,5 @@
 id = "CICD-CODEQL-SECURITY-SCAN-1"
-version = 3
+version = 2
 title = "Run the CodeQL security suite in CI (layer-3 only)"
 domain = "ci-cd"
 layer = "universal"
@@ -37,7 +37,7 @@ title = "CodeQL CLI license: free for analysis of public/open-source repos only"
 
 [decision]
 question = "How does the project run the CodeQL security suite in CI: on a public/open-source repository where CodeQL is free, or via paid GitHub Advanced Security for a private/closed-source repository?"
-why = "CodeQL is a mature semantic-analysis engine that builds a whole-program database and runs curated security queries over it. Camerata composes it as a deterministic check source and enforces its findings at the CI gate, rather than re-implementing whole-program analysis. The licensing is the decision: CodeQL is free ONLY on public/open-source repositories; running it on private code requires GitHub Advanced Security, which is paid per active committer. Either way the whole-program database build is heavy, so CodeQL is a CI / layer-3 capability only: it must never run at the local scan preview or in the agent loop. Picking the tier forces the project to own the licensing and the placement explicitly."
+why = "CodeQL is a mature semantic-analysis engine that builds a whole-program database and runs curated security queries over it. Camerata composes it as a deterministic check source and enforces its findings at the CI gate, rather than re-implementing whole-program analysis. The licensing is the decision: CodeQL is free ONLY on public/open-source repositories; running it on private code requires GitHub Advanced Security, which is paid per active committer. Either way the whole-program database build is heavy, so CodeQL is a CI / layer-3 capability only. It must never run at the local scan preview or in the agent loop. Picking the tier forces the project to own the licensing and the placement explicitly."
 
 [[option]]
 id = "codeql-public-free"

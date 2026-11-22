@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1"
-version = 7
+version = 6
 title = "A database function must not EXECUTE a dynamically-assembled query string built via non-quoting interpolation (|| concatenation or format()'s %s)"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built query
@@ -65,8 +65,8 @@ source files.
 
 `format()`'s own documentation draws the exact safe/unsafe line this rule enforces: `%L` quotes
 its argument as an SQL literal (escaping embedded quotes), `%I` quotes it as a double-quoted
-identifier: both are SAFE because they neutralize the value's ability to terminate the intended
-token. `%s` inserts the argument's string value with NO escaping at all: if the argument is
+identifier. Both are SAFE because they neutralize the value's ability to terminate the intended
+token. `%s` inserts the argument's string value with NO escaping at all. If the argument is
 attacker-controlled, `%s` provides zero protection, functionally identical to naive `||`
 concatenation. `EXECUTE '...' USING value` is Postgres's bound-parameter form for dynamic SQL,
 exactly analogous to a prepared statement's placeholder, and is unconditionally safe regardless
@@ -75,7 +75,7 @@ of what flows into it.
 Severity is driven by reachability: a function with this defect that is additionally GRANTed
 EXECUTE to `anon`/`public`/`authenticated` (Supabase/PostgREST's own anonymous-caller and
 Postgres's own everyone-pseudo-role) is directly reachable by an unauthenticated API request, so
-it is Critical rather than High: the technical defect is identical either way, but who can
+it is Critical rather than High. The technical defect is identical either way, but who can
 trigger it changes the urgency.
 """
 
@@ -84,7 +84,7 @@ id = "require-escaping-or-bound-dynamic-sql"
 label = "Dynamic SQL is assembled with format()'s %L/%I or a bound USING argument, never with || or %s"
 directive = """
 Every query string a database function builds and runs through `EXECUTE` is assembled through a
-channel that neutralises its inputs. `format()`'s `%L` quotes a value as an SQL literal and `%I`
+channel that neutralizes its inputs. `format()`'s `%L` quotes a value as an SQL literal and `%I`
 quotes it as an identifier; `EXECUTE '... $1 ...' USING value` binds the value the way a prepared
 statement's placeholder does. Any of those is safe regardless of what flows into it.
 
@@ -103,7 +103,7 @@ target quoting character (a single quote for %L/USING, a double quote or dot for
 changes which statement actually executes.
 """
 effort = "low"
-why = "Postgres's own format() function already ships the correct safe primitives (%L/%I) and EXECUTE already ships a bound-argument form (USING): the fix is substituting the escaping/bound form for the non-escaping one, not introducing new infrastructure."
+why = "Postgres's own format() function already ships the correct safe primitives (%L/%I) and EXECUTE already ships a bound-argument form (USING). The fix is substituting the escaping/bound form for the non-escaping one, not introducing new infrastructure."
 
 [[option]]
 id = "dynamic-sql-assembled-by-concatenation"

@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-SESSION-LIFETIME-1"
-version = 5
+version = 4
 title = "JWT expiry and refresh-token rotation are tuned deliberately for the project's risk profile, not left at whichever default was never revisited"
 domain = "supabase:auth"
 layer = "platform"
@@ -31,9 +31,9 @@ title = "CWE-613: Insufficient Session Expiration"
 question = "Is refresh-token rotation enabled, and is the JWT access-token lifetime a deliberate, reviewable choice rather than an unexplained departure from the default?"
 default = "rotate-refresh-tokens-and-bound-jwt-expiry"
 why = """
-Supabase ships sane defaults for both knobs (`jwt_expiry = 3600` (a one-hour access token) and
+Supabase ships sane defaults for both knobs: `jwt_expiry = 3600` (a one-hour access token) and
 `enable_refresh_token_rotation = true` (each refresh exchanges the old refresh token for a new one, with
-`refresh_token_reuse_interval` giving a short grace window for in-flight requests)) but both are project-level
+`refresh_token_reuse_interval` giving a short grace window for in-flight requests), but both are project-level
 settings a team can change, and both directions of change carry a real cost. Disabling refresh-token rotation means
 a single leaked or stolen refresh token remains valid to mint new access tokens INDEFINITELY, with no
 rotation-based detection or invalidation when the legitimate holder's own refresh request reuses it; this is
@@ -58,7 +58,7 @@ directive = """
 exchanges the old refresh token on every refresh, so a leaked one stops working as soon as the
 legitimate holder refreshes; with it off, nothing in the system ever expires that token and it mints
 new access tokens indefinitely. It is a security control with no functional downside, so there is no
-general-purpose reason to turn it off. `jwt_expiry` is a genuine risk-profile judgement (a
+general-purpose reason to turn it off. `jwt_expiry` is a genuine risk-profile judgment (a
 low-sensitivity consumer app and one handling financial or health data differ legitimately) so this
 project either keeps it near Supabase's 3600-second default or records, in a comment beside the
 setting, why a longer-lived access token is right here. A longer expiry widens the window in which a
@@ -73,7 +73,7 @@ refresh token that has already been exchanged once is rejected on reuse, and tha
 what you intended.
 """
 effort = "low"
-why = "Refresh-token rotation is a strictly beneficial, no-downside security control that Supabase enables by default: there is no legitimate reason to turn it off, so flagging it unconditionally is correct; the JWT-expiry side genuinely depends on risk profile, so it is scoped to needs_review rather than a hard assertion."
+why = "Refresh-token rotation is a strictly beneficial, no-downside security control that Supabase enables by default. There is no legitimate reason to turn it off, so flagging it unconditionally is correct; the JWT-expiry side genuinely depends on risk profile, so it is scoped to needs_review rather than a hard assertion."
 
 [[option]]
 id = "disable-rotation-or-extend-expiry-for-fewer-refreshes"

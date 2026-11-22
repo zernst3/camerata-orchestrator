@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-2"
-version = 5
+version = 4
 title = "Components are free functions returning Element; multi-prop components derive Props, Clone and PartialEq"
 domain = "rust:dioxus"
 layer = "framework"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How are Dioxus components and their props defined?"
 default = "components-are-free-functions-returning-element"
-why = "Functional components are the canonical shape the framework actively maintains, and the only shape its tooling produces good error messages for. The split between this rule's strong claims and its weak ones matters for how findings should be weighted: defining components as struct/trait objects, or passing props as untyped value bags, are genuine deviations: they block the component-attribute macro, kill compile-time prop checking, and defeat the reason to use a typed language for the UI. But the named-Props-struct-past-three-props line is a READABILITY and CONVENTION preference, not a correctness or performance one. Critically, the component-attribute macro AUTO-GENERATES the Props struct and its Clone + PartialEq derives from inline function arguments, so diffing works correctly whether the author writes a dedicated struct or declares props inline: there is no re-render-on-every-update penalty for choosing inline args. Treat a component that declares several props inline as a low-severity style note (the signature gets long), not a defect; reserve higher severity for the struct/trait-object and untyped-bag shapes that actually break tooling and type-checking."
+why = "Functional components are the canonical shape the framework actively maintains, and the only shape its tooling produces good error messages for. The split between this rule's strong claims and its weak ones matters for how findings should be weighted: defining components as struct/trait objects, or passing props as untyped value bags, are genuine deviations. They block the component-attribute macro, kill compile-time prop checking, and defeat the reason to use a typed language for the UI. But the named-Props-struct-past-three-props line is a READABILITY and CONVENTION preference, not a correctness or performance one. Critically, the component-attribute macro AUTO-GENERATES the Props struct and its Clone + PartialEq derives from inline function arguments, so diffing works correctly whether the author writes a dedicated struct or declares props inline. There is no re-render-on-every-update penalty for choosing inline args. Treat a component that declares several props inline as a low-severity style note (the signature gets long), not a defect; reserve higher severity for the struct/trait-object and untyped-bag shapes that actually break tooling and type-checking."
 
 [[option]]
 id = "components-are-free-functions-returning-element"
@@ -39,7 +39,7 @@ why = "Loses compile-time prop checking entirely: missing or wrongly typed props
 id = "every-component-declares-its-props-inline-as-fun"
 label = "Props declared inline as function arguments"
 directive = "every component declares its props inline as function arguments regardless of count, with no dedicated Props struct even when the component has three or more props"
-why = "Functionally equivalent: the component-attribute macro generates the same Props struct and derives behind the scenes. The only cost is a longer function signature past a few props, so this differs from the default on readability alone, not correctness."
+why = "Functionally equivalent. The component-attribute macro generates the same Props struct and derives behind the scenes. The only cost is a longer function signature past a few props, so this differs from the default on readability alone, not correctness."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/reference/components"

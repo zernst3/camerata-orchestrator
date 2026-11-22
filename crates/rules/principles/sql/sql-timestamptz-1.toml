@@ -1,5 +1,5 @@
 id = "SQL-TIMESTAMPTZ-1"
-version = 5
+version = 4
 title = "A column recording when an EVENT happened uses timestamp WITH time zone, never the bare, zone-less timestamp type"
 domain = "sql"
 layer = "universal"
@@ -41,7 +41,7 @@ The rule is scoped to EVENT-instant columns specifically, because there is a rea
 zone-less value: data that represents a local WALL-CLOCK time independent of any particular zone (a recurring daily
 reminder at '9:00am, whatever zone the user is in', a birth date with no time-of-day component that matters). Those
 cases are the exception, not the common shape a `created_at`/`occurred_at`/`expires_at` column represents, which is
-why an ambiguous column name is `needs_review` rather than an outright violation: the scan cannot always tell the
+why an ambiguous column name is `needs_review` rather than an outright violation. The scan cannot always tell the
 two apart from the name alone.
 """
 

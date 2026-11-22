@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1"
-version = 5
+version = 4
 title = "Mocks replace external system boundaries (network, DB, clock); own domain logic is tested through real implementations"
 domain = "javascript:testing"
 layer = "language"
@@ -7,7 +7,7 @@ enforcement = "structured"
 kind = "decision"
 inspectable = true
 default = true
-qualifies = "No ESLint rule enforces where mocks may or may not be placed. The jest/prefer-spy-on rule (eslint-plugin-jest) nudges toward spyOn over manual assignment, but it does not distinguish boundary mocks from domain mocks. Testing Library's guiding principle ('the more your tests resemble the way your software is used, the more confidence they can give you') operationalises as: mock only what you cannot control (external systems), not what you can control (your own code). Convention is enforced at PR review."
+qualifies = "No ESLint rule enforces where mocks may or may not be placed. The jest/prefer-spy-on rule (eslint-plugin-jest) nudges toward spyOn over manual assignment, but it does not distinguish boundary mocks from domain mocks. Testing Library's guiding principle ('the more your tests resemble the way your software is used, the more confidence they can give you') operationalizes as: mock only what you cannot control (external systems), not what you can control (your own code). Convention is enforced at PR review."
 verification = "grounded"
 
 [[sources]]
@@ -40,5 +40,5 @@ why = "Boundary mocks keep tests fast and infrastructure-free while leaving real
 [[option]]
 id = "mocks-used-liberally-for-any-dependency"
 label = "Mocks are used liberally to isolate the unit under test from any dependency"
-directive = "Every dependency of the unit under test is mocked regardless of whether it is an external boundary or own domain code, maximising isolation of the single function under test."
+directive = "Every dependency of the unit under test is mocked regardless of whether it is an external boundary or own domain code, maximizing isolation of the single function under test."
 why = "Mocking every dependency of the unit under test maximizes isolation and is the classic London-school TDD approach: each class is tested without its collaborators, and the test verifies that the unit calls its dependencies correctly. The trade-off is that such tests assert wiring rather than correctness, break on safe internal refactors without catching real bugs, and pass even when the mocked dependency's behavior is wrong; the suite grows in coverage numbers while producing less confidence that the integrated system works."

@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1"
-version = 7
+version = 6
 title = "A SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated must check caller identity/role/ownership before writing"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that performs a write
@@ -74,8 +74,7 @@ check: a session/JWT identity read (`auth.uid()`, `auth.jwt()`, `current_user`, 
 `request.jwt` claims read) compared against an owner/role column; a call to a role/ownership/
 permission-check function (`has_role(...)`, `is_owner(...)`, `check_permission(...)`); or a
 caller-supplied shared secret/signature compared against a stored or configured value (a webhook-
-style compensating control, where the secret itself, never visible to the UI, is what
-authorizes the call). A function gated by any of these is not the defect this rule targets.
+style compensating control, where the secret itself, never visible to the UI, is what authorizes the call). A function gated by any of these is not the defect this rule targets.
 """
 
 [[option]]
@@ -111,7 +110,7 @@ by confirming a direct RPC call from a caller who does not own/is not entitled t
 is rejected before any row is written.
 """
 effort = "medium"
-why = "Postgres already has the primitives this fix needs (auth.uid()/current_user/session_user, a role-check function, or REVOKE): the fix is adding one guard clause (or narrowing the grant), not introducing new infrastructure."
+why = "Postgres already has the primitives this fix needs (auth.uid()/current_user/session_user, a role-check function, or REVOKE). The fix is adding one guard clause (or narrowing the grant), not introducing new infrastructure."
 
 [[option]]
 id = "privileged-mutating-function-without-authz-check"

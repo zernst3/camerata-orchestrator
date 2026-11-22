@@ -59,32 +59,61 @@ async fn no_client_facing_rule_field_carries_an_em_dash() {
     );
 }
 
-/// The gate must be able to fail: a synthetic rule with a dash in each client-facing slot is
-/// flagged in every one of them, and a dash in an operator-facing slot is not.
+/// Every dash-like character a writer can use as a dash: U+2012 figure dash, U+2013 en dash,
+/// U+2014 em dash, U+2015 horizontal bar, U+2212 minus sign.
+const DASHES: [char; 5] = ['\u{2012}', '\u{2013}', EM_DASH, '\u{2015}', '\u{2212}'];
+
 /// Every `<rule id>: <field>` over EVERY client-reaching field (see
-/// `common::client_reaching_fields`) whose text carries an em dash (U+2014) or en dash (U+2013).
+/// `common::client_reaching_fields`) whose text carries any of [`DASHES`].
 fn dash_offenders_everywhere(corpus: &RuleSet) -> Vec<String> {
     client_reaching_fields(corpus)
         .into_iter()
-        .filter(|f| f.text.contains(EM_DASH) || f.text.contains('\u{2013}'))
+        .filter(|f| f.text.contains(DASHES))
         .map(|f| format!("{}: {}", f.rule_id, f.loc))
         .collect()
 }
 
 #[tokio::test]
-async fn no_client_reaching_rule_field_carries_an_em_or_en_dash() {
+async fn no_client_reaching_rule_field_carries_a_dash() {
     let (corpus, errors) = load_corpus_lenient(&corpus_path()).await;
     assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
     assert!(corpus.iter().count() > 100, "vacuity guard");
     let offenders = dash_offenders_everywhere(&corpus);
     assert!(
         offenders.is_empty(),
-        "text that can reach a client must carry no em or en dash ({} offenders):\n  {}",
+        "text that can reach a client must carry no em dash, en dash or look-alike ({} \
+         offenders):\n  {}",
         offenders.len(),
         offenders.join("\n  ")
     );
 }
 
+/// The wide gate must be able to fail: a dash planted in every field of the wide list is
+/// reported for each one (sources included), and the author-facing `relevance` is not.
+#[tokio::test]
+async fn the_wide_dash_gate_reports_a_dash_planted_in_every_client_reaching_field() {
+    for dash in DASHES {
+        let (_dir, corpus) = common::load_planted(&format!("a {dash} b")).await;
+        let offenders = dash_offenders_everywhere(&corpus);
+        for expected in common::PLANTED_LOCATIONS
+            .iter()
+            .chain(common::PLANTED_SOURCE_LOCATIONS)
+        {
+            assert!(
+                offenders.iter().any(|o| o.contains(expected)),
+                "the gate failed to flag `{expected}` for U+{:04X}: {offenders:#?}",
+                dash as u32
+            );
+        }
+        assert!(
+            !offenders.iter().any(|o| o.contains("relevance")),
+            "relevance is author-facing and must not be flagged: {offenders:#?}"
+        );
+    }
+}
+
+/// The gate must be able to fail: a synthetic rule with a dash in each client-facing slot is
+/// flagged in every one of them, and a dash in an operator-facing slot is not.
 #[tokio::test]
 async fn the_em_dash_gate_fires_on_every_client_facing_field_and_ignores_operator_fields() {
     let dash = EM_DASH;

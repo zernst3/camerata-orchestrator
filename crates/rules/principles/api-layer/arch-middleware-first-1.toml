@@ -1,5 +1,5 @@
 id = "ARCH-MIDDLEWARE-FIRST-1"
-version = 5
+version = 4
 title = "If a cross-cutting concern can be expressed as middleware, it must be"
 domain = "api-layer"
 layer = "universal"
@@ -13,12 +13,12 @@ verification = "policy"
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/"
 title = "ASP.NET Core: Middleware"
-relevance = "Authority note (author-facing): low authority: the pages establish the middleware mechanism itself, not a 'must extract every cross-cutting concern to middleware' mandate, which is this project's own policy"
+relevance = "Authority note (author-facing): low authority — the pages establish the middleware mechanism itself, not a 'must extract every cross-cutting concern to middleware' mandate, which is this project's own policy"
 
 [[sources]]
 url = "https://expressjs.com/en/5x/guide/using-middleware/"
 title = "Express.js: Using middleware"
-relevance = "Authority note (author-facing): low authority: same caveat: documents the mechanism, not the mandate"
+relevance = "Authority note (author-facing): low authority — same caveat: documents the mechanism, not the mandate"
 
 [decision]
 question = "Where are cross-cutting concerns such as auth, logging, and rate limiting implemented?"

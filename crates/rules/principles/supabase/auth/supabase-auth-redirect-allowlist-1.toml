@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1"
-version = 5
+version = 4
 title = "OAuth and magic-link redirect URLs are an exact-origin allowlist, never a bare or broad wildcard"
 domain = "supabase:auth"
 layer = "platform"
@@ -31,11 +31,11 @@ title = "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
 question = "Is every OAuth/magic-link redirect URL an exact, project-controlled origin, rather than a bare or broad wildcard that includes hosts the project does not control?"
 default = "scope-redirect-allowlist-to-exact-known-origins"
 why = """
-Supabase's auth redirect configuration supports wildcard matching in `additional_redirect_urls` as a convenience:
-most commonly to cover every preview-deploy subdomain a hosting provider mints per branch or PR. The convenience
+Supabase's auth redirect configuration supports wildcard matching in `additional_redirect_urls` as a convenience.
+Most commonly to cover every preview-deploy subdomain a hosting provider mints per branch or PR. The convenience
 has a real cost: the redirect URL in an OAuth or magic-link flow is where the session gets handed off after
 authentication completes, so a wildcard broad enough to match a host the project does not control turns the login
-flow into an open redirect (CWE-601) with unusually high stakes: an attacker who can stand up a page on a matching
+flow into an open redirect (CWE-601) with unusually high stakes. An attacker who can stand up a page on a matching
 host (any shared PaaS subdomain the wildcard covers, e.g. `*.vercel.app` when the attacker can register their own
 project there) can craft a login link that authenticates the victim normally and then redirects the resulting
 session straight to the attacker's page, which is session/token exfiltration, not merely a confusing bounce to the
@@ -69,7 +69,7 @@ domain. Verify by confirming an OAuth/magic-link flow started against a crafted 
 matched shared domain is now rejected by Supabase Auth rather than completing the handoff.
 """
 effort = "medium"
-why = "A redirect allowlist entry that matches hosts the project does not control converts a login-flow convenience into an attacker-reachable open redirect at the exact point a session token is handed off: the fix (scoping the wildcard to a domain the project owns) keeps the convenience for legitimate preview deploys while closing the hole for attacker-registrable ones."
+why = "A redirect allowlist entry that matches hosts the project does not control converts a login-flow convenience into an attacker-reachable open redirect at the exact point a session token is handed off. The fix (scoping the wildcard to a domain the project owns) keeps the convenience for legitimate preview deploys while closing the hole for attacker-registrable ones."
 
 [[option]]
 id = "wildcard-redirect-for-convenience-across-all-previews"

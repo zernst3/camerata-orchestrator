@@ -1,5 +1,5 @@
 id = "SEC-NO-RAW-SQL-CONCAT-1"
-version = 7
+version = 6
 title = "SQL queries are never built by string concatenation or format-string interpolation; use parameterized queries or a query builder"
 domain = "universal"
 layer = "universal"
@@ -33,8 +33,7 @@ query's GRAMMAR, not just its data. This is CWE-89 (SQL Injection): a query that
 "SELECT * FROM users WHERE id = " + user_input executes ATTACKER-CHOSEN SQL the moment the
 input contains SQL syntax rather than a plain id. Parameterized queries (bound placeholders:
 `$1`/`?`/named parameters) or a query builder that emits them keep every external value in the
-DATA channel, never the grammar channel, regardless of what characters it contains: the
-database driver, not string formatting, decides where the value's boundaries are.
+DATA channel, never the grammar channel, regardless of what characters it contains. The database driver, not string formatting, decides where the value's boundaries are.
 """
 
 [[option]]

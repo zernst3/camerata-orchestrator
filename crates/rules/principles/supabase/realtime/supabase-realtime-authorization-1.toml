@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-AUTHORIZATION-1"
-version = 4
+version = 3
 title = "Every private Realtime channel has an RLS policy on realtime.messages; public-access is an explicit, reviewed choice, never the silent default"
 domain = "supabase:realtime"
 layer = "platform"
@@ -75,7 +75,7 @@ ownership table). Verify by connecting to the channel as a user who should NOT h
 connection is rejected, not merely that the client UI happens not to display anything.
 """
 effort = "medium"
-why = "Realtime's authorization model lives entirely on a different table (realtime.messages) than the application data the channel is about, so securing the application's own RLS policies provides zero protection for the Realtime layer: both the client-side private flag and the matching policy have to be present, or the channel defaults to public with no check at all."
+why = "Realtime's authorization model lives entirely on a different table (realtime.messages) than the application data the channel is about, so securing the application's own RLS policies provides zero protection for the Realtime layer. Both the client-side private flag and the matching policy have to be present, or the channel defaults to public with no check at all."
 
 [[option]]
 id = "treat-application-table-rls-as-sufficient-for-realtime-channels"

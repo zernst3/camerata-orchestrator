@@ -1,5 +1,5 @@
 id = "CICD-PIN-THIRD-PARTY-ACTIONS-1"
-version = 5
+version = 4
 title = "Third-party CI actions are pinned to a full commit SHA, never a mutable tag or branch"
 domain = "ci-cd"
 layer = "universal"
@@ -47,11 +47,10 @@ This is not a hypothetical: supply-chain compromises of popular third-party GitH
 takeover re-pointing a widely-used tag to a credential-exfiltrating commit) have happened in production and run with
 whatever permissions and secrets the consuming workflow granted the action, which is often substantial (repository
 contents, package registry credentials, cloud deployment identities). Pinning to a full 40-character commit SHA
-closes this specific attack entirely: a SHA, unlike a tag, is a reference to one immutable commit's content: there
-is no re-pointing a SHA, so a consuming workflow that pins to one is unaffected by anything that happens to the
+closes this specific attack entirely: a SHA, unlike a tag, is a reference to one immutable commit's content. There is no re-pointing a SHA, so a consuming workflow that pins to one is unaffected by anything that happens to the
 action's tags or branches AFTER that SHA was chosen. The documented trade-off is losing automatic updates (a SHA pin
 does not follow new releases the way a tag does), which tools like Dependabot's GitHub Actions ecosystem support and
-Renovate are built specifically to manage: they open a PR bumping the pinned SHA (with the new version visible in
+Renovate are built specifically to manage. They open a PR bumping the pinned SHA (with the new version visible in
 the diff and the commit comment), restoring a reviewable update path without reintroducing the mutable-reference
 risk.
 """

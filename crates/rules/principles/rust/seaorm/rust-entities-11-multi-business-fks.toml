@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-11"
-version = 4
+version = 3
 title = "Two or more business FKs to the same parent: both belongs_to + role-named reverse has_many; one impl Related on the primary direction"
 domain = "rust:seaorm"
 layer = "library"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How are SeaORM relations declared when a child has two or more business foreign keys to the same parent?"
 default = "two-or-more-business-fks-to-the-same-parent-both"
-why = "Both directions get type-checked, self-documenting Rust-side traversal, and role-named variants make the relation self-documenting. Uses the macro's one-impl-per-pair limit constructively. Keeping only one belongs_to and storing the other role as a plain column loses SeaORM's relation-based traversal (find_related, relation-driven joins) for the second role, which is exactly the ergonomic benefit the rule exists to give to both business FKs equally: note this is a Rust-side navigation loss, not a database-enforcement loss: a plain Uuid column can and should still carry its own REFERENCES constraint at the DB layer regardless of whether an ORM relation is declared for it. Dropping the reverse has_many for one role works mechanically but business FKs are routinely traversed from both sides (a requester's open requests, a reviewer's pending reviews), so the missing direction becomes inline-join boilerplate at every reverse-traversal call site. Picking impl Related arbitrarily compiles fine but reads worse, because the principal semantic role makes the relation self-documenting and routing impl Related to the secondary role inverts that signal."
+why = "Both directions get type-checked, self-documenting Rust-side traversal, and role-named variants make the relation self-documenting. Uses the macro's one-impl-per-pair limit constructively. Keeping only one belongs_to and storing the other role as a plain column loses SeaORM's relation-based traversal (find_related, relation-driven joins) for the second role, which is exactly the ergonomic benefit the rule exists to give to both business FKs equally. Note this is a Rust-side navigation loss, not a database-enforcement loss: a plain Uuid column can and should still carry its own REFERENCES constraint at the DB layer regardless of whether an ORM relation is declared for it. Dropping the reverse has_many for one role works mechanically but business FKs are routinely traversed from both sides (a requester's open requests, a reviewer's pending reviews), so the missing direction becomes inline-join boilerplate at every reverse-traversal call site. Picking impl Related arbitrarily compiles fine but reads worse, because the principal semantic role makes the relation self-documenting and routing impl Related to the secondary role inverts that signal."
 
 [[option]]
 id = "two-or-more-business-fks-to-the-same-parent-both"
@@ -27,7 +27,7 @@ why = "Both directions get compile-time validation and self-document the roles."
 id = "the-entity-declares-one-of-the-business-fks-as-b"
 label = "One business FK as belongs_to, other as plain Uuid"
 directive = "the entity declares one of the business FKs as belongs_to and stores the other role as a plain Uuid column rather than as a foreign key with its own belongs_to and reverse has_many"
-why = "Loses SeaORM's relation-based traversal for the second role: the Uuid column has no belongs_to, so it can't be used with find_related or relation-driven joins, and reverse traversal from the parent for that role must be hand-built. Whether referential bugs for that role are actually caught depends on the DB-level REFERENCES constraint on the column, which is a separate concern from the ORM relation: the column should still carry that constraint even without a declared entity relation."
+why = "Loses SeaORM's relation-based traversal for the second role: the Uuid column has no belongs_to, so it can't be used with find_related or relation-driven joins, and reverse traversal from the parent for that role must be hand-built. Whether referential bugs for that role are actually caught depends on the DB-level REFERENCES constraint on the column, which is a separate concern from the ORM relation. The column should still carry that constraint even without a declared entity relation."
 
 [[option]]
 id = "the-entity-declares-both-business-fk-belongs-to"

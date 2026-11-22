@@ -1,5 +1,5 @@
 id = "SUPABASE-EXPOSURE-SCHEMAS-1"
-version = 5
+version = 4
 title = "Extra PostgREST-exposed schemas widen the API surface to tables that may never have been RLS-reviewed"
 domain = "supabase:exposure"
 layer = "platform"
@@ -16,7 +16,7 @@ applies_to = { paths = ["**/supabase/config.toml", "**/*.tf", "**/*.hcl"] }
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a config scan: the `[api] schemas = [...]` list in supabase/config.toml (default `[\"public\", \"storage\", \"graphql_public\"]`, per Supabase's own CLI config reference). Any schema named beyond the default set widens the tables reachable through PostgREST. This rule's parse result feeds every other supabase/rls/* and supabase/exposure/* rule's exposed-schema set: it is the source of truth for 'is this table/view/function API-reachable' rather than any rule hardcoding `public`. Conformance holds when the schemas list is either the default or every additional schema listed has been deliberately reviewed for RLS coverage on its tables."
+qualifies = "Enforced by a config scan: the `[api] schemas = [...]` list in supabase/config.toml (default `[\"public\", \"storage\", \"graphql_public\"]`, per Supabase's own CLI config reference). Any schema named beyond the default set widens the tables reachable through PostgREST. This rule's parse result feeds every other supabase/rls/* and supabase/exposure/* rule's exposed-schema set. It is the source of truth for 'is this table/view/function API-reachable' rather than any rule hardcoding `public`. Conformance holds when the schemas list is either the default or every additional schema listed has been deliberately reviewed for RLS coverage on its tables."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/api/using-custom-schemas"
@@ -33,7 +33,7 @@ why = """
 Supabase's CLI config reference documents `[api] schemas` directly as "Schemas to expose in your
 API. Tables, views and functions in this schema will get API endpoints," defaulting to
 `["public", "storage", "graphql_public"]`. Every schema added to that list gets a PostgREST
-endpoint for every table, view, and function inside it: the same access surface `public` has by
+endpoint for every table, view, and function inside it. The same access surface `public` has by
 default, extended to tables that the rest of the team (and this scan's other rules) may still
 implicitly assume are `public`-only. A team that adds a second schema for a new feature and never
 mentally re-applies "does everything in here have RLS" has silently widened its attack surface
@@ -42,7 +42,7 @@ without a corresponding review step.
 This rule has a load-bearing SECOND job beyond its own finding: its parse of `[api] schemas`
 supplies the exposed-schema SET that SUPABASE-RLS-ENABLED-1, SUPABASE-RLS-POLICY-DISABLED-1,
 SUPABASE-RLS-NO-POLICY-1, SUPABASE-RLS-VIEW-INVOKER-1, SUPABASE-AUTH-USERS-EXPOSED-1, and
-SUPABASE-EXPOSURE-MATVIEW-1 all consume: none of those rules should hardcode `public` as the only
+SUPABASE-EXPOSURE-MATVIEW-1 all consume. None of those rules should hardcode `public` as the only
 exposed schema; they should read this rule's parsed schema list instead, so a project with a
 custom-schemas setup gets correctly-scoped findings across the whole group rather than false
 negatives on tables in a second exposed schema.

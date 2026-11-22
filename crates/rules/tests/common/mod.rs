@@ -123,12 +123,18 @@ pub struct ReachingField<'a> {
 ///   ("Fix:" line), `finding_headline`, `finding_detail`, and `why` (the alternatives pass sends
 ///   every option's `why` to the model, and a `violates` option's `why` is interpolated into the
 ///   defect detail), plus the option's `escalation.condition`.
-/// - every `[[sources]].title` (citation block, Standard cited column).
+/// - every `[[sources]].title` (citation block, Standard cited column) and every
+///   `[[sources]].linter` (the enforcing tool and rule id, exported in the citations).
 /// - every stack exception `note` and `current_recommendation` (client-visible suppression and
 ///   staleness notes).
 ///
-/// Not included: `[[sources]].relevance` and `[[sources]].url` (never in the `Rule` type; author
-/// facing only).
+/// Not included: `[[sources]].relevance` (it IS in the `RuleSource` type, but nothing outside the
+/// rules crate reads it: it is author-facing provenance) and `[[sources]].url`.
+///
+/// `escalation.condition` stays in: `dev_implement_run.rs` builds the escalation reason from it
+/// and `routes/runs.rs` serves it to the run screen, so the operator reading a development run
+/// sees it. That is not a client package, but it is a consumer outside the rules crate, so the
+/// "drop it if nothing consumes it" test does not apply.
 pub fn client_reaching_fields(corpus: &RuleSet) -> Vec<ReachingField<'_>> {
     fn fld<'a>(
         rule_id: &'a str,
@@ -160,6 +166,9 @@ pub fn client_reaching_fields(corpus: &RuleSet) -> Vec<ReachingField<'_>> {
         for s in &rule.sources {
             let loc = format!("source `{}`", s.title.chars().take(40).collect::<String>());
             out.push(fld(rid, loc, &s.title, true));
+            if let Some(l) = s.linter.as_deref() {
+                out.push(fld(rid, format!("source linter `{l}`"), l, true));
+            }
         }
         for se in &rule.stack_exceptions {
             out.push(fld(
@@ -194,3 +203,90 @@ pub fn client_reaching_fields(corpus: &RuleSet) -> Vec<ReachingField<'_>> {
     }
     out
 }
+
+/// A synthetic rule with `plant` written into EVERY field of the wide list, for the gates'
+/// "can it fail" tests. The `relevance` line is planted too: it is not client-reaching, so a gate
+/// that reports it is wrong. Returns the TOML for `universal/synth-plant-1.toml`.
+#[allow(dead_code)]
+pub fn planted_rule_toml(plant: &str) -> String {
+    format!(
+        r#"id = "SYNTH-PLANT-1"
+title = "Title {plant}"
+enforcement = "prose"
+kind = "decision"
+inspectable = true
+default = true
+verification = "policy"
+qualifies = "Qualifies {plant}"
+superseded_since = "2020"
+current_recommendation = "Recommendation {plant}"
+
+[[sources]]
+url = "https://example.com/x"
+title = "Source {plant}"
+linter = "tool: rule {plant}"
+relevance = "Relevance {plant}"
+
+[[stack_exception]]
+framework = "Synth"
+path_glob = "**"
+note = "Exception {plant}"
+
+[decision]
+question = "Question {plant}"
+default = "the-correct-option"
+why = "Decision why {plant}"
+
+[[option]]
+id = "the-correct-option"
+label = "Label {plant}"
+directive = "Directive {plant}"
+remediation = "Remediation {plant}"
+finding_headline = "Headline {plant}"
+finding_detail = "Detail {plant}"
+why = "Option why {plant}"
+escalation = {{ condition = "Condition {plant}", severity = "soft-flag" }}
+"#
+    )
+}
+
+/// Write [`planted_rule_toml`] into a temp corpus and load it.
+#[allow(dead_code)]
+pub async fn load_planted(plant: &str) -> (tempfile::TempDir, RuleSet) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let universal = dir.path().join("universal");
+    std::fs::create_dir_all(&universal).expect("mkdir universal");
+    std::fs::write(
+        universal.join("synth-plant-1.toml"),
+        planted_rule_toml(plant),
+    )
+    .expect("write fixture");
+    let (set, errors) = camerata_rules::load_corpus_lenient(dir.path()).await;
+    assert!(errors.is_empty(), "planted fixture must load: {errors:?}");
+    (dir, set)
+}
+
+/// What every planted gate must report: one offender naming each of these locations.
+#[allow(dead_code)]
+pub const PLANTED_LOCATIONS: &[&str] = &[
+    "SYNTH-PLANT-1: title",
+    "SYNTH-PLANT-1: summary",
+    "SYNTH-PLANT-1: decision.question",
+    "SYNTH-PLANT-1: decision.why",
+    "SYNTH-PLANT-1: current_recommendation",
+    "SYNTH-PLANT-1: stack_exception Synth.note",
+    "SYNTH-PLANT-1: the-correct-option.label",
+    "SYNTH-PLANT-1: the-correct-option.directive",
+    "SYNTH-PLANT-1: the-correct-option.why",
+    "SYNTH-PLANT-1: the-correct-option.remediation",
+    "SYNTH-PLANT-1: the-correct-option.finding_headline",
+    "SYNTH-PLANT-1: the-correct-option.finding_detail",
+    "SYNTH-PLANT-1: the-correct-option.escalation.condition",
+];
+
+/// The source locations (external titles): the dash gate reports these, the spelling gate does not.
+#[allow(dead_code)]
+pub const PLANTED_SOURCE_LOCATIONS: &[&str] = &[
+    "SYNTH-PLANT-1: source `Source",
+    "SYNTH-PLANT-1: source linter",
+];

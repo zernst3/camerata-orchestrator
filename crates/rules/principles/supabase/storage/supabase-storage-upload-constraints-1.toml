@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1"
-version = 4
+version = 3
 title = "Every bucket that accepts user uploads declares a file-size limit and a content-type allowlist at the bucket level"
 domain = "supabase:storage"
 layer = "platform"
@@ -13,7 +13,7 @@ inspectable = true
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a scan over bucket-creation statements: `createBucket(name, { ... })` in application code and `insert into storage.buckets (...)` / `update storage.buckets set ...` in migrations, for the presence of both `fileSizeLimit`/`file_size_limit` and `allowedMimeTypes`/`allowed_mime_types`. Conformance holds when a bucket that application code uploads user-supplied content into declares both fields with a finite, non-default value; it fails when a write-accepting bucket is created with neither field set (both default to unlimited/unrestricted), or with only one of the two. A bucket that is read-only from the application's perspective (no upload call site writes to it) is out of scope for this rule."
+qualifies = "Enforced by a scan over bucket-creation statements (`createBucket(name, { ... })` in application code and `insert into storage.buckets (...)` / `update storage.buckets set ...` in migrations) for the presence of both `fileSizeLimit`/`file_size_limit` and `allowedMimeTypes`/`allowed_mime_types`. Conformance holds when a bucket that application code uploads user-supplied content into declares both fields with a finite, non-default value; it fails when a write-accepting bucket is created with neither field set (both default to unlimited/unrestricted), or with only one of the two. A bucket that is read-only from the application's perspective (no upload call site writes to it) is out of scope for this rule."
 
 [[sources]]
 url = "https://supabase.com/docs/reference/javascript/storage-createbucket"
@@ -32,19 +32,19 @@ question = "Does every bucket that accepts user uploads declare a file-size limi
 default = "declare-both-constraints-at-bucket-creation"
 why = """
 Supabase's `createBucket` API exposes `fileSizeLimit` and `allowedMimeTypes` as first-class bucket options, and
-`storage.buckets` carries the matching `file_size_limit` / `allowed_mime_types` columns: both default to unset
+`storage.buckets` carries the matching `file_size_limit` / `allowed_mime_types` columns. Both default to unset
 (unlimited size, any MIME type accepted) unless the bucket declares otherwise. An upload-accepting bucket with
 neither constraint lets any authenticated (or, with a public-write policy, any anonymous) caller push an
 arbitrarily large file or a file of any content type into storage: an attacker can fill the bucket with
 multi-gigabyte uploads to run up storage cost or exhaust quota, or upload an executable/HTML/SVG file disguised as
-an image that gets served back to other users from the same origin: the textbook CWE-434 shape (Unrestricted
+an image that gets served back to other users from the same origin. The textbook CWE-434 shape (Unrestricted
 Upload of File with Dangerous Type).
 
 The reason this belongs at the BUCKET level, not only in application-code validation before the upload call: a
 bucket-level constraint is enforced by the Storage API itself on every write to that bucket, regardless of which
 code path performs the upload. Application-only validation is bypassable the moment a second call site (a bulk
-import script, an admin tool, a future endpoint) writes to the same bucket without re-implementing the same check:
-the constraint has to be re-derived and re-applied at every call site instead of being a property of the bucket
+import script, an admin tool, a future endpoint) writes to the same bucket without re-implementing the same check.
+The constraint has to be re-derived and re-applied at every call site instead of being a property of the bucket
 itself.
 """
 

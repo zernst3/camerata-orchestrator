@@ -1,5 +1,5 @@
 id = "PYTHON-EXPLICIT-IMPORTS-1"
-version = 3
+version = 2
 title = "Imports are explicit and module boundaries are intentional"
 domain = "python"
 layer = "language"

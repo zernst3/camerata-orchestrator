@@ -1,5 +1,5 @@
 id = "SEC-NO-OPEN-REDIRECT-1"
-version = 3
+version = 2
 title = "A redirect target derived from user input is checked against an allowlist before the response is issued"
 domain = "universal"
 layer = "universal"

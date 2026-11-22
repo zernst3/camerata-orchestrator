@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-USER-METADATA-1"
-version = 7
+version = 6
 title = "An RLS policy predicate must never authorize against user_metadata / raw_user_meta_data"
 domain = "supabase:rls"
 layer = "platform"
@@ -41,11 +41,11 @@ why = """
 Supabase's own Row Level Security guide explicitly warns that relying on the `user_metadata` claim
 (and its underlying `raw_user_meta_data` column on auth.users) in an RLS policy "can create
 security issues" because that field is updatable by the authenticated user themselves via the
-standard update-user-metadata API: it is profile data, not a server-issued claim. A policy that
+standard update-user-metadata API. It is profile data, not a server-issued claim. A policy that
 reads `(auth.jwt() -> 'user_metadata' ->> 'is_admin')::boolean` or joins to
 `auth.users.raw_user_meta_data` for an authorization decision lets any authenticated user grant
 themselves that privilege with a single API call: this is CWE-269 (Improper Privilege Management)
-in its most literal form: the actor sets their own privilege level.
+in its most literal form. The actor sets their own privilege level.
 
 The match-set is a single token check inside a CREATE POLICY body: `user_metadata` or
 `raw_user_meta_data` appearing anywhere in USING/WITH CHECK. There is no legitimate use of either

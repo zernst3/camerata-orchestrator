@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-NO-POLICY-1"
-version = 5
+version = 4
 title = "A table with Row Level Security enabled but zero policies denies all anon/authenticated access"
 domain = "supabase:rls"
 layer = "platform"
@@ -22,7 +22,7 @@ max_severity = "medium"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: for a table whose replayed end-state has RLS enabled but has zero CREATE POLICY statements anywhere in its history, Postgres denies ALL access to anon/authenticated roles (RLS enabled with no policy is deny-by-default). Conformance holds when every RLS-enabled table has at least one policy; a zero-policy table is either a broken feature or a sign the application reads that table exclusively via the service_role key, which bypasses RLS entirely. Medium severity: this is an availability/architecture smell, not a direct exposure, so it is a lower severity than the missing-RLS and policy-disabled findings."
+qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: for a table whose replayed end-state has RLS enabled but has zero CREATE POLICY statements anywhere in its history, Postgres denies ALL access to anon/authenticated roles (RLS enabled with no policy is deny-by-default). Conformance holds when every RLS-enabled table has at least one policy; a zero-policy table is either a broken feature or a sign the application reads that table exclusively via the service_role key, which bypasses RLS entirely. Medium severity. This is an availability/architecture smell, not a direct exposure, so it is a lower severity than the missing-RLS and policy-disabled findings."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
@@ -43,7 +43,7 @@ SUPABASE-RLS-ENABLED-1 and SUPABASE-RLS-POLICY-DISABLED-1, this is NOT a direct 
 finding. It is one of two things: (a) a broken feature (the table is legitimately used by the
 anon/authenticated roles and something is silently failing), or (b) a sign the application only
 ever touches the table through a service_role-backed client, which bypasses RLS entirely and
-therefore makes the table's own policies moot. In case (b) the REAL risk lives in whichever code
+therefore makes the table's own policies moot, in which case the REAL risk lives in whichever code
 path constructs that service_role client (see SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1), not in this
 table's RLS configuration. The finding's value is diagnostic rather than a direct vulnerability, so
 it ships at medium severity and its remediation text should point the reader at both possibilities

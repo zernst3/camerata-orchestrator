@@ -1,5 +1,5 @@
 id = "CICD-DEPENDENCY-AUDIT-1"
-version = 4
+version = 3
 title = "Scan dependencies for known vulnerabilities (osv-scanner)"
 domain = "ci-cd"
 layer = "universal"
@@ -24,7 +24,7 @@ How the engine tracks this: once the team picks a cadence, register osv-scanner 
 id       = "CICD-DEPENDENCY-AUDIT-1"
 name     = "dependency vulnerability scan"
 tool     = "osv-scanner"
-version  = "<x.y.z>"          # EXACT pinned version: no ranges
+version  = "<x.y.z>"          # EXACT pinned version. No ranges
 install  = "curl -sSfL https://github.com/google/osv-scanner/releases/download/v<x.y.z>/osv-scanner_linux_amd64 -o osv-scanner && chmod +x osv-scanner && sudo mv osv-scanner /usr/local/bin/"
 command  = "osv-scanner -r ."
 severity = "high"
@@ -140,7 +140,7 @@ remediation = """
 Wire osv-scanner into both the in-loop development gate (set in_loop = true in the manifest) and CI, so every agent task and every CI run is scanned. Verify by confirming a vulnerable dependency is caught both during local/agent development and again in the CI run.
 """
 effort = "medium"
-why = "The every-pass option maximises coverage by running at both Layer 2 (in-loop dev gate) and Layer 3 (CI), because osv-scanner is lightweight enough to run locally. Best for teams with strict security requirements; accept the in-loop latency in exchange for the tightest possible gate."
+why = "The every-pass option maximizes coverage by running at both Layer 2 (in-loop dev gate) and Layer 3 (CI), because osv-scanner is lightweight enough to run locally. Best for teams with strict security requirements; accept the in-loop latency in exchange for the tightest possible gate."
 
 [[option]]
 id = "dep-audit-manual"

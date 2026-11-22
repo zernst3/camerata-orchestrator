@@ -1,5 +1,5 @@
 id = "ARCH-NO-PAN-STORAGE-1"
-version = 5
+version = 4
 title = "Full card numbers (PAN), CVV/CVC and raw magnetic-stripe/track data are never stored, logged or persisted by the application"
 domain = "api-layer"
 layer = "universal"
@@ -11,7 +11,7 @@ inspectable = true
 min_severity = "critical"
 default = true
 verification = "grounded"
-qualifies = "Deterministically checkable IN PRINCIPLE (a column/field/log-statement naming or shape scan: field names matching card_number/cc_number/pan/cvv/cvc/card_cvc/track_data/track1/track2, or a string value matching a card-number shape: 13-19 digits optionally separated by spaces/dashes, passing a Luhn check), but Camerata does not ship this detector. Per the corrected channel guidance, every selected rule reaches the semantic/grounding pass regardless of a shipped detector, so this rule's absence of a wired scanner does not leave it unenforced: it is still read and reasoned about by the governed agent and by a human reviewer. Conformance holds when no column, variable, log statement, or serialized payload in the codebase holds a full PAN, CVV/CVC, or raw track data outside of the payment provider's own hosted fields/tokenization flow; it fails when any such value is captured by application code rather than being tokenized by the provider before it ever reaches the server."
+qualifies = "Deterministically checkable IN PRINCIPLE (a column/field/log-statement naming or shape scan: field names matching card_number/cc_number/pan/cvv/cvc/card_cvc/track_data/track1/track2, or a string value matching a card-number shape: 13-19 digits optionally separated by spaces/dashes, passing a Luhn check), but Camerata does not ship this detector. Per the corrected channel guidance, every selected rule reaches the semantic/grounding pass regardless of a shipped detector, so this rule's absence of a wired scanner does not leave it unenforced. It is still read and reasoned about by the governed agent and by a human reviewer. Conformance holds when no column, variable, log statement, or serialized payload in the codebase holds a full PAN, CVV/CVC, or raw track data outside of the payment provider's own hosted fields/tokenization flow; it fails when any such value is captured by application code rather than being tokenized by the provider before it ever reaches the server."
 
 [[sources]]
 url = "https://www.pcisecuritystandards.org/document_library/"

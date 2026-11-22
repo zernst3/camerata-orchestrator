@@ -1,5 +1,5 @@
 id = "RUST-SEAORM-RAW-SQL-ESCAPE-1"
-version = 4
+version = 3
 title = "Raw-SQL queries are wrapped in a typed domain projection at the repository boundary"
 domain = "rust:seaorm"
 layer = "library"
@@ -24,7 +24,7 @@ inspectable = true
 # The ceiling is authored without touching this rule's `kind`, and is safe either way: as a
 # `decision` rule it already emits deviation rows, so the ceiling only BOUNDS rows that exist
 # today; were it ever reclassified as `defect` the ceiling becomes dead config rather than wrong
-# behavior.
+# behaviour.
 deviation_ceiling = "high"
 default = true
 verification = "grounded"

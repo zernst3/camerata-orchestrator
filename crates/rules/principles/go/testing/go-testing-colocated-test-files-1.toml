@@ -1,5 +1,5 @@
 id = "GO-TESTING-COLOCATED-TEST-FILES-1"
-version = 4
+version = 3
 title = "Unit test files are co-located with the source they test, named with the _test.go suffix"
 domain = "go:testing"
 layer = "testing"
@@ -29,7 +29,7 @@ relevance = "go test documentation: 'Files whose names begin with _ or . (includ
 [decision]
 question = "Where do unit test files live relative to the code they test?"
 default = "colocated"
-why = "Placing _test.go files in the same directory as the code they test is the universal Go convention enforced by the go tool itself. The _test.go suffix is not just a naming suggestion: it is the mechanism by which go build excludes test code from production binaries and by which go test finds tests. go test ./... does still discover and run tests placed in any valid directory structure (it is not broken by a separate tests/ tree); the real cost of moving tests out of the package directory is that an internal test file (package foo, same package as the code) can reach unexported identifiers directly, which is the mechanism Go relies on for testing internals without exposing them: a test moved to an external directory can only exercise the package through its exported API (an external package foo_test import), forcing either broader exports than the design calls for or duplicated coverage. Co-location also keeps tests close to the code they test, making them easy to find and maintain by convention."
+why = "Placing _test.go files in the same directory as the code they test is the universal Go convention enforced by the go tool itself. The _test.go suffix is not just a naming suggestion. It is the mechanism by which go build excludes test code from production binaries and by which go test finds tests. go test ./... does still discover and run tests placed in any valid directory structure (it is not broken by a separate tests/ tree); the real cost of moving tests out of the package directory is that an internal test file (package foo, same package as the code) can reach unexported identifiers directly, which is the mechanism Go relies on for testing internals without exposing them: a test moved to an external directory can only exercise the package through its exported API (an external package foo_test import), forcing either broader exports than the design calls for or duplicated coverage. Co-location also keeps tests close to the code they test, making them easy to find and maintain by convention."
 
 [[option]]
 id = "colocated"

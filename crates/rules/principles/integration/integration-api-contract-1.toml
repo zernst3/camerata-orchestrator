@@ -1,5 +1,5 @@
 id = "INTEGRATION-API-CONTRACT-1"
-version = 4
+version = 3
 title = "Consumer endpoint calls match a producer route and shape"
 domain = "integration"
 layer = "universal"

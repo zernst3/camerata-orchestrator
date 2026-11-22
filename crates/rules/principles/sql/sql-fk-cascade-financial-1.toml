@@ -1,5 +1,5 @@
 id = "SQL-FK-CASCADE-FINANCIAL-1"
-version = 5
+version = 4
 title = "A foreign key from a mutable user table into a financial, audit or historical record never cascades deletes onto that record"
 domain = "sql"
 layer = "universal"
@@ -27,7 +27,7 @@ title = "PostgreSQL: Foreign Keys: ON DELETE CASCADE deletes the referencing row
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
 title = "OWASP Logging Cheat Sheet"
-relevance = "Authority note (author-facing): low authority: supports the general principle that records needed for accountability must remain available for audit/incident review; the specific financial/audit-table carve-out from ordinary cascade behavior is this rule's own judgment, not something the cheat sheet itself prescribes"
+relevance = "Authority note (author-facing): low authority — supports the general principle that records needed for accountability must remain available for audit/incident review; the specific financial/audit-table carve-out from ordinary cascade behavior is this rule's own judgment, not something the cheat sheet itself prescribes"
 
 [decision]
 question = "Does a foreign key from a routine, user-mutable table into a financial, audit, or historical record use ON DELETE CASCADE, silently destroying that record when the ordinary-course row is deleted?"
@@ -40,7 +40,7 @@ happens to reference it) turns an everyday, routine deletion (a cleanup job purg
 their own cart) into an IRREVERSIBLE destruction of a financial or audit record that existed specifically to be the
 durable, after-the-fact evidence of what happened. Once a migration ships `ON DELETE CASCADE` in this direction,
 the loss happens silently, the moment the ordinary-course row is deleted by code that has no idea a financial
-record is wired to disappear with it: there is no error, no review, nothing in application logs pointing at the
+record is wired to disappear with it. There is no error, no review, nothing in application logs pointing at the
 financial table at all.
 
 The fix is almost always `ON DELETE RESTRICT` (block the delete until the financial/audit reference is dealt with

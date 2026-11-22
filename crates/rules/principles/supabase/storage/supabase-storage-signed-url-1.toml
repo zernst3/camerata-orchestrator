@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-SIGNED-URL-1"
-version = 4
+version = 3
 title = "Signed download URLs use the shortest expiry the use case allows and are never persisted into a readable column"
 domain = "supabase:storage"
 layer = "platform"
@@ -33,7 +33,7 @@ generous expiry mostly just extends how long a leaked or forwarded link keeps wo
 The second, independent failure mode is persistence: writing the generated `signedUrl` string into a database
 column (e.g. a `receipt_url` field, so the app doesn't have to re-sign on every page load) creates a SECOND, durable
 copy of that bearer credential. Once it is in a column, the URL's own expiry no longer bounds its real exposure
-window: the column is covered by whatever RLS policy and backup/export/replica pipeline the table is subject to,
+window. The column is covered by whatever RLS policy and backup/export/replica pipeline the table is subject to,
 none of which was designed with "this value stops being valid at time T" in mind. A short `expiresIn` chosen for
 the live-signing path does nothing to protect a cached copy that outlives it; conversely, a long `expiresIn` chosen
 specifically to make a cached copy "not expire too soon" compounds both problems in the same call site. The correct

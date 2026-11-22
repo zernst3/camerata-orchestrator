@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-MFA-PRIVILEGED-1"
-version = 3
+version = 2
 title = "Privileged roles and actions must require a verified MFA factor (aal2), not just a password-only session (aal1)"
 domain = "supabase:auth"
 layer = "platform"
@@ -27,9 +27,7 @@ question = "Do privileged roles/actions require a verified second factor (aal2) 
 default = "require-aal2-on-privileged-actions"
 why = """
 Supabase's MFA implementation issues an Authenticator Assurance Level claim in every session's JWT: `aal1` for a
-plain password (or OAuth) sign-in, `aal2` once the user has also verified an enrolled MFA factor. The claim is
-directly checkable (`auth.jwt()->>'aal'` inside an RLS policy, or `getAuthenticatorAssuranceLevel()` client/server
-side) which means requiring MFA for a sensitive action is a matter of adding one predicate, not building new
+plain password (or OAuth) sign-in, `aal2` once the user has also verified an enrolled MFA factor. The claim is directly checkable (`auth.jwt()->>'aal'` inside an RLS policy, or `getAuthenticatorAssuranceLevel()` client/server side), which means requiring MFA for a sensitive action is a matter of adding one predicate, not building new
 infrastructure. The gap this rule targets is a project that supports MFA enrollment (so the feature exists and some
 users have turned it on) but never actually requires `aal2` anywhere: every privileged action (granting roles,
 touching another user's financial data, anything an admin-only dashboard route performs) remains reachable by any
@@ -55,7 +53,7 @@ handlers) is gated on a verified second factor before it proceeds: `(select auth
 'aal2'` in the RLS policy, or the `getAuthenticatorAssuranceLevel()` equivalent in a server-side
 handler. A password-only session carries `aal1` and does not reach these actions, whether or not
 that user has ever enrolled an MFA factor. Which actions count as privileged is this project's
-judgement (own-content edits in a notes app do not need the bar a role grant does) but the bar,
+judgment (own-content edits in a notes app do not need the bar a role grant does) but the bar,
 once set, is enforced by an `aal` check and not by enrollment being available.
 """
 remediation = """

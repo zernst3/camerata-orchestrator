@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-PUBLIC-BUCKET-1"
-version = 4
+version = 3
 title = "A storage bucket created public bypasses auth/RLS for object retrieval; every public bucket is named and reviewed"
 domain = "supabase:storage"
 layer = "platform"
@@ -40,13 +40,13 @@ why = """
 Supabase's own bucket-fundamentals docs state it directly: "When a bucket is designated as
 'Public,' it effectively bypasses access controls for both retrieving and serving files within the
 bucket." That means every object in a public bucket is downloadable by anyone with (or able to
-guess) its URL: no signed URL, no auth header, no RLS policy evaluation happens on that read
+guess) its URL. No signed URL, no auth header, no RLS policy evaluation happens on that read
 path, regardless of what storage.objects policies exist (they still gate upload/delete/move, but
 not public reads). This is CWE-732 (Incorrect Permission Assignment for Critical Resource) when the
 bucket's contents are actually sensitive.
 
 The critical honesty point (per the design's public-bucket FP carve-out): public buckets are also
-a completely standard, intentional pattern: avatar images, public product photos, marketing
+a completely standard, intentional pattern. Avatar images, public product photos, marketing
 assets. A scanner that flags every public bucket as a vulnerability would be wrong most of the
 time in a typical app and would train the reader to ignore the report. The correct behavior is to
 NAME every public bucket and ASK, using signals available in the repo (the bucket's name,

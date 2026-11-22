@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-COMPOSITION-SCRIPT-SETUP-1"
-version = 4
+version = 3
 title = "Vue component logic style: Composition API with <script setup>, or the Options API"
 domain = "javascript:vue"
 layer = "framework"
@@ -42,4 +42,4 @@ directive = "Component logic is organized using the Options API: data(), compute
 remediation = """
 Rewrite the component's logic using the Options API (data(), computed, methods and lifecycle hooks like mounted/created), moving it off a script-setup Composition API block. Verify by confirming the component behaves the same after the rewrite and its state, derived values and handlers are organized into the corresponding option sections.
 """
-why = "Gives every component the same predictable, low-ceremony shape (state in data(), derived values in computed, behavior in methods) which many developers find easier to learn and read at a glance. The fit for simple components, teams already fluent in it, or codebases standardized on it; its trade-off is that a single feature's code is spread across the fixed sections, so it scales less gracefully than the Composition API for large components with heavily reused logic."
+why = "Gives every component the same predictable, low-ceremony shape (state in data(), derived values in computed, behavior in methods), which many developers find easier to learn and read at a glance. The fit for simple components, teams already fluent in it, or codebases standardized on it; its trade-off is that a single feature's code is spread across the fixed sections, so it scales less gracefully than the Composition API for large components with heavily reused logic."

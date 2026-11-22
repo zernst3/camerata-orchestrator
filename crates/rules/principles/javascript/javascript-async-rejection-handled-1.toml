@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ASYNC-REJECTION-HANDLED-1"
-version = 4
+version = 3
 title = "Async event handlers, effects and callbacks catch the failure of every awaited call and show or report it, so no rejection goes unhandled"
 domain = "javascript"
 layer = "language"
@@ -50,7 +50,7 @@ title = "MDN Web Docs: Window: unhandledrejection event"
 url = "https://typescript-eslint.io/rules/no-misused-promises"
 title = "typescript-eslint: no-misused-promises (checksVoidReturn: promise-returning functions passed where a void return is expected)"
 
-# Source note: The recognized weakness code for an exception that is never caught; the code this
+# Source note: The recognised weakness code for an exception that is never caught; the code this
 # rule carries in `cwe`.
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/248.html"

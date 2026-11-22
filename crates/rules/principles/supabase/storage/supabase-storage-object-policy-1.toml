@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-OBJECT-POLICY-1"
-version = 6
+version = 5
 title = "storage.objects policies must not grant unconditional or unscoped anon write/delete access"
 domain = "supabase:storage"
 layer = "platform"

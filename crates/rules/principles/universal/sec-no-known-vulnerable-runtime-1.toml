@@ -1,5 +1,5 @@
 id = "SEC-NO-KNOWN-VULNERABLE-RUNTIME-1"
-version = 3
+version = 2
 title = "The runtime version the code declares has no publicly known vulnerabilities"
 domain = "universal"
 layer = "universal"

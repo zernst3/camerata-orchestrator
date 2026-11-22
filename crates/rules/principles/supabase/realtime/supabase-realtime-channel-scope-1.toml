@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-CHANNEL-SCOPE-1"
-version = 4
+version = 3
 title = "A channel topic must not be a guessable/enumerable identifier or an unvalidated client-supplied string standing in for an authorization check"
 domain = "supabase:realtime"
 layer = "platform"
@@ -27,11 +27,11 @@ title = "CWE-639: Authorization Bypass Through User-Controlled Key: a sequential
 question = "Is every channel topic either server-issued or built from an unguessable identifier that a realtime.messages RLS policy actually authorizes, rather than a sequential id or a client-controllable string treated as if its secrecy were itself the access control?"
 default = "topics-are-unguessable-and-authorization-checked"
 why = """
-Supabase's own channel documentation describes topics as arbitrary strings the CLIENT chooses: there is no
+Supabase's own channel documentation describes topics as arbitrary strings the CLIENT chooses. There is no
 server-side issuance step by default, and for a channel left in public mode, the documentation gives no indication
 that anything beyond knowing the topic name is required to join it. Two distinct, related failure modes follow: a
 channel topic built from a sequential or otherwise predictable identifier (`room-42`, an incrementing order id) is
-directly ENUMERABLE: an attacker can iterate nearby values and join channels they were never given access to,
+directly ENUMERABLE. An attacker can iterate nearby values and join channels they were never given access to,
 exactly CWE-639's user-controlled-key shape, just applied to a pub/sub topic rather than a row id. The second,
 subtler failure mode is a developer treating topic-name secrecy itself as the access control ('nobody will guess
 this UUID, so I don't need a realtime.messages policy either'), which only holds until the UUID leaks through any
@@ -42,7 +42,7 @@ header, a support ticket screenshot), at which point there is still no authoriza
 The durable fix is layered, and mirrors SUPABASE-REALTIME-AUTHORIZATION-1 rather than substituting for it: an
 unguessable identifier (a UUID, ideally server-issued rather than client-constructed) makes the topic hard to
 stumble onto by brute force, AND a `private: true` channel with a matching realtime.messages policy makes knowing
-the topic name insufficient on its own: the connecting user still has to be authorized for that specific topic.
+the topic name insufficient on its own. The connecting user still has to be authorized for that specific topic.
 Either alone is incomplete: an unguessable topic with no RLS policy is security-through-obscurity; an authorized but
 sequentially-numbered topic is still trivially enumerable by anyone who IS authorized for their own topic and tries
 adjacent numbers.

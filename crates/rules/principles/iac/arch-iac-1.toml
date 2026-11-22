@@ -1,5 +1,5 @@
 id = "ARCH-IAC-1"
-version = 5
+version = 4
 title = "Infrastructure as code, per-environment isolation"
 domain = "iac"
 layer = "universal"

@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-13"
-version = 4
+version = 3
 title = "Forms display errors from the domain newtype constructors; the UI never re-implements validation rules"
 domain = "rust:dioxus"
 layer = "framework"

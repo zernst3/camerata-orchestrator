@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-PAYLOAD-EXPOSURE-1"
-version = 4
+version = 3
 title = "A Postgres Changes or Broadcast payload must not fan out sensitive columns to every channel subscriber by default"
 domain = "supabase:realtime"
 layer = "platform"
@@ -32,7 +32,7 @@ see SOME of its columns (a shared document's title and status, say) but not othe
 billing field, an internal note), the default behavior sends every column to every subscriber of that change
 stream regardless of which columns the feature actually needed to update in real time. This is CWE-200 (Exposure
 of Sensitive Information to an Unauthorized Actor) delivered through a mechanism that is easy to overlook
-specifically because it is not a query or an API response a security review would normally scrutinize: it is a
+specifically because it is not a query or an API response a security review would normally scrutinize. It is a
 side effect of subscribing to table changes for an entirely different, narrower purpose (e.g. 'notify the UI when
 the document's status field changes') that happens to carry every other column along for the ride.
 

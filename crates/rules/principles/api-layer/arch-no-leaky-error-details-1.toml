@@ -1,5 +1,5 @@
 id = "ARCH-NO-LEAKY-ERROR-DETAILS-1"
-version = 5
+version = 4
 title = "Error responses never surface raw database error text, exception stack traces or internal file paths, regardless of the envelope shape"
 domain = "api-layer"
 layer = "universal"
@@ -22,8 +22,8 @@ title = "OWASP Error Handling Cheat Sheet"
 question = "Does an error response's CONTENT ever include a raw caught exception's message, a database driver's error text/hint, a stack trace, or an internal file path, or is response content always drawn from a controlled set of client-safe messages regardless of what the underlying exception says?"
 default = "sanitize-error-content-regardless-of-envelope-shape"
 why = """
-ARCH-STRUCTURED-ERRORS-1 governs the SHAPE every error response takes (a stable code, a message, optional details):
-it says nothing about what text is allowed to populate those fields. A handler can faithfully implement the
+ARCH-STRUCTURED-ERRORS-1 governs the SHAPE every error response takes (a stable code, a message, optional details).
+It says nothing about what text is allowed to populate those fields. A handler can faithfully implement the
 structured envelope and still put the raw caught exception's `.message` into the envelope's own message field,
 which is the far more common way this defect actually ships: a generic catch-all error handler that does
 `res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } })` looks correct by every check
@@ -38,7 +38,7 @@ Gating this behind an environment check (`if (process.env.NODE_ENV !== 'producti
 not a sufficient one: the check can be misconfigured, the variable can be unset in a staging environment mistakenly
 treated as safe, and a code path reached before the check runs (an error during startup, a middleware ordering bug)
 can still leak. The robust fix is that the response-content code path never has ACCESS to the raw exception's
-user-facing text at all: it maps the exception's TYPE to a pre-written, reviewed, client-safe message, and routes
+user-facing text at all. It maps the exception's TYPE to a pre-written, reviewed, client-safe message, and routes
 the exception's full raw detail only to server-side logging or an APM tool, where a developer can see it without it
 ever having been a candidate for the HTTP response body.
 """

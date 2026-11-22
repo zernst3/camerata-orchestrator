@@ -1,5 +1,5 @@
 id = "PROCESS-CONVENTIONAL-COMMIT-1"
-version = 3
+version = 2
 title = "Commit subjects follow the conventional-commits shape"
 domain = "process"
 layer = "universal"
@@ -22,7 +22,7 @@ verification = "grounded"
 # diff, so the typical SSOT layer-2+4 pattern does not apply. The specific
 # parameters (allowed conventional-commit types) are configured in project
 # Settings (process_rule_config), not in this rule's options.
-qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a commitlint config in CI), and in Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced at layer 2: these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (allowed conventional-commit types) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when the commit subject (first line) parses as a conventional-commit header `<type>(optional-scope)!: subject` whose type is one of the configured allowed types; it fails when the subject is free-form. Because the gate reads metadata Camerata itself authors at commit time, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to commits made outside Camerata."
+qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a commitlint config in CI), and in Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced at layer 2. These validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (allowed conventional-commit types) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when the commit subject (first line) parses as a conventional-commit header `<type>(optional-scope)!: subject` whose type is one of the configured allowed types; it fails when the subject is free-form. Because the gate reads metadata Camerata itself authors at commit time, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to commits made outside Camerata."
 
 [[sources]]
 url = "https://www.conventionalcommits.org/"
@@ -36,7 +36,7 @@ linter = "commitlint"
 
 [decision]
 question = "Does the project require commit subjects to follow the conventional-commits shape (<type>(scope)!: subject), enforced over VCS metadata at the commit/PR gate and in CI?"
-why = "A conventional-commit subject makes the commit history machine-parseable: changelog generation, semver bumping, and release tooling all key off the type prefix. Because this is a contract over the commit SUBJECT (metadata authored at commit time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff: it is enforced at layer 4 (CI, via a commitlint-style check) and at Camerata's own VCS-action gate when Camerata authors the commit. The allowed type list is project-specific and lives in project Settings (process_rule_config), not in this rule, so a team can widen or narrow it without re-authoring the rule. Opting out keeps commit subjects free-form, which keeps the history human-readable but forfeits the machine-parseable release tooling that the convention enables."
+why = "A conventional-commit subject makes the commit history machine-parseable: changelog generation, semver bumping, and release tooling all key off the type prefix. Because this is a contract over the commit SUBJECT (metadata authored at commit time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff. It is enforced at layer 4 (CI, via a commitlint-style check) and at Camerata's own VCS-action gate when Camerata authors the commit. The allowed type list is project-specific and lives in project Settings (process_rule_config), not in this rule, so a team can widen or narrow it without re-authoring the rule. Opting out keeps commit subjects free-form, which keeps the history human-readable but forfeits the machine-parseable release tooling that the convention enables."
 
 [[option]]
 id = "enforce-conventional-commit-subject"

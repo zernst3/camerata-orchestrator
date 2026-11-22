@@ -1,5 +1,5 @@
 id = "GO-TESTING-DETERMINISTIC-NO-TIME-SLEEP-1"
-version = 4
+version = 3
 title = "Tests are deterministic: no time.Sleep, no real clocks, no random seeds; use t.TempDir and t.Setenv for isolation"
 domain = "go:testing"
 layer = "testing"
@@ -35,7 +35,7 @@ relevance = "golangci-lint tparallel detects inappropriate usage of t.Parallel()
 [decision]
 question = "How do tests avoid flakiness from time, randomness, environment, and filesystem side effects?"
 default = "deterministic-with-testing-helpers"
-why = "time.Sleep is the most common source of flaky tests: the sleep duration is a guess, and a guess that passes locally fails under CI load. The correct approach is to either inject a clock interface that the test controls directly, or to use channel synchronisation. Environment variables mutated without restoration affect other tests running in the same process. Filesystem writes without cleanup accumulate across test runs. The testing package provides t.TempDir, t.Setenv, and t.Cleanup precisely to handle these cases deterministically: they scope the side effect to one test and tear it down automatically."
+why = "time.Sleep is the most common source of flaky tests: the sleep duration is a guess, and a guess that passes locally fails under CI load. The correct approach is to either inject a clock interface that the test controls directly, or to use channel synchronization. Environment variables mutated without restoration affect other tests running in the same process. Filesystem writes without cleanup accumulate across test runs. The testing package provides t.TempDir, t.Setenv, and t.Cleanup precisely to handle these cases deterministically: they scope the side effect to one test and tear it down automatically."
 
 [[option]]
 id = "deterministic-with-testing-helpers"

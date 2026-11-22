@@ -1,5 +1,5 @@
 id = "ORCH-PREREVIEW-1"
-version = 4
+version = 3
 title = "Every change carries an AI reviewer's verdict into the human review queue"
 domain = "agentic"
 layer = "universal"
@@ -22,7 +22,7 @@ title = "Decision: Cross-agent rules: the integration gate (pipeline: execute â†
 [[sources]]
 url = "https://research.google/pubs/modern-code-review-a-case-study-at-google/"
 title = "Sadowski et al.: Modern Code Review: A Case Study at Google"
-relevance = "Authority note (author-facing): low: supports pre-merge review generally, not an AI-reviewer-specific mandate"
+relevance = "Authority note (author-facing): low â€” supports pre-merge review generally, not an AI-reviewer-specific mandate"
 
 [decision]
 question = "How should AI-authored changes flow toward the human review gate?"

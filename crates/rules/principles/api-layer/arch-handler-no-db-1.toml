@@ -1,5 +1,5 @@
 id = "ARCH-HANDLER-NO-DB-1"
-version = 4
+version = 3
 title = "Handlers never touch the database directly"
 domain = "api-layer"
 layer = "universal"
@@ -7,7 +7,7 @@ enforcement = "architectural"
 kind = "defect"
 inspectable = true
 default = true
-qualifies = "Architectural check (AST tier): a static-analysis pass parses each handler/controller function and rejects any direct database-handle method call (a `db`/`pool`/`conn`/`tx` receiver calling `.query`/`.execute`/etc.) inside its body. No regex can express this: the same `db.query(...)` token is correct in a repository function and a violation in a handler, and only the parse tree knows which scope it sits in. No LLM is needed: the answer is a hard yes/no over the AST. Conformance holds when the AST check runs in CI and a handler that calls a DB handle directly fails the build; it fails when no parse-based boundary exists and a handler can issue a query with nothing flagging it. Camerata ships a proof checker for this rule in `camerata-checks::architectural::handler_no_direct_db`."
+qualifies = "Architectural check (AST tier): a static-analysis pass parses each handler/controller function and rejects any direct database-handle method call (a `db`/`pool`/`conn`/`tx` receiver calling `.query`/`.execute`/etc.) inside its body. No regex can express this. The same `db.query(...)` token is correct in a repository function and a violation in a handler, and only the parse tree knows which scope it sits in. No LLM is needed: the answer is a hard yes/no over the AST. Conformance holds when the AST check runs in CI and a handler that calls a DB handle directly fails the build; it fails when no parse-based boundary exists and a handler can issue a query with nothing flagging it. Camerata ships a proof checker for this rule in `camerata-checks::architectural::handler_no_direct_db`."
 verification = "grounded"
 
 [[sources]]

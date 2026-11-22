@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-SEARCH-PATH-1"
-version = 6
+version = 5
 title = "A SECURITY DEFINER function must set search_path explicitly to prevent search-path hijacking"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a SECURITY DEFINER function without a pinned search_path is
@@ -51,7 +51,7 @@ PostgreSQL's own documentation is explicit and unambiguous on this exact attack:
 search_path should be set to exclude any schemas writable by untrusted users. This prevents
 malicious users from creating objects (e.g., tables, functions, and operators) that mask objects
 intended to be used by the function." A SECURITY DEFINER function executes with the PRIVILEGES OF
-ITS CREATOR regardless of who calls it: if that function resolves an unqualified table or function
+ITS CREATOR regardless of who calls it. If that function resolves an unqualified table or function
 name via the caller's mutable search_path (which by default can include a schema the caller
 controls, including pg_temp), an attacker can create an object with a colliding name that gets
 resolved and executed with the definer's elevated privileges instead of the intended one. This is
@@ -60,7 +60,7 @@ database-advisors page).
 
 The match-set is deterministic once a CREATE FUNCTION statement is parsed as a whole: does the
 statement carry SECURITY DEFINER, and does it also carry a SET search_path clause? Both facts live
-in the same statement, so no cross-file replay is needed: this differs from the RLS-state rules,
+in the same statement, so no cross-file replay is needed. This differs from the RLS-state rules,
 which need timeline replay because their state is established ACROSS files. The remaining
 implementation gap is a statement-granular SQL parser capable of reliably isolating a full
 CREATE FUNCTION body (including its dollar-quoted function definition) rather than a naive
@@ -79,7 +79,7 @@ id = "require-search-path-on-definer-functions"
 label = "SECURITY DEFINER functions pin search_path, and SECURITY INVOKER is used wherever elevation is unnecessary"
 directive = """
 Functions default to SECURITY INVOKER, and that default is kept unless the function genuinely needs
-to act with privileges its caller does not have. Minimising DEFINER is the first control, not an
+to act with privileges its caller does not have. Minimizing DEFINER is the first control, not an
 alternative to the second one.
 
 Where DEFINER is genuinely required, the function pins its name resolution:

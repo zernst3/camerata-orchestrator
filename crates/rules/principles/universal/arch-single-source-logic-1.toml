@@ -1,5 +1,5 @@
 id = "ARCH-SINGLE-SOURCE-LOGIC-1"
-version = 6
+version = 5
 title = "An application decision such as a price, a fee, a status or a permission check is implemented in one function that every place needing it calls, never written out again in a second file"
 domain = "universal"
 layer = "universal"

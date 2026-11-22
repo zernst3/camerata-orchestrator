@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-ENABLED-1"
-version = 6
+version = 5
 title = "Every table in an API-exposed schema has Row Level Security enabled in its replayed end-state"
 domain = "supabase:rls"
 layer = "platform"
@@ -35,7 +35,7 @@ why = """
 A Supabase table in an exposed schema (public by default) is reachable through PostgREST using
 the project's anon key, which ships inside the frontend bundle by design. Without RLS enabled,
 that public key is sufficient to read and write every row: RLS is the ONLY access-control layer
-between an anonymous internet request and the table's data: there is no separate application
+between an anonymous internet request and the table's data. There is no separate application
 firewall in front of PostgREST. This is exactly Splinter's rls_disabled_in_public lint (0013,
 confirmed against the live database-advisors page) and is the load-bearing check of the entire
 Supabase rule group.

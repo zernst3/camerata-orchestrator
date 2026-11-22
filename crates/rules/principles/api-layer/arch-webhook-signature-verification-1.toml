@@ -1,5 +1,5 @@
 id = "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1"
-version = 5
+version = 4
 title = "A payment-provider webhook handler verifies the provider's signature on the raw request body before trusting the event"
 domain = "api-layer"
 layer = "universal"
@@ -35,7 +35,7 @@ active, or triggering a refund-driven state change, all without a cent moving. P
 delivery (Stripe signs with HMAC-SHA256 over the raw body plus a timestamp, carried in a `Stripe-Signature` header;
 other providers follow the same shape with their own header/secret) specifically so the receiver can verify the
 event genuinely originated from the provider's systems and was not replayed or forged. Verification requires the
-RAW, unparsed request body: most frameworks' default body-parsing middleware (JSON parse-then-stringify) does not
+RAW, unparsed request body. Most frameworks' default body-parsing middleware (JSON parse-then-stringify) does not
 reproduce the exact byte sequence the signature was computed over, which is why this is a common integration bug
 even on teams that intend to verify: the raw-body requirement has to be wired explicitly for the webhook route, and
 a handler that reads `req.body` already parsed by generic middleware cannot verify correctly even if it tries. The

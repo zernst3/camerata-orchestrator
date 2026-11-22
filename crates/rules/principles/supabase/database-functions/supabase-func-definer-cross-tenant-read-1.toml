@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1"
-version = 7
+version = 6
 title = "A SECURITY DEFINER function that returns rows filtered only by its own caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, must check that id against the caller's identity"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that reads data
@@ -62,7 +62,7 @@ parameter) to select a resource, without verifying the caller is entitled to tha
 Because the function runs as SECURITY DEFINER, the RLS policies that would otherwise constrain
 which rows a direct table query could return never run. The function's own body is the only
 place such a check can happen, and if it's absent, any caller who can invoke the function at all
-(granted via `anon`, `public`, or `authenticated`, which are Supabase/PostgREST's own broad roles) can
+(granted via `anon`, `public`, or `authenticated`: Supabase/PostgREST's own broad roles) can
 substitute ANY id and read another tenant's, owner's, or user's rows.
 
 This is functionally identical to the IDOR (Insecure Direct Object Reference) class of defect in
@@ -72,7 +72,7 @@ button for another tenant's data is never a substitute: the PostgREST RPC endpoi
 function directly regardless of what any UI does or does not show.
 
 The same three authorization-predicate shapes the WRITE-shape sibling rule accepts are accepted
-here for the identical reason: they are genuine server-side checks that make the caller-supplied
+here for the identical reason. They are genuine server-side checks that make the caller-supplied
 id's relationship to the caller provable before data is returned: a session/JWT identity read
 compared against an owner/tenant column, a role/ownership/permission-check function CALL, or a
 caller-supplied shared secret/signature compared against a stored value.
@@ -112,7 +112,7 @@ by confirming a direct RPC call supplying an id the caller does not own is rejec
 is returned.
 """
 effort = "medium"
-why = "Postgres already has the primitives this fix needs (auth.uid()/current_user/session_user, a role-check function, or deriving the id from the caller's own claims): the fix is adding one guard clause (or removing the parameter entirely), not introducing new infrastructure."
+why = "Postgres already has the primitives this fix needs (auth.uid()/current_user/session_user, a role-check function, or deriving the id from the caller's own claims). The fix is adding one guard clause (or removing the parameter entirely), not introducing new infrastructure."
 
 [[option]]
 id = "definer-read-trusts-caller-supplied-id"

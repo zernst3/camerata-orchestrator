@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REACT-EFFECT-CLEANUP-1"
-version = 5
+version = 4
 title = "An effect that starts an interval, a listener, a subscription or a connection returns a cleanup function that stops it"
 domain = "javascript:react"
 layer = "framework"
@@ -46,7 +46,7 @@ title = "React docs: useEffect (the setup function may return a cleanup function
 url = "https://supabase.com/docs/reference/javascript/removechannel"
 title = "Supabase JavaScript reference: removeChannel (unsubscribe and remove a Realtime channel)"
 
-# Source note: The recognized weakness code for a resource that is not released after the end
+# Source note: The recognised weakness code for a resource that is not released after the end
 # of its useful lifetime; the code this rule carries in `cwe`.
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/772.html"

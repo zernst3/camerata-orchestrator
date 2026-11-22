@@ -1,5 +1,5 @@
 id = "ARCH-API-VERSIONING-1"
-version = 4
+version = 3
 title = "API versioning scheme: URL prefix, request header, in-place evolution or content negotiation"
 domain = "api-layer"
 layer = "universal"
@@ -37,7 +37,7 @@ directive = "The API version is selected by a single request header whose value 
 remediation = """
 Add a version request header (for example Api-Version) that the endpoint reads to select behavior, and remove any version segment baked into the URL path. Document the header's accepted values and keep the resource's URL stable across versions. Verify by confirming the endpoint returns different versioned behavior based solely on the header value, with one canonical URL.
 """
-why = "Keeps URLs clean and gives each resource a single stable address across versions, which suits content-type-driven APIs and clients that already negotiate behavior through headers. The trade-off is reduced visibility: the active version is not apparent from the URL in a log or a trace, so a client that forgets or mis-sets the header lands on a default version: worth managing with a clear default and good observability when header negotiation fits the consumers. This is narrower than full content negotiation (below): the header carries a version number and nothing else selects between representations: the resource's shape and format are otherwise fixed. It differs from date-pinned versioning (below) in that the client names a version number directly rather than a calendar date, and every version boundary requires the server to define and ship an explicit new version value."
+why = "Keeps URLs clean and gives each resource a single stable address across versions, which suits content-type-driven APIs and clients that already negotiate behavior through headers. The trade-off is reduced visibility: the active version is not apparent from the URL in a log or a trace, so a client that forgets or mis-sets the header lands on a default version. Worth managing with a clear default and good observability when header negotiation fits the consumers. This is narrower than full content negotiation (below): the header carries a version number and nothing else selects between representations. The resource's shape and format are otherwise fixed. It differs from date-pinned versioning (below) in that the client names a version number directly rather than a calendar date, and every version boundary requires the server to define and ship an explicit new version value."
 
 [[option]]
 id = "the-api-version-is-selected-by-a-query-parameter"

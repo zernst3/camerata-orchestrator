@@ -37,5 +37,5 @@ why = "A document shape that the rules enforce cannot be widened by a client, so
 id = "write-rules-accept-any-fields"
 violates = true
 label = "Write rules accept any fields of any type"
-directive = "Authorise writes by who is asking alone, accepting whatever fields the caller sends."
+directive = "Authorize writes by who is asking alone, accepting whatever fields the caller sends."
 why = "Firestore documents have no schema, so a rule that never reads the incoming document lets a caller write any field of any type, including privileged fields such as role, isAdmin, credits or price. The rules are the only place field names and types can be constrained."

@@ -1,5 +1,5 @@
 id = "ARCH-WEBHOOK-EVENT-DEDUP-1"
-version = 4
+version = 3
 title = "Payment-provider webhook handlers deduplicate by the provider's event id so redelivery never re-applies a side effect"
 domain = "api-layer"
 layer = "universal"
@@ -8,7 +8,7 @@ kind = "default_with_exceptions"
 inspectable = true
 default = true
 verification = "grounded"
-qualifies = "Enforced by a scan over payment-provider webhook handlers for a side effect (crediting a wallet, marking an order paid, extending a subscription, incrementing a usage counter, sending a fulfillment notification) applied directly from the event payload with no prior check against a persisted record of the provider's own event id (e.g. Stripe's evt_... id, PayPal's webhook event id). Conformance holds when the handler looks up (or inserts, via an atomic unique-constrained insert, not a check-then-act read) the event id in a dedicated processed-events record before applying the effect, and short-circuits with a 2xx acknowledgement on a duplicate without re-applying it; it fails when the side effect runs unconditionally on every delivery, or when deduplication is attempted by a non-atomic 'check if seen, then insert' pair that a concurrent redelivery can race."
+qualifies = "Enforced by a scan over payment-provider webhook handlers for a side effect (crediting a wallet, marking an order paid, extending a subscription, incrementing a usage counter, sending a fulfillment notification) applied directly from the event payload with no prior check against a persisted record of the provider's own event id (e.g. Stripe's evt_... id, PayPal's webhook event id). Conformance holds when the handler looks up (or inserts, via an atomic unique-constrained insert, not a check-then-act read) the event id in a dedicated processed-events record before applying the effect, and short-circuits with a 2xx acknowledgment on a duplicate without re-applying it; it fails when the side effect runs unconditionally on every delivery, or when deduplication is attempted by a non-atomic 'check if seen, then insert' pair that a concurrent redelivery can race."
 
 [[sources]]
 url = "https://docs.stripe.com/webhooks#handle-duplicate-events"
@@ -34,7 +34,7 @@ when the provider retries.
 
 The fix is the receiving side's responsibility: persist the provider's own event id (Stripe's `evt_...`, or PayPal's
 webhook event id) the first time it is processed, and treat any later delivery carrying the same id as a no-op that
-still returns a 2xx acknowledgement (so the provider does not keep retrying) without re-running the effect. The
+still returns a 2xx acknowledgment (so the provider does not keep retrying) without re-running the effect. The
 dedup check and the first-processing record must be a single atomic operation (an insert with a unique constraint on
 the event id, checked via the insert's own conflict result) rather than a 'look up, then act, then record' sequence,
 because two near-simultaneous redeliveries can both pass a non-atomic lookup before either has recorded the id.

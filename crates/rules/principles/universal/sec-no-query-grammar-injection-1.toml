@@ -1,5 +1,5 @@
 id = "SEC-NO-QUERY-GRAMMAR-INJECTION-1"
-version = 4
+version = 3
 title = "User-controlled data is never concatenated into a query/filter grammar string (PostgREST .or()/.filter(), a NoSQL operator string, an LDAP filter); it is passed as a bound argument"
 domain = "universal"
 layer = "universal"
@@ -49,4 +49,4 @@ expression; escape reserved characters (commas, parentheses, wildcards) for any 
 still flow into a grammar string). Verify by confirming a payload containing the grammar's own
 reserved characters (e.g. a comma or closing paren) no longer changes which rows the query returns.
 """
-why = "A grammar injection bypasses Row Level Security at the query-construction step, before any row-level policy is evaluated, so 'RLS probably contains it' is not a valid mitigation: the fix has to be at the boundary where the string is built."
+why = "A grammar injection bypasses Row Level Security at the query-construction step, before any row-level policy is evaluated, so 'RLS probably contains it' is not a valid mitigation. The fix has to be at the boundary where the string is built."

@@ -1,5 +1,5 @@
 id = "ARCH-CURSOR-PAGINATION-1"
-version = 4
+version = 3
 title = "List-endpoint pagination: cursor, offset, no pagination or both shapes"
 domain = "api-layer"
 layer = "universal"
@@ -19,7 +19,7 @@ title = "GitHub REST API: Using pagination in the REST API"
 
 [decision]
 question = "How do list endpoints paginate: by opaque cursor, by offset (page/page_size), no pagination at all, or by exposing both cursor and offset shapes?"
-why = "The right pagination shape follows from how the list is consumed (its size, how often it changes under the reader, and whether clients need random page access) not from a presumed winner. Cursors anchor each page to a stable position in the result set, so they stay correct under concurrent inserts and deletes; they are the natural fit for large or actively-changing lists (feeds, activity, anything that grows) where a reader paging through must not silently skip or repeat rows. Offset pagination (page=N, page_size=K) is simpler to implement and is the shape that supports random page access (jump to page 7, show a numbered page bar), which suits stable or slowly-changing datasets and admin tables where a clickable page index matters more than read-during-write consistency. Returning the full result set with no pagination is the simplest contract and is correct precisely when the list has a hard, low upper bound that does not grow (a country list, a fixed enum), where paging machinery would be pure overhead. Exposing both shapes maximises client flexibility at the cost of a larger surface to build, test, and document. Choose by the list's size and volatility and by whether random page access is a real client need."
+why = "The right pagination shape follows from how the list is consumed (its size, how often it changes under the reader, and whether clients need random page access) not from a presumed winner. Cursors anchor each page to a stable position in the result set, so they stay correct under concurrent inserts and deletes; they are the natural fit for large or actively-changing lists (feeds, activity, anything that grows) where a reader paging through must not silently skip or repeat rows. Offset pagination (page=N, page_size=K) is simpler to implement and is the shape that supports random page access (jump to page 7, show a numbered page bar), which suits stable or slowly-changing datasets and admin tables where a clickable page index matters more than read-during-write consistency. Returning the full result set with no pagination is the simplest contract and is correct precisely when the list has a hard, low upper bound that does not grow (a country list, a fixed enum), where paging machinery would be pure overhead. Exposing both shapes maximizes client flexibility at the cost of a larger surface to build, test, and document. Choose by the list's size and volatility and by whether random page access is a real client need."
 
 [[option]]
 id = "list-endpoints-paginate-by-cursor-not-by-offset"
@@ -55,4 +55,4 @@ directive = "List endpoints expose both cursor and offset pagination shapes and 
 remediation = """
 Add both a cursor-based and an offset-based pagination path to the list endpoint, letting the client choose which query parameters to send. Verify by confirming a request using cursor parameters and a separate request using offset parameters each return correctly paginated results from the same endpoint.
 """
-why = "Maximises client flexibility: consumers that need stable streaming pick the cursor shape and consumers that need random page access pick the offset shape, from the same endpoint. The cost is a larger surface to build, test, and document, and a default shape clients reach for, so it is worth it when the endpoint genuinely serves both kinds of consumer rather than when one shape would do."
+why = "Maximizes client flexibility: consumers that need stable streaming pick the cursor shape and consumers that need random page access pick the offset shape, from the same endpoint. The cost is a larger surface to build, test, and document, and a default shape clients reach for, so it is worth it when the endpoint genuinely serves both kinds of consumer rather than when one shape would do."

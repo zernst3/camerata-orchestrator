@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-ONPUSH-CHANGE-DETECTION-1"
-version = 4
+version = 3
 title = "Components use OnPush change detection by default for performance"
 domain = "javascript:angular"
 layer = "framework"
