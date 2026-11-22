@@ -321,7 +321,10 @@ fn a_deletion_that_fails_part_way_leaves_memory_and_disk_agreeing() {
         "run these tests as an ordinary user"
     );
 
-    assert!(store.clear_checked("p1").is_err(), "the failure is reported");
+    assert!(
+        store.clear_checked("p1").is_err(),
+        "the failure is reported"
+    );
     assert!(store.load("p1").is_some(), "memory still holds the draft");
     let main = dir.path().join("onboarding-draft-p1.json");
     assert!(
@@ -425,7 +428,11 @@ fn a_shared_draft_file_is_split_into_one_file_per_project_and_kept_as_the_backup
 
     let before = names_in(dir.path());
     let again = DraftStore::at(shared);
-    assert_eq!(names_in(dir.path()), before, "a second start changes nothing");
+    assert_eq!(
+        names_in(dir.path()),
+        before,
+        "a second start changes nothing"
+    );
     assert_eq!(again.load("p2"), Some(serde_json::json!({"scan": 2})));
     assert_eq!(std::fs::read_to_string(&backup).unwrap(), text);
 }

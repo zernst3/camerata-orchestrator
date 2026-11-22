@@ -104,11 +104,19 @@ pub(crate) fn project_and_repo(
             format!("project not found: {project_id}"),
         )
     })?;
+    // The project's own repos, else a repo one of its saved inspections audited: a project still
+    // in onboarding owns its repos through its inspections (the same ownership reading uses,
+    // `read::project_owns_repo`), so it can delete the source of what it inspected.
     let repo = project
         .repos
         .iter()
         .find(|r| r.eq_ignore_ascii_case(repo_param.trim()))
         .cloned()
+        .or_else(|| {
+            super::read::is_owner_name(repo_param.trim())
+                .then(|| state.inspections.audited_spelling(&project.id, repo_param))
+                .flatten()
+        })
         .ok_or_else(|| {
             Refusal::conflict(
                 "repo_not_in_project",

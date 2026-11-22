@@ -368,10 +368,11 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         .into_iter()
         .filter(|p| p.id != project.id)
         .collect();
+    // A checkout another project uses, by its repos OR its inspections (as reading counts it).
     let shared_with = |repo: &str| -> Option<String> {
         others
             .iter()
-            .find(|p| p.repos.iter().any(|r| r.eq_ignore_ascii_case(repo)))
+            .find(|p| super::read::project_owns_repo(state, p, repo))
             .map(|p| p.name.clone())
     };
 
@@ -611,13 +612,10 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     let draft_bytes = state.draft.stored_bytes(&project.id);
     let draft_files = state.draft.files_of(&project.id);
     if draft_bytes > 0 || state.draft.holds_project(&project.id) || !draft_files.is_empty() {
-        let source = state
-            .draft
-            .project_file(&project.id)
-            .map_or_else(
-                || format!("onboarding-draft.json#{}", project.id),
-                |f| f.display().to_string(),
-            );
+        let source = state.draft.project_file(&project.id).map_or_else(
+            || format!("onboarding-draft.json#{}", project.id),
+            |f| f.display().to_string(),
+        );
         add(
             &mut extras,
             step(
@@ -655,8 +653,9 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
             let unreadable = p
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().contains(".unreadable-"));
-            let names_project = std::fs::read(&p)
-                .map_or(true, |bytes| String::from_utf8_lossy(&bytes).contains(&project.id));
+            let names_project = std::fs::read(&p).map_or(true, |bytes| {
+                String::from_utf8_lossy(&bytes).contains(&project.id)
+            });
             if !unreadable && !names_project {
                 continue;
             }

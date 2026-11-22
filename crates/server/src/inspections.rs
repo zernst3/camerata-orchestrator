@@ -306,6 +306,15 @@ impl InspectionStore {
             .is_some_and(|l| l.iter().any(|e| e.audited_ref(repo).is_some()))
     }
 
+    /// The spelling of `repo` that one of `project_id`'s entries audited (matched
+    /// case-insensitively), when any did.
+    pub fn audited_spelling(&self, project_id: &str, repo: &str) -> Option<String> {
+        self.lock().get(project_id).and_then(|l| {
+            l.iter()
+                .find_map(|e| e.audited_ref(repo).map(|r| r.repo.clone()))
+        })
+    }
+
     /// The newest entry of `project_id` that covers `repo` with a commit. Clones only that one
     /// entry, not the whole list.
     pub fn newest_with_sha(&self, project_id: &str, repo: &str) -> Option<InspectionEntry> {

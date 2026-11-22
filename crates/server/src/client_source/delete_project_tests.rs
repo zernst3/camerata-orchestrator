@@ -1280,7 +1280,9 @@ async fn a_cleared_projects_deletion_leaves_nothing_of_it_in_the_draft_folder() 
     fx.state
         .draft
         .save(&fx.project_id, serde_json::json!({"scan": 1}));
-    fx.state.draft.save(&fx.project_id, serde_json::json!({"scan": 2}));
+    fx.state
+        .draft
+        .save(&fx.project_id, serde_json::json!({"scan": 2}));
     fx.state.draft.clear(&fx.project_id);
     fx.state
         .draft
@@ -1308,14 +1310,19 @@ async fn a_cleared_projects_deletion_leaves_nothing_of_it_in_the_draft_folder() 
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| n.starts_with("onboarding-draft") && n.contains(&fx.project_id))
         .collect();
-    assert!(left.is_empty(), "draft files of the project remain: {left:?}");
+    assert!(
+        left.is_empty(),
+        "draft files of the project remain: {left:?}"
+    );
     let other = fx
         .state
         .draft
         .project_file("other-project")
         .expect("a data folder");
     assert!(
-        std::fs::read_to_string(other).unwrap().contains("other-project"),
+        std::fs::read_to_string(other)
+            .unwrap()
+            .contains("other-project"),
         "another project's draft is kept"
     );
 }
@@ -1345,8 +1352,12 @@ async fn a_set_aside_draft_of_the_project_is_removed_with_it_and_a_failure_is_re
         .unwrap();
     assert!(first.partial, "{:?}", first.record.items);
     assert!(
-        first.record.items.iter().any(|i| i.category == "onboarding draft"
-            && matches!(i.outcome, super::PurgeOutcome::Failed { .. })),
+        first
+            .record
+            .items
+            .iter()
+            .any(|i| i.category == "onboarding draft"
+                && matches!(i.outcome, super::PurgeOutcome::Failed { .. })),
         "{:?}",
         first.record.items
     );
@@ -1357,7 +1368,10 @@ async fn a_set_aside_draft_of_the_project_is_removed_with_it_and_a_failure_is_re
         .await
         .unwrap();
     assert!(!second.partial, "{:?}", second.record.items);
-    assert!(!aside.exists() && !file.exists(), "every draft file is gone");
+    assert!(
+        !aside.exists() && !file.exists(),
+        "every draft file is gone"
+    );
 }
 
 // ── a checkout is used by a project through its repos OR through its inspections ────────────
@@ -1377,8 +1391,8 @@ fn add_onboarding_project(fx: &Fx, name: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_checkout_an_onboarding_project_triages_is_kept_and_named_when_another_project_is_deleted()
-{
+async fn a_checkout_an_onboarding_project_triages_is_kept_and_named_when_another_project_is_deleted(
+) {
     let fx = fixture();
     let _b = add_onboarding_project(&fx, "Onboarding Beta");
 

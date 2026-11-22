@@ -421,10 +421,7 @@ async fn an_inspection_naming_a_traversal_repo_does_not_make_it_readable() {
         let (_, _, json) = get(&fx, endpoint).await;
         assert_eq!(json["status"], "repo_unlinked", "{json}");
         assert!(
-            json["reason"]
-                .as_str()
-                .unwrap()
-                .contains("not linked to this project"),
+            json["reason"].as_str().unwrap().contains("not linked to"),
             "{json}"
         );
     }
@@ -472,7 +469,7 @@ async fn an_unlinked_repo_and_a_repo_without_a_folder_say_so_in_plain_words() {
     .await;
     assert_eq!(unlinked["status"], "repo_unlinked", "{unlinked}");
     let reason = unlinked["reason"].as_str().unwrap();
-    assert!(reason.contains("not linked to this project"), "{reason}");
+    assert!(reason.contains("not linked to any project"), "{reason}");
     assert!(!reason.contains("changed since scan"), "{reason}");
 
     // Linked, but its folder is gone: the status is still not `file_missing`, and the path it

@@ -225,15 +225,11 @@ fn residual_sentences(
     residuals
 }
 
-/// The names of the OTHER projects that list the target's repo and hold an incremental-scan
+/// The names of the OTHER projects that use the target's repo and hold an incremental-scan
 /// cache slice for it (a deletion removes only its own project's slice).
 fn other_projects_caching(state: &AppState, target: &GuardedTarget) -> Vec<String> {
-    state
-        .projects
-        .list()
+    super::read::other_projects_using(state, &target.project_id, &target.repo)
         .into_iter()
-        .filter(|p| p.id != target.project_id)
-        .filter(|p| p.repos.iter().any(|r| r.eq_ignore_ascii_case(&target.repo)))
         .filter(|p| state.scan_cache.peek_repo(&p.id, &target.repo).had_entry)
         .map(|p| p.name)
         .collect()

@@ -145,9 +145,10 @@ impl DraftStore {
                 if let Ok(mut m) = store.mem.lock() {
                     *m = mem.clone();
                 }
-                let all_written = ids.iter().zip(&had_file).all(|(id, had)| {
-                    *had || store.write_project(id).is_ok()
-                });
+                let all_written = ids
+                    .iter()
+                    .zip(&had_file)
+                    .all(|(id, had)| *had || store.write_project(id).is_ok());
                 if all_written {
                     let _ = std::fs::rename(&path, Self::backup_name(&path));
                 }
@@ -208,7 +209,10 @@ impl DraftStore {
                 // The file exists but cannot be read (permissions, I/O error): nothing is
                 // written over it until the operator is told.
                 let kept = std::fs::copy(path, &aside).map(|_| ());
-                (None, Some(Self::aside_notice(path, &aside, &e.to_string(), kept)))
+                (
+                    None,
+                    Some(Self::aside_notice(path, &aside, &e.to_string(), kept)),
+                )
             }
         }
     }
@@ -225,10 +229,7 @@ impl DraftStore {
                     continue;
                 };
                 for (id, at) in stamps {
-                    let held = into
-                        .get(CLEARED_KEY)
-                        .and_then(|c| c.get(id))
-                        .is_some();
+                    let held = into.get(CLEARED_KEY).and_then(|c| c.get(id)).is_some();
                     if !(keep_existing && held) {
                         Self::stamp_cleared(into, id, at.as_str().unwrap_or_default());
                     }

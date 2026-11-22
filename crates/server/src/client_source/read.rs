@@ -209,12 +209,42 @@ fn owning_project(state: &AppState, project_hint: Option<&str>, repo: &str) -> O
     if let Some(id) = project_hint {
         return state.projects.get(id).filter(|p| owns(p)).map(|p| p.id);
     }
+    // The project that holds the deletion record answers first: its record is what says the
+    // source was deleted, so a project that merely inspected the repo must not shadow it.
+    let owners: Vec<crate::project::Project> = state
+        .projects
+        .list()
+        .into_iter()
+        .filter(|p| owns(p))
+        .collect();
+    owners
+        .iter()
+        .find(|p| deleted_record(state, &p.id, repo).is_some())
+        .or_else(|| {
+            state
+                .projects
+                .active()
+                .and_then(|a| owners.iter().find(|p| p.id == a.id))
+        })
+        .or_else(|| owners.first())
+        .map(|p| p.id.clone())
+}
+
+/// The OTHER projects that use `repo`: it is in their `repos` or one of their saved inspections
+/// audited it ([`project_owns_repo`]). A checkout any of them uses is not this project's to
+/// remove.
+pub(crate) fn other_projects_using(
+    state: &AppState,
+    project_id: &str,
+    repo: &str,
+) -> Vec<crate::project::Project> {
     state
         .projects
-        .active()
-        .filter(|p| owns(p))
-        .or_else(|| state.projects.list().into_iter().find(|p| owns(p)))
-        .map(|p| p.id)
+        .list()
+        .into_iter()
+        .filter(|p| p.id != project_id)
+        .filter(|p| project_owns_repo(state, p, repo))
+        .collect()
 }
 
 /// Whether `repo` is exactly `owner/name` made of the characters a GitHub login and repository
@@ -273,9 +303,11 @@ pub async fn source_for_read(
         Some(id) => id,
         None => {
             return Ok(SourceRead::Unresolved {
-                reason: format!(
-                    "{repo} is not linked to this project, so its code cannot be shown."
-                ),
+                reason: if project_hint.is_some() {
+                    format!("{repo} is not linked to this project, so its code cannot be shown.")
+                } else {
+                    format!("{repo} is not linked to any project, so its code cannot be shown.")
+                },
             })
         }
     };
