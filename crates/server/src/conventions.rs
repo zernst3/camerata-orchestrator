@@ -1828,7 +1828,13 @@ mod tests {
                 .map(|f| f.site_key.clone())
         };
         // Accept git-ref: the place at line 9 (manual) is held. Accept manual: the place at line 12.
-        let held = held_place_rows(&c, &[], "");
+        let mut ruled = c.clone();
+        ruled.standard = StandardState {
+            option_id: Some("git-ref".into()),
+            source: StandardSource::Reviewer,
+            ..StandardState::default()
+        };
+        let held = held_place_rows(&ruled, &[], "");
         assert!(
             held.iter().any(|(_, f)| f.snippet
                 == "This listed place could not be checked for ARCH-TRIGGER-ENV-1 (option \"Manual\", line 9)."),
