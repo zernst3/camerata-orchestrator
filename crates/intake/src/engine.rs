@@ -571,7 +571,8 @@ pub(crate) fn stdin_prompt(prompt: &str) -> String {
 /// argument because the OS caps the argument list (macOS `ARG_MAX`, about 1 MB) and a prompt
 /// that carries a large grounding block exceeds it ("Argument list too long"). The write runs on
 /// its own task so a child that answers before it has read everything cannot block on a full
-/// pipe; a child that exits early is reported by its exit status.
+/// pipe. A write that ends early fails the call when the child exited successfully (its answer is
+/// to a truncated prompt); a child that exited with a failure is reported by its exit status.
 pub(crate) async fn output_with_prompt(
     mut cmd: tokio::process::Command,
     prompt: &str,

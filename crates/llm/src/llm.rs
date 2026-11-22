@@ -6279,6 +6279,7 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
             "sink-ok",
             r#"#!/bin/sh
 printf '%s\n' "$@" > "$(dirname "$0")/args.txt"
+cat > /dev/null
 printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
 "#,
         );
@@ -6316,6 +6317,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let fake = FakeClaude::new(
             "capture-ok",
             r#"#!/bin/sh
+cat > /dev/null
 printf '%s\n' '{"type":"system","subtype":"init"}'
 printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}'
 printf '%s\n' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}}]}}'
@@ -6376,6 +6378,7 @@ exit 1
         let fake = FakeClaude::new(
             "sink-repo",
             r#"#!/bin/sh
+cat > /dev/null
 printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
 "#,
         );
@@ -6433,6 +6436,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
         let fake = FakeClaude::new(
             "live",
             r#"#!/bin/sh
+cat > /dev/null
 i=0
 while [ $i -lt 14 ]; do
   printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tok "}}}'
@@ -6551,7 +6555,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
     /// answer. A counter file in the fake's folder counts the runs.
     fn flaky_claude(tag: &str, failures: u32, failure_body: &str) -> FakeClaude {
         let script = format!(
-            "#!/bin/sh\nc=\"`dirname \"$0\"`/count\"\nn=`cat \"$c\" 2>/dev/null || echo 0`\nn=`expr $n + 1`\necho $n > \"$c\"\nif [ $n -le {failures} ]; then\n{failure_body}\nfi\n{OK_RESULT}\n"
+            "#!/bin/sh\nc=\"`dirname \"$0\"`/count\"\nn=`cat \"$c\" 2>/dev/null || echo 0`\nn=`expr $n + 1`\necho $n > \"$c\"\nif [ $n -le {failures} ]; then\n{failure_body}\nfi\ncat > /dev/null\n{OK_RESULT}\n"
         );
         FakeClaude::new(tag, &script)
     }

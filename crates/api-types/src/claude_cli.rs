@@ -175,6 +175,10 @@ impl PromptWriter {
     /// `Ok` when it completed. `Err` for any write failure (a broken pipe included: the child
     /// closed its input early), and when the grace expires with the write unfinished (the child
     /// has exited, so it cannot have read the whole prompt).
+    ///
+    /// Limit: a child that exits 0 without reading a prompt smaller than the pipe buffer (about
+    /// 64 KB on Linux) still succeeds, because the write completed into the buffer. The guarantee
+    /// holds only above that size; the real CLI reads its stdin to the end.
     pub async fn finish(mut self) -> std::io::Result<()> {
         let Some(mut handle) = self.handle.take() else {
             return Ok(());
@@ -486,7 +490,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_write_that_fails_for_any_reason_but_a_broken_pipe_is_an_error() {
+    async fn any_write_failure_other_than_a_broken_pipe_is_returned_as_it_is() {
         let failed = PromptWriter::start(
             FailingWriter(std::io::ErrorKind::PermissionDenied),
             b"prompt".to_vec(),

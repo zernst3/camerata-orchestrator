@@ -32,9 +32,10 @@ struct Stub {
 }
 
 /// Exits at once without reading its stdin, but leaves a background `sleep` holding the read end
-/// of that pipe open (through its own descriptor 3, because an async command's `<&0` is /dev/null
-/// under dash, so it would hold nothing on Linux) (and its output redirected away so the call still sees the end of the
-/// stream): the prompt writer is stuck on a full pipe after the child has exited.
+/// of that pipe open, so the prompt writer is stuck on a full pipe after the child has exited.
+/// The `sleep` has its output redirected away, so the call still sees the end of the stream.
+/// It holds the pipe through its own descriptor 3, because under dash (Linux) an async command's
+/// `<&0` is /dev/null and would hold nothing.
 const LINGERING_STUB: &str = r#"#!/bin/sh
 exec 3<&0
 sleep 8 <&3 >/dev/null 2>&1 &
@@ -235,6 +236,11 @@ async fn a_writer_stuck_after_the_child_exited_is_given_a_short_time_then_the_ca
         .complete(LlmRequest::new(prompt).with_model("claude-sonnet-5-5"))
         .await;
     let took = started.elapsed();
+    // A broken pipe fails at once; only the grace path waits the full grace first.
+    assert!(
+        took >= camerata_api_types::claude_cli::PROMPT_WRITE_GRACE,
+        "the writer was given the grace period before the call failed: {took:?}"
+    );
     let err = outcome.expect_err("the prompt was not fully written, so the call fails");
     assert!(
         err.to_string().contains("not fully written"),
@@ -270,4 +276,35 @@ async fn a_child_that_exits_without_reading_the_whole_prompt_fails_the_call() {
         err.to_string().contains("not fully written"),
         "the error says why: {err}"
     );
+}
+
+/// Exits non-zero at once, with a reason on stderr, without reading a large prompt.
+const FAILING_STUB: &str = "#!/bin/sh\necho boom >&2\nexit 1\n";
+
+/// The exit status and stderr explain a failed call; the broken pipe the unread prompt leaves is
+/// not what the error says.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_failed_exit_with_a_large_unread_prompt_reports_the_exit_not_the_write() {
+    #[derive(Default)]
+    struct NoWait;
+    impl crate::retry::Sleeper for NoWait {
+        fn sleep<'a>(
+            &'a self,
+            _d: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+    }
+    let stub = Stub::with_script("failing", FAILING_STUB);
+    let _path = patched_path(&stub.dir);
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", stub.dir.join("state"));
+    let prompt = "a line of prompt text that nobody reads\n".repeat(100_000);
+    let outcome = cli_llm()
+        .with_sleeper(std::sync::Arc::new(NoWait))
+        .complete(LlmRequest::new(prompt).with_model("claude-sonnet-5-5"))
+        .await;
+    let err = outcome.expect_err("the child failed").to_string();
+    assert!(err.contains("boom"), "stderr is in the error: {err}");
+    assert!(!err.contains("not fully written"), "{err}");
 }
