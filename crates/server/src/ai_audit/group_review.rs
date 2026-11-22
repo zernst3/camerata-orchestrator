@@ -434,7 +434,7 @@ fn prose_of(obj: &Obj, key: &str, at: &str) -> Result<String, String> {
     text_of(obj, key, at).map(|text| {
         // Redacted first, then rewritten for the client: no em dash, no en dash, no
         // multiplication sign, and a problem in a whole file is "whole file", not `path:0`.
-        crate::report_export::client_prose(&camerata_secrets::redact_str(&text))
+        crate::report_export::client_prose(&camerata_secrets::redact_str_for_client(&text))
     })
 }
 
@@ -444,7 +444,7 @@ fn optional_prose_of(obj: &Obj, key: &str) -> String {
     obj.get(key)
         .and_then(serde_json::Value::as_str)
         .map(|text| {
-            crate::report_export::client_prose(&camerata_secrets::redact_str(text))
+            crate::report_export::client_prose(&camerata_secrets::redact_str_for_client(text))
                 .trim()
                 .to_string()
         })

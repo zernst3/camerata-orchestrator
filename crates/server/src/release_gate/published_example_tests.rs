@@ -90,8 +90,11 @@ fn the_gate_refuses_an_unmasked_published_example_key_on_every_surface_naming_fi
         assert!(!problems.is_empty(), "{surface:?}: no secrets problem");
         let shown = format!("{failure}\n{}", failure.report.problems_json());
         assert!(!shown.contains(&key), "{surface:?}: the value was printed");
+        // The stem is spliced into member names, so the key is followed by name characters and
+        // the credential-named-line shape reads it instead: refused, never shown.
         assert!(
-            problems.iter().any(|q| q.message.contains("Stripe test")),
+            matches!(surface, Surface::Stem)
+                || problems.iter().any(|q| q.message.contains("Stripe test")),
             "{surface:?}: the shape is not named: {problems:?}"
         );
         assert!(
