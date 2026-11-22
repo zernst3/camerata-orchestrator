@@ -6526,7 +6526,7 @@ Project **config** (transferable) and project **data** (local) are kept in separ
 | Project config | `projects.json` — repos, ruleset, onboarded state, `tier_map` | YES — the export is config-only |
 | Units of Work | `uow.json` | NO — local to each developer |
 | Story spine | `stories.json` (`InMemoryStoryStore`) | NO |
-| Onboarding draft | `onboarding-draft.json` | NO |
+| Onboarding draft | `onboarding-draft-<project>.json` (one per project) | NO |
 | Local repo paths | `settings.json` (`repo_paths`) | NO |
 
 UoWs carry in-progress dev-lifecycle state (stage, branch, gate provenance, decision records, run

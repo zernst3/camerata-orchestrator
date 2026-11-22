@@ -632,10 +632,9 @@ pub(crate) fn strip_project_from_file(
     project_id: &str,
 ) -> std::io::Result<()> {
     let bytes = std::fs::read(path)?;
-    let mut map: HashMap<String, serde_json::Value> = serde_json::from_str(
-        std::str::from_utf8(&bytes).map_err(std::io::Error::other)?,
-    )
-    .map_err(std::io::Error::other)?;
+    let mut map: HashMap<String, serde_json::Value> =
+        serde_json::from_str(std::str::from_utf8(&bytes).map_err(std::io::Error::other)?)
+            .map_err(std::io::Error::other)?;
     map.remove(project_id);
     if let Some(o) = map.get_mut(CLEARED_KEY).and_then(|v| v.as_object_mut()) {
         o.remove(project_id);

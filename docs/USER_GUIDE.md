@@ -119,7 +119,7 @@ project). It does not affect any project's scan, recommendations, rescans or dev
 always resolve from that project's own Backend setting above, never from the chat setting.
 
 **Local-first:** Camerata stores only configs + pointers (JSON in the operator's OS app-data dir:
-`projects.json`, `settings.json`, `onboarding-draft.json`); the repo code lives on the operator's own
+`projects.json`, `settings.json`, and one `onboarding-draft-<project>.json` per project); the repo code lives on the operator's own
 machine. Each repo a project references must resolve to a local git checkout (see §5).
 
 ---

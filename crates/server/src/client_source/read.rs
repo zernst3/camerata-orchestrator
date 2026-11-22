@@ -331,7 +331,14 @@ pub async fn source_for_read(
     };
 
     // Deleted wins over everything: the directory is gone by construction.
-    if let Some(record) = deleted_record(state, &project_id, repo) {
+    // A project that only inspected the repo has no record of its own: another project that owns
+    // the repo may have deleted it, and the checkout is gone for both.
+    let record = deleted_record(state, &project_id, repo).or_else(|| {
+        other_projects_using(state, &project_id, repo)
+            .iter()
+            .find_map(|p| deleted_record(state, &p.id, repo))
+    });
+    if let Some(record) = record {
         return Ok(SourceRead::Deleted {
             deleted_at: record.completed_at,
             record_id: record.id,

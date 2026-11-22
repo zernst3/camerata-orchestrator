@@ -1644,7 +1644,11 @@ async fn the_shared_backup_and_old_bak_lose_the_deleted_projects_entries_and_not
     )
     .unwrap();
     let bak = data.join("onboarding-draft.json.bak");
-    std::fs::write(&bak, serde_json::json!({pid.clone(): {"scan": SENT_A}}).to_string()).unwrap();
+    std::fs::write(
+        &bak,
+        serde_json::json!({pid.clone(): {"scan": SENT_A}}).to_string(),
+    )
+    .unwrap();
     // A project whose id merely starts with this one's id is not this project.
     let longer = data.join("onboarding-draft.json.shared-backup-1");
     let longer_text = serde_json::json!({format!("{pid}2"): {"scan": SENT_B}}).to_string();
@@ -1657,8 +1661,14 @@ async fn the_shared_backup_and_old_bak_lose_the_deleted_projects_entries_and_not
     assert!(!out.partial, "{:?}", out.record.items);
 
     let text = std::fs::read_to_string(&backup).unwrap();
-    assert!(!text.contains(&pid), "the project's entries are gone: {text}");
-    assert!(text.contains(SENT_B), "another project's entry stays: {text}");
+    assert!(
+        !text.contains(&pid),
+        "the project's entries are gone: {text}"
+    );
+    assert!(
+        text.contains(SENT_B),
+        "another project's entry stays: {text}"
+    );
     assert!(text.contains("other-project"), "{text}");
     assert!(!bak.exists(), "a copy left with nothing is removed");
     assert_eq!(std::fs::read_to_string(&longer).unwrap(), longer_text);
@@ -1669,9 +1679,9 @@ async fn the_shared_backup_and_old_bak_lose_the_deleted_projects_entries_and_not
         "{listed:?}"
     );
     assert!(
-        !listed
-            .iter()
-            .any(|w| w.ends_with("shared-backup") || w.ends_with("shared-backup-1") || w.ends_with(".bak")),
+        !listed.iter().any(|w| w.ends_with("shared-backup")
+            || w.ends_with("shared-backup-1")
+            || w.ends_with(".bak")),
         "{listed:?}"
     );
 }
@@ -1696,5 +1706,28 @@ async fn a_draft_file_of_no_project_is_listed_as_a_leftover_and_never_removed() 
             .any(|k| k.what.ends_with("onboarding-draft-ghost.json")),
         "{:?}",
         out.record.kept
+    );
+}
+
+#[tokio::test]
+async fn an_onboarding_project_viewing_a_repo_another_project_deleted_is_told_it_was_deleted() {
+    use super::delete::{delete_source, DeleteRequest};
+    use super::read::{source_for_read, SourceRead};
+    let fx = fixture();
+    let request = DeleteRequest {
+        confirm: REPO.to_string(),
+        include_uncommitted: false,
+    };
+    delete_source(&fx.state, &fx.project_id, REPO, &request)
+        .await
+        .unwrap();
+    let b = add_onboarding_project(&fx, "Onboarding Beta");
+
+    let read = source_for_read(&fx.state, Some(&b), REPO, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(read, SourceRead::Deleted { .. }),
+        "the hinted project still hears it was deleted: {read:?}"
     );
 }
