@@ -2423,8 +2423,8 @@ impl Llm {
         {
             Ok(resp) => {
                 // The answer to a prompt that did not reach the child whole is not the answer: a
-                // write failure other than a broken pipe (the child closing its input early,
-                // which its exit status explains) fails the call, and is logged.
+                // write failure, a broken pipe (the child closing its input early) included,
+                // fails the call, and is logged.
                 if let Err(e) = writer.finish().await {
                     tracing::warn!("writing the prompt to the claude CLI failed: {e}");
                     let message = format!("writing the prompt to the claude CLI failed: {e}");
