@@ -25,12 +25,12 @@ fn a_real_package_holds_the_inspection_and_the_decisions_under_json_and_none_at_
         entries.keys()
     );
     assert!(
-        !entries.contains_key("json/inspection.json"),
+        !entries.contains_key("findings.json"),
         "{:?}",
         entries.keys()
     );
     assert!(
-        !entries.contains_key("json/decisions.json"),
+        !entries.contains_key("decisions.json"),
         "{:?}",
         entries.keys()
     );
