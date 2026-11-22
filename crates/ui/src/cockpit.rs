@@ -3504,8 +3504,8 @@ pub mod live_run;
 #[path = "liveview.rs"]
 pub(crate) mod liveview;
 mod palette;
-mod place_viewer;
 mod pane_context;
+mod place_viewer;
 pub(crate) mod queue;
 mod remediation;
 mod review;
