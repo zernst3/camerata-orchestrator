@@ -51,7 +51,7 @@ directive = "Transactional context is provided as a closure-based ambient via ta
 remediation = """
 Remove the explicit transaction parameter from the repository trait and instead read the transaction from task-local storage set up by a closure-based ambient context at the call site. Verify by confirming the repository trait's method signature carries no transaction parameter and the active transaction is read from task-local state at call time.
 """
-why = "Keeps the repository trait signatures clean, no transaction parameter to thread anywhere, and reads naturally for teams coming from ecosystems where ambient request/transaction context is idiomatic. Its trade-off is that posture is invisible at the call site and a service that forgets to establish the context produces a silent partial commit rather than a loud error; in Rust it also contends with the owned, non-Clone transaction, which the task-local design must work around."
+why = "Keeps the repository trait signatures clean (no transaction parameter to thread anywhere) and reads naturally for teams coming from ecosystems where ambient request/transaction context is idiomatic. Its trade-off is that posture is invisible at the call site and a service that forgets to establish the context produces a silent partial commit rather than a loud error; in Rust it also contends with the owned, non-Clone transaction, which the task-local design must work around."
 
 [[option]]
 id = "repository-write-methods-take-a-parameter-typed"

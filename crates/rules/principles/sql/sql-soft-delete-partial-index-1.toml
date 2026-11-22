@@ -32,13 +32,11 @@ mechanism that fixes this: a unique index scoped with `WHERE deleted_at IS NULL`
 LIVE rows, while allowing any number of soft-deleted rows to share the same value.
 
 The second, related failure mode is on the READ side: if every query site has to remember to add
-`WHERE deleted_at IS NULL` by hand, the first one that forgets. A report, an admin list view, a join from an
-unrelated feature, or (on a Supabase/Postgres-backed table) an RLS policy whose predicate never mentions the
-soft-delete column at all. Surfaces soft-deleted rows as if they were still live, which is either a confusing bug
+`WHERE deleted_at IS NULL` by hand, the first one that forgets (a report, an admin list view, a join from an unrelated feature, or, on a Supabase/Postgres-backed table, an RLS policy whose predicate never mentions the soft-delete column at all) surfaces soft-deleted rows as if they were still live, which is either a confusing bug
 (a 'deleted' item reappearing in a list) or a genuine access-control gap if the soft-delete was standing in for a
 revoked grant (a membership or permission row that was 'removed' but a policy with no deleted_at filter still
 authorizes against it). The safer default scopes the filter once (a view, a default scope in the ORM, or the RLS
-policy predicate itself) rather than trusting every future caller to add it.
+policy predicate itself), rather than trusting every future caller to add it.
 """
 
 [[option]]

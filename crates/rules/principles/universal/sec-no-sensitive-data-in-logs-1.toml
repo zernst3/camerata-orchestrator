@@ -34,10 +34,8 @@ default = "redact-sensitive-values-before-logging"
 why = """
 A log line is written for operability, not secrecy, and the pipeline it flows into (a log aggregator,
 an APM tool, a file on disk, a third-party log-shipping vendor) is almost never held to the same
-access-control standard as the primary datastore the value came from. More engineers, support staff,
-and integrations can read "the logs" than can read "the database." CWE-532 names this precisely:
-inserting sensitive information into a log file is itself the vulnerability, independent of whether the
-log store is later breached. The value is now sitting in a system that was never scoped or audited
+access-control standard as the primary datastore the value came from. More engineers, support staff and integrations can read "the logs" than can read "the database." CWE-532 names this precisely:
+inserting sensitive information into a log file is itself the vulnerability, independent of whether the log store is later breached. The value is now sitting in a system that was never scoped or audited
 as a place to hold it. The blast radius differs by value class, which is why this rule's enforcement
 distinguishes two severities rather than treating every sensitive log line identically: a credential or
 secret (an API key, a password, a session token, an Authorization header, a private key) reaching a log
@@ -66,7 +64,7 @@ place. Verify by triggering the log call with a real-shaped (but synthetic) secr
 confirming the emitted log line contains no reconstructable version of it.
 """
 effort = "low"
-why = "Redaction at the log call site is a narrow, mechanical fix (wrap the value, or drop it from the call's arguments) that removes the exposure at its one true source, the log call itself, rather than relying on every downstream log consumer (an aggregator's access policy, a retention/encryption setting, a vendor's own security posture) to compensate for a value that never needed to be there."
+why = "Redaction at the log call site is a narrow, mechanical fix (wrap the value, or drop it from the call's arguments) that removes the exposure at its one true source (the log call itself), rather than relying on every downstream log consumer (an aggregator's access policy, a retention/encryption setting, a vendor's own security posture) to compensate for a value that never needed to be there."
 
 [[option]]
 id = "log-values-as-is-rely-on-log-store-access-controls"

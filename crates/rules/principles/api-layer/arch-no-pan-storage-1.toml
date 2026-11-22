@@ -27,7 +27,7 @@ default = "never-touch-raw-card-data-tokenize-at-the-provider"
 why = """
 PCI DSS Requirement 3 draws a hard categorical line that is stricter than ordinary 'protect sensitive data'
 guidance: full PAN may be stored only when genuinely necessary and only with strong protection, but sensitive
-authentication data, the CVV/CVC and the full magnetic-stripe/chip track data, must NEVER be stored after
+authentication data (the CVV/CVC and the full magnetic-stripe/chip track data) must NEVER be stored after
 authorization completes, encrypted or not; storing it at all is itself the violation, independent of how well it
 is protected. For the overwhelming majority of applications integrating a modern payment provider (Stripe, Braintree,
 Adyen and similar), there is no legitimate reason for the application's own server to ever see a raw card number

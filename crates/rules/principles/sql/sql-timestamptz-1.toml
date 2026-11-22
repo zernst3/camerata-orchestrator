@@ -65,7 +65,7 @@ under. Verify by inserting a row from two different session time zones and confi
 correct absolute instant when read back.
 """
 effort = "medium"
-why = "A zone-less timestamp for an event instant is ambiguous by construction, the same stored value is a different real-world moment depending on who reads it, while timestamptz removes the ambiguity entirely at no cost beyond the type declaration itself, which is exactly why PostgreSQL's own documentation steers toward the zone-aware type for date/time values used across time zones."
+why = "A zone-less timestamp for an event instant is ambiguous by construction (the same stored value is a different real-world moment depending on who reads it), while timestamptz removes the ambiguity entirely at no cost beyond the type declaration itself, which is exactly why PostgreSQL's own documentation steers toward the zone-aware type for date/time values used across time zones."
 
 [[option]]
 id = "store-event-timestamps-as-zone-less-and-track-the-write-zone-separately"

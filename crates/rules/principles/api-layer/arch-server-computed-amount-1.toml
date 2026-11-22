@@ -31,7 +31,7 @@ quantity the customer claims to want, never what those items cost, what a quanti
 whether a discount code reduces the price and by how much. Any of those three values (unit price, quantity-derived
 total, discount amount) accepted from the request body and passed through to the amount the payment provider is
 told to charge is CWE-602 (Client-Side Enforcement of Server-Side Security) in its most direct financial form: the
-'security' decision, what this costs, is made wherever the request originated, and the server merely relays it.
+'security' decision (what this costs) is made wherever the request originated, and the server merely relays it.
 A request is trivially replayable with an edited body (browser dev tools, a proxy, a hand-crafted API call), so
 'the UI never lets you type a negative price' is not a control; nothing prevents a client from sending one directly
 to the endpoint. The fix is the one Stripe's own integration docs describe for a reason: the server looks up the

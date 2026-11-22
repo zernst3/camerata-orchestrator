@@ -24,7 +24,7 @@ candidates = { locator = "sql_policies_routines_and_views" }
 min_severity = "critical"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a match over CREATE POLICY statement bodies: the literal tokens `user_metadata` or `raw_user_meta_data` appearing inside a policy's USING or WITH CHECK clause (whether reached via auth.jwt() or a join against auth.users) are flagged. This match is near-zero false-positive, there is no legitimate reason for a policy predicate to read user-editable profile data as an authorization input, which is why this rule is a floor-port candidate (mechanical, always-block-worthy) rather than merely advisory. Conformance holds when no policy predicate anywhere in the corpus references either token."
+qualifies = "Enforced by a match over CREATE POLICY statement bodies: the literal tokens `user_metadata` or `raw_user_meta_data` appearing inside a policy's USING or WITH CHECK clause (whether reached via auth.jwt() or a join against auth.users) are flagged. This match is near-zero false-positive (there is no legitimate reason for a policy predicate to read user-editable profile data as an authorization input), which is why this rule is a floor-port candidate (mechanical, always-block-worthy) rather than merely advisory. Conformance holds when no policy predicate anywhere in the corpus references either token."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"

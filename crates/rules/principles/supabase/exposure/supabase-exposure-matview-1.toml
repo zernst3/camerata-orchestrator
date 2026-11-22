@@ -70,7 +70,7 @@ check) in an exposed schema that reads from it, so RLS applies at that layer. If
 intentionally. Verify by confirming `<matview>` itself is no longer directly reachable through
 the PostgREST API (only the wrapping view/function is).
 """
-why = "The finding is unconditional given the exposure fact, there is no RLS mechanism a materialized view could adopt, so naming every instance and explaining the structural limitation is the correct, honest framing rather than a probabilistic guess."
+why = "The finding is unconditional given the exposure fact (there is no RLS mechanism a materialized view could adopt), so naming every instance and explaining the structural limitation is the correct, honest framing rather than a probabilistic guess."
 
 # Design note (W22, 2026-10-20): this rule previously carried a second `[[option]]`
 # describing a REJECTED scanner/corpus design, not a client-code state. Removed — a

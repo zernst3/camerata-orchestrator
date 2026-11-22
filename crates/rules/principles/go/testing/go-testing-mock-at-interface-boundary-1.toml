@@ -9,7 +9,7 @@ inspectable = true
 default = true
 verification = "grounded"
 
-qualifies = "In Go, a type that satisfies an interface satisfies it implicitly. Mocks for unit tests implement the same interface that the production code accepts as a parameter. The test passes the mock through the constructor or function parameter, the same injection point used in production, so no test-only code paths exist in the production code itself."
+qualifies = "In Go, a type that satisfies an interface satisfies it implicitly. Mocks for unit tests implement the same interface that the production code accepts as a parameter. The test passes the mock through the constructor or function parameter (the same injection point used in production), so no test-only code paths exist in the production code itself."
 
 [[sources]]
 url = "https://pkg.go.dev/github.com/stretchr/testify/mock"

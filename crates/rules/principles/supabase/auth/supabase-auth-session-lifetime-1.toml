@@ -33,8 +33,7 @@ default = "rotate-refresh-tokens-and-bound-jwt-expiry"
 why = """
 Supabase ships sane defaults for both knobs: `jwt_expiry = 3600` (a one-hour access token) and
 `enable_refresh_token_rotation = true` (each refresh exchanges the old refresh token for a new one, with
-`refresh_token_reuse_interval` giving a short grace window for in-flight requests), but both are project-level
-settings a team can change, and both directions of change carry a real cost. Disabling refresh-token rotation means
+`refresh_token_reuse_interval` giving a short grace window for in-flight requests). But both are project-level settings a team can change, and both directions of change carry a real cost. Disabling refresh-token rotation means
 a single leaked or stolen refresh token remains valid to mint new access tokens INDEFINITELY, with no
 rotation-based detection or invalidation when the legitimate holder's own refresh request reuses it; this is
 CWE-613 (Insufficient Session Expiration) in close to its purest form, since there is no longer any mechanism that

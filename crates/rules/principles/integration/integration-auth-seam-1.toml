@@ -31,7 +31,7 @@ title = "CONVENTIONS.md: §ARCH-SERVER-AUTHZ-1 (authorization on the server; UI 
 
 [decision]
 question = "How does the project verify that every UI affordance it gates on a permission maps to a producer endpoint that enforces that permission server-side?"
-why = "The classic authorization gap is a cross-agent inconsistency no per-agent gate catches: the UI agent hides a button behind a permission and ships a clean diff; the API agent ships a clean diff for an endpoint that enforces nothing; and the SEAM is wrong (the button is hidden but the endpoint is open). The integration tier is the only place positioned to enforce 'every gated affordance maps to a guarded endpoint.' The rule is RELATIONAL and PER-SEAM: it fires ONLY for affordances the UI actually gates. A public endpoint the UI does not gate is out of scope, no false positive, and an intentionally-public endpoint is waived per-endpoint."
+why = "The classic authorization gap is a cross-agent inconsistency no per-agent gate catches: the UI agent hides a button behind a permission and ships a clean diff; the API agent ships a clean diff for an endpoint that enforces nothing; and the SEAM is wrong (the button is hidden but the endpoint is open). The integration tier is the only place positioned to enforce 'every gated affordance maps to a guarded endpoint.' The rule is RELATIONAL and PER-SEAM: it fires ONLY for affordances the UI actually gates. A public endpoint the UI does not gate is out of scope (no false positive) and an intentionally-public endpoint is waived per-endpoint."
 
 [[option]]
 id = "reconcile-gated-affordance-to-guarded-endpoint"

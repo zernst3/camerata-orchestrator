@@ -31,8 +31,7 @@ question = "Is every column that represents a money or currency amount declared 
 default = "money-is-numeric-or-integer-minor-units"
 why = """
 PostgreSQL's own documentation states this as plainly as a vendor doc ever states anything: `real` and `double
-precision` are INEXACT types, 'storing and retrieving a value might show slight discrepancies' and 'comparing two
-floating-point values for equality might not always work as expected', and the documentation explicitly recommends
+precision` are INEXACT types ('storing and retrieving a value might show slight discrepancies' and 'comparing two floating-point values for equality might not always work as expected'), and the documentation explicitly recommends
 `numeric` 'for storing monetary amounts and other quantities where exactness is required.' This is not a stylistic
 preference; it is CWE-1339 (Insufficient Precision or Accuracy of a Real Number) manifesting in the single domain
 where the gap between 'close enough' and 'exact' has a direct dollar cost: a running total computed by summing
@@ -41,8 +40,7 @@ with the number of operations, and `WHERE amount = 19.99` can fail to match a ro
 literal value 19.99, because neither the comparison value nor the stored value round-trips through IEEE 754 binary
 floating point exactly.
 
-The accepted alternative to `numeric`/`decimal` is an exact INTEGER representing minor units (cents), `amount_cents
-integer`, which is also exact and sometimes preferred for arithmetic-heavy ledger systems; what is never acceptable
+The accepted alternative to `numeric`/`decimal` is an exact INTEGER representing minor units (cents), such as `amount_cents integer`, which is also exact and sometimes preferred for arithmetic-heavy ledger systems; what is never acceptable
 is a floating-point type for any column representing an amount of money, since the entire category of bug (off-by-a-
 fraction-of-a-cent totals, equality checks that silently fail) is one PostgreSQL's own type system exists to make
 impossible to write by accident.

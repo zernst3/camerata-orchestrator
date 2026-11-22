@@ -30,8 +30,7 @@ title = "PostgreSQL: Enumerated Types: a native enum type restricts a column to 
 question = "What position does the project take on constraining a closed-set-valued column (native enum, CHECK list or lookup-table FK) versus leaving it an unconstrained text column?"
 default = "pick-one-enum-strategy-by-volatility-and-cross-table-reuse"
 why = """
-A column like `status`, `role`, or `type` very often represents a closed, application-meaningful set of values
-('pending/active/closed', 'admin/member/viewer') that the application code treats as closed (a TypeScript union, a
+A column like `status`, `role`, or `type` very often represents a closed, application-meaningful set of values (such as 'pending/active/closed' or 'admin/member/viewer') that the application code treats as closed (a TypeScript union, a
 switch statement with no default case, a constant array used for validation). Declared as a bare `text`/`varchar`
 column with no database-level constraint, that closedness is a convention enforced ONLY by the application layer
 that happens to validate it, which means a migration, a bulk import, a different service, or a typo in a literal

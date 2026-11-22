@@ -60,9 +60,7 @@ separately: CWE-639 (Authorization Bypass Through User-Controlled Key) describes
 function that uses a caller-supplied key (here, a tenant/parent/owner id passed as a plain
 parameter) to select a resource, without verifying the caller is entitled to that specific key.
 Because the function runs as SECURITY DEFINER, the RLS policies that would otherwise constrain
-which rows a direct table query could return never run. The function's own body is the only
-place such a check can happen, and if it's absent, any caller who can invoke the function at all
-(granted via `anon`, `public` or `authenticated`: Supabase/PostgREST's own broad roles) can
+which rows a direct table query could return never run. The function's own body is the only place such a check can happen, and if it's absent, any caller who can invoke the function at all (granted via `anon`, `public`, or `authenticated`, which are Supabase/PostgREST's own broad roles) can
 substitute ANY id and read another tenant's, owner's or user's rows.
 
 This is functionally identical to the IDOR (Insecure Direct Object Reference) class of defect in

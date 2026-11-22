@@ -40,7 +40,7 @@ WORKFLOW RUNS, not at the time the workflow was last reviewed or merged. A tag (
 mutable by design: the action's own maintainer can re-point it, and if that maintainer's account or their publishing
 pipeline is ever compromised, the attacker can re-point the SAME tag every consumer's workflow already trusts to a
 malicious commit, and every workflow referencing that tag starts executing the attacker's code on its NEXT run, with
-no change to the consuming repository's own files at all, nothing for a PR review or a diff to catch, because the
+no change to the consuming repository's own files at all. Nothing for a PR review or a diff to catch, because the
 consuming workflow's YAML never changed.
 
 This is not a hypothetical: supply-chain compromises of popular third-party GitHub Actions (a maintainer account
