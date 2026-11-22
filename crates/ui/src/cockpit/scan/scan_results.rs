@@ -461,6 +461,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // Closing it gives the keyboard back to where it was opened from: the viewer (which does
     // that itself) or the detail pane.
     super::viewer::use_hub_focus_return(hub_open, try_use_context::<super::viewer::ViewerSlot>());
+    // The place a reviewer opened from the hub (a place that follows a standard has no row). The
+    // viewer for it is drawn above the hub, so closing it leaves the hub as it was.
+    let mut place_open = use_signal(|| Option::<super::queue_table::PlaceOpen>::None);
     let mut queue_rule_filter = use_signal(|| Option::<String>::None);
     let mut processing = use_signal(|| false);
     // ── THE GATED CONVENTION COMMIT (design §3; Q3 + Q4) ──────────────────────
@@ -930,6 +933,9 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                     hub_open.set(None);
                 }),
                 on_close: Callback::new(move |()| hub_open.set(None)),
+                on_open_place: Some(Callback::new(move |p: super::queue_table::PlaceOpen| {
+                    place_open.set(Some(p));
+                })),
                 // The reviewer's ruling on the standard: accept an option, leave it to the
                 // client or withdraw. Saved on the server; the review is read again after.
                 on_ruling: {
@@ -954,6 +960,21 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         });
                     }))
                 },
+            }
+        }
+        // THE PLACE VIEWER, above the hub: the code viewer on one place the hub listed.
+        if let Some(place) = place_open.read().clone() {
+            {
+                let choice = audited_shas(&report, audited.as_ref());
+                rsx! {
+                    super::super::place_viewer::PlaceViewer {
+                        sha: choice.shas.get(&place.repo).cloned().unwrap_or_default(),
+                        sha_conflict: choice.conflicts.contains(&place.repo),
+                        project_id: project_id.clone(),
+                        on_close: Callback::new(move |()| place_open.set(None)),
+                        place,
+                    }
+                }
             }
         }
         // THE COMMIT DIALOG (Q4's gate). Hosted at the results-subtree root for the same
