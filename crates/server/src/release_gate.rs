@@ -885,3 +885,6 @@ mod internal_only_tests;
 
 #[cfg(test)]
 mod operator_only_tests;
+
+#[cfg(test)]
+mod published_example_tests;

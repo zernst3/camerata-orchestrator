@@ -36,6 +36,26 @@ impl SecretMatch {
         self.twin.is_none()
     }
 
+    /// True when the match must be masked in anything a CLIENT receives: a secret; a key a
+    /// vendor publishes in its documentation; or a placeholder-word twin whose word is buried in
+    /// the value instead of delimited (the client rule, stricter than the scan floor's: see
+    /// `placeholder_holds_for_client`). These stay twins for every other purpose, so the scan
+    /// floor and the model-side redaction are unchanged. A value documented only as one
+    /// setting's value (a config enum) is not a key and stays readable. `text` is what the
+    /// match came from.
+    pub fn is_client_visible_secret(&self, text: &str) -> bool {
+        match &self.twin {
+            None => true,
+            Some(Twin::PlaceholderWord(_)) => {
+                !crate::twins::placeholder_holds_for_client(self.shape, &text[self.value.clone()])
+            }
+            Some(twin) if twin.ships_unmasked() => false,
+            Some(_) => crate::published::is_documentation_key(&crate::twins::sha256_hex(
+                &text[self.value.clone()],
+            )),
+        }
+    }
+
     /// True when the match should still be listed as a finding row: a secret, or a twin the floor
     /// keeps (a committed placeholder key is still worth a row; a public anon key is not).
     fn counts_as_finding(&self) -> bool {
@@ -529,6 +549,15 @@ pub fn detect_all(text: &str) -> Vec<SecretMatch> {
 pub fn detect_secrets(text: &str) -> Vec<SecretMatch> {
     let mut matches = detect_all(text);
     matches.retain(SecretMatch::is_secret);
+    matches
+}
+
+/// What a CLIENT may not see unmasked: [`detect_secrets`] plus the published documentation keys
+/// (see [`SecretMatch::is_client_visible_secret`]). The client redactor and the export release
+/// gate use this; every other caller keeps [`detect_secrets`].
+pub fn detect_client_secrets(text: &str) -> Vec<SecretMatch> {
+    let mut matches = detect_all(text);
+    matches.retain(|m| m.is_client_visible_secret(text));
     matches
 }
 

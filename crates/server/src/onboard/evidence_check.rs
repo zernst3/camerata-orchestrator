@@ -184,7 +184,7 @@ fn snippet_near_line_indexed(file: &IndexedFile<'_>, snippet: &str, line: usize)
     if normalise(window).contains(&needle) {
         return true;
     }
-    let redacted = crate::onboard::redact::redact_visible(window);
+    let redacted = crate::onboard::redact::redact_visible_for_client(window);
     normalise(&redacted).contains(&needle)
 }
 
