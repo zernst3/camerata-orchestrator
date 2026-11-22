@@ -7,6 +7,7 @@
 
 use super::Problem;
 use crate::report_export::ReviewedReport;
+use camerata_api_types::package_paths::ALL_FINDINGS_JSON;
 
 /// The rules the gate holds for `reviewed`, as (repo, rule id).
 pub fn split_rules(reviewed: &ReviewedReport) -> Vec<(String, String)> {
@@ -22,7 +23,7 @@ pub fn problems(reviewed: &ReviewedReport) -> Vec<Problem> {
         .into_iter()
         .map(|(repo, rule)| {
             Problem::new(
-                "findings.json",
+                ALL_FINDINGS_JSON,
                 format!("{repo} {rule}"),
                 format!(
                     "the rule {rule} is split between options and has no decision. Recommend an \
