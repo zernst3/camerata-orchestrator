@@ -346,3 +346,96 @@ fn a_deletion_that_fails_part_way_leaves_memory_and_disk_agreeing() {
         }
     }
 }
+
+// ── one draft file per project ────────────────────────────────────────────────────────────
+
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn deleting_one_project_removes_exactly_its_draft_files_and_leaves_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = DraftStore::at(dir.path().join("onboarding-draft.json"));
+    store.save("p1", serde_json::json!({"scan": 1}));
+    store.save("p1", serde_json::json!({"scan": 2}));
+    store.save("p2", serde_json::json!({"scan": 3}));
+    store.save("p2", serde_json::json!({"scan": 4}));
+    // A set-aside copy of each project's own file.
+    std::fs::write(
+        dir.path()
+            .join("onboarding-draft-p1.json.unreadable-1700000000"),
+        "{ torn p1",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path()
+            .join("onboarding-draft-p2.json.unreadable-1700000000"),
+        "{ torn p2",
+    )
+    .unwrap();
+
+    store.clear_checked("p1").unwrap();
+
+    let names = names_in(dir.path());
+    assert!(
+        names.iter().all(|n| !n.contains("p1")),
+        "nothing of p1 is left: {names:?}"
+    );
+    for f in [
+        "onboarding-draft-p2.json",
+        "onboarding-draft-p2.json.bak",
+        "onboarding-draft-p2.json.unreadable-1700000000",
+    ] {
+        assert!(names.iter().any(|n| n == f), "{f} untouched: {names:?}");
+    }
+    assert_eq!(store.load("p2"), Some(serde_json::json!({"scan": 4})));
+    assert!(store.load("p1").is_none());
+}
+
+#[test]
+fn a_shared_draft_file_is_split_into_one_file_per_project_and_kept_as_the_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = dir.path().join("onboarding-draft.json");
+    let text = r#"{"p1":{"scan":1},"p2":{"scan":2},"_cleared_at":{"p1":"2026-11-19T10:00:00Z","p3":"2026-11-19T11:00:00Z"}}"#;
+    std::fs::write(&shared, text).unwrap();
+
+    let store = DraftStore::at(shared.clone());
+    assert_eq!(store.load("p1"), Some(serde_json::json!({"scan": 1})));
+    assert_eq!(store.load("p2"), Some(serde_json::json!({"scan": 2})));
+    let read = |f: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(f)).unwrap()).unwrap()
+    };
+    assert_eq!(
+        read("onboarding-draft-p1.json"),
+        serde_json::json!({"p1": {"scan": 1}, "_cleared_at": {"p1": "2026-11-19T10:00:00Z"}})
+    );
+    assert_eq!(
+        read("onboarding-draft-p2.json"),
+        serde_json::json!({"p2": {"scan": 2}})
+    );
+    assert_eq!(
+        read("onboarding-draft-p3.json"),
+        serde_json::json!({"_cleared_at": {"p3": "2026-11-19T11:00:00Z"}}),
+        "a discard stamp with no draft keeps its own file"
+    );
+    assert!(!shared.exists(), "the shared name is free");
+    let backup = dir.path().join("onboarding-draft.json.shared-backup");
+    assert_eq!(
+        std::fs::read_to_string(&backup).unwrap(),
+        text,
+        "the shared file is kept whole as the backup"
+    );
+
+    let before = names_in(dir.path());
+    let again = DraftStore::at(shared);
+    assert_eq!(names_in(dir.path()), before, "a second start changes nothing");
+    assert_eq!(again.load("p2"), Some(serde_json::json!({"scan": 2})));
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), text);
+}

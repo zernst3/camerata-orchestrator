@@ -1311,3 +1311,120 @@ async fn a_cleared_projects_deletion_leaves_its_id_nowhere_in_the_draft_file_or_
         "another project's draft is kept"
     );
 }
+
+// ── a checkout is used by a project through its repos OR through its inspections ────────────
+
+/// An onboarding project: no repos yet (they join at Apply), one saved inspection of `REPO`.
+fn add_onboarding_project(fx: &Fx, name: &str) -> String {
+    let b = fx.state.projects.create(name, vec![]).unwrap();
+    fx.state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &b.id,
+            report_at(REPO, &fx.head),
+            crate::inspections::InspectionKind::Full,
+        ))
+        .unwrap();
+    b.id
+}
+
+#[tokio::test]
+async fn a_checkout_an_onboarding_project_triages_is_kept_and_named_when_another_project_is_deleted()
+{
+    let fx = fixture();
+    let _b = add_onboarding_project(&fx, "Onboarding Beta");
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(
+        fx.checkout.exists(),
+        "the checkout an onboarding project is triaging stays"
+    );
+    assert!(
+        out.record
+            .kept
+            .iter()
+            .any(|k| k.what.contains(REPO) && k.why.contains("Onboarding Beta")),
+        "the record names it: {:?}",
+        out.record.kept
+    );
+}
+
+#[tokio::test]
+async fn an_onboarding_project_can_delete_the_source_of_the_repo_it_inspected() {
+    use super::delete::{delete_source, DeleteOutcome, DeleteRequest};
+    let fx = fixture();
+    // The only project: it inspected REPO but has not applied rules, so `repos` is empty.
+    fx.state
+        .projects
+        .update(&fx.project_id, |p| p.repos.clear())
+        .unwrap();
+    fx.state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &fx.project_id,
+            report_at(REPO, &fx.head),
+            crate::inspections::InspectionKind::Full,
+        ))
+        .unwrap();
+
+    let request = DeleteRequest {
+        confirm: REPO.to_string(),
+        include_uncommitted: false,
+    };
+    match delete_source(&fx.state, &fx.project_id, REPO, &request).await {
+        Ok(DeleteOutcome::Done { partial, .. }) => assert!(!partial),
+        other => panic!("expected a deletion, not {:?}", other.err()),
+    }
+    assert!(!fx.checkout.exists(), "the checkout is gone");
+}
+
+#[tokio::test]
+async fn the_project_holding_the_deletion_record_is_the_owner_ahead_of_an_inspection_only_one() {
+    use super::delete::{delete_source, DeleteRequest};
+    use super::read::{source_for_read, SourceRead};
+    let fx = fixture();
+    let request = DeleteRequest {
+        confirm: REPO.to_string(),
+        include_uncommitted: false,
+    };
+    delete_source(&fx.state, &fx.project_id, REPO, &request)
+        .await
+        .unwrap();
+    // Later, an onboarding project that inspected the same repo is the active one.
+    let b = add_onboarding_project(&fx, "Onboarding Beta");
+    assert!(fx.state.projects.set_active(&b));
+
+    let read = source_for_read(&fx.state, None, REPO, None).await.unwrap();
+    assert!(
+        matches!(read, SourceRead::Deleted { .. }),
+        "the record's holder answers: {read:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_unlinked_reason_does_not_say_this_project_when_no_project_was_named() {
+    use super::read::{source_for_read, SourceRead};
+    let fx = fixture();
+    match source_for_read(&fx.state, None, "nobody/knows", None)
+        .await
+        .unwrap()
+    {
+        SourceRead::Unresolved { reason } => {
+            assert!(!reason.contains("this project"), "{reason}");
+            assert!(reason.contains("nobody/knows"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    match source_for_read(&fx.state, Some(&fx.project_id), "nobody/knows", None)
+        .await
+        .unwrap()
+    {
+        SourceRead::Unresolved { reason } => {
+            assert!(reason.contains("this project"), "named project: {reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+}

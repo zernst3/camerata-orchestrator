@@ -338,6 +338,9 @@ pub struct SymbolRefsView {
     /// There were more than the list holds.
     #[serde(default)]
     pub more: bool,
+    /// When the repo's source was deleted from this machine (RFC 3339), when the record says.
+    #[serde(default)]
+    pub deleted_at: String,
 }
 
 /// What a references answer means for the list.
@@ -1338,5 +1341,39 @@ mod tests {
         );
         assert_eq!(b.line_count(), 3);
         assert_eq!(b.disposition, "Unresolved");
+    }
+
+    #[test]
+    fn a_repo_that_was_deleted_is_said_to_be_deleted_with_the_date_when_the_record_has_one() {
+        let with_date = SymbolRefsView {
+            status: "file_missing".into(),
+            deleted_at: "2026-10-24T17:40:19Z".into(),
+            ..SymbolRefsView::default()
+        };
+        match with_date.outcome() {
+            RefsOutcome::Note(t) => {
+                assert!(t.contains("deleted"), "{t}");
+                assert!(t.contains("24 Oct 2026"), "{t}");
+                assert!(!t.contains("was not found"), "{t}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let no_record = SymbolRefsView {
+            status: "file_missing".into(),
+            ..SymbolRefsView::default()
+        };
+        match no_record.outcome() {
+            RefsOutcome::Note(t) => assert!(t.contains("deleted"), "{t}"),
+            other => panic!("{other:?}"),
+        }
+        let source_deleted = SymbolRefsView {
+            status: "source_deleted".into(),
+            deleted_at: "2026-10-24T17:40:19Z".into(),
+            ..SymbolRefsView::default()
+        };
+        match source_deleted.outcome() {
+            RefsOutcome::Note(t) => assert!(t.contains("24 Oct 2026"), "{t}"),
+            other => panic!("{other:?}"),
+        }
     }
 }
