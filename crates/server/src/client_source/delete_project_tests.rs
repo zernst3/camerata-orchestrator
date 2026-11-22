@@ -1490,3 +1490,136 @@ async fn the_unlinked_reason_does_not_say_this_project_when_no_project_was_named
         other => panic!("{other:?}"),
     }
 }
+
+// ── round 2: a project owns a repo through its inspections everywhere deletion looks ────────
+
+/// An onboarding-only project: no repos, one saved inspection of `REPO`.
+fn make_onboarding_only(fx: &Fx) {
+    fx.state
+        .projects
+        .update(&fx.project_id, |p| p.repos.clear())
+        .unwrap();
+    fx.state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &fx.project_id,
+            report_at(REPO, &fx.head),
+            crate::inspections::InspectionKind::Full,
+        ))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn deleting_an_onboarding_only_project_removes_its_inspected_checkout_and_names_it() {
+    let fx = fixture();
+    make_onboarding_only(&fx);
+    let cli = fx.roots().cli_state_dir.unwrap();
+    let key = repo_state_key(&fx.checkout);
+    write(&cli.join(format!("{key}.cache.json")), "cache");
+    write(&cli.join(format!("{key}.ledger.json")), "ledger");
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(!out.partial, "{:?}", out.record.items);
+    assert!(!fx.checkout.exists(), "the inspected checkout is removed");
+    assert!(!cli.join(format!("{key}.cache.json")).exists());
+    assert!(!cli.join(format!("{key}.ledger.json")).exists());
+    assert!(
+        out.record.repos.iter().any(|r| r == REPO),
+        "the record names it: {:?}",
+        out.record.repos
+    );
+}
+
+fn put_run(fx: &Fx, run_id: &str, project_id: Option<&str>) -> PathBuf {
+    let cli = fx.roots().cli_state_dir.unwrap();
+    let run_dir = cli.join("runs").join(run_id);
+    let record = RunRecord {
+        schema: STORE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        created_at: NOW.to_string(),
+        updated_at: NOW.to_string(),
+        status: RunStatus::Complete,
+        origin: RunOrigin::Cockpit,
+        project_id: project_id.map(str::to_string),
+        attempt: 1,
+        engine_version: "9.9.9".to_string(),
+        project_key: "k".to_string(),
+        repos: vec![crate::run_store::RepoRecord {
+            name: REPO.to_string(),
+            dir: fx.checkout.to_string_lossy().into_owned(),
+            commit: None,
+            clean: true,
+            tree_at_start: String::new(),
+            tree_at_end: None,
+        }],
+        models: ModelsRecord {
+            audit: "m".into(),
+            calibration: "m".into(),
+            fix: "m".into(),
+            backend: "cli".into(),
+            mode: "auto".into(),
+            resolved: true,
+            group_review: String::new(),
+            finder: String::new(),
+            finder_model: String::new(),
+        },
+        rules_fingerprint: String::new(),
+        ai_scan_key: Default::default(),
+        nonce_seed: String::new(),
+        args: serde_json::Value::Null,
+        estimate_usd: None,
+        plan: Vec::new(),
+        incomplete_reasons: Vec::new(),
+        notes: Vec::new(),
+    };
+    let run_json = run_dir.join("run.json");
+    write(&run_json, &serde_json::to_string(&record).unwrap());
+    run_json
+}
+
+#[tokio::test]
+async fn files_covering_a_folder_an_onboarding_project_inspected_are_kept_and_named() {
+    let fx = fixture();
+    let _b = add_onboarding_project(&fx, "Onboarding Beta");
+    let cli = fx.roots().cli_state_dir.unwrap();
+    let canon = fx
+        .checkout
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let set = "project-1-aaaa00000";
+    write(
+        &cli.join(format!("{set}.repos.json")),
+        &serde_json::to_string(&vec![canon]).unwrap(),
+    );
+    write(&cli.join(format!("{set}.cache.json")), "set cache");
+    let projectless = put_run(&fx, "run-cccccccccccc", None);
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(
+        cli.join(format!("{set}.cache.json")).is_file(),
+        "the set files stay"
+    );
+    assert!(cli.join(format!("{set}.repos.json")).is_file());
+    assert!(projectless.is_file(), "the project-less run stays");
+    assert!(
+        out.record.kept.iter().any(|k| k.what.contains(set)),
+        "{:?}",
+        out.record.kept
+    );
+    assert!(
+        out.record
+            .kept
+            .iter()
+            .any(|k| k.what.contains("run-cccccccccccc")),
+        "{:?}",
+        out.record.kept
+    );
+}
