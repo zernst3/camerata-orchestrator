@@ -595,6 +595,23 @@ pub(super) fn counts_problems_with(
             ));
         }
     }
+    let grid_total: usize = report
+        .priority_grid
+        .rows
+        .iter()
+        .flat_map(|row| row.cells.iter())
+        .map(|cell| cell.count)
+        .sum();
+    if grid_total != want.problems.for_action {
+        problems.push(problem(
+            "PDF data",
+            "priority_grid.cells",
+            format!(
+                "the grid's cells add up to {grid_total} and the counts give {} problems for action",
+                want.problems.for_action
+            ),
+        ));
+    }
     problems.extend(workbook_problems(entries, want));
     problems.extend(order_problems(entries, report, want));
     if let Some(csv) = entries.get("csv/tickets.csv") {
@@ -634,7 +651,7 @@ pub(super) fn counts_problems_with(
     }
     let next_steps = &report.methodology.next_steps;
     let expected = counts_prose::decision_sentence(want);
-    if counts_prose::states_decision_count(want, report.review_state) {
+    if counts_prose::states_decision_count(report.review_state, report.internal) {
         if !next_steps.contains(&expected) {
             problems.push(problem(
                 "PDF data",
@@ -642,12 +659,22 @@ pub(super) fn counts_problems_with(
                 format!("the next steps do not state {expected:?}; they read {next_steps:?}"),
             ));
         }
-    } else if next_steps.contains("reviewer's decision") || next_steps.contains("so far") {
-        problems.push(problem(
-            "PDF data",
-            "methodology.next_steps",
-            format!("a released package's next steps must not state a decision count or say \"so far\"; they read {next_steps:?}"),
-        ));
+    } else {
+        // A released client package: the next steps equal the rebuilt sentence, which states no
+        // decision count and no "so far".
+        let rebuilt = counts_prose::next_steps(
+            want,
+            report.cover.repos.len() > 1,
+            report.review_state,
+            report.internal,
+        );
+        if *next_steps != rebuilt {
+            problems.push(problem(
+                "PDF data",
+                "methodology.next_steps",
+                format!("a released package's next steps read {next_steps:?} and the counts give {rebuilt:?}"),
+            ));
+        }
     }
 
     // 5. No stray number in an override.

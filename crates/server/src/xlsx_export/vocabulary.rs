@@ -27,7 +27,7 @@ pub const DEPARTURES: &str = "Departures";
 pub const DEPENDENCIES: &str = "Dependencies";
 pub const RULES_CHECKED: &str = "Rules checked";
 pub const PATTERNS_ACROSS_SERVICES: &str = "Patterns across services";
-pub const RULED_OUT: &str = "Ruled out";
+pub const RULED_OUT: &str = camerata_api_types::RULED_OUT_SHEET;
 pub const NOT_CHECKED: &str = "Not checked";
 /// Excel caps a sheet name at 31 characters, so "(complete record)" is said by the sheet's own
 /// first lines and by the Start here list, not by the tab.

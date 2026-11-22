@@ -128,12 +128,12 @@ pub(crate) fn decision_sentence(c: &ReportCounts) -> String {
     )
 }
 
-/// Whether the next steps state the decision count and how many rows are ruled out so far. A
-/// released package (reviewed, with nothing left to decide, which the release gate requires)
-/// reads as finished and states neither; a draft and a reviewed export that still holds
-/// decisions state both. The gate asks this same function.
-pub(crate) fn states_decision_count(c: &ReportCounts, state: ReviewState) -> bool {
-    state.is_draft() || c.problems.needs_decision > 0
+/// Whether the next steps state the decision count and how many rows are ruled out so far. Only a
+/// draft and an internal package do: a released client package reads as finished and states
+/// neither, whatever the counts say (the release gate does not force every held row to a
+/// decision). The gate asks this same function.
+pub(crate) fn states_decision_count(state: ReviewState, internal: bool) -> bool {
+    state.is_draft() || internal
 }
 
 /// The methodology line: the source rows reconciled once, in row words (design 5.6).
@@ -192,15 +192,24 @@ pub(crate) fn suppressions_sentence(c: &ReportCounts) -> String {
 }
 
 /// The three steps from here, with the decision sentence in the first.
-pub(crate) fn next_steps(c: &ReportCounts, multi_repo: bool, state: ReviewState) -> String {
+pub(crate) fn next_steps(
+    c: &ReportCounts,
+    multi_repo: bool,
+    state: ReviewState,
+    internal: bool,
+) -> String {
     let (rescan_object, introduces) = if multi_repo {
         ("repositories", "the codebases introduce")
     } else {
         ("repository", "the codebase introduces")
     };
-    let stated = states_decision_count(c, state);
+    let stated = states_decision_count(state, internal);
     let mut status = if !stated {
-        String::new()
+        if c.problems.total == 0 {
+            " This run produced no problems.".to_string()
+        } else {
+            String::new()
+        }
     } else if c.problems.total == 0 {
         " This run produced no problems, so there is no fix rate to report and no problems need a reviewer's decision.".to_string()
     } else {
@@ -421,24 +430,30 @@ mod ruled_out_wording_tests {
     /// A released package's next steps read finished: no "so far", no decision count.
     #[test]
     fn released_next_steps_have_no_so_far_and_no_decision_count() {
-        for c in [counts(213, 0, 21), counts(0, 0, 4)] {
-            let text = next_steps(&c, false, ReviewState::Reviewed);
+        // Whatever needs_decision says: a released client package never prints the count.
+        for c in [counts(213, 0, 21), counts(0, 0, 4), counts(9, 3, 2)] {
+            let text = next_steps(&c, false, ReviewState::Reviewed, false);
             assert!(!text.contains("so far"), "{text}");
             assert!(!text.contains("need a reviewer's decision"), "{text}");
             assert!(!text.contains("needs a reviewer's decision"), "{text}");
             assert!(text.contains("Second, a retest"), "{text}");
         }
+        let none = next_steps(&counts(0, 0, 4), false, ReviewState::Reviewed, false);
+        assert!(
+            none.contains(" This run produced no problems. Second"),
+            "a released package with no problems says so, count free: {none}"
+        );
     }
 
-    /// A draft and a reviewed export that still holds decisions keep stating the count.
+    /// A draft and an internal package keep stating the count; a released client package does not.
     #[test]
-    fn drafts_and_unfinished_reviews_keep_the_decision_count() {
-        let draft = next_steps(&counts(5, 0, 0), false, ReviewState::Raw);
+    fn drafts_and_internal_packages_keep_the_decision_count() {
+        let draft = next_steps(&counts(5, 0, 0), false, ReviewState::Raw, false);
         assert!(
             draft.contains("0 of 5 problems need a reviewer's decision"),
             "{draft}"
         );
-        let open = next_steps(&counts(5, 2, 3), false, ReviewState::Reviewed);
+        let open = next_steps(&counts(5, 2, 3), false, ReviewState::Reviewed, true);
         assert!(
             open.contains("2 of 5 problems need a reviewer's decision"),
             "{open}"
@@ -447,13 +462,12 @@ mod ruled_out_wording_tests {
             open.contains("3 source rows are ruled out so far."),
             "{open}"
         );
-        assert!(states_decision_count(
-            &counts(5, 2, 0),
-            ReviewState::Reviewed
-        ));
-        assert!(!states_decision_count(
-            &counts(5, 0, 0),
-            ReviewState::Reviewed
-        ));
+        // A released client package never states it, even with decisions open.
+        let released = next_steps(&counts(5, 2, 3), false, ReviewState::Reviewed, false);
+        assert!(!released.contains("reviewer's decision"), "{released}");
+        assert!(!released.contains("so far"), "{released}");
+        assert!(states_decision_count(ReviewState::Raw, false));
+        assert!(states_decision_count(ReviewState::Reviewed, true));
+        assert!(!states_decision_count(ReviewState::Reviewed, false));
     }
 }

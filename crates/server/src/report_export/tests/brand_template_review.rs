@@ -329,7 +329,7 @@ fn methodology_next_steps_states_the_decision_count_not_the_placeholder_sentence
         !notes.contains("reviewer's decision") && !notes.contains("so far"),
         "a released paragraph states neither: {notes}"
     );
-    let draft = counts_prose::next_steps(&json.counts, false, ReviewState::Raw);
+    let draft = counts_prose::next_steps(&json.counts, false, ReviewState::Raw, false);
     assert!(
         draft.contains("0 of 3 problems need a reviewer's decision"),
         "a draft states the real counts: {draft}"
@@ -357,7 +357,8 @@ fn counts_of_problems(total: usize, needs: usize, ruled_out: usize) -> ReportCou
 
 #[test]
 fn next_steps_note_singular_finding_noun_at_exactly_one_candidate() {
-    let note = counts_prose::next_steps(&counts_of_problems(1, 0, 0), false, ReviewState::Raw);
+    let note =
+        counts_prose::next_steps(&counts_of_problems(1, 0, 0), false, ReviewState::Raw, false);
     assert!(
         note.contains("0 of 1 problem need a reviewer's decision"),
         "a single problem must use the singular noun, not 'problems': {note}"
@@ -370,7 +371,12 @@ fn next_steps_note_singular_finding_noun_at_exactly_one_candidate() {
 /// of problems that need a decision must be named so the backlog isn't invisible.
 #[test]
 fn next_steps_note_draft_with_held_rows_names_the_held_count_with_no_percentage() {
-    let note = counts_prose::next_steps(&counts_of_problems(23, 23, 0), false, ReviewState::Raw);
+    let note = counts_prose::next_steps(
+        &counts_of_problems(23, 23, 0),
+        false,
+        ReviewState::Raw,
+        false,
+    );
     assert!(
         !note.contains('%'),
         "a draft export must never print a fix-rate percentage: {note}"
@@ -390,8 +396,12 @@ fn next_steps_note_draft_with_held_rows_names_the_held_count_with_no_percentage(
 /// units). A released one (nothing to decide) states neither count.
 #[test]
 fn next_steps_note_reviewed_with_exclusions_states_the_rows_ruled_out() {
-    let note =
-        counts_prose::next_steps(&counts_of_problems(17, 2, 3), false, ReviewState::Reviewed);
+    let note = counts_prose::next_steps(
+        &counts_of_problems(17, 2, 3),
+        false,
+        ReviewState::Reviewed,
+        true,
+    );
     assert!(
         note.contains("2 of 17 problems need a reviewer's decision")
             && note.contains("3 source rows are ruled out so far"),
@@ -403,8 +413,12 @@ fn next_steps_note_reviewed_with_exclusions_states_the_rows_ruled_out() {
 /// Reviewed export with nothing ruled out: the ruled out clause does not appear.
 #[test]
 fn next_steps_note_reviewed_with_no_exclusions_omits_the_ruled_out_clause() {
-    let note =
-        counts_prose::next_steps(&counts_of_problems(20, 1, 0), false, ReviewState::Reviewed);
+    let note = counts_prose::next_steps(
+        &counts_of_problems(20, 1, 0),
+        false,
+        ReviewState::Reviewed,
+        true,
+    );
     assert!(note.contains("1 of 20 problems"), "{note}");
     assert!(
         !note.contains("ruled out so far"),
@@ -1206,7 +1220,10 @@ fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
     assert!(n.contains("1 is accepted risk"), "{n}");
     assert!(n.contains("1 needs a reviewer's decision"), "{n}");
     assert!(
-        n.contains("1 source row was ruled out after review; it is listed with the reason on the Ruled out sheet"),
+        n.contains(&format!(
+            "1 source row was ruled out after review; it is listed with the reason on the {} sheet",
+            crate::xlsx_export::vocabulary::RULED_OUT
+        )),
         "{n}"
     );
     assert!(
@@ -1563,8 +1580,13 @@ fn shipped_template_client_facing_text_has_no_audit_word() {
 fn no_client_facing_authored_string_contains_the_word_audit() {
     let candidates: Vec<String> = vec![
         AUDIT_REPORT_DISCLAIMER.to_string(),
-        counts_prose::next_steps(&counts_of_problems(7, 0, 3), false, ReviewState::Reviewed),
-        counts_prose::next_steps(&counts_of_problems(0, 0, 0), false, ReviewState::Raw),
+        counts_prose::next_steps(
+            &counts_of_problems(7, 0, 3),
+            false,
+            ReviewState::Reviewed,
+            false,
+        ),
+        counts_prose::next_steps(&counts_of_problems(0, 0, 0), false, ReviewState::Raw, false),
         ai_tier_note_for(
             ReviewState::Raw,
             0,

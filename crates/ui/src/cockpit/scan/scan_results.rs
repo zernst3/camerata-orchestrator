@@ -2178,6 +2178,8 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
 #[component]
 pub(super) fn QueueIntro() -> Element {
     rsx! {
-        p { class: "scan-section-sub", "The Queue holds what the scan ACCUSES the codebase of — defects and deviations. Triage each into one of four tables: leave it Unresolved, Ignore it (with a reason), save it as Tech debt, or mark it a False positive (with a reason — the tool was wrong; left out of the problem lists, kept with the reason on the Ruled out sheet, never baselined). The other three tabs are informational: they assert nothing is wrong and need no triage. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
+        p { class: "scan-section-sub",
+            {format!("The Queue holds what the scan ACCUSES the codebase of — defects and deviations. Triage each into one of four tables: leave it Unresolved, Ignore it (with a reason), save it as Tech debt, or mark it a False positive (with a reason — the tool was wrong; left out of the problem lists, kept with the reason on the {} sheet, never baselined). The other three tabs are informational: they assert nothing is wrong and need no triage. When nothing is Unresolved, Process the ignored + tech-debt buckets.", camerata_api_types::RULED_OUT_SHEET)}
+        }
     }
 }

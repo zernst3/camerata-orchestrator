@@ -1791,7 +1791,10 @@ fn the_queue_paragraph_says_false_positives_are_kept_on_the_ruled_out_sheet() {
     vdom.rebuild_in_place();
     let html = dioxus_ssr::render(&vdom);
     assert!(
-        html.contains("left out of the problem lists, kept with the reason on the Ruled out sheet"),
+        html.contains(&format!(
+            "left out of the problem lists, kept with the reason on the {} sheet",
+            camerata_api_types::RULED_OUT_SHEET
+        )),
         "{html}"
     );
     assert!(!html.contains("excluded from the report"), "{html}");
