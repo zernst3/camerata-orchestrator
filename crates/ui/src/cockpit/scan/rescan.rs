@@ -167,7 +167,7 @@ pub(in crate::cockpit) fn record_for_rule<'a>(
         return of_rule.max_by_key(|c| repos.iter().position(|r| r == &c.repo));
     }
     // The row shows this repo's recommendation, so it rules on this repo's record.
-    of_rule.filter(|c| c.repo == recommendation_repo).last()
+    of_rule.rev().find(|c| c.repo == recommendation_repo)
 }
 
 /// Build one rule's control line out of the scan's three sources. PURE, so the priority order
