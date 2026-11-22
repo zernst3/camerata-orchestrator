@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-HTML-SINK-1"
-version = 3
+version = 4
 title = "User- or attacker-influenced data is never rendered through a raw-HTML sink without sanitization"
 domain = "universal"
 layer = "universal"
@@ -31,7 +31,7 @@ DOM innerHTML, Vue's v-html, and template-engine "safe"/"raw"/autoescape-off fil
 framework's default output-encoding. When the value passed to one of these sinks contains any
 attacker-influenced substring (a stored comment, an uploaded profile field, a query-string
 parameter echoed back), the attacker's own <script>/onerror=/onclick= markup executes in the
-victim's browser session — classic stored or reflected cross-site scripting (CWE-79). The fix is
+victim's browser session: classic stored or reflected cross-site scripting (CWE-79). The fix is
 never "trust this one input" case by case; it is to run the value through an allowlist HTML
 sanitizer (DOMPurify or equivalent) immediately before the sink, or to avoid the raw-HTML sink
 entirely in favor of the framework's default escaped-text rendering.

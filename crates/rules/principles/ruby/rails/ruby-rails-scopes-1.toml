@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-SCOPES-1"
-version = 2
+version = 3
 title = "Reusable query conditions are named scopes on the model, not ad-hoc where chains at call sites"
 domain = "ruby:rails"
 layer = "framework"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "Where do reusable query conditions live: as named scopes on the model, or as where-clause chains repeated at each call site?"
 default = "named-scopes-on-model"
-why = "An ad-hoc `.where(status: 'active', deleted_at: nil)` repeated in three controllers and two background jobs is the same condition expressed five times. When the definition changes — a new flag added, a column renamed — each call site must be found and updated. A named scope (`scope :active, -> { where(status: 'active').where(deleted_at: nil) }`) is the single definition that all call sites compose. Scopes also chain with other scopes, enabling composable query building (`User.active.admin.by_created_at`) rather than long repetitive where clauses. Default scopes (applied automatically to every query on the model) are a separate decision with tradeoffs around clarity and unexpected filtering."
+why = "An ad-hoc `.where(status: 'active', deleted_at: nil)` repeated in three controllers and two background jobs is the same condition expressed five times. When the definition changes (a new flag added, a column renamed), each call site must be found and updated. A named scope (`scope :active, -> { where(status: 'active').where(deleted_at: nil) }`) is the single definition that all call sites compose. Scopes also chain with other scopes, enabling composable query building (`User.active.admin.by_created_at`) rather than long repetitive where clauses. Default scopes (applied automatically to every query on the model) are a separate decision with tradeoffs around clarity and unexpected filtering."
 
 [[option]]
 id = "named-scopes-on-model"

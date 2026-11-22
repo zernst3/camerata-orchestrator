@@ -1,5 +1,5 @@
 id = "TESTING-ARRANGE-ACT-ASSERT-1"
-version = 4
+version = 5
 title = "Structure every test as Arrange / Act / Assert with no interleaving"
 domain = "testing"
 layer = "universal"
@@ -33,7 +33,7 @@ directive = "Each test has exactly one setup block (Arrange), one action block (
 remediation = """
 Restructure the test into one setup block (Arrange), one action block (Act) and one assertion block (Assert), in that order, with no assertion before the action and no further action after the first assertion. Verify by confirming the test reads top to bottom as setup, then a single action, then assertions, with no interleaving.
 """
-why = "A consistent three-phase shape makes every test a self-documenting, scannable unit; interleaving phases obscures which action caused which outcome. This is about the internal ordering of one test's body, not about how much setup code is shared across tests — reasonable shared fixtures are compatible with AAA as long as each test's own Arrange/Act/Assert reads clearly."
+why = "A consistent three-phase shape makes every test a self-documenting, scannable unit; interleaving phases obscures which action caused which outcome. This is about the internal ordering of one test's body, not about how much setup code is shared across tests: reasonable shared fixtures are compatible with AAA as long as each test's own Arrange/Act/Assert reads clearly."
 
 [[option]]
 id = "freeform-no-required-structure"

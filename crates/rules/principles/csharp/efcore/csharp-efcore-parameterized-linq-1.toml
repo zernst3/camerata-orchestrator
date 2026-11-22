@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-PARAMETERIZED-LINQ-1"
-version = 3
+version = 4
 title = "LINQ queries pass values as parameters; string interpolation into raw SQL is forbidden"
 domain = "csharp:efcore"
 layer = "library"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How are user-controlled values passed into EF Core queries, including raw SQL escapes?"
 default = "linq-parameters-and-interpolated-sql"
-why = "EF Core's LINQ provider translates C# expressions into parameterized SQL by default: values in Where predicates, OrderBy keys, and LINQ projections are bound as ADO.NET parameters, never concatenated into the SQL string. SQL injection via the LINQ API is not possible when the LINQ provider generates the SQL. The risk appears at the raw SQL escape hatch: FromSqlRaw and ExecuteSqlRaw accept a plain string. If a developer writes FromSqlRaw($'SELECT * FROM Users WHERE Name = {name}') with C# string interpolation, the interpolated string is evaluated before FromSqlRaw receives it, producing a concatenated SQL string with the variable value embedded. EF Core receives an already-interpolated string and cannot parameterize it. The fix is FromSqlInterpolated($'SELECT * FROM Users WHERE Name = {name}'), which accepts a FormattableString and extracts the format arguments as parameters — visually identical but semantically safe. The mechanical enforcement rule bans the unsafe variant at the pattern level so the distinction does not rely on developer recall."
+why = "EF Core's LINQ provider translates C# expressions into parameterized SQL by default: values in Where predicates, OrderBy keys, and LINQ projections are bound as ADO.NET parameters, never concatenated into the SQL string. SQL injection via the LINQ API is not possible when the LINQ provider generates the SQL. The risk appears at the raw SQL escape hatch: FromSqlRaw and ExecuteSqlRaw accept a plain string. If a developer writes FromSqlRaw($'SELECT * FROM Users WHERE Name = {name}') with C# string interpolation, the interpolated string is evaluated before FromSqlRaw receives it, producing a concatenated SQL string with the variable value embedded. EF Core receives an already-interpolated string and cannot parameterize it. The fix is FromSqlInterpolated($'SELECT * FROM Users WHERE Name = {name}'), which accepts a FormattableString and extracts the format arguments as parameters: visually identical but semantically safe. The mechanical enforcement rule bans the unsafe variant at the pattern level so the distinction does not rely on developer recall."
 
 [[option]]
 id = "linq-parameters-and-interpolated-sql"

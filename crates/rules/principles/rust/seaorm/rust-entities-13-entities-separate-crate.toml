@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-13"
-version = 3
+version = 4
 title = "Where persistence entities live: their own crate, the infrastructure crate or the mapper crate"
 domain = "rust:seaorm"
 layer = "library"
@@ -11,8 +11,8 @@ default = false
 verification = "policy"
 
 [decision]
-question = "Where do persistence entity definitions live relative to the rest of the persistence layer: in a dedicated entities crate, co-located in the infrastructure crate, or together with the repository implementations?"
-why = "The right placement follows from whether the project keeps a separate mapper layer between domain and persistence, not from a presumed winner. A dedicated entities crate holding only entity definitions (no pool, driver, or repository code) lets a mapper crate depend on it without depending on infrastructure, which is what keeps the import graph acyclic when a mapper layer sits between domain and persistence — the natural fit for a layered hexagonal arrangement, at the cost of one more crate. Co-locating entities in the infrastructure crate alongside the pool, driver, and repositories removes that crate and is the simplest shape when there is no separate mapper layer to satisfy (entities are mapped inline within infrastructure, or the project maps domain types directly); its trade-off is that any mapper that needs the entities would then have to depend on infrastructure, which is why this option only works without a standalone mapper layer. Putting the repository implementations in the mapper crate alongside the translation code keeps data access and translation in one place, which some projects prefer for cohesion; its trade-off is that translation and adapter logic then share a crate despite having different lifecycles and test surfaces. Choose by whether a separate mapper layer is part of the architecture."
+question = "Where do persistence entity definitions live relative to the rest of the persistence layer: in a dedicated entities crate, co-located in the infrastructure crate or together with the repository implementations?"
+why = "The right placement follows from whether the project keeps a separate mapper layer between domain and persistence, not from a presumed winner. A dedicated entities crate holding only entity definitions (no pool, driver or repository code) lets a mapper crate depend on it without depending on infrastructure, which is what keeps the import graph acyclic when a mapper layer sits between domain and persistence. The natural fit for a layered hexagonal arrangement, at the cost of one more crate. Co-locating entities in the infrastructure crate alongside the pool, driver, and repositories removes that crate and is the simplest shape when there is no separate mapper layer to satisfy (entities are mapped inline within infrastructure, or the project maps domain types directly); its trade-off is that any mapper that needs the entities would then have to depend on infrastructure, which is why this option only works without a standalone mapper layer. Putting the repository implementations in the mapper crate alongside the translation code keeps data access and translation in one place, which some projects prefer for cohesion; its trade-off is that translation and adapter logic then share a crate despite having different lifecycles and test surfaces. Choose by whether a separate mapper layer is part of the architecture."
 
 [[option]]
 id = "entities-live-in-their-own-crate-separate-from-infrastructure"
@@ -30,7 +30,7 @@ directive = "the entities live in the infrastructure crate alongside the DB pool
 remediation = """
 Move the entity definitions into the infrastructure crate alongside the DB pool, driver and repository implementations, inlining or dropping the separate mappers crate. Verify by confirming the entities are defined in the same crate as the infrastructure layer's DB pool and repository code.
 """
-why = "Removes the separate entities crate and keeps the whole persistence layer in one place, the simplest shape when there is no standalone mapper layer to satisfy — translation happens inline within infrastructure, or domain types are mapped directly. Its trade-off is the reason it only works in that case: any mapper that needed the entities would then have to depend on infrastructure, reintroducing the cycle the separate crate exists to avoid."
+why = "Removes the separate entities crate and keeps the whole persistence layer in one place, the simplest shape when there is no standalone mapper layer to satisfy: translation happens inline within infrastructure, or domain types are mapped directly. Its trade-off is the reason it only works in that case: any mapper that needed the entities would then have to depend on infrastructure, reintroducing the cycle the separate crate exists to avoid."
 
 [[option]]
 id = "repository-implementations-live-in-the-mapper-crate"
@@ -39,7 +39,7 @@ directive = "repository implementations live in the mapper crate alongside the t
 remediation = """
 Move the repository implementation out of the infrastructure crate and into the mapper crate, alongside the domain-entity translation logic. Verify by confirming the repository implementation's code lives in the same crate as the mapper functions it depends on.
 """
-why = "Keeps data access and the translation it depends on in a single crate, which some projects prefer for cohesion — a repository method and the mapper it calls are read and changed together. Its trade-off is that translation and adapter logic then share a crate despite having different lifecycles and test surfaces, so a change to one sits next to the other and the two blend in review."
+why = "Keeps data access and the translation it depends on in a single crate, which some projects prefer for cohesion: a repository method and the mapper it calls are read and changed together. Its trade-off is that translation and adapter logic then share a crate despite having different lifecycles and test surfaces, so a change to one sits next to the other and the two blend in review."
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"

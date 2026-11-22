@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-FORMS-SERIALIZERS-VALIDATE-1"
-version = 3
+version = 4
 title = "Input validation runs through Forms or DRF Serializers before data reaches the model or service layer"
 domain = "python:django"
 layer = "framework"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "Where is inbound HTTP request data validated and cleaned before use?"
 default = "forms-or-serializers"
-why = "Everything that arrives in `request.POST`, `request.data`, `request.GET`, or `request.FILES` is untyped, untrusted client-supplied input. Reaching into it directly and passing values to model constructors or service functions means the application operates on data whose shape it only assumed. Django Forms (`form.cleaned_data`) and DRF Serializers (`serializer.validated_data`) run a declared validation schema, convert strings to typed Python values, run field-level and cross-field validators, and reject invalid input with structured errors before any business logic runs. Validating in the view by hand (checking `if 'field' in request.data:`) duplicates what Forms and Serializers do, is error-prone, and produces no structured error response automatically."
+why = "Everything that arrives in `request.POST`, `request.data`, `request.GET` or `request.FILES` is untyped, untrusted client-supplied input. Reaching into it directly and passing values to model constructors or service functions means the application operates on data whose shape it only assumed. Django Forms (`form.cleaned_data`) and DRF Serializers (`serializer.validated_data`) run a declared validation schema, convert strings to typed Python values, run field-level and cross-field validators, and reject invalid input with structured errors before any business logic runs. Validating in the view by hand (checking `if 'field' in request.data:`) duplicates what Forms and Serializers do, is error-prone, and produces no structured error response automatically."
 
 [[option]]
 id = "forms-or-serializers"
@@ -21,13 +21,13 @@ directive = "Every view that accepts state-changing input (POST, PUT, PATCH, DEL
 remediation = """
 Route the view's inbound request data through a Form or DRF Serializer, calling is_valid() (or is_valid(raise_exception=True)) before any business logic runs and have the view read only validated_data or cleaned_data afterward. Remove any manual field-by-field check or direct pass-through of request.POST/request.data to the model. Verify by sending a request with an invalid field and confirming it is rejected by the Form or Serializer before the view's business logic executes.
 """
-why = "Forms and Serializers run a declared schema, produce typed cleaned values, and return structured error responses automatically; manual request-dict access duplicates this work incompletely."
+why = "Forms and Serializers run a declared schema, produce typed cleaned values and return structured error responses automatically; manual request-dict access duplicates this work incompletely."
 
 [[option]]
 id = "direct-request-data-access"
 label = "read request.data fields directly in the view"
 directive = "View functions access `request.data` or `request.POST` dictionary keys directly, validate fields with manual `if` checks and pass the raw values to models or services."
-why = "Duplicates Form/Serializer work incompletely; misses type conversion, cross-field validation, and structured error responses; each validation gap is a potential bug."
+why = "Duplicates Form/Serializer work incompletely; misses type conversion, cross-field validation and structured error responses; each validation gap is a potential bug."
 
 [[option]]
 id = "model-full-clean-only"

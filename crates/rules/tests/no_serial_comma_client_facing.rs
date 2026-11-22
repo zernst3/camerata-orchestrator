@@ -21,7 +21,7 @@
 mod common;
 
 use camerata_rules::{corpus_path, load_corpus_lenient, RuleSet};
-use common::client_facing_fields;
+use common::{client_facing_fields, client_reaching_fields};
 
 /// A list item longer than this many words is read as a clause, not a short list item.
 const MAX_ITEM_WORDS: usize = 5;
@@ -52,6 +52,7 @@ const VERB_OPENERS: &[&str] = &[
     "pass",
     "reject",
     "rejects",
+    "makes",
     "selects",
     "completes",
     "is",
@@ -166,6 +167,55 @@ fn serial_comma_offenders(corpus: &RuleSet) -> Vec<String> {
                 .map(move |snip| format!("{}: {}: ...{snip}", f.rule_id, f.loc))
         })
         .collect()
+}
+
+/// Every `<rule id>: <field>: <snippet>` carrying a serial comma, over EVERY client-reaching
+/// field (see `common::client_reaching_fields`), the same wide set the dash and spelling gates use.
+fn serial_comma_offenders_everywhere(corpus: &RuleSet) -> Vec<String> {
+    client_reaching_fields(corpus)
+        .into_iter()
+        .flat_map(|f| {
+            serial_commas(f.text)
+                .into_iter()
+                .map(move |snip| format!("{}: {}: ...{snip}", f.rule_id, f.loc))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn no_client_reaching_rule_field_carries_a_serial_comma() {
+    let (corpus, errors) = load_corpus_lenient(&corpus_path()).await;
+    assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+    assert!(corpus.iter().count() > 100, "vacuity guard");
+    let offenders = serial_comma_offenders_everywhere(&corpus);
+    assert!(
+        offenders.is_empty(),
+        "text that can reach a client must read \"A, B and C\", never \"A, B, and C\" ({} \
+         offenders):\n  {}",
+        offenders.len(),
+        offenders.join("\n  ")
+    );
+}
+
+/// The wide gate must be able to fail: a serial comma planted in every field of the wide list is
+/// reported for each one, and the author-facing `relevance` is not.
+#[tokio::test]
+async fn the_wide_serial_comma_gate_reports_one_planted_in_every_client_reaching_field() {
+    let (_dir, corpus) = common::load_planted("log the request, the response, and the error").await;
+    let offenders = serial_comma_offenders_everywhere(&corpus);
+    for expected in common::PLANTED_LOCATIONS
+        .iter()
+        .chain(common::PLANTED_SOURCE_LOCATIONS)
+    {
+        assert!(
+            offenders.iter().any(|o| o.contains(expected)),
+            "the gate failed to flag `{expected}`: {offenders:#?}"
+        );
+    }
+    assert!(
+        !offenders.iter().any(|o| o.contains("relevance")),
+        "relevance is author-facing: {offenders:#?}"
+    );
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 id = "JAVA-SQL-PARAMETERIZED-1"
-version = 3
+version = 4
 title = "SQL queries are parameterized with PreparedStatement or JPA parameters; strings are never built via concatenation"
 domain = "java"
 layer = "language"
@@ -13,7 +13,7 @@ enforcement = "structured"
 kind = "defect"
 inspectable = true
 default = true
-qualifies = "Enforced by static analysis (SpotBugs, Semgrep, IDE linters) that detect SQL string concatenation, string interpolation, or format() flowing into query execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
+qualifies = "Enforced by static analysis (SpotBugs, Semgrep, IDE linters) that detect SQL string concatenation, string interpolation or format() flowing into query execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
 verification = "grounded"
 
 [decision]

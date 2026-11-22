@@ -1,5 +1,5 @@
 id = "SQL-FK-CASCADE-FINANCIAL-1"
-version = 4
+version = 5
 title = "A foreign key from a mutable user table into a financial, audit or historical record never cascades deletes onto that record"
 domain = "sql"
 layer = "universal"
@@ -33,24 +33,24 @@ relevance = "Authority note (author-facing): low authority — supports the gene
 question = "Does a foreign key from a routine, user-mutable table into a financial, audit, or historical record use ON DELETE CASCADE, silently destroying that record when the ordinary-course row is deleted?"
 default = "restrict-or-null-cascades-into-financial-records"
 why = """
-`ON DELETE CASCADE` is the right choice for genuinely dependent data — delete a blog post, cascade-delete its
+`ON DELETE CASCADE` is the right choice for genuinely dependent data: delete a blog post, cascade-delete its
 comments, because the comments have no meaning without the post. The same mechanism applied in the other direction
-— a user's session row, cart, or profile edit cascading a DELETE onto a payment, invoice, or audit-log entry that
-happens to reference it — turns an everyday, routine deletion (a cleanup job purging old sessions, a user deleting
+(a user's session row, cart, or profile edit cascading a DELETE onto a payment, invoice, or audit-log entry that
+happens to reference it) turns an everyday, routine deletion (a cleanup job purging old sessions, a user deleting
 their own cart) into an IRREVERSIBLE destruction of a financial or audit record that existed specifically to be the
 durable, after-the-fact evidence of what happened. Once a migration ships `ON DELETE CASCADE` in this direction,
 the loss happens silently, the moment the ordinary-course row is deleted by code that has no idea a financial
-record is wired to disappear with it — there is no error, no review, nothing in application logs pointing at the
+record is wired to disappear with it. There is no error, no review, nothing in application logs pointing at the
 financial table at all.
 
 The fix is almost always `ON DELETE RESTRICT` (block the delete until the financial/audit reference is dealt with
 explicitly, usually by archiving or reassigning it first) or, where the relationship is genuinely optional, `ON
-DELETE SET NULL` on a nullable FK column — either way, the deletion of the routine row can no longer silently take
+DELETE SET NULL` on a nullable FK column. Either way, the deletion of the routine row can no longer silently take
 the financial/audit record down with it.
 
 Detection necessarily relies on a naming heuristic (the referenced table's name suggesting financial/audit/
 historical semantics), since there is no syntactic marker in SQL distinguishing 'data that must survive' from 'data
-that's fine to cascade' — ambiguous names are `needs_review`, matching the same honesty standard this corpus
+that's fine to cascade': ambiguous names are `needs_review`, matching the same honesty standard this corpus
 applies to SUPABASE-STORAGE-PUBLIC-BUCKET-1's bucket-naming heuristic.
 """
 
@@ -76,7 +76,7 @@ the financial/audit row survives (or the delete is rejected until handled explic
 silently.
 """
 effort = "medium"
-why = "A cascading delete into a financial or audit table converts an everyday, often-automated row deletion into irreversible, silent destruction of exactly the records that exist to document what happened — RESTRICT/SET NULL costs nothing in the common case and forces a conscious decision in the rare case where the financial record genuinely should go away too."
+why = "A cascading delete into a financial or audit table converts an everyday, often-automated row deletion into irreversible, silent destruction of exactly the records that exist to document what happened: RESTRICT/SET NULL costs nothing in the common case and forces a conscious decision in the rare case where the financial record genuinely should go away too."
 
 [[option]]
 id = "cascade-deletes-uniformly-regardless-of-referenced-table-semantics"

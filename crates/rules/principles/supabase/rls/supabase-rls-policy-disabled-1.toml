@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-POLICY-DISABLED-1"
-version = 4
+version = 5
 title = "A table with CREATE POLICY statements must have Row Level Security enabled in its replayed end-state"
 domain = "supabase:rls"
 layer = "platform"
@@ -18,7 +18,7 @@ applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/mig
 min_severity = "critical"
 default = true
 verification = "grounded"
-qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: once a table's final RLS-enabled/disabled state and its final policy set are both known, this rule flags a table that has one or more CREATE POLICY statements in its history but whose replayed end-state has RLS disabled — the policies were authored but are silently inactive. Conformance holds when every table carrying at least one policy also has RLS enabled in the same end-state; it fails when policies exist over a table whose RLS is off. Carries the same repo-vs-production honesty caveat as SUPABASE-RLS-ENABLED-1."
+qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: once a table's final RLS-enabled/disabled state and its final policy set are both known, this rule flags a table that has one or more CREATE POLICY statements in its history but whose replayed end-state has RLS disabled. The policies were authored but are silently inactive. Conformance holds when every table carrying at least one policy also has RLS enabled in the same end-state; it fails when policies exist over a table whose RLS is off. Carries the same repo-vs-production honesty caveat as SUPABASE-RLS-ENABLED-1."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
@@ -33,8 +33,7 @@ linter = "splinter: policy_exists_rls_disabled"
 question = "Does any table carry CREATE POLICY statements while Row Level Security itself is left disabled?"
 default = "flag-policy-exists-rls-disabled"
 why = """
-This is a more dangerous variant of SUPABASE-RLS-ENABLED-1: the codebase LOOKS protected — a
-developer wrote CREATE POLICY statements that read as access control — but because RLS itself was
+This is a more dangerous variant of SUPABASE-RLS-ENABLED-1: the codebase LOOKS protected. A developer wrote CREATE POLICY statements that read as access control, but because RLS itself was
 never enabled (or was disabled after the policies were written), Postgres never evaluates those
 policies at all. The table is fully open in production while the code review and the migration
 diff both show what appears to be a security control. This exact shape is Splinter's

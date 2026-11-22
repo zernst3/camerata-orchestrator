@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-XUNIT-CONSTRUCTOR-ISOLATION-1"
-version = 2
+version = 3
 title = "xUnit per-test isolation: use the constructor for per-test setup and IDisposable for teardown; use IClassFixture only for expensive shared resources"
 domain = "csharp:testing"
 layer = "language"
@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "How is per-test setup and teardown managed in xUnit, and when is shared context used?"
 default = "constructor-dispose-then-fixture"
-why = "xUnit's design deliberately replaces [SetUp]/[TearDown] from NUnit/MSTest with constructor/Dispose. The rationale is that a new test class instance per test automatically provides isolation: each test starts with a fresh object graph without any risk of state leaking from a prior test. The [SetUp] attribute was removed from xUnit v2 because it led to hidden shared state and reading-order dependencies. When test setup is expensive (spinning up a test server, seeding a database), IClassFixture<T> shares one fixture instance across all tests in the class without exposing mutable test-class state to adjacent tests. For cross-class sharing, ICollectionFixture<T> combined with [Collection] attributes extends the lifetime to the entire named collection. Microsoft's best-practices documentation reinforces this: 'Use helper methods instead of Setup and Teardown' — helper methods make setup visible within each test, avoiding hidden preconditions."
+why = "xUnit's design deliberately replaces [SetUp]/[TearDown] from NUnit/MSTest with constructor/Dispose. The rationale is that a new test class instance per test automatically provides isolation: each test starts with a fresh object graph without any risk of state leaking from a prior test. The [SetUp] attribute was removed from xUnit v2 because it led to hidden shared state and reading-order dependencies. When test setup is expensive (spinning up a test server, seeding a database), IClassFixture<T> shares one fixture instance across all tests in the class without exposing mutable test-class state to adjacent tests. For cross-class sharing, ICollectionFixture<T> combined with [Collection] attributes extends the lifetime to the entire named collection. Microsoft's best-practices documentation reinforces this: 'Use helper methods instead of Setup and Teardown'. Helper methods make setup visible within each test, avoiding hidden preconditions."
 
 [[option]]
 id = "constructor-dispose-then-fixture"

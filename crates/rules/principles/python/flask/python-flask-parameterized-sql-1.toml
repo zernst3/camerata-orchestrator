@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-PARAMETERIZED-SQL-1"
-version = 3
+version = 4
 title = "Database queries use SQLAlchemy ORM or parameterized text() expressions; f-strings in SQL are forbidden"
 domain = "python:flask"
 layer = "framework"
@@ -7,13 +7,13 @@ enforcement = "mechanical"
 kind = "defect"
 inspectable = true
 default = true
-qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) flagging f-strings, `%`-formatting, `.format()`, or string concatenation inside `session.execute()`, `connection.execute()`, `cursor.execute()`, or `db.engine.execute()`. Conformance holds when the CI gate runs and any interpolated SQL site fails; it fails when no SQL injection lint runs in CI."
+qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) flagging f-strings, `%`-formatting, `.format()` or string concatenation inside `session.execute()`, `connection.execute()`, `cursor.execute()` or `db.engine.execute()`. Conformance holds when the CI gate runs and any interpolated SQL site fails; it fails when no SQL injection lint runs in CI."
 verification = "grounded"
 
 [decision]
 question = "How are dynamic values placed into database queries in a Flask + SQLAlchemy application?"
 default = "orm-or-text-with-bindparams"
-why = "Flask itself is database-agnostic, but Flask applications almost always use SQLAlchemy (via Flask-SQLAlchemy) or direct DBAPI connections. SQLAlchemy's ORM query API (`.filter_by()`, `.filter(Model.col == value)`, `select()` with `.where()`) parameterizes values automatically. When raw SQL is necessary, SQLAlchemy's `text()` expression accepts `:named` bind parameters (`session.execute(text('SELECT * FROM t WHERE id = :id'), {'id': user_id})`), which the driver sends separately from the SQL grammar. Interpolating a value into the SQL string with an f-string, `%`-format, or `.format()` before passing to any execute call puts user-controlled text into the query grammar and is the canonical SQL injection vector."
+why = "Flask itself is database-agnostic, but Flask applications almost always use SQLAlchemy (via Flask-SQLAlchemy) or direct DBAPI connections. SQLAlchemy's ORM query API (`.filter_by()`, `.filter(Model.col == value)`, `select()` with `.where()`) parameterizes values automatically. When raw SQL is necessary, SQLAlchemy's `text()` expression accepts `:named` bind parameters (`session.execute(text('SELECT * FROM t WHERE id = :id'), {'id': user_id})`), which the driver sends separately from the SQL grammar. Interpolating a value into the SQL string with an f-string, `%`-format or `.format()` before passing to any execute call puts user-controlled text into the query grammar and is the canonical SQL injection vector."
 
 [[option]]
 id = "orm-or-text-with-bindparams"
@@ -36,7 +36,7 @@ why = "The canonical SQL injection antipattern; every such site is a latent vuln
 id = "stored-procedures-only"
 label = "move all parameterized logic into database stored procedures"
 directive = "Business logic involving dynamic SQL is pushed into stored procedures called from Python with only scalar arguments."
-why = "Eliminates injection at the application layer but tightly couples business logic to the database, makes schema migrations more complex, and removes Python-level testability."
+why = "Eliminates injection at the application layer but tightly couples business logic to the database, makes schema migrations more complex and removes Python-level testability."
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-sql-expression/"

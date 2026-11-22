@@ -1,5 +1,5 @@
 id = "ARCH-SERVER-COMPUTED-AMOUNT-1"
-version = 4
+version = 5
 title = "A charge's price, quantity and discount are computed server-side from the merchant's own records; the client supplies only a selection, never an amount"
 domain = "api-layer"
 layer = "universal"
@@ -11,7 +11,7 @@ inspectable = true
 # with NO intervening server-side lookup".
 min_severity = "high"
 default = true
-qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'a value that reaches a payment-provider charge/amount/total/price/quantity/discount field was READ from the inbound request body/query/path rather than computed from a server-side product, price, or coupon lookup,' which requires tracing data flow from the request-parsing boundary to the charge call site — an AST/taint-analysis CI gate wired with the project's own request-DTO and pricing-service shapes. The generic pattern exists (don't trust client input for a security-sensitive value) but the specific fields that count as 'amount-bearing' are project-specific, so this is a bespoke check, not a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a charge-call argument traced back to raw request input (with no intervening server-side lookup) fails the build; it fails when no such trace exists and a request body field can reach a charge amount unchanged."
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'a value that reaches a payment-provider charge/amount/total/price/quantity/discount field was READ from the inbound request body/query/path rather than computed from a server-side product, price, or coupon lookup,' which requires tracing data flow from the request-parsing boundary to the charge call site. An AST/taint-analysis CI gate wired with the project's own request-DTO and pricing-service shapes. The generic pattern exists (don't trust client input for a security-sensitive value) but the specific fields that count as 'amount-bearing' are project-specific, so this is a bespoke check, not a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a charge-call argument traced back to raw request input (with no intervening server-side lookup) fails the build; it fails when no such trace exists and a request body field can reach a charge amount unchanged."
 verification = "grounded"
 
 [[sources]]
@@ -27,19 +27,18 @@ question = "Does a charge's amount, quantity, or discount get recomputed from th
 default = "recompute-amount-server-side-from-authoritative-records"
 why = """
 A checkout or billing flow's only trustworthy inputs from the client are which items were selected and in what
-quantity the customer claims to want — never what those items cost, what a quantity-based total comes to, or
+quantity the customer claims to want, never what those items cost, what a quantity-based total comes to, or
 whether a discount code reduces the price and by how much. Any of those three values (unit price, quantity-derived
 total, discount amount) accepted from the request body and passed through to the amount the payment provider is
 told to charge is CWE-602 (Client-Side Enforcement of Server-Side Security) in its most direct financial form: the
-'security' decision — what this costs — is made wherever the request originated, and the server merely relays it.
+'security' decision (what this costs) is made wherever the request originated, and the server merely relays it.
 A request is trivially replayable with an edited body (browser dev tools, a proxy, a hand-crafted API call), so
 'the UI never lets you type a negative price' is not a control; nothing prevents a client from sending one directly
 to the endpoint. The fix is the one Stripe's own integration docs describe for a reason: the server looks up the
 authoritative price for each selected product/SKU from its own database or price list, recomputes the total from
 server-held quantities and that authoritative price, independently validates and applies any discount/coupon code
 against server-held rules (expiry, eligibility, stacking limits), and passes ONLY that server-computed number to the
-payment provider's charge/PaymentIntent call. The client-supplied amount, if any arrives, is never read for this
-purpose — at most it is a non-authoritative value the server *compares against* its own computation to abort with a
+payment provider's charge/PaymentIntent call. The client-supplied amount, if any arrives, is never read for this purpose. At most it is a non-authoritative value the server *compares against* its own computation to abort with a
 clear error on mismatch (catching integration bugs), never a value it uses.
 """
 

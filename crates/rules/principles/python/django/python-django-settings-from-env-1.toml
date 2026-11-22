@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-SETTINGS-FROM-ENV-1"
-version = 3
+version = 4
 title = "Django settings read credentials from environment variables; no secrets in settings.py"
 domain = "python:django"
 layer = "framework"
@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "How are credentials and environment-specific values provided to Django's settings module?"
 default = "env-vars-in-settings"
-why = "A Django `settings.py` file is Python source code committed to version control. Embedding `SECRET_KEY`, database passwords, API keys, or `ALLOWED_HOSTS` values as string literals means they enter git history permanently, are visible to anyone with repository access, and survive in every clone and container image. Per-environment values (different databases for dev, staging, and production) hardcoded into a single committed file require editing the file or maintaining multiple committed versions. `os.environ.get()` or a library like `django-environ` or `python-decouple` reads values from the process environment at startup, keeping secrets out of the repository and per-environment configuration out of source control. `SECRET_KEY` in particular must be treated as a credential: exposure invalidates all sessions and HMAC signatures."
+why = "A Django `settings.py` file is Python source code committed to version control. Embedding `SECRET_KEY`, database passwords, API keys, or `ALLOWED_HOSTS` values as string literals means they enter git history permanently, are visible to anyone with repository access, and survive in every clone and container image. Per-environment values (different databases for dev, staging and production) hardcoded into a single committed file require editing the file or maintaining multiple committed versions. `os.environ.get()` or a library like `django-environ` or `python-decouple` reads values from the process environment at startup, keeping secrets out of the repository and per-environment configuration out of source control. `SECRET_KEY` in particular must be treated as a credential: exposure invalidates all sessions and HMAC signatures."
 
 [[option]]
 id = "env-vars-in-settings"
@@ -37,7 +37,7 @@ id = "per-environment-settings-files"
 violates = true
 label = "maintain separate settings files per environment committed to git"
 directive = "Environment-specific settings live in committed files (`settings_dev.py`, `settings_prod.py`) that contain the actual credentials for each environment."
-why = "Production credentials are still committed to the repository, so anyone with repository access can read them and they stay in git history after any later removal; rotating one requires a commit and a deploy. Splitting settings per environment improves organisation but changes nothing about the exposure."
+why = "Production credentials are still committed to the repository, so anyone with repository access can read them and they stay in git history after any later removal; rotating one requires a commit and a deploy. Splitting settings per environment improves organization but changes nothing about the exposure."
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/ref/settings/#secret-key"

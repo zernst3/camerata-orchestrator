@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-ASNOTRACKING-1"
-version = 3
+version = 4
 title = "Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated"
 domain = "csharp:efcore"
 layer = "library"
@@ -21,7 +21,7 @@ directive = "Every LINQ query whose result is not subsequently passed to SaveCha
 remediation = """
 Add .AsNoTracking() to the query in the read-only repository method, reserving change tracking for methods whose result is passed to SaveChanges. Rename or document the method so its tracking intent is clear (Get/Find/List for no-tracking, Update/Delete for tracked). Verify by confirming EF Core's change tracker does not report the returned entities as tracked after a read-only call.
 """
-why = "Read-only queries gain lower memory use, faster execution, and smaller DbContext state; tracked queries remain available for the write path that needs them."
+why = "Read-only queries gain lower memory use, faster execution and smaller DbContext state; tracked queries remain available for the write path that needs them."
 
 [[option]]
 id = "global-asnotracking-default"

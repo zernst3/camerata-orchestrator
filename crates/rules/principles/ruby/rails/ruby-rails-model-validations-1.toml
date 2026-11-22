@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-MODEL-VALIDATIONS-1"
-version = 3
+version = 4
 title = "Data integrity rules are declared as model validations, not enforced only in controllers or views"
 domain = "ruby:rails"
 layer = "framework"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "Where are data integrity rules (required fields, format constraints, uniqueness) enforced?"
 default = "model-validations"
-why = "A Rails controller receives one HTTP request. A background job, a rake task, a Rails console command, and a data migration each bypass the controller entirely and call the model directly. Validating only in the controller means every non-HTTP write path is unguarded. Model-level validations (`validates :email, presence: true, format: { with: URI::MailTo::EMAIL_REGEXP }, uniqueness: true`) run before every `save` regardless of the caller, so the rule is enforced consistently across all write paths. Controller-level checks (checking `params[:email].present?` before building the object, or whitelisting permitted fields with strong_parameters) are appropriate for HTTP-specific error messages and for rejecting unexpected fields early, but are not a substitute for model validation: they guard only the HTTP entry point, and a background job, rake task, or console write bypasses them entirely. Client-side (JavaScript) validation is a convenience for the user and provides no security guarantee whatsoever, since a forged request bypasses it completely; it must never be treated as an enforcement layer. Database-level constraints (NOT NULL, UNIQUE) are the deepest layer and should mirror the model validations for defense in depth, but are not sufficient alone because they fire after the application tries to write, returning a raw database error."
+why = "A Rails controller receives one HTTP request. A background job, a rake task, a Rails console command, and a data migration each bypass the controller entirely and call the model directly. Validating only in the controller means every non-HTTP write path is unguarded. Model-level validations (`validates :email, presence: true, format: { with: URI::MailTo::EMAIL_REGEXP }, uniqueness: true`) run before every `save` regardless of the caller, so the rule is enforced consistently across all write paths. Controller-level checks (checking `params[:email].present?` before building the object, or whitelisting permitted fields with strong_parameters) are appropriate for HTTP-specific error messages and for rejecting unexpected fields early, but are not a substitute for model validation: they guard only the HTTP entry point, and a background job, rake task or console write bypasses them entirely. Client-side (JavaScript) validation is a convenience for the user and provides no security guarantee whatsoever, since a forged request bypasses it completely; it must never be treated as an enforcement layer. Database-level constraints (NOT NULL, UNIQUE) are the deepest layer and should mirror the model validations for defense in depth, but are not sufficient alone because they fire after the application tries to write, returning a raw database error."
 
 [[option]]
 id = "model-validations"

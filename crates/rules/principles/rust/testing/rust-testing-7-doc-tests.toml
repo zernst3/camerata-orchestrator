@@ -1,5 +1,5 @@
 id = "RUST-TESTING-7"
-version = 4
+version = 5
 title = "Public API items have doc-tests in their /// comments that serve as runnable usage examples"
 domain = "rust:testing"
 layer = "language"
@@ -24,7 +24,7 @@ title = "The Rustdoc Book: Documentation Tests (attributes: should_panic, no_run
 [decision]
 question = "How are usage examples for public API items documented and kept compiling?"
 default = "doc-tests-on-public-api-items"
-why = "Rust's toolchain compiles and runs code blocks in /// documentation comments as first-class tests during cargo test. A doc-test that is wrong (wrong return type, stale method name, impossible example) fails the build — meaning documentation comments that contain code are always kept in sync with the implementation. This property is unique to doc-tests: a prose comment becomes stale silently, but a doc-test comment fails the build when the code it documents changes incompatibly. The Rust Book (Ch 14.2) and Rust By Example (Doc Testing) treat this as the canonical way to write examples for public API items. Doc-tests are not appropriate for private items (they cannot access them) or for complex multi-step scenarios better suited to an examples/ or tests/ file. A doc-test should show the simplest useful invocation of the item; it is documentation first and a regression test second. Lines prefixed with # are compiled but not rendered in rustdoc output, which allows boilerplate setup/teardown to be hidden without losing the executable guarantee."
+why = "Rust's toolchain compiles and runs code blocks in /// documentation comments as first-class tests during cargo test. A doc-test that is wrong (wrong return type, stale method name, impossible example) fails the build, meaning documentation comments that contain code are always kept in sync with the implementation. This property is unique to doc-tests: a prose comment becomes stale silently, but a doc-test comment fails the build when the code it documents changes incompatibly. The Rust Book (Ch 14.2) and Rust By Example (Doc Testing) treat this as the canonical way to write examples for public API items. Doc-tests are not appropriate for private items (they cannot access them) or for complex multi-step scenarios better suited to an examples/ or tests/ file. A doc-test should show the simplest useful invocation of the item; it is documentation first and a regression test second. Lines prefixed with # are compiled but not rendered in rustdoc output, which allows boilerplate setup/teardown to be hidden without losing the executable guarantee."
 
 [[option]]
 id = "doc-tests-on-public-api-items"

@@ -1,5 +1,5 @@
 id = "CSHARP-RECORDS-IMMUTABILITY-1"
-version = 3
+version = 4
 title = "Data transfer objects and value types use records (C# 9+) or immutable classes; mutable classes are avoided outside of domain entities"
 domain = "csharp"
 layer = "language"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How are data structures designed to be mutable or immutable?"
 default = "records-and-immutable-classes"
-why = "Immutability makes code easier to reason about, thread-safe without locks, and cacheable (the same immutable value can be safely shared and reused). Mutable classes require defensive copying, defensive null checks, and synchronization to be thread-safe. Records (C# 9+) are immutable value types that automatically generate Equals, GetHashCode, ToString, and a deconstructor based on properties. A record's properties are init-only by default (can be set during construction but never reassigned), making the entire type immutable. Immutable classes (with private setters or init-only properties) provide the same benefits. Mutable classes should be rare and limited to entities whose state is managed by a unit-of-work (database transaction). DTOs, API request/response models, and query results should always be immutable records so that callers can safely share and pass them without surprise modifications."
+why = "Immutability makes code easier to reason about, thread-safe without locks, and cacheable (the same immutable value can be safely shared and reused). Mutable classes require defensive copying, defensive null checks and synchronization to be thread-safe. Records (C# 9+) are immutable value types that automatically generate Equals, GetHashCode, ToString and a deconstructor based on properties. A record's properties are init-only by default (can be set during construction but never reassigned), making the entire type immutable. Immutable classes (with private setters or init-only properties) provide the same benefits. Mutable classes should be rare and limited to entities whose state is managed by a unit-of-work (database transaction). DTOs, API request/response models, and query results should always be immutable records so that callers can safely share and pass them without surprise modifications."
 
 [[option]]
 id = "records-and-immutable-classes"
@@ -21,7 +21,7 @@ directive = "Data transfer objects, API request/response models and value types 
 remediation = """
 Convert this DTO or value type from a mutable class with public setters to a record (record class or record struct), or to a class with init-only properties if the project targets pre-C# 9. Leave entity classes that are genuinely meant to mutate as documented mutable classes. Verify by confirming an attempt to set a property on the type outside of construction fails to compile.
 """
-why = "Immutability is thread-safe, sharable, and easier to reason about. Records eliminate boilerplate (Equals, GetHashCode, ToString)."
+why = "Immutability is thread-safe, sharable and easier to reason about. Records eliminate boilerplate (Equals, GetHashCode, ToString)."
 
 [[option]]
 id = "mutable-classes-everywhere"

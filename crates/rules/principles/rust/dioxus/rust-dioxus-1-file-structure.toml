@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-1"
-version = 2
+version = 3
 title = "How the UI crate is organized: by file role, by feature, flat or file-based routing"
 domain = "rust:dioxus"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [decision]
 question = "How is the UI crate organized: split by file role (views/components/hooks/contexts/services), grouped into feature folders, kept flat at the crate root, or driven by a file-based routing convention?"
-why = "All of these are legitimate ways to lay out a UI crate, and the right one follows from the UI's size, team structure, and how reuse flows through it, not from a presumed winner. Splitting by file role gives a predictable file-path-to-role mapping that every other UI convention can attach to, so per-folder rules apply mechanically and reusable primitives have one obvious home — the natural fit for a single-app product where one team owns the whole tree. A feature-folder structure co-locates everything for one feature, which keeps a feature's code together and supports independent feature-team ownership; it suits large UIs with strong ownership boundaries, at the cost that shared primitives are harder to discover. A flat module structure with every file at the crate root is the fastest to start and has no folder taxonomy to learn, which fits a small UI that is not expected to grow much past a few dozen files. A file-based routing convention derives the route tree from the file layout, which some teams prefer for the directness of route-equals-path; in a framework that does not provide it natively it requires custom build tooling. Choose by the UI's scale and ownership shape, and revisit when those change."
+why = "All of these are legitimate ways to lay out a UI crate, and the right one follows from the UI's size, team structure, and how reuse flows through it, not from a presumed winner. Splitting by file role gives a predictable file-path-to-role mapping that every other UI convention can attach to, so per-folder rules apply mechanically and reusable primitives have one obvious home. The natural fit for a single-app product where one team owns the whole tree. A feature-folder structure co-locates everything for one feature, which keeps a feature's code together and supports independent feature-team ownership; it suits large UIs with strong ownership boundaries, at the cost that shared primitives are harder to discover. A flat module structure with every file at the crate root is the fastest to start and has no folder taxonomy to learn, which fits a small UI that is not expected to grow much past a few dozen files. A file-based routing convention derives the route tree from the file layout, which some teams prefer for the directness of route-equals-path; in a framework that does not provide it natively it requires custom build tooling. Choose by the UI's scale and ownership shape, and revisit when those change."
 
 [[option]]
 id = "ui-crate-is-organized-by-file-role-views-components-hooks-contexts-services"
