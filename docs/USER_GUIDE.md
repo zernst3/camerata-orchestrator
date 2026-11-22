@@ -3587,7 +3587,7 @@ glossary (`docs/CLIENT_PACKAGE.md`) defines the package columns.
   tables. **Confirmed**: it is real and it ships in the report. **Ignored**: accepted, with a reason
   (an Ignored row shows "Needs client confirmation" until the client acknowledges it, then "Accepted
   risk"). **Tech debt**: filed as a GitHub issue, resolve later or resolve now. **False positive**: the
-  tool was wrong; excluded from the report, never baselined, reason required. **Merged**: folded into
+  tool was wrong; left out of the problem lists, kept with the reason on the Ruled out sheet, never baselined, reason required. **Merged**: folded into
   another row (it stays in the tree). **Put back**: a row the engine threw out that the operator put
   back into review.
 - **Ruled out** (the workbook's word): looked at and not a problem. The Ruled out sheet holds what a

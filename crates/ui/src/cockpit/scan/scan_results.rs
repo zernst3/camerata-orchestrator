@@ -1629,7 +1629,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
             // ── Findings (after the audit runs) ────────────────────────────────
             if audited.is_some() {
                 p { class: "scan-section-h", "Findings" }
-                p { class: "scan-section-sub", "The Queue holds what the scan ACCUSES the codebase of — defects and deviations. Triage each into one of four tables: leave it Unresolved, Ignore it (with a reason), save it as Tech debt, or mark it a False positive (with a reason — the tool was wrong; excluded from the report, never baselined). The other three tabs are informational: they assert nothing is wrong and need no triage. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
+                QueueIntro {}
 
                 // The one-rule-one-surface invariant (design §8), asserted. Silent in the
                 // healthy case, which is every case; loud when the pipeline mislabels a rule.
@@ -2171,5 +2171,13 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 }
             }
         }
+    }
+}
+
+/// The paragraph under the Findings heading that explains the Queue and its four tables.
+#[component]
+pub(super) fn QueueIntro() -> Element {
+    rsx! {
+        p { class: "scan-section-sub", "The Queue holds what the scan ACCUSES the codebase of — defects and deviations. Triage each into one of four tables: leave it Unresolved, Ignore it (with a reason), save it as Tech debt, or mark it a False positive (with a reason — the tool was wrong; left out of the problem lists, kept with the reason on the Ruled out sheet, never baselined). The other three tabs are informational: they assert nothing is wrong and need no triage. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
     }
 }
