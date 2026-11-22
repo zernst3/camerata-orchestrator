@@ -40,7 +40,7 @@ protection once it is sitting in a `<script>` tag or a React Server Component pa
 
 The only sound fix is architectural: define an explicit, named shape for what a client view of this resource looks
 like (a narrower type, a projection function, a dedicated select-list) and apply it BEFORE the value crosses the
-boundary (inside the server component, the loader, or the page's data-fetching function) never after, and never
+boundary (inside the server component, the loader or the page's data-fetching function) never after, and never
 by relying on the UI to simply not render the extra fields it received. This is the same discipline
 ARCH-API-DTOS-1 and ARCH-RESPONSE-FIELD-PROJECTION-1 apply to a conventional JSON API response, generalized to the
 SSR/RSC hydration channel, which carries data to the browser just as surely as a fetch response does even though it

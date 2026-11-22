@@ -32,7 +32,7 @@ directive = "The API defines an error response envelope (e.g., {code: string, me
 remediation = """
 Change the handler's error response to the project's structured error envelope (code, message, status and optional details) instead of a bare status code or an ad-hoc shape. Verify by triggering the error from a client and confirming the response body contains the structured fields consistently, matching what other endpoints return for their errors.
 """
-why = "Structured errors are parseable, loggable, and enable client-side error handling; one schema used across all handlers."
+why = "Structured errors are parseable, loggable and enable client-side error handling; one schema used across all handlers."
 
 [[option]]
 id = "status-code-only"

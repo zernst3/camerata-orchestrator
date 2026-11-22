@@ -19,7 +19,7 @@ url = "https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_
 title = "OWASP Unvalidated Redirects and Forwards Cheat Sheet"
 
 [decision]
-question = "Is a redirect target (a next/returnTo/redirect_uri query param, a stored callback URL, or similar) ever handed to a redirect response without validating it against a known-safe allowlist of internal paths or registered hosts?"
+question = "Is a redirect target (a next/returnTo/redirect_uri query param, a stored callback URL or similar) ever handed to a redirect response without validating it against a known-safe allowlist of internal paths or registered hosts?"
 default = "allowlist-redirect-targets"
 why = """
 An open redirect lets an attacker craft a link on the victim's own trusted domain that bounces the

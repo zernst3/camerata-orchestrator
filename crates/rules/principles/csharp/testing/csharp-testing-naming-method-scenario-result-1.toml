@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "How are test methods and test classes named?"
 default = "method-scenario-result"
-why = "A test name is the first diagnostic signal when a build fails. A name like 'Test1' or 'Add_ShouldWork' conveys nothing; a name like 'Add_SingleNumber_ReturnsSameNumber' tells a reader exactly what system under test, what input state, and what outcome is being verified. Microsoft's official unit-testing best-practices documentation mandates this three-part structure ('Name of the method being tested / Scenario under which it is being tested / Expected behavior when the scenario is invoked') and provides before/after examples. The test class named after the production class (OrderServiceTests) groups all tests for that class together and makes discovery intuitive. Deviating from this convention silently degrades the diagnostic value of the test suite."
+why = "A test name is the first diagnostic signal when a build fails. A name like 'Test1' or 'Add_ShouldWork' conveys nothing; a name like 'Add_SingleNumber_ReturnsSameNumber' tells a reader exactly what system under test, what input state and what outcome is being verified. Microsoft's official unit-testing best-practices documentation mandates this three-part structure ('Name of the method being tested / Scenario under which it is being tested / Expected behavior when the scenario is invoked') and provides before/after examples. The test class named after the production class (OrderServiceTests) groups all tests for that class together and makes discovery intuitive. Deviating from this convention silently degrades the diagnostic value of the test suite."
 
 [[option]]
 id = "method-scenario-result"

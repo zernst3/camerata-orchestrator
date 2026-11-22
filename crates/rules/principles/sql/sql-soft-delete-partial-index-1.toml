@@ -11,7 +11,7 @@ inspectable = true
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a scan over tables carrying a soft-delete column (deleted_at, is_deleted, archived_at, and close variants) for two distinct facets: (1) a sibling UNIQUE constraint or unique index on that table with no `WHERE deleted_at IS NULL` (or equivalent) partial qualifier. Crisp and near-mechanical, since a plain unique index plus a soft-delete column WILL eventually block re-creating a row with a previously-soft-deleted value; and (2) whether the table's normal read paths (application queries, or an RLS policy on a Supabase/Postgres-backed table) filter the soft-delete column by default rather than requiring every caller to remember the predicate. A more semantic judgment requiring the query/policy code as evidence. Conformance holds when every unique constraint on a soft-deletable table is partial and ordinary reads exclude soft-deleted rows without each caller having to opt in."
+qualifies = "Enforced by a scan over tables carrying a soft-delete column (deleted_at, is_deleted, archived_at and close variants) for two distinct facets: (1) a sibling UNIQUE constraint or unique index on that table with no `WHERE deleted_at IS NULL` (or equivalent) partial qualifier. Crisp and near-mechanical, since a plain unique index plus a soft-delete column WILL eventually block re-creating a row with a previously-soft-deleted value; and (2) whether the table's normal read paths (application queries, or an RLS policy on a Supabase/Postgres-backed table) filter the soft-delete column by default rather than requiring every caller to remember the predicate. A more semantic judgment requiring the query/policy code as evidence. Conformance holds when every unique constraint on a soft-deletable table is partial and ordinary reads exclude soft-deleted rows without each caller having to opt in."
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/indexes-partial.html"
@@ -22,7 +22,7 @@ question = "Is every unique constraint on a soft-deletable table scoped to exclu
 default = "partial-unique-constraints-and-default-filtered-reads"
 why = """
 Soft deletion (a `deleted_at`/`is_deleted` column instead of an actual `DELETE`) is a common, legitimate pattern.
-It preserves history, supports undo, and keeps foreign-key relationships intact. It interacts badly with a PLAIN
+It preserves history, supports undo and keeps foreign-key relationships intact. It interacts badly with a PLAIN
 unique constraint, though: once a row with `email = 'a@example.com'` is soft-deleted (the row still physically
 exists, just flagged), re-signing up with the same email (which the product almost always wants to allow, since
 the old account is gone as far as the user is concerned) fails with a unique-constraint violation the database

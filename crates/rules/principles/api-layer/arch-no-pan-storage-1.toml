@@ -30,7 +30,7 @@ guidance: full PAN may be stored only when genuinely necessary and only with str
 authentication data, the CVV/CVC and the full magnetic-stripe/chip track data, must NEVER be stored after
 authorization completes, encrypted or not; storing it at all is itself the violation, independent of how well it
 is protected. For the overwhelming majority of applications integrating a modern payment provider (Stripe, Braintree,
-Adyen, and similar), there is no legitimate reason for the application's own server to ever see a raw card number
+Adyen and similar), there is no legitimate reason for the application's own server to ever see a raw card number
 in the first place: the provider's hosted Elements/fields, or a client-side tokenization SDK, capture the card
 details directly in the customer's browser and hand the application a non-sensitive token/payment-method id to use
 for the actual charge. An application whose server-side code reads a `card_number`, `cvv`, or `track_data` field

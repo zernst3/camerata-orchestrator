@@ -36,7 +36,7 @@ directive = "Even intra-aggregate atomicity is expressed through the same unit-o
 remediation = """
 Add a unit-of-work parameter to the repository method's trait signature for this intra-aggregate write, matching the same parameter cross-aggregate writes use, instead of letting the method open its own transaction internally. Verify by confirming the method's signature exposes a transaction-handle parameter and it refuses to open its own transaction when one isn't supplied.
 """
-why = "Gives every transactional method one uniform signature, so there is a single transaction mechanism to learn, reason about, and test rather than two. The fit when signature uniformity and a single transaction story are valued; its trade-off is that the service must construct a unit of work even for an operation it does not actually coordinate, pushing a transaction detail across the aggregate boundary."
+why = "Gives every transactional method one uniform signature, so there is a single transaction mechanism to learn, reason about and test rather than two. The fit when signature uniformity and a single transaction story are valued; its trade-off is that the service must construct a unit of work even for an operation it does not actually coordinate, pushing a transaction detail across the aggregate boundary."
 
 [[option]]
 id = "no-repository-transaction-boundaries"

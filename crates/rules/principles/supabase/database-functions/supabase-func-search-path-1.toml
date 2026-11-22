@@ -49,7 +49,7 @@ default = "require-search-path-on-definer-functions"
 why = """
 PostgreSQL's own documentation is explicit and unambiguous on this exact attack: "For security,
 search_path should be set to exclude any schemas writable by untrusted users. This prevents
-malicious users from creating objects (e.g., tables, functions, and operators) that mask objects
+malicious users from creating objects (e.g., tables, functions and operators) that mask objects
 intended to be used by the function." A SECURITY DEFINER function executes with the PRIVILEGES OF
 ITS CREATOR regardless of who calls it. If that function resolves an unqualified table or function
 name via the caller's mutable search_path (which by default can include a schema the caller

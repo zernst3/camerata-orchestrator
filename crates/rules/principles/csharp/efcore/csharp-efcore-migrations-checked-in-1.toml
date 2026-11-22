@@ -21,7 +21,7 @@ directive = "Schema changes are made by modifying the EF Core model (entities, r
 remediation = """
 Generate a migration file with dotnet ef migrations add for this schema change, and commit the migration file and the updated model snapshot in the same PR as the entity change that caused it. Apply migrations as an explicit pre-deploy step rather than relying on EnsureCreated. Verify by confirming the migrations folder in source control reflects the current entity model and a fresh database ends up in the same schema state after applying them.
 """
-why = "Checked-in migrations are reviewable, reproducible, and deployable independently of application startup; a pre-deploy runner avoids startup-time migration races under horizontal scaling."
+why = "Checked-in migrations are reviewable, reproducible and deployable independently of application startup; a pre-deploy runner avoids startup-time migration races under horizontal scaling."
 
 [[option]]
 id = "migrate-on-startup"

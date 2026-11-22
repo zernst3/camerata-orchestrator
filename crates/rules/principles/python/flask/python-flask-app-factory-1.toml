@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How is a Flask application instantiated and how are its routes organized?"
 default = "app-factory-plus-blueprints"
-why = "A module-level `app = Flask(__name__)` created at import time makes testing difficult: there is no way to create a second app instance with a different configuration (e.g. a test database URL) without reloading the module. All routes live in one file or must import the global app, creating circular-import risks. The application factory pattern (`create_app(config=None)`) creates the Flask instance inside a function, registers blueprints and extensions, and returns the app. Tests call `create_app('testing')` to get a fresh instance with test config. Blueprints group related routes (e.g. `auth`, `api`, `admin`) into separate modules with their own URL prefixes, keeping route files focused and making it possible to register or exclude feature sets per environment."
+why = "A module-level `app = Flask(__name__)` created at import time makes testing difficult: there is no way to create a second app instance with a different configuration (e.g. a test database URL) without reloading the module. All routes live in one file or must import the global app, creating circular-import risks. The application factory pattern (`create_app(config=None)`) creates the Flask instance inside a function, registers blueprints and extensions and returns the app. Tests call `create_app('testing')` to get a fresh instance with test config. Blueprints group related routes (e.g. `auth`, `api`, `admin`) into separate modules with their own URL prefixes, keeping route files focused and making it possible to register or exclude feature sets per environment."
 
 [[option]]
 id = "app-factory-plus-blueprints"

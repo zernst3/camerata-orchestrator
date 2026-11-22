@@ -16,7 +16,7 @@ candidates = { locator = "sql_tables" }
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a scan over column declarations for a `text`/`varchar` column whose name suggests a closed set of values (status, state, role, type, kind, tier, category, and close variants) with no corresponding CHECK constraint, native ENUM type, or FK to a lookup table constraining it. Conformance holds when the column's valid values are constrained by one of the three mechanisms below; it fails when the column accepts any string and the 'closed set' exists only as a convention documented in application code (a TypeScript union, a constant list) with nothing enforcing it at the database. A column whose name is ambiguous (could be genuinely free-form text) is `needs_review`."
+qualifies = "Enforced by a scan over column declarations for a `text`/`varchar` column whose name suggests a closed set of values (status, state, role, type, kind, tier, category and close variants) with no corresponding CHECK constraint, native ENUM type, or FK to a lookup table constraining it. Conformance holds when the column's valid values are constrained by one of the three mechanisms below; it fails when the column accepts any string and the 'closed set' exists only as a convention documented in application code (a TypeScript union, a constant list) with nothing enforcing it at the database. A column whose name is ambiguous (could be genuinely free-form text) is `needs_review`."
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/ddl-constraints.html"
@@ -27,7 +27,7 @@ url = "https://www.postgresql.org/docs/current/datatype-enum.html"
 title = "PostgreSQL: Enumerated Types: a native enum type restricts a column to a static, ordered set of values"
 
 [decision]
-question = "What position does the project take on constraining a closed-set-valued column (native enum, CHECK list, or lookup-table FK) versus leaving it an unconstrained text column?"
+question = "What position does the project take on constraining a closed-set-valued column (native enum, CHECK list or lookup-table FK) versus leaving it an unconstrained text column?"
 default = "pick-one-enum-strategy-by-volatility-and-cross-table-reuse"
 why = """
 A column like `status`, `role`, or `type` very often represents a closed, application-meaningful set of values

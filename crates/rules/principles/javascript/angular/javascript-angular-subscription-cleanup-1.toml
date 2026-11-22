@@ -21,7 +21,7 @@ linter = "@angular-eslint/no-implicit-take-until-destroyed"
 [decision]
 question = "How do components end their Observable subscriptions when they are destroyed?"
 default = "subscriptions-are-cleaned-up-with-takeuntildestroy"
-why = "An Observable subscription that is not cleaned up continues to emit and consume resources even after a component is destroyed, creating memory leaks, duplicate event listeners, and unpredictable behavior. The manual pattern of calling .subscribe() and storing the Subscription in a field, then unsubscribing in ngOnDestroy, is error-prone: the cleanup hook is easy to forget, and the subscription is active for longer than needed. Modern Angular provides two reliable patterns: the takeUntilDestroyed operator (Angular 16+), which automatically terminates the subscription when the component is destroyed; and the async pipe in the template, which subscribes and unsubscribes automatically. Both are implicit, automatic, and guaranteed. The rule is: Observable chains should use takeUntilDestroyed to terminate them automatically, or the subscription should live in a template via the async pipe. Manual .subscribe() calls without cleanup in ngOnDestroy are forbidden."
+why = "An Observable subscription that is not cleaned up continues to emit and consume resources even after a component is destroyed, creating memory leaks, duplicate event listeners and unpredictable behavior. The manual pattern of calling .subscribe() and storing the Subscription in a field, then unsubscribing in ngOnDestroy, is error-prone: the cleanup hook is easy to forget, and the subscription is active for longer than needed. Modern Angular provides two reliable patterns: the takeUntilDestroyed operator (Angular 16+), which automatically terminates the subscription when the component is destroyed; and the async pipe in the template, which subscribes and unsubscribes automatically. Both are implicit, automatic and guaranteed. The rule is: Observable chains should use takeUntilDestroyed to terminate them automatically, or the subscription should live in a template via the async pipe. Manual .subscribe() calls without cleanup in ngOnDestroy are forbidden."
 
 [[option]]
 id = "subscriptions-are-cleaned-up-with-takeuntildestroy"
@@ -30,7 +30,7 @@ directive = "Observable subscriptions are terminated automatically using one of 
 remediation = """
 Add the takeUntilDestroyed() operator to the Observable chain, or replace the manual .subscribe() call with the async pipe in the template, instead of leaving the subscription to run past the component's lifetime. Remove any now-redundant manual .unsubscribe() call in ngOnDestroy(). Verify by destroying the component and confirming the subscription's callback no longer fires afterward.
 """
-why = "takeUntilDestroyed and the async pipe guarantee cleanup and prevent memory leaks, dangling listeners, and surprising behavior after component destruction."
+why = "takeUntilDestroyed and the async pipe guarantee cleanup and prevent memory leaks, dangling listeners and surprising behavior after component destruction."
 
 [[option]]
 id = "manual-subscribe-calls-are-tracked-and-unsubscrib"

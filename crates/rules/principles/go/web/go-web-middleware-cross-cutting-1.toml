@@ -20,7 +20,7 @@ title = "Gin Web Framework: Using middleware"
 [decision]
 question = "How should cross-cutting concerns like logging, authentication, timeouts, and panic recovery be handled across handlers?"
 default = "middleware-all-concerns"
-why = "Go web frameworks (Gin, Echo, net/http) provide middleware chains as the primary extension point for concerns that span all or many handlers. Implementing these concerns inside individual handlers creates duplication, introduces inconsistency across routes (one handler logs JSON, another logs text), and couples business logic to infrastructure. A handler that implements its own auth check may diverge from a global auth middleware, leaving security gaps. Panic recovery in every handler is both boilerplate and error-prone; a single recovery middleware catches all panics uniformly. Middleware is both the Go idiom and the maintainability win: one place to instrument, update, and audit each concern."
+why = "Go web frameworks (Gin, Echo, net/http) provide middleware chains as the primary extension point for concerns that span all or many handlers. Implementing these concerns inside individual handlers creates duplication, introduces inconsistency across routes (one handler logs JSON, another logs text), and couples business logic to infrastructure. A handler that implements its own auth check may diverge from a global auth middleware, leaving security gaps. Panic recovery in every handler is both boilerplate and error-prone; a single recovery middleware catches all panics uniformly. Middleware is both the Go idiom and the maintainability win: one place to instrument, update and audit each concern."
 
 [[option]]
 id = "middleware-all-concerns"

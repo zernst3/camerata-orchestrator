@@ -9,7 +9,7 @@ inspectable = true
 default = true
 verification = "grounded"
 
-qualifies = "A deferred function is paired with every resource acquire (file.Open, net.Listen, db.Begin, goroutine spawn). Goroutines spawned by a function should either join (via a sync.WaitGroup or channel) before the function returns, or be anchored to a context that the function cancels. Leaks manifest as growing process memory, orphaned database connections, or stuck goroutines; they are difficult to debug once deployed."
+qualifies = "A deferred function is paired with every resource acquire (file.Open, net.Listen, db.Begin, goroutine spawn). Goroutines spawned by a function should either join (via a sync.WaitGroup or channel) before the function returns, or be anchored to a context that the function cancels. Leaks manifest as growing process memory, orphaned database connections or stuck goroutines; they are difficult to debug once deployed."
 
 [[sources]]
 url = "https://go.dev/doc/effective_go#defer"

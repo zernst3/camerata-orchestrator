@@ -27,7 +27,7 @@ provider; it says nothing about whether this is the FIRST time the provider has 
 provider documents at-least-once delivery semantics: a network blip, a slow response from the merchant's endpoint,
 or the provider's own retry policy after a non-2xx response can cause the exact same event to arrive two or more
 times, each one carrying a valid signature because it genuinely is the provider resending it. A handler that applies
-its side effect unconditionally on every delivery (crediting a wallet, extending a subscription period, or
+its side effect unconditionally on every delivery (crediting a wallet, extending a subscription period or
 incrementing a usage counter) double-applies that effect on a redelivered event exactly as surely as a client-side
 retry without an idempotency key double-charges a card, except here the DEVELOPER has no control over whether or
 when the provider retries.

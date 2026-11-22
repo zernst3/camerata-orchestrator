@@ -39,7 +39,7 @@ directive = "New _test.go files declare package foo_test. When a test genuinely 
 remediation = """
 Change the test file's package declaration to the _test suffix (package foo_test) so it exercises only the exported API, unless the test genuinely needs unexported access, in which case keep it as package foo with a comment explaining why. Verify by confirming the testpackage linter passes and any exception carries an inline justification.
 """
-why = "Tests the public contract, prevents coupling to internals, and enables fearless refactoring."
+why = "Tests the public contract, prevents coupling to internals and enables fearless refactoring."
 
 [[option]]
 id = "white-box-always"

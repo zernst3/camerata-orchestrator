@@ -20,7 +20,7 @@ title = "OWASP Logging Cheat Sheet"
 relevance = "Authority note (author-facing): low authority — supports the general principle that state affecting money must be auditable and correctable after the fact; the specific reconciliation mechanism is this rule's own judgment grounded in the provider's documented async-state behavior, not something the cheat sheet itself prescribes"
 
 [decision]
-question = "Does the application have a mechanism (webhook-driven updates, a scheduled reconciliation job, or both) that can correct local order/payment state after the fact, or is the synchronous charge-call response treated as the final word?"
+question = "Does the application have a mechanism (webhook-driven updates, a scheduled reconciliation job or both) that can correct local order/payment state after the fact, or is the synchronous charge-call response treated as the final word?"
 default = "webhook-or-scheduled-reconciliation"
 why = """
 A payment provider's state for a charge, subscription, or dispute does not always resolve at the moment the
@@ -33,7 +33,7 @@ record silently diverges from the provider's own authoritative state, and the ga
 complains that an order they were never charged for shipped, or a support ticket surfaces a 'paid' order that the
 provider's own dashboard shows as refunded or disputed. Payment providers build for exactly this gap by emitting
 webhook events for every state transition (`payment_intent.succeeded`, `charge.refunded`, `charge.dispute.created`,
-`invoice.payment_failed`, and similar) specifically so an application can update local state as the authoritative
+`invoice.payment_failed` and similar) specifically so an application can update local state as the authoritative
 side effect of an event, rather than trusting its own initial assumption. Where webhook coverage is incomplete or a
 delivery is missed (webhooks can be delayed, retried or, rarely, dropped), a periodic reconciliation job that
 queries the provider's API for the current status of open/pending orders and corrects any local mismatch is the

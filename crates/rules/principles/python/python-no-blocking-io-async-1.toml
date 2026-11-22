@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How is blocking I/O handled inside async functions?"
 default = "async-or-offload"
-why = "An `async def` shares one event-loop thread with every other coroutine in the process. A synchronous call inside it (a blocking DB driver, `requests.get`, `time.sleep`, a synchronous file read, or a CPU-bound loop) stalls the entire loop: every other in-flight request freezes until that call returns, collapsing the concurrency the async stack exists to provide. The fix is to use an async-native client for the I/O, or, when only a sync API exists, to offload the call to a thread or process pool (`asyncio.to_thread` / `run_in_executor`) so the loop stays free. Writing blocking calls directly in async handlers is the most common async-Python performance bug precisely because it works fine under one user and silently destroys throughput under load, with no error to point at."
+why = "An `async def` shares one event-loop thread with every other coroutine in the process. A synchronous call inside it (a blocking DB driver, `requests.get`, `time.sleep`, a synchronous file read or a CPU-bound loop) stalls the entire loop: every other in-flight request freezes until that call returns, collapsing the concurrency the async stack exists to provide. The fix is to use an async-native client for the I/O, or, when only a sync API exists, to offload the call to a thread or process pool (`asyncio.to_thread` / `run_in_executor`) so the loop stays free. Writing blocking calls directly in async handlers is the most common async-Python performance bug precisely because it works fine under one user and silently destroys throughput under load, with no error to point at."
 
 [[option]]
 id = "async-or-offload"

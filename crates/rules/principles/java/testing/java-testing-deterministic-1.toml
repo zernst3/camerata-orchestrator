@@ -11,7 +11,7 @@ qualifies = "Enforced by SpotBugs (IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD, th
 verification = "grounded"
 
 [decision]
-question = "How are tests kept deterministic so they pass or fail consistently regardless of execution order, timing, or random state?"
+question = "How are tests kept deterministic so they pass or fail consistently regardless of execution order, timing or random state?"
 default = "no-sleep-no-clock-no-random"
 why = "A test that passes on one run and fails on the next (a 'flaky test') destroys trust in the test suite: engineers learn to re-run rather than fix, and real regressions hide behind the noise. The three most common sources of flakiness in Java tests are: (1) Thread.sleep(), where the test waits for a real-time condition that may not hold under CPU load or GC pause; (2) wall-clock time, where code that calls LocalDateTime.now() or System.currentTimeMillis() produces different results on different days, breaking date-based assertions; (3) ordering dependency, where a @Test method mutates shared static state that the next test depends on. SpotBugs IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD flags assertions in Runnable.run() bodies (another threading anti-pattern). The fix for (1) is to use awaitility or to inject a controlled delay mechanism; for (2), inject a Clock that the test replaces with a fixed-time mock; for (3), ensure each @Test method leaves shared state unchanged or use @BeforeEach to reset it."
 

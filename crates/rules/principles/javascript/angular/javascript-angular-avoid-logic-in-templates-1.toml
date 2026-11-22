@@ -30,7 +30,7 @@ directive = "Templates contain only simple property bindings, *ngIf on single bo
 remediation = """
 Move the inline conditional, computation or method call currently in the template into a component property or method and have the template bind to that simple property instead of evaluating logic itself. Verify by confirming the template contains only property bindings, single-condition *ngIf and *ngFor, with no ternaries, AND/OR chains or method calls with side effects.
 """
-why = "Simple templates are readable, testable, and performant. Logic belongs in the component class, where it can be unit-tested, reused, and cached."
+why = "Simple templates are readable, testable and performant. Logic belongs in the component class, where it can be unit-tested, reused and cached."
 
 [[option]]
 id = "templates-contain-complex-logic-ternary-operators"

@@ -29,7 +29,7 @@ relevance = "Interfaces should be defined by the consumer, not the producer. Def
 [decision]
 question = "How are external dependencies (databases, HTTP clients, queues) replaced in unit tests?"
 default = "interface-mock-at-injection-point"
-why = "Go's implicit interface satisfaction means any struct with the right method set satisfies an interface. A service that takes a UserRepository interface can be tested with an in-memory mock that implements the same interface, without a live database. The mock is injected through the same constructor parameter used in production. There is no if isTesting branch, no global variable swap, no unexported field access. testify/mock is the widely-used library for this: it records call expectations (m.On), returns controlled values, and verifies expectations with m.AssertExpectations(t)."
+why = "Go's implicit interface satisfaction means any struct with the right method set satisfies an interface. A service that takes a UserRepository interface can be tested with an in-memory mock that implements the same interface, without a live database. The mock is injected through the same constructor parameter used in production. There is no if isTesting branch, no global variable swap, no unexported field access. testify/mock is the widely-used library for this: it records call expectations (m.On), returns controlled values and verifies expectations with m.AssertExpectations(t)."
 
 [[option]]
 id = "interface-mock-at-injection-point"
@@ -50,4 +50,4 @@ why = "Global variable swaps create test ordering sensitivity and break parallel
 id = "embed-real-dependency"
 label = "use the real dependency (e.g., a real database) in unit tests"
 directive = "Unit tests connect to a real database or service; no mocking."
-why = "Correct approach for integration tests but not unit tests: makes unit tests slow, fragile, and dependent on external infrastructure."
+why = "Correct approach for integration tests but not unit tests: makes unit tests slow, fragile and dependent on external infrastructure."

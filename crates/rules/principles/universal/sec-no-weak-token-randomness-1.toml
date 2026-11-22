@@ -23,7 +23,7 @@ url = "https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Chea
 title = "OWASP Cryptographic Storage Cheat Sheet (secure random generation)"
 
 [decision]
-question = "Is a security-sensitive value (a password-reset token, session id, API key, share-link secret, or similar access credential) generated with a general-purpose PRNG (Math.random, random.random, rand(), a fixed/time-based seed) instead of a cryptographically secure random source?"
+question = "Is a security-sensitive value (a password-reset token, session id, API key, share-link secret or similar access credential) generated with a general-purpose PRNG (Math.random, random.random, rand(), a fixed/time-based seed) instead of a cryptographically secure random source?"
 default = "use-csprng-for-security-tokens"
 why = """
 A general-purpose PRNG such as JavaScript's Math.random() or Python's random module is designed

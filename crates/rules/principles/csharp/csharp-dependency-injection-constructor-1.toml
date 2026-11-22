@@ -30,7 +30,7 @@ directive = "All dependencies are declared as constructor parameters: either a t
 remediation = """
 Move the class's dependencies from [Inject]-annotated properties or IServiceProvider resolution into constructor parameters (a traditional constructor or a C# 12 primary constructor), assigned to private readonly fields. Remove the property-injection attributes or service-locator calls once the constructor accepts the dependency directly. Verify by confirming the class can be instantiated in a unit test by passing mocks directly to the constructor, with no container involved.
 """
-why = "Constructor injection (traditional or primary-constructor form) is explicit, immutable, testable, and makes circular dependencies obvious; Blazor components are the one place the framework itself requires property injection instead."
+why = "Constructor injection (traditional or primary-constructor form) is explicit, immutable, testable and makes circular dependencies obvious; Blazor components are the one place the framework itself requires property injection instead."
 
 [[option]]
 id = "property-injection"

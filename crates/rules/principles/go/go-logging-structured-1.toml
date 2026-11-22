@@ -9,7 +9,7 @@ inspectable = true
 default = true
 verification = "grounded"
 
-qualifies = "Structured logging (JSON or key-value format) is easier to parse, search, and aggregate in log aggregation systems. A logger with Info(msg, keyVals...) or ctx.Log.Info(msg, key, value) produces parseable output; unstructured Printf logs require regex parsing and are fragile."
+qualifies = "Structured logging (JSON or key-value format) is easier to parse, search and aggregate in log aggregation systems. A logger with Info(msg, keyVals...) or ctx.Log.Info(msg, key, value) produces parseable output; unstructured Printf logs require regex parsing and are fragile."
 
 [[sources]]
 url = "https://go.dev/blog/slog"

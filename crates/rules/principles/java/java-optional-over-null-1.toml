@@ -26,7 +26,7 @@ directive = "Methods that might not have a value to return use Optional<T> as th
 remediation = """
 Change the method's return type from a nullable reference to Optional of the value type, and update its callers to handle absence explicitly via ifPresent(), orElse() or orElseThrow() instead of a null check. Reserve a bare null only for internal fields never exposed as a return value. Verify by confirming the method's signature no longer implies a nullable return and callers fail to compile if they skip handling the empty case.
 """
-why = "Optional makes absence explicit in the type system, forces callers to handle it, and avoids NullPointerException."
+why = "Optional makes absence explicit in the type system, forces callers to handle it and avoids NullPointerException."
 
 [[option]]
 id = "return-null"

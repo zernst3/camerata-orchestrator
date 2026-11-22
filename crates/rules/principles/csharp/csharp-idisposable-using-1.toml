@@ -21,7 +21,7 @@ title = "IDE0063: Use simple 'using' statement"
 [decision]
 question = "How are IDisposable resources managed?"
 default = "using-declarations"
-why = "Objects implementing IDisposable hold unmanaged resources (database connections, file handles, streams, network sockets) that must be released to prevent resource leaks, handle exhaustion, and cascading failures. The using statement or using declaration guarantees that Dispose() is called exactly once, even if an exception is thrown, by ensuring cleanup runs in a finally block. Manual try-finally with explicit Dispose() is verbose and error-prone; using is the language-level guarantee. C# 8.0+ using declarations are preferred as they are syntactically cleaner and scope cleanup to the variable's lexical block."
+why = "Objects implementing IDisposable hold unmanaged resources (database connections, file handles, streams, network sockets) that must be released to prevent resource leaks, handle exhaustion and cascading failures. The using statement or using declaration guarantees that Dispose() is called exactly once, even if an exception is thrown, by ensuring cleanup runs in a finally block. Manual try-finally with explicit Dispose() is verbose and error-prone; using is the language-level guarantee. C# 8.0+ using declarations are preferred as they are syntactically cleaner and scope cleanup to the variable's lexical block."
 
 [[option]]
 id = "using-declarations"

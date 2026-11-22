@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "Where do unit test files live and how are they named relative to the source files they exercise?"
 default = "mirror-source-tree"
-why = "When spec/models/user_spec.rb mirrors app/models/user.rb (and test/models/user_test.rb mirrors app/models/user.rb for Minitest), any developer or tool can locate the test for a given source file in O(1) by replacing the path prefix and suffix. This eliminates the cognitive overhead of hunting for which spec covers which class and is the convention enforced by rspec-rails scaffolding, the Rails test generator, and rubocop-rspec's RSpec/SpecFilePathFormat cop. Deviating from the mirror convention creates a corpus that is impossible to navigate without grep, forces ad-hoc naming decisions on every new file, and breaks tooling such as bundle exec rspec <path> inferred from the edited source file."
+why = "When spec/models/user_spec.rb mirrors app/models/user.rb (and test/models/user_test.rb mirrors app/models/user.rb for Minitest), any developer or tool can locate the test for a given source file in O(1) by replacing the path prefix and suffix. This eliminates the cognitive overhead of hunting for which spec covers which class and is the convention enforced by rspec-rails scaffolding, the Rails test generator and rubocop-rspec's RSpec/SpecFilePathFormat cop. Deviating from the mirror convention creates a corpus that is impossible to navigate without grep, forces ad-hoc naming decisions on every new file, and breaks tooling such as bundle exec rspec <path> inferred from the edited source file."
 
 [[option]]
 id = "mirror-source-tree"
@@ -23,7 +23,7 @@ remediation = """
 Move the spec file into spec/ (or test/) mirroring the exact path of the source file it tests, named after the subject with a _spec.rb or _test.rb suffix, out of a flat spec directory. Verify by confirming the spec file's path matches the source file's path one-to-one under the spec/ or test/ root.
 """
 effort = "medium"
-why = "O(1) file discovery, consistent scaffolding, and enforced by rubocop-rspec."
+why = "O(1) file discovery, consistent scaffolding and enforced by rubocop-rspec."
 
 [[option]]
 id = "flat-spec-directory"

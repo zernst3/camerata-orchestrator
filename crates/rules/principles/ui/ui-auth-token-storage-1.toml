@@ -8,7 +8,7 @@ kind = "defect"
 inspectable = true
 default = true
 verification = "grounded"
-qualifies = "Enforced by a scan over client-side code for an access token, refresh token, session id, or API key written via localStorage.setItem/sessionStorage.setItem, persisted into IndexedDB, or set as a cookie with no HttpOnly attribute (document.cookie writes are always JS-readable/writable and can never carry HttpOnly, which only a Set-Cookie response header can set). Conformance holds when every such credential is set only via a server response's Set-Cookie header carrying HttpOnly, Secure, and an explicit SameSite value, with no client-side JavaScript ever holding the token's own value in a readable store; it fails when a token is written to localStorage/sessionStorage/IndexedDB in any form (including a seemingly-opaque wrapper object), or when a cookie carrying a credential is set without HttpOnly."
+qualifies = "Enforced by a scan over client-side code for an access token, refresh token, session id or API key written via localStorage.setItem/sessionStorage.setItem, persisted into IndexedDB, or set as a cookie with no HttpOnly attribute (document.cookie writes are always JS-readable/writable and can never carry HttpOnly, which only a Set-Cookie response header can set). Conformance holds when every such credential is set only via a server response's Set-Cookie header carrying HttpOnly, Secure, and an explicit SameSite value, with no client-side JavaScript ever holding the token's own value in a readable store; it fails when a token is written to localStorage/sessionStorage/IndexedDB in any form (including a seemingly-opaque wrapper object), or when a cookie carrying a credential is set without HttpOnly."
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/522.html"
@@ -23,7 +23,7 @@ url = "https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet
 title = "OWASP HTML5 Security Cheat Sheet: Local Storage: 'do not store... sensitive data in local storage due to the lack of security'"
 
 [decision]
-question = "Does every session/auth/refresh token live only in an HttpOnly, Secure, SameSite cookie set by the server, or does any such credential ever live in JS-accessible storage (localStorage, sessionStorage, IndexedDB, or a cookie set without HttpOnly)?"
+question = "Does every session/auth/refresh token live only in an HttpOnly, Secure, SameSite cookie set by the server, or does any such credential ever live in JS-accessible storage (localStorage, sessionStorage, IndexedDB or a cookie set without HttpOnly)?"
 default = "httponly-secure-samesite-cookie-only"
 why = """
 localStorage, sessionStorage, and IndexedDB share one defining property relevant here: any JavaScript running on the

@@ -8,7 +8,7 @@ kind = "defect"
 inspectable = true
 default = true
 verification = "grounded"
-qualifies = "Deterministically checkable as a header-presence scan: does a response from a route that returns an auth/session token, a password-reset/magic-link token, or a payload containing PII fields set a Cache-Control header including no-store (or an equivalent private, no-cache, max-age=0, must-revalidate combination at minimum), versus a route with no Cache-Control header at all (inheriting whatever default the framework, a CDN, or an intermediate proxy applies) or an explicit max-age permitting retention. Camerata ships no detector for this scan; a project wiring an actual CI gate would assert the header via a contract/integration test hitting the representative routes. Conformance holds when every such response sets no-store (or equivalently strict directives); it fails when a token- or PII-bearing response has no Cache-Control header, or sets one that permits any caching."
+qualifies = "Deterministically checkable as a header-presence scan: does a response from a route that returns an auth/session token, a password-reset/magic-link token, or a payload containing PII fields set a Cache-Control header including no-store (or an equivalent private, no-cache, max-age=0, must-revalidate combination at minimum), versus a route with no Cache-Control header at all (inheriting whatever default the framework, a CDN or an intermediate proxy applies) or an explicit max-age permitting retention. Camerata ships no detector for this scan; a project wiring an actual CI gate would assert the header via a contract/integration test hitting the representative routes. Conformance holds when every such response sets no-store (or equivalently strict directives); it fails when a token- or PII-bearing response has no Cache-Control header, or sets one that permits any caching."
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/525.html"
@@ -23,7 +23,7 @@ url = "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_S
 title = "OWASP Session Management Cheat Sheet: applications should send Cache-Control: no-store on pages/responses containing sensitive content"
 
 [decision]
-question = "Does every API response carrying an auth/session token or PII explicitly set Cache-Control: no-store (or equivalently strict directives), or is the response left with no explicit caching policy (inheriting whatever default a browser, CDN, or intermediate proxy applies)?"
+question = "Does every API response carrying an auth/session token or PII explicitly set Cache-Control: no-store (or equivalently strict directives), or is the response left with no explicit caching policy (inheriting whatever default a browser, CDN or intermediate proxy applies)?"
 default = "explicit-no-store-on-token-and-pii-responses"
 why = """
 `UI-AUTH-TOKEN-STORAGE-1` governs where a token lives once the client has it; this rule governs a DIFFERENT copy of

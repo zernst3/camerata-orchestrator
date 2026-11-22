@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How large and how cohesive are interfaces?"
 default = "small-focused-interfaces"
-why = "A large interface with many unrelated methods (a \"fat\" interface) forces implementations to provide all methods even if only a subset is relevant. This violates the Interface Segregation Principle (ISP): clients should depend on abstractions specific to their use case, not on generic catch-alls. A class implementing a fat interface is tightly coupled to more behavior than it needs, making it harder to mock in tests (the test must set up all methods even if only one is used), harder to document (the interface contract is vague), and harder to refactor (changing the interface breaks all implementations). Small, focused interfaces are easier to understand, test, and reuse across multiple contexts. A class can implement multiple small interfaces to express its full capabilities."
+why = "A large interface with many unrelated methods (a \"fat\" interface) forces implementations to provide all methods even if only a subset is relevant. This violates the Interface Segregation Principle (ISP): clients should depend on abstractions specific to their use case, not on generic catch-alls. A class implementing a fat interface is tightly coupled to more behavior than it needs, making it harder to mock in tests (the test must set up all methods even if only one is used), harder to document (the interface contract is vague), and harder to refactor (changing the interface breaks all implementations). Small, focused interfaces are easier to understand, test and reuse across multiple contexts. A class can implement multiple small interfaces to express its full capabilities."
 
 [[option]]
 id = "small-focused-interfaces"
@@ -21,7 +21,7 @@ directive = "Each interface represents a single capability or role. Methods are 
 remediation = """
 Split the fat interface into smaller interfaces grouped by cohesive capability (for example separating IOrderService's invoicing and shipping methods into their own interfaces), and have each implementing class implement only the interfaces it actually needs. Remove any default no-op or throwing stub methods that existed only to satisfy the larger interface. Verify by confirming no implementation contains a method it does not meaningfully support.
 """
-why = "Small interfaces are easier to understand, mock, and reuse."
+why = "Small interfaces are easier to understand, mock and reuse."
 
 [[option]]
 id = "fat-interfaces"

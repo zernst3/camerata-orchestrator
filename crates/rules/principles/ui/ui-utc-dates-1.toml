@@ -57,4 +57,4 @@ why = "Client-only rendering via a post-mount effect loses SSR for that content 
 id = "feature-code-calls-the-platform-s-date-formattin"
 label = "Call date-formatting APIs without a timezone"
 directive = "feature code calls the platform's date-formatting APIs without specifying a timezone, letting the platform's default locale and timezone control the result at each site"
-why = "Platform-default timezone varies by browser, OS, region, and browser version; the rule's outcome becomes 'whatever the platform happened to decide today'."
+why = "Platform-default timezone varies by browser, OS, region and browser version; the rule's outcome becomes 'whatever the platform happened to decide today'."

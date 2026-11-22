@@ -34,7 +34,7 @@ default = "mechanical-flag-plus-prose-escalation"
 why = """
 Supabase Edge Functions default to `verify_jwt = true`, which rejects any request without a valid
 JWT before the handler code ever runs. Setting `verify_jwt = false` (per-function, in
-`supabase/config.toml`'s `[functions.<name>]` block, or via `--no-verify-jwt` at deploy time) is a
+`supabase/config.toml`'s `[functions.<name>]` block or via `--no-verify-jwt` at deploy time) is a
 legitimate, documented pattern for genuinely public endpoints: Stripe/webhook receivers that
 verify the provider's own signature instead, or endpoints meant to be called by unauthenticated
 visitors. It is also the single most common accidental-exposure shape in a vibe-coded functions

@@ -11,7 +11,7 @@ inspectable = true
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a path-scoped regex for `getSession(` inside server-execution-context files: Next.js middleware.*/app/**/route.*/server components, SvelteKit +page.server.*/hooks.server.*, and comparable framework server-boundary paths. `getSession()` returns the session object built from the client-supplied cookie without re-validating it, so trusting it for an authorization decision on the server accepts a value the caller controls. Conformance holds when server-boundary code establishes identity via `getClaims()` (local, cryptographic JWT-signature verification, no network round-trip) or `getUser()` (a network call to the Auth server for a fully up-to-date record) rather than `getSession()`. FP carve-out: legitimate CLIENT-side usage of getSession() (browser components, client hooks) is unaffected. The path heuristic scopes this to server-execution files, and ambiguous paths are flagged `needs_review` rather than asserted as a violation."
+qualifies = "Enforced by a path-scoped regex for `getSession(` inside server-execution-context files: Next.js middleware.*/app/**/route.*/server components, SvelteKit +page.server.*/hooks.server.* and comparable framework server-boundary paths. `getSession()` returns the session object built from the client-supplied cookie without re-validating it, so trusting it for an authorization decision on the server accepts a value the caller controls. Conformance holds when server-boundary code establishes identity via `getClaims()` (local, cryptographic JWT-signature verification, no network round-trip) or `getUser()` (a network call to the Auth server for a fully up-to-date record) rather than `getSession()`. FP carve-out: legitimate CLIENT-side usage of getSession() (browser components, client hooks) is unaffected. The path heuristic scopes this to server-execution files, and ambiguous paths are flagged `needs_review` rather than asserted as a violation."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/auth/server-side/nextjs"
@@ -40,7 +40,7 @@ access/refresh token value itself, never as a proxy for "is this request authent
 directive therefore flags `getSession(` used for an authorization decision in a server-execution
 path and asks the code to route through `getClaims()` or `getUser()` instead.
 
-FP scope: this is a PATH-SCOPED regex (middleware.*, app/**/route.*, +page.server.*, api/, and
+FP scope: this is a PATH-SCOPED regex (middleware.*, app/**/route.*, +page.server.*, api/ and
 equivalent server-boundary conventions per framework), and client-side getSession() usage (browser
 components reading the current session for UI state) is legitimate and unaffected. Paths that
 don't clearly resolve to server vs. client execution are marked `needs_review` rather than flagged

@@ -33,9 +33,9 @@ linter = "golangci-lint: tparallel"
 relevance = "golangci-lint tparallel detects inappropriate usage of t.Parallel() that can cause data races when tests mutate shared state. Used alongside t.Setenv restrictions to prevent race conditions in parallel tests."
 
 [decision]
-question = "How do tests avoid flakiness from time, randomness, environment, and filesystem side effects?"
+question = "How do tests avoid flakiness from time, randomness, environment and filesystem side effects?"
 default = "deterministic-with-testing-helpers"
-why = "time.Sleep is the most common source of flaky tests: the sleep duration is a guess, and a guess that passes locally fails under CI load. The correct approach is to either inject a clock interface that the test controls directly, or to use channel synchronization. Environment variables mutated without restoration affect other tests running in the same process. Filesystem writes without cleanup accumulate across test runs. The testing package provides t.TempDir, t.Setenv, and t.Cleanup precisely to handle these cases deterministically: they scope the side effect to one test and tear it down automatically."
+why = "time.Sleep is the most common source of flaky tests: the sleep duration is a guess, and a guess that passes locally fails under CI load. The correct approach is to either inject a clock interface that the test controls directly, or to use channel synchronization. Environment variables mutated without restoration affect other tests running in the same process. Filesystem writes without cleanup accumulate across test runs. The testing package provides t.TempDir, t.Setenv and t.Cleanup precisely to handle these cases deterministically: they scope the side effect to one test and tear it down automatically."
 
 [[option]]
 id = "deterministic-with-testing-helpers"

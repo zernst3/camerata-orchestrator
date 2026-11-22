@@ -16,7 +16,7 @@ title = "pkg.go.dev: net/http Server.Shutdown"
 [decision]
 question = "How should the HTTP server handle shutdown when a stop signal (SIGTERM, interrupt) is received?"
 default = "graceful-shutdown-with-timeout"
-why = "A server that stops abruptly mid-request corrupts in-flight transactions, leaves database connections dangling, and breaks clients. Go's *http.Server provides Shutdown(ctx) which stops accepting new connections and waits for in-flight requests to complete before closing listeners. A context deadline ensures the wait does not hang forever if a request is stuck. A graceful shutdown (wait for in-flight requests with a timeout, then force-close) gives requests a chance to finish cleanly while ensuring the process eventually terminates. The alternative, immediate termination (os.Exit, return from main), is a deadlock and data-corruption risk."
+why = "A server that stops abruptly mid-request corrupts in-flight transactions, leaves database connections dangling and breaks clients. Go's *http.Server provides Shutdown(ctx) which stops accepting new connections and waits for in-flight requests to complete before closing listeners. A context deadline ensures the wait does not hang forever if a request is stuck. A graceful shutdown (wait for in-flight requests with a timeout, then force-close) gives requests a chance to finish cleanly while ensuring the process eventually terminates. The alternative, immediate termination (os.Exit, return from main), is a deadlock and data-corruption risk."
 
 [[option]]
 id = "graceful-shutdown-with-timeout"
@@ -25,7 +25,7 @@ directive = "The application sets up a signal handler (SIGTERM, SIGINT) that, on
 remediation = """
 Add a signal handler for SIGTERM/SIGINT that calls the server's Shutdown method with a bounded context timeout, allowing in-flight requests to finish before forcing a close, instead of terminating immediately or waiting indefinitely. Verify by sending a shutdown signal during an in-flight request and confirming it completes before the process exits, while a new request after the signal is rejected.
 """
-why = "Graceful shutdown ensures in-flight requests complete, database transactions finish, and the process terminates cleanly; the deadline prevents indefinite hangs."
+why = "Graceful shutdown ensures in-flight requests complete, database transactions finish and the process terminates cleanly; the deadline prevents indefinite hangs."
 
 [[option]]
 id = "immediate-termination"

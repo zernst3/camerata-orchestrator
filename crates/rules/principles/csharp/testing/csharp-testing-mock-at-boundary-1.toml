@@ -34,7 +34,7 @@ why = "Creates a tight coupling between the test and the class's inheritance/vir
 id = "no-mocks-integration-style"
 label = "spin up real in-process infrastructure (SQLite, in-memory buses) even for unit tests"
 directive = "Unit tests instantiate real database connections (in-memory SQLite), real HTTP servers (TestServer) or real queue implementations."
-why = "These are integration tests, not unit tests; they are slower, order-dependent, and require environment setup. Reserve real infrastructure for the IntegrationTests project."
+why = "These are integration tests, not unit tests; they are slower, order-dependent and require environment setup. Reserve real infrastructure for the IntegrationTests project."
 
 
 [[sources]]

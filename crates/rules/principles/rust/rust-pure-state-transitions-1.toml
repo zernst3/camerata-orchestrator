@@ -35,7 +35,7 @@ why = "Pure transitions are deterministic, testable without a runtime, and reusa
 id = "mutate-in-place"
 label = "mutate state in place"
 directive = "State changes are applied by mutating the existing state value in place rather than returning a new state from a pure function."
-why = "Sometimes faster to write, but loses cheap comparison, snapshotting, and replay, and makes change detection harder."
+why = "Sometimes faster to write, but loses cheap comparison, snapshotting, and replay and makes change detection harder."
 
 [[option]]
 id = "effects-in-core"

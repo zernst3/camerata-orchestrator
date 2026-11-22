@@ -36,7 +36,7 @@ directive = "Services are decorated with @Injectable() and declared as providers
 remediation = """
 Decorate the manually-instantiated service with @Injectable(), declare it as a provider in its module and have consumers receive it via constructor injection instead of calling `new` or reading a static property. Verify by confirming the service can be resolved from the module's testing setup (Test.createTestingModule) rather than being constructed directly.
 """
-why = "DI makes services composable, testable, and easy to wire together."
+why = "DI makes services composable, testable and easy to wire together."
 
 [[option]]
 id = "manual-service-instantiation"

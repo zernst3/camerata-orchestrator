@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "How is diagnostic information logged?"
 default = "structured-logging-framework"
-why = "Structured logging (using slf4j, Log4j, or similar) produces machine-readable output (JSON or key-value pairs) that can be parsed, indexed, and searched by centralized logging systems (Elasticsearch, Splunk, CloudWatch). Concatenating strings and printing to stdout or stderr is unstructured, cannot be easily searched, is hard to correlate with application events, and gets lost or buffered in container environments. Structured logging also supports multiple output formats and log levels (debug, info, warn, error) that can be dynamically configured without recompilation. Exception objects are properly serialized with full stack traces, not mangled in string concatenation."
+why = "Structured logging (using slf4j, Log4j or similar) produces machine-readable output (JSON or key-value pairs) that can be parsed, indexed, and searched by centralized logging systems (Elasticsearch, Splunk, CloudWatch). Concatenating strings and printing to stdout or stderr is unstructured, cannot be easily searched, is hard to correlate with application events, and gets lost or buffered in container environments. Structured logging also supports multiple output formats and log levels (debug, info, warn, error) that can be dynamically configured without recompilation. Exception objects are properly serialized with full stack traces, not mangled in string concatenation."
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#systemprintln"
@@ -27,7 +27,7 @@ directive = "Logging is done via a logging framework (slf4j with Logback or Log4
 remediation = """
 Replace the System.out/System.err print or string-concatenated log call with a call through the logging framework (slf4j with Logback or Log4j2), using {} placeholders for variables instead of building the message with string concatenation. Verify by confirming the resulting log line goes through the configured logger (with level, timestamp and structured fields) rather than printing raw text to stdout.
 """
-why = "Structured logging is machine-readable, searchable, and integrates with centralized logging systems."
+why = "Structured logging is machine-readable, searchable and integrates with centralized logging systems."
 
 [[option]]
 id = "system-print-statements"
