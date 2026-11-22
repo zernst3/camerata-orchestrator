@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-AUTHORIZATION-1"
-version = 3
+version = 4
 title = "Every private Realtime channel has an RLS policy on realtime.messages; public-access is an explicit, reviewed choice, never the silent default"
 domain = "supabase:realtime"
 layer = "platform"
@@ -32,16 +32,15 @@ it is a SEPARATE mechanism living on a different table (`realtime.messages`, not
 happens to be about) and gated by a client-side flag (`private: true` in the channel config) PLUS a project-level
 'Allow public access' toggle that must also be disabled. A developer who has correctly locked down RLS on their
 application tables can still ship a Realtime channel that broadcasts or subscribes to changes on that same data with
-NO authorization at all, because table RLS and `realtime.messages` RLS are evaluated by entirely different code
-paths — securing one says nothing about the other. Supabase's documentation is explicit that without the `private`
+NO authorization at all, because table RLS and `realtime.messages` RLS are evaluated by entirely different code paths. Securing one says nothing about the other. Supabase's documentation is explicit that without the `private`
 flag and the matching policy, a channel is public: anyone who can reach the Realtime endpoint and knows (or
 guesses) the topic name can join it, with authorization validated 'when the user connects... based on' the
-realtime.messages policies that exist — so the absence of ANY policy is equivalent to the absence of ANY check.
+realtime.messages policies that exist, so the absence of ANY policy is equivalent to the absence of ANY check.
 
 This rule mirrors SUPABASE-RLS-NO-POLICY-1's shape exactly (RLS enabled but zero policies means the table is
 unreachable until at least one policy exists) applied to the Realtime-specific target: RLS enabled on
 `realtime.messages` with a policy scoping who may access which topic, plus the client-side `private: true` flag that
-actually routes the channel through that enforcement in the first place. Both halves have to be present — a
+actually routes the channel through that enforcement in the first place. Both halves have to be present: a
 private flag with no matching policy, or a policy with the channel still left public, both leave the real-world
 access check absent.
 """
@@ -75,7 +74,7 @@ ownership table). Verify by connecting to the channel as a user who should NOT h
 connection is rejected, not merely that the client UI happens not to display anything.
 """
 effort = "medium"
-why = "Realtime's authorization model lives entirely on a different table (realtime.messages) than the application data the channel is about, so securing the application's own RLS policies provides zero protection for the Realtime layer — both the client-side private flag and the matching policy have to be present, or the channel defaults to public with no check at all."
+why = "Realtime's authorization model lives entirely on a different table (realtime.messages) than the application data the channel is about, so securing the application's own RLS policies provides zero protection for the Realtime layer. Both the client-side private flag and the matching policy have to be present, or the channel defaults to public with no check at all."
 
 [[option]]
 id = "treat-application-table-rls-as-sufficient-for-realtime-channels"

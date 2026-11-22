@@ -1,5 +1,5 @@
 id = "JAVA-PACKAGE-BY-FEATURE-1"
-version = 3
+version = 4
 title = "Java package organization: by feature (domain), by layer or a flat namespace"
 domain = "java"
 layer = "architecture"
@@ -11,8 +11,8 @@ qualifies = "Enforced by package structure conventions and code review. The dire
 verification = "grounded"
 
 [decision]
-question = "How are Java packages organized: by feature (domain), by layer (presentation/business/data), or as a flat namespace?"
-why = "The right package structure follows from the size of the codebase and how its team and features are likely to evolve, not from a presumed winner. Organizing by feature (com.example.users, com.example.organizations) groups all of a feature's code — controller, service, repository, model — in one place, makes cross-feature dependencies explicit as package imports, and makes a feature easy to understand or later extract; it is the natural fit for a codebase with several distinct features and an eye toward feature-level ownership or extraction. Organizing by layer (com.example.controllers, com.example.services, com.example.repositories) groups code by technical role, which makes a layer's conventions and shared infrastructure easy to see in one place and matches how many Spring tutorials and teams already think; it is a familiar fit for layer-oriented teams and smaller apps where the feature set is stable. A flat namespace keeps everything in one or two packages, which is the right amount of structure for a genuinely tiny project or a prototype where any package hierarchy would be premature. Choose by the codebase's size and the boundaries it actually has, and graduate from flat to feature or layer structure as it grows."
+question = "How are Java packages organized: by feature (domain), by layer (presentation/business/data) or as a flat namespace?"
+why = "The right package structure follows from the size of the codebase and how its team and features are likely to evolve, not from a presumed winner. Organizing by feature (com.example.users, com.example.organizations) groups all of a feature's code (controller, service, repository, model) in one place, makes cross-feature dependencies explicit as package imports, and makes a feature easy to understand or later extract; it is the natural fit for a codebase with several distinct features and an eye toward feature-level ownership or extraction. Organizing by layer (com.example.controllers, com.example.services, com.example.repositories) groups code by technical role, which makes a layer's conventions and shared infrastructure easy to see in one place and matches how many Spring tutorials and teams already think; it is a familiar fit for layer-oriented teams and smaller apps where the feature set is stable. A flat namespace keeps everything in one or two packages, which is the right amount of structure for a genuinely tiny project or a prototype where any package hierarchy would be premature. Choose by the codebase's size and the boundaries it actually has, and graduate from flat to feature or layer structure as it grows."
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_design.html#loosepackagecoupling"

@@ -1,5 +1,5 @@
 id = "SEC-NO-VENDOR-TOKEN-1"
-version = 3
+version = 4
 title = "Vendor credential tokens (AWS, GitHub, Slack, Stripe, Google, Anthropic, Supabase) are never hardcoded; they live in a secrets manager or environment variables"
 domain = "universal"
 layer = "universal"
@@ -44,24 +44,24 @@ secrets manager (Vault, AWS Secrets Manager, Azure Key Vault) or environment var
 runtime.
 
 Supabase secret shapes added to the match-set (confirmed against the live Supabase API-keys docs):
-  (a) sb_secret_ new-format secret keys — a fixed literal prefix (sb_secret_) followed by an
+  (a) sb_secret_ new-format secret keys. A fixed literal prefix (sb_secret_) followed by an
       opaque body; near-zero FP, matched the same way AWS AKIA/ASIA prefixes are.
-  (b) Legacy service_role JWTs — Supabase's pre-sb_secret_ format is a standard three-part JWT
+  (b) Legacy service_role JWTs: Supabase's pre-sb_secret_ format is a standard three-part JWT
       whose PAYLOAD (the base64 middle segment) decodes to a claims object containing
       "role":"service_role". A bare regex cannot see inside a JWT's base64 payload, so this arm
-      decodes the matched token's middle segment at match time and checks for that claim — the
+      decodes the matched token's middle segment at match time and checks for that claim: the
       same decode-at-match-time technique this rule already uses for the SafeLoader/FullLoader
       carve-out precedent in SEC-NO-UNSAFE-DESERIALIZATION-1. A JWT decoding to
-      "role":"anon" or "role":"authenticated" is NOT flagged — those are the intentionally-public
+      "role":"anon" or "role":"authenticated" is NOT flagged. Those are the intentionally-public
       anon/publishable keys (see SUPABASE-KEY-SERVICE-ROLE-CLIENT-1's qualifies for why the anon
       key's mere presence must never be flagged).
-  (c) Supabase Postgres connection strings with an inline password — postgres(ql)?://[^@]+:[^@]+@
+  (c) Supabase Postgres connection strings with an inline password: postgres(ql)?://[^@]+:[^@]+@
       db.<project-ref>.supabase.co(:5432)?/postgres. The project's direct-connection URI embeds the
       database password in the URI itself (confirmed against Supabase's own "Connecting to
       Postgres" docs, whose example is literally
-      postgresql://postgres:[YOUR-PASSWORD]@db.<ref>.supabase.co:5432/postgres) — a hardcoded copy
+      postgresql://postgres:[YOUR-PASSWORD]@db.<ref>.supabase.co:5432/postgres): a hardcoded copy
       of this string is a hardcoded database password, not merely an API credential.
-This is a match-set EXTENSION to an already-`grounded` floor rule — no new rule id, no change to
+This is a match-set EXTENSION to an already-`grounded` floor rule. No new rule id, no change to
 the rule's tier or its enforcement status; it remains `AUDIT_RULES`-enforced exactly as before.
 """
 

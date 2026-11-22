@@ -150,10 +150,9 @@ where
 /// everything cannot block both sides on full pipes.
 ///
 /// Dropping it aborts the task, so a call that is killed, times out or is dropped leaves no
-/// writer behind. [`PromptWriter::finish`] reports how the write ended: a child that exits early
-/// leaves a broken pipe, which is its exit status's to explain and is not an error here; any other
-/// failure means the prompt did not reach the child whole, and the answer to a truncated prompt
-/// must not be taken as the answer.
+/// writer behind. [`PromptWriter::finish`] reports how the write ended: any failure, a broken pipe
+/// from a child that exited early included, means the prompt did not reach the child whole, and the
+/// answer to a truncated prompt must not be taken as the answer.
 pub struct PromptWriter {
     handle: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
 }
@@ -173,19 +172,28 @@ impl PromptWriter {
     /// exited: a writer still unfinished then is stuck (something else, such as a grandchild the
     /// child left running, holds the pipe open) and is aborted rather than waited on forever.
     ///
-    /// `Ok` when it completed, or the child closed its input early (broken pipe, logged: its exit
-    /// status says why). `Err` for any other write failure, and when the grace expires with the
-    /// write unfinished (the child has exited, so it cannot have read the whole prompt).
+    /// `Ok` when it completed. `Err` for any write failure (a broken pipe included: the child
+    /// closed its input early), and when the grace expires with the write unfinished (the child
+    /// has exited, so it cannot have read the whole prompt).
+    ///
+    /// Limit: a child that exits 0 without reading a prompt smaller than the pipe buffer (about
+    /// 64 KB on Linux) still succeeds, because the write completed into the buffer. The guarantee
+    /// holds only above that size; the real CLI reads its stdin to the end.
     pub async fn finish(mut self) -> std::io::Result<()> {
         let Some(mut handle) = self.handle.take() else {
             return Ok(());
         };
         match tokio::time::timeout(PROMPT_WRITE_GRACE, &mut handle).await {
+            // The child closed its input before the whole prompt was written, so it cannot have
+            // answered the whole prompt: the same failure as a writer stuck past the grace.
             Ok(Ok(Err(e))) if e.kind() == std::io::ErrorKind::BrokenPipe => {
                 eprintln!(
                     "[camerata] the claude CLI closed its input before the whole prompt was written: {e}"
                 );
-                Ok(())
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the prompt was not fully written before the CLI exited",
+                ))
             }
             Ok(Ok(Err(e))) => Err(e),
             // Completed, or the task was cancelled (nothing was left to finish).
@@ -482,7 +490,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_write_that_fails_for_any_reason_but_a_broken_pipe_is_an_error() {
+    async fn any_write_failure_other_than_a_broken_pipe_is_returned_as_it_is() {
         let failed = PromptWriter::start(
             FailingWriter(std::io::ErrorKind::PermissionDenied),
             b"prompt".to_vec(),
@@ -496,14 +504,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_broken_pipe_is_the_childs_exit_status_to_explain_not_a_write_error() {
+    async fn a_broken_pipe_means_the_prompt_was_not_fully_written() {
         let result = PromptWriter::start(
             FailingWriter(std::io::ErrorKind::BrokenPipe),
             b"prompt".to_vec(),
         )
         .finish()
         .await;
-        assert!(result.is_ok(), "{result:?}");
+        let err = result.expect_err("a child that closed its input early did not read it all");
+        assert!(err.to_string().contains("not fully written"), "{err}");
     }
 
     #[tokio::test]

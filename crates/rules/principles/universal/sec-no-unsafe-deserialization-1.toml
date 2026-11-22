@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-DESERIALIZATION-1"
-version = 4
+version = 5
 title = "Unsafe deserialization of untrusted data is never used in production code; tests that require it use a suppression with a reason"
 domain = "universal"
 layer = "universal"
@@ -34,32 +34,32 @@ influence the stream, they control what code runs.
 
 Match-set (gate-enforced):
   Python:
-    - yaml.load( without SafeLoader or FullLoader — the default YAML loader executes
+    - yaml.load( without SafeLoader or FullLoader. The default YAML loader executes
       arbitrary Python constructors (!!python/object). The carve-out is precise: a line
       containing SafeLoader or FullLoader alongside yaml.load( is safe and is NOT flagged.
-    - yaml.unsafe_load( — explicitly named unsafe; no safe variant.
-    - pickle.load( / pickle.loads( — Python's native serialisation; trivially weaponisable.
-    - cPickle.load( / cPickle.loads( — C-extension alias of pickle; same risk.
-    - _pickle.load( — CPython internal alias; same risk.
+    - yaml.unsafe_load( is explicitly named unsafe; no safe variant.
+    - pickle.load( / pickle.loads( is Python's native serialization; trivially weaponizable.
+    - cPickle.load( / cPickle.loads( is a C-extension alias of pickle; same risk.
+    - _pickle.load( is a CPython internal alias; same risk.
   PHP:
-    - unserialize( — PHP's native object deserialisation. The PHP manual explicitly warns
+    - unserialize( is PHP's native object deserialization. The PHP manual explicitly warns
       that it must never be called on untrusted input. No safe alternative exists; use JSON.
   Ruby:
-    - Marshal.load( / Marshal.restore( — Ruby's native serialisation; untrusted input can
+    - Marshal.load( / Marshal.restore( is Ruby's native serialization; untrusted input can
       invoke arbitrary object methods during loading.
   .NET:
-    - BinaryFormatter — deprecated in .NET 5+ specifically because of this vulnerability.
-    - NetDataContractSerializer — same risk profile; same deprecation trajectory.
-    - LosFormatter — ASP.NET ViewState serialiser; the same object-graph reconstruction
+    - BinaryFormatter is deprecated in .NET 5+ specifically because of this vulnerability.
+    - NetDataContractSerializer has the same risk profile; same deprecation trajectory.
+    - LosFormatter is the ASP.NET ViewState serializer; the same object-graph reconstruction
       vulnerability applies.
-    - ObjectStateFormatter — companion to LosFormatter; same risk.
+    - ObjectStateFormatter is a companion to LosFormatter; same risk.
 
-Known gap — Java:
+Known gap for Java:
   Java's ObjectInputStream.readObject() is the canonical unsafe-deser sink. However, it
-  fires on virtually every Java framework that uses serialisation internally (Spring, Hibernate,
+  fires on virtually every Java framework that uses serialization internally (Spring, Hibernate,
   RMI, Java EE containers), producing a false-positive rate that would block legitimate commits
   without AST context (specifically: whether the input stream originates from user-controlled
-  data). A regex cannot distinguish "reading a local trusted object graph" from "deserialising
+  data). A regex cannot distinguish "reading a local trusted object graph" from "deserializing
   a network payload". Java coverage is deferred to the semgrep tier, where AST-structural
   taint-tracking rules are available and can express the "user-controlled source" constraint.
 
@@ -70,7 +70,7 @@ SafeLoader / FullLoader carve-out:
   the match is skipped. yaml.safe_load( is separately safe and does not match the regex at all.
 
 Test-scope policy: Waive.
-  Test code legitimately deserialises trusted fixtures (e.g. a test that round-trips a known
+  Test code legitimately deserializes trusted fixtures (e.g. a test that round-trips a known
   payload through pickle or yaml.load). A Waive policy means the gate does not block
   #[cfg(test)] blocks or test-path files. If the suppression is needed outside a test scope,
   use camerata:allow SEC-NO-UNSAFE-DESERIALIZATION-1: <reason>.
@@ -79,7 +79,7 @@ Test-scope policy: Waive.
 [[option]]
 id = "never-in-production"
 label = "Unsafe deserializers are never called on untrusted input in production code; tests that need them use an explicit suppression comment"
-directive = "yaml.load without SafeLoader/FullLoader, yaml.unsafe_load, pickle/cPickle/_pickle .load/.loads, PHP unserialize(), Ruby Marshal.load/restore and .NET BinaryFormatter/NetDataContractSerializer/LosFormatter/ObjectStateFormatter are never called on data whose origin is not fully trusted and sandboxed. The correct alternatives are: yaml.safe_load() or yaml.load(Loader=SafeLoader) for YAML; json / protobuf / msgpack for structured data that does not require arbitrary object reconstruction. When a test must call an unsafe deserialiser on a controlled fixture, suppress that call with an explicit suppression comment that explains why the input is trusted."
+directive = "yaml.load without SafeLoader/FullLoader, yaml.unsafe_load, pickle/cPickle/_pickle .load/.loads, PHP unserialize(), Ruby Marshal.load/restore and .NET BinaryFormatter/NetDataContractSerializer/LosFormatter/ObjectStateFormatter are never called on data whose origin is not fully trusted and sandboxed. The correct alternatives are: yaml.safe_load() or yaml.load(Loader=SafeLoader) for YAML; json / protobuf / msgpack for structured data that does not require arbitrary object reconstruction. When a test must call an unsafe deserializer on a controlled fixture, suppress that call with an explicit suppression comment that explains why the input is trusted."
 remediation = """
 Replace the unsafe deserializer call (yaml.load without a safe loader, pickle.load, PHP unserialize(), Ruby Marshal.load, .NET BinaryFormatter or similar) on untrusted input with its safe equivalent (SafeLoader, a schema-validated parser or a format that doesn't execute arbitrary code on load). If the input is genuinely from a fully trusted, sandboxed source, keep the unsafe call only behind an explicit, reviewed suppression comment documenting that trust boundary. Verify by feeding the deserializer a crafted malicious payload and confirming it is rejected or safely parsed rather than executing arbitrary code.
 """
@@ -89,10 +89,10 @@ finding_detail = """
 Certain deserializers reconstruct objects in a way that can execute attacker-controlled code the moment the data is loaded: before any validation of the result ever runs. If the input this call reads in `<path>` can ever come from outside your own trusted backend, switch to a safe format (JSON, or a safe YAML loader) or validate the source before it reaches this call.
 """
 why = """
-Every unsafe deserialiser in the match-set reconstructs an arbitrary object graph from the
+Every unsafe deserializer in the match-set reconstructs an arbitrary object graph from the
 byte stream, executing code during reconstruction. There is no safe way to call them on
-untrusted input regardless of input validation upstream — by the time the attack payload
-reaches the deserialiser, the execution has already begun. The safe alternatives (json,
+untrusted input regardless of input validation upstream. By the time the attack payload
+reaches the deserializer, the execution has already begun. The safe alternatives (json,
 yaml.safe_load, protobuf) impose a schema that prevents arbitrary code paths from being
 invoked. The gate enforces the safe default and requires the code author to document a
 justification via the suppression comment when a genuine exception exists.

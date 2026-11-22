@@ -463,7 +463,7 @@ fn twin_published_azure_emulator_account_key() {
     // The well-known Azurite development key, assembled from fragments.
     let key = [
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1",
-        "OUzFT50uSRZ6IFsuFq2UVErCz4I6tq==",
+        "OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
     ]
     .concat();
     let line = format!("AccountKey={key}");

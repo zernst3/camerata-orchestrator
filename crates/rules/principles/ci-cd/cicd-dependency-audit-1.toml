@@ -1,5 +1,5 @@
 id = "CICD-DEPENDENCY-AUDIT-1"
-version = 3
+version = 4
 title = "Scan dependencies for known vulnerabilities (osv-scanner)"
 domain = "ci-cd"
 layer = "universal"
@@ -24,7 +24,7 @@ How the engine tracks this: once the team picks a cadence, register osv-scanner 
 id       = "CICD-DEPENDENCY-AUDIT-1"
 name     = "dependency vulnerability scan"
 tool     = "osv-scanner"
-version  = "<x.y.z>"          # EXACT pinned version — no ranges
+version  = "<x.y.z>"          # EXACT pinned version. No ranges
 install  = "curl -sSfL https://github.com/google/osv-scanner/releases/download/v<x.y.z>/osv-scanner_linux_amd64 -o osv-scanner && chmod +x osv-scanner && sudo mv osv-scanner /usr/local/bin/"
 command  = "osv-scanner -r ."
 severity = "high"
@@ -53,7 +53,7 @@ title = "OSV-Scanner usage: CLI flags, output formats, configuration"
 
 [decision]
 question = "Where and how often should dependency-vulnerability scanning run?"
-why = "Camerata does not build a scheduling or cadence engine. The cadence is a project decision: the team picks when the scan fires, and the developer implements the cadence (cron job, PR trigger, in-loop, or on-demand) when wiring CI. Four options cover the common patterns. The recommended default is a weekly scheduled CI job — low noise, catches newly-disclosed CVEs without blocking every PR. Higher-friction teams choose per-PR; teams wanting in-loop enforcement choose every-pass; automation-heavy teams may prefer on-demand."
+why = "Camerata does not build a scheduling or cadence engine. The cadence is a project decision: the team picks when the scan fires, and the developer implements the cadence (cron job, PR trigger, in-loop or on-demand) when wiring CI. Four options cover the common patterns. The recommended default is a weekly scheduled CI job: low noise, catches newly-disclosed CVEs without blocking every PR. Higher-friction teams choose per-PR; teams wanting in-loop enforcement choose every-pass; automation-heavy teams may prefer on-demand."
 
 [[option]]
 id = "dep-audit-weekly-ci"
@@ -140,7 +140,7 @@ remediation = """
 Wire osv-scanner into both the in-loop development gate (set in_loop = true in the manifest) and CI, so every agent task and every CI run is scanned. Verify by confirming a vulnerable dependency is caught both during local/agent development and again in the CI run.
 """
 effort = "medium"
-why = "The every-pass option maximises coverage by running at both Layer 2 (in-loop dev gate) and Layer 3 (CI), because osv-scanner is lightweight enough to run locally. Best for teams with strict security requirements; accept the in-loop latency in exchange for the tightest possible gate."
+why = "The every-pass option maximizes coverage by running at both Layer 2 (in-loop dev gate) and Layer 3 (CI), because osv-scanner is lightweight enough to run locally. Best for teams with strict security requirements; accept the in-loop latency in exchange for the tightest possible gate."
 
 [[option]]
 id = "dep-audit-manual"

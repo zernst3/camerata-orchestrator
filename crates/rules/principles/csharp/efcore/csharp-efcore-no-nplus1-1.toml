@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-NO-NPLUS1-1"
-version = 3
+version = 4
 title = "Related data is loaded via Include/ThenInclude or projection; no lazy-loading and no N+1 loops"
 domain = "csharp:efcore"
 layer = "library"
@@ -21,7 +21,7 @@ directive = "Lazy loading is disabled (the UseLazyLoadingProxies call is absent 
 remediation = """
 Replace the per-item lazy load or explicit-load loop with a single query that uses .Include()/.ThenInclude() for the related data, or a .Select() projection into a DTO that already contains what's needed. Disable lazy loading (remove UseLazyLoadingProxies) so a missed Include fails visibly instead of silently issuing one query per row. Verify by running the endpoint under a query-count profiler and confirming a fixed, small number of queries regardless of result set size.
 """
-why = "Explicit Include or projection makes the loading strategy visible at the query site, eliminates unintended round-trips, and loads exactly the data required."
+why = "Explicit Include or projection makes the loading strategy visible at the query site, eliminates unintended round-trips and loads exactly the data required."
 
 [[option]]
 id = "lazy-loading-via-proxies"

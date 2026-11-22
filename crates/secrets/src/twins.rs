@@ -72,6 +72,45 @@ impl Twin {
     }
 }
 
+impl Twin {
+    /// Whether a match with this twin may reach a client file UNMASKED (the release gate's
+    /// decision, one arm per twin so a twin added tomorrow forces a decision here).
+    ///
+    /// Allowed because the value is public by design or is not a value at all: a Supabase `anon`
+    /// or `authenticated` JWT, a publishable key, a Firebase web API key, an environment variable
+    /// name, a path, a readable name, a label, a module path, a template token, an already
+    /// redacted form, a PEM header with no key material, and a sealed secret's ciphertext
+    /// (encrypted for committing). A placeholder word (`sk_live_your_key_here`) is allowed too
+    /// when it is delimited or the body is single-case (the client path checks that, see
+    /// [`crate::SecretMatch::is_client_visible_secret`]): it is a fake by its own spelling, and
+    /// the placeholder is the documented way to show a key slot without a key.
+    ///
+    /// Refused: a key a vendor publishes in its documentation (a value documented only as one
+    /// setting's value, a config enum, is not a key: [`crate::SecretMatch::is_client_visible_secret`]
+    /// reads the digest for that). It is real-looking, it is not
+    /// public by design (the vendor says to replace it), and a reader who finds it unmasked in a
+    /// report cannot tell it from a leak. The export masks it, and the gate proves it did.
+    pub fn ships_unmasked(&self) -> bool {
+        match self {
+            Twin::PublishedExampleKey => false,
+            Twin::PlaceholderWord(_)
+            | Twin::EnvNameLiteral
+            | Twin::PublicKeyRole(_)
+            | Twin::TemplateToken
+            | Twin::PathLike
+            | Twin::RedactionMarker
+            | Twin::NoKeyMaterial
+            | Twin::ReadableName
+            | Twin::PublishableKey
+            | Twin::FirebaseWebApiKey
+            | Twin::QualifiedLabelName
+            | Twin::BlockHeaderLabel
+            | Twin::ModulePath
+            | Twin::SealedCiphertext => true,
+        }
+    }
+}
+
 /// T1 placeholder words, matched case-insensitively against the opaque body. Adding one is a
 /// one-line change with a twin test.
 pub const PLACEHOLDER_WORDS: &[&str] = &[
@@ -142,6 +181,34 @@ fn placeholder_word(body: &str, delimited_only: bool) -> Option<&'static str> {
     PLACEHOLDER_WORDS.iter().copied().find(|word| {
         lower.match_indices(word).any(|(start, _)| {
             !delimited_only || single_case || is_delimited(body, start, start + word.len(), word)
+        })
+    })
+}
+
+/// Whether the placeholder twin on `value` still holds under the CLIENT rule: the body is
+/// single-case, or some placeholder word is set apart by a SEPARATOR (a non-alphanumeric byte) or
+/// by the start or end of the body. A case change or a digit next to the word is not enough, as it
+/// is for a vendor body: a word buried in mixed-case random text (`Kx9fakeT2mQ8vLp3Zr7wYn5Bd1Hs`)
+/// proves nothing, so a client package masks it.
+pub(crate) fn placeholder_holds_for_client(shape: SecretShape, value: &str) -> bool {
+    let body = &value[prefix_of(shape, value).len()..];
+    let single_case = !body.bytes().any(|b| b.is_ascii_lowercase())
+        || !body.bytes().any(|b| b.is_ascii_uppercase());
+    if single_case {
+        return placeholder_word(body, false).is_some();
+    }
+    let bytes = body.as_bytes();
+    let lower = body.to_ascii_lowercase();
+    PLACEHOLDER_WORDS.iter().any(|word| {
+        lower.match_indices(word).any(|(start, _)| {
+            let end = start + word.len();
+            let left = start == 0
+                || word.starts_with(['_', '-'])
+                || !bytes[start - 1].is_ascii_alphanumeric();
+            let right = end == bytes.len()
+                || word.ends_with(['_', '-'])
+                || !bytes[end].is_ascii_alphanumeric();
+            left && right
         })
     })
 }

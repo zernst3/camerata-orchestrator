@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-INTEGRATION-LOCATION-1"
-version = 3
+version = 4
 title = "Integration and system tests live in spec/requests/ (API flows) and spec/system/ (browser flows), not spec/controllers/"
 domain = "ruby:testing"
 layer = "language"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "Where do integration-level and end-to-end tests live in an RSpec Rails project?"
 default = "requests-and-system"
-why = "Controller specs (spec/controllers/) test the controller object in isolation from routing and middleware. The RSpec core team deprecated this approach because it tests an artificial interface rather than the HTTP contract: two tests can both pass while a routing misconfiguration silently breaks all requests. Request specs (spec/requests/) exercise the full Rack stack — routing, middleware, authentication, serialization — against a real in-process HTTP client, which is the correct layer for testing API endpoints. System specs (spec/system/) drive a real browser (or headless Capybara driver) and cover full user flows including JavaScript; Rails 5.1 adopted this as the canonical end-to-end test layer and rspec-rails ships first-class support for it. The split between spec/requests/ and spec/system/ maps naturally to the two integration concerns: HTTP contracts vs. user-visible behavior."
+why = "Controller specs (spec/controllers/) test the controller object in isolation from routing and middleware. The RSpec core team deprecated this approach because it tests an artificial interface rather than the HTTP contract: two tests can both pass while a routing misconfiguration silently breaks all requests. Request specs (spec/requests/) exercise the full Rack stack (routing, middleware, authentication, serialization) against a real in-process HTTP client, which is the correct layer for testing API endpoints. System specs (spec/system/) drive a real browser (or headless Capybara driver) and cover full user flows including JavaScript; Rails 5.1 adopted this as the canonical end-to-end test layer and rspec-rails ships first-class support for it. The split between spec/requests/ and spec/system/ maps naturally to the two integration concerns: HTTP contracts vs. user-visible behavior."
 
 [[option]]
 id = "requests-and-system"

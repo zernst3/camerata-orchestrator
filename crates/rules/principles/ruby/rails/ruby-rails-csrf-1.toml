@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-CSRF-1"
-version = 2
+version = 3
 title = "CSRF protection is on by default; only API-only JSON endpoints are selectively exempt with token auth"
 domain = "ruby:rails"
 layer = "framework"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How is CSRF protection handled for state-changing requests?"
 default = "csrf-on-with-selective-api-exemption"
-why = "Rails includes `protect_from_forgery with: :exception` in ApplicationController by default, which requires a valid authenticity token on every non-GET/HEAD/OPTIONS/TRACE request. Disabling it globally removes the defense for all form-based state changes; an attacker can craft a page that causes authenticated users to submit requests to the application without their knowledge. The appropriate exemption is narrow: pure API endpoints that authenticate with a Bearer token or API key (not cookies) do not benefit from CSRF tokens because the attacker cannot forge the Authorization header from a cross-origin page — the Same-Origin Policy prevents the browser from reading it. Blanket `skip_before_action :verify_authenticity_token` in ApplicationController, or in any controller that also uses cookie-based session auth, is the dangerous pattern."
+why = "Rails includes `protect_from_forgery with: :exception` in ApplicationController by default, which requires a valid authenticity token on every non-GET/HEAD/OPTIONS/TRACE request. Disabling it globally removes the defense for all form-based state changes; an attacker can craft a page that causes authenticated users to submit requests to the application without their knowledge. The appropriate exemption is narrow: pure API endpoints that authenticate with a Bearer token or API key (not cookies) do not benefit from CSRF tokens because the attacker cannot forge the Authorization header from a cross-origin page. The Same-Origin Policy prevents the browser from reading it. Blanket `skip_before_action :verify_authenticity_token` in ApplicationController, or in any controller that also uses cookie-based session auth, is the dangerous pattern."
 
 [[option]]
 id = "csrf-on-with-selective-api-exemption"

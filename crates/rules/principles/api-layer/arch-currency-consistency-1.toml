@@ -1,5 +1,5 @@
 id = "ARCH-CURRENCY-CONSISTENCY-1"
-version = 4
+version = 5
 title = "A payment amount's currency code and minor-unit denomination stay consistent from authorization through storage and comparison"
 domain = "api-layer"
 layer = "universal"
@@ -7,7 +7,7 @@ enforcement = "prose"
 kind = "defect"
 inspectable = true
 default = true
-qualifies = "Prose check, not a pattern scan: the defect is a MISMATCH between the currency/denomination a value was created in and the currency/denomination it is later compared against, stored as, or displayed as — which requires reading the surrounding business logic (what currency was this order placed in, what does the provider API expect, what does the persisted column represent) rather than a textual pattern. The two concrete, recurring shapes worth naming for the agent: (1) a monetary integer passed to a payment-provider API meant for a zero-decimal currency (JPY, KRW, and similar) as if it needed the usual x100 minor-unit conversion, producing a charge 100x too large or too small; (2) a value computed or compared in one currency (e.g. a cart total summed in the customer's display currency) being passed to, or compared against, a provider call or stored column denominated in a different currency (the merchant's settlement currency) with no conversion step. Conformance holds when every amount's currency and minor-unit convention is traceable to a single, consistent source through its full path from computation to the provider call and to storage; it fails when a currency or denomination change happens silently partway through that path."
+qualifies = "Prose check, not a pattern scan: the defect is a MISMATCH between the currency/denomination a value was created in and the currency/denomination it is later compared against, stored as, or displayed as, which requires reading the surrounding business logic (what currency was this order placed in, what does the provider API expect, what does the persisted column represent) rather than a textual pattern. The two concrete, recurring shapes worth naming for the agent: (1) a monetary integer passed to a payment-provider API meant for a zero-decimal currency (JPY, KRW and similar) as if it needed the usual x100 minor-unit conversion, producing a charge 100x too large or too small; (2) a value computed or compared in one currency (e.g. a cart total summed in the customer's display currency) being passed to, or compared against, a provider call or stored column denominated in a different currency (the merchant's settlement currency) with no conversion step. Conformance holds when every amount's currency and minor-unit convention is traceable to a single, consistent source through its full path from computation to the provider call and to storage; it fails when a currency or denomination change happens silently partway through that path."
 verification = "grounded"
 
 [[sources]]
@@ -26,10 +26,10 @@ Money-handling bugs caused by currency or denomination mismatch are a distinct f
 point imprecision (ARCH-EXACT-DECIMALS-1, which is about the NUMERIC TYPE used for arithmetic) and from client-
 supplied amounts (ARCH-SERVER-COMPUTED-AMOUNT-1, which is about WHO computes the number): this rule is about
 whether the same number, correctly computed and correctly typed, nonetheless represents the WRONG MAGNITUDE or the
-WRONG CURRENCY by the time it reaches the provider call, a comparison, or a stored column. The most common concrete
+WRONG CURRENCY by the time it reaches the provider call, a comparison or a stored column. The most common concrete
 case is the zero-decimal currency trap: most payment providers expect amounts in the currency's smallest unit
 (cents for USD, pence for GBP) and code written against that convention multiplies a decimal amount by 100 before
-calling the provider — but a currency like JPY or KRW has no minor unit at all, and the SAME x100 multiplication
+calling the provider, but a currency like JPY or KRW has no minor unit at all, and the SAME x100 multiplication
 silently produces a charge 100 times too large (or, if the mistake runs the other direction at display/reconciliation
 time, a recorded amount 100 times too small). The second recurring case is a value computed in one currency (a
 cart total summed from prices tagged in the customer's selected display currency) flowing into a comparison,
@@ -55,7 +55,7 @@ order total exactly (not 100x off in either direction), and by confirming a cros
 converts explicitly rather than comparing raw numbers.
 """
 effort = "medium"
-why = "The zero-decimal-currency branch and the explicit-conversion step are each a few lines once the provider's documented currency list and a conversion-rate source are available; the alternative — a silent 100x error or a same-numbers-different-currencies comparison — produces exactly the kind of wrong-amount bug that looks correct in code review and only surfaces against real customer disputes or reconciliation."
+why = "The zero-decimal-currency branch and the explicit-conversion step are each a few lines once the provider's documented currency list and a conversion-rate source are available; the alternative, a silent 100x error or a same-numbers-different-currencies comparison, produces exactly the kind of wrong-amount bug that looks correct in code review and only surfaces against real customer disputes or reconciliation."
 
 [[option]]
 id = "assume-uniform-minor-unit-and-single-currency-throughout"

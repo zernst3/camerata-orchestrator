@@ -135,6 +135,14 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Clippy (pedantic + restriction, report only)
+        # Report only, at the step: the job-level continue-on-error above keeps the run green,
+        # but GitHub still marks the commit with a red X for a failed job. Here the strict lints
+        # stay warnings (the workflow-wide RUSTFLAGS "-D warnings" would turn every one into an
+        # error), and a failure of the step itself (a new stable toolchain that breaks the build)
+        # cannot fail the job. The blocking jobs above are unchanged.
+        continue-on-error: true
+        env:
+          RUSTFLAGS: ""
         run: >
           ./scripts/ci-gate.sh "Strict frontier"
           cargo clippy --workspace --all-targets --

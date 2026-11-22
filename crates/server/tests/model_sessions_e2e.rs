@@ -20,6 +20,7 @@ const NAMING: &str = "ARCH-NAMING-ONE-CONCEPT-1";
 /// empty (but well-formed) audit result.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 printf '%s\n' "$@" >> "$(dirname "$0")/args.log"
+cat > /dev/null
 printf '%s\n' '{"type":"result","is_error":false,"result":"{\"findings\":[],\"proposed_rules\":[],\"needs_files\":[],\"verdicts\":[],\"fixes\":[],\"recommendations\":[]}","total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":5}}'
 "#;
 

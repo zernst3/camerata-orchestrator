@@ -1,6 +1,7 @@
 //! Unit tests for the detector and redactor (spec section 8.1). Every secret value is built at
 //! runtime by [`crate::fixtures`]; this crate's source contains no secret-shaped literal.
 
+mod client_masking;
 mod detection;
 mod detector_edges;
 mod false_alarms;

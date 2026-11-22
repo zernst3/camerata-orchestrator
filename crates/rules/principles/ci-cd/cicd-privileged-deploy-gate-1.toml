@@ -1,5 +1,5 @@
 id = "CICD-PRIVILEGED-DEPLOY-GATE-1"
-version = 4
+version = 5
 title = "A production-impacting job (deploy, prod database migration, infra apply) requires a protected environment with required reviewers, never an unconditional push-triggered run"
 domain = "ci-cd"
 layer = "universal"
@@ -8,7 +8,7 @@ kind = "defect"
 inspectable = true
 default = true
 verification = "grounded"
-qualifies = "Deterministically checkable in principle (does a job that deploys to production, runs a migration against a production database, or applies infrastructure changes reference a GitHub Environment — or the equivalent protected-deployment-target concept on another CI platform — configured with required reviewers/wait timer, versus running unconditionally on every push to its trigger branch), but confirming the environment protection rule is actually CONFIGURED (required reviewers added, not merely an environment referenced with no protection rules set) requires reading the platform's repository/environment settings, not only the workflow YAML — the YAML can reference an environment that has no protection configured at all, which looks identical to a correctly-gated job by file inspection alone. This is architectural: Camerata cannot confirm environment-level protection-rule configuration from repository file content; the project verifies it in its own platform settings. Conformance holds when the environment referenced by a privileged job has required reviewers (or an equivalent human gate) actually configured; it fails when no environment is referenced at all, or when one is referenced but has no protection rules configured."
+qualifies = "Deterministically checkable in principle (does a job that deploys to production, runs a migration against a production database, or applies infrastructure changes reference a GitHub Environment (or the equivalent protected-deployment-target concept on another CI platform) configured with required reviewers/wait timer, versus running unconditionally on every push to its trigger branch), but confirming the environment protection rule is actually CONFIGURED (required reviewers added, not merely an environment referenced with no protection rules set) requires reading the platform's repository/environment settings, not only the workflow YAML. The YAML can reference an environment that has no protection configured at all, which looks identical to a correctly-gated job by file inspection alone. This is architectural: Camerata cannot confirm environment-level protection-rule configuration from repository file content; the project verifies it in its own platform settings. Conformance holds when the environment referenced by a privileged job has required reviewers (or an equivalent human gate) actually configured; it fails when no environment is referenced at all, or when one is referenced but has no protection rules configured."
 
 [[sources]]
 url = "https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment"
@@ -25,20 +25,20 @@ why = """
 `ARCH-TRIGGER-ENV-1` establishes WHICH git ref maps to WHICH deploy environment; this rule is about what stands
 between that mapping and an actual production-impacting action running, because the two are not the same question.
 A workflow can have a perfectly correct trigger→environment mapping (a tag push deploys to prod, a release-branch
-push deploys to staging) and still have zero human gate in the path: the moment the triggering ref is pushed — by
-anyone with push access, by an automated process, or by a compromised CI token with write access to tags — the
+push deploys to staging) and still have zero human gate in the path: the moment the triggering ref is pushed (by
+anyone with push access, by an automated process, or by a compromised CI token with write access to tags) the
 privileged job runs to completion with no pause point for a human to catch a mistake before it reaches production
 data or production infrastructure.
 
 A protected environment (GitHub Environments' required-reviewers protection rule, or the equivalent concept on
 another CI platform) inserts exactly that pause: the job is defined to target the protected environment, and the
-platform itself — not application code, not a convention, not a code-review step that happened earlier in the PR
-process — blocks the job from proceeding past that point until one of the designated reviewers approves the specific
+platform itself (not application code, not a convention, not a code-review step that happened earlier in the PR
+process) blocks the job from proceeding past that point until one of the designated reviewers approves the specific
 run. This catches failure modes a correct trigger mapping and a correct code review cannot: a tag accidentally
 pushed to the wrong place, a migration that was correct in review but targets the wrong database because of an
 environment-variable misconfiguration discovered only at run time, or a compromised automation credential that can
 push a tag but is not one of the designated human reviewers. The gate is deliberately scoped to PRIVILEGED actions
-specifically (production deploys, production-database migrations, infrastructure applies) — gating every CI job
+specifically (production deploys, production-database migrations, infrastructure applies), gating every CI job
 this way would reintroduce the friction continuous delivery exists to remove, for jobs (linting, running a test
 suite, building an artifact) that have no comparable blast radius if something goes wrong.
 """

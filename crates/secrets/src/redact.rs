@@ -4,9 +4,9 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use crate::detect::{detect_secrets, is_decor, SecretMatch};
+use crate::detect::{detect_client_secrets, detect_secrets, is_decor, SecretMatch};
 use crate::shapes::{self, prefix_of, SecretShape};
-use crate::twins::ELLIPSIS;
+use crate::twins::{Twin, ELLIPSIS};
 
 /// A body longer than this many chars shows its last four chars; a body of this length or less
 /// shows only the total length (a four-char tail on a twenty-char body would reveal 20% of it).
@@ -46,6 +46,39 @@ fn generic_form(shape: SecretShape, value: &str) -> String {
         String::new()
     };
     format!("{prefix}{ELLIPSIS}{tail} ({total} chars)")
+}
+
+/// The mask of a key a vendor publishes in its documentation: the prefix, the length and the
+/// words `published example`, never any of the body, so a reader sees it is a public example and
+/// not a leaked key.
+fn published_form(shape: SecretShape, value: &str) -> String {
+    let prefix = prefix_of(shape, value);
+    let total = value.chars().count();
+    format!("{prefix}{ELLIPSIS} ({total} chars, published example)")
+}
+
+/// Whether `after_ellipsis` (the text right after a redaction ellipsis) is the rest of a
+/// published-example mask: ` (N chars, published example)`.
+fn is_published_mask_tail(after_ellipsis: &str) -> bool {
+    let Some(rest) = after_ellipsis.strip_prefix(" (") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && rest[digits..].starts_with(" chars, published example)")
+}
+
+/// Whether `text` holds the mask of a published documentation key (see [`redact_for_client`]).
+pub fn is_published_example_mask(text: &str) -> bool {
+    text.match_indices(ELLIPSIS)
+        .any(|(at, _)| is_published_mask_tail(&text[at + ELLIPSIS.len_utf8()..]))
+}
+
+/// Whether `text` holds a redaction ellipsis that marks a REAL value taken out: any ellipsis that
+/// is not the mask of a published documentation key (that one marks a public example, so a row
+/// holding only it cites no real secret).
+pub fn has_real_redaction_marker(text: &str) -> bool {
+    text.match_indices(ELLIPSIS)
+        .any(|(at, _)| !is_published_mask_tail(&text[at + ELLIPSIS.len_utf8()..]))
 }
 
 fn jwt_form(value: &str, role: Option<&str>) -> String {
@@ -125,6 +158,7 @@ impl SecretMatch {
             SecretShape::SupabaseServiceRoleJwt | SecretShape::OpaqueJwt => {
                 jwt_form(value, self.jwt_role.as_deref())
             }
+            shape if self.twin == Some(Twin::PublishedExampleKey) => published_form(shape, value),
             shape => generic_form(shape, value),
         }
     }
@@ -161,6 +195,23 @@ pub fn redact(text: &str) -> Redacted {
 /// `redact(text).text`, borrowing when nothing matched.
 pub fn redact_str(text: &str) -> Cow<'_, str> {
     let matches = detect_secrets(text);
+    if matches.is_empty() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(apply(text, &matches).text)
+    }
+}
+
+/// [`redact`] for text a CLIENT receives: also masks a key a vendor publishes in its
+/// documentation (labelled `published example`), which [`redact`] leaves readable because it is
+/// not a secret. Same idempotence and line-count guarantees.
+pub fn redact_for_client(text: &str) -> Redacted {
+    apply(text, &detect_client_secrets(text))
+}
+
+/// `redact_for_client(text).text`, borrowing when nothing matched.
+pub fn redact_str_for_client(text: &str) -> Cow<'_, str> {
+    let matches = detect_client_secrets(text);
     if matches.is_empty() {
         Cow::Borrowed(text)
     } else {

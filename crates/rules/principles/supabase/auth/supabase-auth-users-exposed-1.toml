@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-USERS-EXPOSED-1"
-version = 5
+version = 6
 title = "auth.users must never be exposed to anon/authenticated via a view, materialized view or grant in an exposed schema"
 domain = "supabase:auth"
 layer = "platform"
@@ -18,7 +18,7 @@ applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/mig
 min_severity = "critical"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a statement-granular scan for SQL referencing auth.users inside a CREATE VIEW, CREATE MATERIALIZED VIEW, or GRANT statement whose target object lives in an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1). auth.users carries every account's email, phone number, and metadata; exposing any of it through PostgREST is a full account-directory leak. Conformance holds when no exposed-schema object selects from or grants access to auth.users directly — legitimate app-level user data belongs in an application-owned public.profiles-style table populated via trigger, never a direct view over auth.users."
+qualifies = "Enforced by a statement-granular scan for SQL referencing auth.users inside a CREATE VIEW, CREATE MATERIALIZED VIEW, or GRANT statement whose target object lives in an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1). auth.users carries every account's email, phone number and metadata; exposing any of it through PostgREST is a full account-directory leak. Conformance holds when no exposed-schema object selects from or grants access to auth.users directly: legitimate app-level user data belongs in an application-owned public.profiles-style table populated via trigger, never a direct view over auth.users."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0002_auth_users_exposed"
@@ -29,12 +29,11 @@ linter = "splinter: auth_users_exposed"
 question = "Does any view, materialized view, or grant in an API-exposed schema read from auth.users directly?"
 default = "flag-any-exposed-auth-users-reference"
 why = """
-auth.users is Supabase's own internal identity table — it holds every user's email, phone number,
+auth.users is Supabase's own internal identity table. It holds every user's email, phone number,
 and raw_user_meta_data, none of which is meant to be readable through the public API surface. A
 view or materialized view defined in an exposed schema that selects from auth.users (commonly
 created so app code can "join user info" conveniently) or a GRANT that hands anon/authenticated
-direct SELECT on auth.users itself makes the entire user directory readable through PostgREST —
-this is Splinter's auth_users_exposed lint (0002, confirmed against the live database-advisors
+direct SELECT on auth.users itself makes the entire user directory readable through PostgREST. This is Splinter's auth_users_exposed lint (0002, confirmed against the live database-advisors
 page: "User data exposed through a view... inadvertently expose personal information"). There is
 no partial-exposure version of this finding that is acceptable: any reference from an exposed
 object to auth.users is a full account-list leak, so it ships as an unconditional critical with no
@@ -42,7 +41,7 @@ needs_review carve-out.
 
 The correct pattern (which the finding's remediation text should point at) is a separate,
 application-owned public.profiles table (or similar), populated by a trigger on auth.users insert,
-exposing only the columns the application actually needs to share — never a live view over the
+exposing only the columns the application actually needs to share, never a live view over the
 auth schema itself.
 """
 
@@ -65,7 +64,7 @@ that exposes only the specific non-sensitive columns your app actually needs (ne
 other identifying fields unless the feature requires them). Verify by confirming no exposed-schema
 view, materialized view or grant references `auth.users` directly anymore.
 """
-why = "There is no legitimate reason for an exposed-schema object to reference auth.users directly — the correct pattern (a curated profiles table) exists precisely to avoid this, so an unconditional critical with no carve-out is the right severity."
+why = "There is no legitimate reason for an exposed-schema object to reference auth.users directly. The correct pattern (a curated profiles table) exists precisely to avoid this, so an unconditional critical with no carve-out is the right severity."
 
 [[option]]
 id = "allow-column-restricted-views-over-auth-users"

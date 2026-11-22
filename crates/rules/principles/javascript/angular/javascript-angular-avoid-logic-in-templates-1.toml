@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-AVOID-LOGIC-IN-TEMPLATES-1"
-version = 4
+version = 5
 title = "Templates are simple and logic-free; complex conditions and computations live in the component"
 domain = "javascript:angular"
 layer = "framework"
@@ -21,7 +21,7 @@ linter = "@angular-eslint/template/no-call-expression"
 [decision]
 question = "Where do complex conditions and computations for an Angular view live?"
 default = "templates-are-simple-and-logic-free"
-why = "A template's job is to render the view; it should be a declarative map of the component's state to the DOM. When logic lives in the template—nested *ngIf statements, ternary operators, method calls, complex expressions—the template becomes difficult to read, expensive to test (templates cannot be unit-tested the way component classes can), and fragile (a template change can have unexpected side effects). Complex logic in the template also runs on every change-detection cycle, potentially wasting performance. The correct pattern is to compute values in the component class and expose them as simple properties or methods; the template uses property bindings, *ngIf on simple conditions, and *ngFor on arrays, nothing more. If a derived value is needed multiple times, store it in a component property. If the computation is expensive, cache it or use a pipe (which is specifically designed for repeatable transformations). The rule is: avoid logic in templates. Any condition more complex than a single boolean property, any computation beyond accessing a property or calling a zero-argument getter, and any method call with side effects belong in the component class, not the template."
+why = "A template's job is to render the view; it should be a declarative map of the component's state to the DOM. When logic lives in the template (nested *ngIf statements, ternary operators, method calls, complex expressions), the template becomes difficult to read, expensive to test (templates cannot be unit-tested the way component classes can), and fragile (a template change can have unexpected side effects). Complex logic in the template also runs on every change-detection cycle, potentially wasting performance. The correct pattern is to compute values in the component class and expose them as simple properties or methods; the template uses property bindings, *ngIf on simple conditions, and *ngFor on arrays, nothing more. If a derived value is needed multiple times, store it in a component property. If the computation is expensive, cache it or use a pipe (which is specifically designed for repeatable transformations). The rule is: avoid logic in templates. Any condition more complex than a single boolean property, any computation beyond accessing a property or calling a zero-argument getter, and any method call with side effects belong in the component class, not the template."
 
 [[option]]
 id = "templates-are-simple-and-logic-free"
@@ -30,7 +30,7 @@ directive = "Templates contain only simple property bindings, *ngIf on single bo
 remediation = """
 Move the inline conditional, computation or method call currently in the template into a component property or method and have the template bind to that simple property instead of evaluating logic itself. Verify by confirming the template contains only property bindings, single-condition *ngIf and *ngFor, with no ternaries, AND/OR chains or method calls with side effects.
 """
-why = "Simple templates are readable, testable, and performant. Logic belongs in the component class, where it can be unit-tested, reused, and cached."
+why = "Simple templates are readable, testable and performant. Logic belongs in the component class, where it can be unit-tested, reused and cached."
 
 [[option]]
 id = "templates-contain-complex-logic-ternary-operators"

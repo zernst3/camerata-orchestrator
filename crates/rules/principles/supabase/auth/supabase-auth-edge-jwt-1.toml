@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-EDGE-JWT-1"
-version = 3
+version = 4
 title = "An Edge Function with JWT verification disabled must have a compensating auth check in the function body"
 domain = "supabase:auth"
 layer = "platform"
@@ -14,7 +14,7 @@ inspectable = true
 max_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Two-stage rule. Stage one (mechanical, always emitted): a regex scan over supabase/config.toml for a `[functions.<name>]` block setting `verify_jwt = false`, and over deploy scripts/CI for `--no-verify-jwt` on the CLI — this flag detection is near-zero-FP and fires unconditionally whenever the setting is present. Stage two (prose, evidence-fed): whether the function body implements its OWN compensating auth check is a semantic judgment not expressible as a regex, so the mechanical finding is escalated to prose review with the function source attached as evidence. Conformance holds when every verify_jwt = false function either legitimately needs to be public (a genuinely unauthenticated endpoint, e.g. a public webhook receiver that verifies the provider's own signature) or implements an equivalent auth check inline; it fails when the flag is off with no compensating check and no documented reason."
+qualifies = "Two-stage rule. Stage one (mechanical, always emitted): a regex scan over supabase/config.toml for a `[functions.<name>]` block setting `verify_jwt = false`, and over deploy scripts/CI for `--no-verify-jwt` on the CLI. This flag detection is near-zero-FP and fires unconditionally whenever the setting is present. Stage two (prose, evidence-fed): whether the function body implements its OWN compensating auth check is a semantic judgment not expressible as a regex, so the mechanical finding is escalated to prose review with the function source attached as evidence. Conformance holds when every verify_jwt = false function either legitimately needs to be public (a genuinely unauthenticated endpoint, e.g. a public webhook receiver that verifies the provider's own signature) or implements an equivalent auth check inline; it fails when the flag is off with no compensating check and no documented reason."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/functions/auth"
@@ -34,14 +34,14 @@ default = "mechanical-flag-plus-prose-escalation"
 why = """
 Supabase Edge Functions default to `verify_jwt = true`, which rejects any request without a valid
 JWT before the handler code ever runs. Setting `verify_jwt = false` (per-function, in
-`supabase/config.toml`'s `[functions.<name>]` block, or via `--no-verify-jwt` at deploy time) is a
-legitimate, documented pattern for genuinely public endpoints — Stripe/webhook receivers that
+`supabase/config.toml`'s `[functions.<name>]` block or via `--no-verify-jwt` at deploy time) is a
+legitimate, documented pattern for genuinely public endpoints: Stripe/webhook receivers that
 verify the provider's own signature instead, or endpoints meant to be called by unauthenticated
 visitors. It is also the single most common accidental-exposure shape in a vibe-coded functions
 directory: a developer disables the flag to get past a local development friction point (or an AI
 coding assistant does it to make a demo "just work") and never adds anything in its place.
 
-The flag itself (verify_jwt = false present) is a mechanical, near-zero-FP fact — a config regex.
+The flag itself (verify_jwt = false present) is a mechanical, near-zero-FP fact: a config regex.
 Whether the function body implements an equivalent check (validating a webhook signature, checking
 a shared secret, or intentionally requiring nothing because the endpoint is meant to be public) is
 a SEMANTIC judgment that no regex can make reliably: it requires reading the function's control

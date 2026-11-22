@@ -1,5 +1,5 @@
 id = "TESTING-ONE-ASSERTION-PER-TEST-1"
-version = 3
+version = 4
 title = "One logical assertion per test (guideline): each test verifies a single behavior"
 domain = "testing"
 layer = "universal"
@@ -24,7 +24,7 @@ title = "Ham Vocke / Martin Fowler: Practical Test Pyramid: tests verify one thi
 [decision]
 question = "How many logical behaviors should a single test verify?"
 default = "one-logical-assertion-guideline"
-why = "A test that asserts on ten independent properties fails on the first failing property and hides whether the remaining nine pass or fail. The developer sees one red test, fixes property one, re-runs, and discovers property three is also broken — a slow feedback loop masked by the multi-assertion structure. More subtly, a test that verifies multiple independent behaviors is not testing a behavior: it is testing a batch of behaviors, and when it fails, the failure signal does not name which behavior broke. Meszaros calls this 'Single Condition per Test' and identifies it as a principle, not an absolute rule: the intent is that each test has a single reason to fail. Multiple physical `assert` calls that all verify facets of the same logical outcome (e.g., that a returned object is fully populated) are fine; multiple asserts that each verify a distinct, independently-breakable behavior are not. This rule is a guideline because strict 'one assert per test' can lead to excessive test proliferation and verbose setup duplication; the load-bearing principle is single logical failure condition."
+why = "A test that asserts on ten independent properties fails on the first failing property and hides whether the remaining nine pass or fail. The developer sees one red test, fixes property one, re-runs, and discovers property three is also broken: a slow feedback loop masked by the multi-assertion structure. More subtly, a test that verifies multiple independent behaviors is not testing a behavior: it is testing a batch of behaviors, and when it fails, the failure signal does not name which behavior broke. Meszaros calls this 'Single Condition per Test' and identifies it as a principle, not an absolute rule: the intent is that each test has a single reason to fail. Multiple physical `assert` calls that all verify facets of the same logical outcome (e.g., that a returned object is fully populated) are fine; multiple asserts that each verify a distinct, independently-breakable behavior are not. This rule is a guideline because strict 'one assert per test' can lead to excessive test proliferation and verbose setup duplication; the load-bearing principle is single logical failure condition."
 
 [[option]]
 id = "one-logical-assertion-guideline"

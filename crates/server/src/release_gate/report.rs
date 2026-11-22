@@ -149,7 +149,7 @@ impl Problem {
         message: impl AsRef<str>,
         evidence: Option<String>,
     ) -> Self {
-        let clean = |text: &str| camerata_secrets::redact_str(text).into_owned();
+        let clean = |text: &str| camerata_secrets::redact_str_for_client(text).into_owned();
         Self {
             file: clean(file.as_ref()),
             location: clean(location.as_ref()),
@@ -241,7 +241,7 @@ impl GateFailure {
     /// it is client-controlled text like any other: a secret-shaped repo or branch name must not
     /// reach the failure block or the HTTP body through the one field no [`Problem`] wraps.
     pub fn stem_for_display(&self) -> String {
-        camerata_secrets::redact_str(&self.stem).into_owned()
+        camerata_secrets::redact_str_for_client(&self.stem).into_owned()
     }
 }
 

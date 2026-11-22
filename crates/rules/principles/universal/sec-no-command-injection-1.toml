@@ -1,5 +1,5 @@
 id = "SEC-NO-COMMAND-INJECTION-1"
-version = 3
+version = 4
 title = "OS commands and dynamic code/method dispatch are never invoked with data the function did not construct itself"
 domain = "universal"
 layer = "universal"
@@ -32,7 +32,7 @@ metacharacters (`;`, `|`, `&&`, backticks, `$()`). If any part of that string is
 function did not construct itself, an attacker can terminate the intended command and append
 their own (CWE-78). The same risk shows up one level removed in dynamic code/method dispatch
 (`eval()`, `instance_eval`, `send`/`public_send` with a string the function did not construct
-itself) — the "command" being injected is Ruby/Python/JS source rather than a shell line, but the
+itself). The "command" being injected is Ruby/Python/JS source rather than a shell line, but the
 defect shape and the fix are identical: never let an externally-influenced value choose what
 gets executed (CWE-94). The fix in both cases is structural, not escaping: invoke the target
 directly with a fixed, separately-passed argument list (no shell in the middle), or dispatch

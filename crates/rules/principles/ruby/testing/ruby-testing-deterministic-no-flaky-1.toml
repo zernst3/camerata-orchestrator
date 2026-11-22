@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-DETERMINISTIC-NO-FLAKY-1"
-version = 3
+version = 4
 title = "Tests run in random order with --order random and pass on any seed; no time, sequence or state leakage"
 domain = "ruby:testing"
 layer = "language"
@@ -10,9 +10,9 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "How should the test suite be configured to prevent flaky, order-dependent, or non-deterministic tests?"
+question = "How should the test suite be configured to prevent flaky, order-dependent or non-deterministic tests?"
 default = "random-order-no-leakage"
-why = "A test suite that only passes when examples run in a fixed order has hidden dependencies: one example is setting global state (a class variable, an ActiveRecord object, a singleton, an environment variable) that a later example silently depends on. These dependencies are invisible until a future refactor or a CI shuffle changes the run order, causing spurious red builds. RSpec's config.order = :random surfaces order dependencies immediately: if a failure only reproduces on one seed, rspec --bisect isolates the minimal failing pair. Three categories of leakage to eliminate: (1) database state — use database_cleaner or Rails' transactional fixtures so each example begins from an empty database; (2) time — freeze time in examples that assert on timestamps using Timecop or travel_to; (3) global/class state — reset class variables, singletons, and instance variables in after hooks. Randomizing with Kernel.srand config.seed means the same seed always produces the same run order, making failures reproducible for debugging."
+why = "A test suite that only passes when examples run in a fixed order has hidden dependencies: one example is setting global state (a class variable, an ActiveRecord object, a singleton, an environment variable) that a later example silently depends on. These dependencies are invisible until a future refactor or a CI shuffle changes the run order, causing spurious red builds. RSpec's config.order = :random surfaces order dependencies immediately: if a failure only reproduces on one seed, rspec --bisect isolates the minimal failing pair. Three categories of leakage to eliminate: (1) database state (use database_cleaner or Rails' transactional fixtures so each example begins from an empty database); (2) time (freeze time in examples that assert on timestamps using Timecop or travel_to); (3) global/class state (reset class variables, singletons and instance variables in after hooks). Randomizing with Kernel.srand config.seed means the same seed always produces the same run order, making failures reproducible for debugging."
 
 [[option]]
 id = "random-order-no-leakage"

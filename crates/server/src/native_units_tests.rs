@@ -367,6 +367,7 @@ fn local_clone(dir: &Path) {
 fn install_fake_agent(bin_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let script = "#!/bin/sh\n\
+        cat > /dev/null\n\
         printf 'implemented by the fake agent\\n' > IMPLEMENTED.md\n\
         printf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"result\":\"done\",\"session_id\":\"fake\",\"total_cost_usd\":0}'\n";
     let bin = bin_dir.join("claude");

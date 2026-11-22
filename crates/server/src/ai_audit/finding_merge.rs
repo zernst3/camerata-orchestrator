@@ -432,7 +432,7 @@ pub(super) fn snippet_value_is_template(snippet: &str) -> bool {
 /// ellipsis is left only where a real value was). A real key pasted into `.env.example` is a
 /// leak, whatever the file is called.
 pub(super) fn snippet_holds_real_secret(snippet: &str) -> bool {
-    snippet.contains('\u{2026}')
+    camerata_secrets::has_real_redaction_marker(snippet)
         || camerata_secrets::detect_all(snippet)
             .iter()
             .any(camerata_secrets::SecretMatch::is_secret)

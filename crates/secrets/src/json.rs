@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::detect::{detect_secrets, SecretMatch};
+use crate::detect::{detect_client_secrets, detect_secrets, SecretMatch};
 use crate::redact::{redact, redact_str};
 
 /// Redact every string value (and object key) in a JSON tree in place; returns the number of
@@ -47,7 +47,7 @@ fn redact_object(map: &mut Map<String, Value>) -> usize {
 
 /// A path segment for an object key. A key that is itself a secret is never echoed.
 fn key_segment(key: &str) -> String {
-    if detect_secrets(key).is_empty() {
+    if detect_client_secrets(key).is_empty() {
         key.to_string()
     } else {
         "<redacted key>".to_string()
@@ -58,9 +58,14 @@ fn key_segment(key: &str) -> String {
 /// (`findings[0].also_locations[1].snippet`; the root is `$`). The release gate's JSON check.
 pub fn find_secrets_in_json(value: &Value) -> Vec<(String, SecretMatch)> {
     let mut found = Vec::new();
-    walk(value, "$".to_string(), &mut |path, _text, m| {
-        found.push((path.to_string(), m));
-    });
+    walk(
+        value,
+        "$".to_string(),
+        detect_secrets,
+        &mut |path, _text, m| {
+            found.push((path.to_string(), m));
+        },
+    );
     found
 }
 
@@ -70,33 +75,50 @@ pub fn find_secrets_in_json(value: &Value) -> Vec<(String, SecretMatch)> {
 pub struct JsonHit {
     pub path: String,
     pub shape: crate::SecretShape,
+    /// Why the match is not an ordinary secret, when it is a published documentation key.
+    pub twin: Option<crate::Twin>,
     pub form: String,
 }
 
-/// [`find_secrets_in_json`] with each match already rendered to its redacted form, so a caller
-/// building a message never has to hold the matched text.
+/// [`find_secrets_in_json`] for a CLIENT-bound document (the export release gate): also finds a
+/// published documentation key left unmasked ([`detect_client_secrets`]). Each match is already
+/// rendered to its redacted form, so a caller building a message never has to hold the matched
+/// text.
 pub fn find_secret_hits_in_json(value: &Value) -> Vec<JsonHit> {
     let mut hits = Vec::new();
-    walk(value, "$".to_string(), &mut |path, text, m| {
-        hits.push(JsonHit {
-            path: path.to_string(),
-            shape: m.shape,
-            form: m.redacted_form(text),
-        });
-    });
+    walk(
+        value,
+        "$".to_string(),
+        detect_client_secrets,
+        &mut |path, text, m| {
+            hits.push(JsonHit {
+                path: path.to_string(),
+                shape: m.shape,
+                twin: m.twin.clone(),
+                form: m.redacted_form(text),
+            });
+        },
+    );
     hits
 }
 
-fn walk(value: &Value, path: String, found: &mut dyn FnMut(&str, &str, SecretMatch)) {
+type Detector = fn(&str) -> Vec<SecretMatch>;
+
+fn walk(
+    value: &Value,
+    path: String,
+    detect: Detector,
+    found: &mut dyn FnMut(&str, &str, SecretMatch),
+) {
     match value {
         Value::String(text) => {
-            for m in detect_secrets(text) {
+            for m in detect(text) {
                 found(&path, text, m);
             }
         }
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                walk(item, format!("{path}[{index}]"), found);
+                walk(item, format!("{path}[{index}]"), detect, found);
             }
         }
         Value::Object(map) => {
@@ -106,10 +128,10 @@ fn walk(value: &Value, path: String, found: &mut dyn FnMut(&str, &str, SecretMat
                 } else {
                     format!("{path}.{}", key_segment(key))
                 };
-                for m in detect_secrets(key) {
+                for m in detect(key) {
                     found(&child, key, m);
                 }
-                walk(item, child, found);
+                walk(item, child, detect, found);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}

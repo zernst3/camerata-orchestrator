@@ -1,5 +1,5 @@
 id = "GO-GRPC-PROTO-GENERATED-IMMUTABLE-1"
-version = 3
+version = 4
 title = "Proto-generated code is not hand-edited; changes flow through .proto definitions and code generation, never direct edits to generated files"
 domain = "go:grpc"
 layer = "library"
@@ -16,7 +16,7 @@ title = "gRPC: Basics tutorial (Go)"
 [decision]
 question = "How should proto-generated Go code be maintained?"
 default = "proto-generated-immutable"
-why = "The protoc compiler generates Go code from .proto definitions. Handwriting or editing the generated code defeats the generator: the next time protoc runs, it overwrites those edits. Edits to generated files silently vanish on the next code-generation run, leaving the codebase in an inconsistent state. The .proto file is the single source of truth for the message schema, service interface, and field names; all changes must be made there and regenerated. A CI step (or pre-commit hook) that runs protoc on .proto files and commits the generated code, or fails if the generated code is out of sync, prevents drift. Hand-edits to generated files are a code-smell that signals a missing .proto change or a failure to regenerate."
+why = "The protoc compiler generates Go code from .proto definitions. Handwriting or editing the generated code defeats the generator: the next time protoc runs, it overwrites those edits. Edits to generated files silently vanish on the next code-generation run, leaving the codebase in an inconsistent state. The .proto file is the single source of truth for the message schema, service interface and field names; all changes must be made there and regenerated. A CI step (or pre-commit hook) that runs protoc on .proto files and commits the generated code, or fails if the generated code is out of sync, prevents drift. Hand-edits to generated files are a code-smell that signals a missing .proto change or a failure to regenerate."
 
 [[option]]
 id = "proto-generated-immutable"
