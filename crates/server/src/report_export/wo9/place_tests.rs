@@ -365,6 +365,7 @@ fn a_place_reads_as_a_defect_when_a_departure_carries_one() {
             convention_label: "The usual way".to_string(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         },
     ));
     report.findings = vec![defect, departure];

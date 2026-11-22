@@ -1728,6 +1728,7 @@ fn mixed_scan_report() -> ScanReport {
             convention_label: "URI-versioned endpoints".to_string(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         })
     };
     let rows: Vec<(&str, &str, Option<FindingKind>)> = vec![
@@ -1934,6 +1935,7 @@ fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
                 convention_label: "x".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             },
         ),
     ));
@@ -2011,6 +2013,7 @@ fn the_gate_catches_a_rendered_finding_whose_kind_differs_from_the_matrix() {
                 convention_label: "x".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             },
         ),
     ));

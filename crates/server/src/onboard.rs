@@ -3808,8 +3808,15 @@ pub async fn audit_repos_with_llm_controlled(
         }
     }
     report.recommendations_by_repo = recommendations.into_values().collect();
-    let conventions_block =
+    let mut conventions_block =
         crate::scan_ledger::ConventionsBlock::from_records(&all_conventions, &report.findings);
+    // The independent check: a finder row the records counted must still be a row, an absorbed
+    // place or a set-aside row. A gap is disclosed, never silent (no open violations).
+    let lost_finder_rows = conventions_block.check_finder_rows_kept(
+        &all_conventions,
+        &report.findings,
+        &report.discarded,
+    );
     report.conventions = all_conventions;
     // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
     // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
@@ -3832,6 +3839,25 @@ pub async fn audit_repos_with_llm_controlled(
     // ("N rules could not be mechanically checked...") directly from the ledger instead of
     // from a pile of per-rule `FailedPass` entries.
     let repo_label = report.repos.join(", ");
+    if !lost_finder_rows.is_empty() {
+        all_failed_passes.push(crate::ai_audit::FailedPass {
+            repo: repo_label.clone(),
+            pass: "pipeline integrity (convention accounting)".to_string(),
+            reason: format!(
+                "{} finder row(s) counted for rules with options are in neither the final rows nor \
+                 the rows set aside (first: {} at {}:{})",
+                lost_finder_rows.len(),
+                lost_finder_rows[0].0,
+                lost_finder_rows[0].1,
+                lost_finder_rows[0].2,
+            ),
+            files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
+        });
+    }
     for stage in pipeline_ledger.stages() {
         // A stage that ran over one repo is disclosed against that repo, not the whole project.
         let label = stage.disclosure_label(&repo_label);

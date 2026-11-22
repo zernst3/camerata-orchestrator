@@ -1534,9 +1534,11 @@ fn build_deviation_groups(
             let mut convention_label = String::new();
             let mut source = None;
             let mut differs: Option<String> = None;
+            let mut following: Option<usize> = None;
             for row in &group {
                 if let Some(FindingKind::Deviation(d)) = &row.kind.0 {
                     source = source.or(d.standard_source);
+                    following = following.or(d.following_sites);
                     if differs.is_none() {
                         differs = d.differs_from_default.clone();
                     }
@@ -1565,6 +1567,7 @@ fn build_deviation_groups(
                 &convention_label,
                 deviating_sites,
                 assessed_sites.map(|a| a.max(deviating_sites)),
+                following,
                 differs.as_deref(),
             );
             DeviationGroupRow {
@@ -1633,6 +1636,7 @@ fn standard_note(
     label: &str,
     departing: usize,
     assessed: Option<usize>,
+    following: Option<usize>,
     differs: Option<&str>,
 ) -> String {
     use camerata_api_types::audit::StandardSource;
@@ -1648,13 +1652,22 @@ fn standard_note(
         Some(StandardSource::RuleDefault) => {
             format!("Convention taken from the rule's default: {label}. {departs}")
         }
+        Some(StandardSource::EarlierChoice) => {
+            format!(
+                "Convention taken from the option your project chose earlier: {label}. {departs}"
+            )
+        }
+        Some(StandardSource::MostCommon) => {
+            format!("Convention taken from the option most places follow: {label}. {departs}")
+        }
         _ => {
-            let follow = match assessed {
-                Some(m) => format!(
-                    "Observed in your code: {} of {m} places follow it.",
-                    m.saturating_sub(departing)
-                ),
-                None => "Observed in your code.".to_string(),
+            // "N of M" counts the places of the standard's own option: a place of a third option,
+            // or of the rule's default while the standard is only observed, does not follow it.
+            let follow = match (following, assessed) {
+                (Some(n), Some(m)) => {
+                    format!("Observed in your code: {n} of {m} places follow it.")
+                }
+                _ => "Observed in your code.".to_string(),
             };
             let differs = differs
                 .map(|d| format!(" Differs from the rule's default: {d}."))
@@ -4142,6 +4155,7 @@ mod tests {
                 convention_label: String::new(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             })),
             Some(FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: String::new(),
@@ -4200,6 +4214,7 @@ mod tests {
                     convention_label: "URI-versioned endpoints".to_string(),
                     standard_source: None,
                     differs_from_default: None,
+                    following_sites: None,
                 }),
             ),
             kinded(
@@ -4340,6 +4355,7 @@ mod tests {
                 convention_label: "Default".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
         );
         let defect = kinded(
@@ -4403,6 +4419,7 @@ mod tests {
                 convention_label: "observed majority".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
         );
         let legacy = finding("LEGACY-1", "b.rs", 2, "high");
@@ -6309,6 +6326,7 @@ mod tests {
                     convention_label: "URI-versioned endpoints".to_string(),
                     standard_source: None,
                     differs_from_default: None,
+                    following_sites: None,
                 }),
             ),
             kinded(
@@ -6528,6 +6546,7 @@ mod tests {
                 convention_label: "the pattern used elsewhere in this codebase".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6578,6 +6597,7 @@ mod tests {
                 convention_label: "URI-versioned endpoints".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6633,6 +6653,7 @@ mod tests {
                         convention_label: "Typed path params".to_string(),
                         standard_source: None,
                         differs_from_default: None,
+                        following_sites: None,
                     }),
                 )
             })
@@ -6670,6 +6691,7 @@ mod tests {
                 convention_label: "Typed path params".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
         );
         let report = report_with(vec![dev], vec![]);
@@ -6722,6 +6744,7 @@ mod tests {
                 convention_label: "Typed path params".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
@@ -6785,6 +6808,7 @@ mod tests {
                 convention_label: "Typed path params".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
         );
         f.evaluated_option_id = Some("parse-in-handler".to_string());
@@ -7299,6 +7323,7 @@ mod tests {
                 convention_label: "URI-versioned endpoints".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
         );
         dev.also_locations = vec![loc(18, false), loc(31, true)];

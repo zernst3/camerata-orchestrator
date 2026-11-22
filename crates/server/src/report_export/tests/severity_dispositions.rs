@@ -691,6 +691,7 @@ fn deviation_finding(rule_id: &str, path: &str, line: usize, severity: &str) -> 
         convention_label: "Default".to_string(),
         standard_source: None,
         differs_from_default: None,
+        following_sites: None,
     }));
     f
 }

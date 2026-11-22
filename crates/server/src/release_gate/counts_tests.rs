@@ -1056,6 +1056,7 @@ fn departure() -> camerata_api_types::audit::FindingKind {
         convention_label: "the usual way".to_string(),
         standard_source: None,
         differs_from_default: None,
+        following_sites: None,
     })
 }
 

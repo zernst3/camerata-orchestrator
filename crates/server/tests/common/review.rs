@@ -213,6 +213,7 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
                     convention_label: "Session cookie".to_string(),
                     standard_source: None,
                     differs_from_default: None,
+                    following_sites: None,
                 },
             ));
         }

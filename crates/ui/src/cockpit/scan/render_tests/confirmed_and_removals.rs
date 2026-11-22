@@ -1,6 +1,7 @@
 //! Render tests: confirmed and removals.
 
 use super::*;
+use camerata_ui_core::triage::rule_hub;
 
 // ── Pass 2 step 3: `Confirmed` on the curator surface ───────────────────
 

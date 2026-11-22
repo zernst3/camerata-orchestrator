@@ -991,7 +991,13 @@ async fn uncorrected_engine_check_no_is_refused_through_every_loader() {
     // the same statement. A new loader that skips it fails here.
     let mut found = 0;
     for (file, text) in source_files() {
-        for (at, _) in text.match_indices("apply_overlay_with_standards(") {
+        // Both entry points: the plain one and the one that carries the reviewer's standards. A
+        // new loader calling either must attach the evidence.
+        let calls = ["apply_overlay(", "apply_overlay_with_standards("]
+            .into_iter()
+            .flat_map(|needle| text.match_indices(needle).map(|(at, _)| at))
+            .collect::<Vec<_>>();
+        for at in calls {
             if text[..at].ends_with("fn ") || file == "report_export/overlay.rs" {
                 continue;
             }

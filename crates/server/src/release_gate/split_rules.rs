@@ -9,6 +9,10 @@ use super::Problem;
 use crate::report_export::ReviewedReport;
 use camerata_api_types::package_paths::ALL_FINDINGS_JSON;
 
+/// What every split-rule problem's message contains; a caller that must tell these problems from
+/// the gate's others (the CLI's hint) looks for it.
+pub const SPLIT_PROBLEM_MARK: &str = "is split between options and has no decision";
+
 /// The rules the gate holds for `reviewed`, as (repo, rule id).
 pub fn split_rules(reviewed: &ReviewedReport) -> Vec<(String, String)> {
     crate::conventions::split_rules_without_choice(&reviewed.report().conventions)
@@ -26,7 +30,7 @@ pub fn problems(reviewed: &ReviewedReport) -> Vec<Problem> {
                 ALL_FINDINGS_JSON,
                 format!("{repo} {rule}"),
                 format!(
-                    "the rule {rule} is split between options and has no decision. Recommend an \
+                    "the rule {rule} {SPLIT_PROBLEM_MARK}. Accept an \
                      option for it, or leave it to the client, then export again"
                 ),
                 Some(rule),

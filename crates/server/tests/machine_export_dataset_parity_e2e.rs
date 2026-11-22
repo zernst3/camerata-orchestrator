@@ -87,6 +87,7 @@ fn deviation(sites: usize, assessed: Option<usize>, label: &str) -> FindingKind 
         convention_label: label.to_string(),
         standard_source: None,
         differs_from_default: None,
+        following_sites: None,
     })
 }
 

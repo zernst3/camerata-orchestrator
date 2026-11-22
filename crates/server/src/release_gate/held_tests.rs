@@ -1622,7 +1622,7 @@ mod split_rules {
             problems[0]
         );
         assert!(
-            problems[0].message.contains("Recommend an option")
+            problems[0].message.contains("Accept an option")
                 && problems[0].message.contains("leave it to the client"),
             "{:?}",
             problems[0]

@@ -597,13 +597,15 @@ pub(in crate::cockpit) struct ScanReportView {
 }
 
 /// `POST /api/projects/:id/standards` or the revoke route: the reviewer's ruling on the standard of
-/// one rule. `Err` carries the server's reason for a refusal, or why it could not be reached.
+/// one rule. `Ok` carries the id of the ruling the server stored (when it said), so a later
+/// withdraw can name it. `Err` carries the server's reason for a refusal, or why it could not be
+/// reached.
 pub(in crate::cockpit) async fn post_ruling(
     project_id: &str,
     repo: &str,
     rule_id: &str,
     action: &super::queue_table::RulingAction,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     use super::queue_table::RulingAction;
     use camerata_api_types::decisions::{PostStandardReq, StandardChoice};
     let base = crate::bff_base();
@@ -638,7 +640,8 @@ pub(in crate::cockpit) async fn post_ruling(
     }
     .map_err(|e| format!("The ruling could not be saved: {e}"))?;
     if resp.status().is_success() {
-        Ok(())
+        let v: serde_json::Value = resp.json().await.unwrap_or_default();
+        Ok(v["id"].as_str().map(str::to_string))
     } else {
         let v: serde_json::Value = resp.json().await.unwrap_or_default();
         Err(v["message"]

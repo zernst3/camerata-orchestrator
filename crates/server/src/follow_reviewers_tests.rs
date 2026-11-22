@@ -232,6 +232,7 @@ fn deviation_row(rule: &str, stage1: &str, reason: Option<EscalationReason>) -> 
             convention_label: "Handlers check access themselves".to_string(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         },
     ));
     f.review.escalation_reason = reason;

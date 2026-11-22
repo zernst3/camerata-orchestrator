@@ -864,6 +864,21 @@ mod convention_wording {
             convention_label: "Option A".into(),
             standard_source: source,
             differs_from_default: differs.map(str::to_string),
+            following_sites: Some(3),
+        })
+    }
+
+    /// A departure of a rule where 6 of 9 places follow the standard, 1 departs and 2 follow the
+    /// rule's default (the standard is only observed): "8 of 9" would be untrue.
+    fn deviation_a2() -> FindingKind {
+        FindingKind::Deviation(DeviationKind {
+            deviating_sites: 1,
+            assessed_sites: Some(9),
+            convention_option_id: Some("a".into()),
+            convention_label: "Option A".into(),
+            standard_source: None,
+            differs_from_default: Some("Option B".into()),
+            following_sites: Some(6),
         })
     }
 
@@ -954,6 +969,14 @@ mod convention_wording {
             obs.contains("Observed in your code: 3 of 5 places follow it. 2 places depart. Differs from the rule's default: Option B."),
             "{obs}"
         );
+        // The count of places that follow is the standard option's own (design test 17, A2).
+        let a2 = workbook_with(vec![rule_row("ARCH-A2-1", "src/a2.rs", deviation_a2())]);
+        let cell = departures_cell(&a2, "ARCH-A2-1");
+        assert!(
+            cell.contains("Observed in your code: 6 of 9 places follow it. 1 place departs."),
+            "{cell}"
+        );
+        assert!(!cell.contains("8 of 9"), "{cell}");
         let rev = departures_cell(&xlsx, "ARCH-REV-1");
         assert!(
             rev.contains("Convention set by the reviewer: Option A. 2 places depart."),
@@ -972,6 +995,33 @@ mod convention_wording {
         );
         let (status, _) = conventions_row(&xlsx, "ARCH-SPLIT-1");
         assert_eq!(status, crate::xlsx_export::CONVENTION_STATUS_NONE_ADOPTED);
+    }
+
+    /// Review item 5: the standard's source is worded by its true origin.
+    #[test]
+    fn the_standard_source_is_worded_by_where_it_really_came_from() {
+        for (source, expect) in [
+            (
+                StandardSource::RuleDefault,
+                "Convention taken from the rule's default: Option A.",
+            ),
+            (
+                StandardSource::EarlierChoice,
+                "Convention taken from the option your project chose earlier: Option A.",
+            ),
+            (
+                StandardSource::MostCommon,
+                "Convention taken from the option most places follow: Option A.",
+            ),
+        ] {
+            let xlsx = workbook_with(vec![rule_row(
+                "ARCH-SRC-1",
+                "src/s.rs",
+                deviation(Some(source), None),
+            )]);
+            let cell = departures_cell(&xlsx, "ARCH-SRC-1");
+            assert!(cell.contains(expect), "{source:?}: {cell}");
+        }
     }
 
     /// Test 18: an open question lists every option of the rule from the corpus (label, directive,

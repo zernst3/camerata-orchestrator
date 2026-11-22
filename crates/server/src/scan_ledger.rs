@@ -911,6 +911,11 @@ impl ConventionLedgerRule {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ConventionsBlock {
     pub rules: Vec<ConventionLedgerRule>,
+    /// Finder rows the records counted that are in neither the final rows nor the rows set aside
+    /// (lost between tagging and the report). Worked out from the final rows by
+    /// [`Self::check_finder_rows_kept`]; zero until that check runs.
+    #[serde(default)]
+    pub lost_finder_rows: usize,
 }
 
 impl ConventionsBlock {
@@ -948,12 +953,55 @@ impl ConventionsBlock {
                 }
             })
             .collect();
-        Self { rules }
+        Self {
+            rules,
+            lost_finder_rows: 0,
+        }
     }
 
-    /// Every rule's three parts add up to its total.
+    /// The independent check (design section 5, step 6): every finder row a record counted is
+    /// still in the final rows (as a row, or as a place absorbed into one) or in the rows set
+    /// aside. The three-part sum above is true by construction; this is what catches a row lost
+    /// in a merge or a dedup after it was tagged. Rows match by site key when they have one, else
+    /// by their place (repo, path, line). Returns the rows that are gone, and records how many.
+    pub fn check_finder_rows_kept(
+        &mut self,
+        records: &[camerata_api_types::audit::RuleConvention],
+        rows: &[crate::onboard::Finding],
+        discarded: &[crate::onboard::Finding],
+    ) -> Vec<(String, String, usize)> {
+        let keys: std::collections::HashSet<&str> = rows
+            .iter()
+            .chain(discarded)
+            .map(|f| f.site_key.as_str())
+            .filter(|k| !k.is_empty())
+            .collect();
+        let place = |repo: &str, path: &str, line: usize| {
+            let path = path.trim_start_matches("./");
+            rows.iter().chain(discarded).any(|f| {
+                (f.repo == repo && f.path.trim_start_matches("./") == path && f.line == line)
+                    || f.also_locations.iter().any(|l| {
+                        l.repo == repo && l.path.trim_start_matches("./") == path && l.line == line
+                    })
+            })
+        };
+        let mut lost = Vec::new();
+        for c in records {
+            for r in &c.finder_rows {
+                let kept = (!r.site_key.is_empty() && keys.contains(r.site_key.as_str()))
+                    || place(&c.repo, &r.path, r.line);
+                if !kept {
+                    lost.push((c.rule_id.clone(), r.path.clone(), r.line));
+                }
+            }
+        }
+        self.lost_finder_rows = lost.len();
+        lost
+    }
+
+    /// Every rule's three parts add up to its total, and no finder row was lost.
     pub fn reconciles(&self) -> bool {
-        self.rules.iter().all(ConventionLedgerRule::reconciles)
+        self.lost_finder_rows == 0 && self.rules.iter().all(ConventionLedgerRule::reconciles)
     }
 }
 

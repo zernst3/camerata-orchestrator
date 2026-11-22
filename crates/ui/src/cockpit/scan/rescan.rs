@@ -142,9 +142,26 @@ pub(in crate::cockpit) fn convention_badge(
     match (&c.standard.option_id, c.standard.source) {
         (Some(_), StandardSource::Reviewer) => ("rec-badge rec-badge-yours", "Set by you"),
         (Some(_), StandardSource::RuleDefault) => ("rec-badge", "The rule's default"),
+        (Some(_), StandardSource::EarlierChoice) => ("rec-badge", "Your project's earlier choice"),
+        (Some(_), StandardSource::MostCommon) => ("rec-badge", "The option most places follow"),
         (Some(_), _) => ("rec-badge", "Observed in the code"),
         (None, _) => ("rec-badge rec-badge-pending", "Proposal, no convention yet"),
     }
+}
+
+/// The convention record a rule's row rules on. The row shows the by-rule recommendation, which
+/// is the one of the repo scanned last (`ScanReport::recommendations`), so with several repos the
+/// record is that repo's, never the first repo's by accident: a pick rules on the (repo, rule) the
+/// row is about.
+pub(in crate::cockpit) fn record_for_rule<'a>(
+    conventions: &'a [camerata_api_types::audit::RuleConvention],
+    repos: &[String],
+    rule_id: &str,
+) -> Option<&'a camerata_api_types::audit::RuleConvention> {
+    conventions
+        .iter()
+        .filter(|c| c.rule_id.eq_ignore_ascii_case(rule_id))
+        .max_by_key(|c| repos.iter().position(|r| r == &c.repo))
 }
 
 /// Build one rule's control line out of the scan's three sources. PURE, so the priority order
@@ -499,7 +516,7 @@ pub(in crate::cockpit) fn RuleAlternativesPanel(
                         );
                         let evaluated_id = row.evaluated_option_id.clone();
                         // A rule with a convention record is ruled on, not staged for a rescan.
-                        let record = conventions.iter().find(|c| c.rule_id.eq_ignore_ascii_case(&rid)).cloned();
+                        let record = record_for_rule(&conventions, &repos, &rid).cloned();
                         let mut row = row;
                         if let Some(c) = &record {
                             (row.badge_class, row.badge_text) = convention_badge(c);
@@ -517,7 +534,7 @@ pub(in crate::cockpit) fn RuleAlternativesPanel(
                                         spawn(async move {
                                             let action = super::queue_table::RulingAction::Accept(picked);
                                             match super::wire::post_ruling(&pid, &c.repo, &c.rule_id, &action).await {
-                                                Ok(()) => {
+                                                Ok(_) => {
                                                     if let Some(mut r) = shell_refresh {
                                                         r.0 += 1;
                                                     }

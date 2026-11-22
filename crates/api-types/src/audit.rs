@@ -225,6 +225,11 @@ pub struct DeviationKind {
     /// The rule's default option label when the standard is a different option.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub differs_from_default: Option<String>,
+    /// How many places follow the standard's own option (not "assessed minus departing": places of
+    /// a third option, and places of the rule's default while the standard is only observed, are
+    /// neither). `None` when the producer did not count, and for a report saved before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following_sites: Option<usize>,
 }
 
 /// Payload of [`FindingKind::ConventionObserved`] — the convention the codebase was judged
@@ -329,9 +334,15 @@ pub enum StandardSource {
     Reviewer,
     /// The convention two thirds of the assessed places follow.
     Observed,
-    /// A `default_with_exceptions` rule with no ruling and no observed convention: the
-    /// rule's own default.
+    /// A rule with a default and no ruling and no observed convention: the rule's own default
+    /// (also the project's chosen option when that is the default).
     RuleDefault,
+    /// A rule with no ruling and no observed convention whose project chose an option earlier
+    /// that is not the rule's default.
+    EarlierChoice,
+    /// A rule with no ruling, no observed convention, no default and no earlier choice: the
+    /// option most of the places follow.
+    MostCommon,
     /// No standard.
     #[default]
     None,
@@ -500,6 +511,7 @@ mod tests {
             convention_label: "URI-versioned endpoints".to_string(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         });
         let v = serde_json::to_value(&k).unwrap();
         assert_eq!(v["kind"], "deviation");
@@ -532,6 +544,7 @@ mod tests {
             convention_label: "URI-versioned endpoints".to_string(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         });
         let json = serde_json::to_string(&k).unwrap();
         let back: FindingKind = serde_json::from_str(&json).unwrap();
@@ -544,6 +557,7 @@ mod tests {
             convention_label: "observed majority".to_string(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         });
         let back2: FindingKind =
             serde_json::from_str(&serde_json::to_string(&unknown).unwrap()).unwrap();
@@ -574,6 +588,7 @@ mod tests {
             convention_label: String::new(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         })
         .is_informational());
         assert!(FindingKind::ConventionObserved(ConventionObservedKind {
@@ -627,6 +642,7 @@ mod tests {
                 convention_label: "URI-versioned endpoints".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             })),
         };
         let v = serde_json::to_value(&row).unwrap();
@@ -686,6 +702,7 @@ mod tests {
                 convention_label: "URI-versioned endpoints".to_string(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }))),
         })
         .unwrap();
@@ -716,6 +733,7 @@ mod tests {
                 convention_label: String::new(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }),
             FindingKind::ConventionObserved(ConventionObservedKind {
                 convention_option_id: "x".to_string(),

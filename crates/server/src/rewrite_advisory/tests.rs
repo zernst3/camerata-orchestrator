@@ -230,6 +230,7 @@ fn departed() -> FindingKind {
         convention_label: "A".to_string(),
         standard_source: None,
         differs_from_default: None,
+        following_sites: None,
     })
 }
 

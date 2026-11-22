@@ -1147,7 +1147,7 @@ pub(in crate::cockpit) fn RuleHubStrip(
                         div { class: "rule-hub-places",
                             p { class: "rule-hub-places-h", "{g.title}" }
                             ul {
-                                for pl in g.places.iter() {
+                                for (at, pl) in g.places.iter().enumerate() {
                                     {
                                         let open = PlaceOpen {
                                             repo: pl.repo.clone(),
@@ -1155,7 +1155,7 @@ pub(in crate::cockpit) fn RuleHubStrip(
                                             line: pl.line,
                                         };
                                         rsx! {
-                                            li { key: "{pl.path}:{pl.line}",
+                                            li { key: "{at}:{pl.path}:{pl.line}",
                                                 button {
                                                     class: "rule-hub-link rule-hub-place",
                                                     "data-place": "{pl.path}:{pl.line}",
@@ -1283,6 +1283,75 @@ pub(in crate::cockpit) enum RulingAction {
     Leave,
     /// Withdraw the ruling with this id.
     Withdraw(String),
+}
+
+/// What this session knows about a ruling it made: the scan's own records are not read again after a
+/// ruling, so the screen keeps the answer here and shows it on the record (the server is the
+/// truth; this is what the server was just told).
+#[derive(Clone, PartialEq, Debug)]
+pub(in crate::cockpit) enum RulingEcho {
+    /// The reviewer accepted this option; the ruling's id when the server returned it.
+    Accepted {
+        option_id: String,
+        ruling_id: Option<String>,
+    },
+    /// The reviewer left the rule to the client.
+    Left { ruling_id: Option<String> },
+    /// The reviewer withdrew the ruling: the rule has no choice again.
+    Undecided,
+}
+
+impl RulingEcho {
+    /// The echo of a ruling that was accepted by the server as `id`.
+    pub(in crate::cockpit) fn of(action: &RulingAction, id: Option<String>) -> Self {
+        match action {
+            RulingAction::Accept(option_id) => Self::Accepted {
+                option_id: option_id.clone(),
+                ruling_id: id,
+            },
+            RulingAction::Leave => Self::Left { ruling_id: id },
+            RulingAction::Withdraw(_) => Self::Undecided,
+        }
+    }
+}
+
+/// The scan's convention records with this session's rulings shown on them: the standard of a rule
+/// the reviewer ruled on is what they asked, whatever the scan recorded.
+pub(in crate::cockpit) fn with_rulings(
+    conventions: &[camerata_api_types::audit::RuleConvention],
+    echo: &std::collections::HashMap<String, RulingEcho>,
+) -> Vec<camerata_api_types::audit::RuleConvention> {
+    use camerata_api_types::audit::{StandardSource, StandardState};
+    conventions
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            let key = camerata_ui_core::adopt::adoption_key(&c.repo, &c.rule_id);
+            match echo.get(&key) {
+                Some(RulingEcho::Accepted {
+                    option_id,
+                    ruling_id,
+                }) => {
+                    c.standard = StandardState {
+                        option_id: Some(option_id.clone()),
+                        source: StandardSource::Reviewer,
+                        ruling_id: ruling_id.clone(),
+                        ..StandardState::default()
+                    };
+                }
+                Some(RulingEcho::Left { ruling_id }) => {
+                    c.standard = StandardState {
+                        left_to_client: true,
+                        ruling_id: ruling_id.clone(),
+                        ..StandardState::default()
+                    };
+                }
+                // Withdrawn, or never ruled on: the record is the scan's own, which holds no ruling.
+                Some(RulingEcho::Undecided) | None => {}
+            }
+            c
+        })
+        .collect()
 }
 
 /// A place the reviewer asked to open in the code viewer.

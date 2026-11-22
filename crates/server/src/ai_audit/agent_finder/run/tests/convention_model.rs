@@ -433,3 +433,107 @@ async fn a_finder_row_whose_option_is_unknown_is_not_a_departure_and_stays_in_th
     assert_eq!(r.option_basis, OptionBasis::Unknown);
     assert_ne!(r.status, PlaceStatus::Departs);
 }
+
+fn dwe_corpus() -> camerata_rules::RuleSet {
+    let mut set = camerata_rules::RuleSet::default();
+    let mut r = decision("ARCH-LAYER-2", &[("a", "Option A"), ("b", "Option B")], "a");
+    r.kind = Some(RuleKind::DefaultWithExceptions);
+    set.push(r);
+    set
+}
+
+/// A rule with a default that is not a pure decision: two thirds of the code follow option B, the
+/// finder was judged against the default A. The record says so, so a finder row at a place of B is
+/// not a departure from B (review item 3: it was recorded as judged against the observed option,
+/// which made every finder row a departure from the code's own convention).
+#[tokio::test]
+async fn a_default_with_exceptions_rule_is_judged_against_its_default_not_the_observed_option() {
+    let agent = ScriptedAgent::new(full_script(
+        &[("src/a.rs", 6)],
+        vec![problem(
+            1,
+            "src/a.rs",
+            5,
+            "medium",
+            "fn item_5() { run(5); }",
+        )],
+        vec![json!({"n": 1, "rule": "ARCH-LAYER-2"})],
+        vec![json!({
+            "rule": "ARCH-LAYER-2", "answer": "problems", "problems": [1],
+            "options": [
+                {"id": "a", "count": 1, "places": ["src/a.rs:1"]},
+                {"id": "b", "count": 8, "places": ["src/a.rs:5"]}
+            ]
+        })],
+    ));
+    let (rows, _, _, failed, _, extras) = run_with(
+        &agent,
+        &[("src/a.rs".to_string(), rust_file(6))],
+        &[AuditRule::new("ARCH-LAYER-2", "Layer it.")],
+        &dwe_corpus(),
+        &options(),
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let c = &extras.conventions[0];
+    assert_eq!(c.judged_option_id.as_deref(), Some("a"), "the default");
+    assert_eq!(c.standard.option_id.as_deref(), Some("b"), "anti-vacuity");
+    assert_eq!(c.finder_rows.len(), 1);
+    assert_ne!(
+        c.finder_rows[0].status,
+        PlaceStatus::Departs,
+        "the row sits at a place of the observed option: {:?}",
+        c.finder_rows
+    );
+    let row = rows.iter().find(|f| f.line == 5).unwrap();
+    assert!(
+        !matches!(row.kind, Some(FindingKind::Deviation(_))),
+        "{row:?}"
+    );
+}
+
+/// Review item 7: the ledger's convention block guards something. A finder row dropped after it was
+/// tagged (a merge or a dedup that lost it) is found by the independent check; the three-part sum
+/// alone stays true.
+#[tokio::test]
+async fn the_convention_ledger_finds_a_finder_row_lost_after_tagging() {
+    let (rows, _, _, failed, _, extras) = hearth(
+        json!({
+            "rule": PAR, "answer": "problems", "problems": [1, 2],
+            "options": [
+                {"id": "seq", "count": 4, "places": []},
+                {"id": "par", "count": 1, "places": []}
+            ]
+        }),
+        true,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let mut block = crate::scan_ledger::ConventionsBlock::from_records(&extras.conventions, &rows);
+    assert!(
+        block
+            .check_finder_rows_kept(&extras.conventions, &rows, &[])
+            .is_empty(),
+        "nothing is lost in a real run"
+    );
+    assert!(block.reconciles());
+    // One finder row goes missing (and is not among the rows set aside).
+    let victim = rows
+        .iter()
+        .find(|f| f.line == 17)
+        .expect("the listings row")
+        .clone();
+    let kept: Vec<_> = rows
+        .iter()
+        .filter(|f| !(f.path == victim.path && f.line == victim.line))
+        .cloned()
+        .collect();
+    let lost = block.check_finder_rows_kept(&extras.conventions, &kept, &[]);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(!block.reconciles(), "{block:?}");
+    // The same row, set aside, is accounted for.
+    let mut block = crate::scan_ledger::ConventionsBlock::from_records(&extras.conventions, &rows);
+    assert!(block
+        .check_finder_rows_kept(&extras.conventions, &kept, &[victim])
+        .is_empty());
+}

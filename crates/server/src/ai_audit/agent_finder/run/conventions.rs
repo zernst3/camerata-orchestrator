@@ -55,31 +55,6 @@ pub(super) fn checked_place(
     ))
 }
 
-/// The problem needing a decision for a listed place that could not be checked against the file.
-fn held_row(
-    repo: &str,
-    rule: &str,
-    title: &str,
-    option_label: &str,
-    place: &CensusPlace,
-) -> Finding {
-    Finding {
-        repo: repo.to_string(),
-        path: place.path.trim_start_matches("./").to_string(),
-        line: place.line,
-        rule_id: "AI-OPEN-QUESTION".to_string(),
-        severity: "low".to_string(),
-        snippet: "A listed place could not be checked".to_string(),
-        detail: format!(
-            "A place could not be checked{}A reviewer listed this place as using \"{option_label}\" for {title} ({rule}), but it could not be found in the file. It needs a decision.",
-            crate::ai_audit::digest_parse::HEADLINE_SEP,
-        ),
-        needs_review: true,
-        located: false,
-        ..Finding::default()
-    }
-}
-
 /// The problem needing a decision for a further place of a problem that could not be checked
 /// against the file (no such line, or a blank one).
 pub(super) fn held_problem_place_row(
@@ -219,22 +194,26 @@ pub(super) fn conventions_from_answers(
         let (standard_id, source) = match &uc.convention {
             Some(id) => (Some(id.clone()), StandardSource::Observed),
             None if decision => (None, StandardSource::None),
-            None => (
-                alt.selected_option_id.clone().or(plurality.clone()),
-                StandardSource::RuleDefault,
-            ),
+            // `selected_option_id` is the project's chosen option, else the rule's default. The
+            // source says which: the default itself, an earlier choice that is a different
+            // option, or (neither exists) the option most places follow.
+            None => match alt.selected_option_id.clone() {
+                Some(id) if default_option.as_deref() == Some(id.as_str()) => {
+                    (Some(id), StandardSource::RuleDefault)
+                }
+                Some(id) => (Some(id), StandardSource::EarlierChoice),
+                None => (plurality.clone(), StandardSource::MostCommon),
+            },
         };
         let mut record = RuleConvention {
             repo: repo.to_string(),
             rule_id: uc.rule.clone(),
             default_option_id: default_option.clone(),
-            // What the finder's directive was: the project's chosen option, else the default. A
-            // rule that is not a pure decision is judged against its standard.
-            judged_option_id: if decision {
-                alt.selected_option_id.clone()
-            } else {
-                standard_id.clone()
-            },
+            // What the finder's directive was: the project's chosen option, else the default,
+            // for every kind of rule. (A rule with a default is judged against it even when
+            // most of the code follows another option, so its rows are not all departures from
+            // the observed standard.)
+            judged_option_id: alt.selected_option_id.clone(),
             observed_option_id: uc.convention.clone(),
             assessed_places: Some(uc.total),
             places_recorded: true,
@@ -407,24 +386,14 @@ pub(super) fn departure_and_held_rows(
         let title = corpus
             .get_by_id(&c.rule_id)
             .map_or_else(|| c.rule_id.clone(), |r| r.title.clone());
-        for o in &c.options {
-            if crate::conventions::option_status(c, &c.standard, &o.option_id)
-                != PlaceStatus::Departs
-            {
-                continue;
-            }
-            for p in o.places.iter().filter(|p| !p.checked) {
-                notes.push(format!(
-                    "{}: a listed place of the option \"{}\" ({}{}) could not be checked against the file",
-                    c.rule_id,
-                    o.label,
-                    p.path,
-                    if p.line > 0 { format!(":{p}", p = p.line) } else { String::new() },
-                ));
-                let mut row = held_row(&c.repo, &c.rule_id, &title, &o.label, p);
-                crate::onboard::redact::redact_finding(&mut row);
-                held.push(row);
-            }
+        for (option, row) in crate::conventions::held_place_rows(c, rows, &title) {
+            notes.push(format!(
+                "{}: a listed place of the option \"{option}\" ({}{}) could not be checked against the file",
+                c.rule_id,
+                row.path,
+                if row.line > 0 { format!(":{}", row.line) } else { String::new() },
+            ));
+            held.push(row);
         }
     }
     (departures, held, notes)

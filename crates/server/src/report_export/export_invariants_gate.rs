@@ -1776,6 +1776,7 @@ async fn req_c2_the_sites_vs_rows_check_is_gone_because_a_sub_groups_members_are
         convention_label: "URI-versioned endpoints".to_string(),
         standard_source: None,
         differs_from_default: None,
+        following_sites: None,
     }));
     let mut report = report_with(vec![f], vec!["ARCH-API-VERSIONING-1"]);
     let rows_before = report.findings.len();

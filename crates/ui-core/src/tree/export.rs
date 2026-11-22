@@ -220,9 +220,29 @@ fn split_rules_sentence(split: &[camerata_api_types::review_view::SplitRuleHold]
     if split.is_empty() {
         return String::new();
     }
-    let mut ids: Vec<&str> = split.iter().map(|s| s.rule_id.as_str()).collect();
-    ids.dedup();
-    let n = split.len();
+    // One entry for each (repo, rule), whatever order they come in. With several repos the repo
+    // is named, since the same rule can be split in more than one and the count is per repo.
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for s in split {
+        let entry = (s.repo.as_str(), s.rule_id.as_str());
+        if !seen.contains(&entry) {
+            seen.push(entry);
+        }
+    }
+    let mut repos: Vec<&str> = seen.iter().map(|(r, _)| *r).collect();
+    repos.sort_unstable();
+    repos.dedup();
+    let ids: Vec<String> = seen
+        .iter()
+        .map(|(repo, rule)| {
+            if repos.len() > 1 {
+                format!("{rule} in {repo}")
+            } else {
+                (*rule).to_string()
+            }
+        })
+        .collect();
+    let n = seen.len();
     let (noun, verb, each) = if n == 1 {
         ("split rule", "needs", "for it")
     } else {
@@ -527,6 +547,40 @@ mod tests {
         let text = blocked_line(&gate, None).unwrap().text;
         assert!(
             text.contains("held row") && text.ends_with("or leave it to the client."),
+            "{text}"
+        );
+    }
+
+    /// Review item 13: the same rule split in two repos is two splits, named by repo; a repeated
+    /// entry is counted once, whatever its place in the list.
+    #[test]
+    fn the_split_sentence_names_the_repo_when_there_are_several_and_counts_each_once() {
+        use camerata_api_types::review_view::SplitRuleHold;
+        let split = |repo: &str, rule: &str| SplitRuleHold {
+            repo: repo.into(),
+            rule_id: rule.into(),
+        };
+        let gate = ExportGateView {
+            split_rules: vec![
+                split("acme/a", "ARCH-X-1"),
+                split("acme/b", "ARCH-X-1"),
+                split("acme/a", "ARCH-X-1"),
+            ],
+            ..ExportGateView::default()
+        };
+        let text = blocked_line(&gate, None).unwrap().text;
+        assert!(
+            text.contains("2 split rules need a decision: ARCH-X-1 in acme/a, ARCH-X-1 in acme/b."),
+            "{text}"
+        );
+        // One repo: the ids alone, each once.
+        let gate = ExportGateView {
+            split_rules: vec![split("acme/a", "ARCH-A-1"), split("acme/a", "ARCH-B-1")],
+            ..ExportGateView::default()
+        };
+        let text = blocked_line(&gate, None).unwrap().text;
+        assert!(
+            text.contains("2 split rules need a decision: ARCH-A-1, ARCH-B-1."),
             "{text}"
         );
     }

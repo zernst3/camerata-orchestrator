@@ -748,6 +748,7 @@ pub(crate) fn assign_deviation_kinds(
                 convention_label: opt.label.clone(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }));
         }
     }

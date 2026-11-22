@@ -528,8 +528,7 @@ fn leaves_rule(f: &Finding, rule: &str, records: &[RuleConvention]) -> bool {
             return false;
         }
     }
-    let (option, _) = crate::conventions::option_of_row(f, c);
-    crate::conventions::finder_status(c, &c.standard, option.as_deref())
+    crate::conventions::row_status(c, &c.standard, f)
         != camerata_api_types::audit::PlaceStatus::Departs
 }
 

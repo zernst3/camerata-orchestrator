@@ -144,6 +144,31 @@ pub fn finder_status(c: &RuleConvention, s: &StandardState, option: Option<&str>
     }
 }
 
+/// Whether a finder row citing the rule departs from the standard, judged from the row itself.
+/// A row whose line range holds recorded places of more than one option cannot be said to follow
+/// the standard just because one of them does: when any of those options departs, the row is a
+/// departure, so the departing place inside it is never taken as covered by a conforming row.
+pub fn row_status(c: &RuleConvention, s: &StandardState, row: &Finding) -> PlaceStatus {
+    let (option, _) = option_of_row(row, c);
+    if s.option_id.is_some() {
+        let (lo, hi) = row_range(row);
+        let path = plain_path(&row.path);
+        let any_departs = c
+            .options
+            .iter()
+            .filter(|o| {
+                o.places
+                    .iter()
+                    .any(|p| plain_path(&p.path) == path && p.line >= lo && p.line <= hi)
+            })
+            .any(|o| option_status(c, s, &o.option_id) == PlaceStatus::Departs);
+        if any_departs {
+            return PlaceStatus::Departs;
+        }
+    }
+    finder_status(c, s, option.as_deref())
+}
+
 fn label_of<'a>(c: &'a RuleConvention, option: &'a str) -> &'a str {
     c.options
         .iter()
@@ -164,6 +189,10 @@ fn standard_sentence(label: &str, source: StandardSource) -> String {
     match source {
         StandardSource::Reviewer => format!("The convention set by the reviewer is \"{label}\"."),
         StandardSource::RuleDefault => format!("The rule's default is \"{label}\"."),
+        StandardSource::EarlierChoice => {
+            format!("The option your project chose earlier is \"{label}\".")
+        }
+        StandardSource::MostCommon => format!("Most places follow \"{label}\"."),
         _ => format!("Most of the code follows \"{label}\"."),
     }
 }
@@ -269,6 +298,92 @@ fn remainder_row(
     f
 }
 
+/// The snippet of the problem needing a decision for a listed place that could not be checked.
+const HELD_PLACE_SNIPPET: &str = "A listed place could not be checked";
+
+/// The problem needing a decision for a listed place that could not be checked against the file.
+/// An empty `title` names the rule by its id alone.
+pub fn held_place_row(
+    repo: &str,
+    rule: &str,
+    title: &str,
+    option_label: &str,
+    place: &CensusPlace,
+) -> Finding {
+    let rule_name = if title.is_empty() {
+        rule.to_string()
+    } else {
+        format!("{title} ({rule})")
+    };
+    let mut row = Finding {
+        repo: repo.to_string(),
+        path: plain_path(&place.path).to_string(),
+        line: place.line,
+        rule_id: "AI-OPEN-QUESTION".to_string(),
+        severity: "low".to_string(),
+        snippet: HELD_PLACE_SNIPPET.to_string(),
+        detail: format!(
+            "A place could not be checked{}A reviewer listed this place as using \"{option_label}\" for {rule_name}, but it could not be found in the file. It needs a decision.",
+            crate::ai_audit::HEADLINE_SEP,
+        ),
+        needs_review: true,
+        located: false,
+        ..Finding::default()
+    };
+    crate::onboard::redact::redact_finding(&mut row);
+    row
+}
+
+/// Whether `rows` already hold the question for this unchecked place of `rule`.
+fn has_held_place_row(rows: &[Finding], repo: &str, rule: &str, place: &CensusPlace) -> bool {
+    rows.iter().any(|r| {
+        r.repo == repo
+            && r.rule_id == "AI-OPEN-QUESTION"
+            && r.snippet == HELD_PLACE_SNIPPET
+            && plain_path(&r.path) == plain_path(&place.path)
+            && r.line == place.line
+            && r.detail.contains(rule)
+    })
+}
+
+/// A held question for every listed place that could not be checked and whose option departs from
+/// the standard of `c`, unless `rows` already hold it. A place that cannot be checked has no code
+/// to show, so it cannot be a departure row: it is a question for the reviewer, and it is made
+/// from the standard in force (not only at scan time), so a place that only departs once the
+/// reviewer rules on the rule is never left out (no open violations). `title` is the rule's title,
+/// or empty.
+pub fn held_place_rows(
+    c: &RuleConvention,
+    rows: &[Finding],
+    title: &str,
+) -> Vec<(String, Finding)> {
+    let mut out = Vec::new();
+    if c.standard.option_id.is_none() {
+        return out;
+    }
+    for o in &c.options {
+        if option_status(c, &c.standard, &o.option_id) != PlaceStatus::Departs {
+            continue;
+        }
+        for p in o.places.iter().filter(|p| !p.checked) {
+            let made: Vec<Finding> = out
+                .iter()
+                .map(|(_, f): &(String, Finding)| f.clone())
+                .collect();
+            if has_held_place_row(rows, &c.repo, &c.rule_id, p)
+                || has_held_place_row(&made, &c.repo, &c.rule_id, p)
+            {
+                continue;
+            }
+            out.push((
+                o.label.clone(),
+                held_place_row(&c.repo, &c.rule_id, title, &o.label, p),
+            ));
+        }
+    }
+    out
+}
+
 fn is_engine_departure(f: &Finding) -> bool {
     f.captures.contains_key(CONVENTION_PLACE_CAPTURE)
 }
@@ -297,7 +412,7 @@ pub fn departure_rows(c: &RuleConvention, rows: &[Finding]) -> Vec<Finding> {
     let mut finder_by_option: BTreeMap<String, usize> = BTreeMap::new();
     for row in &citing {
         let (option, _) = option_of_row(row, c);
-        if finder_status(c, s, option.as_deref()) != PlaceStatus::Departs {
+        if row_status(c, s, row) != PlaceStatus::Departs {
             continue;
         }
         if let Some(o) = &option {
@@ -335,9 +450,14 @@ pub fn departure_rows(c: &RuleConvention, rows: &[Finding]) -> Vec<Finding> {
                 // The scan held an unchecked place as a question of its own.
                 continue;
             }
+            // Only a finder row that itself departs covers a departing place: a conforming row
+            // that happens to span it must not hide it.
             let covered = citing.iter().any(|r| {
                 let (lo, hi) = row_range(r);
-                plain_path(&r.path) == plain_path(&p.path) && p.line >= lo && p.line <= hi
+                plain_path(&r.path) == plain_path(&p.path)
+                    && p.line >= lo
+                    && p.line <= hi
+                    && row_status(c, s, r) == PlaceStatus::Departs
             });
             if covered {
                 continue;
@@ -390,7 +510,7 @@ pub fn tag(rows: &mut [Finding], conventions: &mut [RuleConvention]) {
                 continue;
             }
             let (option, basis) = option_of_row(row, c);
-            let status = finder_status(c, &s, option.as_deref());
+            let status = row_status(c, &s, row);
             refs.push(FinderRowRef {
                 site_key: row.site_key.clone(),
                 path: row.path.clone(),
@@ -464,6 +584,7 @@ pub fn tag(rows: &mut [Finding], conventions: &mut [RuleConvention]) {
                 convention_label: standard.label.clone(),
                 standard_source: Some(s.source),
                 differs_from_default: s.differs_from_default.clone(),
+                following_sites: standard.count,
             }));
             rows[i].evaluated_option_id = Some(standard.option_id.clone());
         }
@@ -587,8 +708,18 @@ pub fn resolve(
         });
         outcome.removed += before - rows.len();
         let mut new_rows = departure_rows(c, rows);
+        // An unchecked place that departs under this ruling and that the scan did not hold (it
+        // had no standard then, or the place followed the rule's default) becomes a held
+        // question now, so no departure is left out of sight.
+        let held: Vec<Finding> = held_place_rows(c, rows, "")
+            .into_iter()
+            .map(|(_, f)| f)
+            .collect();
+        let held_any = has_departing_unchecked_place(c);
+        new_rows.extend(held);
         if let Some(standard) = usable_standard(c) {
-            let any_departure = !new_rows.is_empty() || has_departing_finder_row(c, rows);
+            let any_departure =
+                !new_rows.is_empty() || held_any || has_departing_finder_row(c, rows);
             if !any_departure && standard.count.unwrap_or(0) > 0 {
                 new_rows.push(observed_row(c, standard));
             }
@@ -610,14 +741,21 @@ pub fn resolve(
     outcome
 }
 
+/// Whether a listed place that could not be checked belongs to an option that departs.
+fn has_departing_unchecked_place(c: &RuleConvention) -> bool {
+    c.options.iter().any(|o| {
+        option_status(c, &c.standard, &o.option_id) == PlaceStatus::Departs
+            && o.places.iter().any(|p| !p.checked)
+    })
+}
+
 /// Whether a finder row keyed to the rule departs from the rule's current standard.
 fn has_departing_finder_row(c: &RuleConvention, rows: &[Finding]) -> bool {
     rows.iter().any(|r| {
         is_finder_row(r)
             && r.repo == c.repo
             && same_rule(&r.rule_id, &c.rule_id)
-            && finder_status(c, &c.standard, option_of_row(r, c).0.as_deref())
-                == PlaceStatus::Departs
+            && row_status(c, &c.standard, r) == PlaceStatus::Departs
     })
 }
 
@@ -638,10 +776,34 @@ fn observed_row(c: &RuleConvention, standard: &OptionCensus) -> Finding {
             "Convention set by the reviewer: \"{}\". No exceptions found.",
             standard.label
         ),
-        _ => format!(
-            "The codebase consistently follows \"{}\" for {}. Zero violations were observed this scan.",
-            standard.label, c.rule_id
-        ),
+        _ => {
+            // Places of the rule's default that sit beside an observed standard are no departure
+            // (A2), but they are not "consistent" either: say what is true.
+            let by_default: usize = c
+                .options
+                .iter()
+                .filter(|o| {
+                    option_status(c, &c.standard, &o.option_id) == PlaceStatus::FollowsRuleDefault
+                })
+                .map(|o| o.count.unwrap_or(0))
+                .sum();
+            if by_default == 0 {
+                format!(
+                    "The codebase consistently follows \"{}\" for {}. Zero violations were observed this scan.",
+                    standard.label, c.rule_id
+                )
+            } else {
+                let (places, verb) = if by_default == 1 {
+                    ("place", "follows")
+                } else {
+                    ("places", "follow")
+                };
+                format!(
+                    "The codebase mostly follows \"{}\" for {}. {by_default} {places} {verb} the rule's default instead, which is not counted as a departure.",
+                    standard.label, c.rule_id
+                )
+            }
+        }
     };
     let mut f = Finding {
         repo: c.repo.clone(),
@@ -1187,6 +1349,7 @@ mod tests {
                 convention_label: "Sequential awaits by default".into(),
                 standard_source: None,
                 differs_from_default: None,
+                following_sites: None,
             }));
             report.findings.push(f);
         }
@@ -1310,5 +1473,126 @@ mod tests {
         let mut left = trigger_env();
         left.standard.left_to_client = true;
         assert!(split_rules_without_choice(&[left]).is_empty());
+    }
+
+    fn unchecked(mut o: OptionCensus) -> OptionCensus {
+        for p in &mut o.places {
+            p.checked = false;
+            p.text = String::new();
+        }
+        o
+    }
+
+    fn held_for<'a>(rows: &'a [Finding], path: &str, line: usize) -> Vec<&'a Finding> {
+        rows.iter()
+            .filter(|f| f.rule_id == "AI-OPEN-QUESTION" && f.path == path && f.line == line)
+            .collect()
+    }
+
+    /// Review item 1: a split has no standard at scan time, so a listed place that could not be
+    /// checked got no held question. Once the reviewer accepts the other option it departs, and
+    /// it must come back as a held question (not vanish into the remainder count).
+    #[test]
+    fn an_unchecked_place_that_departs_after_accepting_on_a_split_becomes_a_held_question() {
+        let mut c = trigger_env();
+        c.options[1] = unchecked(c.options[1].clone());
+        let mut rows = Vec::new();
+        let mut cs = vec![c];
+        let mut r = accept("git-ref");
+        r.rule_id = "ARCH-TRIGGER-ENV-1".into();
+        resolve(&mut rows, &mut cs, &[r]);
+        assert_eq!(held_for(&rows, "deploy.yml", 8).len(), 1, "{rows:?}");
+        assert!(
+            rows.iter().all(|f| !f.path.is_empty()),
+            "no remainder: {rows:?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|f| matches!(f.kind, Some(FindingKind::ConventionObserved(_)))),
+            "a departure exists, so the rule is not 'followed with zero violations': {rows:?}"
+        );
+    }
+
+    /// Review item 1, the A2 case: a place of the rule's default is no departure while the standard
+    /// is only observed; the reviewer then accepts the observed option and it departs.
+    #[test]
+    fn an_unchecked_rule_default_place_becomes_a_held_question_after_accepting_the_observed_option()
+    {
+        let mut c = hearth(true);
+        c.options[0] = unchecked(opt("par", "Run in parallel", Some(1), &[("x.ts", 3)]));
+        c.options[1] = opt(
+            "seq",
+            "Sequential awaits by default",
+            Some(4),
+            &[("a.ts", 1)],
+        );
+        let mut rows = Vec::new();
+        let mut cs = vec![c];
+        resolve(&mut rows, &mut cs, &[accept("seq")]);
+        assert_eq!(held_for(&rows, "x.ts", 3).len(), 1, "{rows:?}");
+        // Asked twice (the scan already holds it): still one.
+        let mut again = rows.clone();
+        let mut cs2 = cs.clone();
+        resolve(&mut again, &mut cs2, &[accept("seq")]);
+        assert_eq!(held_for(&again, "x.ts", 3).len(), 1, "{again:?}");
+    }
+
+    /// Review item 2: a conforming finder row whose line range also holds a place of a departing
+    /// option must not hide that place.
+    #[test]
+    fn a_conforming_finder_row_does_not_swallow_a_departing_place_in_its_range() {
+        let mut c = hearth(true);
+        c.options = vec![
+            opt(
+                "seq",
+                "Sequential awaits by default",
+                Some(1),
+                &[("a.ts", 10)],
+            ),
+            opt("par", "Run in parallel", Some(1), &[("a.ts", 11)]),
+        ];
+        c.assessed_places = Some(2);
+        let mut row = finder("a.ts", 10, "SPIRIT-OPTIMIZE-1", 1);
+        row.captures.insert(
+            crate::ai_audit::agent_finder::reply::FINDER_END_LINE_CAPTURE.into(),
+            "12".into(),
+        );
+        let mut rows = vec![row];
+        let mut cs = vec![c];
+        resolve(&mut rows, &mut cs, &[accept("seq")]);
+        assert_eq!(
+            cs[0].finder_rows[0].status,
+            PlaceStatus::Departs,
+            "{:?}",
+            cs[0].finder_rows
+        );
+        assert!(
+            rows.iter().any(|f| f.rule_id == RULE
+                && f.captures.contains_key(CONVENTION_PLACE_CAPTURE)
+                && f.path == "a.ts"),
+            "the departing place is still a row: {rows:?}"
+        );
+    }
+
+    /// Review item 14: the information row of an observed standard says "consistently, zero
+    /// violations" only when no place follows the rule's default instead.
+    #[test]
+    fn the_observed_row_does_not_claim_consistency_beside_places_of_the_rule_default() {
+        let c = hearth(true);
+        let standard = c.options[1].clone();
+        let text = observed_row(&c, &standard).detail;
+        assert!(
+            !text.contains("consistently") && !text.contains("Zero violations"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 place follows the rule's default instead"),
+            "{text}"
+        );
+        let mut clean = hearth(true);
+        clean.options[0].count = Some(0);
+        let text = observed_row(&clean, &clean.options[1].clone()).detail;
+        assert!(text.contains("consistently follows"), "{text}");
     }
 }

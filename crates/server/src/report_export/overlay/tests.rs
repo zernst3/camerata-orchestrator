@@ -934,6 +934,19 @@ mod standards {
             .findings
             .iter()
             .any(|f| f.site_key == key));
+        // The decision is kept by the store but has no row to stand on: it applies to nothing, so
+        // it shows through the stale path (a decision with no row) and never as a disposition.
+        assert!(
+            !withdrawn.dispositions().contains_key(&key),
+            "a decision whose row is gone must not apply"
+        );
+        assert!(
+            withdrawn.report().conventions[0]
+                .standard
+                .ruling_id
+                .is_none(),
+            "the withdrawn ruling no longer stands"
+        );
     }
 
     /// Test 20: the departures a ruling makes are Unresolved (no decision, so no disposition) and
@@ -955,5 +968,59 @@ mod standards {
             );
             assert_eq!(d.severity, "low");
         }
+    }
+
+    /// Review item 1 (overlay): a split with one unchecked place, then Accept. The place departs
+    /// under the ruling and must come back as a held question, not vanish.
+    #[test]
+    fn a_split_with_an_unchecked_place_then_accept_keeps_the_place_as_a_held_question() {
+        let mut report = ScanReport::gated(&["acme/app".to_string()]);
+        report.gated = false;
+        let place =
+            |path: &str, line: usize, checked: bool| camerata_api_types::audit::CensusPlace {
+                path: path.into(),
+                line,
+                text: if checked {
+                    format!("code {path}")
+                } else {
+                    String::new()
+                },
+                checked,
+                status: PlaceStatus::NoStandard,
+            };
+        let mut a = opt("a", "Option A", 1);
+        a.places = vec![place("src/a.rs", 3, true)];
+        let mut b = opt("b", "Option B", 1);
+        b.places = vec![place("src/b.rs", 9, false)];
+        report.conventions = vec![RuleConvention {
+            repo: "acme/app".into(),
+            rule_id: RULE.into(),
+            default_option_id: Some("a".into()),
+            judged_option_id: Some("a".into()),
+            assessed_places: Some(2),
+            places_recorded: true,
+            options: vec![a, b],
+            standard: StandardState::default(),
+            ..RuleConvention::default()
+        }];
+        report.provenance.started_at = "2026-11-02T10:00:00Z".into();
+        report.provenance.finished_at = "2026-11-02T10:00:00Z".into();
+        let sealed = report.seal();
+        let reviewed = apply_overlay_with_standards(&sealed, &[], &[], &[], &[accept("a")]);
+        let held: Vec<&Finding> = reviewed
+            .report()
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "AI-OPEN-QUESTION" && f.path == "src/b.rs" && f.line == 9)
+            .collect();
+        assert_eq!(held.len(), 1, "{:?}", reviewed.report().findings);
+        assert!(!held[0].site_key.is_empty());
+        // Applying twice gives the same key.
+        let again = apply_overlay_with_standards(&sealed, &[], &[], &[], &[accept("a")]);
+        assert!(again
+            .report()
+            .findings
+            .iter()
+            .any(|f| f.site_key == held[0].site_key));
     }
 }

@@ -25,6 +25,7 @@ fn deviation() -> FindingKind {
         convention_label: "the convention".to_string(),
         standard_source: None,
         differs_from_default: None,
+        following_sites: None,
     })
 }
 

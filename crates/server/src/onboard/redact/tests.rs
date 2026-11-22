@@ -39,6 +39,7 @@ fn kinds_carrying(text: &str) -> Vec<FindingKind> {
             convention_label: text.to_string(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         }),
         FindingKind::ConventionObserved(ConventionObservedKind {
             convention_option_id: "opt".to_string(),

@@ -115,6 +115,7 @@ pub fn two_repo_report() -> ScanReport {
         convention_label: "cursor pagination".to_string(),
         standard_source: None,
         differs_from_default: None,
+        following_sites: None,
     }));
     let logging = finding(WEB, LOGGING_RULE, "src/log.ts", 1, "medium");
 

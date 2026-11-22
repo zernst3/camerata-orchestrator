@@ -543,6 +543,7 @@ fn your_conventions_is_counts_and_short_lines() {
             convention_label: "Handlers call services".to_string(),
             standard_source: None,
             differs_from_default: None,
+            following_sites: None,
         }));
         rows.push(f);
     }
@@ -847,6 +848,7 @@ fn your_conventions_words_reviewer_conventions_and_open_questions() {
             convention_label: "Handlers call services".to_string(),
             standard_source: Some(StandardSource::Reviewer),
             differs_from_default: None,
+            following_sites: None,
         }));
         rows.push(f);
     }

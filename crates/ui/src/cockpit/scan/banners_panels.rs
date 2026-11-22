@@ -845,6 +845,13 @@ pub(in crate::cockpit) fn NoConventionPanel(
     /// A commit is in flight.
     #[props(default)]
     busy: bool,
+    /// The scan's convention records (with the reviewer's rulings applied). A rule with a record
+    /// is ruled on through the standards routes, not by a local pick that records nothing.
+    #[props(default)]
+    conventions: Vec<camerata_api_types::audit::RuleConvention>,
+    /// The reviewer ruled on a rule: (repo, rule id, what they asked).
+    #[props(default)]
+    on_ruling: Callback<(String, String, super::queue_table::RulingAction)>,
 ) -> Element {
     let all = split_rules(&findings);
     if all.is_empty() {
@@ -898,7 +905,93 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                             .filter_map(|(id, _, _)| r.option_line(id))
                                             .collect();
                                         let detail = detail_of.get(&key).cloned().unwrap_or_default();
+                                        // A rule with a record is ruled on, so its state is the record's.
+                                        let record = conventions
+                                            .iter()
+                                            .find(|c| c.repo == r.repo && c.rule_id.eq_ignore_ascii_case(&r.rule_id))
+                                            .cloned();
+                                        let ruling = record.as_ref().map(|c| {
+                                            (
+                                                camerata_ui_core::convention_view::split_state(c),
+                                                c.standard.ruling_id.clone(),
+                                                c.standard.option_id.clone(),
+                                            )
+                                        });
+                                        let (repo_for_ruling, rule_for_ruling) = (r.repo.clone(), r.rule_id.clone());
                                         rsx! {
+                                            if let Some((state, ruling_id, chosen)) = ruling {
+                                                li {
+                                                    key: "{key}",
+                                                    class: if state.is_decided() { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
+                                                    "data-rule": "{r.rule_id}",
+                                                    span {
+                                                        class: if state.is_decided() { "adopt-state on" } else { "adopt-state off" },
+                                                        "data-control": "state",
+                                                        "{state.text()}"
+                                                    }
+                                                    button {
+                                                        class: "rule-hub-link kind-panel-rule",
+                                                        title: "Everything this scan knows about {r.rule_id}.",
+                                                        onclick: move |_| on_open_hub.call(req.clone()),
+                                                        "{r.rule_id}"
+                                                    }
+                                                    if summary.is_empty() {
+                                                        span { class: "kind-panel-label", "{detail}" }
+                                                    } else {
+                                                        span { class: "kind-panel-label", "{summary.join(\" \u{00b7} \")}" }
+                                                    }
+                                                    span { class: "kind-panel-repo", "{r.repo}" }
+                                                    select {
+                                                        class: "adopt-pick",
+                                                        "data-control": super::queue_table::CTRL_ACCEPT,
+                                                        value: chosen.clone().unwrap_or_default(),
+                                                        onchange: {
+                                                            let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                            move |e| {
+                                                                let v = e.value();
+                                                                if !v.is_empty() {
+                                                                    on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Accept(v)));
+                                                                }
+                                                            }
+                                                        },
+                                                        option { value: "", "Choose an option to accept" }
+                                                        for (id , label , sites) in options.iter() {
+                                                            option { key: "{id}", value: "{id}",
+                                                                if let Some(n) = sites {
+                                                                    "Accept: {label} ({n} sites)"
+                                                                } else {
+                                                                    "Accept: {label}"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    p { class: "adopt-effect", "{camerata_ui_core::convention_view::ACCEPT_EFFECT}" }
+                                                    button {
+                                                        class: "btn-ghost rule-hub-leave",
+                                                        "data-control": super::queue_table::CTRL_LEAVE,
+                                                        onclick: {
+                                                            let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                            move |_| on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Leave))
+                                                        },
+                                                        "{camerata_ui_core::convention_view::LEAVE_LABEL}"
+                                                    }
+                                                    p { class: "adopt-effect", "{camerata_ui_core::convention_view::LEAVE_EFFECT}" }
+                                                    if let Some(id) = ruling_id {
+                                                        button {
+                                                            class: "btn-ghost rule-hub-withdraw",
+                                                            "data-control": super::queue_table::CTRL_WITHDRAW,
+                                                            onclick: {
+                                                                let (repo, rule) = (repo_for_ruling.clone(), rule_for_ruling.clone());
+                                                                move |_| on_ruling.call((repo.clone(), rule.clone(), super::queue_table::RulingAction::Withdraw(id.clone())))
+                                                            },
+                                                            "Withdraw"
+                                                        }
+                                                    }
+                                                    if !state.is_decided() {
+                                                        p { class: "adopt-effect", "{camerata_ui_core::convention_view::NEEDS_DECISION}" }
+                                                    }
+                                                }
+                                            } else {
                                             li {
                                                 key: "{key}",
                                                 class: if picked.is_some() { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
@@ -962,6 +1055,7 @@ pub(in crate::cockpit) fn NoConventionPanel(
                                                         }
                                                     }
                                                 }
+                                            }
                                             }
                                         }
                                     }

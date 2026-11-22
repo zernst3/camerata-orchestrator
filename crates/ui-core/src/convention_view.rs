@@ -17,6 +17,51 @@ pub const LEAVE_EFFECT: &str =
 /// Printed when the scan did not record places (a report saved before the model).
 pub const PLACES_NOT_RECORDED: &str = "The places were not recorded for this scan.";
 
+/// What an untouched split reads: nothing has been decided, and the gate says so too.
+pub const NO_CHOICE_YET: &str = "No choice yet";
+/// Why an untouched split matters, in the words of the export gate and the export dialog.
+pub const NEEDS_DECISION: &str =
+    "This rule needs a decision before a client package can be exported.";
+
+/// Where a split rule stands, read from its record.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SplitState {
+    /// No ruling: the gate holds the export.
+    NoChoiceYet,
+    /// The reviewer left it to the client.
+    LeftToClient,
+    /// The reviewer accepted this option (its label).
+    Accepted(String),
+}
+
+impl SplitState {
+    /// The words the panel prints.
+    pub fn text(&self) -> String {
+        match self {
+            Self::NoChoiceYet => NO_CHOICE_YET.to_string(),
+            Self::LeftToClient => "Left to the client".to_string(),
+            Self::Accepted(label) => format!("Accepted: {label}"),
+        }
+    }
+
+    /// Whether a ruling has been made.
+    pub fn is_decided(&self) -> bool {
+        !matches!(self, Self::NoChoiceYet)
+    }
+}
+
+/// The state of a rule's record: a split with no ruling is "No choice yet", never a claim that
+/// something was recorded.
+pub fn split_state(c: &RuleConvention) -> SplitState {
+    if c.standard.left_to_client {
+        return SplitState::LeftToClient;
+    }
+    match (&c.standard.option_id, c.standard.source) {
+        (Some(id), StandardSource::Reviewer) => SplitState::Accepted(label(c, id).to_string()),
+        _ => SplitState::NoChoiceYet,
+    }
+}
+
 /// One place in a list: where it is and what is known about it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PlaceLine {
@@ -82,6 +127,8 @@ pub fn origin_label(c: &RuleConvention) -> String {
     ) {
         (Some(_), StandardSource::Reviewer, _) => "set by you".to_string(),
         (Some(_), StandardSource::RuleDefault, _) => "the rule's default".to_string(),
+        (Some(_), StandardSource::EarlierChoice, _) => "your project's earlier choice".to_string(),
+        (Some(_), StandardSource::MostCommon, _) => "the option most places follow".to_string(),
         (Some(_), _, _) => "observed in the code".to_string(),
         (None, _, Some(p)) => match p.basis {
             ProposalBasis::RuleDefault => "proposal: the rule's default".to_string(),
@@ -113,7 +160,11 @@ pub fn engine_line(c: &RuleConvention) -> String {
                 .options
                 .iter()
                 .filter(|o| o.count.unwrap_or(0) > 0)
-                .map(|o| format!("{} follow \"{}\"", o.count.unwrap_or(0), o.label))
+                .map(|o| {
+                    let n = o.count.unwrap_or(0);
+                    let verb = if n == 1 { "follows" } else { "follow" };
+                    format!("{n} {verb} \"{}\"", o.label)
+                })
                 .collect();
             format!("Split: {}. No option holds two thirds.", parts.join(", "))
         }
@@ -134,9 +185,19 @@ fn status_title(s: PlaceStatus) -> &'static str {
 /// own note; one whose option was not recorded is listed under "Reported by the finder".
 pub fn place_groups(c: &RuleConvention) -> Vec<PlaceGroup> {
     let mut groups: Vec<PlaceGroup> = Vec::new();
+    // A place is listed once in a group: a finder row at a place the scan also recorded is the
+    // same place (the recorded one, listed first, wins).
     let mut add =
         |title: String, place: PlaceLine| match groups.iter_mut().find(|g| g.title == title) {
-            Some(g) => g.places.push(place),
+            Some(g) => {
+                if !g
+                    .places
+                    .iter()
+                    .any(|p| (&p.path, p.line) == (&place.path, place.line))
+                {
+                    g.places.push(place);
+                }
+            }
             None => groups.push(PlaceGroup {
                 title,
                 places: vec![place],
@@ -435,5 +496,67 @@ mod tests {
         let v = convention_view(&split);
         assert_eq!(v.accept.unwrap().label, "Accept: Run in parallel");
         assert!(v.engine_line.starts_with("Split: "), "{}", v.engine_line);
+    }
+
+    /// Review item 11: one word, singular and plural, in the engine line of a split.
+    #[test]
+    fn the_split_line_says_follows_for_one_place_and_follow_for_several() {
+        let mut split = observed();
+        split.observed_option_id = None;
+        split.standard = StandardState::default();
+        split.options[0].count = Some(1);
+        split.options[1].count = Some(2);
+        let line = engine_line(&split);
+        assert!(
+            line.contains("1 follows \"") && line.contains("2 follow \""),
+            "{line}"
+        );
+    }
+
+    /// Review item 14: a finder row at a place the scan also recorded is listed once.
+    #[test]
+    fn a_finder_row_at_a_recorded_place_is_listed_once() {
+        let mut c = observed();
+        c.options[1].places = vec![CensusPlace {
+            path: "a.ts".into(),
+            line: 5,
+            text: "code".into(),
+            checked: true,
+            status: PlaceStatus::Conforms,
+        }];
+        c.finder_rows = vec![FinderRowRef {
+            path: "a.ts".into(),
+            line: 5,
+            note: "problem".into(),
+            option_id: Some(c.options[1].option_id.clone()),
+            option_basis: OptionBasis::Listed,
+            status: PlaceStatus::Conforms,
+            ..FinderRowRef::default()
+        }];
+        let groups = place_groups(&c);
+        let all: Vec<&PlaceLine> = groups.iter().flat_map(|g| g.places.iter()).collect();
+        assert_eq!(all.len(), 1, "{groups:?}");
+    }
+
+    /// Review item 4: an untouched split reads "No choice yet"; a ruling reads as what it is.
+    #[test]
+    fn a_split_reads_no_choice_yet_until_a_ruling_is_made() {
+        let mut split = observed();
+        split.observed_option_id = None;
+        split.standard = StandardState::default();
+        assert_eq!(split_state(&split), SplitState::NoChoiceYet);
+        assert_eq!(split_state(&split).text(), "No choice yet");
+        assert!(!split_state(&split).is_decided());
+        split.standard.left_to_client = true;
+        assert_eq!(split_state(&split).text(), "Left to the client");
+        split.standard = StandardState {
+            option_id: Some("seq".into()),
+            source: StandardSource::Reviewer,
+            ..StandardState::default()
+        };
+        assert_eq!(split_state(&split).text(), "Accepted: Sequential");
+        // An observed standard is not a ruling.
+        split.standard.source = StandardSource::Observed;
+        assert_eq!(split_state(&split), SplitState::NoChoiceYet);
     }
 }
