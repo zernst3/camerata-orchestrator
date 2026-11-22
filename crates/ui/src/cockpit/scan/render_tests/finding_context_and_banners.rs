@@ -244,7 +244,7 @@ fn an_unlinked_repo_says_so_in_plain_words_never_file_not_found() {
         ),
         (
             "",
-            "This repo is not linked to this project, or it has no local folder.",
+            "This repo is not linked to a project, or it has no local folder.",
         ),
     ] {
         let html = render_context(serde_json::json!({

@@ -3988,6 +3988,49 @@ mod network_tests {
 
     #[tokio::test]
     #[serial_test::serial(process_env)]
+    async fn a_deleted_repo_shows_the_servers_dated_reason_and_a_missing_one_its_own_reason() {
+        // The shapes the server really sends: `source_deleted` with its dated reason, and
+        // `file_missing` with the reason the file reader gives.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .and(query_param("symbol", "gone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "source_deleted",
+                "reason": "Source deleted on 24 Oct 2026, re-fetch to view",
+                "deleted_at": "2026-10-24T17:40:19Z", "record_id": "r1",
+                "symbol": "gone", "hits": [], "more": false
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .and(query_param("symbol", "lost"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "file_missing", "reason": "file not found \u{2014} changed since scan?",
+                "symbol": "lost", "hits": [], "more": false
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let deleted = fetch_symbol_refs("acme/app", "gone", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted.outcome(),
+            RefsOutcome::Note("Source deleted on 24 Oct 2026, re-fetch to view".into())
+        );
+        let missing = fetch_symbol_refs("acme/app", "lost", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            missing.outcome(),
+            RefsOutcome::Note("file not found \u{2014} changed since scan?".into())
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn a_symbol_search_the_server_does_not_answer_is_none() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -5256,7 +5299,7 @@ mod host_tests {
             ),
             (
                 "",
-                "This repo is not linked to this project, or it has no local folder.",
+                "This repo is not linked to a project, or it has no local folder.",
             ),
         ] {
             let (mut vdom, server) = mounted_with_answer(

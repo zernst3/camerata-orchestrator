@@ -25,6 +25,36 @@ fn sibling(path: &std::path::Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// An unreadable-file notice: the project it is for (`None`: every project) and its words.
+type Notice = (Option<String>, String);
+
+/// A project id as a file-name part (`inspections::file_stem`: injective, and never empty, so no
+/// id gets `onboarding-draft-.json`).
+fn file_part(project_id: &str) -> String {
+    crate::inspections::file_stem(project_id)
+}
+
+/// The project id a file-name part stands for (the inverse of [`file_part`]).
+fn id_of_part(part: &str) -> Option<String> {
+    if part == "%00empty" {
+        return Some(String::new());
+    }
+    let b = part.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = part.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// Whether `bytes` are a draft map this build can read.
 fn parses_as_map(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes)
@@ -59,17 +89,20 @@ fn write_atomic(path: &std::path::Path, json: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Persists per-project onboarding drafts to `<data_dir>/camerata/onboarding-draft.json`
-/// (a `{ project_id: draft }` map), with an in-memory mirror so a session without a
-/// resolvable data dir still works in-run. `Clone` is a shallow handle (shared state) so
-/// it can live in the axum `AppState`.
+/// Persists per-project onboarding drafts, ONE FILE PER PROJECT, next to the legacy shared path
+/// `<data_dir>/onboarding-draft.json`: `onboarding-draft-<project>.json`, each a
+/// `{ project_id: draft, "_cleared_at": { project_id: at } }` map holding that project's keys
+/// only, with its own `.bak`, `.tmp` and `.unreadable-<secs>` siblings. So a project's deletion
+/// removes exactly its files. An in-memory mirror serves a session without a data dir. `Clone`
+/// is a shallow handle (shared state) so it can live in the axum `AppState`.
 #[derive(Clone, Default)]
 pub struct DraftStore {
     path: Option<Arc<PathBuf>>,
     mem: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     /// Set when the file on disk could not be read at start and was set aside; the operator is
-    /// told once, on the next read of the draft ([`Self::take_unreadable_notice`]).
-    notice: Arc<Mutex<Option<String>>>,
+    /// told once, on the next read of the draft ([`Self::take_unreadable_notice`]). Each is for the
+    /// project whose file it was, or for every project (`None`) when a shared file was set aside.
+    notice: Arc<Mutex<Vec<Notice>>>,
 }
 
 impl DraftStore {
@@ -78,56 +111,263 @@ impl DraftStore {
         Self::default()
     }
 
-    /// Persist to (and rehydrate from) `path`. A file this build cannot read (not UTF-8, not a
-    /// draft map such as the old bare-draft shape, or a read error) is never dropped: it is
-    /// copied aside to a timestamped `.unreadable-<seconds>` file, the operator is told, and the
-    /// store starts empty.
-    pub fn at(path: PathBuf) -> Self {
-        let mut notice = None;
-        let mem = match std::fs::read(&path) {
+    /// Persist to (and rehydrate from) the per-project files next to `path` (the legacy shared
+    /// draft file's name, which also fixes the folder and the file-name stem). A file this build
+    /// cannot read (not UTF-8, not a draft map such as the old bare-draft shape, or a read error)
+    /// is never dropped: it is copied aside to a timestamped `.unreadable-<seconds>` file, the
+    /// operator is told, and that file's drafts are not restored.
+    ///
+    /// A shared file from before the split is migrated here, once: each project's draft and
+    /// discard stamp go to its own file (a project that already has its own file keeps that one),
+    /// then the shared file is renamed to `<path>.shared-backup`, never deleted. A shared file
+    /// that cannot be read is moved to its `.unreadable-<seconds>` name instead, so a second
+    /// start finds nothing to redo.
+    pub fn at(path: PathBuf, live_ids: &[String]) -> Self {
+        let mut notices: Vec<Notice> = Vec::new();
+        let mut mem: HashMap<String, serde_json::Value> = HashMap::new();
+        let store = Self {
+            path: Some(Arc::new(path.clone())),
+            mem: Arc::new(Mutex::new(HashMap::new())),
+            notice: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        // Projects whose own file was read: that file is authoritative for ALL of the project's
+        // keys (its draft and its discard stamp), whatever a shared file says.
+        let mut own_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for file in store.project_files_on_disk() {
+            let (map, told) = Self::load_file(&file, false);
+            if let Some(told) = told {
+                notices.push((store.owner_of_file(&file), told));
+            }
+            if let Some(map) = map {
+                own_ids.extend(map.keys().filter(|k| k.as_str() != CLEARED_KEY).cloned());
+                if let Some(o) = map.get(CLEARED_KEY).and_then(|c| c.as_object()) {
+                    own_ids.extend(o.keys().cloned());
+                }
+                Self::merge(&mut mem, map, false);
+            }
+        }
+
+        if path.exists() {
+            let (map, told) = Self::load_file(&path, true);
+            if let Some(told) = told {
+                notices.push((None, told));
+            }
+            if let Some(map) = map {
+                // Only projects that still exist, and have no readable file of their own, are
+                // migrated; the rest stay in the shared file, which is kept whole as the backup.
+                let mut ids: Vec<String> = map
+                    .keys()
+                    .filter(|k| k.as_str() != CLEARED_KEY)
+                    .cloned()
+                    .collect();
+                if let Some(o) = map.get(CLEARED_KEY).and_then(|c| c.as_object()) {
+                    ids.extend(o.keys().cloned());
+                }
+                ids.sort();
+                ids.dedup();
+                let all_ids = ids.clone();
+                ids.retain(|id| live_ids.contains(id) && !own_ids.contains(id));
+                let mut eligible: HashMap<String, serde_json::Value> = HashMap::new();
+                for id in &ids {
+                    if let Some(d) = map.get(id) {
+                        eligible.insert(id.clone(), d.clone());
+                    }
+                    if let Some(at) = map.get(CLEARED_KEY).and_then(|c| c.get(id)) {
+                        Self::stamp_cleared(&mut eligible, id, at.as_str().unwrap_or_default());
+                    }
+                }
+                Self::merge(&mut mem, eligible, false);
+                if let Ok(mut m) = store.mem.lock() {
+                    *m = mem.clone();
+                }
+                let all_written = ids.iter().all(|id| store.write_project(id).is_ok());
+                // The shared file is moved aside only when every project in it is accounted for:
+                // migrated just now, or already holding its own file. With no live ids (the
+                // project list could not be read) or a project not yet known, it stays where it
+                // is, so a restored project list finds the drafts again.
+                let accounted = all_ids
+                    .iter()
+                    .all(|id| own_ids.contains(id) || (live_ids.contains(id) && ids.contains(id)));
+                if !live_ids.is_empty() && all_written && accounted {
+                    let _ = std::fs::rename(&path, Self::backup_name(&path));
+                }
+            }
+        }
+
+        if let Ok(mut m) = store.mem.lock() {
+            *m = mem;
+        }
+        if let Ok(mut n) = store.notice.lock() {
+            *n = notices;
+        }
+        store
+    }
+
+    /// The project a per-project draft file (or one of its `.bak`, `.tmp`, set-aside copies)
+    /// belongs to, read from its name. `None` for a name that is not a per-project draft file.
+    pub fn owner_of_file(&self, file: &std::path::Path) -> Option<String> {
+        let shared = self.path.as_ref()?;
+        let stem = shared.file_stem()?.to_string_lossy().to_string();
+        let name = file.file_name()?.to_string_lossy().to_string();
+        let rest = name.strip_prefix(&format!("{stem}-"))?;
+        id_of_part(rest.split('.').next()?)
+    }
+
+    /// Where a shared file is kept once its drafts have their own files.
+    fn backup_name(shared: &std::path::Path) -> PathBuf {
+        let first = sibling(shared, ".shared-backup");
+        if !first.exists() {
+            return first;
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        sibling(shared, &format!(".shared-backup-{secs}"))
+    }
+
+    /// Read one draft file. `None` for a file that is not there. A file this build cannot read is
+    /// set aside (`move_aside`: moved to its `.unreadable-<secs>` name, else copied there) and
+    /// the notice says so.
+    fn load_file(
+        path: &std::path::Path,
+        move_aside: bool,
+    ) -> (Option<HashMap<String, serde_json::Value>>, Option<String>) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let aside = sibling(path, &format!(".unreadable-{secs}"));
+        match std::fs::read(path) {
             Ok(bytes) => match std::str::from_utf8(&bytes)
                 .map_err(|e| e.to_string())
                 .and_then(|s| {
                     serde_json::from_str::<HashMap<String, serde_json::Value>>(s)
                         .map_err(|e| e.to_string())
                 }) {
-                Ok(map) => map,
+                Ok(map) => (Some(map), None),
                 Err(why) => {
-                    let secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_secs());
-                    let aside = sibling(&path, &format!(".unreadable-{secs}"));
-                    notice = Some(Self::aside_notice(
-                        &path,
-                        &aside,
-                        &why,
-                        std::fs::write(&aside, &bytes),
-                    ));
-                    HashMap::new()
+                    let kept = if move_aside && std::fs::rename(path, &aside).is_ok() {
+                        Ok(())
+                    } else {
+                        std::fs::write(&aside, &bytes)
+                    };
+                    (None, Some(Self::aside_notice(path, &aside, &why, kept)))
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
             Err(e) => {
                 // The file exists but cannot be read (permissions, I/O error): nothing is
                 // written over it until the operator is told.
-                let secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
-                let aside = sibling(&path, &format!(".unreadable-{secs}"));
-                notice = Some(Self::aside_notice(
-                    &path,
-                    &aside,
-                    &e.to_string(),
-                    std::fs::copy(&path, &aside).map(|_| ()),
-                ));
-                HashMap::new()
+                let kept = std::fs::copy(path, &aside).map(|_| ());
+                (
+                    None,
+                    Some(Self::aside_notice(path, &aside, &e.to_string(), kept)),
+                )
             }
-        };
-        Self {
-            path: Some(Arc::new(path)),
-            mem: Arc::new(Mutex::new(mem)),
-            notice: Arc::new(Mutex::new(notice)),
         }
+    }
+
+    /// Fold `map` into `into`. With `keep_existing`, what `into` already holds for a project wins.
+    fn merge(
+        into: &mut HashMap<String, serde_json::Value>,
+        map: HashMap<String, serde_json::Value>,
+        keep_existing: bool,
+    ) {
+        for (key, value) in map {
+            if key == CLEARED_KEY {
+                let Some(stamps) = value.as_object() else {
+                    continue;
+                };
+                for (id, at) in stamps {
+                    let held = into.get(CLEARED_KEY).and_then(|c| c.get(id)).is_some();
+                    if !(keep_existing && held) {
+                        Self::stamp_cleared(into, id, at.as_str().unwrap_or_default());
+                    }
+                }
+            } else if !(keep_existing && into.contains_key(&key)) {
+                into.insert(key, value);
+            }
+        }
+    }
+
+    /// The file `project_id`'s draft lives in: `onboarding-draft-<project>.json` beside the shared
+    /// path. `None` for a store with no folder.
+    pub fn project_file(&self, project_id: &str) -> Option<PathBuf> {
+        let shared = self.path.as_ref()?;
+        let stem = shared.file_stem()?.to_string_lossy().to_string();
+        let name = match shared.extension() {
+            Some(ext) => format!("{stem}-{}.{}", file_part(project_id), ext.to_string_lossy()),
+            None => format!("{stem}-{}", file_part(project_id)),
+        };
+        Some(shared.with_file_name(name))
+    }
+
+    /// Every per-project draft file in the folder (not their `.bak`, `.tmp` or set-aside copies).
+    fn project_files_on_disk(&self) -> Vec<PathBuf> {
+        let Some(shared) = &self.path else {
+            return Vec::new();
+        };
+        let Some(dir) = shared.parent() else {
+            return Vec::new();
+        };
+        let stem = shared
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let ext = shared
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        let (head, tail) = (format!("{stem}-"), ext);
+        let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|r| {
+                r.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_file()
+                            && p.file_name().is_some_and(|n| {
+                                let n = n.to_string_lossy();
+                                n.starts_with(&head) && n.ends_with(&tail)
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    /// Everything on disk that is `project_id`'s alone: its draft file and that file's `.bak`,
+    /// `.tmp` and set-aside copies. Never another project's, never the shared file.
+    pub fn files_of(&self, project_id: &str) -> Vec<PathBuf> {
+        let Some(file) = self.project_file(project_id) else {
+            return Vec::new();
+        };
+        let Some(dir) = file.parent() else {
+            return Vec::new();
+        };
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|r| {
+                r.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.file_name().is_some_and(|n| {
+                            let n = n.to_string_lossy();
+                            n == name
+                                || n == format!("{name}.bak")
+                                || n == format!("{name}.tmp")
+                                || n.starts_with(&format!("{name}.unreadable-"))
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
     }
 
     /// The operator-facing words for a draft file that was set aside, also printed to stderr.
@@ -160,20 +400,55 @@ impl DraftStore {
     /// Why no draft could be restored, when the draft file on disk was unreadable at start and
     /// nothing has been saved since. Taking it clears it: the operator is told once, and what
     /// they do next (start again, save) is not blocked by a message that keeps coming back.
-    pub fn take_unreadable_notice(&self) -> Option<String> {
-        self.notice.lock().ok().and_then(|mut n| n.take())
+    pub fn take_unreadable_notice(&self, project_id: &str) -> Option<String> {
+        let mut n = self.notice.lock().ok()?;
+        let i = n
+            .iter()
+            .position(|(who, _)| who.as_deref().is_none_or(|w| w == project_id))?;
+        Some(n.remove(i).1)
     }
 
-    /// Best-effort flush of the whole map to disk; the in-memory mirror is authoritative. The
+    /// Write `project_id`'s file from the in-memory map: its draft and its discard stamp, and
+    /// nothing of any other project. No file is written for a project the map holds nothing of.
+    fn write_project(&self, project_id: &str) -> std::io::Result<()> {
+        let Some(file) = self.project_file(project_id) else {
+            return Ok(());
+        };
+        // The lock is held across the write: a deletion ([`Self::clear_checked`]) takes the same
+        // lock, so a write can never put back what a deletion just removed.
+        let m = self
+            .mem
+            .lock()
+            .map_err(|_| std::io::Error::other("draft store mutex poisoned"))?;
+        {
+            let mut only: HashMap<String, serde_json::Value> = HashMap::new();
+            if let Some(d) = m.get(project_id) {
+                only.insert(project_id.to_string(), d.clone());
+            }
+            if let Some(at) = m.get(CLEARED_KEY).and_then(|c| c.get(project_id)) {
+                only.insert(
+                    CLEARED_KEY.to_string(),
+                    serde_json::json!({ project_id: at }),
+                );
+            }
+            if only.is_empty() {
+                return Ok(());
+            }
+            let json = serde_json::to_string(&only).map_err(std::io::Error::other)?;
+            write_with_backup(&file, &json)
+        }
+    }
+
+    /// Best-effort flush of `project_id`'s file; the in-memory mirror is authoritative. The
     /// unreadable-file notice is dropped only once a write has succeeded.
-    fn flush(&self) {
-        let Some(p) = &self.path else { return };
-        let Ok(map) = self.mem.lock() else { return };
-        if let Ok(s) = serde_json::to_string(&*map) {
-            if write_with_backup(p.as_ref().as_path(), &s).is_ok() {
-                if let Ok(mut n) = self.notice.lock() {
-                    *n = None;
-                }
+    fn flush(&self, project_id: &str) {
+        if self.path.is_none() {
+            return;
+        }
+        if self.write_project(project_id).is_ok() {
+            if let Ok(mut n) = self.notice.lock() {
+                // This project's notice, and a shared file's (it concerned every project).
+                n.retain(|(who, _)| who.as_deref().is_some_and(|w| w != project_id));
             }
         }
     }
@@ -196,31 +471,30 @@ impl DraftStore {
         }
     }
 
-    /// Drop `project_id`'s draft and its discard stamp, for the project's deletion. Leaves no
-    /// copy: the `.bak` is rewritten to the file as it will stand, not rotated. Memory changes
-    /// only after BOTH writes succeed. The `.bak` goes first: if it fails nothing else was
-    /// touched, and if the main file then fails the `.bak` merely lacks the project already, so
-    /// disk and memory never disagree about whether the draft is there.
+    /// Drop `project_id`'s draft and its discard stamp, for the project's deletion: every file
+    /// that is the project's alone ([`Self::files_of`]: the draft file, its `.bak`, `.tmp` and
+    /// set-aside copies) is removed, and no other project's file is touched. The draft file goes
+    /// last, and memory changes only after every removal succeeded, so a failure part way leaves
+    /// disk and memory agreeing the draft is still there, and a retry finishes the job.
     pub fn clear_checked(&self, project_id: &str) -> std::io::Result<()> {
         let mut m = self
             .mem
             .lock()
             .map_err(|_| std::io::Error::other("draft store mutex poisoned"))?;
-        let mut kept = m.clone();
-        kept.remove(project_id);
-        if let Some(o) = kept.get_mut(CLEARED_KEY).and_then(|v| v.as_object_mut()) {
+        let main = self.project_file(project_id);
+        let mut files = self.files_of(project_id);
+        files.sort_by_key(|f| Some(f) == main.as_ref());
+        for f in files {
+            match std::fs::remove_file(&f) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        m.remove(project_id);
+        if let Some(o) = m.get_mut(CLEARED_KEY).and_then(|v| v.as_object_mut()) {
             o.remove(project_id);
         }
-        if let Some(p) = &self.path {
-            let json = serde_json::to_string(&kept).map_err(std::io::Error::other)?;
-            let path = p.as_ref().as_path();
-            let bak = sibling(path, ".bak");
-            if bak.exists() {
-                std::fs::write(&bak, &json)?;
-            }
-            write_atomic(path, &json)?;
-        }
-        *m = kept;
         Ok(())
     }
 
@@ -246,7 +520,7 @@ impl DraftStore {
         if let Ok(mut m) = self.mem.lock() {
             m.insert(project_id.to_string(), v);
         }
-        self.flush();
+        self.flush(project_id);
     }
 
     /// Put a finished run's report into `project_id`'s draft as its `audit`, so the review the
@@ -322,7 +596,7 @@ impl DraftStore {
             true
         };
         if changed {
-            self.flush();
+            self.flush(project_id);
         }
         changed
     }
@@ -342,8 +616,56 @@ impl DraftStore {
             m.remove(project_id);
             Self::stamp_cleared(&mut m, project_id, at);
         }
-        self.flush();
+        self.flush(project_id);
     }
+}
+
+/// Whether a draft file from before each project had its own (the shared file, its `.bak`, the
+/// one-time backup of a migration) holds `project_id`: its draft or its discard stamp. `None`
+/// when the file cannot be parsed as a draft map (so nothing can be said about it).
+pub(crate) fn shared_file_holds(path: &std::path::Path, project_id: &str) -> Option<bool> {
+    let bytes = std::fs::read(path).ok()?;
+    let map: HashMap<String, serde_json::Value> =
+        serde_json::from_str(std::str::from_utf8(&bytes).ok()?).ok()?;
+    Some(
+        map.contains_key(project_id)
+            || map
+                .get(CLEARED_KEY)
+                .and_then(|c| c.as_object())
+                .is_some_and(|o| o.contains_key(project_id)),
+    )
+}
+
+/// Rewrite a shared-era draft file without `project_id`'s draft and discard stamp (written
+/// through a temp file and a rename). A file left with no project at all is removed.
+pub(crate) fn strip_project_from_file(
+    path: &std::path::Path,
+    project_id: &str,
+) -> std::io::Result<bool> {
+    let bytes = std::fs::read(path)?;
+    let mut map: HashMap<String, serde_json::Value> =
+        serde_json::from_str(std::str::from_utf8(&bytes).map_err(std::io::Error::other)?)
+            .map_err(std::io::Error::other)?;
+    map.remove(project_id);
+    if let Some(o) = map.get_mut(CLEARED_KEY).and_then(|v| v.as_object_mut()) {
+        o.remove(project_id);
+    }
+    let stamps_left = map
+        .get(CLEARED_KEY)
+        .and_then(|c| c.as_object())
+        .is_some_and(|o| !o.is_empty());
+    let drafts_left = map.keys().any(|k| k != CLEARED_KEY);
+    if !stamps_left && !drafts_left {
+        return std::fs::remove_file(path).map(|()| true);
+    }
+    if !stamps_left {
+        map.remove(CLEARED_KEY);
+    }
+    write_atomic(
+        path,
+        &serde_json::to_string(&map).map_err(std::io::Error::other)?,
+    )
+    .map(|()| false)
 }
 
 /// An RFC 3339 timestamp as an instant, whatever its offset or fraction.

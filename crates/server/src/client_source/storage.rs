@@ -137,6 +137,24 @@ pub fn known_storage_locations(roots: &StorageRoots) -> Vec<KnownLocation> {
                 treatment: *treatment,
             });
         }
+        // Each project's draft has its own file (`onboarding-draft-<id>.json` with its `.bak`
+        // and set-aside copies), so they are found on disk, not named in the table. Kept, like
+        // the shared draft file they came from.
+        if let Ok(read) = std::fs::read_dir(data) {
+            let mut files: Vec<PathBuf> = read
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("onboarding-draft-"))
+                })
+                .collect();
+            files.sort();
+            out.extend(files.into_iter().map(|path| KnownLocation {
+                path,
+                treatment: Treatment::Kept,
+            }));
+        }
     }
     if let Some(cli) = &roots.cli_state_dir {
         out.push(KnownLocation {
@@ -442,5 +460,35 @@ mod tests {
             treatment("/sandbox/cli-state/camerata"),
             Some(Treatment::Purged)
         );
+    }
+}
+
+#[cfg(test)]
+mod per_project_draft_tests {
+    use super::*;
+
+    #[test]
+    fn per_project_draft_files_on_disk_are_known_locations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = StorageRoots::sandboxed(tmp.path());
+        let data = roots.data_dir.clone().unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        for f in [
+            "onboarding-draft-p1.json",
+            "onboarding-draft-p1.json.bak",
+            "unrelated.json",
+        ] {
+            std::fs::write(data.join(f), "{}").unwrap();
+        }
+        let known = known_storage_locations(&roots);
+        for f in ["onboarding-draft-p1.json", "onboarding-draft-p1.json.bak"] {
+            assert!(
+                known
+                    .iter()
+                    .any(|k| k.path == data.join(f) && k.treatment == Treatment::Kept),
+                "{f} is known"
+            );
+        }
+        assert!(!known.iter().any(|k| k.path == data.join("unrelated.json")));
     }
 }
