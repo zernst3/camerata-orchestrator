@@ -1731,3 +1731,80 @@ async fn an_onboarding_project_viewing_a_repo_another_project_deleted_is_told_it
         "the hinted project still hears it was deleted: {read:?}"
     );
 }
+
+#[tokio::test]
+async fn a_rewritten_shared_copy_is_reported_as_rewritten_not_removed_whole() {
+    let fx = fixture();
+    let pid = fx.project_id.clone();
+    let data = fx.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let backup = data.join("onboarding-draft.json.shared-backup");
+    std::fs::write(
+        &backup,
+        serde_json::json!({pid.clone(): {"scan": SENT_A}, "other-project": {"scan": SENT_B}})
+            .to_string(),
+    )
+    .unwrap();
+
+    let out = delete_all(&fx.state, &pid, &req("Acme")).await.unwrap();
+
+    let item = out
+        .record
+        .items
+        .iter()
+        .find(|i| i.path.ends_with("shared-backup"))
+        .expect("the copy is in the record");
+    assert!(item.category.contains("file kept"), "{}", item.category);
+    assert_eq!((item.files, item.bytes), (0, 0), "the file was not removed");
+}
+
+#[tokio::test]
+async fn leftover_tmp_files_of_a_shared_copy_are_stripped_or_listed() {
+    let fx = fixture();
+    let pid = fx.project_id.clone();
+    let data = fx.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let tmp = data.join("onboarding-draft.json.tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::json!({pid.clone(): {"scan": SENT_A}, "other-project": {"scan": SENT_B}})
+            .to_string(),
+    )
+    .unwrap();
+    let bak_tmp = data.join("onboarding-draft.json.bak.tmp");
+    std::fs::write(&bak_tmp, "{ torn").unwrap();
+
+    let out = delete_all(&fx.state, &pid, &req("Acme")).await.unwrap();
+
+    let text = std::fs::read_to_string(&tmp).unwrap();
+    assert!(!text.contains(&pid) && text.contains(SENT_B), "{text}");
+    assert!(
+        out.record
+            .kept
+            .iter()
+            .any(|k| k.what.ends_with("onboarding-draft.json.bak.tmp")),
+        "{:?}",
+        out.record.kept
+    );
+}
+
+#[tokio::test]
+async fn status_of_an_inspected_repo_another_project_deleted_says_deleted_with_that_record() {
+    use super::delete::{delete_source, DeleteRequest};
+    use super::status::{source_status, RepoSourceStatus};
+    let fx = fixture();
+    let request = DeleteRequest {
+        confirm: REPO.to_string(),
+        include_uncommitted: false,
+    };
+    delete_source(&fx.state, &fx.project_id, REPO, &request)
+        .await
+        .unwrap();
+    let b = add_onboarding_project(&fx, "Onboarding Beta");
+
+    let status = source_status(&fx.state, &b, REPO).await;
+    assert!(
+        matches!(status, RepoSourceStatus::Deleted { .. }),
+        "{status:?}"
+    );
+}

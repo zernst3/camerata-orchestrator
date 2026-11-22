@@ -567,3 +567,20 @@ fn a_write_never_brings_back_a_draft_a_deletion_removed() {
         );
     }
 }
+
+#[test]
+fn drafts_wait_in_the_shared_file_while_the_project_list_is_empty_and_return_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = dir.path().join("onboarding-draft.json");
+    let text = r#"{"p1":{"scan":1}}"#;
+    std::fs::write(&shared, text).unwrap();
+
+    // projects.json was unreadable: no live ids. Nothing is migrated and nothing is moved.
+    let none = DraftStore::at(shared.clone(), &[]);
+    assert!(none.load("p1").is_none());
+    assert_eq!(std::fs::read_to_string(&shared).unwrap(), text, "still there");
+
+    // projects.json is back: the draft is restored.
+    let back = DraftStore::at(shared, &ids(&["p1"]));
+    assert_eq!(back.load("p1"), Some(serde_json::json!({"scan": 1})));
+}
