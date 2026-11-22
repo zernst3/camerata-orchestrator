@@ -261,6 +261,7 @@ pub(in crate::cockpit) fn RuleAlternativeControls(
             }
             select {
                 class: "rec-select",
+                "data-rule": "{row.rule_id}",
                 value: "{evaluated_id}",
                 onchange: move |e: Event<FormData>| on_pick.call(e.value()),
                 for (id , label) in row.options.iter() {

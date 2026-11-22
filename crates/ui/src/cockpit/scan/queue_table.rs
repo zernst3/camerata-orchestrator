@@ -1158,6 +1158,7 @@ pub(in crate::cockpit) fn RuleHubStrip(
                                             li { key: "{pl.path}:{pl.line}",
                                                 button {
                                                     class: "rule-hub-link rule-hub-place",
+                                                    "data-place": "{pl.path}:{pl.line}",
                                                     onclick: move |_| {
                                                         if let Some(cb) = on_open_place {
                                                             cb.call(open.clone());
@@ -1186,6 +1187,7 @@ pub(in crate::cockpit) fn RuleHubStrip(
                                     rsx! {
                                         button {
                                             class: "btn-edit-sm rule-hub-accept",
+                                            "data-control": CTRL_ACCEPT,
                                             onclick: move |_| {
                                                 if let Some(cb) = on_ruling {
                                                     cb.call(RulingAction::Accept(id.clone()));
@@ -1200,6 +1202,7 @@ pub(in crate::cockpit) fn RuleHubStrip(
                             if !m.others.is_empty() {
                                 select {
                                     class: "rule-hub-other-option",
+                                    "data-control": CTRL_OTHER_OPTION,
                                     onchange: move |e| {
                                         let v = e.value();
                                         if !v.is_empty() {
@@ -1217,6 +1220,7 @@ pub(in crate::cockpit) fn RuleHubStrip(
                             }
                             button {
                                 class: "btn-ghost rule-hub-leave",
+                                "data-control": CTRL_LEAVE,
                                 onclick: move |_| {
                                     if let Some(cb) = on_ruling {
                                         cb.call(RulingAction::Leave);
@@ -1228,6 +1232,7 @@ pub(in crate::cockpit) fn RuleHubStrip(
                             if let Some(id) = m.withdraw.clone() {
                                 button {
                                     class: "btn-ghost rule-hub-withdraw",
+                                    "data-control": CTRL_WITHDRAW,
                                     onclick: move |_| {
                                         if let Some(cb) = on_ruling {
                                             cb.call(RulingAction::Withdraw(id.clone()));
@@ -1287,6 +1292,14 @@ pub(in crate::cockpit) struct PlaceOpen {
     pub path: String,
     pub line: usize,
 }
+
+/// What each ruling control of the hub is called in its `data-control` attribute. The tests find
+/// the controls by these, and a value that is not a literal reaches the DOM as an attribute they
+/// can read.
+pub(in crate::cockpit) const CTRL_ACCEPT: &str = "accept";
+pub(in crate::cockpit) const CTRL_OTHER_OPTION: &str = "other-option";
+pub(in crate::cockpit) const CTRL_LEAVE: &str = "leave";
+pub(in crate::cockpit) const CTRL_WITHDRAW: &str = "withdraw";
 
 const ACCEPT_EFFECT_TEXT: &str = camerata_ui_core::convention_view::ACCEPT_EFFECT;
 

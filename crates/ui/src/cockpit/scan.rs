@@ -165,6 +165,8 @@ mod render_tests;
 mod pane_render_tests;
 
 #[cfg(test)]
+mod convention_click_tests;
+#[cfg(test)]
 mod rule_hub_tests;
 
 // ─────────────────────────────────────────────────────────────────────────────
