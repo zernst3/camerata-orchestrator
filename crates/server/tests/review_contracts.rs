@@ -1492,7 +1492,7 @@ async fn call_bytes(
 }
 
 /// Review F3 (wave 7, round 2): after the rate and floor change, the screen's own inspection
-/// fetch (`/reviewed-report`) and the product export's `findings.json` name the same escalated
+/// fetch (`/reviewed-report`) and the product export's `json/inspection.json` name the same escalated
 /// rows. Both read the one re-marked line, so a changed budget cannot show on the screen and
 /// ship another set.
 #[tokio::test]
@@ -1567,7 +1567,7 @@ async fn after_a_budget_post_the_reviewed_report_and_the_product_export_agree_on
         "one row is above the line: {on_screen:?}"
     );
 
-    // The export: the same rows in findings.json.
+    // The export: the same rows in json/inspection.json.
     let (status, bytes) = call_bytes(&f, &format!("{}/product-export", base(&f)), json!({})).await;
     assert_eq!(
         status,
@@ -1576,7 +1576,7 @@ async fn after_a_budget_post_the_reviewed_report_and_the_product_export_agree_on
         String::from_utf8_lossy(&bytes)
     );
     let entries = camerata_server::release_gate::read_zip_entries(&bytes).unwrap();
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     let mut shipped: Vec<String> = findings["findings"]
         .as_array()
         .unwrap()
@@ -1800,7 +1800,7 @@ async fn every_editable_field_round_trips_from_the_details_request_into_every_ex
     let (status, bytes) = call_bytes(&f, &format!("{}/product-export", base(&f)), json!({})).await;
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
     let entries = camerata_server::release_gate::read_zip_entries(&bytes).unwrap();
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     let site = camerata_server::report_export::site_id(&f.keys.plain);
     let exported = findings["findings"]
         .as_array()
@@ -1849,7 +1849,7 @@ async fn every_editable_field_round_trips_from_the_details_request_into_every_ex
         "the kind edit ({kind_id}) is not in the export: {deviated}"
     );
     assert_eq!(exported["severity"], "low");
-    let text = String::from_utf8_lossy(&entries["findings.json"]).into_owned();
+    let text = String::from_utf8_lossy(&entries["json/inspection.json"]).into_owned();
     assert!(
         text.contains("A headline the reviewer wrote"),
         "the headline is exported"

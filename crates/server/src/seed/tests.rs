@@ -721,7 +721,7 @@ fn gate_refusals(reviewed: &ReviewedReport) -> Option<Vec<Held>> {
                 for p in outcome
                     .problems
                     .iter()
-                    .filter(|p| p.file == "findings.json")
+                    .filter(|p| p.file == "json/inspection.json")
                 {
                     let Some(mut reason) = reason_of(outcome.check) else {
                         continue;

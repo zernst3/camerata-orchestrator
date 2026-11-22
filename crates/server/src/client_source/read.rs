@@ -209,12 +209,60 @@ fn owning_project(state: &AppState, project_hint: Option<&str>, repo: &str) -> O
     if let Some(id) = project_hint {
         return state.projects.get(id).filter(|p| owns(p)).map(|p| p.id);
     }
+    // The project that holds the deletion record answers first: its record is what says the
+    // source was deleted, so a project that merely inspected the repo must not shadow it.
+    let owners: Vec<crate::project::Project> = state
+        .projects
+        .list()
+        .into_iter()
+        .filter(|p| owns(p))
+        .collect();
+    owners
+        .iter()
+        .find(|p| deleted_record(state, &p.id, repo).is_some())
+        .or_else(|| {
+            state
+                .projects
+                .active()
+                .and_then(|a| owners.iter().find(|p| p.id == a.id))
+        })
+        .or_else(|| owners.first())
+        .map(|p| p.id.clone())
+}
+
+/// Every repo `project` owns: its own `repos` plus every repo its saved inspections audited
+/// (a plain `owner/name` only), without duplicates (case-insensitive). The ONE answer deletion
+/// uses for "this project's repos", matching [`project_owns_repo`].
+pub(crate) fn owned_repos(state: &AppState, project: &crate::project::Project) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in &project.repos {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(r)) {
+            out.push(r.clone());
+        }
+    }
+    for r in state.inspections.audited_repos(&project.id) {
+        if is_owner_name(&r) && !out.iter().any(|o| o.eq_ignore_ascii_case(&r)) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// The OTHER projects that use `repo`: it is in their `repos` or one of their saved inspections
+/// audited it ([`project_owns_repo`]). A checkout any of them uses is not this project's to
+/// remove.
+pub(crate) fn other_projects_using(
+    state: &AppState,
+    project_id: &str,
+    repo: &str,
+) -> Vec<crate::project::Project> {
     state
         .projects
-        .active()
-        .filter(|p| owns(p))
-        .or_else(|| state.projects.list().into_iter().find(|p| owns(p)))
-        .map(|p| p.id)
+        .list()
+        .into_iter()
+        .filter(|p| p.id != project_id)
+        .filter(|p| project_owns_repo(state, p, repo))
+        .collect()
 }
 
 /// Whether `repo` is exactly `owner/name` made of the characters a GitHub login and repository
@@ -273,15 +321,24 @@ pub async fn source_for_read(
         Some(id) => id,
         None => {
             return Ok(SourceRead::Unresolved {
-                reason: format!(
-                    "{repo} is not linked to this project, so its code cannot be shown."
-                ),
+                reason: if project_hint.is_some() {
+                    format!("{repo} is not linked to this project, so its code cannot be shown.")
+                } else {
+                    format!("{repo} is not linked to any project, so its code cannot be shown.")
+                },
             })
         }
     };
 
     // Deleted wins over everything: the directory is gone by construction.
-    if let Some(record) = deleted_record(state, &project_id, repo) {
+    // A project that only inspected the repo has no record of its own: another project that owns
+    // the repo may have deleted it, and the checkout is gone for both.
+    let record = deleted_record(state, &project_id, repo).or_else(|| {
+        other_projects_using(state, &project_id, repo)
+            .iter()
+            .find_map(|p| deleted_record(state, &p.id, repo))
+    });
+    if let Some(record) = record {
         return Ok(SourceRead::Deleted {
             deleted_at: record.completed_at,
             record_id: record.id,

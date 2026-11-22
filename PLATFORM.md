@@ -37,7 +37,7 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
  REAL: runs today, reproducible from this repository
     ▸ CODEBASE INSPECTION: a deterministic scan plus an AI pass, calibrated and
       de-duplicated, grouped and ranked by a group reviewer, reviewed by a person,
-      exported as a PDF summary, a workbook, findings.json, decisions.json, CSV and JSON
+      exported as a PDF summary, a workbook, json/inspection.json, json/decisions.json, CSV and JSON
       datasets and import-ready tickets (docs/CLIENT_PACKAGE.md lists every file). Runs from
       the app or headless with `camerata inspect`. The most hardened part.
     ▸ GOVERNANCE GATE: deny-before-execute blocks a real `claude -p` agent's
@@ -109,7 +109,7 @@ A row is not a yes/no. Every exported row carries an explicit `kind`, and the fi
 | `no_convention` | No convention has been adopted; the codebase is inconsistent with no clear majority. | `info`, exactly one row per rule, never N. |
 | `not_assessed` | The rule was armed but could not be evaluated (tool failed, no files matched, the model declined). An honesty row, structurally distinguishable from "assessed and clean". | `info`. |
 
-A row whose producer never assigned a kind exports as the explicit tag `unspecified`. It is deliberately **never** rendered as `defect`: an unmapped emission path has to be visible as a gap rather than silently counted as an accusation. The taxonomy is defined once, in `crates/api-types/src/audit.rs`, and the same discriminator reaches the PDF, the workbook and `findings.json`. What each file holds is in [`docs/CLIENT_PACKAGE.md`](docs/CLIENT_PACKAGE.md). Mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6a.
+A row whose producer never assigned a kind exports as the explicit tag `unspecified`. It is deliberately **never** rendered as `defect`: an unmapped emission path has to be visible as a gap rather than silently counted as an accusation. The taxonomy is defined once, in `crates/api-types/src/audit.rs`, and the same discriminator reaches the PDF, the workbook and `json/inspection.json`. What each file holds is in [`docs/CLIENT_PACKAGE.md`](docs/CLIENT_PACKAGE.md). Mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6a.
 
 ### Run an inspection headless
 
@@ -120,8 +120,8 @@ cargo run -p camerata -- count <PATH>       # no model, no network: files and li
                                             # the number the inspection is priced on
 cargo run -p camerata -- inspect --repo <PATH> --client "<CLIENT NAME>" --export <OUT.zip>
                                             # prints an estimate first; the ZIP holds the PDF
-                                            # summary, the workbook, findings.json,
-                                            # decisions.json, csv/ and json/ datasets
+                                            # summary, the workbook, json/inspection.json,
+                                            # json/decisions.json, csv/ and json/ datasets
                                             # (csv/tickets.csv for Jira, Linear or GitHub),
                                             # manifest.json and README.txt.
                                             # Also writes a scan ledger to the operator's state folder and prints its path.
@@ -139,7 +139,7 @@ cargo run -p camerata -- integrity-gate --ledger <LEDGER PATH THE RUN PRINTED>
 
 Without `--internal`, every inspection is a client engagement: it runs only on the Anthropic API with Anthropic models and never executes the repository's own code. `--internal` is for the maintainer's own development.
 
-The workbook holds every row, organised by the question a reader asks: **Start here** and **Glossary**, then **Fix plan** (one row per fix, in the order to do them), **All problems** (every problem once, at its place), **Needs a decision**, **Your conventions**, **Departures** (one row per rule, at the grain the departure numbers are actually computed), **Dependencies**, then **Rules checked**, **Patterns across services** (only for a project of several repos), **Ruled out** and **Not checked**; last come the reviewers' sheets (**All source rows**, **Reviewer decisions** and **How problems were grouped**). The PDF is a summary of 20 pages at most and deliberately does not carry every row; `findings.json` carries every problem that was not ruled out, every kind included. Each problem carries a rough range of hours to fix, labeled as a rough range. Exit code 2 on the gate is the point of the design: a wrapper that read "the gate could not run" as "the gate passed" would be the same class of bug as a scan that reads "the tool did not run" as "the rule is clean".
+The workbook holds every row, organised by the question a reader asks: **Start here** and **Glossary**, then **Fix plan** (one row per fix, in the order to do them), **All problems** (every problem once, at its place), **Needs a decision**, **Your conventions**, **Departures** (one row per rule, at the grain the departure numbers are actually computed), **Dependencies**, then **Rules checked**, **Patterns across services** (only for a project of several repos), **Ruled out** and **Not checked**; last come the reviewers' sheets (**All source rows**, **Reviewer decisions** and **How problems were grouped**). The PDF is a summary of 20 pages at most and deliberately does not carry every row; `json/inspection.json` carries every problem that was not ruled out, every kind included. Each problem carries a rough range of hours to fix, labeled as a rough range. Exit code 2 on the gate is the point of the design: a wrapper that read "the gate could not run" as "the gate passed" would be the same class of bug as a scan that reads "the tool did not run" as "the rule is clean".
 
 ## What has changed recently
 
@@ -216,7 +216,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 **Verified at runtime (reproducible from this repository):**
 
 - A **30-member workspace** (29 crates and one maintainer tool, `tools/corpus-verifier`) with **12,000+ automated tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
-- **The Codebase Inspection, end to end on fixture repositories:** per-repo detection and rule proposal, the two-tier audit with calibration and dedup, multi-repo projects, saved runs and resume (a fixed parser reuses saved replies instead of re-paying them), the group reviewer and the person's review with its decision record, plus the client package (PDF, workbook, `findings.json`, `decisions.json`, CSV and JSON datasets, import-ready tickets) behind a release gate that refuses a deliverable carrying a secret, a held row without a decision or datasets that disagree (and an export that is refused while any part is unfinished).
+- **The Codebase Inspection, end to end on fixture repositories:** per-repo detection and rule proposal, the two-tier audit with calibration and dedup, multi-repo projects, saved runs and resume (a fixed parser reuses saved replies instead of re-paying them), the group reviewer and the person's review with its decision record, plus the client package (PDF, workbook, `json/inspection.json`, `json/decisions.json`, CSV and JSON datasets, import-ready tickets) behind a release gate that refuses a deliverable carrying a secret, a held row without a decision or datasets that disagree (and an export that is refused while any part is unfinished).
 - **Brownfield onboarding, end to end** on fixture repos: the triage tables, Process emitting baseline waivers and GitHub issues and Apply writing the governance branch.
 - **The gate denies a real agent (standalone)** via `camerata live-demo`, with the gateway's verdict and jail tests covered by `cargo test`.
 - **The governed development console:** issue pull + Epic/sub-issue tree, UoW creation and the full lifecycle UI, the project-aware chat assistant and the deterministic gate self-check, wired and unit-tested in-app.

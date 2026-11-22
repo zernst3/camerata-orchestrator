@@ -7,7 +7,7 @@
 //! > — the independent Fable review, the audit findings tracker
 //!
 //! Every defect on that tracker — architecture rules silenced, rows injected into the PDF
-//! only, `findings.json` contradicting itself, a merge losing rows, a whole tool tier never
+//! only, `json/inspection.json` contradicting itself, a merge losing rows, a whole tool tier never
 //! running — was found by paying for an external graded run. The in-repo suite was green
 //! throughout. This file is the suite that would not have been.
 //!
@@ -34,9 +34,9 @@
 //!
 //! # The three invariants
 //!
-//! **INV-1 ARTIFACT PARITY.** The PDF's data, the Excel workbook and `findings.json` describe
+//! **INV-1 ARTIFACT PARITY.** The PDF's data, the Excel workbook and `json/inspection.json` describe
 //! the SAME row set. The real bug (B1/B2/B3) was rows injected downstream of the merge into
-//! one exporter only, so `findings.json` contradicted itself inside a single file:
+//! one exporter only, so `json/inspection.json` contradicted itself inside a single file:
 //! `summary.candidates_reviewed` described N+K while the `findings` array held N.
 //!
 //! **INV-2 ROW CONSERVATION.** Rows in equals rows out plus rows accounted for, across every
@@ -266,7 +266,7 @@ fn rows_from_report_json(json: &serde_json::Value) -> BTreeSet<RowId> {
 fn rows_from_findings_json(json: &serde_json::Value) -> BTreeSet<RowId> {
     json["findings"]
         .as_array()
-        .expect("findings.json must carry a findings array")
+        .expect("json/inspection.json must carry a findings array")
         .iter()
         .filter_map(row_id)
         .collect()
@@ -401,7 +401,7 @@ async fn req_i1_the_synthetic_fixture_is_load_bearing_and_not_vacuous() {
     );
     assert!(
         !rows_from_findings_json(&art.findings_export_value).is_empty(),
-        "findings.json carried no rows"
+        "json/inspection.json carried no rows"
     );
 
     // The multi-site shape must genuinely reach the merge, or the conservation invariant is
@@ -418,17 +418,17 @@ async fn req_i1_the_synthetic_fixture_is_load_bearing_and_not_vacuous() {
 
 // ═══ INV-1 — ARTIFACT PARITY ════════════════════════════════════════════════════════════════
 
-/// req_i1 / INV-1: the PDF's data, `findings.json` and the workbook describe the SAME row set.
+/// req_i1 / INV-1: the PDF's data, `json/inspection.json` and the workbook describe the SAME row set.
 ///
 /// THE DEFECT THIS CATCHES (B1/B2/B3): rows were injected downstream of the merge horizon into
-/// ONE exporter only, so `findings.json` contradicted itself inside a single file —
+/// ONE exporter only, so `json/inspection.json` contradicted itself inside a single file —
 /// `summary.candidates_reviewed` described N+K while the `findings` array held N. A prior
 /// workstream added the `SealedReport` newtype to make post-seal injection a compile error;
 /// this is the RUNTIME proof that the seal holds end to end, over a real scan rather than a
 /// hand-built struct.
 ///
 /// Stated as set EQUALITY in both directions, not as containment: a row in the PDF and not in
-/// findings.json is the PDF-only-ghost defect, and a row in findings.json and not in the PDF
+/// json/inspection.json is the PDF-only-ghost defect, and a row in json/inspection.json and not in the PDF
 /// is its mirror. Containment would catch one and miss the other.
 #[tokio::test]
 async fn req_i1_pdf_xlsx_and_findings_json_describe_the_same_row_set() {
@@ -446,12 +446,12 @@ async fn req_i1_pdf_xlsx_and_findings_json_describe_the_same_row_set() {
     let json_only: Vec<&RowId> = json_rows.difference(&pdf_rows).collect();
     assert!(
         pdf_only.is_empty(),
-        "PDF-ONLY GHOST ROWS — rows reached the PDF's data and not findings.json. This is \
+        "PDF-ONLY GHOST ROWS — rows reached the PDF's data and not json/inspection.json. This is \
          exactly the B2 injection defect: {pdf_only:#?}"
     );
     assert!(
         json_only.is_empty(),
-        "rows reached findings.json and not the PDF's data (the mirror of the B2 defect): \
+        "rows reached json/inspection.json and not the PDF's data (the mirror of the B2 defect): \
          {json_only:#?}"
     );
 
@@ -463,11 +463,11 @@ async fn req_i1_pdf_xlsx_and_findings_json_describe_the_same_row_set() {
     for (rule_id, _repo, path, _line) in &json_rows {
         assert!(
             strings.iter().any(|s| s == rule_id || s.contains(rule_id)),
-            "the workbook does not mention rule `{rule_id}`, which findings.json reports"
+            "the workbook does not mention rule `{rule_id}`, which json/inspection.json reports"
         );
         assert!(
             strings.iter().any(|s| s == path || s.contains(path)),
-            "the workbook does not mention path `{path}`, which findings.json reports"
+            "the workbook does not mention path `{path}`, which json/inspection.json reports"
         );
     }
     // Per-ROW presence, keyed on each row's `headline`. A headline is row-specific prose,
@@ -489,7 +489,7 @@ async fn req_i1_pdf_xlsx_and_findings_json_describe_the_same_row_set() {
     for h in &headlines {
         assert!(
             strings.iter().any(|s| s == h),
-            "the workbook does not contain the row headline {h:?} that findings.json reports \
+            "the workbook does not contain the row headline {h:?} that json/inspection.json reports \
              — the workbook is missing a row the other two artifacts carry"
         );
     }
@@ -500,7 +500,7 @@ async fn req_i1_pdf_xlsx_and_findings_json_describe_the_same_row_set() {
     );
 }
 
-/// req_i1 / INV-1 second half: the SELF-CONSISTENCY of findings.json, which is where the
+/// req_i1 / INV-1 second half: the SELF-CONSISTENCY of json/inspection.json, which is where the
 /// contradiction actually showed up. `summary` is cloned from the PDF's `AuditReportJson`
 /// while `findings` is derived independently, so the two can disagree inside a single file —
 /// and did, by exactly K rows on all four graded repos.
@@ -518,11 +518,11 @@ async fn req_i1_findings_json_summary_cannot_contradict_its_own_findings_array()
     let summary = &art.findings_export_value["summary"];
     let embedded = summary["candidates_reviewed"]
         .as_u64()
-        .expect("findings.json's embedded summary must carry candidates_reviewed")
+        .expect("json/inspection.json's embedded summary must carry candidates_reviewed")
         as usize;
     assert_eq!(
         embedded, candidates,
-        "findings.json's embedded summary disagrees with the report JSON's summary"
+        "json/inspection.json's embedded summary disagrees with the report JSON's summary"
     );
 
     // The declared reconciling identity, asserted rather than assumed:
@@ -588,7 +588,7 @@ async fn req_i1_every_pipeline_stage_conserves_rows_and_the_export_reconciles() 
     let json_rows = rows_from_findings_json(&art.findings_export_value);
     assert!(
         json_rows.len() <= art.sealed_row_count,
-        "findings.json reports {} rows from a sealed set of {} — rows were MANUFACTURED after \
+        "json/inspection.json reports {} rows from a sealed set of {} — rows were MANUFACTURED after \
          the seal",
         json_rows.len(),
         art.sealed_row_count,
@@ -755,7 +755,7 @@ async fn req_i1_the_i2_gate_and_this_harness_agree_on_the_same_scan() {
 /// W6 wrote this `#[ignore]`d and deliberately representation-agnostic, documenting the live
 /// C5 defect for the workstream that owned merge identity. W7 fixed it by exporting
 /// `Finding::also_locations` (verbatim) plus a `site_count` field on every row of
-/// `findings.json` / the workbook's "Sites" + "Also found at" columns / the report JSON's
+/// `json/inspection.json` / the workbook's "Sites" + "Also found at" columns / the report JSON's
 /// curated sites — so every absorbed site now reaches the artifacts and the assertion below
 /// passes through its `also_locations` arm.
 ///

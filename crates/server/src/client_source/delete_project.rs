@@ -209,6 +209,9 @@ enum Action {
     Path(PathBuf),
     ScanCache,
     Draft,
+    /// A draft file from before each project had its own: rewritten without this project's
+    /// entries (removed when nothing else is left in it).
+    StripShared(PathBuf),
     /// This project's development console rows (units of work, stories, questions, routines,
     /// checkpoints, escalations), by the ids found when the plan was built.
     Dev(Dev, Vec<String>),
@@ -226,7 +229,7 @@ impl Action {
     fn phase(&self) -> u8 {
         match self {
             Action::Path(_) => 0,
-            Action::ScanCache | Action::Draft | Action::Dev(..) => 1,
+            Action::ScanCache | Action::Draft | Action::StripShared(_) | Action::Dev(..) => 1,
             Action::Memory => 2,
             Action::StoreFile(_) => 3,
             Action::Inspection(_) | Action::ProjectRecord => 4,
@@ -267,6 +270,9 @@ fn path_step(category: &str, path: PathBuf) -> Step {
 struct Built {
     project: Project,
     targets: Vec<(GuardedTarget, super::purge::PurgePlan)>,
+    /// Every repo the project owns (its repos and the ones its inspections audited), read before
+    /// anything is removed.
+    owned: Vec<String>,
     _claims: Vec<OpGuard>,
     extras: Vec<Step>,
     /// Repos whose checkout the guard refused: reported as failed items.
@@ -368,10 +374,11 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         .into_iter()
         .filter(|p| p.id != project.id)
         .collect();
+    // A checkout another project uses, by its repos OR its inspections (as reading counts it).
     let shared_with = |repo: &str| -> Option<String> {
         others
             .iter()
-            .find(|p| p.repos.iter().any(|r| r.eq_ignore_ascii_case(repo)))
+            .find(|p| super::read::project_owns_repo(state, p, repo))
             .map(|p| p.name.clone())
     };
 
@@ -383,7 +390,12 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     let mut blocked_repos: HashSet<String> = HashSet::new();
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
-    for repo in &project.repos {
+    let owned = super::read::owned_repos(state, &project);
+    let other_owned: Vec<String> = others
+        .iter()
+        .flat_map(|p| super::read::owned_repos(state, p))
+        .collect();
+    for repo in &owned {
         if let Some(refusal) = run_in_flight_refusal(state, &project.id, repo) {
             return Err(refusal);
         }
@@ -463,15 +475,13 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     // Folders of this project's repos, and of every other project's.
     // (A repo whose folder the guard refused is not trusted to be this project's: its folder
     // counts for nothing below.)
-    let own_dirs: Vec<PathBuf> = project
-        .repos
+    let own_dirs: Vec<PathBuf> = owned
         .iter()
         .filter(|r| !blocked_repos.contains(&r.to_ascii_lowercase()))
         .filter_map(|r| resolve_dir(state, r))
         .collect();
-    let other_dirs: Vec<PathBuf> = others
+    let other_dirs: Vec<PathBuf> = other_owned
         .iter()
-        .flat_map(|p| p.repos.iter())
         .filter_map(|r| resolve_dir(state, r))
         .collect();
     let shared_repo = |repo: &str| shared_with(repo).is_some();
@@ -487,8 +497,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         // Per-checkout bookkeeping that is not already in a repo plan.
         let canon = |p: &Path| crate::onboard::finding_context::canonicalize_existing_prefix(p);
         let other_canon: Vec<PathBuf> = other_dirs.iter().map(|d| canon(d)).collect();
-        for repo in project
-            .repos
+        for repo in owned
             .iter()
             .filter(|r| !shared_repo(r) && !blocked_repos.contains(&r.to_ascii_lowercase()))
         {
@@ -609,43 +618,86 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
         );
     }
     let draft_bytes = state.draft.stored_bytes(&project.id);
-    if draft_bytes > 0 || state.draft.holds_project(&project.id) || in_file("onboarding-draft.json")
-    {
+    let draft_files = state.draft.files_of(&project.id);
+    if draft_bytes > 0 || state.draft.holds_project(&project.id) || !draft_files.is_empty() {
+        let source = state.draft.project_file(&project.id).map_or_else(
+            || format!("onboarding-draft.json#{}", project.id),
+            |f| f.display().to_string(),
+        );
         add(
             &mut extras,
             step(
                 "onboarding draft",
-                format!("onboarding-draft.json#{}", project.id),
-                0,
+                source,
+                draft_files.len() as u64,
                 draft_bytes,
                 Action::Draft,
             ),
         );
     }
 
-    // Draft files set aside because they could not be read: they name no project, so Camerata
-    // cannot tell whose they are. They are never removed here; each is listed as a leftover that
-    // may hold this project's data.
+    // Each project's draft has its own file, removed above with its `.bak` and set-aside copies.
+    // The files from before that split (the shared file and its `.bak`, the one-time backup a
+    // migration keeps) still hold every project's drafts: the deleted project's entries are
+    // rewritten out of them, so nothing of the project is left. A copy that cannot be parsed
+    // cannot be rewritten; it is listed as a leftover that may hold this project's data, as is
+    // any shared file set aside because it could not be read.
+    let live: HashSet<String> = state.projects.list().into_iter().map(|p| p.id).collect();
     if let Ok(read) = std::fs::read_dir(&data) {
-        let mut aside: Vec<PathBuf> = read
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name().is_some_and(|n| {
-                    n.to_string_lossy()
-                        .starts_with("onboarding-draft.json.unreadable-")
-                })
-            })
-            .collect();
-        aside.sort();
-        for p in aside {
-            kept.push(KeptItem {
-                what: p.display().to_string(),
-                why: "an onboarding draft file Camerata could not read and set aside; it names \
-                      no project, so it may include this project's data. It is not deleted: \
-                      check it by hand"
-                    .to_string(),
-            });
+        let mut names: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
+        names.sort();
+        for p in names {
+            let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if name.starts_with("onboarding-draft-") {
+                // A per-project file of a project that no longer exists: it cannot be told to
+                // be anyone's now, so it is left and listed.
+                let owner = state.draft.owner_of_file(&p);
+                if owner.as_ref().is_some_and(|o| !live.contains(o)) {
+                    kept.push(KeptItem {
+                        what: p.display().to_string(),
+                        why: "an onboarding draft file of a project that no longer exists; it \
+                              is not deleted: check it by hand"
+                            .to_string(),
+                    });
+                }
+                continue;
+            }
+            // Every other `onboarding-draft.json*` name is shared-era too (the backup, a temp file
+            // a crash left): it is rewritten, or listed when it cannot be parsed.
+            let set_aside = name.starts_with("onboarding-draft.json.unreadable-");
+            let shared_era = name.starts_with("onboarding-draft.json") && !set_aside;
+            if set_aside {
+                kept.push(KeptItem {
+                    what: p.display().to_string(),
+                    why: "an onboarding draft file Camerata could not read and set aside; it \
+                          names no project, so it may include this project's data. It is not \
+                          deleted: check it by hand"
+                        .to_string(),
+                });
+            } else if shared_era {
+                match crate::draft::shared_file_holds(&p, &project.id) {
+                    Some(true) => add(
+                        &mut extras,
+                        step(
+                            "shared onboarding draft copy",
+                            p.display().to_string(),
+                            1,
+                            std::fs::metadata(&p).map_or(0, |m| m.len()),
+                            Action::StripShared(p.clone()),
+                        ),
+                    ),
+                    Some(false) => {}
+                    None => kept.push(KeptItem {
+                        what: p.display().to_string(),
+                        why: "a shared onboarding draft file Camerata could not parse, so it \
+                              may hold this project's draft. It is not deleted: check it by \
+                              hand"
+                            .to_string(),
+                    }),
+                }
+            }
         }
     }
 
@@ -726,6 +778,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     );
     Ok(Built {
         project,
+        owned,
         targets,
         _claims: claims,
         extras,
@@ -784,11 +837,14 @@ async fn dev_rows(
         Foreign,
     }
     let lower = |r: &String| r.to_ascii_lowercase();
-    let own: HashSet<String> = project.repos.iter().map(lower).collect();
+    let own: HashSet<String> = super::read::owned_repos(state, project)
+        .iter()
+        .map(lower)
+        .collect();
     let other: HashSet<String> = others
         .iter()
-        .flat_map(|p| p.repos.iter())
-        .map(lower)
+        .flat_map(|p| super::read::owned_repos(state, p))
+        .map(|r| r.to_ascii_lowercase())
         .collect();
     let classify = |repos: &[String]| -> Who {
         let repos: Vec<String> = repos.iter().map(lower).collect();
@@ -950,13 +1006,13 @@ fn failed(file: &Path, e: &std::io::Error) -> PurgeOutcome {
 
 /// Forget the in-memory copies of the decision, edit and Engine Check stores, the scan
 /// transcripts, finished jobs and last scans of the project. (Inspections wait for the end.)
-fn forget_console_memory(state: &AppState, project: &Project) {
+fn forget_console_memory(state: &AppState, project: &Project, repos: &[String]) {
     state.decisions.forget_project(&project.id);
     state.edits.forget_project(&project.id);
     state.engine_check.forget_project(&project.id);
     state.transcripts.clear(crate::SCAN_AUDIT_KEY);
     state.jobs.remove_finished_for_project(&project.id);
-    state.forget_project_scans(&project.id, &project.repos);
+    state.forget_project_scans(&project.id, repos);
 }
 
 /// Remove one set of development console rows (the write is checked: on a failure nothing is
@@ -1061,7 +1117,7 @@ pub(crate) fn story_deleting_refusal(state: &AppState, story_id: &str) -> Option
             unit.project_id.as_deref() == Some(p.id.as_str())
                 || repo
                     .as_deref()
-                    .is_some_and(|r| p.repos.iter().any(|x| x.eq_ignore_ascii_case(r)))
+                    .is_some_and(|r| super::read::project_owns_repo(state, p, r))
         })
         .find_map(|p| state.source_ops.deleting_refusal(&p.id))
 }
@@ -1104,6 +1160,7 @@ pub async fn delete_all(
     let built = build(state, project_id, false).await?;
     let Built {
         project,
+        owned,
         targets,
         _claims,
         mut extras,
@@ -1143,7 +1200,7 @@ pub async fn delete_all(
                     "decision store" | "edit store" | "engine check store"
                 ) && !memory_forgotten
                 {
-                    forget_console_memory(state, &project);
+                    forget_console_memory(state, &project, &owned);
                     memory_forgotten = true;
                 }
                 item.outcome = run_blocking(move || remove_path(&path)).await;
@@ -1157,7 +1214,28 @@ pub async fn delete_all(
             Action::Draft => {
                 item.outcome = match state.draft.clear_checked(&project.id) {
                     Ok(()) => PurgeOutcome::Removed,
-                    Err(e) => failed(&data.join("onboarding-draft.json"), &e),
+                    Err(e) => failed(
+                        &state
+                            .draft
+                            .project_file(&project.id)
+                            .unwrap_or_else(|| data.join("onboarding-draft.json")),
+                        &e,
+                    ),
+                };
+            }
+            Action::StripShared(path) => {
+                item.outcome = match crate::draft::strip_project_from_file(&path, &project.id) {
+                    Ok(true) => PurgeOutcome::Removed,
+                    Ok(false) => {
+                        // The file stays, without this project's entry: no file or byte count.
+                        item.category =
+                            "shared onboarding draft copy (project's entry removed, file kept)"
+                                .to_string();
+                        item.files = 0;
+                        item.bytes = 0;
+                        PurgeOutcome::Removed
+                    }
+                    Err(e) => failed(&path, &e),
                 };
             }
             Action::Dev(dev, ids) => {
@@ -1175,7 +1253,7 @@ pub async fn delete_all(
             }
             Action::Memory => {
                 if !memory_forgotten {
-                    forget_console_memory(state, &project);
+                    forget_console_memory(state, &project, &owned);
                     memory_forgotten = true;
                 }
                 item.outcome = PurgeOutcome::Removed;
@@ -1231,7 +1309,7 @@ pub async fn delete_all(
         project_id: project.id.clone(),
         project_name: project.name.clone(),
         client_name: project.client_name.clone(),
-        repos: project.repos.clone(),
+        repos: owned.clone(),
         requested_at,
         completed_at,
         camerata_build: build_id(),

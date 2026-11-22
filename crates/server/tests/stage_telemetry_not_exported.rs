@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 //! Per-stage cost telemetry is operator-only. The export format (manifest, README, workbook,
-//! findings.json) is a protected area, so recording telemetry on the scan ledger must not change
+//! json/inspection.json) is a protected area, so recording telemetry on the scan ledger must not change
 //! one byte of it. This pins that: the same scan, with and without telemetry on its ledger,
 //! produces identical export content, and no cost term appears in it.
 
@@ -119,7 +119,10 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
     let (report_without, findings_without) = exported(report(ScanLedger::new()));
 
     assert_eq!(report_with, report_without, "report.json changed");
-    assert_eq!(findings_with, findings_without, "findings.json changed");
+    assert_eq!(
+        findings_with, findings_without,
+        "json/inspection.json changed"
+    );
     for term in [
         "stage_telemetry",
         "ai_key",
@@ -179,7 +182,10 @@ fn recording_the_efficiency_set_and_a_cost_cap_changes_nothing_in_the_client_exp
     let (report_with, findings_with) = exported(report(capped));
     let (report_without, findings_without) = exported(report(ScanLedger::new()));
     assert_eq!(report_with, report_without, "report.json changed");
-    assert_eq!(findings_with, findings_without, "findings.json changed");
+    assert_eq!(
+        findings_with, findings_without,
+        "json/inspection.json changed"
+    );
     for term in [
         "7.77",
         "8.88",

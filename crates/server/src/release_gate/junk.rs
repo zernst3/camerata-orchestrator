@@ -15,6 +15,7 @@ use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::junk_finding::JUNK_CONTENT_CAPTURE;
 use crate::onboard::Finding;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// The rows marked as junk that `decisions` has not decided: what [`junk_without_decision`]
 /// refuses, as rows (the review screen's export panel lists these same rows).
@@ -36,7 +37,7 @@ pub fn junk_without_decision(
     undecided_junk(findings, decisions)
         .map(|f| {
             Problem::new(
-                "findings.json",
+                INSPECTION_JSON,
                 format!("{} line {}", f.path, f.line),
                 format!(
                     "this finding is junk ({}) and no reviewer decision is recorded for it. Open \

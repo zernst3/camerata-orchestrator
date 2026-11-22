@@ -229,7 +229,7 @@ async fn an_unlinked_repo_is_repo_unlinked_not_file_missing() {
     assert!(json["reason"]
         .as_str()
         .unwrap()
-        .contains("not linked to this project"));
+        .contains("not linked to any project"));
 }
 
 #[tokio::test]

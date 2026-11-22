@@ -5,11 +5,12 @@
 //! defined here, once, and the Glossary sheet prints the definition; no other file spells the
 //! name for itself.
 //!
-//! Machine-facing files keep their own field names (`csv/`, `json/`, `findings.json`,
+//! Machine-facing files keep their own field names (`csv/`, `json/`, `json/inspection.json`,
 //! `tickets.csv`'s headers and the wire values such as `do_now` or `kind`). Those are for tools,
 //! not people, and renaming them would break whatever reads them. Everything a person reads is
 //! named from this module.
 
+use camerata_api_types::package_paths::{workbook_name, DS_ALL_FINDINGS, DS_FALSE_POSITIVES};
 use camerata_api_types::review::FpReason;
 
 /// Excel refuses a sheet name over this many characters.
@@ -27,7 +28,7 @@ pub const DEPARTURES: &str = "Departures";
 pub const DEPENDENCIES: &str = "Dependencies";
 pub const RULES_CHECKED: &str = "Rules checked";
 pub const PATTERNS_ACROSS_SERVICES: &str = "Patterns across services";
-pub const RULED_OUT: &str = "Ruled out";
+pub const RULED_OUT: &str = camerata_api_types::RULED_OUT_SHEET;
 pub const NOT_CHECKED: &str = "Not checked";
 /// Excel caps a sheet name at 31 characters, so "(complete record)" is said by the sheet's own
 /// first lines and by the Start here list, not by the tab.
@@ -694,7 +695,7 @@ pub const GLOSSARY_ENTRIES: &[GlossaryEntry] = &[
     e(
         TERM_ALSO_MATCHES,
         "A rule that another problem at the same place also breaks. The problem that heads the place lists it, and each such rule keeps its own severity, kind and decision.",
-        "All problems; the Rules column; the also_matches field of findings.json",
+        concat!("All problems; the Rules column; the also_matches field of ", camerata_api_types::pkg_inspection_json!()),
     ),
     e(
         "Rule id",
@@ -1597,12 +1598,8 @@ pub const INTERNAL_TERMS: &[&str] = &[POSSIBLE_FALSE_POSITIVE, POSSIBLE_DUPLICAT
 /// retired word written with capitals in the table (an id header) is matched as written.
 pub fn banned_synonym_in(text: &str) -> Option<(&'static str, &'static str)> {
     let mut cleaned = text.to_string();
-    for file in [
-        "all-findings",
-        "findings.json",
-        "findings.xlsx",
-        "false-positives",
-    ] {
+    let workbook = workbook_name("");
+    for file in [DS_ALL_FINDINGS, workbook.as_str(), DS_FALSE_POSITIVES] {
         cleaned = cleaned.replace(file, " ");
     }
     let mut lower = cleaned.to_lowercase();
@@ -1857,7 +1854,7 @@ mod tests {
             Some(("deviation", "Departure"))
         );
         assert_eq!(banned_synonym_in("a website"), None);
-        assert_eq!(banned_synonym_in("see findings.json"), None);
+        assert_eq!(banned_synonym_in("see json/inspection.json"), None);
     }
 
     /// A word an owned concept uses is not retired: "pattern" names the Patterns across services

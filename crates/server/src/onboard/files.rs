@@ -496,7 +496,7 @@ pub struct ExtractedRepo {
     /// The reference list hit [`HARD_CAP_REFERENCE_FILES`]: some reference text is missing.
     pub reference_truncated: bool,
     /// Admissible files NOT read because they exceed [`MAX_FILE_BYTES`], by path. Listed under
-    /// Coverage in the report and `findings.json`, so a skipped file is named, never silent.
+    /// Coverage in the report and `json/inspection.json`, so a skipped file is named, never silent.
     pub skipped_oversize: Vec<String>,
     /// Admissible files NOT read because the walk had already admitted [`HARD_CAP_FILES`], by
     /// path. Non-empty exactly when `truncated` is true. Listed under Coverage like

@@ -155,14 +155,14 @@ fn an_override_that_states_only_counts_of_the_package_passes() {
 #[test]
 fn the_gate_refuses_counts_in_findings_json_that_the_files_do_not_give() {
     let (mut entries, report) = consistent();
-    edit_json(&mut entries, "findings.json", |v| {
+    edit_json(&mut entries, "json/inspection.json", |v| {
         v["counts"]["problems"]["total"] = json!(2);
     });
     let problems = counts_problems(&entries, &report);
     assert!(
         problems
             .iter()
-            .any(|p| p.location == "counts.problems.total" && p.file == "findings.json"),
+            .any(|p| p.location == "counts.problems.total" && p.file == "json/inspection.json"),
         "{}",
         messages(&problems)
     );
@@ -463,10 +463,10 @@ fn ruled_out_host_carrying_another_rules_place() -> (BTreeMap<String, Vec<u8>>, 
 #[test]
 fn the_gate_recount_counts_a_place_a_ruled_out_row_carries_as_a_problem_to_decide() {
     let (entries, report) = ruled_out_host_carrying_another_rules_place();
-    // Anti-vacuity: the object counts the place, and findings.json lists it.
+    // Anti-vacuity: the object counts the place, and json/inspection.json lists it.
     assert_eq!(report.counts.problems.total, 1);
     assert_eq!(report.counts.problems.needs_decision, 1);
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     assert_eq!(findings["findings"].as_array().unwrap().len(), 0);
     assert_eq!(
         findings["open_beside_ruled_out"].as_array().unwrap().len(),
@@ -485,14 +485,14 @@ fn the_gate_recount_counts_a_place_a_ruled_out_row_carries_as_a_problem_to_decid
     assert!(at_counts(&honest).is_empty(), "{}", messages(&honest));
     // Remove the key: the recount sees no problem and the object says one.
     let mut tampered = entries.clone();
-    edit_json(&mut tampered, "findings.json", |v| {
+    edit_json(&mut tampered, "json/inspection.json", |v| {
         v.as_object_mut().unwrap().remove("open_beside_ruled_out");
     });
     let problems = counts_problems(&tampered, &report);
     assert!(
         problems
             .iter()
-            .any(|p| p.file == "findings.json" && p.location == "counts.problems.total"),
+            .any(|p| p.file == "json/inspection.json" && p.location == "counts.problems.total"),
         "{}",
         messages(&problems)
     );
@@ -503,14 +503,14 @@ fn the_gate_recount_counts_a_place_a_ruled_out_row_carries_as_a_problem_to_decid
 #[test]
 fn the_gate_refuses_a_findings_json_with_no_fixes_array() {
     let (mut entries, report) = consistent();
-    edit_json(&mut entries, "findings.json", |v| {
+    edit_json(&mut entries, "json/inspection.json", |v| {
         v.as_object_mut().unwrap().remove("fixes");
     });
     let problems = counts_problems(&entries, &report);
     assert!(
         problems
             .iter()
-            .any(|p| p.file == "findings.json" && p.message.contains("fixes array")),
+            .any(|p| p.file == "json/inspection.json" && p.message.contains("fixes array")),
         "{}",
         messages(&problems)
     );
@@ -717,14 +717,14 @@ fn the_sheet_row_count_finds_its_header_by_name_on_every_sheet() {
 #[test]
 fn the_gate_refuses_an_object_that_breaks_an_identity() {
     let (mut entries, report) = consistent();
-    edit_json(&mut entries, "findings.json", |v| {
+    edit_json(&mut entries, "json/inspection.json", |v| {
         v["counts"]["problems"]["accepted"] = json!(1);
     });
     let problems = counts_problems(&entries, &report);
     assert!(
         problems
             .iter()
-            .any(|p| p.file == "findings.json" && p.location == "identities"),
+            .any(|p| p.file == "json/inspection.json" && p.location == "identities"),
         "{}",
         messages(&problems)
     );
@@ -850,7 +850,7 @@ fn needs_a_decision_is_one_number_on_every_surface() {
     );
     // The grid's count of problems it leaves out for a decision.
     assert_eq!(report.priority_grid.held_count, n, "the grid");
-    // The sheet, the Start here count and findings.json.
+    // The sheet, the Start here count and json/inspection.json.
     let xlsx = &entries[&xlsx_name()];
     assert_eq!(
         super::counts_check::sheet_rows(xlsx, "Needs a decision"),
@@ -865,11 +865,11 @@ fn needs_a_decision_is_one_number_on_every_surface() {
         .and_then(|c| c.parse::<f64>().ok())
         .map(|x| x as usize);
     assert_eq!(said, Some(n), "Start here");
-    let findings: Value = serde_json::from_slice(&entries["findings.json"]).unwrap();
+    let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     assert_eq!(
         findings["counts"]["problems"]["needs_decision"],
         json!(n),
-        "findings.json counts"
+        "json/inspection.json counts"
     );
     // The summary's sentence states the same number.
     let summary = findings["summary"]["narrative"]
@@ -878,7 +878,7 @@ fn needs_a_decision_is_one_number_on_every_surface() {
     assert_eq!(
         integer_before(summary, " need a"),
         Some(n),
-        "findings.json summary: {summary:?}"
+        "json/inspection.json summary: {summary:?}"
     );
     // And the gate agrees with all of them.
     let problems = counts_problems(&entries, &report);
@@ -1017,7 +1017,7 @@ fn a_baseline_row_a_reviewer_decided_does_not_block_release() {
 #[test]
 fn the_gate_refuses_a_findings_json_summary_that_contradicts_the_counts() {
     let (mut entries, report) = consistent();
-    edit_json(&mut entries, "findings.json", |v| {
+    edit_json(&mut entries, "json/inspection.json", |v| {
         v["summary"]["held_for_review"] = json!(99);
         v["summary"]["curated_total"] = json!(1);
     });
@@ -1608,5 +1608,93 @@ fn the_counts_check_passes_the_reviewer_and_open_question_statuses_and_fails_an_
     assert!(
         !problems.is_empty(),
         "an unknown status must fail the check"
+    );
+}
+
+// A released client package: reviewed, not internal.
+
+fn reviewed_client_package() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    let report = scan_report();
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        crate::report_export::finding_key(&sealed.findings[0]),
+        crate::report_export::DispositionWire {
+            state: "Confirmed".to_string(),
+            ..Default::default()
+        },
+    );
+    entries_of(package_with_dispositions(report, &dispositions))
+}
+
+#[test]
+fn a_real_reviewed_client_package_passes_and_states_no_decision_count() {
+    let (entries, report) = reviewed_client_package();
+    assert_eq!(
+        report.review_state,
+        crate::report_export::ReviewState::Reviewed
+    );
+    assert!(!report.internal, "anti-vacuity: a client package");
+    assert_eq!(report.counts.problems.total, 1, "anti-vacuity");
+    let steps = &report.methodology.next_steps;
+    assert!(
+        !steps.contains("reviewer's decision") && !steps.contains("so far"),
+        "{steps}"
+    );
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}
+
+#[test]
+fn the_gate_refuses_a_so_far_or_a_decision_count_in_a_reviewed_client_package() {
+    for planted in [
+        " 1 source row is ruled out so far.",
+        " 0 of 1 problem needs a reviewer's decision.",
+    ] {
+        let (entries, mut report) = reviewed_client_package();
+        report.methodology.next_steps = report.methodology.next_steps.replacen(
+            "reviewing engineer.",
+            &format!("reviewing engineer.{planted}"),
+            1,
+        );
+        assert!(
+            report.methodology.next_steps.contains(planted),
+            "anti-vacuity: planted"
+        );
+        let problems = counts_problems(&entries, &report);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.location == "methodology.next_steps"),
+            "{planted}: {}",
+            messages(&problems)
+        );
+    }
+}
+
+#[test]
+fn an_internal_reviewed_package_must_state_the_decision_count() {
+    let (entries, mut report) = reviewed_client_package();
+    report.internal = true;
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.location == "methodology.next_steps"),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_grid_whose_cells_do_not_add_up_to_the_problems_for_action() {
+    let (entries, mut report) = consistent();
+    assert_eq!(report.counts.problems.for_action, 1, "anti-vacuity");
+    report.priority_grid.rows[0].cells[0].count += 1;
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems.iter().any(|p| p.location == "priority_grid.cells"),
+        "{}",
+        messages(&problems)
     );
 }

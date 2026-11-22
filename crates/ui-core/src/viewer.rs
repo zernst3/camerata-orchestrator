@@ -104,7 +104,7 @@ pub struct SourceFileView {
 /// What the UI says for a `repo_unlinked` answer that carries no reason of its own. Never "file
 /// not found": no file was looked for.
 pub const REPO_UNLINKED_WORDS: &str =
-    "This repo is not linked to this project, or it has no local folder.";
+    "This repo is not linked to a project, or it has no local folder.";
 
 /// What a response means for the viewer's body.
 #[derive(Clone, Debug, PartialEq, Eq)]

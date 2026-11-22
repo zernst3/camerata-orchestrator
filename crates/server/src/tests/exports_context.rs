@@ -165,7 +165,10 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         names.iter().any(|n| n.ends_with("-findings.xlsx")),
         "{names:?}"
     );
-    assert!(names.contains(&"findings.json".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"json/inspection.json".to_string()),
+        "{names:?}"
+    );
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
     let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
@@ -195,12 +198,12 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
 
     let mut findings_json_str = String::new();
     archive
-        .by_name("findings.json")
+        .by_name("json/inspection.json")
         .unwrap()
         .read_to_string(&mut findings_json_str)
         .unwrap();
     let findings_json: serde_json::Value =
-        serde_json::from_str(&findings_json_str).expect("findings.json must be valid JSON");
+        serde_json::from_str(&findings_json_str).expect("json/inspection.json must be valid JSON");
     assert!(
         findings_json.get("provenance").is_some(),
         "{findings_json_str}"
@@ -212,11 +215,11 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
     let findings_arr = findings_json
         .get("findings")
         .and_then(|f| f.as_array())
-        .expect("findings.json must have a findings array");
+        .expect("json/inspection.json must have a findings array");
     assert_eq!(
         findings_arr.len(),
         1,
-        "the one non-FP fixture finding must be the sole findings.json row: {findings_json_str}"
+        "the one non-FP fixture finding must be the sole json/inspection.json row: {findings_json_str}"
     );
 
     let mut readme = String::new();
@@ -227,7 +230,7 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         .unwrap();
     assert!(readme.contains(&pdf_name), "{readme}");
     assert!(readme.contains(&xlsx_name), "{readme}");
-    assert!(readme.contains("findings.json"), "{readme}");
+    assert!(readme.contains("json/inspection.json"), "{readme}");
     // P6 (2026-09-29): the product is "Codebase Inspection" — the README names it and
     // never says "audit"/"Audit" (the disclaimer paragraph it embeds verbatim is itself
     // audit-free per `report_export`'s own contract test).
@@ -350,9 +353,9 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
     for path in [
         "a-inspection.pdf",
         "a-inspection-findings.xlsx",
-        "findings.json",
+        "json/inspection.json",
         "README.txt",
-        "decisions.json",
+        "json/decisions.json",
         "csv/tickets.csv",
         "csv/all-findings.csv",
         "json/all-findings.json",
@@ -375,7 +378,7 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
             "{path}: {purpose:?}"
         );
     }
-    // The two all-findings files are the rows of findings.json, not a sheet of the workbook.
+    // The two all-findings files are the rows of json/inspection.json, not a sheet of the workbook.
     for path in ["csv/all-findings.csv", "json/all-findings.json"] {
         let (purpose, _) = manifest_file_facts(path);
         assert!(
@@ -383,7 +386,10 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
                 && !purpose.to_lowercase().contains("xlsx"),
             "{path}: {purpose:?} calls it a workbook table"
         );
-        assert!(purpose.contains("findings.json"), "{path}: {purpose:?}");
+        assert!(
+            purpose.contains("json/inspection.json"),
+            "{path}: {purpose:?}"
+        );
     }
     for old in [
         "manifest",
@@ -523,7 +529,7 @@ fn the_freshness_scanner_catches_a_planted_marker_at_any_depth() {
 }
 
 /// THE GATE. Builds every client artifact through the same builders the product export
-/// uses (PDF input data, xlsx, findings.json, csv/*, json/*, README, manifest, the zip
+/// uses (PDF input data, xlsx, json/inspection.json, csv/*, json/*, README, manifest, the zip
 /// itself) and asserts none contains operator-only freshness text. Also scans the SOURCE of
 /// the export builders for freshness identifiers, so a future wiring is caught at the
 /// import, before it ever produces output.
@@ -1048,7 +1054,7 @@ fn manifest_lists_and_hashes_every_file_except_itself() {
     for expected in [
         "acme-audit.pdf",
         "acme-audit-findings.xlsx",
-        "findings.json",
+        "json/inspection.json",
         "README.txt",
         "csv/all-findings.csv",
         "json/all-findings.json",

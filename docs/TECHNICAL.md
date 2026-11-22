@@ -1972,7 +1972,7 @@ into one row) looks exactly like a detection miss. Five guarantees were added on
   field - on a three-site fixture the pipeline detected 3, absorbed 2, and
   exported ONE row with no trace of the other two. Rows now carry
   `also_locations` (verbatim `MergedLocation` entries) and `site_count`
-  (`1 + absorbed`) into `findings.json`, the workbook ("Sites" and "Also found at"
+  (`1 + absorbed`) into `json/inspection.json`, the workbook ("Sites" and "Also found at"
   columns) and the PDF's data. Note that `also_matches` ALONE is not a complete
   record: an absorbed row sharing the primary's rule id leaves no `also_matches`
   entry, so `also_locations` is the field to read.
@@ -2616,7 +2616,7 @@ can disagree with another:
 |---|---|---|---|
 | 1 | `normalize_severity` | Fixes casing. An UNRECOGNISED string becomes `"low"`, which is why a typo'd bound is a build failure rather than a no-op | None |
 | 2 | `raise_to_rule_min_severity` | Raises to the rule's authored `min_severity`, never lowers | Requires an ACCUSING kind, explicitly present (`Defect` / `Deviation` only), and a real location (not empty path AND line 0). An absent kind is excluded under the standing rule that nothing may silently default to `Defect` |
-| 3 | `downgrade_unlocated_above_informational` (C4-R1) | Sends a row with an empty path AND line 0 to `info` | Part of the shared chain (`severity_bounds::bounded_severity`), so the live scan, the PDF/JSON partition and the xlsx/CSV/JSON/`findings.json` partition all apply it (until 2026-10-21 it was PDF-only). The floor declines on an unlocated row at its own precondition, so it cannot inflate one from any position |
+| 3 | `downgrade_unlocated_above_informational` (C4-R1) | Sends a row with an empty path AND line 0 to `info` | Part of the shared chain (`severity_bounds::bounded_severity`), so the live scan, the PDF/JSON partition and the xlsx/CSV/JSON/`json/inspection.json` partition all apply it (until 2026-10-21 it was PDF-only). The floor declines on an unlocated row at its own precondition, so it cannot inflate one from any position |
 | 4 | `clamp_to_rule_max_severity` | Clamps to the rule's authored `max_severity`, never raises | None. It wins over everything upstream, so "no report may exceed it" holds absolutely |
 | 5 | `clamp_deviation_severity` | Caps a `Deviation` row at `DEVIATION_DEFAULT_CEILING` (`medium`) unless its rule authors `deviation_ceiling = "high"` | Kind-gated: a `Defect` under the same rule, and a legacy row with no kind, are untouched. It runs after the `max_severity` clamp but can only lower, and a corpus-load gate forbids a `deviation_ceiling` ranking above the same rule's `max_severity`, so the ceiling still binds |
 
@@ -2669,7 +2669,7 @@ specific shipped defect. `apply_evidence_gate` used to run INSIDE
 `build_report_json`, against a CLONED report which then shadowed that function's
 own parameter. The PDF's JSON saw the synthetic rows; `build_workbook` and
 `build_findings_export` read the original, un-injected report and never did. The
-visible symptom was `findings.json` whose own `summary` described `N+K` rows while
+visible symptom was `json/inspection.json` whose own `summary` described `N+K` rows while
 its `findings` array held `N`.
 
 The fix was a POSITION fix, not a logic fix: the evidence gate is now part of the
@@ -3126,7 +3126,7 @@ calibration, `drop_discarded_invented_rows` removes a model-invented (`AI-`) row
 explanation says to discard it or whose headline or rule id is a placeholder, and the removal
 is a disposition of the `ai-calibration` ledger stage (`discarded_placeholder_row`), so the row
 accounting still reconciles; no adopted-rule row is ever removed by its prose. (3) The release
-gate's `finding content` check refuses a package whose `findings.json` still holds one. The rule
+gate's `finding content` check refuses a package whose `json/inspection.json` still holds one. The rule
 id enum in the scan schema was considered and not done: a batch holds over a hundred rules, and
 a genuinely new rule needs a free name (the schema is also one cached prefix for every pass).
 
@@ -3253,7 +3253,7 @@ against a runaway bill, not a saving, so it fails loudly:
   (`COST_CAP_README_LINE`) only when it is true. The release gate checks the two
   agree (`verify_readme_provenance`). No cost number is exported;
   `tests/stage_telemetry_not_exported.rs` pins that the efficiency set and the cap
-  record change nothing in `report.json` or `findings.json`.
+  record change nothing in `report.json` or `json/inspection.json`.
 - **Desktop app.** The scan settings have a "Spend limit (USD)" field (blank = none),
   sent as `max_cost_usd` on the audit request. A value that is not a positive number
   stops the scan from starting and says why. The results screen shows an
@@ -3637,7 +3637,7 @@ thing:
   `client_provenance::export_provenance_with`; the README renders each line and gate 7 parses
   it back.
 - **Release gate check "severity and kind counts"** (22d): before this, the gate checked
-  row IDENTITY (PDF rows vs `findings.json`) and CSV vs JSON cell parity, but no count by
+  row IDENTITY (PDF rows vs `json/inspection.json`) and CSV vs JSON cell parity, but no count by
   severity and kind. `release_gate::consistency::count_reconciliation_problems` (archive pass)
   holds `csv/all-findings.csv`, the workbook's All Findings rows (for the kinds that sheet lists,
   `xlsx_export::ALL_FINDINGS_SHEET_KINDS`), the Index "Statement types" counts
@@ -3647,7 +3647,7 @@ thing:
   rows and its cover severity summary. A difference names the cell and both counts. The gate
   now runs several checks (`finding content` and the rest are described in section 6c).
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
-- **`findings.json`** is the machine-readable data structure. It carries the WHOLE
+- **`json/inspection.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`
   reused verbatim from the PDF's own `AuditReportJson` rather than re-derived.
 - **`README.txt`**, the orientation note.
@@ -3767,7 +3767,7 @@ Three coverage-honesty properties are easy to lose and are each pinned by a test
   said nothing. `tool_coverage_disclosures` emits ONE concise client-facing line
   per affected tool, routed through the existing `failed_passes` channel, which
   the PDF template already renders in both the executive summary and the
-  methodology. `findings.json` inherits it via the embedded executive summary.
+  methodology. `json/inspection.json` inherits it via the embedded executive summary.
 - **The Coverage sheet does not leak internal vocabulary.** "How we checked it"
   replaced a raw `citation_kind` cell that was putting `grounded` / `preview` /
   `advisory` in front of a client, and the Result column reads "Clean - nothing
@@ -3794,7 +3794,7 @@ Such a citation now has its own kind, `related`, and its label starts with
 "Related standard (matched by keyword, not a rule check): ". The kind and label
 are computed once in `citation_for_finding`, so the PDF (which prints that
 heading over the source list), the workbook's Citation column and
-`findings.json`'s `citation_label` all say the same thing, and the workbook's
+`json/inspection.json`'s `citation_label` all say the same thing, and the workbook's
 Provenance column reads "AI-advisory" for these rows. The Methodology section
 carries one plain sentence explaining the term (`MethodologyJson::citation_note`)
 and the Index sheet defines it. A finding whose OWN rule id is a cited corpus
@@ -4037,10 +4037,10 @@ rows. The label is what the operator reads in `[brackets]` and in the "Release c
 
 | # | Check (label) | What it holds |
 |---|---|---|
-| 1 | secrets | no secret value in any client visible byte: every string of every file (`data.json`, `findings.json`, each dataset in both formats, every workbook cell and shared string, the README, the manifest, member names), zero-width characters stripped, never a field list |
+| 1 | secrets | no secret value in any client visible byte: every string of every file (`data.json`, `json/inspection.json`, each dataset in both formats, every workbook cell and shared string, the README, the manifest, member names), zero-width characters stripped, never a field list |
 | 2 | dataset set | exactly the promised files and datasets are in the package (list below), the PDF starts with `%PDF-`, the workbook parses |
-| 3 | dataset parity | every dataset's CSV agrees with its JSON, and `findings.json` agrees with `all-findings` |
-| 4 | row parity | the PDF's rows and `findings.json`'s rows are the same set (needs the in memory rows, so `release-gate <zip>` cannot run it) |
+| 3 | dataset parity | every dataset's CSV agrees with its JSON, and `json/inspection.json` agrees with `all-findings` |
+| 4 | row parity | the PDF's rows and `json/inspection.json`'s rows are the same set (needs the in memory rows, so `release-gate <zip>` cannot run it) |
 | 5 | severity and kind counts | the PDF's rows and cover summary, the workbook's rows and Index summaries and the CSV agree with `json/all-findings.json` by severity and kind, and every printed number holds to an independent recount of the files in the package (single counts) |
 | 6 | finding content | no model invented row is junk: a placeholder title or rule id, no evidence, an explanation that says to discard it (D1); also the claim about missing preview tools agrees with the ledger |
 | 7 | reviewer decision on unverified evidence | every row whose quoted evidence was not found carries a reviewer decision (M5) |
@@ -4048,7 +4048,7 @@ rows. The label is what the operator reads in `[brackets]` and in the "Release c
 | 9 | reviewer decision on restored findings | a finding the engine threw out and the reviewer put back is decided before it ships (A12 item 2) |
 | 10 | reviewer decision on split-out problems | a problem split out of one the reviewer ruled out has a decision of its own |
 | 11 | reviewer correction on flagged findings | a site the Engine Check said No to carries a correction, a decision or a later edit. An Engine Check file that cannot be read refuses too. (The README's label does not say Engine Check: it never appears in a client output.) |
-| 12 | reviewer decision on critical and unsure findings | every finding shown at critical severity, and every finding the finder was unsure of (marked needs a decision), carries a reviewer's decision of its own, whatever the review budget. A severity edit the reviewer made on that row (in Review or as an Engine Check correction, in either direction) is a decision of its own: the reviewer ruled on the row (2026-11-20). `decisions.json` records it as a `severity_set` row. An edit of the wording or the location is not. A high is not forced. The export panel lists the same rows (`release_gate::holds`), and a group decision leaves them out, so each is decided in person (outside review item 2) |
+| 12 | reviewer decision on critical and unsure findings | every finding shown at critical severity, and every finding the finder was unsure of (marked needs a decision), carries a reviewer's decision of its own, whatever the review budget. A severity edit the reviewer made on that row (in Review or as an Engine Check correction, in either direction) is a decision of its own: the reviewer ruled on the row (2026-11-20). `json/decisions.json` records it as a `severity_set` row. An edit of the wording or the location is not. A high is not forced. The export panel lists the same rows (`release_gate::holds`), and a group decision leaves them out, so each is decided in person (outside review item 2) |
 | 13 | confidentiality marking | every workbook sheet's footer carries the confidentiality line naming the client, and it is the PDF's line |
 | 14 | manifest | every manifest hash equals the archive member's hash and every member is listed. A client package whose manifest records an incomplete run is refused. |
 | 15 | provenance | an internal package's README provenance lines equal the manifest's. A client package's README carries none of them. |
@@ -4074,17 +4074,17 @@ file and an unexpected one). `<stem>` is `camerata-inspection-{repo}-{sha}`.
 |---|---|
 | `<stem>.pdf` | the report to read first: cover, executive summary, scorecard by area, severity by effort matrix, the problems with citations and fixes, what is healthy, the dependency snapshot and how the inspection was done. Ruled out problems are left out and counted once in the methodology section. |
 | `<stem>-findings.xlsx` | the working list for the engineers: Start here, Glossary, Fix plan, All problems, Needs a decision, Your conventions, Departures, Dependencies, Rules checked, Ruled out and Not checked; for reviewers All source rows, Reviewer decisions and How problems were grouped (the names are `xlsx_export/vocabulary.rs`; a several repo project adds the Patterns across services sheet) |
-| `findings.json` | every row that was not ruled out, of every kind, wrapped with the report's summary counts. For scripts and CI. |
-| `decisions.json` | every decision record the report was reviewed with |
+| `json/inspection.json` | every row that was not ruled out, of every kind, wrapped with the report's summary counts. For scripts and CI. |
+| `json/decisions.json` | every decision record the report was reviewed with |
 | `README.txt` | what each file is (`product_export_readme`) |
 | `manifest.json` | the list of files with a checksum for each, written last over the final bytes (it never lists itself), and the provenance |
-| `csv/<dataset>.csv` and `json/<dataset>.json` | one pair for each of eight datasets (`DATASETS`): `all-findings`, `deviations`, `conventions`, `not-assessed`, `dependencies`, `false-positives`, `coverage`, `rules-applied`. `all-findings` holds the same rows as `findings.json`, flat. |
+| `csv/<dataset>.csv` and `json/<dataset>.json` | one pair for each of eight datasets (`DATASETS`): `all-findings`, `deviations`, `conventions`, `not-assessed`, `dependencies`, `false-positives`, `coverage`, `rules-applied`. `all-findings` holds the same rows as `json/inspection.json`, flat. |
 | `csv/tickets.csv` | one ticket for each fix that still has places to change, with columns for a Jira, Linear or GitHub Issues import (title, description, priority, labels, estimate, group id, places, place list). A place ruled out or accepted as a risk is on no ticket. No JSON sibling. |
 | `csv/triage-log.csv` | optional and off by default; admitted when present |
 
 An internal package (`--internal`, `ReportOptions.internal`) is the operator's own review copy. It
 carries what the client package must not: the review flags (Possible false positive, a column in the
-workbook's technical band and a key in `findings.json`), the held rows marked held, and, for a run
+workbook's technical band and a key in `json/inspection.json`), the held rows marked held, and, for a run
 that did not complete, the INTERNAL INCOMPLETE marking (`INTERNAL_INCOMPLETE_README_LINE`). It is
 released only by `release_internal`, and the client text style check does not apply to it.
 
@@ -4098,13 +4098,13 @@ and everything in it. Where they are: section 6i.
 **Merged sites and the CSV (D5).** A merged finding's absorbed sites (`also_locations`) are
 redacted where the merge builds them and again by `sanitize_finding_text` before any dataset,
 workbook or PDF field is built (snippet and headline of every site); a test runs a credential
-through a merged site into `findings.json`, every CSV and JSON dataset, the workbook and the
+through a merged site into `json/inspection.json`, every CSV and JSON dataset, the workbook and the
 PDF's data, with `terse_output` on and off. The export that was refused in the efficiency run
 held no credential: the `also_locations` CSV cell is compact JSON, and scanned as ONE string a
 rule id naming a key beside an environment variable NAME (`NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=`)
 read as a named secret literal. The secrets check now scans a CSV cell that holds a JSON list or
 object BOTH ways and reports the union: parsed and walked string by string as it does
-`findings.json` (which also sees an unquoted `.env` line inside a snippet), and as one string
+`json/inspection.json` (which also sees an unquoted `.env` line inside a snippet), and as one string
 (which also sees a value whose name sits in a neighbouring field). The one shape skipped, on the
 one-string pass only, is a named secret literal whose "value" is itself an environment variable
 name (upper case, underscores, fewer than four digits). A real key inside the cell, quoted,
@@ -4245,7 +4245,7 @@ The rule is run to completion: a deliverable never holds a failed or unfinished 
   inspection did not run to completion, so it cannot be exported for a client", and exit code 4
   (spend limit), 5 (outage) or 6 (anything else). An `--internal` run writes the export and marks it
   INTERNAL INCOMPLETE (the README line, `manifest.json` `inspection.run_incomplete` and a marking in
-  `findings.json`). The release gate refuses such a package for a client even when the files are
+  `json/inspection.json`). The release gate refuses such a package for a client even when the files are
   edited by hand (`incomplete_run_problems`).
 * A resume (`camerata inspect --resume`) sends again only what is not stored as good (section 14).
 
@@ -4961,7 +4961,7 @@ holds, with no model call, so the operator can open those rows first and rule th
 
 **It never hides, drops, merges or lowers anything.** It changes no severity, kind, escalation or
 decision. A flagged row stays a problem until the operator rules it out. The flag reaches the
-operator only: the review UI, the internal workbook's technical band and an internal `findings.json`.
+operator only: the review UI, the internal workbook's technical band and an internal `json/inspection.json`.
 A client package carries neither the flag nor its reasons (pinned by
 `crates/server/src/report_export/wo9/possible_fp_tests.rs`). The UI shows it in three places. On the row
 it is a chip with a dashed violet outline (hover text is the reasons as sentences). In the queue it is
@@ -5508,7 +5508,7 @@ JSON files in `dirs::data_dir()/camerata/`:
 |---|---|---|
 | `projects.json` | `ProjectStore` (`crates/server/src/project.rs`) | All projects: id, name, repos list, `ProjectRuleset` (selections/cross-repo/process/custom), onboarded repo set, `TierMap` (fleet bands + fallback chains), `DesignerBand` (enabled + model), `StepModels` (per-step helper models), `ModelProfile` (Balanced/MaxEfficiency/MaxQuality/Custom), `L3ReviewConfig` (enabled + model), stall thresholds, loop guard, the soft-context layers (product brief, operating principles, curated memory; see 5b), and the work `HierarchySchema` (work-item `WorkType`s + `TypeRelation` nesting rules, the design-page work-type graph; `GET`/`POST /api/projects/:id/hierarchy`). All of these travel with the project export. |
 | `settings.json` | `SettingsStore` (`crates/server/src/settings.rs`) | `workspace_root` (the dir under which repos are cloned) + `repo_paths` (machine-local per-repo path overrides; never travels in export) + `bombe_enabled` (global animation on/off). Credentials (OpenRouter key, GitHub token) are stored in the system keychain, not in this file. |
-| `onboarding-draft.json` | `DraftStore` (`crates/server/src/draft.rs`) | In-flight brownfield onboarding state, a `{ project_id: draft }` map (one draft PER PROJECT, opaque JSON the UI owns) — opening a project with a draft prompts continue/start-over. Survives a restart; lost only if the scan hasn't produced output yet. |
+| `onboarding-draft-<project>.json` (one file per project, each with its own `.bak` and set-aside copies; the old shared `onboarding-draft.json` is split on first start and kept as `onboarding-draft.json.shared-backup`) | `DraftStore` (`crates/server/src/draft.rs`) | In-flight brownfield onboarding state, a `{ project_id: draft }` map in each project's file (one draft PER PROJECT, opaque JSON the UI owns) — opening a project with a draft prompts continue/start-over. Survives a restart; lost only if the scan hasn't produced output yet. |
 | `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus`, the precise `UowStage` lifecycle, `history`, `gate_provenance`, `sign_off`, `evidence`, and a `decisions` read-cache (durable home is the `ArtifactStore`). See §10. |
 | `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, `RoutineStatus` (Idle/Running/BlockedNeedsReview/Done/Failed), last_run/last_fired, project_id, and a bounded `runs` history (cap 20). The auto-fire scheduler (`auto_fire.rs`) ticks over these; see 4c. |
 | `escalations.json` | `EscalationStore` (`crates/server/src/escalation.rs`) | Routine escalations: a blocked run's reason/options/suggestions, the human↔lead-engineer conversation, status (open/resolved), and the translated resume directive. |
@@ -6138,7 +6138,7 @@ view shows (`INTERNAL_ONLY_PHRASES`); the names are distinctive (`review_*`, `re
 `*_active_ms`) so a scan has no false positives. `camerata-ui-core` tests that every key the log
 and the stats JSON write is on that list and every listed key is written, so a field added to the
 internal shapes and not listed fails there. (2) The server's `release_gate::internal_only_tests`
-build a real package (workbook, `findings.json`, `manifest.json`, README, every CSV and JSON
+build a real package (workbook, `json/inspection.json`, `manifest.json`, README, every CSV and JSON
 dataset, the PDF member, the PDF's data and the shipped Typst template) and assert none of those
 names or phrases appears anywhere in it, including every part of the workbook, and
 `the_scan_reaches_every_surface` plants a listed name on each surface to prove the scan finds it
@@ -6526,7 +6526,7 @@ Project **config** (transferable) and project **data** (local) are kept in separ
 | Project config | `projects.json` — repos, ruleset, onboarded state, `tier_map` | YES — the export is config-only |
 | Units of Work | `uow.json` | NO — local to each developer |
 | Story spine | `stories.json` (`InMemoryStoryStore`) | NO |
-| Onboarding draft | `onboarding-draft.json` | NO |
+| Onboarding draft | `onboarding-draft-<project>.json` (one per project) | NO |
 | Local repo paths | `settings.json` (`repo_paths`) | NO |
 
 UoWs carry in-progress dev-lifecycle state (stage, branch, gate provenance, decision records, run
@@ -7835,7 +7835,7 @@ equals the rule's authored text, as the export prints it, is labelled a Standard
 equality. A primary that inherits a merged member's fix inherits the marker with it. Every export labels each fix with
 `report_export::fix_type_label`: "Tailored fix" (a `fix_specific` that is not marked), "Standard fix"
 (the marked one, or a row with only the rule's own `fix`), or empty (no fix text). The label is the
-`fix_type` field of every `findings.json` row and every row of `json/all-findings.json` and its CSV,
+`fix_type` field of every `json/inspection.json` row and every row of `json/all-findings.json` and its CSV,
 of `json/deviations.json` (always "Standard fix", the rule's own guidance) and of each curated site
 in the PDF's data; the workbook has a "Fix type" column on the findings sheets and the Deviations
 sheet, and the PDF prints the label in front of the fix. The release gate's dataset check demands

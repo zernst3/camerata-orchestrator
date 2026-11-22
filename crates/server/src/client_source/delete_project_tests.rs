@@ -783,7 +783,6 @@ async fn a_failed_session_removal_is_found_again_by_the_retry() {
 async fn a_write_that_fails_is_reported_failed_not_removed_and_a_retry_succeeds() {
     for (file, category) in [
         ("scan-cache.json", "scan cache entry"),
-        ("onboarding-draft.json", "onboarding draft"),
         ("uow.json", "development console record"),
         ("projects.json", "project record"),
     ] {
@@ -1274,18 +1273,25 @@ async fn a_set_aside_unreadable_draft_is_listed_as_a_leftover_and_never_removed(
 }
 
 #[tokio::test]
-async fn a_cleared_projects_deletion_leaves_its_id_nowhere_in_the_draft_file_or_its_bak() {
+async fn a_cleared_projects_deletion_leaves_nothing_of_it_in_the_draft_folder() {
     let w = world().await;
     let fx = &w.fx;
     // The architect started over: no draft, but a discard stamp for the project.
     fx.state
         .draft
         .save(&fx.project_id, serde_json::json!({"scan": 1}));
+    fx.state
+        .draft
+        .save(&fx.project_id, serde_json::json!({"scan": 2}));
     fx.state.draft.clear(&fx.project_id);
     fx.state
         .draft
         .save("other-project", serde_json::json!({"scan": 2}));
-    let file = fx.root.join("data").join("onboarding-draft.json");
+    let file = fx
+        .state
+        .draft
+        .project_file(&fx.project_id)
+        .expect("a data folder");
     assert!(
         std::fs::read_to_string(&file)
             .unwrap()
@@ -1298,16 +1304,507 @@ async fn a_cleared_projects_deletion_leaves_its_id_nowhere_in_the_draft_file_or_
         .unwrap();
     assert!(!out.partial, "{:?}", out.record.items);
 
-    for f in ["onboarding-draft.json", "onboarding-draft.json.bak"] {
-        let text = std::fs::read_to_string(fx.root.join("data").join(f)).unwrap_or_default();
-        assert!(
-            !text.contains(&fx.project_id),
-            "{f} still names the project: {text}"
-        );
-    }
-    let text = std::fs::read_to_string(&file).unwrap();
+    let left: Vec<String> = std::fs::read_dir(fx.root.join("data"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with("onboarding-draft") && n.contains(&fx.project_id))
+        .collect();
     assert!(
-        text.contains("other-project"),
+        left.is_empty(),
+        "draft files of the project remain: {left:?}"
+    );
+    let other = fx
+        .state
+        .draft
+        .project_file("other-project")
+        .expect("a data folder");
+    assert!(
+        std::fs::read_to_string(other)
+            .unwrap()
+            .contains("other-project"),
         "another project's draft is kept"
+    );
+}
+
+#[tokio::test]
+async fn a_set_aside_draft_of_the_project_is_removed_with_it_and_a_failure_is_retried() {
+    let w = world().await;
+    let fx = &w.fx;
+    let file = fx
+        .state
+        .draft
+        .project_file(&fx.project_id)
+        .expect("a data folder");
+    let mut aside = file.clone().into_os_string();
+    aside.push(".unreadable-1700000000");
+    let aside = PathBuf::from(aside);
+    std::fs::write(&aside, "{ torn, this project's").unwrap();
+    // A second set-aside name that cannot be removed as a file: the draft step fails, and
+    // nothing of the draft is reported removed.
+    let mut stuck = file.clone().into_os_string();
+    stuck.push(".unreadable-1700000001");
+    let stuck = PathBuf::from(stuck);
+    std::fs::create_dir(&stuck).unwrap();
+
+    let first = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+    assert!(first.partial, "{:?}", first.record.items);
+    assert!(
+        first
+            .record
+            .items
+            .iter()
+            .any(|i| i.category == "onboarding draft"
+                && matches!(i.outcome, super::PurgeOutcome::Failed { .. })),
+        "{:?}",
+        first.record.items
+    );
+    assert!(fx.state.projects.get(&fx.project_id).is_some());
+
+    std::fs::remove_dir(&stuck).unwrap();
+    let second = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+    assert!(!second.partial, "{:?}", second.record.items);
+    assert!(
+        !aside.exists() && !file.exists(),
+        "every draft file is gone"
+    );
+}
+
+// ── a checkout is used by a project through its repos OR through its inspections ────────────
+
+/// An onboarding project: no repos yet (they join at Apply), one saved inspection of `REPO`.
+fn add_onboarding_project(fx: &Fx, name: &str) -> String {
+    let b = fx.state.projects.create(name, vec![]).unwrap();
+    fx.state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &b.id,
+            report_at(REPO, &fx.head),
+            crate::inspections::InspectionKind::Full,
+        ))
+        .unwrap();
+    b.id
+}
+
+#[tokio::test]
+async fn a_checkout_an_onboarding_project_triages_is_kept_and_named_when_another_project_is_deleted(
+) {
+    let fx = fixture();
+    let _b = add_onboarding_project(&fx, "Onboarding Beta");
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(
+        fx.checkout.exists(),
+        "the checkout an onboarding project is triaging stays"
+    );
+    assert!(
+        out.record
+            .kept
+            .iter()
+            .any(|k| k.what.contains(REPO) && k.why.contains("Onboarding Beta")),
+        "the record names it: {:?}",
+        out.record.kept
+    );
+}
+
+#[tokio::test]
+async fn an_onboarding_project_can_delete_the_source_of_the_repo_it_inspected() {
+    use super::delete::{delete_source, DeleteOutcome, DeleteRequest};
+    let fx = fixture();
+    // The only project: it inspected REPO but has not applied rules, so `repos` is empty.
+    fx.state
+        .projects
+        .update(&fx.project_id, |p| p.repos.clear())
+        .unwrap();
+    fx.state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &fx.project_id,
+            report_at(REPO, &fx.head),
+            crate::inspections::InspectionKind::Full,
+        ))
+        .unwrap();
+
+    let request = DeleteRequest {
+        confirm: REPO.to_string(),
+        include_uncommitted: false,
+    };
+    match delete_source(&fx.state, &fx.project_id, REPO, &request).await {
+        Ok(DeleteOutcome::Done { partial, .. }) => assert!(!partial),
+        other => panic!("expected a deletion, not {:?}", other.err()),
+    }
+    assert!(!fx.checkout.exists(), "the checkout is gone");
+}
+
+#[tokio::test]
+async fn the_project_holding_the_deletion_record_is_the_owner_ahead_of_an_inspection_only_one() {
+    use super::delete::{delete_source, DeleteRequest};
+    use super::read::{source_for_read, SourceRead};
+    let fx = fixture();
+    let request = DeleteRequest {
+        confirm: REPO.to_string(),
+        include_uncommitted: false,
+    };
+    delete_source(&fx.state, &fx.project_id, REPO, &request)
+        .await
+        .unwrap();
+    // Later, an onboarding project that inspected the same repo is the active one.
+    let b = add_onboarding_project(&fx, "Onboarding Beta");
+    assert!(fx.state.projects.set_active(&b));
+
+    let read = source_for_read(&fx.state, None, REPO, None).await.unwrap();
+    assert!(
+        matches!(read, SourceRead::Deleted { .. }),
+        "the record's holder answers: {read:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_unlinked_reason_does_not_say_this_project_when_no_project_was_named() {
+    use super::read::{source_for_read, SourceRead};
+    let fx = fixture();
+    match source_for_read(&fx.state, None, "nobody/knows", None)
+        .await
+        .unwrap()
+    {
+        SourceRead::Unresolved { reason } => {
+            assert!(!reason.contains("this project"), "{reason}");
+            assert!(reason.contains("nobody/knows"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    match source_for_read(&fx.state, Some(&fx.project_id), "nobody/knows", None)
+        .await
+        .unwrap()
+    {
+        SourceRead::Unresolved { reason } => {
+            assert!(reason.contains("this project"), "named project: {reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// ── round 2: a project owns a repo through its inspections everywhere deletion looks ────────
+
+/// An onboarding-only project: no repos, one saved inspection of `REPO`.
+fn make_onboarding_only(fx: &Fx) {
+    fx.state
+        .projects
+        .update(&fx.project_id, |p| p.repos.clear())
+        .unwrap();
+    fx.state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &fx.project_id,
+            report_at(REPO, &fx.head),
+            crate::inspections::InspectionKind::Full,
+        ))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn deleting_an_onboarding_only_project_removes_its_inspected_checkout_and_names_it() {
+    let fx = fixture();
+    make_onboarding_only(&fx);
+    let cli = fx.roots().cli_state_dir.unwrap();
+    let key = repo_state_key(&fx.checkout);
+    write(&cli.join(format!("{key}.cache.json")), "cache");
+    write(&cli.join(format!("{key}.ledger.json")), "ledger");
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(!out.partial, "{:?}", out.record.items);
+    assert!(!fx.checkout.exists(), "the inspected checkout is removed");
+    assert!(!cli.join(format!("{key}.cache.json")).exists());
+    assert!(!cli.join(format!("{key}.ledger.json")).exists());
+    assert!(
+        out.record.repos.iter().any(|r| r == REPO),
+        "the record names it: {:?}",
+        out.record.repos
+    );
+}
+
+fn put_run(fx: &Fx, run_id: &str, project_id: Option<&str>) -> PathBuf {
+    let cli = fx.roots().cli_state_dir.unwrap();
+    let run_dir = cli.join("runs").join(run_id);
+    let record = RunRecord {
+        schema: STORE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        created_at: NOW.to_string(),
+        updated_at: NOW.to_string(),
+        status: RunStatus::Complete,
+        origin: RunOrigin::Cockpit,
+        project_id: project_id.map(str::to_string),
+        attempt: 1,
+        engine_version: "9.9.9".to_string(),
+        project_key: "k".to_string(),
+        repos: vec![crate::run_store::RepoRecord {
+            name: REPO.to_string(),
+            dir: fx.checkout.to_string_lossy().into_owned(),
+            commit: None,
+            clean: true,
+            tree_at_start: String::new(),
+            tree_at_end: None,
+        }],
+        models: ModelsRecord {
+            audit: "m".into(),
+            calibration: "m".into(),
+            fix: "m".into(),
+            backend: "cli".into(),
+            mode: "auto".into(),
+            resolved: true,
+            group_review: String::new(),
+            finder: String::new(),
+            finder_model: String::new(),
+        },
+        rules_fingerprint: String::new(),
+        ai_scan_key: Default::default(),
+        nonce_seed: String::new(),
+        args: serde_json::Value::Null,
+        estimate_usd: None,
+        plan: Vec::new(),
+        incomplete_reasons: Vec::new(),
+        notes: Vec::new(),
+    };
+    let run_json = run_dir.join("run.json");
+    write(&run_json, &serde_json::to_string(&record).unwrap());
+    run_json
+}
+
+#[tokio::test]
+async fn files_covering_a_folder_an_onboarding_project_inspected_are_kept_and_named() {
+    let fx = fixture();
+    let _b = add_onboarding_project(&fx, "Onboarding Beta");
+    let cli = fx.roots().cli_state_dir.unwrap();
+    let canon = fx
+        .checkout
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let set = "project-1-aaaa00000";
+    write(
+        &cli.join(format!("{set}.repos.json")),
+        &serde_json::to_string(&vec![canon]).unwrap(),
+    );
+    write(&cli.join(format!("{set}.cache.json")), "set cache");
+    let projectless = put_run(&fx, "run-cccccccccccc", None);
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(
+        cli.join(format!("{set}.cache.json")).is_file(),
+        "the set files stay"
+    );
+    assert!(cli.join(format!("{set}.repos.json")).is_file());
+    assert!(projectless.is_file(), "the project-less run stays");
+    assert!(
+        out.record.kept.iter().any(|k| k.what.contains(set)),
+        "{:?}",
+        out.record.kept
+    );
+    assert!(
+        out.record
+            .kept
+            .iter()
+            .any(|k| k.what.contains("run-cccccccccccc")),
+        "{:?}",
+        out.record.kept
+    );
+}
+
+// ── shared-era draft copies: the deleted project's entries go, nothing else's ───────────────
+
+#[tokio::test]
+async fn the_shared_backup_and_old_bak_lose_the_deleted_projects_entries_and_nothing_else() {
+    let fx = fixture();
+    let pid = fx.project_id.clone();
+    let data = fx.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let backup = data.join("onboarding-draft.json.shared-backup");
+    std::fs::write(
+        &backup,
+        serde_json::json!({
+            pid.clone(): {"scan": SENT_A},
+            "other-project": {"scan": SENT_B},
+            "_cleared_at": {pid.clone(): "2026-11-19T10:00:00Z", "other-project": "2026-11-19T11:00:00Z"},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let bak = data.join("onboarding-draft.json.bak");
+    std::fs::write(
+        &bak,
+        serde_json::json!({pid.clone(): {"scan": SENT_A}}).to_string(),
+    )
+    .unwrap();
+    // A project whose id merely starts with this one's id is not this project.
+    let longer = data.join("onboarding-draft.json.shared-backup-1");
+    let longer_text = serde_json::json!({format!("{pid}2"): {"scan": SENT_B}}).to_string();
+    std::fs::write(&longer, &longer_text).unwrap();
+    // A copy nobody can parse stays, listed.
+    let torn = data.join("onboarding-draft.json.unreadable-1700000000");
+    std::fs::write(&torn, "{ torn").unwrap();
+
+    let out = delete_all(&fx.state, &pid, &req("Acme")).await.unwrap();
+    assert!(!out.partial, "{:?}", out.record.items);
+
+    let text = std::fs::read_to_string(&backup).unwrap();
+    assert!(
+        !text.contains(&pid),
+        "the project's entries are gone: {text}"
+    );
+    assert!(
+        text.contains(SENT_B),
+        "another project's entry stays: {text}"
+    );
+    assert!(text.contains("other-project"), "{text}");
+    assert!(!bak.exists(), "a copy left with nothing is removed");
+    assert_eq!(std::fs::read_to_string(&longer).unwrap(), longer_text);
+    assert!(torn.exists());
+    let listed: Vec<&str> = out.record.kept.iter().map(|k| k.what.as_str()).collect();
+    assert!(
+        listed.iter().any(|w| w.ends_with("unreadable-1700000000")),
+        "{listed:?}"
+    );
+    assert!(
+        !listed.iter().any(|w| w.ends_with("shared-backup")
+            || w.ends_with("shared-backup-1")
+            || w.ends_with(".bak")),
+        "{listed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_draft_file_of_no_project_is_listed_as_a_leftover_and_never_removed() {
+    let fx = fixture();
+    let data = fx.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let ghost = data.join("onboarding-draft-ghost.json");
+    std::fs::write(&ghost, r#"{"ghost":{"scan":1}}"#).unwrap();
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(ghost.exists(), "not removed");
+    assert!(
+        out.record
+            .kept
+            .iter()
+            .any(|k| k.what.ends_with("onboarding-draft-ghost.json")),
+        "{:?}",
+        out.record.kept
+    );
+}
+
+#[tokio::test]
+async fn an_onboarding_project_viewing_a_repo_another_project_deleted_is_told_it_was_deleted() {
+    use super::delete::{delete_source, DeleteRequest};
+    use super::read::{source_for_read, SourceRead};
+    let fx = fixture();
+    let request = DeleteRequest {
+        confirm: REPO.to_string(),
+        include_uncommitted: false,
+    };
+    delete_source(&fx.state, &fx.project_id, REPO, &request)
+        .await
+        .unwrap();
+    let b = add_onboarding_project(&fx, "Onboarding Beta");
+
+    let read = source_for_read(&fx.state, Some(&b), REPO, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(read, SourceRead::Deleted { .. }),
+        "the hinted project still hears it was deleted: {read:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_rewritten_shared_copy_is_reported_as_rewritten_not_removed_whole() {
+    let fx = fixture();
+    let pid = fx.project_id.clone();
+    let data = fx.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let backup = data.join("onboarding-draft.json.shared-backup");
+    std::fs::write(
+        &backup,
+        serde_json::json!({pid.clone(): {"scan": SENT_A}, "other-project": {"scan": SENT_B}})
+            .to_string(),
+    )
+    .unwrap();
+
+    let out = delete_all(&fx.state, &pid, &req("Acme")).await.unwrap();
+
+    let item = out
+        .record
+        .items
+        .iter()
+        .find(|i| i.path.ends_with("shared-backup"))
+        .expect("the copy is in the record");
+    assert!(item.category.contains("file kept"), "{}", item.category);
+    assert_eq!((item.files, item.bytes), (0, 0), "the file was not removed");
+}
+
+#[tokio::test]
+async fn leftover_tmp_files_of_a_shared_copy_are_stripped_or_listed() {
+    let fx = fixture();
+    let pid = fx.project_id.clone();
+    let data = fx.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let tmp = data.join("onboarding-draft.json.tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::json!({pid.clone(): {"scan": SENT_A}, "other-project": {"scan": SENT_B}})
+            .to_string(),
+    )
+    .unwrap();
+    let bak_tmp = data.join("onboarding-draft.json.bak.tmp");
+    std::fs::write(&bak_tmp, "{ torn").unwrap();
+
+    let out = delete_all(&fx.state, &pid, &req("Acme")).await.unwrap();
+
+    let text = std::fs::read_to_string(&tmp).unwrap();
+    assert!(!text.contains(&pid) && text.contains(SENT_B), "{text}");
+    assert!(
+        out.record
+            .kept
+            .iter()
+            .any(|k| k.what.ends_with("onboarding-draft.json.bak.tmp")),
+        "{:?}",
+        out.record.kept
+    );
+}
+
+#[tokio::test]
+async fn status_of_an_inspected_repo_another_project_deleted_says_deleted_with_that_record() {
+    use super::delete::{delete_source, DeleteRequest};
+    use super::status::{source_status, RepoSourceStatus};
+    let fx = fixture();
+    let request = DeleteRequest {
+        confirm: REPO.to_string(),
+        include_uncommitted: false,
+    };
+    delete_source(&fx.state, &fx.project_id, REPO, &request)
+        .await
+        .unwrap();
+    let b = add_onboarding_project(&fx, "Onboarding Beta");
+
+    let status = source_status(&fx.state, &b, REPO).await;
+    assert!(
+        matches!(status, RepoSourceStatus::Deleted { .. }),
+        "{status:?}"
     );
 }

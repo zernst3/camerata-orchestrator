@@ -33,6 +33,7 @@ use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::onboard::Finding;
 use crate::report_export::ReviewedReport;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// Why a row needs a decision of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +126,7 @@ pub fn critical_or_unsure_without_decision(
                 Why::Unsure => "the finder was unsure this finding is a real problem",
             };
             Problem::new(
-                "findings.json",
+                INSPECTION_JSON,
                 format!("{} line {}", f.path, f.line),
                 format!(
                     "{what}, and no reviewer decision is recorded for it. Open it, then confirm \

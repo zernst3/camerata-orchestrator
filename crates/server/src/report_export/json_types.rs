@@ -2,6 +2,7 @@
 //! and the small helpers that sit beside them.
 
 use super::*;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// Real pluralization for a count + noun pair (`"1 site"` / `"3 sites"`), replacing the
 /// `"N thing(s)"` CLI-ism that reads as sloppy in a flagship client PDF.
@@ -78,7 +79,7 @@ pub struct CodeVolumeJson {
     /// this is non-empty.
     pub by_language: Vec<crate::onboard::LanguageVolume>,
     /// Each repo's own line count, when the project has more than one repo. Absent from the JSON
-    /// otherwise, so a one-repo `findings.json` is byte for byte what it always was; the template
+    /// otherwise, so a one-repo `json/inspection.json` is byte for byte what it always was; the template
     /// guards for the key. Never merged into the total above without saying which repo holds
     /// what.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -113,7 +114,7 @@ pub struct CoverJson {
     pub camerata_version: String,
     /// The git commit the exporting engine was built from ([`crate::ENGINE_COMMIT`]). `None`
     /// for a build outside a git checkout. Rendered in the PDF methodology and carried in
-    /// `findings.json`'s `provenance`.
+    /// `json/inspection.json`'s `provenance`.
     pub engine_commit: Option<String>,
     /// The rule-library lock hash ([`camerata_rules::corpus_version`]: the digest over every
     /// rule's id, version and content hash, exactly the content of `CORPUS_LOCK.toml`). The
@@ -142,7 +143,7 @@ pub struct CoverJson {
     /// nothing extra.
     pub incremental_note: Option<String>,
     /// Set only on an internal export of a run that did not complete: the line printed on the
-    /// cover and carried in `findings.json`. Absent otherwise, so a complete run's output is
+    /// cover and carried in `json/inspection.json`. Absent otherwise, so a complete run's output is
     /// unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_incomplete: Option<String>,
@@ -519,7 +520,11 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson, counts: &ReportCounts) ->
     let present_severities: Vec<&str> = SEVERITY_ORDER
         .iter()
         .copied()
-        .filter(|sev| action_findings.iter().any(|f| f.severity == *sev))
+        .filter(|sev| {
+            action_findings
+                .iter()
+                .any(|f| super::counts::tier_of(&f.severity) == *sev)
+        })
         .collect();
     let present_efforts: Vec<&str> = EFFORT_ORDER
         .iter()
@@ -540,7 +545,8 @@ pub(crate) fn build_priority_grid(matrix: &MatrixJson, counts: &ReportCounts) ->
                     let mut findings: Vec<GridTagJson> = action_findings
                         .iter()
                         .filter(|f| {
-                            f.severity == *sev && grid_effort_key(f.effort.as_deref()) == *eff
+                            super::counts::tier_of(&f.severity) == *sev
+                                && grid_effort_key(f.effort.as_deref()) == *eff
                         })
                         .map(|f| GridTagJson {
                             rule_id: f.rule_id.clone(),
@@ -620,7 +626,7 @@ pub struct CuratedSiteJson {
     /// identical to the parent [`CuratedGroupJson::citation`] shown once at the group header
     /// (which is that same call applied to the group's FIRST site only). Exists so a consumer
     /// needing the per-finding citation never has to assume group membership implies a shared
-    /// citation; the cross-artifact equality gate compares this against `findings.json`'s
+    /// citation; the cross-artifact equality gate compares this against `json/inspection.json`'s
     /// `FindingRow::citation_label`/`citation_urls` for the same finding.
     pub citation: CitationJson,
     /// Raw rule ids absorbed into this finding during P1 clustering — an INTERNAL/traceability
@@ -667,7 +673,7 @@ pub struct CuratedSiteJson {
     pub fix_for_this_finding: Option<String>,
     /// D8: the label printed beside this site's fix, [`TAILORED_FIX_LABEL`] or
     /// [`STANDARD_FIX_LABEL`] (see [`fix_type_label`]); empty when the site carries no fix text.
-    /// The same value `findings.json` and the datasets carry in `fix_type`.
+    /// The same value `json/inspection.json` and the datasets carry in `fix_type`.
     pub fix_type: String,
     /// Pass-1 W7 (C5): every evidence site a merge ABSORBED into this row
     /// (`Finding::also_locations`, verbatim) — carried in the PDF's own data so the three
@@ -699,7 +705,7 @@ pub struct CuratedSiteJson {
     /// not another site. `1` for an un-merged row.
     pub site_count: usize,
     /// WO8: whether the reviewer edited any field of this site's row. The PDF prints nothing for
-    /// it; the data carries it so the PDF's rows agree with `findings.json`'s.
+    /// it; the data carries it so the PDF's rows agree with `json/inspection.json`'s.
     pub reviewer_edited: bool,
     /// The ids of the edits applied to this site's row, in the order they were applied.
     pub edit_ids: Vec<String>,
@@ -802,7 +808,7 @@ pub const STANDARD_FIX_LABEL: &str = "Standard fix";
 /// The label every export prints beside a finding's fix (D8): [`TAILORED_FIX_LABEL`] when the fix
 /// was written for this code and passed the checks, [`STANDARD_FIX_LABEL`] when the fix is the
 /// rule's own guidance, and empty when the row carries no fix text at all. One definition, read
-/// by the PDF data, `findings.json`, every dataset and the workbook.
+/// by the PDF data, `json/inspection.json`, every dataset and the workbook.
 ///
 /// `specific_is_authored` is true when the finding's `fix_specific`, as the export prints it, is
 /// the same text as the rule's own authored fix. An old saved run, an old scan cache or a
@@ -1066,7 +1072,7 @@ pub struct PdfWordsJson {
     pub area: String,
     /// How many skipped files the PDF names before it points at the Not checked sheet.
     pub skipped_files_cap: usize,
-    /// "and N more skipped files, listed in full on the Not checked sheet and in findings.json":
+    /// "and N more skipped files, listed in full on the Not checked sheet and in json/inspection.json":
     /// the part after "N".
     pub skipped_files_more: String,
     /// How many "not run" notes the PDF prints in each place before it points at the Not checked
@@ -1109,7 +1115,7 @@ impl PdfWordsJson {
             failed_passes_more: format!("more, listed on the {} sheet", v::NOT_CHECKED),
             skipped_files_cap: PDF_MAX_SKIPPED_FILES,
             skipped_files_more: format!(
-                "more skipped files, listed in full on the {} sheet and in findings.json",
+                "more skipped files, listed in full on the {} sheet and in {INSPECTION_JSON}",
                 v::NOT_CHECKED
             ),
         }
@@ -1124,7 +1130,7 @@ pub struct AuditReportJson {
     /// which stay for one release.
     pub counts: super::counts::ReportCounts,
     /// The package is for the operator's own review. Not part of the PDF's data: the exporters
-    /// that build from this value beside the PDF (`findings.json`) read it to decide whether the
+    /// that build from this value beside the PDF (`json/inspection.json`) read it to decide whether the
     /// group reviewer's triage columns go in.
     #[serde(skip)]
     pub internal: bool,
@@ -1205,7 +1211,7 @@ pub struct AuditReportJson {
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
     /// H4: what this scan did not cover, by pass and by path (see [`coverage_gaps`]). Rendered
-    /// in the PDF's Coverage block, the workbook's Coverage sheet and `findings.json`.
+    /// in the PDF's Coverage block, the workbook's Coverage sheet and `json/inspection.json`.
     pub coverage_gaps: CoverageGapsJson,
     pub disclaimer: String,
 }

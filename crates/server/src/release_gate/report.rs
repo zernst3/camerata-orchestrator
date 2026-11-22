@@ -15,9 +15,9 @@ pub enum CheckId {
     Secrets,
     /// Exactly the promised files and datasets are in the package.
     DatasetSet,
-    /// Every dataset's CSV agrees with its JSON; `findings.json` agrees with `all-findings`.
+    /// Every dataset's CSV agrees with its JSON; `json/inspection.json` agrees with `all-findings`.
     DatasetParity,
-    /// The PDF's rows and `findings.json`'s rows are the same set.
+    /// The PDF's rows and `json/inspection.json`'s rows are the same set.
     RowParity,
     /// The PDF's rows and cover summary, the workbook's rows and Index summaries and the CSV
     /// agree with `json/all-findings.json` by severity AND kind (22d).
@@ -131,7 +131,7 @@ impl CheckId {
 /// One fail-loud line. Never carries a secret: `evidence` is the redacted form only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Problem {
-    /// The file the problem is in (`findings.json`, `camerata-...-findings.xlsx`, `PDF data`).
+    /// The file the problem is in (`json/inspection.json`, `camerata-...-findings.xlsx`, `PDF data`).
     pub file: String,
     /// Where in that file (`findings[0].fix_specific`, `sheet "All Findings" cell V2`).
     pub location: String,

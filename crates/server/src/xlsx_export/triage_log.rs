@@ -45,7 +45,7 @@ use crate::report_export::{
 pub const TRIAGE_LOG_SHEET: &str = "Triage Log";
 /// The archive path the client package must never carry. Kept so the release gate and the tests
 /// can name what they refuse.
-pub const TRIAGE_LOG_CSV: &str = "csv/triage-log.csv";
+pub const TRIAGE_LOG_CSV: &str = camerata_api_types::package_paths::TRIAGE_LOG_CSV;
 /// The file name the operator's download and the command line's file beside the zip end with.
 pub const INTERNAL_FILE_NAME: &str = "camerata-triage-log-INTERNAL.csv";
 /// The words that start the first line of the operator file.

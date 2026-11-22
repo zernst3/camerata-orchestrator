@@ -345,7 +345,7 @@ async fn purge_completeness_no_client_file_remains_in_any_known_location() {
     let before_finding = files_containing(&fx.root, &fx.root, SENTINEL_FINDING, &skip);
     for expected in [
         "data/scan-cache.json",
-        "data/onboarding-draft.json",
+        "data/onboarding-draft-",
         "cli-state/camerata",
     ] {
         assert!(
@@ -411,7 +411,7 @@ async fn purge_completeness_no_client_file_remains_in_any_known_location() {
     let kept: Vec<&String> = after_finding.iter().collect();
     assert!(
         kept.iter().all(|p| {
-            p.as_str() == "data/onboarding-draft.json" || p.starts_with("data/inspections/")
+            p.starts_with("data/onboarding-draft-") || p.starts_with("data/inspections/")
         }),
         "SENTINEL_FINDING may remain only in the draft and the inspection, found in {after_finding:?}"
     );
@@ -424,7 +424,7 @@ async fn purge_completeness_no_client_file_remains_in_any_known_location() {
     assert!(
         after_finding
             .iter()
-            .any(|p| p == "data/onboarding-draft.json"),
+            .any(|p| p.starts_with("data/onboarding-draft-")),
         "the draft keeps the excerpt: {after_finding:?}"
     );
 
@@ -910,9 +910,9 @@ async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
     let before = unzip(&before_zip);
     let before_findings = before
         .iter()
-        .find(|(name, _)| name.ends_with("findings.json"))
+        .find(|(name, _)| name.ends_with("json/inspection.json"))
         .map(|(_, bytes)| bytes.clone())
-        .expect("the package carries findings.json");
+        .expect("the package carries json/inspection.json");
     assert!(String::from_utf8_lossy(&before_findings).contains("src/leak.ts"));
 
     delete_over_http(fx).await;
@@ -935,9 +935,9 @@ async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
     let after = unzip(&after_zip);
     let after_findings = after
         .iter()
-        .find(|(name, _)| name.ends_with("findings.json"))
+        .find(|(name, _)| name.ends_with("json/inspection.json"))
         .map(|(_, bytes)| bytes.clone())
-        .expect("the regenerated package carries findings.json");
+        .expect("the regenerated package carries json/inspection.json");
     let strip_clock = |bytes: &[u8]| -> serde_json::Value {
         let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         if let Some(map) = value.as_object_mut() {

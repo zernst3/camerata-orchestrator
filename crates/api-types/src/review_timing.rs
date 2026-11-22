@@ -2,7 +2,7 @@
 //! overridden by Zach's 2026-10-23 ruling): the review timer's per-group active time, the per-row
 //! "reviewed" record, and the stats built from them.
 //!
-//! Zach's ruling: this data is never in any client export (xlsx, `findings.json`, the PDF, the
+//! Zach's ruling: this data is never in any client export (xlsx, `json/inspection.json`, the PDF, the
 //! manifest, the CSV and JSON datasets, the README, anything a client receives). It is shown in an
 //! internal stats view as data for pricing and nowhere else.
 //!

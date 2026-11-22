@@ -24,7 +24,7 @@ The reviewer, not the engine, removes a false alarm.
    until the operator rules it out ("Ruled out", the existing term).
 3. **The operator only.** It appears in the review UI (a chip, the reasons in the detail and the
    queue's "Possible false positives first" look) and in internal packages (a technical-band
-   column, a `findings.json` key and a Start here count). A client package carries none of it.
+   column, a `json/inspection.json` key and a Start here count). A client package carries none of it.
 4. **Vocabulary.** "Possible false positive" is its own term for its own concept, a reviewers-only
    one (`vocabulary::INTERNAL_TERMS`). The retired-word check blanks an owned term before it
    matches, so "Possible false positive" passes while a bare "false positive" is still refused in

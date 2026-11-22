@@ -175,7 +175,10 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         names.iter().any(|n| n.ends_with("-findings.xlsx")),
         "{names:?}"
     );
-    assert!(names.contains(&"findings.json".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"json/inspection.json".to_string()),
+        "{names:?}"
+    );
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
     // 22c: the manifest states the quote basis exactly as `camerata count` does (the same
@@ -461,16 +464,16 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
     {
         use std::io::Read;
         let mut f = archive
-            .by_name("findings.json")
-            .expect("the export must contain findings.json");
+            .by_name("json/inspection.json")
+            .expect("the export must contain json/inspection.json");
         f.read_to_string(&mut findings_json)
-            .expect("findings.json must be valid UTF-8");
+            .expect("json/inspection.json must be valid UTF-8");
     }
     let parsed: serde_json::Value =
-        serde_json::from_str(&findings_json).expect("findings.json must be valid JSON");
+        serde_json::from_str(&findings_json).expect("json/inspection.json must be valid JSON");
     let failed_passes = parsed["summary"]["failed_passes"]
         .as_array()
-        .expect("findings.json summary must carry a failed_passes array");
+        .expect("json/inspection.json summary must carry a failed_passes array");
     // The exact rule id(s) the commodity taint layer claims to cover for a Python repo (a
     // universal id like `SEC-NO-RAW-SQL-CONCAT-1`, a Python-specific one like
     // `PYTHON-PARAMETERIZED-SQL-1`, or both, depending on the stack-exception mechanism —

@@ -29,7 +29,10 @@ fn the_panel_has_no_triage_log_checkbox() {
         !html.contains("Also export, per rule"),
         "the old checkbox hint is gone: {html}"
     );
-    assert!(!html.contains("csv/triage-log.csv"), "{html}");
+    assert!(
+        !html.contains(camerata_api_types::package_paths::TRIAGE_LOG_CSV),
+        "{html}"
+    );
 }
 
 #[test]
@@ -127,14 +130,20 @@ async fn the_download_calls_the_triage_log_route() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/projects/p1/triage-log.csv"))
+        .and(path(format!(
+            "/api/projects/p1/{}",
+            camerata_api_types::package_paths::TRIAGE_LOG_FILE
+        )))
         .respond_with(
             ResponseTemplate::new(200).set_body_string("INTERNAL operator file.\nRule ID\n"),
         )
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/api/projects/p2/triage-log.csv"))
+        .and(path(format!(
+            "/api/projects/p2/{}",
+            camerata_api_types::package_paths::TRIAGE_LOG_FILE
+        )))
         .respond_with(
             ResponseTemplate::new(404)
                 .set_body_json(serde_json::json!({ "ok": false, "message": "No scan results." })),

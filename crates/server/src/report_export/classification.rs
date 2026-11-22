@@ -723,7 +723,7 @@ pub(crate) fn finding_confidence_rank(f: &Finding) -> u8 {
     u8::from(f.needs_review || f.confidence.as_deref() == Some("needs-review"))
 }
 
-// ── C4-P2 / C5-4: one hedge source of truth, shared by findings.json / the xlsx workbook / the
+// ── C4-P2 / C5-4: one hedge source of truth, shared by json/inspection.json / the xlsx workbook / the
 // PDF ──────────────────────────────────────────────────────────────────────────────────────
 //
 // Bug family (artifact-consistency hardening, see docs/plans for the originating report): the
@@ -731,7 +731,7 @@ pub(crate) fn finding_confidence_rank(f: &Finding) -> u8 {
 // `confidence` string could each tell a different story for the SAME finding — a row routed to
 // the informational/held appendix for a reason OTHER than calibration doubt (an `info`-severity
 // note, a testing-style deviation with no corpus, an absence-type stance rule) rendered with
-// `needs_review: false` / `confidence: "high"` in `findings.json`/the workbook, even though the
+// `needs_review: false` / `confidence: "high"` in `json/inspection.json`/the workbook, even though the
 // narrative text calls that same row "held for a human reviewer's judgment call" — an unhedged
 // row sitting in the bucket whose entire definition is "needs a human to decide". Separately, a
 // raw desync between `f.needs_review` and `f.confidence` (a verdict re-application, a merge)
@@ -742,7 +742,7 @@ pub(crate) fn finding_confidence_rank(f: &Finding) -> u8 {
 // placement (`bucket == "informational"` or `bucket == "held"` (C5-4) — being held for review IS
 // a hedge, by definition of either bucket). `build_report_json` (the PDF's
 // `CuratedSiteJson.confidence`) and `xlsx_export::partition_rows`
-// (`FindingRow.confidence`/`FindingRow.needs_review`, which `findings.json` serializes verbatim)
+// (`FindingRow.confidence`/`FindingRow.needs_review`, which `json/inspection.json` serializes verbatim)
 // both call this ONE function with their own already-computed `bucket` (itself a single shared
 // computation — see `effective_bucket`) — never re-deriving hedge state independently. This does
 // NOT change bucket placement (a finding explicitly dispositioned out of `Unresolved` still
@@ -1317,7 +1317,7 @@ pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
 /// silently shadowing that function's own `report` parameter — so the PDF's JSON saw the
 /// synthetic rows, but `xlsx_export::build_workbook` / `build_findings_export` (which read the
 /// ORIGINAL, un-injected `ScanReport` directly, never the exporter-local clone) never did. That
-/// was the exact shape of the measured defect: `findings.json`'s own `summary` (cloned from the
+/// was the exact shape of the measured defect: `json/inspection.json`'s own `summary` (cloned from the
 /// PDF's `AuditReportJson`) described `N+K` rows while its `findings` array held only `N`.
 ///
 /// The fix is a POSITION fix, not a logic fix: this function is now part of the SCAN pipeline,

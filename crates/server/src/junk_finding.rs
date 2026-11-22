@@ -4,7 +4,7 @@
 //!
 //! A scan reply once carried a row with rule `JAVASCRIPT-TYPESRIPT-PLACEHOLDER`, title
 //! `placeholder`, code `x` and detail `x`. Calibration and the detail step both said to discard
-//! it; nothing could, and it shipped in the PDF, the workbook and `findings.json`. Three layers
+//! it; nothing could, and it shipped in the PDF, the workbook and `json/inspection.json`. Three layers
 //! now hold it back, all reading THIS one definition so they cannot drift apart:
 //!
 //! 1. scan parsing ([`parse_gate_reason`]) never lets such a row exist;
