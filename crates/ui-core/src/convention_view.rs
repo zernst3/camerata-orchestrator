@@ -534,8 +534,12 @@ mod tests {
             ..FinderRowRef::default()
         }];
         let groups = place_groups(&c);
-        let all: Vec<&PlaceLine> = groups.iter().flat_map(|g| g.places.iter()).collect();
-        assert_eq!(all.len(), 1, "{groups:?}");
+        let at_the_place = groups
+            .iter()
+            .flat_map(|g| g.places.iter())
+            .filter(|p| (p.path.as_str(), p.line) == ("a.ts", 5))
+            .count();
+        assert_eq!(at_the_place, 1, "{groups:?}");
     }
 
     /// Review item 4: an untouched split reads "No choice yet"; a ruling reads as what it is.

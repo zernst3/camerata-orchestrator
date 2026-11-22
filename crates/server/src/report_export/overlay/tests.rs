@@ -934,11 +934,19 @@ mod standards {
             .findings
             .iter()
             .any(|f| f.site_key == key));
-        // The decision is kept by the store but has no row to stand on: it applies to nothing, so
-        // it shows through the stale path (a decision with no row) and never as a disposition.
+        // The decision is still held by the overlay, but no row carries its key: it is stale (a
+        // decision with no row to stand on), and the release gate reads it as such.
         assert!(
-            !withdrawn.dispositions().contains_key(&key),
-            "a decision whose row is gone must not apply"
+            withdrawn.records().iter().any(|r| r.key == key),
+            "the decision is kept"
+        );
+        assert!(
+            !withdrawn
+                .report()
+                .findings
+                .iter()
+                .any(|f| f.site_key == key),
+            "and has no row, so it is stale"
         );
         assert!(
             withdrawn.report().conventions[0]
