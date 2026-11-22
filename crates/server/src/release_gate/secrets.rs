@@ -39,7 +39,7 @@ fn scan_text_except(
     let mut seen: HashSet<(String, String)> = HashSet::new();
     let mut problems = Vec::new();
     for variant in variants {
-        for m in camerata_secrets::detect_secrets(variant) {
+        for m in camerata_secrets::detect_client_secrets(variant) {
             if skip(&m, variant) {
                 continue;
             }
@@ -62,12 +62,28 @@ fn scan_text_except(
             problems.push(Problem::new(
                 file,
                 at,
-                format!("{} present in a client file", m.shape.display_name()),
+                present_message(m.shape, m.twin.as_ref()),
                 Some(evidence),
             ));
         }
     }
     problems
+}
+
+/// The problem's message: the shape named, and for a published documentation key that it is one
+/// and is unmasked (the export masks it; this proves it did). Never the value.
+fn present_message(
+    shape: camerata_secrets::SecretShape,
+    twin: Option<&camerata_secrets::Twin>,
+) -> String {
+    if twin.is_some() {
+        format!(
+            "{} (a published example key) present unmasked in a client file",
+            shape.display_name()
+        )
+    } else {
+        format!("{} present in a client file", shape.display_name())
+    }
 }
 
 /// A plain-text file (the README, the manifest, a non-JSON member).
@@ -112,7 +128,7 @@ pub fn json_problems(file: &str, value: &Value) -> Vec<Problem> {
             problems.push(Problem::new(
                 file,
                 hit.path,
-                format!("{} present in a client file", hit.shape.display_name()),
+                present_message(hit.shape, hit.twin.as_ref()),
                 Some(evidence),
             ));
         }

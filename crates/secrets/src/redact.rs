@@ -4,9 +4,9 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use crate::detect::{detect_secrets, is_decor, SecretMatch};
+use crate::detect::{detect_client_secrets, detect_secrets, is_decor, SecretMatch};
 use crate::shapes::{self, prefix_of, SecretShape};
-use crate::twins::ELLIPSIS;
+use crate::twins::{Twin, ELLIPSIS};
 
 /// A body longer than this many chars shows its last four chars; a body of this length or less
 /// shows only the total length (a four-char tail on a twenty-char body would reveal 20% of it).
@@ -46,6 +46,15 @@ fn generic_form(shape: SecretShape, value: &str) -> String {
         String::new()
     };
     format!("{prefix}{ELLIPSIS}{tail} ({total} chars)")
+}
+
+/// The mask of a key a vendor publishes in its documentation: the prefix, the length and the
+/// words `published example`, never any of the body, so a reader sees it is a public example and
+/// not a leaked key.
+fn published_form(shape: SecretShape, value: &str) -> String {
+    let prefix = prefix_of(shape, value);
+    let total = value.chars().count();
+    format!("{prefix}{ELLIPSIS} ({total} chars, published example)")
 }
 
 fn jwt_form(value: &str, role: Option<&str>) -> String {
@@ -125,6 +134,7 @@ impl SecretMatch {
             SecretShape::SupabaseServiceRoleJwt | SecretShape::OpaqueJwt => {
                 jwt_form(value, self.jwt_role.as_deref())
             }
+            shape if self.twin == Some(Twin::PublishedExampleKey) => published_form(shape, value),
             shape => generic_form(shape, value),
         }
     }
@@ -161,6 +171,23 @@ pub fn redact(text: &str) -> Redacted {
 /// `redact(text).text`, borrowing when nothing matched.
 pub fn redact_str(text: &str) -> Cow<'_, str> {
     let matches = detect_secrets(text);
+    if matches.is_empty() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(apply(text, &matches).text)
+    }
+}
+
+/// [`redact`] for text a CLIENT receives: also masks a key a vendor publishes in its
+/// documentation (labelled `published example`), which [`redact`] leaves readable because it is
+/// not a secret. Same idempotence and line-count guarantees.
+pub fn redact_for_client(text: &str) -> Redacted {
+    apply(text, &detect_client_secrets(text))
+}
+
+/// `redact_for_client(text).text`, borrowing when nothing matched.
+pub fn redact_str_for_client(text: &str) -> Cow<'_, str> {
+    let matches = detect_client_secrets(text);
     if matches.is_empty() {
         Cow::Borrowed(text)
     } else {

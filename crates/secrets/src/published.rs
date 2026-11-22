@@ -99,3 +99,13 @@ pub fn is_published_example(sha256_hex: &str, before_value: &str) -> bool {
                 .is_none_or(|identifier| names_identifier(before_value, identifier))
     })
 }
+
+/// Whether `sha256_hex` is a key the vendor publishes as ITSELF (a documentation key every snippet
+/// uses, [`PublishedExample::identifier`] `None`), as opposed to a value documented only as one
+/// setting's value (a config enum). Only the first kind is a key that must be masked in a client
+/// package; the second is a setting a reader sees as one.
+pub fn is_documentation_key(sha256_hex: &str) -> bool {
+    PUBLISHED_EXAMPLES
+        .iter()
+        .any(|example| example.digest == sha256_hex && example.identifier.is_none())
+}

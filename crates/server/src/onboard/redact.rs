@@ -23,7 +23,7 @@ use camerata_api_types::audit::FindingKind;
 /// it from the detector while a reader still sees the key. Borrows when nothing changed.
 pub(crate) fn redact_visible(text: &str) -> Cow<'_, str> {
     let clean = strip_zero_width(text);
-    let redacted = match camerata_secrets::redact_str(&clean) {
+    let redacted = match camerata_secrets::redact_str_for_client(&clean) {
         Cow::Owned(redacted) => Some(redacted),
         Cow::Borrowed(_) => None,
     };
@@ -36,7 +36,7 @@ pub(crate) fn redact_string(text: &mut String) -> usize {
     if let Cow::Owned(clean) = strip_zero_width(text) {
         *text = clean;
     }
-    let redacted = camerata_secrets::redact(text);
+    let redacted = camerata_secrets::redact_for_client(text);
     let count = redacted.redactions.len();
     if count > 0 {
         *text = redacted.text;

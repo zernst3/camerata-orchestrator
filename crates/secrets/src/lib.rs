@@ -23,12 +23,14 @@ mod shapes;
 mod twins;
 
 pub use detect::{
-    detect_all, detect_for_rule, detect_for_rule_in_file, detect_secrets, detect_shapes,
-    first_secret, is_key_body_line, match_lines, match_lines_for_rule,
+    detect_all, detect_client_secrets, detect_for_rule, detect_for_rule_in_file, detect_secrets,
+    detect_shapes, first_secret, is_key_body_line, match_lines, match_lines_for_rule,
     match_lines_for_rule_in_file, SecretMatch,
 };
 pub use json::{find_secret_hits_in_json, find_secrets_in_json, redact_json_values, JsonHit};
-pub use redact::{redact, redact_str, Redacted, Redaction};
+pub use redact::{
+    redact, redact_for_client, redact_str, redact_str_for_client, Redacted, Redaction,
+};
 pub use shapes::{is_supabase_dsn, shapes_for_rule, SecretShape, URL_SECRET_PARAMS};
 pub use twins::{Twin, PLACEHOLDER_WORDS};
 

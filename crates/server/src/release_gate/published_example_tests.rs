@@ -123,7 +123,10 @@ fn the_normal_export_path_masks_the_published_example_key_and_the_gate_accepts_i
 
 #[test]
 fn keys_that_are_public_by_design_still_ship_unmasked() {
-    let publishable = format!("pk_live_{}", body(40, "abcdefghijklmnopqrstuvwxyz0123456789", 51));
+    let publishable = format!(
+        "pk_live_{}",
+        body(40, "abcdefghijklmnopqrstuvwxyz0123456789", 51)
+    );
     let anon = jwt(Some("anon"));
     let lines = [
         format!("NEXT_PUBLIC_STRIPE_KEY={publishable}"),
@@ -149,7 +152,10 @@ fn keys_that_are_public_by_design_still_ship_unmasked() {
     }
     let pkg = exported(vec![finding_with(&publishable)]);
     let findings = String::from_utf8_lossy(&pkg.findings_json).into_owned();
-    assert!(findings.contains(&publishable), "the publishable key was masked");
+    assert!(
+        findings.contains(&publishable),
+        "the publishable key was masked"
+    );
 }
 
 #[test]
@@ -166,7 +172,8 @@ fn the_long_alphanumeric_runs_in_findings_json_are_only_hashes_and_commit_ids() 
             }
             runs += 1;
             assert!(
-                run.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) && matches!(run.len(), 40 | 64),
+                run.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+                    && matches!(run.len(), 40 | 64),
                 "a long alphanumeric run in findings.json is neither a sha1 nor a sha256 hex \
                  digest (length {})",
                 run.len()
@@ -175,7 +182,9 @@ fn the_long_alphanumeric_runs_in_findings_json_are_only_hashes_and_commit_ids() 
     }
     assert!(runs > 0, "the fixture has no long run to prove the point");
     assert!(
-        strings.iter().all(|s| camerata_secrets::first_secret(s).is_none()),
+        strings
+            .iter()
+            .all(|s| camerata_secrets::first_secret(s).is_none()),
         "the detector reads a secret in findings.json"
     );
 }
