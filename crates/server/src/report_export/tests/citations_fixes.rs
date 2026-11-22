@@ -2238,6 +2238,7 @@ fn is_known_authority_url(url: &str) -> bool {
         "postgrest.org",
         "github.com/mde/ejs",
         "api.rubyonrails.org",
+        "guides.rubyonrails.org",
         "handlebarsjs.com",
         "pugjs.org",
         "jinja.palletsprojects.com",
