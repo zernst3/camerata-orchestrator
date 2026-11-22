@@ -813,6 +813,7 @@ fn finding_for(rule_id: &str, path: &str) -> super::FindingView {
 
 fn rec(option_id: &str, operator_chosen: bool) -> super::RuleRecommendationView {
     super::RuleRecommendationView {
+        repo: String::new(),
         recommended_option_id: option_id.to_string(),
         recommendation_reasoning: "because".to_string(),
         hallucinated: false,

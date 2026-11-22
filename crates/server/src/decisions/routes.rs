@@ -506,6 +506,29 @@ pub(crate) async fn post_standard(
     }
 }
 
+/// `GET /api/projects/:id/standards`: the active rulings on the standards of the latest
+/// inspection. The screen reads them on load and after every ruling, so the convention controls
+/// show what the server holds (a reload never loses a ruling).
+pub(crate) async fn get_standards(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if state.projects.get(&id).is_none() {
+        return no_project();
+    }
+    if state.decisions.is_corrupt(&id) {
+        return corrupt_response();
+    }
+    let Some(latest) = state.inspections.latest(&id) else {
+        return no_inspection();
+    };
+    Json(crate::conventions::rulings_for_run(
+        &state.decisions.standards(&id),
+        &latest.id,
+    ))
+    .into_response()
+}
+
 /// `POST /api/projects/:id/standards/:ruling_id/revoke`: withdraw a ruling.
 pub(crate) async fn revoke_standard(
     State(state): State<AppState>,

@@ -464,10 +464,39 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     // The place a reviewer opened from the hub (a place that follows a standard has no row). The
     // viewer for it is drawn above the hub, so closing it leaves the hub as it was.
     let mut place_open = use_signal(|| Option::<super::queue_table::PlaceOpen>::None);
-    // What this session asked of each rule's standard: the scan's records are not read again after a
-    // ruling, so the answer is shown on them from here.
-    let ruling_echo =
-        use_signal(std::collections::HashMap::<String, super::queue_table::RulingEcho>::new);
+    // The reviewer's active rulings, as the server holds them: read on load and again after every
+    // ruling (the review counter), so a reload never loses one.
+    let rulings_res = {
+        use_resource(move || {
+            let _ = review_refresh.read();
+            // Read inside the resource, so it runs again once the project is known.
+            let pid = live_project
+                .and_then(|l| l.0.read().clone())
+                .or_else(|| active_project_res.read().clone().flatten())
+                .map(|p| p.id)
+                .unwrap_or_default();
+            async move {
+                if pid.is_empty() {
+                    None
+                } else {
+                    super::wire::fetch_rulings(&pid).await
+                }
+            }
+        })
+    };
+    // The INSPECTION's convention records (the scan report this screen opened on is the phase-1
+    // scan, which holds none) with those rulings shown on them.
+    let convention_records: Vec<camerata_api_types::audit::RuleConvention> = {
+        let rulings = rulings_res.read().clone().flatten().unwrap_or_default();
+        super::queue_table::with_rulings(
+            &audit
+                .read()
+                .as_ref()
+                .map(|a| a.conventions.clone())
+                .unwrap_or_default(),
+            &rulings,
+        )
+    };
     let mut queue_rule_filter = use_signal(|| Option::<String>::None);
     let mut processing = use_signal(|| false);
     // ── THE GATED CONVENTION COMMIT (design §3; Q3 + Q4) ──────────────────────
@@ -779,7 +808,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     let open_hub: Option<RuleHubView> = hub_open.read().as_ref().and_then(|r| {
         camerata_ui_core::triage::rule_hub_with_conventions(
             &findings,
-            &super::queue_table::with_rulings(&report.conventions, &ruling_echo.read()),
+            &convention_records,
             &r.repo,
             &r.rule_id,
         )
@@ -950,7 +979,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         };
                         let project_id = project_id.clone();
                         spawn(async move {
-                            match rule_on(&project_id, &req.repo, &req.rule_id, &action, ruling_echo, review_refresh).await {
+                            match rule_on(&project_id, &req.repo, &req.rule_id, &action, review_refresh).await {
                                 Ok(()) => {
                                     hub_open.set(None);
                                 }
@@ -1861,7 +1890,7 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                                 repos: report.repos.clone(),
                                 recommendations,
                                 audit,
-                                conventions: super::queue_table::with_rulings(&report.conventions, &ruling_echo.read()),
+                                conventions: convention_records.clone(),
                             }
                         }
                     }
@@ -1952,13 +1981,13 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 } else if kind_view() == KindSurface::NoConvention {
                     NoConventionPanel {
                         findings: findings_on_surface(&findings, KindSurface::NoConvention),
-                        conventions: super::queue_table::with_rulings(&report.conventions, &ruling_echo.read()),
+                        conventions: convention_records.clone(),
                         on_ruling: {
                             let project_id = project_id.clone();
                             Callback::new(move |(repo, rule, action): (String, String, super::queue_table::RulingAction)| {
                                 let project_id = project_id.clone();
                                 spawn(async move {
-                                    if let Err(msg) = rule_on(&project_id, &repo, &rule, &action, ruling_echo, review_refresh).await {
+                                    if let Err(msg) = rule_on(&project_id, &repo, &rule, &action, review_refresh).await {
                                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, msg);
                                     }
                                 });
@@ -2258,22 +2287,17 @@ pub(super) fn QueueIntro() -> Element {
     }
 }
 
-/// Ask the server to record a ruling on the standard of one rule, then show it on the record and
-/// read the review again (the Queue, the tree and the export line follow it). `Err` is the
+/// Ask the server to record a ruling on the standard of one rule, then read the review and the
+/// rulings again (the Queue, the tree, the export line and the controls follow it). `Err` is the
 /// server's reason, for a toast.
 async fn rule_on(
     project_id: &str,
     repo: &str,
     rule_id: &str,
     action: &super::queue_table::RulingAction,
-    mut echo: Signal<std::collections::HashMap<String, super::queue_table::RulingEcho>>,
     mut refresh: Signal<u32>,
 ) -> Result<(), String> {
-    let id = super::wire::post_ruling(project_id, repo, rule_id, action).await?;
-    echo.write().insert(
-        camerata_ui_core::adopt::adoption_key(repo, rule_id),
-        super::queue_table::RulingEcho::of(action, id),
-    );
+    super::wire::post_ruling(project_id, repo, rule_id, action).await?;
     refresh += 1;
     Ok(())
 }

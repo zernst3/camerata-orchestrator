@@ -2260,3 +2260,27 @@ async fn the_standards_routes_store_refuse_replace_and_withdraw_a_ruling() {
     let (status, _) = call(&app, "POST", &uri, Some(leave)).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn the_standards_read_returns_the_active_rulings_of_the_latest_inspection() {
+    let (state, app, pid) = app_with_project();
+    state.inspections.append(entry_with_rule(&pid)).unwrap();
+    let uri = format!("/api/projects/{pid}/standards");
+    let (status, none) = call(&app, "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(none, serde_json::json!([]));
+    let post = serde_json::json!({"repo": "acme/app", "rule_id": "ARCH-X-1",
+        "choice": {"accept": {"option_id": "b"}}, "reason": ""});
+    let (_, ruling) = call(&app, "POST", &uri, Some(post)).await;
+    let (_, read) = call(&app, "GET", &uri, None).await;
+    assert_eq!(read.as_array().map(Vec::len), Some(1), "{read}");
+    assert_eq!(read[0]["id"], ruling["id"]);
+    let id = ruling["id"].as_str().unwrap();
+    call(&app, "POST", &format!("{uri}/{id}/revoke"), None).await;
+    let (_, read) = call(&app, "GET", &uri, None).await;
+    assert_eq!(
+        read,
+        serde_json::json!([]),
+        "a withdrawn ruling is not returned"
+    );
+}

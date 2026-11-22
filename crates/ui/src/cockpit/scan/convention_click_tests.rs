@@ -251,6 +251,103 @@ thread_local! {
     static REPORT: RefCell<Value> = const { RefCell::new(Value::Null) };
 }
 
+/// What the server holds, shared with the stub's answers (the tests run one at a time): the saved
+/// draft (the phase-1 scan, and the inspection with its convention records) and the active rulings.
+static DRAFT: std::sync::Mutex<Value> = std::sync::Mutex::new(Value::Null);
+static RULINGS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+/// The inspection the server holds. The scan this screen opens on is the phase-1 scan, which
+/// carries NO convention records (only the inspection writes them), so the screen must read the
+/// records from the inspection (the saved draft's audit), as a real run does.
+fn set_inspection(inspection: Value) {
+    let mut scan = inspection.clone();
+    if let Some(o) = scan.as_object_mut() {
+        o.remove("conventions");
+    }
+    REPORT.with(|r| *r.borrow_mut() = scan.clone());
+    if let Ok(mut d) = DRAFT.lock() {
+        *d = json!({"scan": scan, "audit": inspection});
+    }
+    if let Ok(mut r) = RULINGS.lock() {
+        r.clear();
+    }
+}
+
+/// A ruling as the server stores and returns it.
+fn ruling_json(id: &str, repo: &str, rule: &str, choice: Value) -> Value {
+    json!({
+        "id": id, "repo": repo, "rule_id": rule, "choice": choice, "reason": "",
+        "decided_by": "z", "decided_at": "t", "run_id": "insp-1", "engine_version": "0",
+        "revoked_at": null
+    })
+}
+
+/// The server's answer to a ruling: stored (replacing the earlier one for the rule) and returned,
+/// or the refusal the test asked for.
+struct RulingPost(Option<ResponseTemplate>);
+
+impl wiremock::Respond for RulingPost {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        if let Some(refusal) = &self.0 {
+            return refusal.clone();
+        }
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        let mut all = RULINGS.lock().expect("rulings");
+        all.retain(|r| r["repo"] != body["repo"] || r["rule_id"] != body["rule_id"]);
+        let r = ruling_json(
+            &format!("std-{:06}", all.len() + 1),
+            body["repo"].as_str().unwrap_or_default(),
+            body["rule_id"].as_str().unwrap_or_default(),
+            body["choice"].clone(),
+        );
+        all.push(r.clone());
+        ResponseTemplate::new(200).set_body_json(r)
+    }
+}
+
+fn rulings_get(_: &Request) -> ResponseTemplate {
+    let all = RULINGS.lock().expect("rulings").clone();
+    ResponseTemplate::new(200).set_body_json(all)
+}
+
+fn revoke(req: &Request) -> ResponseTemplate {
+    let id = req
+        .url
+        .path()
+        .trim_end_matches("/revoke")
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    RULINGS
+        .lock()
+        .expect("rulings")
+        .retain(|r| r["id"] != json!(id));
+    ResponseTemplate::new(200).set_body_json(json!({"ok": true}))
+}
+
+fn draft_get(_: &Request) -> ResponseTemplate {
+    let d = DRAFT.lock().expect("draft").clone();
+    ResponseTemplate::new(200).set_body_json(d)
+}
+
+/// The export gate: held for the split until a ruling stands.
+fn gate_get(_: &Request) -> ResponseTemplate {
+    let decided = !RULINGS.lock().expect("rulings").is_empty();
+    let gate = camerata_api_types::review_view::ExportGateView {
+        split_rules: if decided {
+            Vec::new()
+        } else {
+            vec![camerata_api_types::review_view::SplitRuleHold {
+                repo: "me/api".into(),
+                rule_id: "ARCH-PAR-1".into(),
+            }]
+        },
+        ..Default::default()
+    };
+    ResponseTemplate::new(200).set_body_json(gate)
+}
+
 fn screen() -> Element {
     use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
     use_context_provider(|| Signal::new(None::<ScanReportView>));
@@ -283,43 +380,91 @@ fn source_file(req: &Request) -> ResponseTemplate {
 }
 
 async fn stub_server() -> MockServer {
-    stub_server_answering(ResponseTemplate::new(200).set_body_json(json!({"ok": true}))).await
+    stub_server_answering(None).await
 }
 
-/// The stub server, with `answer` as what a ruling gets.
-async fn stub_server_answering(answer: ResponseTemplate) -> MockServer {
+/// The stub server: the project, the saved draft, the decisions, the source files, the review's
+/// export gate and the rulings (stored, listed and withdrawn). `refusal` is what a ruling gets
+/// instead of being stored.
+async fn stub_server_answering(refusal: Option<ResponseTemplate>) -> MockServer {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/projects/active"))
+    let get = |p: &str| Mock::given(method("GET")).and(path(p.to_string()));
+    get("/api/projects/active")
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "p1", "name": "Acme", "repos": ["me/api"], "client_name": ""
         })))
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/api/onboard/source-file"))
+    get("/api/onboard/draft")
+        .respond_with(draft_get)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/onboard/draft"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .mount(&server)
+        .await;
+    get("/api/projects/p1/decisions")
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "decisions": [], "standings": [], "migrated_from_draft": true,
+            "latest_run_id": "insp-1"
+        })))
+        .mount(&server)
+        .await;
+    get("/api/onboard/source-file")
         .respond_with(source_file)
+        .mount(&server)
+        .await;
+    get("/api/projects/p1/review/export-gate")
+        .respond_with(gate_get)
+        .mount(&server)
+        .await;
+    get("/api/projects/p1/standards")
+        .respond_with(rulings_get)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path("/api/projects/p1/standards"))
-        .respond_with(answer)
+        .respond_with(RulingPost(refusal))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/api/projects/p1/standards/std-000001/revoke"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .and(wiremock::matchers::path_regex(
+            r"^/api/projects/p1/standards/[^/]+/revoke$",
+        ))
+        .respond_with(revoke)
         .mount(&server)
         .await;
     server
 }
 
 /// The screen over `report`, loaded, with the hub open on the rule.
-async fn screen_with_the_hub_open(report: Value) -> Mounted {
-    REPORT.with(|r| *r.borrow_mut() = report);
+async fn screen_with_the_hub_open(inspection: Value) -> Mounted {
+    set_inspection(inspection);
     let mut m = Mounted::mount(screen);
-    // The Queue draws its pane once the screen has read the project and its decisions.
-    m.pump(400).await;
+    // The Queue draws its pane once the screen has read the project, its decisions and the saved
+    // inspection (the records live there).
+    m.pump(700).await;
+    m.forget();
+    let hub = m.context::<crate::cockpit::viewer::ViewerHubOpen>();
+    m.vdom.in_runtime(|| {
+        let mut sig = hub.0;
+        sig.set(Some(RuleHubRequest {
+            repo: "me/api".into(),
+            rule_id: "ARCH-PAR-1".into(),
+        }));
+    });
+    m.until("the hub shows the rule", |h| h.contains("rule-hub-modal"))
+        .await;
+    m
+}
+
+/// [`screen_with_the_hub_open`] on a server that already holds these rulings.
+async fn screen_with_the_hub_open_after(inspection: Value, rulings: Vec<Value>) -> Mounted {
+    set_inspection(inspection.clone());
+    *RULINGS.lock().expect("rulings") = rulings;
+    let mut m = Mounted::mount(screen);
+    m.pump(700).await;
     m.forget();
     let hub = m.context::<crate::cockpit::viewer::ViewerHubOpen>();
     m.vdom.in_runtime(|| {
@@ -491,12 +636,17 @@ async fn leaving_it_to_the_client_replaces_leave_as_reported_and_posts_the_choic
 async fn withdraw_posts_the_revoke_of_the_live_ruling() {
     let server = stub_server().await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-    let mut live = record(PlaceStatus::FollowsRuleDefault);
-    live.standard.source = StandardSource::Reviewer;
-    live.standard.ruling_id = Some("std-000001".into());
-    let mut report = report_json();
-    report["conventions"] = json!([serde_json::to_value(live).expect("json")]);
-    let mut m = screen_with_the_hub_open(report).await;
+    // The server holds the reviewer's ruling (a record never does): the hub reads it from there.
+    let mut m = screen_with_the_hub_open_after(
+        report_json(),
+        vec![ruling_json(
+            "std-000001",
+            "me/api",
+            "ARCH-PAR-1",
+            json!({"accept": {"option_id": "seq"}}),
+        )],
+    )
+    .await;
     m.click("data-control=withdraw");
     m.until("the hub closes", |h| !h.contains("rule-hub-modal"))
         .await;
@@ -511,9 +661,9 @@ async fn withdraw_posts_the_revoke_of_the_live_ruling() {
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
 async fn a_refused_ruling_says_why_keeps_the_hub_open_and_does_not_refresh() {
-    let server = stub_server_answering(ResponseTemplate::new(422).set_body_json(json!({
+    let server = stub_server_answering(Some(ResponseTemplate::new(422).set_body_json(json!({
         "code": "unknown_option", "message": "That option is not one of the rule's options."
-    })))
+    }))))
     .await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let mut m = screen_with_the_hub_open(report_json()).await;
@@ -566,6 +716,12 @@ fn alternatives() -> Element {
         "ARCH-PAR-1".to_string(),
         RuleRecommendationView {
             recommended_option_id: "par".into(),
+            // The row's recommendation is the first repo's, not the last one scanned.
+            repo: if SECOND_REPO.with(std::cell::Cell::get) {
+                "me/api".into()
+            } else {
+                String::new()
+            },
             ..RuleRecommendationView::default()
         },
     )]);
@@ -645,8 +801,8 @@ async fn rule_alternatives_without_a_record_still_stages_a_rescan() {
     WITH_RECORD.with(|w| w.set(true));
 }
 
-/// Review item 12: with two repos that both have a record of the rule, a pick rules on the repo
-/// the row is about (the one scanned last), not on the first record found by rule id.
+/// Review item 12 (round 2, item 8): with two repos that both have a record of the rule, a pick
+/// rules on the repo the row's recommendation is for, and the row names it.
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
 async fn rule_alternatives_with_two_repos_rules_on_the_repo_of_the_row() {
@@ -661,7 +817,12 @@ async fn rule_alternatives_with_two_repos_rules_on_the_repo_of_the_row() {
     SECOND_REPO.with(|w| w.set(false));
     let sent = posts(&server, "/api/projects/p1/standards").await;
     assert_eq!(sent.len(), 1, "{sent:?}");
-    assert_eq!(sent[0]["repo"], "me/web", "{sent:?}");
+    assert_eq!(sent[0]["repo"], "me/api", "{sent:?}");
+    assert!(
+        m.html().contains("(me/api)"),
+        "the row names its repo: {}",
+        m.html()
+    );
 }
 
 // ── Tests 23 and 24 on a split: the No convention panel and the export line ───────────────────
@@ -701,98 +862,13 @@ fn split_report_json() -> Value {
     })
 }
 
-/// The export gate of the stub server: held for the split until a ruling is stored, and again
-/// after it is withdrawn.
-#[derive(Clone, Default)]
-struct GateState(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-struct GateAnswer(GateState);
-
-impl wiremock::Respond for GateAnswer {
-    fn respond(&self, _: &Request) -> ResponseTemplate {
-        let decided = self.0 .0.load(std::sync::atomic::Ordering::SeqCst);
-        let gate = camerata_api_types::review_view::ExportGateView {
-            split_rules: if decided {
-                Vec::new()
-            } else {
-                vec![camerata_api_types::review_view::SplitRuleHold {
-                    repo: "me/api".into(),
-                    rule_id: "ARCH-PAR-1".into(),
-                }]
-            },
-            ..Default::default()
-        };
-        ResponseTemplate::new(200).set_body_json(gate)
-    }
-}
-
-/// Answers a ruling: remembers that the rule is decided (or not) and returns the stored ruling.
-struct RulingAnswer(GateState, bool);
-
-impl wiremock::Respond for RulingAnswer {
-    fn respond(&self, _: &Request) -> ResponseTemplate {
-        self.0 .0.store(self.1, std::sync::atomic::Ordering::SeqCst);
-        ResponseTemplate::new(200).set_body_json(json!({"id": "std-000001"}))
-    }
-}
-
-async fn stub_server_with_gate() -> (MockServer, GateState) {
-    let state = GateState::default();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/projects/active"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "p1", "name": "Acme", "repos": ["me/api"], "client_name": ""
-        })))
-        .mount(&server)
-        .await;
-    // The saved draft holds the finished inspection, so the screen shows its findings.
-    Mock::given(method("GET"))
-        .and(path("/api/onboard/draft"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "scan": split_report_json(), "audit": split_report_json(),
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/onboard/draft"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/projects/p1/decisions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "decisions": [], "standings": [], "migrated_from_draft": true,
-            "latest_run_id": "insp-1"
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/projects/p1/review/export-gate"))
-        .respond_with(GateAnswer(state.clone()))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/projects/p1/standards"))
-        .respond_with(RulingAnswer(state.clone(), true))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/projects/p1/standards/std-000001/revoke"))
-        .respond_with(RulingAnswer(state.clone(), false))
-        .mount(&server)
-        .await;
-    (server, state)
-}
-
 const SPLIT_LINE: &str = "1 split rule needs a decision: ARCH-PAR-1";
 
 async fn no_convention_panel(server: &MockServer) -> (Mounted, camerata_test_env::EnvGuard) {
     let env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-    REPORT.with(|r| *r.borrow_mut() = split_report_json());
+    set_inspection(split_report_json());
     let mut m = Mounted::mount(screen);
-    m.pump(400).await;
-    m.pump(300).await;
+    m.pump(700).await;
     m.click("data-kind=No convention");
     m.until("the split is held and listed", |h| {
         h.contains(SPLIT_LINE) && h.contains("No choice yet")
@@ -804,7 +880,7 @@ async fn no_convention_panel(server: &MockServer) -> (Mounted, camerata_test_env
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
 async fn an_untouched_split_reads_no_choice_yet_and_claims_nothing_was_recorded() {
-    let (server, _) = stub_server_with_gate().await;
+    let server = stub_server().await;
     let (m, _env) = no_convention_panel(&server).await;
     let html = m.html();
     assert!(
@@ -823,7 +899,7 @@ async fn an_untouched_split_reads_no_choice_yet_and_claims_nothing_was_recorded(
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
 async fn leaving_a_split_to_the_client_posts_it_and_the_export_line_clears() {
-    let (server, _) = stub_server_with_gate().await;
+    let server = stub_server().await;
     let (mut m, _env) = no_convention_panel(&server).await;
     m.click("data-control=leave");
     let html = m
@@ -839,7 +915,7 @@ async fn leaving_a_split_to_the_client_posts_it_and_the_export_line_clears() {
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
 async fn accepting_an_option_on_a_split_posts_it_and_the_row_and_line_follow() {
-    let (server, _) = stub_server_with_gate().await;
+    let server = stub_server().await;
     let (mut m, _env) = no_convention_panel(&server).await;
     m.pick("data-control=accept", "seq");
     let html = m
@@ -854,7 +930,7 @@ async fn accepting_an_option_on_a_split_posts_it_and_the_row_and_line_follow() {
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(process_env)]
 async fn withdrawing_a_ruling_on_a_split_returns_it_to_no_choice_yet() {
-    let (server, _) = stub_server_with_gate().await;
+    let server = stub_server().await;
     let (mut m, _env) = no_convention_panel(&server).await;
     m.pick("data-control=accept", "seq");
     m.until("the ruling shows with its withdraw", |h| {
@@ -881,14 +957,13 @@ async fn withdrawing_a_ruling_on_a_split_returns_it_to_no_choice_yet() {
 /// Answers the Queue lane's read: the rows as the scan held them until a ruling is stored, then the
 /// reviewed rows with the departure the ruling made.
 struct QueueAnswer {
-    gate: GateState,
     before: Value,
     after: Value,
 }
 
 impl wiremock::Respond for QueueAnswer {
     fn respond(&self, _: &Request) -> ResponseTemplate {
-        let decided = self.gate.0.load(std::sync::atomic::Ordering::SeqCst);
+        let decided = !RULINGS.lock().expect("rulings").is_empty();
         ResponseTemplate::new(200).set_body_json(if decided { &self.after } else { &self.before })
     }
 }
@@ -897,7 +972,7 @@ impl wiremock::Respond for QueueAnswer {
 #[serial_test::serial(process_env)]
 async fn accepting_on_a_split_posts_the_ruling_and_the_queue_lane_shows_the_departures() {
     use camerata_ui_core::test_support::review_fixtures::{build, Params};
-    let (server, gate) = stub_server_with_gate().await;
+    let server = stub_server().await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     // The review views: the shell, and the Queue lane before and after the ruling.
     let ds = build(&Params::base(7));
@@ -925,16 +1000,14 @@ async fn accepting_on_a_split_posts_the_ruling_and_the_queue_lane_shows_the_depa
     Mock::given(method("GET"))
         .and(path("/api/projects/p1/review/queue"))
         .respond_with(QueueAnswer {
-            gate: gate.clone(),
             before: serde_json::to_value(&before).expect("json"),
             after: serde_json::to_value(&after).expect("json"),
         })
         .mount(&server)
         .await;
-    REPORT.with(|r| *r.borrow_mut() = split_report_json());
+    set_inspection(split_report_json());
     let mut m = Mounted::mount(screen);
-    m.pump(400).await;
-    m.pump(300).await;
+    m.pump(700).await;
     // The Review lanes, on the Queue lane.
     m.click("id=review-open");
     m.until("the review shell is up", |h| {
@@ -973,4 +1046,75 @@ async fn accepting_on_a_split_posts_the_ruling_and_the_queue_lane_shows_the_depa
         !html.contains("split rule needs a decision"),
         "the line no longer says the rule needs a decision: {html}"
     );
+}
+
+// ── Round 2 item 2: a reload keeps the ruling; item 1: the records are the inspection's ───────
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn after_a_reload_a_ruled_split_shows_its_ruling_with_withdraw() {
+    let server = stub_server().await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    set_inspection(split_report_json());
+    let mut first = Mounted::mount(screen);
+    first.pump(700).await;
+    first.click("data-kind=No convention");
+    first
+        .until("the split is untouched", |h| h.contains("No choice yet"))
+        .await;
+    first.pick("data-control=accept", "seq");
+    first
+        .until("the ruling shows", |h| h.contains("Accepted: Sequential"))
+        .await;
+    drop(first);
+    // The screen is built again from what the server holds (the draft and the rulings).
+    let mut again = Mounted::mount(screen);
+    again.pump(700).await;
+    again.click("data-kind=No convention");
+    let html = again
+        .until("the ruling is shown after the reload", |h| {
+            h.contains("Accepted: Sequential") && h.contains("Withdraw")
+        })
+        .await;
+    assert!(!html.contains("No choice yet"), "{html}");
+    assert!(
+        !html.contains("This rule needs a decision before a client package can be exported."),
+        "{html}"
+    );
+    // And the hub shows it too.
+    let hub = again.context::<crate::cockpit::viewer::ViewerHubOpen>();
+    again.vdom.in_runtime(|| {
+        let mut sig = hub.0;
+        sig.set(Some(RuleHubRequest {
+            repo: "me/api".into(),
+            rule_id: "ARCH-PAR-1".into(),
+        }));
+    });
+    let html = again
+        .until("the hub shows the rule", |h| h.contains("rule-hub-modal"))
+        .await;
+    assert!(html.contains("set by you"), "{html}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn a_split_row_with_no_record_is_read_only_and_claims_no_choice() {
+    let server = stub_server().await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut report = split_report_json();
+    report["conventions"] = json!([]);
+    set_inspection(report);
+    let mut m = Mounted::mount(screen);
+    m.pump(700).await;
+    m.click("data-kind=No convention");
+    let html = m
+        .until("the row is listed", |h| {
+            h.contains("cannot be ruled on here")
+        })
+        .await;
+    assert!(
+        !html.contains("adopt-pick") && !html.contains("No recommendation, leave it to the client"),
+        "no control and no claim of a choice: {html}"
+    );
+    assert!(!html.contains("Left to the client"), "{html}");
 }

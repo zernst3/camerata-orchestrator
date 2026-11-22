@@ -157,11 +157,17 @@ pub(in crate::cockpit) fn record_for_rule<'a>(
     conventions: &'a [camerata_api_types::audit::RuleConvention],
     repos: &[String],
     rule_id: &str,
+    recommendation_repo: &str,
 ) -> Option<&'a camerata_api_types::audit::RuleConvention> {
-    conventions
+    let of_rule = conventions
         .iter()
-        .filter(|c| c.rule_id.eq_ignore_ascii_case(rule_id))
-        .max_by_key(|c| repos.iter().position(|r| r == &c.repo))
+        .filter(|c| c.rule_id.eq_ignore_ascii_case(rule_id));
+    if recommendation_repo.is_empty() {
+        // A report from before the recommendation carried its repo: the repo scanned last.
+        return of_rule.max_by_key(|c| repos.iter().position(|r| r == &c.repo));
+    }
+    // The row shows this repo's recommendation, so it rules on this repo's record.
+    of_rule.filter(|c| c.repo == recommendation_repo).last()
 }
 
 /// Build one rule's control line out of the scan's three sources. PURE, so the priority order
@@ -516,11 +522,15 @@ pub(in crate::cockpit) fn RuleAlternativesPanel(
                         );
                         let evaluated_id = row.evaluated_option_id.clone();
                         // A rule with a convention record is ruled on, not staged for a rescan.
-                        let record = record_for_rule(&conventions, &repos, &rid).cloned();
+                        let record = record_for_rule(&conventions, &repos, &rid, &rec.repo).cloned();
                         let mut row = row;
                         if let Some(c) = &record {
                             (row.badge_class, row.badge_text) = convention_badge(c);
                             row.staged = false;
+                            // With several repos the row says which repo it rules on.
+                            if repos.len() > 1 {
+                                row.title = format!("{} ({})", row.title, c.repo);
+                            }
                         }
                         let pid_for_pick = project_id.clone();
                         rsx! {

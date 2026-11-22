@@ -934,8 +934,10 @@ mod standards {
             .findings
             .iter()
             .any(|f| f.site_key == key));
-        // The decision is still held by the overlay, but no row carries its key: it is stale (a
-        // decision with no row to stand on), and the release gate reads it as such.
+        // What is tested: the decision record is still held by the overlay but no row carries its
+        // key (it is dormant), and through the public gate and report APIs it counts for nothing:
+        // the export is not refused for that rule, and the counts equal those of a report that
+        // never had the decision.
         assert!(
             withdrawn.records().iter().any(|r| r.key == key),
             "the decision is kept"
@@ -946,7 +948,20 @@ mod standards {
                 .findings
                 .iter()
                 .any(|f| f.site_key == key),
-            "and has no row, so it is stale"
+            "and has no row"
+        );
+        let gate = crate::release_gate::holds::gate_holds(&withdrawn);
+        assert!(!gate.is_blocked(), "the export is not refused: {gate:?}");
+        let never = apply_overlay(&sealed, &[], &[], &[]);
+        let opts = crate::report_export::ReportOptions::default();
+        let counts = |r: &ReviewedReport| {
+            serde_json::to_value(&crate::report_export::build_report_json(r, None, &opts).counts)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            counts(&withdrawn),
+            counts(&never),
+            "the dormant decision is not counted"
         );
         assert!(
             withdrawn.report().conventions[0]

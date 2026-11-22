@@ -144,28 +144,50 @@ pub fn finder_status(c: &RuleConvention, s: &StandardState, option: Option<&str>
     }
 }
 
+/// The first option with a recorded place inside the row's line range that departs from the
+/// standard, when there is a standard.
+fn departing_listed_option<'a>(
+    c: &'a RuleConvention,
+    s: &StandardState,
+    row: &Finding,
+) -> Option<&'a OptionCensus> {
+    s.option_id.as_ref()?;
+    let (lo, hi) = row_range(row);
+    let path = plain_path(&row.path);
+    c.options.iter().find(|o| {
+        option_status(c, s, &o.option_id) == PlaceStatus::Departs
+            && o.places
+                .iter()
+                .any(|p| plain_path(&p.path) == path && p.line >= lo && p.line <= hi)
+    })
+}
+
+/// The option a finder row stands for, judged for the standard in force: the option of
+/// [`option_of_row`], except that a row whose range holds places of several options is labeled
+/// with the one that departs, never with the standard itself.
+pub fn option_for_standard(
+    row: &Finding,
+    c: &RuleConvention,
+    s: &StandardState,
+) -> (Option<String>, OptionBasis) {
+    let (option, basis) = option_of_row(row, c);
+    if let Some(dep) = departing_listed_option(c, s, row) {
+        if option.as_deref() != Some(dep.option_id.as_str()) {
+            return (Some(dep.option_id.clone()), OptionBasis::Listed);
+        }
+    }
+    (option, basis)
+}
+
 /// Whether a finder row citing the rule departs from the standard, judged from the row itself.
 /// A row whose line range holds recorded places of more than one option cannot be said to follow
 /// the standard just because one of them does: when any of those options departs, the row is a
 /// departure, so the departing place inside it is never taken as covered by a conforming row.
 pub fn row_status(c: &RuleConvention, s: &StandardState, row: &Finding) -> PlaceStatus {
-    let (option, _) = option_of_row(row, c);
-    if s.option_id.is_some() {
-        let (lo, hi) = row_range(row);
-        let path = plain_path(&row.path);
-        let any_departs = c
-            .options
-            .iter()
-            .filter(|o| {
-                o.places
-                    .iter()
-                    .any(|p| plain_path(&p.path) == path && p.line >= lo && p.line <= hi)
-            })
-            .any(|o| option_status(c, s, &o.option_id) == PlaceStatus::Departs);
-        if any_departs {
-            return PlaceStatus::Departs;
-        }
+    if departing_listed_option(c, s, row).is_some() {
+        return PlaceStatus::Departs;
     }
+    let (option, _) = option_of_row(row, c);
     finder_status(c, s, option.as_deref())
 }
 
@@ -299,7 +321,12 @@ fn remainder_row(
 }
 
 /// The snippet of the problem needing a decision for a listed place that could not be checked.
-const HELD_PLACE_SNIPPET: &str = "A listed place could not be checked";
+/// It names the rule, the option and the line, so the row's key (which is made from the snippet)
+/// belongs to that place and option: a decision on it never moves to another place after the
+/// reviewer rules again.
+fn held_place_snippet(rule: &str, option_label: &str, line: usize) -> String {
+    format!("A listed place could not be checked: {rule}, \"{option_label}\", line {line}")
+}
 
 /// The problem needing a decision for a listed place that could not be checked against the file.
 /// An empty `title` names the rule by its id alone.
@@ -321,7 +348,7 @@ pub fn held_place_row(
         line: place.line,
         rule_id: "AI-OPEN-QUESTION".to_string(),
         severity: "low".to_string(),
-        snippet: HELD_PLACE_SNIPPET.to_string(),
+        snippet: held_place_snippet(rule, option_label, place.line),
         detail: format!(
             "A place could not be checked{}A reviewer listed this place as using \"{option_label}\" for {rule_name}, but it could not be found in the file. It needs a decision.",
             crate::ai_audit::HEADLINE_SEP,
@@ -334,15 +361,22 @@ pub fn held_place_row(
     row
 }
 
-/// Whether `rows` already hold the question for this unchecked place of `rule`.
-fn has_held_place_row(rows: &[Finding], repo: &str, rule: &str, place: &CensusPlace) -> bool {
+/// Whether `rows` already hold the question for this unchecked place of `rule` and `option`.
+/// The snippet names the rule exactly, so `X-1` never matches `X-10`.
+fn has_held_place_row(
+    rows: &[Finding],
+    repo: &str,
+    rule: &str,
+    option_label: &str,
+    place: &CensusPlace,
+) -> bool {
+    let snippet = held_place_snippet(rule, option_label, place.line);
     rows.iter().any(|r| {
         r.repo == repo
             && r.rule_id == "AI-OPEN-QUESTION"
-            && r.snippet == HELD_PLACE_SNIPPET
+            && r.snippet == snippet
             && plain_path(&r.path) == plain_path(&place.path)
             && r.line == place.line
-            && r.detail.contains(rule)
     })
 }
 
@@ -370,8 +404,8 @@ pub fn held_place_rows(
                 .iter()
                 .map(|(_, f): &(String, Finding)| f.clone())
                 .collect();
-            if has_held_place_row(rows, &c.repo, &c.rule_id, p)
-                || has_held_place_row(&made, &c.repo, &c.rule_id, p)
+            if has_held_place_row(rows, &c.repo, &c.rule_id, &o.label, p)
+                || has_held_place_row(&made, &c.repo, &c.rule_id, &o.label, p)
             {
                 continue;
             }
@@ -379,6 +413,83 @@ pub fn held_place_rows(
                 o.label.clone(),
                 held_place_row(&c.repo, &c.rule_id, title, &o.label, p),
             ));
+        }
+    }
+    out
+}
+
+/// The rows an engine check found under a rule that the no-convention filter set aside at scan
+/// time (a rule with no convention emits no per-site problems), brought back once the reviewer has
+/// set a standard: nothing the engine found stays out of sight (no open violations). A set-aside
+/// row at a place a recorded place or a departing finder row already covers needs nothing. For
+/// any other, a departure when the standard is the option the finder was judged against (the row
+/// broke it by definition), else a held question: which option the place follows is not known.
+/// Errs toward duplicates.
+pub fn set_aside_rows(c: &RuleConvention, rows: &[Finding], discarded: &[Finding]) -> Vec<Finding> {
+    let Some(standard) = usable_standard(c) else {
+        return Vec::new();
+    };
+    let departs_judged = c.judged_option_id.as_deref() == Some(standard.option_id.as_str());
+    let mut out: Vec<Finding> = Vec::new();
+    for d in discarded {
+        if d.repo != c.repo
+            || crate::engine_discard::reason_of(d) != Some(crate::engine_discard::NO_CONVENTION)
+            || !same_rule(d.rule_id.trim_start_matches("AI-"), &c.rule_id)
+        {
+            continue;
+        }
+        let path = plain_path(&d.path);
+        let listed = c.options.iter().any(|o| {
+            o.places
+                .iter()
+                .any(|p| plain_path(&p.path) == path && p.line == d.line)
+        });
+        let by_finder = rows.iter().any(|r| {
+            is_finder_row(r)
+                && r.repo == c.repo
+                && cites_rule(r, &c.rule_id)
+                && plain_path(&r.path) == path
+                && row_range(r).0 <= d.line
+                && d.line <= row_range(r).1
+                && row_status(c, &c.standard, r) == PlaceStatus::Departs
+        });
+        if listed || by_finder {
+            continue;
+        }
+        let row = if departs_judged {
+            let mut f = departure_row_at_finder(c, d, None, &standard.label);
+            f.captures
+                .insert(CONVENTION_PLACE_CAPTURE.to_string(), String::new());
+            f
+        } else {
+            let mut f = Finding {
+                repo: c.repo.clone(),
+                path: path.to_string(),
+                line: d.line,
+                rule_id: "AI-OPEN-QUESTION".to_string(),
+                severity: "low".to_string(),
+                snippet: format!(
+                    "An engine finding at this place was set aside: {}, line {}",
+                    c.rule_id, d.line
+                ),
+                detail: format!(
+                    "An engine check found something at this place under {}{}The scan set it aside because the rule had no convention. The reviewer has since chosen \"{}\", and this place was not counted, so it needs a decision.",
+                    c.rule_id,
+                    crate::ai_audit::HEADLINE_SEP,
+                    standard.label
+                ),
+                needs_review: true,
+                located: false,
+                ..Finding::default()
+            };
+            crate::onboard::redact::redact_finding(&mut f);
+            f
+        };
+        let dup = out.iter().chain(rows).any(|r| {
+            (&r.repo, &r.path, r.line, &r.snippet) == (&row.repo, &row.path, row.line, &row.snippet)
+        });
+        if !dup {
+            out.push(row);
         }
     }
     out
@@ -411,7 +522,7 @@ pub fn departure_rows(c: &RuleConvention, rows: &[Finding]) -> Vec<Finding> {
     // Departing finder rows keyed to another rule: a departure row at their own place.
     let mut finder_by_option: BTreeMap<String, usize> = BTreeMap::new();
     for row in &citing {
-        let (option, _) = option_of_row(row, c);
+        let (option, _) = option_for_standard(row, c, s);
         if row_status(c, s, row) != PlaceStatus::Departs {
             continue;
         }
@@ -509,7 +620,7 @@ pub fn tag(rows: &mut [Finding], conventions: &mut [RuleConvention]) {
             if !is_finder_row(row) || row.repo != c.repo || !cites_rule(row, &c.rule_id) {
                 continue;
             }
-            let (option, basis) = option_of_row(row, c);
+            let (option, basis) = option_for_standard(row, c, &s);
             let status = row_status(c, &s, row);
             refs.push(FinderRowRef {
                 site_key: row.site_key.clone(),
@@ -675,6 +786,17 @@ pub fn resolve(
     conventions: &mut [RuleConvention],
     rulings: &[StandardRuling],
 ) -> ResolveOutcome {
+    resolve_with_discarded(rows, conventions, rulings, &[])
+}
+
+/// [`resolve`], also bringing back the rows the scan set aside under a rule that had no
+/// convention (`discarded` is the report's set-aside list, which is left as it is).
+pub fn resolve_with_discarded(
+    rows: &mut Vec<Finding>,
+    conventions: &mut [RuleConvention],
+    rulings: &[StandardRuling],
+    discarded: &[Finding],
+) -> ResolveOutcome {
     let mut outcome = ResolveOutcome::default();
     let keyed = rows.iter().any(|r| !r.site_key.is_empty());
     let mut ruled: Vec<usize> = Vec::new();
@@ -715,8 +837,10 @@ pub fn resolve(
             .into_iter()
             .map(|(_, f)| f)
             .collect();
-        let held_any = has_departing_unchecked_place(c);
+        let aside = set_aside_rows(c, rows, discarded);
+        let held_any = has_departing_unchecked_place(c) || !aside.is_empty();
         new_rows.extend(held);
+        new_rows.extend(aside);
         if let Some(standard) = usable_standard(c) {
             let any_departure =
                 !new_rows.is_empty() || held_any || has_departing_finder_row(c, rows);
@@ -1594,5 +1718,141 @@ mod tests {
         clean.options[0].count = Some(0);
         let text = observed_row(&clean, &clean.options[1].clone()).detail;
         assert!(text.contains("consistently follows"), "{text}");
+    }
+
+    fn set_aside(path: &str, line: usize) -> Finding {
+        let mut f = Finding {
+            repo: REPO.into(),
+            path: path.into(),
+            line,
+            rule_id: "ARCH-TRIGGER-ENV-1".into(),
+            severity: "medium".into(),
+            snippet: format!("detector row at {path}:{line}"),
+            detail: "d".into(),
+            located: true,
+            ..Finding::default()
+        };
+        crate::engine_discard::mark(&mut f, crate::engine_discard::NO_CONVENTION);
+        f
+    }
+
+    fn accept_env(option: &str) -> StandardRuling {
+        let mut r = accept(option);
+        r.rule_id = "ARCH-TRIGGER-ENV-1".into();
+        r
+    }
+
+    /// Round 2 item 3: a detector row the scan set aside (no convention) at a place the census never
+    /// counted comes back when the reviewer accepts: a departure when the accepted option is the
+    /// judged one, else a held question. A place the census listed is not made twice.
+    #[test]
+    fn a_set_aside_detector_row_comes_back_after_accepting() {
+        let aside = vec![set_aside("elsewhere.yml", 20), set_aside("deploy.yml", 8)];
+        // The judged option (git-ref) is accepted: a departure at the place.
+        let (mut rows, mut cs) = (Vec::new(), vec![trigger_env()]);
+        resolve_with_discarded(&mut rows, &mut cs, &[accept_env("git-ref")], &aside);
+        let at = |rows: &[Finding], p: &str| {
+            rows.iter()
+                .filter(|f| f.path == p)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let back = at(&rows, "elsewhere.yml");
+        assert_eq!(back.len(), 1, "{rows:?}");
+        assert!(back[0].captures.contains_key(CONVENTION_PLACE_CAPTURE));
+        assert!(
+            matches!(back[0].kind, Some(FindingKind::Deviation(_))),
+            "{:?}",
+            back[0].kind
+        );
+        // The listed place (deploy.yml:8, option manual) is its own departure row, once.
+        assert_eq!(at(&rows, "deploy.yml").len(), 1, "{rows:?}");
+        // Another option is accepted: the place's option is not known, so a held question.
+        let (mut rows, mut cs) = (Vec::new(), vec![trigger_env()]);
+        resolve_with_discarded(&mut rows, &mut cs, &[accept_env("manual")], &aside);
+        let back = at(&rows, "elsewhere.yml");
+        assert_eq!(back.len(), 1, "{rows:?}");
+        assert_eq!(back[0].rule_id, "AI-OPEN-QUESTION");
+        assert!(back[0].needs_review);
+        assert!(!back[0].site_key.is_empty() || !rows.iter().any(|r| !r.site_key.is_empty()));
+    }
+
+    /// Round 2 item 4: a held question's key belongs to its place and option, so after the reviewer
+    /// rules again a decision never moves to a different place; and rule ids match exactly.
+    #[test]
+    fn held_question_keys_follow_the_place_and_the_rule_matches_exactly() {
+        let mut c = trigger_env();
+        c.options[0] = unchecked(opt("git-ref", "Git ref", Some(1), &[("f.ts", 12)]));
+        c.options[1] = unchecked(opt("manual", "Manual", Some(1), &[("f.ts", 9)]));
+        let key_at = |accepted: &str, line: usize| {
+            // A keyed report: one unrelated row with a key, so the rows made get keys too.
+            let keyed = Finding {
+                site_key: "unrelated".into(),
+                ..Finding::default()
+            };
+            let (mut rows, mut cs) = (vec![keyed], vec![c.clone()]);
+            let mut r = accept(accepted);
+            r.rule_id = "ARCH-TRIGGER-ENV-1".into();
+            resolve(&mut rows, &mut cs, &[r]);
+            rows.iter()
+                .find(|f| f.rule_id == "AI-OPEN-QUESTION" && f.line == line)
+                .map(|f| f.site_key.clone())
+        };
+        // Accept git-ref: the place at line 9 (manual) is held. Accept manual: the place at line 12.
+        let nine = key_at("git-ref", 9).expect("held at 9");
+        let twelve = key_at("manual", 12).expect("held at 12");
+        assert_ne!(nine, twelve, "different places never share a key");
+        assert_eq!(Some(nine), key_at("git-ref", 9), "and a key is stable");
+        // X-1 is not X-10.
+        let mut other = c.clone();
+        other.rule_id = "ARCH-TRIGGER-ENV-10".into();
+        let held_for_10 = held_place_rows(&other, &[], "");
+        let made = held_place_rows(&c, &[], "");
+        let none_missing = held_place_rows(
+            &c,
+            &held_for_10
+                .iter()
+                .map(|(_, f)| f.clone())
+                .collect::<Vec<_>>(),
+            "",
+        );
+        assert_eq!(
+            made.len(),
+            none_missing.len(),
+            "a row of X-10 does not stand for X-1"
+        );
+    }
+
+    /// Round 2 item 5: a row whose range holds places of two options is labeled with the one that
+    /// departs, never with the standard.
+    #[test]
+    fn a_mixed_range_row_is_labeled_with_the_departing_option() {
+        let mut c = hearth(true);
+        c.options = vec![
+            opt(
+                "seq",
+                "Sequential awaits by default",
+                Some(1),
+                &[("a.ts", 10)],
+            ),
+            opt("par", "Run in parallel", Some(1), &[("a.ts", 11)]),
+        ];
+        c.assessed_places = Some(2);
+        let mut row = finder("a.ts", 10, "SPIRIT-OPTIMIZE-1", 1);
+        row.captures
+            .insert(FINDER_END_LINE_CAPTURE.into(), "12".into());
+        let (mut rows, mut cs) = (vec![row], vec![c]);
+        resolve(&mut rows, &mut cs, &[accept("seq")]);
+        let dep = rows
+            .iter()
+            .find(|f| f.rule_id == RULE && f.captures.contains_key(CONVENTION_PLACE_CAPTURE))
+            .expect("a departure row");
+        assert_eq!(dep.captures[CONVENTION_PLACE_CAPTURE], "par");
+        assert!(
+            dep.detail.contains("uses \"Run in parallel\""),
+            "{}",
+            dep.detail
+        );
+        assert_eq!(cs[0].finder_rows[0].option_id.as_deref(), Some("par"));
     }
 }

@@ -356,7 +356,13 @@ pub fn apply_overlay_with_standards(
         // The reviewer's rulings on a standard: the departure rows and information rows they ask
         // for are made before the reviewer's own findings, so a key is never taken twice.
         let mut conventions = std::mem::take(&mut r.conventions);
-        let ruled = crate::conventions::resolve(&mut r.findings, &mut conventions, standards);
+        let set_aside = r.discarded.clone();
+        let ruled = crate::conventions::resolve_with_discarded(
+            &mut r.findings,
+            &mut conventions,
+            standards,
+            &set_aside,
+        );
         r.conventions = conventions;
         let (added_rows, taken) = add_findings(&mut r.findings, added);
         superseded = taken;

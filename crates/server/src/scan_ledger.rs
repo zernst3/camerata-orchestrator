@@ -976,12 +976,19 @@ impl ConventionsBlock {
             .map(|f| f.site_key.as_str())
             .filter(|k| !k.is_empty())
             .collect();
-        let place = |repo: &str, path: &str, line: usize| {
+        let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+        let place = |repo: &str, path: &str, line: usize, rule: &str| {
             let path = path.trim_start_matches("./");
             rows.iter().chain(discarded).any(|f| {
-                (f.repo == repo && f.path.trim_start_matches("./") == path && f.line == line)
+                (f.repo == repo
+                    && f.path.trim_start_matches("./") == path
+                    && f.line == line
+                    && same(&f.rule_id, rule))
                     || f.also_locations.iter().any(|l| {
-                        l.repo == repo && l.path.trim_start_matches("./") == path && l.line == line
+                        l.repo == repo
+                            && l.path.trim_start_matches("./") == path
+                            && l.line == line
+                            && same(&l.rule_id, rule)
                     })
             })
         };
@@ -989,7 +996,7 @@ impl ConventionsBlock {
         for c in records {
             for r in &c.finder_rows {
                 let kept = (!r.site_key.is_empty() && keys.contains(r.site_key.as_str()))
-                    || place(&c.repo, &r.path, r.line);
+                    || place(&c.repo, &r.path, r.line, &r.keyed_rule_id);
                 if !kept {
                     lost.push((c.rule_id.clone(), r.path.clone(), r.line));
                 }

@@ -1285,69 +1285,37 @@ pub(in crate::cockpit) enum RulingAction {
     Withdraw(String),
 }
 
-/// What this session knows about a ruling it made: the scan's own records are not read again after a
-/// ruling, so the screen keeps the answer here and shows it on the record (the server is the
-/// truth; this is what the server was just told).
-#[derive(Clone, PartialEq, Debug)]
-pub(in crate::cockpit) enum RulingEcho {
-    /// The reviewer accepted this option; the ruling's id when the server returned it.
-    Accepted {
-        option_id: String,
-        ruling_id: Option<String>,
-    },
-    /// The reviewer left the rule to the client.
-    Left { ruling_id: Option<String> },
-    /// The reviewer withdrew the ruling: the rule has no choice again.
-    Undecided,
-}
-
-impl RulingEcho {
-    /// The echo of a ruling that was accepted by the server as `id`.
-    pub(in crate::cockpit) fn of(action: &RulingAction, id: Option<String>) -> Self {
-        match action {
-            RulingAction::Accept(option_id) => Self::Accepted {
-                option_id: option_id.clone(),
-                ruling_id: id,
-            },
-            RulingAction::Leave => Self::Left { ruling_id: id },
-            RulingAction::Withdraw(_) => Self::Undecided,
-        }
-    }
-}
-
-/// The scan's convention records with this session's rulings shown on them: the standard of a rule
-/// the reviewer ruled on is what they asked, whatever the scan recorded.
+/// The inspection's convention records with the server's active rulings shown on them. The records
+/// are the inspection's own and never hold a ruling (rulings are stored beside the decisions), so
+/// the standard of a ruled rule is what the ruling says: the reviewer's option, or left to the
+/// client, with the ruling's id so it can be withdrawn.
 pub(in crate::cockpit) fn with_rulings(
     conventions: &[camerata_api_types::audit::RuleConvention],
-    echo: &std::collections::HashMap<String, RulingEcho>,
+    rulings: &[camerata_api_types::decisions::StandardRuling],
 ) -> Vec<camerata_api_types::audit::RuleConvention> {
     use camerata_api_types::audit::{StandardSource, StandardState};
+    use camerata_api_types::decisions::StandardChoice;
     conventions
         .iter()
         .map(|c| {
             let mut c = c.clone();
-            let key = camerata_ui_core::adopt::adoption_key(&c.repo, &c.rule_id);
-            match echo.get(&key) {
-                Some(RulingEcho::Accepted {
-                    option_id,
-                    ruling_id,
-                }) => {
-                    c.standard = StandardState {
+            let ruling = rulings.iter().rev().find(|r| {
+                r.is_active() && r.repo == c.repo && r.rule_id.eq_ignore_ascii_case(&c.rule_id)
+            });
+            if let Some(r) = ruling {
+                c.standard = match &r.choice {
+                    StandardChoice::Accept { option_id } => StandardState {
                         option_id: Some(option_id.clone()),
                         source: StandardSource::Reviewer,
-                        ruling_id: ruling_id.clone(),
+                        ruling_id: Some(r.id.clone()),
                         ..StandardState::default()
-                    };
-                }
-                Some(RulingEcho::Left { ruling_id }) => {
-                    c.standard = StandardState {
+                    },
+                    StandardChoice::LeaveToClient => StandardState {
                         left_to_client: true,
-                        ruling_id: ruling_id.clone(),
+                        ruling_id: Some(r.id.clone()),
                         ..StandardState::default()
-                    };
-                }
-                // Withdrawn, or never ruled on: the record is the scan's own, which holds no ruling.
-                Some(RulingEcho::Undecided) | None => {}
+                    },
+                };
             }
             c
         })

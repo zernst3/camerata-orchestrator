@@ -993,6 +993,7 @@ pub(super) fn recommendation(
     operator_chosen: bool,
 ) -> RuleRecommendationView {
     RuleRecommendationView {
+        repo: String::new(),
         recommended_option_id: option_id.to_string(),
         recommendation_reasoning: reasoning.to_string(),
         hallucinated,
@@ -1011,6 +1012,7 @@ pub(super) fn recommendation_with_evidence(
     applicable: bool,
 ) -> RuleRecommendationView {
     RuleRecommendationView {
+        repo: String::new(),
         recommended_option_id: option_id.to_string(),
         recommendation_reasoning: reasoning.to_string(),
         hallucinated: false,

@@ -1582,7 +1582,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/projects/:id/standards",
-            post(crate::decisions::routes::post_standard),
+            post(crate::decisions::routes::post_standard)
+                .get(crate::decisions::routes::get_standards),
         )
         .route(
             "/api/projects/:id/standards/:ruling_id/revoke",
