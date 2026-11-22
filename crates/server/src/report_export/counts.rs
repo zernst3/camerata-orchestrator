@@ -141,10 +141,22 @@ pub struct OtherCounts {
     pub client_suppressions_found: usize,
 }
 
+/// The one rule for where a problem's severity lands in the counts and in the severity-by-effort
+/// grid: critical, high and medium stand for themselves and anything else (low, and a confirmed
+/// info row) is low. The counts and the grid both call this, so they cannot disagree.
+pub(crate) fn tier_of(severity: &str) -> &'static str {
+    match severity {
+        "critical" => "critical",
+        "high" => "high",
+        "medium" => "medium",
+        _ => "low",
+    }
+}
+
 impl SeverityCounts {
     /// One more problem of `severity` (anything but critical, high and medium is low).
     pub fn add(&mut self, severity: &str) {
-        match severity {
+        match tier_of(severity) {
             "critical" => self.critical += 1,
             "high" => self.high += 1,
             "medium" => self.medium += 1,

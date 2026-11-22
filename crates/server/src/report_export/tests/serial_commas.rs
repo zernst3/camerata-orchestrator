@@ -399,7 +399,7 @@ fn the_executive_summary_sentence_has_no_serial_comma() {
             for sentence in [
                 counts_prose::narrative(&c, state),
                 counts_prose::methodology_line(&c, state),
-                counts_prose::next_steps(&c, false, state),
+                counts_prose::next_steps(&c, false, state, false),
                 counts_prose::grid_left_out(&c),
             ] {
                 assert!(

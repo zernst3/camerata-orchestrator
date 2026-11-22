@@ -1537,3 +1537,91 @@ fn the_order_check_pushes_a_problem_for_a_missing_column() {
         );
     }
 }
+
+// A released client package: reviewed, not internal.
+
+fn reviewed_client_package() -> (BTreeMap<String, Vec<u8>>, AuditReportJson) {
+    let report = scan_report();
+    let sealed = report.clone().seal();
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        crate::report_export::finding_key(&sealed.findings[0]),
+        crate::report_export::DispositionWire {
+            state: "Confirmed".to_string(),
+            ..Default::default()
+        },
+    );
+    entries_of(package_with_dispositions(report, &dispositions))
+}
+
+#[test]
+fn a_real_reviewed_client_package_passes_and_states_no_decision_count() {
+    let (entries, report) = reviewed_client_package();
+    assert_eq!(
+        report.review_state,
+        crate::report_export::ReviewState::Reviewed
+    );
+    assert!(!report.internal, "anti-vacuity: a client package");
+    assert_eq!(report.counts.problems.total, 1, "anti-vacuity");
+    let steps = &report.methodology.next_steps;
+    assert!(
+        !steps.contains("reviewer's decision") && !steps.contains("so far"),
+        "{steps}"
+    );
+    let problems = counts_problems(&entries, &report);
+    assert!(problems.is_empty(), "{}", messages(&problems));
+}
+
+#[test]
+fn the_gate_refuses_a_so_far_or_a_decision_count_in_a_reviewed_client_package() {
+    for planted in [
+        " 1 source row is ruled out so far.",
+        " 0 of 1 problem needs a reviewer's decision.",
+    ] {
+        let (entries, mut report) = reviewed_client_package();
+        report.methodology.next_steps = report.methodology.next_steps.replacen(
+            "reviewing engineer.",
+            &format!("reviewing engineer.{planted}"),
+            1,
+        );
+        assert!(
+            report.methodology.next_steps.contains(planted),
+            "anti-vacuity: planted"
+        );
+        let problems = counts_problems(&entries, &report);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.location == "methodology.next_steps"),
+            "{planted}: {}",
+            messages(&problems)
+        );
+    }
+}
+
+#[test]
+fn an_internal_reviewed_package_must_state_the_decision_count() {
+    let (entries, mut report) = reviewed_client_package();
+    report.internal = true;
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.location == "methodology.next_steps"),
+        "{}",
+        messages(&problems)
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_grid_whose_cells_do_not_add_up_to_the_problems_for_action() {
+    let (entries, mut report) = consistent();
+    assert_eq!(report.counts.problems.for_action, 1, "anti-vacuity");
+    report.priority_grid.rows[0].cells[0].count += 1;
+    let problems = counts_problems(&entries, &report);
+    assert!(
+        problems.iter().any(|p| p.location == "priority_grid.cells"),
+        "{}",
+        messages(&problems)
+    );
+}

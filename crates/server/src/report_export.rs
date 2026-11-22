@@ -2049,7 +2049,7 @@ pub fn build_report_json_with_counts(
         candidates_reviewed: counts.rows.total,
         excluded_false_positive: counts.rows.ruled_out,
         held_for_review: held_for_review_total,
-        next_steps: counts_prose::next_steps(counts, multi_repo, review_state),
+        next_steps: counts_prose::next_steps(counts, multi_repo, review_state, opts.internal),
         deterministic_note: deterministic_note_for(method_facts.finder),
         ai_tier_note: ai_tier_note_for(
             review_state,

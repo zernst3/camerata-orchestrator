@@ -1777,3 +1777,25 @@ async fn accept_alternatives_scopes_to_the_given_rule_ids() {
 
     assert_eq!(resp.expect("parses").accepted, 1);
 }
+
+/// The Queue paragraph says a false positive is left out of the problem lists and kept with its
+/// reason on the Ruled out sheet, not that it is excluded from the report.
+#[test]
+fn the_queue_paragraph_says_false_positives_are_kept_on_the_ruled_out_sheet() {
+    use dioxus::prelude::*;
+    #[component]
+    fn Harness() -> Element {
+        rsx! { super::scan_results::QueueIntro {} }
+    }
+    let mut vdom = VirtualDom::new(Harness);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+    assert!(
+        html.contains(&format!(
+            "left out of the problem lists, kept with the reason on the {} sheet",
+            camerata_api_types::RULED_OUT_SHEET
+        )),
+        "{html}"
+    );
+    assert!(!html.contains("excluded from the report"), "{html}");
+}

@@ -102,10 +102,13 @@ pub(crate) fn narrative(c: &ReportCounts, state: ReviewState) -> String {
         is_are(c.rows.dependency),
     ));
     if !state.is_draft() && c.rows.ruled_out > 0 {
+        let one = c.rows.ruled_out == 1;
         s.push_str(&format!(
-            " {} {} ruled out and left out of this report.",
+            " {} {} ruled out after review; {} listed with the reason on the {} sheet.",
             noun(c.rows.ruled_out, "source row", "source rows"),
-            if c.rows.ruled_out == 1 { "was" } else { "were" },
+            if one { "was" } else { "were" },
+            if one { "it is" } else { "each is" },
+            crate::xlsx_export::vocabulary::RULED_OUT,
         ));
     }
     s
@@ -123,6 +126,14 @@ pub(crate) fn decision_sentence(c: &ReportCounts) -> String {
         noun(c.problems.total, "problem", "problems"),
         needs_need(c.problems.needs_decision),
     )
+}
+
+/// Whether the next steps state the decision count and how many rows are ruled out so far. Only a
+/// draft and an internal package do: a released client package reads as finished and states
+/// neither, whatever the counts say (the release gate does not force every held row to a
+/// decision). The gate asks this same function.
+pub(crate) fn states_decision_count(state: ReviewState, internal: bool) -> bool {
+    state.is_draft() || internal
 }
 
 /// The methodology line: the source rows reconciled once, in row words (design 5.6).
@@ -181,18 +192,30 @@ pub(crate) fn suppressions_sentence(c: &ReportCounts) -> String {
 }
 
 /// The three steps from here, with the decision sentence in the first.
-pub(crate) fn next_steps(c: &ReportCounts, multi_repo: bool, state: ReviewState) -> String {
+pub(crate) fn next_steps(
+    c: &ReportCounts,
+    multi_repo: bool,
+    state: ReviewState,
+    internal: bool,
+) -> String {
     let (rescan_object, introduces) = if multi_repo {
         ("repositories", "the codebases introduce")
     } else {
         ("repository", "the codebase introduces")
     };
-    let mut status = if c.problems.total == 0 {
-        "This run produced no problems, so there is no fix rate to report and no problems need a reviewer's decision.".to_string()
+    let stated = states_decision_count(state, internal);
+    let mut status = if !stated {
+        if c.problems.total == 0 {
+            " This run produced no problems.".to_string()
+        } else {
+            String::new()
+        }
+    } else if c.problems.total == 0 {
+        " This run produced no problems, so there is no fix rate to report and no problems need a reviewer's decision.".to_string()
     } else {
-        format!("{}.", decision_sentence(c))
+        format!(" {}.", decision_sentence(c))
     };
-    if !state.is_draft() && c.rows.ruled_out > 0 {
+    if stated && !state.is_draft() && c.rows.ruled_out > 0 {
         status.push_str(&format!(
             " {} {} ruled out so far.",
             noun(c.rows.ruled_out, "source row", "source rows"),
@@ -201,7 +224,7 @@ pub(crate) fn next_steps(c: &ReportCounts, multi_repo: bool, state: ReviewState)
     }
     format!(
         "There are three steps from here. First, the fixes above get done, by the \
-         client's own team, an outside contractor or the reviewing engineer. {status} Second, a \
+         client's own team, an outside contractor or the reviewing engineer.{status} Second, a \
          retest: the reviewing engineer re-scans the {rescan_object} once the fixes are in and \
          signs a short addendum confirming each item is closed. Third, ongoing coverage: a \
          monthly delta rescan plus on-call architect availability for anything new \
@@ -366,5 +389,85 @@ mod grid_note_tests {
                 "{s}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ruled_out_wording_tests {
+    use super::*;
+    use crate::report_export::ReportCounts;
+    use crate::xlsx_export::vocabulary::RULED_OUT;
+
+    fn counts(problems: usize, needs_decision: usize, ruled_out: usize) -> ReportCounts {
+        let mut c = ReportCounts::default();
+        c.rows.total = problems + ruled_out;
+        c.rows.problem = problems;
+        c.rows.ruled_out = ruled_out;
+        c.problems.total = problems;
+        c.problems.needs_decision = needs_decision;
+        c.problems.for_action = problems - needs_decision;
+        c
+    }
+
+    /// A released package says where the ruled out rows are kept, not that they were left out.
+    #[test]
+    fn the_released_narrative_says_the_ruled_out_rows_are_listed_on_their_sheet() {
+        let text = narrative(&counts(5, 0, 31), ReviewState::Reviewed);
+        let want = format!(
+            "31 source rows were ruled out after review; each is listed with the reason on the {RULED_OUT} sheet."
+        );
+        assert!(text.contains(&want), "{text}");
+        assert!(!text.contains("left out of this report"), "{text}");
+        let one = narrative(&counts(5, 0, 1), ReviewState::Reviewed);
+        assert!(
+            one.contains(&format!(
+                "1 source row was ruled out after review; it is listed with the reason on the {RULED_OUT} sheet."
+            )),
+            "{one}"
+        );
+    }
+
+    /// A released package's next steps read finished: no "so far", no decision count.
+    #[test]
+    fn released_next_steps_have_no_so_far_and_no_decision_count() {
+        // Whatever needs_decision says: a released client package never prints the count.
+        for c in [counts(213, 0, 21), counts(0, 0, 4), counts(9, 3, 2)] {
+            let text = next_steps(&c, false, ReviewState::Reviewed, false);
+            assert!(!text.contains("so far"), "{text}");
+            assert!(!text.contains("need a reviewer's decision"), "{text}");
+            assert!(!text.contains("needs a reviewer's decision"), "{text}");
+            assert!(text.contains("Second, a retest"), "{text}");
+        }
+        let none = next_steps(&counts(0, 0, 4), false, ReviewState::Reviewed, false);
+        assert!(
+            none.contains(" This run produced no problems. Second"),
+            "a released package with no problems says so, count free: {none}"
+        );
+    }
+
+    /// A draft and an internal package keep stating the count; a released client package does not.
+    #[test]
+    fn drafts_and_internal_packages_keep_the_decision_count() {
+        let draft = next_steps(&counts(5, 0, 0), false, ReviewState::Raw, false);
+        assert!(
+            draft.contains("0 of 5 problems need a reviewer's decision"),
+            "{draft}"
+        );
+        let open = next_steps(&counts(5, 2, 3), false, ReviewState::Reviewed, true);
+        assert!(
+            open.contains("2 of 5 problems need a reviewer's decision"),
+            "{open}"
+        );
+        assert!(
+            open.contains("3 source rows are ruled out so far."),
+            "{open}"
+        );
+        // A released client package never states it, even with decisions open.
+        let released = next_steps(&counts(5, 2, 3), false, ReviewState::Reviewed, false);
+        assert!(!released.contains("reviewer's decision"), "{released}");
+        assert!(!released.contains("so far"), "{released}");
+        assert!(states_decision_count(ReviewState::Raw, false));
+        assert!(states_decision_count(ReviewState::Reviewed, true));
+        assert!(!states_decision_count(ReviewState::Reviewed, false));
     }
 }
