@@ -1,5 +1,5 @@
 id = "ARCH-BOUNDED-LIST-READS-1"
-version = 4
+version = 5
 title = "Every list read that serves a request is bounded by a limit or a page, so no endpoint returns a whole growing table"
 domain = "api-layer"
 layer = "universal"

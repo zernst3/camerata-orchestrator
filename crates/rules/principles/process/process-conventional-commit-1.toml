@@ -1,5 +1,5 @@
 id = "PROCESS-CONVENTIONAL-COMMIT-1"
-version = 2
+version = 3
 title = "Commit subjects follow the conventional-commits shape"
 domain = "process"
 layer = "universal"

@@ -1,5 +1,5 @@
 id = "JAVA-SMALL-INTERFACES-1"
-version = 3
+version = 4
 title = "Interfaces are small and focused; each interface has a single responsibility, not a god-interface"
 domain = "java"
 layer = "architecture"

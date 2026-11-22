@@ -1,5 +1,5 @@
 id = "UI-QUERY-LIBRARY-1"
-version = 4
+version = 5
 title = "All UI data fetches go through a query library, never ad-hoc fetch and store"
 domain = "ui"
 layer = "universal"

@@ -1,5 +1,5 @@
 id = "FIREBASE-ADMIN-SDK-CLIENT-1"
-version = 2
+version = 3
 title = "The Firebase Admin SDK is imported only by server code, never by code that ships to a browser"
 domain = "firebase"
 layer = "platform"

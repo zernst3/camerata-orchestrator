@@ -87,7 +87,7 @@ const MOVED: [(&str, &str); 10] = [
     ),
     (
         "GO-SMALL-INTERFACES-1",
-        "Small, focused interfaces are easier to implement, mock, a",
+        "Small, focused interfaces are easier to implement, mock and",
     ),
     (
         "GO-SQL-PARAMETERIZED-1",

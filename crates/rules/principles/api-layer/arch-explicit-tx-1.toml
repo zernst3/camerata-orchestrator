@@ -1,5 +1,5 @@
 id = "ARCH-EXPLICIT-TX-1"
-version = 4
+version = 5
 title = "Services own the transaction lifecycle; repositories receive the handle as a parameter"
 domain = "api-layer"
 layer = "universal"

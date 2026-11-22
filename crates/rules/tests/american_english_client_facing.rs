@@ -24,10 +24,10 @@
 //!
 //! Skipped on purpose:
 //! - a whitespace-separated token containing `_`, `://` or a backtick (code, an identifier or a
-//!   URL, not prose), and a word with an internal capital (`somePromise`, `isCancelled`);
-//! - a token that is a rule OPTION ID. Option ids are identifiers: adopted selections are stored
-//!   by id, so an id is never renamed to fix a spelling. The option id of a field is not in the
-//!   field list at all; this also covers an id quoted inside prose;
+//!   URL, not prose), and a word with an internal capital (`somePromise`, `isCancelled`).
+//!
+//! Rule ids and option ids are in the field set and are checked like prose: no real client run
+//! has stored a selection yet, so a British spelling is renamed everywhere, not exempted.
 //! - the title of an external source (`[[sources]].title` and `.linter`), because a quoted
 //!   standard keeps its own spelling.
 
@@ -35,7 +35,6 @@ mod common;
 
 use camerata_rules::{corpus_path, load_corpus_lenient, RuleSet};
 use common::client_reaching_fields;
-use std::collections::HashSet;
 
 /// Words that end in `-ise` (or inflect from one) in American English too.
 const ISE_OK: &[&str] = &[
@@ -283,15 +282,11 @@ fn is_identifier_case(word: &str) -> bool {
     rest != rest.to_lowercase() && word != word.to_uppercase()
 }
 
-/// The British words found in `text`. `option_ids` are skipped (see the module doc).
-fn british_words(text: &str, option_ids: &HashSet<String>) -> Vec<String> {
+/// The British words found in `text`.
+fn british_words(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     for token in text.split_whitespace() {
         if token.contains('_') || token.contains("://") || token.contains('`') {
-            continue;
-        }
-        let bare = token.trim_matches(|c: char| ".,;:()[]{}\"'!?*".contains(c));
-        if option_ids.contains(bare) {
             continue;
         }
         for word in token.split(|c: char| !c.is_ascii_alphabetic()) {
@@ -306,20 +301,12 @@ fn british_words(text: &str, option_ids: &HashSet<String>) -> Vec<String> {
     found
 }
 
-fn option_ids(corpus: &RuleSet) -> HashSet<String> {
-    corpus
-        .iter()
-        .flat_map(|r| r.options.iter().map(|o| o.id.clone()))
-        .collect()
-}
-
 fn spelling_offenders(corpus: &RuleSet) -> Vec<String> {
-    let ids = option_ids(corpus);
     client_reaching_fields(corpus)
         .into_iter()
         .filter(|f| !f.external_title)
         .flat_map(|f| {
-            british_words(f.text, &ids)
+            british_words(f.text)
                 .into_iter()
                 .map(move |w| format!("{}: {} ({w})", f.rule_id, f.loc))
                 .collect::<Vec<_>>()
@@ -343,7 +330,6 @@ async fn no_client_reaching_rule_field_uses_a_british_spelling() {
 
 #[test]
 fn the_matcher_catches_each_pattern_and_spares_american_words() {
-    let none = HashSet::new();
     for british in [
         "behaviour",
         "colours",
@@ -386,7 +372,7 @@ fn the_matcher_catches_each_pattern_and_spares_american_words() {
         "programme",
     ] {
         assert_eq!(
-            british_words(british, &none),
+            british_words(british),
             [british],
             "the matcher missed `{british}`"
         );
@@ -440,24 +426,23 @@ fn the_matcher_catches_each_pattern_and_spares_american_words() {
         "isCancelled",
     ] {
         assert!(
-            british_words(american, &none).is_empty(),
+            british_words(american).is_empty(),
             "the matcher flagged `{american}`: {:?}",
-            british_words(american, &none)
+            british_words(american)
         );
     }
     // URLs and backticked code are not prose.
-    assert!(british_words("See https://example.com/colour/behaviour", &none).is_empty());
-    assert!(british_words("call `colour()` here", &none).is_empty());
+    assert!(british_words("See https://example.com/colour/behaviour").is_empty());
+    assert!(british_words("call `colour()` here").is_empty());
 }
 
 #[test]
-fn an_option_id_quoted_in_prose_is_not_flagged() {
-    let ids: HashSet<String> = ["test-names-describe-behaviour".to_string()].into();
-    assert!(british_words("Pick test-names-describe-behaviour.", &ids).is_empty());
+fn a_hyphenated_id_is_checked_word_by_word() {
     assert_eq!(
-        british_words("Pick test-names-describe-behaviour here.", &HashSet::new()),
+        british_words("test-names-describe-behaviour-no-duplicate-titles"),
         ["behaviour"]
     );
+    assert!(british_words("test-names-describe-behavior-no-duplicate-titles").is_empty());
 }
 
 /// The wide gate must be able to fail: a British word planted in every field of the wide list is

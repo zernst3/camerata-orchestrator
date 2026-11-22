@@ -1,5 +1,5 @@
 id = "RUST-AXUM-TIMEOUT-LIMITS-1"
-version = 3
+version = 4
 title = "Set request timeouts and body size limits to prevent resource exhaustion"
 domain = "rust:axum"
 layer = "framework"

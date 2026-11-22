@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-USERS-EXPOSED-1"
-version = 5
+version = 6
 title = "auth.users must never be exposed to anon/authenticated via a view, materialized view or grant in an exposed schema"
 domain = "supabase:auth"
 layer = "platform"

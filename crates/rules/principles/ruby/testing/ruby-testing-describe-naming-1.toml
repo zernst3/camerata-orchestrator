@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-DESCRIBE-NAMING-1"
-version = 3
+version = 4
 title = "describe uses the class constant; nested describe uses #method or .method; context starts with when/with/without"
 domain = "ruby:testing"
 layer = "language"

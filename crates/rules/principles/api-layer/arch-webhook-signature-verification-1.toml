@@ -1,5 +1,5 @@
 id = "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1"
-version = 4
+version = 5
 title = "A payment-provider webhook handler verifies the provider's signature on the raw request body before trusting the event"
 domain = "api-layer"
 layer = "universal"

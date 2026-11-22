@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-AUTHORIZATION-1"
-version = 3
+version = 4
 title = "Every private Realtime channel has an RLS policy on realtime.messages; public-access is an explicit, reviewed choice, never the silent default"
 domain = "supabase:realtime"
 layer = "platform"

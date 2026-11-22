@@ -1,5 +1,5 @@
 id = "JAVA-SQL-PARAMETERIZED-1"
-version = 3
+version = 4
 title = "SQL queries are parameterized with PreparedStatement or JPA parameters; strings are never built via concatenation"
 domain = "java"
 layer = "language"

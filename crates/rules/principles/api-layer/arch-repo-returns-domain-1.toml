@@ -1,5 +1,5 @@
 id = "ARCH-REPO-RETURNS-DOMAIN-1"
-version = 4
+version = 5
 title = "Repositories return domain types, never persistence representations"
 domain = "api-layer"
 layer = "universal"

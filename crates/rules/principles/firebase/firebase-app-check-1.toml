@@ -1,5 +1,5 @@
 id = "FIREBASE-APP-CHECK-1"
-version = 2
+version = 3
 title = "The app proves its own identity to the backend with App Check, initialized in the client and enforced on the backends that matter"
 domain = "firebase"
 layer = "platform"

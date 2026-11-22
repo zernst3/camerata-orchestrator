@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-OPEN-1"
-version = 3
+version = 4
 title = "Firestore rules grant no unconditional access to private data: an allow with an always true condition appears only on paths whose contents are meant to be public"
 domain = "firebase"
 layer = "platform"

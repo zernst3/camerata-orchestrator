@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1"
-version = 4
+version = 5
 title = "Use NestJS modules and dependency injection to organize and inject services"
 domain = "javascript:nest"
 layer = "framework"

@@ -1,5 +1,5 @@
 id = "SEC-NO-RAW-SQL-CONCAT-1"
-version = 6
+version = 7
 title = "SQL queries are never built by string concatenation or format-string interpolation; use parameterized queries or a query builder"
 domain = "universal"
 layer = "universal"

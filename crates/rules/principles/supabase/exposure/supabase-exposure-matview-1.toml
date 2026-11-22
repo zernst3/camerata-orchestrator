@@ -1,5 +1,5 @@
 id = "SUPABASE-EXPOSURE-MATVIEW-1"
-version = 4
+version = 5
 title = "A materialized view in an API-exposed schema cannot be row-secured; its exposure is all-or-nothing"
 domain = "supabase:exposure"
 layer = "platform"

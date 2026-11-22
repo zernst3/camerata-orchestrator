@@ -1,5 +1,5 @@
 id = "CICD-SEMGREP-SECURITY-SCAN-1"
-version = 3
+version = 4
 title = "Run the Semgrep security suite in CI"
 domain = "ci-cd"
 layer = "universal"

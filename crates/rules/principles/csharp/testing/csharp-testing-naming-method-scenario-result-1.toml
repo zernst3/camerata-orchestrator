@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-NAMING-METHOD-SCENARIO-RESULT-1"
-version = 2
+version = 3
 title = "Test methods follow MethodName_Scenario_ExpectedResult naming; test classes are named <ClassUnderTest>Tests"
 domain = "csharp:testing"
 layer = "language"

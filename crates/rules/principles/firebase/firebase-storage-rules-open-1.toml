@@ -1,5 +1,5 @@
 id = "FIREBASE-STORAGE-RULES-OPEN-1"
-version = 3
+version = 4
 title = "Storage rules let only the owner or an authorized role read and write private files, and public files sit under an explicit public path"
 domain = "firebase"
 layer = "platform"

@@ -113,6 +113,8 @@ pub struct ReachingField<'a> {
 /// the dash and spelling gates; it is wider than [`client_facing_fields`] on purpose.
 ///
 /// How the set was established (following the corpus type in `src/lib.rs` into the server):
+/// - rule ids and option ids: stored in client selections and shown in the package, so they
+///   follow the same spelling rules as prose.
 /// - `title`: Rules checked sheet, coverage.json and coverage.csv, the PDF, the report headline.
 /// - `summary` (derived from `qualifies`, else `decision.why`, else `title`): the scope-limited
 ///   rules sentence, the clone advisory "Scope:" line, the rule detail shown to the client.
@@ -153,6 +155,7 @@ pub fn client_reaching_fields(corpus: &RuleSet) -> Vec<ReachingField<'_>> {
     for rule in corpus.iter() {
         let rid = rule.id.0.as_str();
         out.push(fld(rid, "title".into(), &rule.title, false));
+        out.push(fld(rid, "rule id".into(), rid, false));
         out.push(fld(rid, "summary".into(), &rule.summary, false));
         if let Some(t) = rule.decision_question.as_deref() {
             out.push(fld(rid, "decision.question".into(), t, false));
@@ -179,6 +182,7 @@ pub fn client_reaching_fields(corpus: &RuleSet) -> Vec<ReachingField<'_>> {
             ));
         }
         for o in &rule.options {
+            out.push(fld(rid, format!("option id {}", o.id), &o.id, false));
             out.push(fld(rid, format!("{}.label", o.id), &o.label, false));
             out.push(fld(rid, format!("{}.directive", o.id), &o.directive, false));
             out.push(fld(rid, format!("{}.why", o.id), &o.why, false));

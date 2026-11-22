@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-5"
-version = 4
+version = 5
 title = "Async all the way down"
 domain = "rust"
 layer = "language"

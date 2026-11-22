@@ -1,5 +1,5 @@
 id = "ARCH-NO-STORE-SENSITIVE-RESPONSES-1"
-version = 4
+version = 5
 title = "API responses carrying auth tokens or PII set Cache-Control: no-store, so browser disk cache and shared/intermediate caches never retain them"
 domain = "api-layer"
 layer = "universal"

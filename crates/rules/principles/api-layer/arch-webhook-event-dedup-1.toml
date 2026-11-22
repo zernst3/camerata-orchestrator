@@ -1,5 +1,5 @@
 id = "ARCH-WEBHOOK-EVENT-DEDUP-1"
-version = 3
+version = 4
 title = "Payment-provider webhook handlers deduplicate by the provider's event id so redelivery never re-applies a side effect"
 domain = "api-layer"
 layer = "universal"

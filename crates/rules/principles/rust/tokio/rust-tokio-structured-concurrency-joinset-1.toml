@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-STRUCTURED-CONCURRENCY-JOINSET-1"
-version = 4
+version = 5
 title = "Use JoinSet for structured concurrency; track spawned tasks and ensure all complete or are canceled"
 domain = "rust:tokio"
 layer = "framework"

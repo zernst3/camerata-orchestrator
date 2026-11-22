@@ -1,5 +1,5 @@
 id = "CSHARP-SMALL-FOCUSED-INTERFACES-1"
-version = 2
+version = 3
 title = "Interfaces are narrow and focused on a single responsibility; fat interfaces with many unrelated methods are split"
 domain = "csharp"
 layer = "architecture"

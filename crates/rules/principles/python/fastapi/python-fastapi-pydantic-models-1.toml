@@ -1,5 +1,5 @@
 id = "PYTHON-FASTAPI-PYDANTIC-MODELS-1"
-version = 3
+version = 4
 title = "Request and response bodies use explicit Pydantic models, not dict or ORM objects"
 domain = "python:fastapi"
 layer = "framework"

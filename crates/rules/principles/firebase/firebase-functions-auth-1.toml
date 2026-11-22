@@ -1,5 +1,5 @@
 id = "FIREBASE-FUNCTIONS-AUTH-1"
-version = 3
+version = 4
 title = "HTTP functions verify the caller's token and callable functions check the caller's auth before privileged work"
 domain = "firebase"
 layer = "platform"

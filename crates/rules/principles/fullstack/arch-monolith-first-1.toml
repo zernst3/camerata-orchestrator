@@ -1,5 +1,5 @@
 id = "ARCH-MONOLITH-FIRST-1"
-version = 3
+version = 4
 title = "Deployment topology: a single service, a message broker or independent services"
 domain = "fullstack"
 layer = "universal"

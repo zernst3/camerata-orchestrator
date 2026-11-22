@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-SERIALIZABLE-STATE-1"
-version = 4
+version = 5
 title = "Only plain serializable values live in the store and in actions"
 domain = "javascript:redux"
 layer = "library"

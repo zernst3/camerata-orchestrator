@@ -1,5 +1,5 @@
 id = "ARCH-TRUNK-SYNC-1"
-version = 3
+version = 4
 title = "Single-source trunk sync"
 domain = "ci-cd"
 layer = "universal"

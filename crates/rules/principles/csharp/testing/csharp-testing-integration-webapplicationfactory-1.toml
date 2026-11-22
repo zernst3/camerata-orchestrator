@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-INTEGRATION-WEBAPPLICATIONFACTORY-1"
-version = 3
+version = 4
 title = "ASP.NET Core integration tests use WebApplicationFactory<TProgram> to host the real application in-process; infrastructure is replaced via ConfigureWebHost"
 domain = "csharp:testing"
 layer = "language"

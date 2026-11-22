@@ -1,5 +1,5 @@
 id = "FIREBASE-ADMIN-CLAIMS-1"
-version = 2
+version = 3
 title = "Admin and role checks come from custom claims or from documents that no client can write"
 domain = "firebase"
 layer = "platform"

@@ -1,5 +1,5 @@
 id = "PROC-PR-CONCURRENCY-1"
-version = 4
+version = 5
 title = "PR template forces a concurrency story"
 domain = "concurrency"
 layer = "universal"

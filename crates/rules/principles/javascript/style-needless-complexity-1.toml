@@ -1,5 +1,5 @@
 id = "STYLE-NEEDLESS-COMPLEXITY-1"
-version = 2
+version = 3
 title = "Code says what it means directly: a conditional is not negated just to swap its branches, and a component prop that every caller supplies is not declared optional"
 domain = "javascript"
 layer = "language"

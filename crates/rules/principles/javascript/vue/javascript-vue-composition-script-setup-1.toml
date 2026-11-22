@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-COMPOSITION-SCRIPT-SETUP-1"
-version = 3
+version = 4
 title = "Vue component logic style: Composition API with <script setup>, or the Options API"
 domain = "javascript:vue"
 layer = "framework"

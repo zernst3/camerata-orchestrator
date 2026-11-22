@@ -1,5 +1,5 @@
 id = "SEC-NO-COMMAND-INJECTION-1"
-version = 3
+version = 4
 title = "OS commands and dynamic code/method dispatch are never invoked with data the function did not construct itself"
 domain = "universal"
 layer = "universal"

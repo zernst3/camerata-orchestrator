@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-AAA-STRUCTURE-1"
-version = 4
+version = 5
 title = "Every test body follows Arrange-Act-Assert structure with one act per test"
 domain = "javascript:testing"
 layer = "language"

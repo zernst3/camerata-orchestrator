@@ -1,5 +1,5 @@
 id = "CICD-PIN-THIRD-PARTY-ACTIONS-1"
-version = 4
+version = 5
 title = "Third-party CI actions are pinned to a full commit SHA, never a mutable tag or branch"
 domain = "ci-cd"
 layer = "universal"

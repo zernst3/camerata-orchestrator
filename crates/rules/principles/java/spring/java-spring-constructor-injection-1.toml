@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-CONSTRUCTOR-INJECTION-1"
-version = 3
+version = 4
 title = "Dependencies are injected via constructor parameters and stored in final fields; @Autowired field injection is forbidden"
 domain = "java:spring"
 layer = "framework"

@@ -1,5 +1,5 @@
 id = "RUST-AXUM-HANDLERS-THIN-DELEGATE-1"
-version = 4
+version = 5
 title = "Handlers stay thin; business logic and data access live in services or repositories"
 domain = "rust:axum"
 layer = "framework"

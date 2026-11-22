@@ -1,5 +1,5 @@
 id = "ARCH-SHARED-CONSTANT-1"
-version = 6
+version = 7
 title = "A domain value such as a queue name, a route or a rate is defined once as a named constant and imported wherever it is used, never repeated as a bare literal across modules"
 domain = "universal"
 layer = "universal"

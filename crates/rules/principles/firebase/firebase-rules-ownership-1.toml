@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-OWNERSHIP-1"
-version = 2
+version = 3
 title = "Update rules compare the caller to the owner recorded on the stored document, not to an owner field the caller sends"
 domain = "firebase"
 layer = "platform"

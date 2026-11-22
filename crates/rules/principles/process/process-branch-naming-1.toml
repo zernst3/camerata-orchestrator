@@ -1,5 +1,5 @@
 id = "PROCESS-BRANCH-NAMING-1"
-version = 3
+version = 4
 title = "Branch names start with an allowed prefix"
 domain = "process"
 layer = "universal"

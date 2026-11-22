@@ -1,5 +1,5 @@
 id = "RUST-TESTING-5"
-version = 3
+version = 4
 title = "Mocking is done at trait boundaries; concrete dependencies are injected as trait objects or generics"
 domain = "rust:testing"
 layer = "language"

@@ -1,5 +1,5 @@
 id = "ARCH-API-VERSIONING-1"
-version = 3
+version = 4
 title = "API versioning scheme: URL prefix, request header, in-place evolution or content negotiation"
 domain = "api-layer"
 layer = "universal"

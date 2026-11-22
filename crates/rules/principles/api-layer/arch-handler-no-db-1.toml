@@ -1,5 +1,5 @@
 id = "ARCH-HANDLER-NO-DB-1"
-version = 3
+version = 4
 title = "Handlers never touch the database directly"
 domain = "api-layer"
 layer = "universal"

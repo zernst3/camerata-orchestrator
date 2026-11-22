@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-HTML-SINK-1"
-version = 3
+version = 4
 title = "User- or attacker-influenced data is never rendered through a raw-HTML sink without sanitization"
 domain = "universal"
 layer = "universal"

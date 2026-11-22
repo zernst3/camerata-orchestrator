@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1"
-version = 1
+version = 2
 title = "ASP.NET Core routing style: Minimal APIs or MVC controllers"
 domain = "csharp:aspnetcore"
 layer = "framework"

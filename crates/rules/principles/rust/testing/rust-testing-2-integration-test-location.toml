@@ -1,5 +1,5 @@
 id = "RUST-TESTING-2"
-version = 3
+version = 4
 title = "Integration tests live in a top-level tests/ directory; each file is a separate crate"
 domain = "rust:testing"
 layer = "language"

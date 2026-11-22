@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-DISABLED-NOT-RESTORED-1"
-version = 4
+version = 5
 title = "Row Level Security explicitly disabled on a table must be restored, never left off by omission"
 domain = "supabase:rls"
 # General Postgres, not just Supabase: an explicit `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`

@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-DESERIALIZATION-1"
-version = 4
+version = 5
 title = "Unsafe deserialization of untrusted data is never used in production code; tests that require it use a suppression with a reason"
 domain = "universal"
 layer = "universal"

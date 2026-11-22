@@ -1,5 +1,5 @@
 id = "ARCH-STRUCTURED-ERRORS-1"
-version = 4
+version = 5
 title = "Error responses use a structured envelope with stable machine-readable codes"
 domain = "api-layer"
 layer = "universal"

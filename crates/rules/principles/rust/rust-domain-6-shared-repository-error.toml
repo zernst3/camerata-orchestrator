@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-6"
-version = 3
+version = 4
 title = "Crate-boundary error types: typed enums organized by category or by aggregate"
 domain = "rust"
 layer = "language"

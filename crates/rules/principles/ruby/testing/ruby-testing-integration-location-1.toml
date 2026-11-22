@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-INTEGRATION-LOCATION-1"
-version = 3
+version = 4
 title = "Integration and system tests live in spec/requests/ (API flows) and spec/system/ (browser flows), not spec/controllers/"
 domain = "ruby:testing"
 layer = "language"

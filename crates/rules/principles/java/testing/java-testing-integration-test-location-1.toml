@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-INTEGRATION-TEST-LOCATION-1"
-version = 2
+version = 3
 title = "Integration tests are named *IT.java (or *ITCase.java) and tagged @Tag(\"integration\") so they can be separated from unit tests in CI"
 domain = "java:testing"
 layer = "language"

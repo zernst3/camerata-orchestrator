@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-METHOD-SECURITY-1"
-version = 4
+version = 5
 title = "Protected service methods carry @PreAuthorize; authorization is not re-implemented in every controller"
 domain = "java:spring"
 layer = "framework"

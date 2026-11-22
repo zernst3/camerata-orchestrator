@@ -1,5 +1,5 @@
 id = "RUST-PURE-STATE-TRANSITIONS-1"
-version = 3
+version = 4
 title = "Core state changes are pure functions from old state to new state, with side effects pushed to the edges"
 domain = "rust"
 layer = "library"

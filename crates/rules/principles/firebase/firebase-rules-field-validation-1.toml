@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-FIELD-VALIDATION-1"
-version = 2
+version = 3
 title = "Write rules constrain which fields and types a document may contain"
 domain = "firebase"
 layer = "platform"

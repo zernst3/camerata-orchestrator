@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1"
-version = 4
+version = 5
 title = "Mocks replace external system boundaries (network, DB, clock); own domain logic is tested through real implementations"
 domain = "javascript:testing"
 layer = "language"

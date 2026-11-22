@@ -1,5 +1,5 @@
 id = "GO-GRPC-STREAMING-CLEANUP-1"
-version = 3
+version = 4
 title = "Streaming RPCs properly close send/receive loops and handle context cancellation; no resource leaks or dangling goroutines"
 domain = "go:grpc"
 layer = "framework"

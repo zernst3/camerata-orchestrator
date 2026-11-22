@@ -1,5 +1,5 @@
 id = "GO-LOGGING-STRUCTURED-1"
-version = 3
+version = 4
 title = "Logging is structured using a logger interface (slog, zap); log lines are not built with string concatenation or Printf"
 domain = "go"
 layer = "language"

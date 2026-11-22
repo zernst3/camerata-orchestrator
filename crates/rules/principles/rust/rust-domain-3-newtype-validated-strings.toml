@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-3"
-version = 3
+version = 4
 title = "How validated text is represented: newtype with fallible constructor, inline call-site checks, runtime tag or plain String"
 domain = "rust"
 layer = "language"
