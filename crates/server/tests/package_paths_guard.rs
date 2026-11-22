@@ -135,10 +135,7 @@ fn no_package_path_is_spelled_outside_the_paths_module() {
 fn the_guard_catches_a_literal_and_ignores_comments_and_the_test_module() {
     let forbidden = forbidden();
     let code = "let a = \"findings.json\";\n// findings.json in a comment\nlet b = \"json/x.json\";\nlet ok = \"all-findings\";\n#[cfg(test)]\nmod tests { let t = \"findings.json\"; }\n";
-    let hits: Vec<_> = offences(code, &forbidden)
-        .into_iter()
-        .map(|(l, n)| (l, n))
-        .collect();
+    let hits = offences(code, &forbidden);
     assert_eq!(hits, vec![(1, "findings.json"), (3, "a json/ path")]);
     let prose = "\"the rows of json/inspection.json\"";
     assert!(!offences(prose, &forbidden).is_empty());
