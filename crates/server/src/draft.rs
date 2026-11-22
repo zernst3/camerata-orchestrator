@@ -25,19 +25,31 @@ fn sibling(path: &std::path::Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// A project id as a file-name part: ASCII letters, digits, `_` and `-` as they are, anything
-/// else (a `.`, a separator) as `%XX` per byte, so no id can name another project's file.
+/// A project id as a file-name part (`inspections::file_stem`: injective, and never empty, so no
+/// id gets `onboarding-draft-.json`).
 fn file_part(project_id: &str) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    for b in project_id.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
-            out.push(char::from(b));
+    crate::inspections::file_stem(project_id)
+}
+
+/// The project id a file-name part stands for (the inverse of [`file_part`]).
+fn id_of_part(part: &str) -> Option<String> {
+    if part == "%00empty" {
+        return Some(String::new());
+    }
+    let b = part.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = part.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
         } else {
-            let _ = write!(out, "%{b:02X}");
+            out.push(b[i]);
+            i += 1;
         }
     }
-    out
+    String::from_utf8(out).ok()
 }
 
 /// Whether `bytes` are a draft map this build can read.
@@ -85,8 +97,9 @@ pub struct DraftStore {
     path: Option<Arc<PathBuf>>,
     mem: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     /// Set when the file on disk could not be read at start and was set aside; the operator is
-    /// told once, on the next read of the draft ([`Self::take_unreadable_notice`]).
-    notice: Arc<Mutex<Option<String>>>,
+    /// told once, on the next read of the draft ([`Self::take_unreadable_notice`]). Each is for the
+    /// project whose file it was, or for every project (`None`) when a shared file was set aside.
+    notice: Arc<Mutex<Vec<(Option<String>, String)>>>,
 }
 
 impl DraftStore {
@@ -107,27 +120,39 @@ impl DraftStore {
     /// that cannot be read is moved to its `.unreadable-<seconds>` name instead, so a second
     /// start finds nothing to redo.
     pub fn at(path: PathBuf, live_ids: &[String]) -> Self {
-        let _ = live_ids;
-        let mut notice = None;
+        let mut notices: Vec<(Option<String>, String)> = Vec::new();
         let mut mem: HashMap<String, serde_json::Value> = HashMap::new();
         let store = Self {
             path: Some(Arc::new(path.clone())),
             mem: Arc::new(Mutex::new(HashMap::new())),
-            notice: Arc::new(Mutex::new(None)),
+            notice: Arc::new(Mutex::new(Vec::new())),
         };
 
+        // Projects whose own file was read: that file is authoritative for ALL of the project's
+        // keys (its draft and its discard stamp), whatever a shared file says.
+        let mut own_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for file in store.project_files_on_disk() {
             let (map, told) = Self::load_file(&file, false);
-            notice = notice.or(told);
+            if let Some(told) = told {
+                notices.push((store.owner_of_file(&file), told));
+            }
             if let Some(map) = map {
+                own_ids.extend(map.keys().filter(|k| k.as_str() != CLEARED_KEY).cloned());
+                if let Some(o) = map.get(CLEARED_KEY).and_then(|c| c.as_object()) {
+                    own_ids.extend(o.keys().cloned());
+                }
                 Self::merge(&mut mem, map, false);
             }
         }
 
         if path.exists() {
             let (map, told) = Self::load_file(&path, true);
-            notice = notice.or(told);
+            if let Some(told) = told {
+                notices.push((None, told));
+            }
             if let Some(map) = map {
+                // Only projects that still exist, and have no readable file of their own, are
+                // migrated; the rest stay in the shared file, which is kept whole as the backup.
                 let mut ids: Vec<String> = map
                     .keys()
                     .filter(|k| k.as_str() != CLEARED_KEY)
@@ -138,18 +163,21 @@ impl DraftStore {
                 }
                 ids.sort();
                 ids.dedup();
-                let had_file: Vec<bool> = ids
-                    .iter()
-                    .map(|id| store.project_file(id).is_some_and(|f| f.exists()))
-                    .collect();
-                Self::merge(&mut mem, map, true);
+                ids.retain(|id| live_ids.contains(id) && !own_ids.contains(id));
+                let mut eligible: HashMap<String, serde_json::Value> = HashMap::new();
+                for id in &ids {
+                    if let Some(d) = map.get(id) {
+                        eligible.insert(id.clone(), d.clone());
+                    }
+                    if let Some(at) = map.get(CLEARED_KEY).and_then(|c| c.get(id)) {
+                        Self::stamp_cleared(&mut eligible, id, at.as_str().unwrap_or_default());
+                    }
+                }
+                Self::merge(&mut mem, eligible, false);
                 if let Ok(mut m) = store.mem.lock() {
                     *m = mem.clone();
                 }
-                let all_written = ids
-                    .iter()
-                    .zip(&had_file)
-                    .all(|(id, had)| *had || store.write_project(id).is_ok());
+                let all_written = ids.iter().all(|id| store.write_project(id).is_ok());
                 if all_written {
                     let _ = std::fs::rename(&path, Self::backup_name(&path));
                 }
@@ -160,9 +188,19 @@ impl DraftStore {
             *m = mem;
         }
         if let Ok(mut n) = store.notice.lock() {
-            *n = notice;
+            *n = notices;
         }
         store
+    }
+
+    /// The project a per-project draft file (or one of its `.bak`, `.tmp`, set-aside copies)
+    /// belongs to, read from its name. `None` for a name that is not a per-project draft file.
+    pub fn owner_of_file(&self, file: &std::path::Path) -> Option<String> {
+        let shared = self.path.as_ref()?;
+        let stem = shared.file_stem()?.to_string_lossy().to_string();
+        let name = file.file_name()?.to_string_lossy().to_string();
+        let rest = name.strip_prefix(&format!("{stem}-"))?;
+        id_of_part(rest.split('.').next()?)
     }
 
     /// Where a shared file is kept once its drafts have their own files.
@@ -351,8 +389,12 @@ impl DraftStore {
     /// Why no draft could be restored, when the draft file on disk was unreadable at start and
     /// nothing has been saved since. Taking it clears it: the operator is told once, and what
     /// they do next (start again, save) is not blocked by a message that keeps coming back.
-    pub fn take_unreadable_notice(&self, _project_id: &str) -> Option<String> {
-        self.notice.lock().ok().and_then(|mut n| n.take())
+    pub fn take_unreadable_notice(&self, project_id: &str) -> Option<String> {
+        let mut n = self.notice.lock().ok()?;
+        let i = n
+            .iter()
+            .position(|(who, _)| who.as_deref().is_none_or(|w| w == project_id))?;
+        Some(n.remove(i).1)
     }
 
     /// Write `project_id`'s file from the in-memory map: its draft and its discard stamp, and
@@ -361,11 +403,13 @@ impl DraftStore {
         let Some(file) = self.project_file(project_id) else {
             return Ok(());
         };
-        let json = {
-            let m = self
-                .mem
-                .lock()
-                .map_err(|_| std::io::Error::other("draft store mutex poisoned"))?;
+        // The lock is held across the write: a deletion ([`Self::clear_checked`]) takes the same
+        // lock, so a write can never put back what a deletion just removed.
+        let m = self
+            .mem
+            .lock()
+            .map_err(|_| std::io::Error::other("draft store mutex poisoned"))?;
+        {
             let mut only: HashMap<String, serde_json::Value> = HashMap::new();
             if let Some(d) = m.get(project_id) {
                 only.insert(project_id.to_string(), d.clone());
@@ -379,9 +423,9 @@ impl DraftStore {
             if only.is_empty() {
                 return Ok(());
             }
-            serde_json::to_string(&only).map_err(std::io::Error::other)?
-        };
-        write_with_backup(&file, &json)
+            let json = serde_json::to_string(&only).map_err(std::io::Error::other)?;
+            write_with_backup(&file, &json)
+        }
     }
 
     /// Best-effort flush of `project_id`'s file; the in-memory mirror is authoritative. The
@@ -392,7 +436,8 @@ impl DraftStore {
         }
         if self.write_project(project_id).is_ok() {
             if let Ok(mut n) = self.notice.lock() {
-                *n = None;
+                // This project's notice, and a shared file's (it concerned every project).
+                n.retain(|(who, _)| who.as_deref().is_some_and(|w| w != project_id));
             }
         }
     }
