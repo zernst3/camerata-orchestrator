@@ -22,7 +22,7 @@
 mod common;
 
 use camerata_rules::{corpus_path, load_corpus_lenient, RuleSet};
-use common::client_facing_fields;
+use common::{client_facing_fields, client_reaching_fields};
 
 /// U+2014, spelled as an escape so this file does not itself contain the character.
 const EM_DASH: char = '\u{2014}';
@@ -61,6 +61,30 @@ async fn no_client_facing_rule_field_carries_an_em_dash() {
 
 /// The gate must be able to fail: a synthetic rule with a dash in each client-facing slot is
 /// flagged in every one of them, and a dash in an operator-facing slot is not.
+/// Every `<rule id>: <field>` over EVERY client-reaching field (see
+/// `common::client_reaching_fields`) whose text carries an em dash (U+2014) or en dash (U+2013).
+fn dash_offenders_everywhere(corpus: &RuleSet) -> Vec<String> {
+    client_reaching_fields(corpus)
+        .into_iter()
+        .filter(|f| f.text.contains(EM_DASH) || f.text.contains('\u{2013}'))
+        .map(|f| format!("{}: {}", f.rule_id, f.loc))
+        .collect()
+}
+
+#[tokio::test]
+async fn no_client_reaching_rule_field_carries_an_em_or_en_dash() {
+    let (corpus, errors) = load_corpus_lenient(&corpus_path()).await;
+    assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+    assert!(corpus.iter().count() > 100, "vacuity guard");
+    let offenders = dash_offenders_everywhere(&corpus);
+    assert!(
+        offenders.is_empty(),
+        "text that can reach a client must carry no em or en dash ({} offenders):\n  {}",
+        offenders.len(),
+        offenders.join("\n  ")
+    );
+}
+
 #[tokio::test]
 async fn the_em_dash_gate_fires_on_every_client_facing_field_and_ignores_operator_fields() {
     let dash = EM_DASH;
