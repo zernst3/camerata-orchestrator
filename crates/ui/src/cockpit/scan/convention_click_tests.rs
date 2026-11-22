@@ -244,7 +244,7 @@ fn report_json() -> Value {
 }
 
 thread_local! {
-    static REPORT: RefCell<Value> = RefCell::new(Value::Null);
+    static REPORT: RefCell<Value> = const { RefCell::new(Value::Null) };
 }
 
 fn screen() -> Element {
