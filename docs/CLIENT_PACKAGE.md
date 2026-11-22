@@ -111,6 +111,10 @@ A place below the line is not left unchecked. The engine checked it against the 
 - The reviewer's working notes, the group reviewer's reasons and ranks, the escalation budget, the time spent on review and any cost figure. These are the operator's and are left out of every client file.
 - Problems the engine or the reviewer ruled out, apart from a count and the Ruled out sheet that gives the reason for each.
 
+## What changed in the layout
+
+The whole inspection moved from `findings.json` at the top level to `json/inspection.json`, and `decisions.json` moved to `json/decisions.json`. Every JSON file is now in `json/`, and only `manifest.json` and `README.txt` stay at the top level beside the PDF and the workbook. The manifest lists `json/inspection.json` with the schema version `inspection/1.0` (it was `findings/1.0`). Packages exported before this change no longer pass `camerata release-gate`, because the gate looks for the files at their new paths.
+
 ## Glossary
 
 The glossary below is generated from the same vocabulary the workbook's Glossary sheet prints, so the two cannot differ. Because the workbook speaks to the client, its definitions address the reader as "you". To change a definition, change the vocabulary and regenerate this block.

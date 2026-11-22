@@ -1,5 +1,5 @@
 //! The machine-readable files of a real package: a header row on every CSV, and the list and
-//! number fields beside the prose ones in `findings.json` and the finding datasets.
+//! number fields beside the prose ones in `json/inspection.json` and the finding datasets.
 
 use serde_json::Value;
 

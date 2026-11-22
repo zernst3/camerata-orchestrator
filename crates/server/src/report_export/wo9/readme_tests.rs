@@ -168,7 +168,7 @@ fn the_client_readme_has_no_second_person() {
     }
 }
 
-/// `findings.json` is every row that was not ruled out, of every kind, before the All problems
+/// `json/inspection.json` is every row that was not ruled out, of every kind, before the All problems
 /// sheet shows each problem once. It is not "the same rows" as that sheet.
 #[test]
 fn the_readme_describes_findings_json_as_every_row_not_ruled_out() {
@@ -197,7 +197,7 @@ fn the_readme_describes_findings_json_as_every_row_not_ruled_out() {
     }
 }
 
-/// `csv/all-findings.csv` and `json/all-findings.json` are the rows of `findings.json`, not a
+/// `csv/all-findings.csv` and `json/all-findings.json` are the rows of `json/inspection.json`, not a
 /// sheet of the workbook, so the README must not call every file of `csv/` and `json/` a table of
 /// the workbook.
 #[test]

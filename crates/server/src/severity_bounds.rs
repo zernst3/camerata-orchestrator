@@ -27,7 +27,7 @@
 //!
 //! C4-R1 says no finding above `info` may ship with BOTH an empty path AND line 0. Its rationale
 //! is about the FINDING, not about one artifact's presentation. It had been applied by the PDF
-//! alone, which left the live scan, the workbook, the CSV/JSON exports and `findings.json`
+//! alone, which left the live scan, the workbook, the CSV/JSON exports and `json/inspection.json`
 //! showing the producer's severity for the same row (`high` where the PDF said `info`). So it
 //! runs in the shared chain, between the floor and the ceilings, and every surface agrees.
 //!

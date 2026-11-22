@@ -1,5 +1,5 @@
 //! H4 item 2: the engine version, the git commit it was built from and the rule-library lock
-//! hash reach the PDF, `findings.json`, the README and `manifest.json`, reusing the existing
+//! hash reach the PDF, `json/inspection.json`, the README and `manifest.json`, reusing the existing
 //! fields (`engine_version`, `corpus_version`) rather than adding parallel ones.
 
 use std::collections::HashMap;

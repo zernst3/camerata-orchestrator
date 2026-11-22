@@ -315,7 +315,7 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
     assert!(text.contains("Node.js 18 has received no security fixes since 2025-04-30."));
     assert!(text.contains("Node.js 18.17.0 has 4 known vulnerabilities"));
 
-    // findings.json.
+    // json/inspection.json.
     let export = camerata_server::xlsx_export::build_findings_export(
         &camerata_server::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
         Some(&corpus),

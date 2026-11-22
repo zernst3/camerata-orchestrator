@@ -248,7 +248,7 @@ async fn with_no_flag_the_group_reviewer_runs_on_opus_and_the_environment_is_ign
         assert_ne!(req.model, "env-picked-model");
     }
     // This export is the operator's own (the project is not a client engagement). What the group
-    // reviewer said stays out of its findings.json, but for the one thing a row states: why it
+    // reviewer said stays out of its json/inspection.json, but for the one thing a row states: why it
     // was escalated, in the closed reason vocabulary.
     let text = String::from_utf8(findings_json).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).unwrap();

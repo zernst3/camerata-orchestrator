@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used)]
-//! A project of several repos, through the export pipeline (report JSON, `findings.json`, the
+//! A project of several repos, through the export pipeline (report JSON, `json/inspection.json`, the
 //! workbook, the JSON and CSV datasets): the deliverable has to keep the services apart.
 //!
 //! * the same path in two repos is two places, so every site list names its repo;
@@ -208,7 +208,7 @@ fn a_rule_violated_in_one_repo_and_clean_in_another_is_one_pattern_row_and_no_fi
     assert_eq!(state(WEB), CellState::Violated { sites: 1 });
     assert_eq!(state(API), CellState::Clean);
 
-    // findings.json: its own key, never inside the findings array.
+    // json/inspection.json: its own key, never inside the findings array.
     let fj = findings_json(&report);
     let section = &fj["patterns_across_services"];
     assert_eq!(section["rows"].as_array().unwrap().len(), 1);
@@ -835,7 +835,7 @@ fn start_here_does_not_count_pattern_rows_in_the_scorecard() {
     );
 }
 
-/// The shipped `findings.json` of a one-repo project is byte for byte what it was: the per-repo
+/// The shipped `json/inspection.json` of a one-repo project is byte for byte what it was: the per-repo
 /// volume key exists only when there is more than one repo to list.
 #[test]
 fn a_one_repo_findings_json_carries_no_per_repo_volume_key() {

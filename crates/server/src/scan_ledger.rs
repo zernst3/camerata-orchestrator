@@ -930,7 +930,7 @@ pub struct ScanInputFacts {
     #[serde(default)]
     pub audit_model: Option<String>,
     /// Auditable files the scan did NOT read, by path and reason (over the size cap, or past
-    /// the file cap). H4: listed under Coverage in the report and `findings.json` so a skipped
+    /// the file cap). H4: listed under Coverage in the report and `json/inspection.json` so a skipped
     /// file is named, never silently absent. `serde(default)` so an older ledger still loads.
     #[serde(default)]
     pub skipped_files: Vec<SkippedFile>,

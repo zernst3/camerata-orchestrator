@@ -1,5 +1,5 @@
 //! The Possible duplicate hint in the packages: an internal package carries it (a column in the
-//! workbook's technical band, a key in `findings.json`, a count on Start here); a client package
+//! workbook's technical band, a key in `json/inspection.json`, a count on Start here); a client package
 //! carries none of it; and the hint changes no other field of any row. Synthetic data.
 
 use std::collections::BTreeMap;
@@ -86,8 +86,8 @@ fn workbook(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
 }
 
 fn findings_rows(entries: &BTreeMap<String, Vec<u8>>) -> Vec<serde_json::Value> {
-    let doc: serde_json::Value =
-        serde_json::from_slice(&entries["json/inspection.json"]).expect("findings.json parses");
+    let doc: serde_json::Value = serde_json::from_slice(&entries["json/inspection.json"])
+        .expect("json/inspection.json parses");
     doc["findings"].as_array().expect("rows").clone()
 }
 
@@ -157,7 +157,7 @@ fn an_internal_package_carries_the_hint_in_the_workbook_findings_json_and_start_
     assert_ne!(layering_fix, orders_sql_fix, "two causes");
     let reviewed = apply_overlay(&sealed, &[], &[], &[]);
     let entries = internal_entries(&reviewed);
-    // findings.json: the key on the two paired rows only, naming the other cause's Fix id.
+    // json/inspection.json: the key on the two paired rows only, naming the other cause's Fix id.
     let rows = findings_rows(&entries);
     let hinted: Vec<&serde_json::Value> = rows
         .iter()
@@ -343,7 +343,7 @@ fn a_pair_the_model_did_not_call_the_same_flaw_is_not_hinted_anywhere() {
             findings_rows(&entries)
                 .iter()
                 .all(|r| r.get("possible_duplicate_of").is_none()),
-            "no findings.json key"
+            "no json/inspection.json key"
         );
         let xlsx = workbook(&entries);
         assert_eq!(

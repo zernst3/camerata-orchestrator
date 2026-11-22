@@ -1,6 +1,6 @@
 //! Build script: records the git commit this binary was built from as `CAMERATA_GIT_COMMIT`, so
 //! every export can name the exact engine that produced it (README, `manifest.json`,
-//! `findings.json`, the PDF). Read in the crate through `option_env!`, so a build outside a git
+//! `json/inspection.json`, the PDF). Read in the crate through `option_env!`, so a build outside a git
 //! checkout (a source tarball, a vendored copy) simply records no commit rather than failing.
 //!
 //! A release pipeline can set `CAMERATA_GIT_COMMIT` itself; that value wins over `git`.

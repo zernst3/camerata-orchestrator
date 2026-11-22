@@ -18,8 +18,8 @@
 //! M5) already refuses every `evidence_unverified` row that carries no decision, which is exactly
 //! that check.
 //!
-//! The merge check reads the package itself: the merged rows of `findings.json` and the records of
-//! `decisions.json`, so what is checked is what the client receives. They are mechanical and hard.
+//! The merge check reads the package itself: the merged rows of `json/inspection.json` and the records of
+//! `json/decisions.json`, so what is checked is what the client receives. They are mechanical and hard.
 
 use super::evidence::ReviewerDecisions;
 use super::Problem;
@@ -32,7 +32,7 @@ use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// One problem per merged row that has no decision record naming it, that state and a reason,
 /// and one per site a live group decision covers that has no per-site record. Read from the
-/// package's own files: the merged rows of `findings.json` and the records of `decisions.json`.
+/// package's own files: the merged rows of `json/inspection.json` and the records of `json/decisions.json`.
 /// A merged row is one whose `merged_into` names the row it points to.
 pub fn merged_without_decision_in_archive(
     entries: &std::collections::BTreeMap<String, Vec<u8>>,

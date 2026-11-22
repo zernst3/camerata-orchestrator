@@ -340,7 +340,7 @@ fn every_export_carries_reviewer_edited_and_the_edit_ids() {
             .unwrap_or_else(|| panic!("no row for {path}"))
             .clone()
     };
-    // findings.json and the JSON dataset.
+    // json/inspection.json and the JSON dataset.
     for (name, rows) in [
         (
             "json/inspection.json",
@@ -631,10 +631,10 @@ fn each_editable_field_round_trips_into_the_exports() {
         };
         assert_eq!(
             got[column], want,
-            "{field:?} did not reach findings.json: {got}"
+            "{field:?} did not reach json/inspection.json: {got}"
         );
         assert_eq!(got["reviewer_edited"], true, "{field:?}");
-        // Every other dataset agrees with findings.json (the gate's parity check).
+        // Every other dataset agrees with json/inspection.json (the gate's parity check).
         let released = release(package);
         assert!(released.is_ok(), "{field:?}: {:?}", released.err());
     }
@@ -867,7 +867,7 @@ fn export_gate_view_equals_release_gate_refusals() {
         kind(HoldReason::RestoredWithoutDecision),
         located_in(CheckId::RestoredWithoutDecision, "json/inspection.json")
     );
-    // The Engine Check's kept row is a problem in findings.json; its thrown-out row is a problem
+    // The Engine Check's kept row is a problem in json/inspection.json; its thrown-out row is a problem
     // against the thrown-out findings, which the client package never carries.
     assert_eq!(
         kind(HoldReason::EngineCheckNoWithoutCorrection),

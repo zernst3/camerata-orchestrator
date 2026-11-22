@@ -107,7 +107,8 @@ fn stage2_reasons_and_why_text_appear_only_in_the_internal_workbook() {
     // The operator's data files carry the escalation reason of each row (nothing else of the
     // triage): the reason the row was escalated, in the closed vocabulary, and no model text.
     let findings = String::from_utf8_lossy(&entries["json/inspection.json"]).into_owned();
-    let doc: serde_json::Value = serde_json::from_str(&findings).expect("findings.json parses");
+    let doc: serde_json::Value =
+        serde_json::from_str(&findings).expect("json/inspection.json parses");
     let reasons: Vec<&str> = doc["findings"]
         .as_array()
         .expect("rows")
@@ -128,7 +129,7 @@ fn stage2_reasons_and_why_text_appear_only_in_the_internal_workbook() {
     ] {
         assert!(
             !findings.contains(key),
-            "an internal findings.json carries {key}"
+            "an internal json/inspection.json carries {key}"
         );
     }
     // The same reason is in the json/ and csv/ datasets, so the parity checks stay equal.

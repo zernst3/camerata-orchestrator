@@ -225,7 +225,7 @@ pub(crate) fn resolve_citation(
 /// match (`classify_ai_finding`). The standard is real and relevant, but no Camerata rule
 /// checked the code against it: the model reported a defect and its wording matched a defect
 /// class. Such a citation carries kind `"related"`, never `"grounded"`, so neither the report,
-/// the workbook nor `findings.json` presents it as a rule that was checked. Triage
+/// the workbook nor `json/inspection.json` presents it as a rule that was checked. Triage
 /// confirmation was the other option and was rejected: triage is optional in the desktop
 /// flow, so gating the citation on it would strip every keyword-matched finding of its
 /// standard (and, through `is_uncited_ai_finding`, out of the curated set) in any export made
@@ -494,7 +494,7 @@ pub(crate) fn title_for_finding(
 
 /// C4-P4 (residual defect 2): human-readable TITLES for a finding's `also_matches` list (other
 /// rule ids absorbed into this one during P1 clustering) — NEVER the raw rule ids themselves.
-/// Client-facing prose (the PDF curated-site "Also violates" line, the xlsx/`findings.json`
+/// Client-facing prose (the PDF curated-site "Also violates" line, the xlsx/`json/inspection.json`
 /// "Also matches" column) must never surface an internal rule-id token, which a reader has no
 /// way to decode. An id with no resolvable corpus title is DROPPED from the list entirely
 /// rather than falling back to the bare id — unlike [`title_for_finding`]'s last-resort bare-id
@@ -573,7 +573,7 @@ pub(crate) fn is_uncited_ai_finding(
 /// DEFAULT option, or the resolved option's `remediation` field is itself absent/blank in the
 /// TOML (not yet authored — the common case until the corpus-wide authoring pass in Phase 2a
 /// lands). Surfaced as the PDF's "Fix:" line (`CuratedSiteJson::fix`) and the workbook's
-/// "Recommended Fix" column / `findings.json`'s `fix` field (`FindingRow::fix`) — same join, all
+/// "Recommended Fix" column / `json/inspection.json`'s `fix` field (`FindingRow::fix`) — same join, all
 /// three, so an absent remediation reads as an honestly OMITTED Fix block everywhere rather than
 /// one artifact inventing text the others don't have.
 /// Resolve for the option this finding was ACTUALLY evaluated under, so the report's Fix
@@ -614,7 +614,7 @@ pub(crate) fn resolve_deviation_fix(
 }
 
 /// Kind-aware [`resolve_fix`] used by every export surface that prints a row's fix (the PDF
-/// data, `findings.json`, the datasets and the workbook, and the held-for-review routing): a
+/// data, `json/inspection.json`, the datasets and the workbook, and the held-for-review routing): a
 /// consistency deviation row resolves through [`resolve_deviation_fix`], every other row stays
 /// strict, so one row never has a fix in one artifact and none in another.
 pub(crate) fn resolve_fix_for_row(

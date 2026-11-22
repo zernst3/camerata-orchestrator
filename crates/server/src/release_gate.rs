@@ -2,7 +2,7 @@
 //! (docs/design/2026-10-23_secret-redaction-and-release-gate.md section 7).
 //!
 //! One path to zip bytes: [`build_product_package`] assembles everything one product export
-//! consists of (the PDF's data and the compiled PDF, the workbook, `findings.json`, the CSV and
+//! consists of (the PDF's data and the compiled PDF, the workbook, `json/inspection.json`, the CSV and
 //! JSON datasets, the README and the provenance), and [`release`] is the ONLY function the three
 //! real exporters (the HTTP `export_product`, `camerata inspect --export`, the sample generator)
 //! call to obtain zip bytes. [`release`] zips the package, then runs every check over the
@@ -69,9 +69,9 @@ pub struct ProductPackage {
     pub pdf: Vec<u8>,
     /// The workbook.
     pub xlsx: Vec<u8>,
-    /// The rows behind `findings.json` (and the workbook's "All Findings" sheet).
+    /// The rows behind `json/inspection.json` (and the workbook's "All Findings" sheet).
     pub findings_export: FindingsExport,
-    /// `findings.json`, serialized.
+    /// `json/inspection.json`, serialized.
     pub findings_json: Vec<u8>,
     /// `csv/*.csv` then `json/*.json`.
     pub datasets: Vec<(String, Vec<u8>)>,
@@ -212,7 +212,7 @@ pub(crate) fn assemble_package(
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // `findings.json`: the machine-readable sibling of the workbook's "All Findings" sheet,
+    // `json/inspection.json`: the machine-readable sibling of the workbook's "All Findings" sheet,
     // built from the SAME reviewed report/corpus pass (and `report_json`'s cover and
     // executive summary), so it can never disagree with the PDF or the workbook.
     let findings_export = crate::xlsx_export::build_findings_export(
@@ -225,7 +225,7 @@ pub(crate) fn assemble_package(
         .map_err(|e| anyhow::anyhow!("could not serialize {INSPECTION_JSON}: {e}"))?;
 
     // The per-dataset machine-readable tables: the SAME `partition_rows` pass as the workbook
-    // and findings.json, so every artifact agrees. CSV first, then JSON.
+    // and json/inspection.json, so every artifact agrees. CSV first, then JSON.
     let csv = crate::xlsx_export::build_csv_exports(reviewed, corpus, options)
         .map_err(|e| anyhow::anyhow!("could not build the machine-readable exports: {e}"))?;
     let json = crate::xlsx_export::build_json_exports(reviewed, corpus, options)
@@ -233,7 +233,7 @@ pub(crate) fn assemble_package(
     let mut datasets = csv;
     datasets.extend(json);
     // The list and number fields beside the prose ones, and a header on every empty CSV. One pass
-    // over findings.json and the datasets, so they stay equal to each other.
+    // over json/inspection.json and the datasets, so they stay equal to each other.
     crate::machine_files::finish(&mut findings_json, &mut datasets)
         .map_err(|e| anyhow::anyhow!("could not finish the machine-readable exports: {e}"))?;
     // The decisions the report was reviewed with. The gate reads this file, not the records the
@@ -384,7 +384,7 @@ pub fn audit_zip(zip_bytes: &[u8], pdf_text: Option<&str>) -> GateReport {
 /// [`audit_zip`], optionally letting a package that records an incomplete run through (the
 /// internal export of such a run; nothing else passes it).
 ///
-/// `archive_content` is whether the junk-content check reads the archive's `findings.json`. A
+/// `archive_content` is whether the junk-content check reads the archive's `json/inspection.json`. A
 /// standalone audit has no reviewer decisions, so every junk row is a problem there. [`release`]
 /// holds the rows and checks their decisions itself ([`junk::junk_without_decision`]) and passes
 /// `false`, so a junk row a reviewer has decided is not refused a second time.
@@ -461,7 +461,7 @@ fn audit_zip_with(
     );
     // A merge with no decision behind it, or a group decision missing a site's record, is a
     // structural defect whoever receives the package, so it is checked for an internal package
-    // too. Read from the package's own decisions.json.
+    // too. Read from the package's own json/decisions.json.
     report.record(
         CheckId::MergedWithoutDecision,
         held::merged_without_decision_in_archive(&entries),
@@ -472,7 +472,7 @@ fn audit_zip_with(
 /// The check that a package does not record an inspection that failed to run to completion: such
 /// a package is for the operator's own review, never for a client. Reads the manifest's
 /// `inspection.run_incomplete` flag, the README's INTERNAL INCOMPLETE line and the marking in
-/// `findings.json`, none of which a complete run carries, so a package edited to drop one of them
+/// `json/inspection.json`, none of which a complete run carries, so a package edited to drop one of them
 /// is still refused.
 fn incomplete_run_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
     let mut problems = Vec::new();
@@ -550,7 +550,7 @@ fn archive_secret_problems(
     problems
 }
 
-/// The content check (D1) over an archive alone: no row in `findings.json` is real junk
+/// The content check (D1) over an archive alone: no row in `json/inspection.json` is real junk
 /// ([`crate::junk_finding::JunkReason`]). A placeholder title or rule id, a row with no evidence
 /// and no explanation, an empty explanation, the model's own refusal or chat reply, an
 /// untranslated JSON fragment, or the verdict "discard this finding" makes the package unfit to

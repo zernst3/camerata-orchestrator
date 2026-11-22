@@ -1,4 +1,4 @@
-//! WO9: the package's `decisions.json` and Decisions sheet, and the release gate reading them.
+//! WO9: the package's `json/decisions.json` and Decisions sheet, and the release gate reading them.
 
 use camerata_api_types::decisions::DecisionState;
 use serde_json::Value;
@@ -76,7 +76,7 @@ fn merged_without_decision_reads_the_package_decisions_json() {
     );
     let reviewed = apply_overlay(&sealed, std::slice::from_ref(&merge), &[], &[]);
     let package = package_of(&reviewed, &client_options());
-    // In memory the merge has its record. The package's own decisions.json is what the gate
+    // In memory the merge has its record. The package's own json/decisions.json is what the gate
     // reads, so a record struck from that file is a merge with no decision.
 
     let rebuilt = |datasets: Vec<(String, Vec<u8>)>| {

@@ -1,5 +1,5 @@
 //! WO9, design 3B: every output renders the same reviewed rows. Row count, count per review level
-//! and count per sub-group are equal across `findings.json`, the JSON and CSV datasets and the
+//! and count per sub-group are equal across `json/inspection.json`, the JSON and CSV datasets and the
 //! workbook, and the manifest lists every file.
 
 use std::collections::BTreeMap;
@@ -139,7 +139,7 @@ fn every_export_renders_the_same_reviewed_row_set() {
         }
     }
 
-    // The tree in findings.json counts the same rows in each sub-group.
+    // The tree in json/inspection.json counts the same rows in each sub-group.
     let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     let nodes = findings["tree"]["nodes"].as_array().expect("the tree");
     let tree_groups: Tally = nodes
@@ -152,7 +152,10 @@ fn every_export_renders_the_same_reviewed_row_set() {
             )
         })
         .collect();
-    assert_eq!(tree_groups, want_groups, "findings.json tree: sub-groups");
+    assert_eq!(
+        tree_groups, want_groups,
+        "json/inspection.json tree: sub-groups"
+    );
 
     // The PDF's patterns describe the sites that are not false positives, in the same
     // sub-groups and at the same review levels.

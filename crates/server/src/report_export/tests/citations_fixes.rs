@@ -642,7 +642,7 @@ async fn every_curated_finding_has_a_non_empty_est_hours() {
 /// finding` never sets `confidence` or `effort`) with a REAL location, against a rule whose
 /// corpus TOML carries an authored effort band (`SUPABASE-FUNC-SEARCH-PATH-1`, authored
 /// `effort = "low"` on its default option), must export `confidence == "high"` AND a
-/// non-empty estimate — in `findings.json` (`CuratedSiteJson`), the xlsx `FindingRow`, AND
+/// non-empty estimate — in `json/inspection.json` (`CuratedSiteJson`), the xlsx `FindingRow`, AND
 /// the compiled PDF's rendered text. Never "not evaluated this run" / "not estimated this
 /// run" next to a proven defect.
 #[tokio::test]
@@ -673,7 +673,7 @@ async fn deterministic_finding_with_real_location_exports_high_confidence_and_an
         &empty_opts(),
     );
 
-    // ── findings.json (CuratedSiteJson) ──
+    // ── json/inspection.json (CuratedSiteJson) ──
     let site = &json
         .curated_findings
         .iter()
@@ -694,9 +694,9 @@ async fn deterministic_finding_with_real_location_exports_high_confidence_and_an
         site.effort
     );
 
-    // ── xlsx FindingRow (via the same findings.json export the product route ships) ──
+    // ── xlsx FindingRow (via the same json/inspection.json export the product route ships) ──
     // `FindingRow`'s fields are private to `xlsx_export` (only the struct is `pub`), so a
-    // sibling module inspects it the same way an external consumer of `findings.json`
+    // sibling module inspects it the same way an external consumer of `json/inspection.json`
     // would: through its serialized shape.
     let findings_export = crate::xlsx_export::build_findings_export(
         &crate::report_export::ReviewedReport::unreviewed(&report.clone().seal(), &HashMap::new()),
@@ -2011,7 +2011,7 @@ fn a1_capped_test_path_ai_row_lands_in_held_at_low() {
 /// a sibling finding's — a held, uncited AI-tier row must never display "Deterministic"
 /// provenance or another rule's citation, even when a genuinely grounded deterministic
 /// finding is exported right alongside it in the same report. Exercised through
-/// `findings.json` (`FindingRow`), the one exported shape that resolves `provenance` and
+/// `json/inspection.json` (`FindingRow`), the one exported shape that resolves `provenance` and
 /// `citation_urls` independently of the PDF's curated/held-for-review grouping, so this
 /// stays a meaningful cross-check of `FindingRow`'s own resolution regardless of which
 /// `CuratedGroupJson` bucket (C6-B1) the same row also lands in.
@@ -2035,7 +2035,7 @@ async fn uncited_ai_row_provenance_and_citation_are_never_borrowed_from_a_siblin
         &json,
         &HashMap::new(),
     );
-    // `FindingRow`'s fields are private to `xlsx_export` (only `findings.json`'s serialized
+    // `FindingRow`'s fields are private to `xlsx_export` (only `json/inspection.json`'s serialized
     // shape is the stable public contract) — go through `serde_json::Value`, same as the
     // `export_invariants_gate` module's own fixture crawlers do.
     let export_value =
@@ -2047,7 +2047,7 @@ async fn uncited_ai_row_provenance_and_citation_are_never_borrowed_from_a_siblin
     let ai_row = rows
         .iter()
         .find(|r| r["rule_id"].as_str() == Some("AI-SOME-NOVEL-DEFECT"))
-        .expect("the uncited AI row must still be exported in findings.json");
+        .expect("the uncited AI row must still be exported in json/inspection.json");
     assert_eq!(
         ai_row["provenance"].as_str(),
         Some("AI-advisory"),

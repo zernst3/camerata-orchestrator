@@ -79,7 +79,7 @@ jobs:
       # for an external graded run against benchmark repos while this very suite stayed green.
       # The engine had elaborate honesty machinery and no self-measurement machinery. These
       # are the checks that would have caught them: artifact parity across the PDF, the
-      # workbook and findings.json; row conservation at every pipeline stage; no silent
+      # workbook and json/inspection.json; row conservation at every pipeline stage; no silent
       # non-execution of a rule, pass or tool tier.
       #
       # It runs first because it is seconds long and because its failures are the expensive

@@ -1,7 +1,7 @@
 //! H4: what a scan did NOT cover, stated by path and by pass, so nothing is lost silently.
 //!
 //! Two kinds of gap reach the Coverage section of the PDF, the workbook's Coverage sheet and
-//! `findings.json`, all from the one [`coverage_gaps`] computation:
+//! `json/inspection.json`, all from the one [`coverage_gaps`] computation:
 //!
 //! - an AI scan pass that failed (a transport error, a refusal, or a reply that was still not
 //!   JSON after its bounded retries) reads "pass failed, N files not reviewed by the AI pass",
@@ -304,7 +304,7 @@ impl CoverageGapsJson {
 }
 
 /// The Coverage gaps for `report`. Pure, and the only derivation: the PDF data, the workbook
-/// and `findings.json` all call it (or reuse its output), so they cannot disagree.
+/// and `json/inspection.json` all call it (or reuse its output), so they cannot disagree.
 pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
     let mut failed_ai_passes: Vec<String> = report
         .failed_passes

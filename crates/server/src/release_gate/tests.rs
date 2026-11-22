@@ -229,7 +229,7 @@ fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
     assert_eq!(manifest["client_engagement"], true);
     assert_eq!(manifest["models"][0]["role"], "the scan");
     assert_eq!(manifest["models"][0]["model"], scan_model.as_str());
-    // The PDF and findings.json carry the backend on the report cover.
+    // The PDF and json/inspection.json carry the backend on the report cover.
     assert_eq!(
         package.report_json.cover.model_backend.as_deref(),
         Some("api (anthropic)")
@@ -841,7 +841,7 @@ fn audit_zip_over_a_released_zip_is_clean() {
         "{:?}",
         report.problems().collect::<Vec<_>>()
     );
-    // WO9: 8 -> 9, and the client text style check makes 10. The merge check now reads the package's own decisions.json, so a standalone
+    // WO9: 8 -> 9, and the client text style check makes 10. The merge check now reads the package's own json/decisions.json, so a standalone
     // audit of a zip runs it too. Item #1 adds the one-fix-per-row check: 11. The rewrite
     // advisory's internal-notes check makes 12.
     assert_eq!(

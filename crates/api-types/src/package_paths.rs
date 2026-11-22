@@ -50,7 +50,7 @@ macro_rules! pkg_readme_txt {
 #[macro_export]
 macro_rules! pkg_inspection_json {
     () => {
-        "json/inspection.json"
+        concat!($crate::pkg_json_dir!(), "inspection.json")
     };
 }
 
@@ -58,7 +58,72 @@ macro_rules! pkg_inspection_json {
 #[macro_export]
 macro_rules! pkg_decisions_json {
     () => {
-        "json/decisions.json"
+        concat!($crate::pkg_json_dir!(), "decisions.json")
+    };
+}
+
+/// The name of each workbook table that ships as a CSV and a JSON file. Each is spelled once,
+/// here, and every file path and list of tables is built from it.
+#[macro_export]
+macro_rules! pkg_dataset_all_findings {
+    () => {
+        "all-findings"
+    };
+}
+
+/// See [`pkg_dataset_all_findings!`].
+#[macro_export]
+macro_rules! pkg_dataset_deviations {
+    () => {
+        "deviations"
+    };
+}
+
+/// See [`pkg_dataset_all_findings!`].
+#[macro_export]
+macro_rules! pkg_dataset_conventions {
+    () => {
+        "conventions"
+    };
+}
+
+/// See [`pkg_dataset_all_findings!`].
+#[macro_export]
+macro_rules! pkg_dataset_not_assessed {
+    () => {
+        "not-assessed"
+    };
+}
+
+/// See [`pkg_dataset_all_findings!`].
+#[macro_export]
+macro_rules! pkg_dataset_dependencies {
+    () => {
+        "dependencies"
+    };
+}
+
+/// See [`pkg_dataset_all_findings!`].
+#[macro_export]
+macro_rules! pkg_dataset_false_positives {
+    () => {
+        "false-positives"
+    };
+}
+
+/// See [`pkg_dataset_all_findings!`].
+#[macro_export]
+macro_rules! pkg_dataset_coverage {
+    () => {
+        "coverage"
+    };
+}
+
+/// See [`pkg_dataset_all_findings!`].
+#[macro_export]
+macro_rules! pkg_dataset_rules_applied {
+    () => {
+        "rules-applied"
     };
 }
 
@@ -66,7 +131,11 @@ macro_rules! pkg_decisions_json {
 #[macro_export]
 macro_rules! pkg_all_findings_json {
     () => {
-        "json/all-findings.json"
+        concat!(
+            $crate::pkg_json_dir!(),
+            $crate::pkg_dataset_all_findings!(),
+            ".json"
+        )
     };
 }
 
@@ -74,7 +143,11 @@ macro_rules! pkg_all_findings_json {
 #[macro_export]
 macro_rules! pkg_all_findings_csv {
     () => {
-        "csv/all-findings.csv"
+        concat!(
+            $crate::pkg_csv_dir!(),
+            $crate::pkg_dataset_all_findings!(),
+            ".csv"
+        )
     };
 }
 
@@ -82,7 +155,15 @@ macro_rules! pkg_all_findings_csv {
 #[macro_export]
 macro_rules! pkg_tickets_csv {
     () => {
-        "csv/tickets.csv"
+        concat!($crate::pkg_csv_dir!(), "tickets.csv")
+    };
+}
+
+/// The file name of the operator's triage log, which is also the last part of its download route.
+#[macro_export]
+macro_rules! pkg_triage_log_file {
+    () => {
+        "triage-log.csv"
     };
 }
 
@@ -90,7 +171,7 @@ macro_rules! pkg_tickets_csv {
 #[macro_export]
 macro_rules! pkg_triage_log_csv {
     () => {
-        "csv/triage-log.csv"
+        concat!($crate::pkg_csv_dir!(), $crate::pkg_triage_log_file!())
     };
 }
 
@@ -115,12 +196,57 @@ pub const TICKETS_CSV: &str = pkg_tickets_csv!();
 /// See [`pkg_triage_log_csv!`].
 pub const TRIAGE_LOG_CSV: &str = pkg_triage_log_csv!();
 
-/// The JSON file of each workbook table that code names on its own.
-pub const DEVIATIONS_JSON: &str = concat!(pkg_json_dir!(), "deviations.json");
+/// The table names, each spelled once (see [`pkg_dataset_all_findings!`]).
+pub const DS_ALL_FINDINGS: &str = pkg_dataset_all_findings!();
+/// See [`DS_ALL_FINDINGS`].
+pub const DS_DEVIATIONS: &str = pkg_dataset_deviations!();
+/// See [`DS_ALL_FINDINGS`].
+pub const DS_CONVENTIONS: &str = pkg_dataset_conventions!();
+/// See [`DS_ALL_FINDINGS`].
+pub const DS_NOT_ASSESSED: &str = pkg_dataset_not_assessed!();
+/// See [`DS_ALL_FINDINGS`].
+pub const DS_DEPENDENCIES: &str = pkg_dataset_dependencies!();
+/// See [`DS_ALL_FINDINGS`].
+pub const DS_FALSE_POSITIVES: &str = pkg_dataset_false_positives!();
+/// See [`DS_ALL_FINDINGS`].
+pub const DS_COVERAGE: &str = pkg_dataset_coverage!();
+/// See [`DS_ALL_FINDINGS`].
+pub const DS_RULES_APPLIED: &str = pkg_dataset_rules_applied!();
+
+/// The eight machine-readable datasets every product package ships, as `csv/{name}.csv` and
+/// `json/{name}.json`. The ONE definition: the release gate's dataset-set check and the export
+/// tests both read it, so a dataset added here is demanded of every package.
+pub const DATASETS: [&str; 8] = [
+    DS_ALL_FINDINGS,
+    DS_DEVIATIONS,
+    DS_CONVENTIONS,
+    DS_NOT_ASSESSED,
+    DS_DEPENDENCIES,
+    DS_FALSE_POSITIVES,
+    DS_COVERAGE,
+    DS_RULES_APPLIED,
+];
+
+/// The file name of the triage log, also the end of its download route.
+pub const TRIAGE_LOG_FILE: &str = pkg_triage_log_file!();
+
+/// The JSON file of a table that code names on its own.
+pub const DEVIATIONS_JSON: &str = concat!(pkg_json_dir!(), pkg_dataset_deviations!(), ".json");
 /// See [`DEVIATIONS_JSON`].
-pub const FALSE_POSITIVES_JSON: &str = concat!(pkg_json_dir!(), "false-positives.json");
+pub const FALSE_POSITIVES_JSON: &str =
+    concat!(pkg_json_dir!(), pkg_dataset_false_positives!(), ".json");
 /// See [`DEVIATIONS_JSON`].
-pub const DEPENDENCIES_JSON: &str = concat!(pkg_json_dir!(), "dependencies.json");
+pub const DEPENDENCIES_JSON: &str = concat!(pkg_json_dir!(), pkg_dataset_dependencies!(), ".json");
+
+/// The name of the PDF report in the package, from the package stem.
+pub fn pdf_name(stem: &str) -> String {
+    format!("{stem}.pdf")
+}
+
+/// The name of the workbook in the package, from the package stem.
+pub fn workbook_name(stem: &str) -> String {
+    format!("{stem}-findings.xlsx")
+}
 
 /// The path of the JSON file for a workbook table (`dataset` is the table's name, such as
 /// `deviations`).
@@ -154,8 +280,11 @@ mod tests {
         assert_eq!(ALL_FINDINGS_JSON, "json/all-findings.json");
         assert_eq!(MANIFEST_JSON, "manifest.json");
         assert_eq!(README_TXT, "README.txt");
-        assert_eq!(json_path("coverage"), "json/coverage.json");
-        assert_eq!(csv_path("coverage"), "csv/coverage.csv");
+        assert_eq!(json_path(DS_COVERAGE), "json/coverage.json");
+        assert_eq!(pdf_name("s"), "s.pdf");
+        assert_eq!(workbook_name("s"), "s-findings.xlsx");
+        assert_eq!(DATASETS.len(), 8);
+        assert_eq!(csv_path(DS_COVERAGE), "csv/coverage.csv");
         for file in NAMED_FILES {
             let top_level = !file.contains('/');
             assert_eq!(

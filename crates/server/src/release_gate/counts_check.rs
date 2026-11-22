@@ -7,7 +7,7 @@
 //!
 //! Checks (numbers are the design's):
 //!
-//! 1. The recount equals the object in `findings.json`, field by field.
+//! 1. The recount equals the object in `json/inspection.json`, field by field.
 //! 2. The identities hold, on the recount and on the object (restated here, not called).
 //! 3. Every surface equals the object: the PDF data's `counts`, the cover, the grid, the
 //!    methodology fields the template prints as "problems" and "need a decision", the Start here
@@ -445,7 +445,7 @@ pub(super) fn counts_problems_with(
     };
     let mut problems = Vec::new();
 
-    // 1. The recount equals the object in findings.json, and the PDF data's object equals both.
+    // 1. The recount equals the object in json/inspection.json, and the PDF data's object equals both.
     let findings_json: Option<Value> = entries
         .get(INSPECTION_JSON)
         .and_then(|b| serde_json::from_slice(b).ok());
@@ -482,7 +482,7 @@ pub(super) fn counts_problems_with(
         }
     }
 
-    // 1b. Every field of findings.json `summary` equals the recount.
+    // 1b. Every field of json/inspection.json `summary` equals the recount.
     problems.extend(summary_problems(findings_json.as_ref(), &recounted));
     problems.extend(more_line_problems(report, &recounted));
 
@@ -683,7 +683,7 @@ fn workbook_problems(entries: &Entries, want: &ReportCounts) -> Vec<Problem> {
             "the package does not hold exactly one PDF, so its workbook cannot be found to count its rows",
         )];
     };
-    let xlsx_name = format!("{stem}-findings.xlsx");
+    let xlsx_name = camerata_api_types::package_paths::workbook_name(&stem);
     let Some(xlsx) = entries.get(&xlsx_name) else {
         return vec![problem(
             &xlsx_name,
@@ -893,7 +893,7 @@ fn more_line_problems(report: &AuditReportJson, want: &ReportCounts) -> Vec<Prob
     out
 }
 
-/// Every tally of findings.json `summary` equals the recount, and the retired row tallies
+/// Every tally of json/inspection.json `summary` equals the recount, and the retired row tallies
 /// (`curated_total`, `open`) are not in the file. Fail closed: a missing summary or tally is a
 /// problem.
 fn summary_problems(findings_json: Option<&Value>, want: &ReportCounts) -> Vec<Problem> {
@@ -1168,7 +1168,7 @@ fn order_problems(
         ));
         return out;
     };
-    let xlsx_name = format!("{stem}-findings.xlsx");
+    let xlsx_name = camerata_api_types::package_paths::workbook_name(&stem);
     let Some(xlsx) = entries.get(&xlsx_name) else {
         out.push(problem(
             &xlsx_name,

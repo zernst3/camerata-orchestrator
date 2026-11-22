@@ -5,7 +5,7 @@
 //! The scan stub reports the SAME line twice under different rule names, so the real merge folds
 //! one report into the other and the absorbed site lands in `also_locations`. The real production
 //! functions then run (`ai_audit::audit_repo` -> `ai_audit::group_semantic` -> the report,
-//! workbook, `findings.json` and dataset builders), and every client-visible surface is read: no
+//! workbook, `json/inspection.json` and dataset builders), and every client-visible surface is read: no
 //! surface may hold the key, and the merged row must really be there (anti-vacuity).
 //!
 //! ZERO API SPEND: the stub never makes a network call.
@@ -261,7 +261,7 @@ async fn assert_redacted_everywhere(terse_output: bool) {
         );
         assert!(
             surfaces.iter().any(|(n, _)| n == "json/inspection.json"),
-            "findings.json was not built"
+            "json/inspection.json was not built"
         );
         for (name, text) in &surfaces {
             assert!(

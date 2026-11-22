@@ -408,7 +408,7 @@ async fn build_fixture() -> Fixture {
 
 /// Every client-facing per-finding text field across BOTH artifact shapes: the PDF/JSON's
 /// `AuditReportJson` (matrix headlines, curated/held-for-review site prose, three-things,
-/// the priority grid) and `findings.json`/the xlsx's `FindingRow` set. Returns
+/// the priority grid) and `json/inspection.json`/the xlsx's `FindingRow` set. Returns
 /// `(location-label, text)` pairs for debuggable failure messages.
 fn all_client_text_fields(fx: &Fixture) -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -1194,7 +1194,7 @@ async fn same_construct_injection_and_pagination_pair_export_as_two_distinct_gro
 /// already routed to `matrix.informational`" — true before C5-7, false after it (C5-7
 /// routes a high/critical uncited finding to the severity-unbounded `held` bucket
 /// instead). The row stayed counted everywhere that tallies `code_findings` directly
-/// (`matrix.held`, the cover severity strip, the category scorecard, `findings.json`/the
+/// (`matrix.held`, the cover severity strip, the category scorecard, `json/inspection.json`/the
 /// workbook) while the PDF renderer never emitted it in ANY section. Fixed by always
 /// building a site (see that loop's updated doc comment); this test is the STANDING gate
 /// against a regression of the same SHAPE from a different cause — any future change that
@@ -1804,7 +1804,7 @@ async fn req_c2_the_sites_vs_rows_check_is_gone_because_a_sub_groups_members_are
 // `inject_evidence_gate_findings`) ran INSIDE `build_report_json` against a CLONED report
 // that silently shadowed the function's own parameter — `xlsx_export::build_workbook` /
 // `build_findings_export` read the ORIGINAL, un-injected `ScanReport` directly, so the PDF
-// rendered N+K rows while `findings.json`/the xlsx rendered N. The fix moves the gate
+// rendered N+K rows while `json/inspection.json`/the xlsx rendered N. The fix moves the gate
 // upstream of `ScanReport::seal` (see that method's doc comment for the full pipeline
 // order) and changes all three exporters to take `&SealedReport`.
 //
@@ -1952,7 +1952,7 @@ async fn req_d1_the_seal_fixture_actually_exercises_the_evidence_gate_and_previe
 /// both by COUNT and by IDENTITY (rule_id, repo, path, line) — when built from one sealed
 /// report whose evidence gate AND external-tool preview merge both fired. Before the fix,
 /// the PDF's row set (via the clone-shadowed `inject_evidence_gate_findings`) held N+K rows
-/// while `findings.json`/the xlsx held only N; this asserts the gap is fully closed.
+/// while `json/inspection.json`/the xlsx held only N; this asserts the gap is fully closed.
 #[tokio::test]
 async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
     let (sealed, k) = build_seal_fixture().await;
@@ -2000,7 +2000,7 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
         }
     }
 
-    // `findings.json`'s row-identity set — read via `serde_json::Value` since
+    // `json/inspection.json`'s row-identity set — read via `serde_json::Value` since
     // `xlsx_export::FindingRow`'s fields are private to that module (same convention
     // `all_client_text_fields` above already uses for this exact type).
     let findings_export_value =
@@ -2055,7 +2055,7 @@ async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
     // The xlsx: proven via its shared-strings pool (the same technique invariants 1/2 at
     // the top of this module already use) rather than parsing worksheet XML relationships —
     // both rule ids, including the evidence-gate-synthesized one, must appear somewhere in
-    // the workbook's text, proving it was ALSO exported there, not just in findings.json.
+    // the workbook's text, proving it was ALSO exported there, not just in json/inspection.json.
     let shared_strings = workbook_shared_string_texts(&workbook_shared_strings_xml(&workbook));
     let joined = shared_strings.join("\n");
     assert!(
@@ -2135,7 +2135,7 @@ async fn req_d2_candidates_reviewed_cover_totals_and_hedge_counts_reconcile_agai
         "at least the evidence-gate row must be held for review"
     );
 
-    // findings.json's `summary` is REUSED verbatim from the PDF's own `executive_summary`
+    // json/inspection.json's `summary` is REUSED verbatim from the PDF's own `executive_summary`
     // (never independently recomputed — see `build_findings_export`'s doc comment), so it
     // is the SAME shared helper by construction; pin that explicitly so a future change
     // that makes it recompute its own summary independently is caught here.

@@ -118,7 +118,7 @@ fn exports(reviewed: &ReviewedReport) -> (AuditReportJson, Value) {
     let export = build_findings_export(reviewed, None, &json, &HashMap::new());
     (
         json,
-        serde_json::to_value(&export).expect("findings.json serializes"),
+        serde_json::to_value(&export).expect("json/inspection.json serializes"),
     )
 }
 
@@ -148,7 +148,10 @@ fn a_site_a_ruled_out_row_absorbed_for_another_rule_becomes_a_held_row() {
     let (json, findings) = exports(&reviewed);
     let rows = rows_of(&findings);
     let b = row_for(&rows, RULE_B);
-    assert!(b.is_some(), "findings.json holds a rule B row: {rows:?}");
+    assert!(
+        b.is_some(),
+        "json/inspection.json holds a rule B row: {rows:?}"
+    );
     let b = b.unwrap();
     assert_eq!(b["repo"], WEB);
     assert_eq!(b["path"], "src/query.ts");

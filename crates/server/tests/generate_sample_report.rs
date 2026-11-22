@@ -517,7 +517,7 @@ async fn regenerate_sample_report() {
         xlsx.len()
     );
 
-    // ═══ Build + write the REAL findings.json (machine-readable sibling of the xlsx) ═══
+    // ═══ Build + write the REAL json/inspection.json (machine-readable sibling of the xlsx) ═══
     // Same `report`/`dispositions`/`corpus` inputs as the xlsx above, plus the ALREADY-BUILT
     // `json` (`AuditReportJson`) for provenance/summary reuse — see
     // `xlsx_export::build_findings_export`'s doc comment. Both a standalone file (for Zach
@@ -534,10 +534,10 @@ async fn regenerate_sample_report() {
     assert_eq!(
         findings_export.findings.len(),
         6,
-        "findings.json must carry exactly the 6 non-FP code findings (matches curated_total)"
+        "json/inspection.json must carry exactly the 6 non-FP code findings (matches curated_total)"
     );
     let findings_json_bytes =
-        serde_json::to_vec_pretty(&findings_export).expect("serialize findings.json");
+        serde_json::to_vec_pretty(&findings_export).expect("serialize json/inspection.json");
     std::fs::write(
         repo_root.join("camerata-sample-audit-findings.json"),
         &findings_json_bytes,

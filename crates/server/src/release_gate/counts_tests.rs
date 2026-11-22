@@ -461,7 +461,7 @@ fn ruled_out_host_carrying_another_rules_place() -> (BTreeMap<String, Vec<u8>>, 
 #[test]
 fn the_gate_recount_counts_a_place_a_ruled_out_row_carries_as_a_problem_to_decide() {
     let (entries, report) = ruled_out_host_carrying_another_rules_place();
-    // Anti-vacuity: the object counts the place, and findings.json lists it.
+    // Anti-vacuity: the object counts the place, and json/inspection.json lists it.
     assert_eq!(report.counts.problems.total, 1);
     assert_eq!(report.counts.problems.needs_decision, 1);
     let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
@@ -848,7 +848,7 @@ fn needs_a_decision_is_one_number_on_every_surface() {
     );
     // The grid's count of problems it leaves out for a decision.
     assert_eq!(report.priority_grid.held_count, n, "the grid");
-    // The sheet, the Start here count and findings.json.
+    // The sheet, the Start here count and json/inspection.json.
     let xlsx = &entries[&xlsx_name()];
     assert_eq!(
         super::counts_check::sheet_rows(xlsx, "Needs a decision"),
@@ -867,7 +867,7 @@ fn needs_a_decision_is_one_number_on_every_surface() {
     assert_eq!(
         findings["counts"]["problems"]["needs_decision"],
         json!(n),
-        "findings.json counts"
+        "json/inspection.json counts"
     );
     // The summary's sentence states the same number.
     let summary = findings["summary"]["narrative"]
@@ -876,7 +876,7 @@ fn needs_a_decision_is_one_number_on_every_surface() {
     assert_eq!(
         integer_before(summary, " need a"),
         Some(n),
-        "findings.json summary: {summary:?}"
+        "json/inspection.json summary: {summary:?}"
     );
     // And the gate agrees with all of them.
     let problems = counts_problems(&entries, &report);

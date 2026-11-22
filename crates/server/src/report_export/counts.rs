@@ -29,7 +29,7 @@ use super::ReportOptions;
 use crate::review_tree::{place_key, places_of, PlaceClass};
 use crate::xlsx_export::{CountKind, CountingView};
 
-/// Every count of the package. Serialised whole as `counts` in the PDF data and `findings.json`.
+/// Every count of the package. Serialised whole as `counts` in the PDF data and `json/inspection.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportCounts {
     pub rows: RowCounts,

@@ -25,12 +25,12 @@ fn a_real_package_holds_the_inspection_and_the_decisions_under_json_and_none_at_
         entries.keys()
     );
     assert!(
-        !entries.contains_key("findings.json"),
+        !entries.contains_key("json/inspection.json"),
         "{:?}",
         entries.keys()
     );
     assert!(
-        !entries.contains_key("decisions.json"),
+        !entries.contains_key("json/decisions.json"),
         "{:?}",
         entries.keys()
     );
@@ -94,8 +94,17 @@ fn the_readme_names_each_file_at_its_new_path() {
     ] {
         assert!(readme.contains(expected), "missing {expected:?}:\n{readme}");
     }
-    assert!(!readme.contains("\nfindings.json\n"), "{readme}");
-    assert!(!readme.contains("\ndecisions.json\n"), "{readme}");
+    // No old root name anywhere in the text: not as a heading and not inside a sentence.
+    assert!(!readme.contains("findings.json"), "{readme}");
+    for (at, _) in readme.match_indices("decisions.json") {
+        assert!(
+            readme[..at].ends_with("json/"),
+            "an old root name decisions.json at byte {at}:\n{readme}"
+        );
+    }
+    for (at, _) in readme.match_indices("manifest.json") {
+        assert!(!readme[..at].ends_with("json/"), "{readme}");
+    }
 }
 
 #[test]

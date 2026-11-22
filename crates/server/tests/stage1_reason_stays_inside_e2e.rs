@@ -2,7 +2,7 @@
 //! END-TO-END (WO4): what stage 1 said about a site stays inside the engine. The scripted stage 1
 //! reply carries a distinctive reason and lowers a critical finding to low, which records a
 //! severity adjustment on the row. The real pipeline (`ai_audit::audit_repo`, the grouping, the
-//! report, workbook, `findings.json`, CSV and JSON builders) then runs, and every client-visible
+//! report, workbook, `json/inspection.json`, CSV and JSON builders) then runs, and every client-visible
 //! surface is read: the reason is on none of them, while the adjustment itself (the fixed
 //! sentence naming the two severities) is on at least one, so the test is not vacuous.
 //!

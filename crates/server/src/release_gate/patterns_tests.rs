@@ -172,7 +172,7 @@ fn the_gate_flags_a_workbook_sheet_the_report_does_not_have() {
     );
 }
 
-/// `findings.json` with the patterns cell of `repo` for the one pattern row set to clean.
+/// `json/inspection.json` with the patterns cell of `repo` for the one pattern row set to clean.
 fn plant_clean_cell(entries: &mut BTreeMap<String, Vec<u8>>, repo: &str) {
     let mut findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     let cells = findings["patterns_across_services"]["rows"][0]["cells"]
@@ -196,7 +196,7 @@ fn the_gate_refuses_a_patterns_cell_that_says_clean_beside_an_open_problem() {
         patterns_section_problems(&entries, &report).is_empty(),
         "anti-vacuity: the package as built is consistent"
     );
-    // acme/portal has an open problem under the rule in findings.json; its cell now says clean.
+    // acme/portal has an open problem under the rule in json/inspection.json; its cell now says clean.
     plant_clean_cell(&mut entries, "acme/portal");
     let problems = patterns_section_problems(&entries, &report);
     assert!(
@@ -507,7 +507,7 @@ fn findings_json_omits_open_beside_ruled_out_when_there_is_nothing_to_list() {
     let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     assert!(
         findings.get("findings").is_some(),
-        "anti-vacuity: findings.json parsed with its findings"
+        "anti-vacuity: json/inspection.json parsed with its findings"
     );
     assert!(
         findings.get("open_beside_ruled_out").is_none(),
@@ -515,7 +515,7 @@ fn findings_json_omits_open_beside_ruled_out_when_there_is_nothing_to_list() {
     );
 }
 
-/// The package as built, with `findings.json`'s rows replaced by `rows` and the patterns row's
+/// The package as built, with `json/inspection.json`'s rows replaced by `rows` and the patterns row's
 /// title by `title`, and the portal's cell planted clean.
 fn gate_problems_with_rows(rows: Value, title: Option<&str>) -> Vec<Problem> {
     let (mut entries, report) = entries_of(package_for(two_repo_report()));

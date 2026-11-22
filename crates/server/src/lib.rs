@@ -18,7 +18,7 @@
 //!   [`dep_audit`], `mechanical_gate` (private) and [`suppression`].
 //! - **The client deliverable.** [`report_export`] builds the PDF's JSON and owns the
 //!   severity choke-point; [`xlsx_export`] builds the kind-partitioned workbook and
-//!   `findings.json`. Both take `&onboard::SealedReport`, never `&ScanReport`, so the
+//!   `json/inspection.json`. Both take `&onboard::SealedReport`, never `&ScanReport`, so the
 //!   row set cannot be mutated after sealing. See `docs/TECHNICAL.md` section 6a.
 //! - **Self-measurement.** [`scan_ledger`] records what actually ran;
 //!   [`integrity_gate`] turns that into a verdict with an exit code. See
@@ -1938,7 +1938,13 @@ pub fn router(state: AppState) -> Router {
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
         // ── Triage log (the operator's file, never in the client package) ─────
-        .route("/api/projects/:id/triage-log.csv", get(export_triage_log))
+        .route(
+            concat!(
+                "/api/projects/:id/",
+                camerata_api_types::pkg_triage_log_file!()
+            ),
+            get(export_triage_log),
+        )
         // ── Audit-report (PDF) export ─────────────────────────────────────────
         .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
@@ -3903,7 +3909,7 @@ async fn export_audit_report(
     let stem = gated.released.stem;
     let pdf_bytes = gated.pdf;
 
-    let filename = format!("{stem}.pdf");
+    let filename = package_paths::pdf_name(&stem);
 
     (
         StatusCode::OK,
@@ -4200,7 +4206,7 @@ async fn export_product(
     };
     // Pass-1 W1 seal fix: see the identical comment in `export_audit_report` — this is the
     // "row set is final" point for every artifact this handler builds (PDF, xlsx,
-    // findings.json), all three now reading the SAME sealed set.
+    // json/inspection.json), all three now reading the SAME sealed set.
     let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
         &state.decisions.active(&id),
     ));
@@ -4387,14 +4393,14 @@ pub fn product_export_readme(
          \n\
          This ZIP holds the files below. All of them come from the same inspection.\n\
          \n\
-         {stem}.pdf\n\
+         {pdf}\n\
          \x20 The report to read first. It has the cover, the executive summary, the scorecard by\n\
          \x20 area, the severity by effort matrix, the problems with their citations and fixes,\n\
          \x20 what is healthy, the dependency snapshot and how the inspection was done. It is\n\
          \x20 written for a board, a buyer or a decision maker. Problems ruled out are left out\n\
          \x20 and counted once, in the methodology section.\n\
          \n\
-         {stem}-findings.xlsx\n\
+         {workbook}\n\
          \x20 The complete working list for the engineers doing the fixes. Open the {start} sheet\n\
          \x20 first: it lists the sheets and says what each one holds, and the {glossary} sheet says\n\
          \x20 what every word and column means. The {fix_plan} sheet has one row for each fix, in the\n\
@@ -4464,6 +4470,8 @@ pub fn product_export_readme(
         decisions = v::REVIEWER_DECISIONS,
         grouped = v::HOW_PROBLEMS_WERE_GROUPED,
         fix_id = v::H_FIX_ID,
+        pdf = package_paths::pdf_name(stem),
+        workbook = package_paths::workbook_name(stem),
         inspection = package_paths::INSPECTION_JSON,
         decisions_json = package_paths::DECISIONS_JSON,
         manifest = package_paths::MANIFEST_JSON,
@@ -4834,7 +4842,7 @@ impl ManifestProvenance {
 /// The git commit this binary was built from, recorded by `build.rs` (`CAMERATA_GIT_COMMIT`).
 /// `None` for a build outside a git checkout: an honest absence, never a placeholder. Stated in
 /// [`ManifestProvenance::engine_version`] (README and `manifest.json`) and in the report cover
-/// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
+/// (`report_export::CoverJson::engine_commit`, which the PDF and `json/inspection.json` render).
 pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
 
 /// Whether the tree had uncommitted changes when this binary was built (`build.rs`). Reported on
@@ -4901,13 +4909,7 @@ fn manifest_file_facts(path: &str) -> (String, Option<String>) {
         || path == INSPECTION_JSON
         || path == DECISIONS_JSON
     {
-        // The inspection file keeps the schema label it always had (`findings/1.0`): the label
-        // names the contract, not the path, and a tool that matches on it keeps working.
-        let dataset = if path == INSPECTION_JSON {
-            "findings"
-        } else {
-            base.trim_end_matches(".csv").trim_end_matches(".json")
-        };
+        let dataset = base.trim_end_matches(".csv").trim_end_matches(".json");
         Some(format!("{dataset}/1.0"))
     } else {
         None
@@ -4945,8 +4947,8 @@ pub fn build_manifest(
         })
     };
     let mut files = vec![
-        entry(format!("{stem}.pdf"), pdf_bytes),
-        entry(format!("{stem}-findings.xlsx"), xlsx_bytes),
+        entry(package_paths::pdf_name(stem), pdf_bytes),
+        entry(package_paths::workbook_name(stem), xlsx_bytes),
         entry(INSPECTION_JSON.to_string(), findings_json_bytes),
         entry(README_TXT.to_string(), readme.as_bytes()),
     ];
@@ -4965,7 +4967,7 @@ pub fn build_manifest(
     bytes
 }
 
-/// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
+/// Zip the PDF + xlsx + `json/inspection.json` + README.txt into one in-memory archive (Deflate
 /// compression) for the product-export response body. The ONLY I/O here is the in-memory
 /// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
 /// contract.
@@ -4993,10 +4995,10 @@ pub(crate) fn build_product_zip(
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip_now());
 
-    writer.start_file(format!("{stem}.pdf"), options)?;
+    writer.start_file(package_paths::pdf_name(stem), options)?;
     writer.write_all(pdf_bytes)?;
 
-    writer.start_file(format!("{stem}-findings.xlsx"), options)?;
+    writer.start_file(package_paths::workbook_name(stem), options)?;
     writer.write_all(xlsx_bytes)?;
 
     writer.start_file(INSPECTION_JSON, options)?;

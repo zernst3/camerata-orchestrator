@@ -5,11 +5,12 @@
 //! defined here, once, and the Glossary sheet prints the definition; no other file spells the
 //! name for itself.
 //!
-//! Machine-facing files keep their own field names (`csv/`, `json/`, `findings.json`,
+//! Machine-facing files keep their own field names (`csv/`, `json/`, `json/inspection.json`,
 //! `tickets.csv`'s headers and the wire values such as `do_now` or `kind`). Those are for tools,
 //! not people, and renaming them would break whatever reads them. Everything a person reads is
 //! named from this module.
 
+use camerata_api_types::package_paths::{workbook_name, DS_ALL_FINDINGS, DS_FALSE_POSITIVES};
 use camerata_api_types::review::FpReason;
 
 /// Excel refuses a sheet name over this many characters.
@@ -1591,7 +1592,8 @@ pub const INTERNAL_TERMS: &[&str] = &[POSSIBLE_FALSE_POSITIVE, POSSIBLE_DUPLICAT
 /// retired word written with capitals in the table (an id header) is matched as written.
 pub fn banned_synonym_in(text: &str) -> Option<(&'static str, &'static str)> {
     let mut cleaned = text.to_string();
-    for file in ["all-findings", "findings.xlsx", "false-positives"] {
+    let workbook = workbook_name("");
+    for file in [DS_ALL_FINDINGS, workbook.as_str(), DS_FALSE_POSITIVES] {
         cleaned = cleaned.replace(file, " ");
     }
     let mut lower = cleaned.to_lowercase();

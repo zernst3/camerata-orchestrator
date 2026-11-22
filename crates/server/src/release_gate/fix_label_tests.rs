@@ -83,7 +83,7 @@ fn expect_labels(rows: &[Value], what: &str) {
     assert_eq!(label_of(rows, 30), "", "{what}: no fix text, no label");
 }
 
-/// The label is in findings.json and in both formats of the all-findings dataset, whether the
+/// The label is in json/inspection.json and in both formats of the all-findings dataset, whether the
 /// finding's explanation is one sentence (the `terse_output` shape) or several paragraphs, and
 /// the gate clears the package.
 #[test]
@@ -180,7 +180,7 @@ fn the_gate_refuses_an_unlabelled_or_misnamed_fix() {
 
     for tamper in [Tamper::Remove, Tamper::Rename] {
         let mut tampered = entries.clone();
-        // The same edit in findings.json and all-findings.json, so the parity check passes and
+        // The same edit in json/inspection.json and all-findings.json, so the parity check passes and
         // only the label check can notice.
         let mut doc: Value =
             serde_json::from_slice(&tampered["json/inspection.json"]).expect("parses");

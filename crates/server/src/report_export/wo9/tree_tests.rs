@@ -1,4 +1,4 @@
-//! WO9: the tree in `findings.json` and on the Tree sheet, and the prose checks every summary
+//! WO9: the tree in `json/inspection.json` and on the Tree sheet, and the prose checks every summary
 //! passes before client output.
 
 use serde_json::Value;
@@ -79,7 +79,7 @@ fn findings_json_carries_the_tree_with_counts_from_the_rows() {
     let findings: Value = serde_json::from_slice(&entries["json/inspection.json"]).unwrap();
     let nodes = findings["tree"]["nodes"]
         .as_array()
-        .expect("a tree in findings.json");
+        .expect("a tree in json/inspection.json");
     let sub = nodes
         .iter()
         .find(|n| n["id"] == "sub:SEC-NO-RAW-SQL-CONCAT-1/0")
@@ -200,7 +200,7 @@ fn a_summary_with_a_methodology_leak_is_flagged_before_client_output() {
 
 #[test]
 fn a_label_or_cause_with_a_methodology_leak_reaches_no_row_and_no_sheet() {
-    // The marker rides on every row of the sub-group (findings.json, csv/, json/, the findings
+    // The marker rides on every row of the sub-group (json/inspection.json, csv/, json/, the findings
     // sheets, the All source rows sheet) unless the label and the cause pass the same checks the plan, the
     // tree, the tickets and the PDF apply.
     for (label, cause, what) in [
