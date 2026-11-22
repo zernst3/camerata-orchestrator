@@ -24,7 +24,7 @@ title = "OWASP Cross Site Scripting Prevention Cheat Sheet"
 
 # Source note: States that `<%=` escapes the value and `<%-` outputs the unescaped value.
 [[sources]]
-url = "https://github.com/mde/ejs"
+url = "https://github.com/mde/ejs/blob/main/README.md"
 title = "EJS documentation: `<%=` escapes output and `<%-` outputs the unescaped value"
 
 # Source note: States that `raw` outputs a string without escaping it by marking it HTML safe.
@@ -80,7 +80,7 @@ Wrap the value passed to the raw-HTML sink (dangerouslySetInnerHTML, innerHTML, 
 `html_safe` or `<%==`, Handlebars `{{{ }}}`, Pug `!=` or Jinja and Nunjucks `|safe`) in an
 allowlist sanitizer such as DOMPurify.sanitize(...) at the point of use. If the content never
 needs to carry real markup, switch to the engine's default escaped output instead (EJS `<%=`,
-ERB `<%=` without `raw`, Handlebars `{{ }}`, Pug `=`, or Jinja and Nunjucks with autoescape on and no `|safe`). Verify by confirming a payload like
+ERB `<%=` without `raw`, Handlebars `{{ }}`, Pug `=` or Jinja and Nunjucks with autoescape on and no `|safe`). Verify by confirming a payload like
 <img src=x onerror=alert(1)> renders as inert text or is stripped, never executes.
 """
 why = "An allowlist sanitizer run at the point of use is the only fix that survives the value being edited or re-sourced later; per-caller manual escaping is easy to forget on the next code path that reaches the same sink."

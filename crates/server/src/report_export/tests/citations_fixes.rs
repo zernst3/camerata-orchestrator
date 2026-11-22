@@ -2236,6 +2236,12 @@ fn is_known_authority_url(url: &str) -> bool {
         "react.dev",
         "developer.mozilla.org",
         "postgrest.org",
+        "github.com/mde/ejs",
+        "api.rubyonrails.org",
+        "handlebarsjs.com",
+        "pugjs.org",
+        "jinja.palletsprojects.com",
+        "mozilla.github.io/nunjucks",
     ];
     is_external_source_url(url)
         && KNOWN_AUTHORITY_HOSTS.iter().any(|host| {

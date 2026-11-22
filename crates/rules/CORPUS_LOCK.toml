@@ -388,7 +388,7 @@
 "SEC-NO-SECRET-FILE-1" = { version = 4, hash = "sha256:ee8e02ccf88ffb75e08a006d6220be01549c4620dc2f5672864c6a9967bbd380" }
 "SEC-NO-SENSITIVE-DATA-IN-LOGS-1" = { version = 5, hash = "sha256:00e07e6398f503f74a62c4bfe6ec080b205acbbe6911940f829243ea2c322a7e" }
 "SEC-NO-UNSAFE-DESERIALIZATION-1" = { version = 5, hash = "sha256:113a70a1afaaa543c921774d182911290e3043b5973502f7526537ddf2b24e91" }
-"SEC-NO-UNSAFE-HTML-SINK-1" = { version = 5, hash = "sha256:0ad0dea8d347f6874b9785c9766dc36d437e727f1cefb2c0fb4cef4b07cb2997" }
+"SEC-NO-UNSAFE-HTML-SINK-1" = { version = 5, hash = "sha256:5b224e38eb8ed295d18c8d9dfbadc83ea7d8812bc869bab5e463c9972c26ee73" }
 "SEC-NO-VENDOR-TOKEN-1" = { version = 4, hash = "sha256:1e392729975df9aed50c1613fde427e4b930af9ca1bc84c953ebd6cb6aa05f9a" }
 "SEC-NO-WEAK-TOKEN-RANDOMNESS-1" = { version = 3, hash = "sha256:29deafbd63eda474eee873e2aaccdd490e68ef9bcb775fd357e81275cf33cd80" }
 "SPIRIT-DOC-DECISIONS-1" = { version = 4, hash = "sha256:653b7c621b9160db4e3ee19a058f11b2bcfbb99b678af9d87595406c72bca41d" }
