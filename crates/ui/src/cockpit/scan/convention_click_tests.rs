@@ -51,7 +51,9 @@ impl Mounted {
                     id,
                     ..
                 } if matches!(*name, "data-control" | "data-place" | "data-rule" | "id") => {
-                    self.marks.borrow_mut().insert(*id, format!("{name}={text}"));
+                    self.marks
+                        .borrow_mut()
+                        .insert(*id, format!("{name}={text}"));
                 }
                 Mutation::NewEventListener { name, id } => {
                     self.listeners.borrow_mut().push((name.clone(), *id));
@@ -149,7 +151,9 @@ impl Mounted {
     fn escape(&self, html_id: &str) {
         use dioxus::html::{Code, Key, Location, Modifiers, SerializedKeyboardData};
         let id = self.with_mark("keydown", &format!("id={html_id}"));
-        let id = *id.last().unwrap_or_else(|| panic!("no key handler on #{html_id}"));
+        let id = *id
+            .last()
+            .unwrap_or_else(|| panic!("no key handler on #{html_id}"));
         let data: Rc<dyn std::any::Any> = Rc::new(dioxus::html::PlatformEventData::new(Box::new(
             SerializedKeyboardData::new(
                 Key::Escape,
@@ -160,9 +164,11 @@ impl Mounted {
                 false,
             ),
         )));
-        self.vdom
-            .runtime()
-            .handle_event("keydown", dioxus::dioxus_core::Event::new(data, true), id);
+        self.vdom.runtime().handle_event(
+            "keydown",
+            dioxus::dioxus_core::Event::new(data, true),
+            id,
+        );
     }
 
     /// A context the screen provided, found by asking the scopes it created.
@@ -319,7 +325,8 @@ async fn screen_with_the_hub_open(report: Value) -> Mounted {
             rule_id: "ARCH-PAR-1".into(),
         }));
     });
-    m.until("the hub shows the rule", |h| h.contains("rule-hub-modal")).await;
+    m.until("the hub shows the rule", |h| h.contains("rule-hub-modal"))
+        .await;
     m
 }
 
@@ -388,11 +395,17 @@ async fn each_place_the_hub_lists_opens_the_code_viewer_at_its_path_and_line() {
             Some(line.to_string().as_str())
         );
         assert_eq!(last.get("repo").map(String::as_str), Some("me/api"));
-        assert_eq!(last.get("sha").map(String::as_str), Some(SHA), "the inspected commit");
+        assert_eq!(
+            last.get("sha").map(String::as_str),
+            Some(SHA),
+            "the inspected commit"
+        );
         assert_eq!(last.get("project").map(String::as_str), Some("p1"));
         // Escape closes the viewer; the hub is as it was.
         m.escape("camerata-code-viewer");
-        let html = m.until("the viewer closes", |h| !h.contains("cv-panel")).await;
+        let html = m
+            .until("the viewer closes", |h| !h.contains("cv-panel"))
+            .await;
         assert!(html.contains("rule-hub-modal"), "{html}");
     }
 }
@@ -409,7 +422,9 @@ async fn accept_posts_the_ruling_and_the_screen_reads_the_review_again() {
     let before = m.vdom.in_runtime(|| *refresh.0.peek());
 
     m.click("data-control=accept");
-    let html = m.until("the hub closes", |h| !h.contains("rule-hub-modal")).await;
+    let html = m
+        .until("the hub closes", |h| !h.contains("rule-hub-modal"))
+        .await;
     let sent = posts(&server, "/api/projects/p1/standards").await;
     assert_eq!(
         sent,
@@ -420,7 +435,11 @@ async fn accept_posts_the_ruling_and_the_screen_reads_the_review_again() {
         "{html}"
     );
     let after = m.vdom.in_runtime(|| *refresh.0.peek());
-    assert_eq!(after, before + 1, "the review is read again (the Queue follows it)");
+    assert_eq!(
+        after,
+        before + 1,
+        "the review is read again (the Queue follows it)"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -430,7 +449,8 @@ async fn choosing_another_option_posts_that_option() {
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let mut m = screen_with_the_hub_open(report_json()).await;
     m.pick("data-control=other-option", "par");
-    m.until("the hub closes", |h| !h.contains("rule-hub-modal")).await;
+    m.until("the hub closes", |h| !h.contains("rule-hub-modal"))
+        .await;
     let sent = posts(&server, "/api/projects/p1/standards").await;
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["choice"], json!({"accept": {"option_id": "par"}}));
@@ -443,7 +463,10 @@ async fn leaving_it_to_the_client_replaces_leave_as_reported_and_posts_the_choic
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
     let mut m = screen_with_the_hub_open(report_json()).await;
     let html = m.html();
-    assert!(html.contains("No recommendation, leave it to the client"), "{html}");
+    assert!(
+        html.contains("No recommendation, leave it to the client"),
+        "{html}"
+    );
     assert!(
         html.contains(
             "The report lists the options and the places that follow each, with none suggested."
@@ -452,7 +475,8 @@ async fn leaving_it_to_the_client_replaces_leave_as_reported_and_posts_the_choic
     );
     assert!(!html.contains("Leave as reported"), "{html}");
     m.click("data-control=leave");
-    m.until("the hub closes", |h| !h.contains("rule-hub-modal")).await;
+    m.until("the hub closes", |h| !h.contains("rule-hub-modal"))
+        .await;
     let sent = posts(&server, "/api/projects/p1/standards").await;
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["choice"], json!("leave_to_client"));
@@ -470,9 +494,12 @@ async fn withdraw_posts_the_revoke_of_the_live_ruling() {
     report["conventions"] = json!([serde_json::to_value(live).expect("json")]);
     let mut m = screen_with_the_hub_open(report).await;
     m.click("data-control=withdraw");
-    m.until("the hub closes", |h| !h.contains("rule-hub-modal")).await;
+    m.until("the hub closes", |h| !h.contains("rule-hub-modal"))
+        .await;
     assert_eq!(
-        posts(&server, "/api/projects/p1/standards/std-000001/revoke").await.len(),
+        posts(&server, "/api/projects/p1/standards/std-000001/revoke")
+            .await
+            .len(),
         1
     );
 }
@@ -500,7 +527,11 @@ async fn a_refused_ruling_says_why_keeps_the_hub_open_and_does_not_refresh() {
         "the refusal is said: {said:?}"
     );
     assert!(m.html().contains("rule-hub-modal"), "the hub stays open");
-    assert_eq!(m.vdom.in_runtime(|| *refresh.0.peek()), before, "nothing to refresh");
+    assert_eq!(
+        m.vdom.in_runtime(|| *refresh.0.peek()),
+        before,
+        "nothing to refresh"
+    );
 }
 
 // ── Test 26: Rule alternatives posts a ruling, and shows no rescan bar for such a rule ───────
@@ -559,7 +590,10 @@ async fn rule_alternatives_posts_a_ruling_and_shows_no_rescan_bar_for_a_rule_wit
     let mut m = Mounted::mount(alternatives);
     m.pump(100).await;
     let html = m.html();
-    assert!(html.contains("Observed in the code"), "the badge says where it came from: {html}");
+    assert!(
+        html.contains("Observed in the code"),
+        "the badge says where it came from: {html}"
+    );
     assert!(!html.contains("AI recommended"), "{html}");
     let refresh = m.context::<crate::cockpit::tree::ShellRefresh>();
     let before = m.vdom.in_runtime(|| *refresh.0.peek());
@@ -570,7 +604,10 @@ async fn rule_alternatives_posts_a_ruling_and_shows_no_rescan_bar_for_a_rule_wit
     assert_eq!(sent[0]["rule_id"], "ARCH-PAR-1");
     assert_eq!(sent[0]["choice"], json!({"accept": {"option_id": "par"}}));
     let html = m.html();
-    assert!(!html.contains("rec-sticky-bar") && !html.contains("Rescan"), "{html}");
+    assert!(
+        !html.contains("rec-sticky-bar") && !html.contains("Rescan"),
+        "{html}"
+    );
     assert_eq!(m.vdom.in_runtime(|| *refresh.0.peek()), before + 1);
 }
 
@@ -585,7 +622,12 @@ async fn rule_alternatives_without_a_record_still_stages_a_rescan() {
     m.pick("data-rule=ARCH-PAR-1", "seq");
     m.pump(200).await;
     let html = m.html();
-    assert!(html.contains("rec-sticky-bar") && html.contains("Rescan 1 overridden rule"), "{html}");
-    assert!(posts(&server, "/api/projects/p1/standards").await.is_empty());
+    assert!(
+        html.contains("rec-sticky-bar") && html.contains("Rescan 1 overridden rule"),
+        "{html}"
+    );
+    assert!(posts(&server, "/api/projects/p1/standards")
+        .await
+        .is_empty());
     WITH_RECORD.with(|w| w.set(true));
 }

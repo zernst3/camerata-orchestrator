@@ -1265,6 +1265,44 @@ mod tests {
             .starts_with("1 more place follows \"Manual\""));
     }
 
+    /// Design section 3: a finder row whose option is unknown departs only when the standard IS the
+    /// judged option (it broke that option by definition); against any other standard it is the
+    /// finder's own problem and stays so.
+    #[test]
+    fn a_finder_row_with_an_unknown_option_departs_only_from_the_judged_option() {
+        let three = || {
+            let mut c = hearth(false);
+            c.observed_option_id = None;
+            c.standard = StandardState::default();
+            c.options = vec![
+                opt("par", "Run in parallel", Some(1), &[]),
+                opt("seq", "Sequential awaits by default", Some(2), &[]),
+                opt("third", "Third way", Some(2), &[]),
+            ];
+            c
+        };
+        let row = || vec![finder("elsewhere.ts", 5, RULE, 1)];
+        assert_eq!(
+            option_of_row(&row()[0], &three()),
+            (None, OptionBasis::Unknown)
+        );
+        // The standard is the judged option: the row departs.
+        let (mut rows, mut cs) = (row(), vec![three()]);
+        resolve(&mut rows, &mut cs, &[accept("par")]);
+        let is_departure = |rows: &[Finding]| {
+            rows.iter().any(|r| {
+                r.path == "elsewhere.ts" && matches!(r.kind, Some(FindingKind::Deviation(_)))
+            })
+        };
+        assert!(is_departure(&rows), "{rows:?}");
+        assert_eq!(cs[0].finder_rows[0].status, PlaceStatus::Departs);
+        // The standard is another option: the row is the finder's own problem again.
+        let (mut rows, mut cs) = (row(), vec![three()]);
+        resolve(&mut rows, &mut cs, &[accept("seq")]);
+        assert!(!is_departure(&rows), "{rows:?}");
+        assert_eq!(cs[0].finder_rows[0].status, PlaceStatus::NoStandard);
+    }
+
     #[test]
     fn a_split_with_no_choice_is_counted_once_by_the_shared_function() {
         let split = vec![trigger_env(), hearth(false)];
