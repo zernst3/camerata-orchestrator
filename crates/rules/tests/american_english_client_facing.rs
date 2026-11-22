@@ -6,7 +6,7 @@
 //!
 //! The matcher is built from spelling PATTERNS, not a word list of the words seen so far, so a
 //! new rule that writes "utilise" or "neighbour" is caught on first sight:
-//! - `-ise`, `-ised`, `-ises`, `-ising`, `-iser`, `-isation`, except words American English also
+//! - `-ise`, `-ised`, `-ises`, `-ising`, `-iser`, `-isation`, `-isable` (stem list), except words American English also
 //!   spells with `-ise` ([`ISE_OK`]);
 //! - `-yse`, `-ysed`, `-ysing` and the like (`analyse`, `paralyse`), but not `analyses`, which is
 //!   the American plural of `analysis`;
@@ -96,6 +96,40 @@ const ISE_OK: &[&str] = &[
     "vise",
     "exorcise",
 ];
+/// Stems that British spelling turns into `-isable` and `-isability` (`weaponisable`,
+/// `organisable`). A list, not a pattern, because `disable` and `advisable` end the same way.
+const ISAB_STEMS: &[&str] = &[
+    "weapon",
+    "organ",
+    "serial",
+    "custom",
+    "optim",
+    "minim",
+    "maxim",
+    "util",
+    "final",
+    "normal",
+    "local",
+    "visual",
+    "standard",
+    "personal",
+    "synchron",
+    "author",
+    "sanit",
+    "parameter",
+    "initial",
+    "recogn",
+    "real",
+    "categor",
+    "summar",
+    "token",
+    "memor",
+    "prior",
+    "capital",
+    "general",
+    "special",
+    "mobil",
+];
 const ISE_SUFFIXES: &[&str] = &["ise", "ised", "ises", "ising", "iser", "isers"];
 const YSE_SUFFIXES: &[&str] = &["yse", "ysed", "ysing", "yser", "ysers"];
 
@@ -174,7 +208,13 @@ const L_ENDINGS: &[&str] = &[
 
 /// Whether the lowercase alphabetic `w` is a British spelling.
 fn is_british(w: &str) -> bool {
-    if MISC.contains(&w) || w.ends_with("isation") || w.ends_with("isations") {
+    if MISC.contains(&w) || w.contains("isation") {
+        return true;
+    }
+    if ISAB_STEMS
+        .iter()
+        .any(|st| w.ends_with(&format!("{st}isable")) || w.ends_with(&format!("{st}isability")))
+    {
         return true;
     }
     for suf in ISE_SUFFIXES {

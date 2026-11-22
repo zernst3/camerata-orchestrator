@@ -38,7 +38,7 @@ Match-set (gate-enforced):
       arbitrary Python constructors (!!python/object). The carve-out is precise: a line
       containing SafeLoader or FullLoader alongside yaml.load( is safe and is NOT flagged.
     - yaml.unsafe_load( is explicitly named unsafe; no safe variant.
-    - pickle.load( / pickle.loads( is Python's native serialization; trivially weaponisable.
+    - pickle.load( / pickle.loads( is Python's native serialization; trivially weaponizable.
     - cPickle.load( / cPickle.loads( is a C-extension alias of pickle; same risk.
     - _pickle.load( is a CPython internal alias; same risk.
   PHP:
