@@ -45,7 +45,7 @@ financial table at all.
 
 The fix is almost always `ON DELETE RESTRICT` (block the delete until the financial/audit reference is dealt with
 explicitly, usually by archiving or reassigning it first) or, where the relationship is genuinely optional, `ON
-DELETE SET NULL` on a nullable FK column, either way, the deletion of the routine row can no longer silently take
+DELETE SET NULL` on a nullable FK column. Either way, the deletion of the routine row can no longer silently take
 the financial/audit record down with it.
 
 Detection necessarily relies on a naming heuristic (the referenced table's name suggesting financial/audit/

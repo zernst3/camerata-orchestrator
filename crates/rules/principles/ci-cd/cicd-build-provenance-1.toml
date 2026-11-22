@@ -41,7 +41,7 @@ locally-built copy with the same name/tag) and confirming verification fails, wh
 artifact verifies successfully.
 """
 effort = "high"
-why = "Provenance is the one control in this rule set that protects a CONSUMER of the artifact rather than the build process itself, closing the gap between 'the build pipeline is hardened' and 'this specific artifact in the registry actually came from that hardened pipeline', without it, a compromise anywhere between a successful build and the artifact's eventual use (registry tampering, a substituted upload, a compromised publish credential used out-of-band) produces an artifact indistinguishable from a legitimate one to anyone who only checks the registry's own access controls."
+why = "Provenance is the one control in this rule set that protects a CONSUMER of the artifact rather than the build process itself, closing the gap between 'the build pipeline is hardened' and 'this specific artifact in the registry actually came from that hardened pipeline'. Without it, a compromise anywhere between a successful build and the artifact's eventual use (registry tampering, a substituted upload, a compromised publish credential used out-of-band) produces an artifact indistinguishable from a legitimate one to anyone who only checks the registry's own access controls."
 
 [[option]]
 id = "publish-artifacts-with-no-provenance-attestation"

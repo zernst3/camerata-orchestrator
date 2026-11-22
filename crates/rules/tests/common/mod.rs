@@ -211,7 +211,6 @@ pub fn client_reaching_fields(corpus: &RuleSet) -> Vec<ReachingField<'_>> {
 /// A synthetic rule with `plant` written into EVERY field of the wide list, for the gates'
 /// "can it fail" tests. The `relevance` line is planted too: it is not client-reaching, so a gate
 /// that reports it is wrong. Returns the TOML for `universal/synth-plant-1.toml`.
-#[allow(dead_code)]
 pub fn planted_rule_toml(plant: &str) -> String {
     format!(
         r#"id = "SYNTH-PLANT-1"
@@ -255,7 +254,6 @@ escalation = {{ condition = "Condition {plant}", severity = "soft-flag" }}
 }
 
 /// Write [`planted_rule_toml`] into a temp corpus and load it.
-#[allow(dead_code)]
 pub async fn load_planted(plant: &str) -> (tempfile::TempDir, RuleSet) {
     let dir = tempfile::tempdir().expect("temp dir");
     let universal = dir.path().join("universal");
@@ -271,7 +269,6 @@ pub async fn load_planted(plant: &str) -> (tempfile::TempDir, RuleSet) {
 }
 
 /// What every planted gate must report: one offender naming each of these locations.
-#[allow(dead_code)]
 pub const PLANTED_LOCATIONS: &[&str] = &[
     "SYNTH-PLANT-1: title",
     "SYNTH-PLANT-1: summary",
@@ -289,7 +286,6 @@ pub const PLANTED_LOCATIONS: &[&str] = &[
 ];
 
 /// The source locations (external titles): the dash gate reports these, the spelling gate does not.
-#[allow(dead_code)]
 pub const PLANTED_SOURCE_LOCATIONS: &[&str] = &[
     "SYNTH-PLANT-1: source `Source",
     "SYNTH-PLANT-1: source linter",

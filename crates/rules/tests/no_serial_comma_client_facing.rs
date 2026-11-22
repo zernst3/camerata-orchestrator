@@ -52,6 +52,7 @@ const VERB_OPENERS: &[&str] = &[
     "pass",
     "reject",
     "rejects",
+    "makes",
     "selects",
     "completes",
     "is",

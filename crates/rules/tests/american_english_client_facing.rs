@@ -94,6 +94,13 @@ const ISE_OK: &[&str] = &[
     "porpoise",
     "vise",
     "exorcise",
+    "bitwise",
+    "pairwise",
+    "stepwise",
+    "crises",
+    "malaise",
+    "improvisation",
+    "improvisations",
 ];
 /// Stems that British spelling turns into `-isable` and `-isability` (`weaponisable`,
 /// `organisable`). A list, not a pattern, because `disable` and `advisable` end the same way.
@@ -207,7 +214,7 @@ const L_ENDINGS: &[&str] = &[
 
 /// Whether the lowercase alphabetic `w` is a British spelling.
 fn is_british(w: &str) -> bool {
-    if MISC.contains(&w) || w.contains("isation") {
+    if MISC.contains(&w) || (w.contains("isation") && !ISE_OK.contains(&w)) {
         return true;
     }
     if ISAB_STEMS
@@ -464,6 +471,28 @@ async fn the_wide_spelling_gate_reports_a_british_word_planted_in_every_client_r
         assert!(
             !offenders.iter().any(|o| o.contains(exempt)),
             "`{exempt}` must be exempt: {offenders:#?}"
+        );
+    }
+}
+
+/// Ids are in the gate: a British RULE id and a British OPTION id are each reported, so dropping
+/// ids from `client_reaching_fields` fails this test.
+#[tokio::test]
+async fn the_spelling_gate_reports_a_british_rule_id_and_option_id() {
+    let toml = common::planted_rule_toml("plain words")
+        .replace("SYNTH-PLANT-1", "SYNTH-BEHAVIOUR-1")
+        .replace("the-correct-option", "the-colour-option");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let universal = dir.path().join("universal");
+    std::fs::create_dir_all(&universal).expect("mkdir universal");
+    std::fs::write(universal.join("synth-behaviour-1.toml"), toml).expect("write fixture");
+    let (corpus, errors) = load_corpus_lenient(dir.path()).await;
+    assert!(errors.is_empty(), "fixture must load: {errors:?}");
+    let offenders = spelling_offenders(&corpus);
+    for expected in ["SYNTH-BEHAVIOUR-1: rule id", "option id the-colour-option"] {
+        assert!(
+            offenders.iter().any(|o| o.contains(expected)),
+            "the gate failed to flag `{expected}`: {offenders:#?}"
         );
     }
 }

@@ -45,8 +45,7 @@ its data behind a RLS-capable interface.
 Because the finding is unconditional given the exposure fact (there is no partial-remediation
 option beyond removing exposure or wrapping the data differently), the report should name the
 specific materialized view and let the reader judge whether its (necessarily all-or-nothing)
-content is appropriate for public access, often a rollup/aggregate view is genuinely meant to be
-public, so this ships as a high-severity finding for review, not an automatic critical.
+content is appropriate for public access. Often a rollup/aggregate view is genuinely meant to be public, so this ships as a high-severity finding for review, not an automatic critical.
 """
 
 [[option]]
