@@ -588,9 +588,9 @@ pub(crate) async fn output_with_prompt(
         )
     });
     let out = child.wait_with_output().await?;
-    // A broken pipe is the child closing its input early (its exit status says why). Any other
-    // write failure means the prompt did not arrive whole: the call fails rather than return the
-    // answer to a truncated prompt.
+    // Any write failure (a broken pipe, the child closing its input early, included) means the
+    // prompt did not arrive whole: a child that exited successfully fails the call rather than
+    // return the answer to a truncated prompt; a failed exit is explained by its own status.
     if let Some(writer) = writer {
         if let Err(e) = writer.finish().await {
             eprintln!("[camerata-intake] writing the prompt to the claude CLI failed: {e}");
