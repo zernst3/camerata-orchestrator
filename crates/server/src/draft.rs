@@ -166,6 +166,7 @@ impl DraftStore {
                 }
                 ids.sort();
                 ids.dedup();
+                let all_ids = ids.clone();
                 ids.retain(|id| live_ids.contains(id) && !own_ids.contains(id));
                 let mut eligible: HashMap<String, serde_json::Value> = HashMap::new();
                 for id in &ids {
@@ -181,7 +182,14 @@ impl DraftStore {
                     *m = mem.clone();
                 }
                 let all_written = ids.iter().all(|id| store.write_project(id).is_ok());
-                if all_written {
+                // The shared file is moved aside only when every project in it is accounted for:
+                // migrated just now, or already holding its own file. With no live ids (the
+                // project list could not be read) or a project not yet known, it stays where it
+                // is, so a restored project list finds the drafts again.
+                let accounted = all_ids
+                    .iter()
+                    .all(|id| own_ids.contains(id) || (live_ids.contains(id) && ids.contains(id)));
+                if !live_ids.is_empty() && all_written && accounted {
                     let _ = std::fs::rename(&path, Self::backup_name(&path));
                 }
             }
@@ -633,7 +641,7 @@ pub(crate) fn shared_file_holds(path: &std::path::Path, project_id: &str) -> Opt
 pub(crate) fn strip_project_from_file(
     path: &std::path::Path,
     project_id: &str,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     let bytes = std::fs::read(path)?;
     let mut map: HashMap<String, serde_json::Value> =
         serde_json::from_str(std::str::from_utf8(&bytes).map_err(std::io::Error::other)?)
@@ -648,7 +656,7 @@ pub(crate) fn strip_project_from_file(
         .is_some_and(|o| !o.is_empty());
     let drafts_left = map.keys().any(|k| k != CLEARED_KEY);
     if !stamps_left && !drafts_left {
-        return std::fs::remove_file(path);
+        return std::fs::remove_file(path).map(|()| true);
     }
     if !stamps_left {
         map.remove(CLEARED_KEY);
@@ -657,6 +665,7 @@ pub(crate) fn strip_project_from_file(
         path,
         &serde_json::to_string(&map).map_err(std::io::Error::other)?,
     )
+    .map(|()| false)
 }
 
 /// An RFC 3339 timestamp as an instant, whatever its offset or fraction.

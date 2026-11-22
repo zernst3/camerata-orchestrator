@@ -664,10 +664,10 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
                 }
                 continue;
             }
-            let shared_era = name == "onboarding-draft.json"
-                || name == "onboarding-draft.json.bak"
-                || name.starts_with("onboarding-draft.json.shared-backup");
+            // Every other `onboarding-draft.json*` name is shared-era too (the backup, a temp file
+            // a crash left): it is rewritten, or listed when it cannot be parsed.
             let set_aside = name.starts_with("onboarding-draft.json.unreadable-");
+            let shared_era = name.starts_with("onboarding-draft.json") && !set_aside;
             if set_aside {
                 kept.push(KeptItem {
                     what: p.display().to_string(),
@@ -1225,7 +1225,16 @@ pub async fn delete_all(
             }
             Action::StripShared(path) => {
                 item.outcome = match crate::draft::strip_project_from_file(&path, &project.id) {
-                    Ok(()) => PurgeOutcome::Removed,
+                    Ok(true) => PurgeOutcome::Removed,
+                    Ok(false) => {
+                        // The file stays, without this project's entry: no file or byte count.
+                        item.category =
+                            "shared onboarding draft copy (project's entry removed, file kept)"
+                                .to_string();
+                        item.files = 0;
+                        item.bytes = 0;
+                        PurgeOutcome::Removed
+                    }
                     Err(e) => failed(&path, &e),
                 };
             }

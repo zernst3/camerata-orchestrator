@@ -578,7 +578,11 @@ fn drafts_wait_in_the_shared_file_while_the_project_list_is_empty_and_return_wit
     // projects.json was unreadable: no live ids. Nothing is migrated and nothing is moved.
     let none = DraftStore::at(shared.clone(), &[]);
     assert!(none.load("p1").is_none());
-    assert_eq!(std::fs::read_to_string(&shared).unwrap(), text, "still there");
+    assert_eq!(
+        std::fs::read_to_string(&shared).unwrap(),
+        text,
+        "still there"
+    );
 
     // projects.json is back: the draft is restored.
     let back = DraftStore::at(shared, &ids(&["p1"]));
