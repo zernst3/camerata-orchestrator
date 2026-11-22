@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-SETTINGS-FROM-ENV-1"
-version = 3
+version = 4
 title = "Django settings read credentials from environment variables; no secrets in settings.py"
 domain = "python:django"
 layer = "framework"
@@ -37,7 +37,7 @@ id = "per-environment-settings-files"
 violates = true
 label = "maintain separate settings files per environment committed to git"
 directive = "Environment-specific settings live in committed files (`settings_dev.py`, `settings_prod.py`) that contain the actual credentials for each environment."
-why = "Production credentials are still committed to the repository, so anyone with repository access can read them and they stay in git history after any later removal; rotating one requires a commit and a deploy. Splitting settings per environment improves organisation but changes nothing about the exposure."
+why = "Production credentials are still committed to the repository, so anyone with repository access can read them and they stay in git history after any later removal; rotating one requires a commit and a deploy. Splitting settings per environment improves organization but changes nothing about the exposure."
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/ref/settings/#secret-key"

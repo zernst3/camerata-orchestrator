@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-INTEGRATION-TEST-LOCATION-1"
-version = 2
+version = 3
 title = "Integration tests are named *IT.java (or *ITCase.java) and tagged @Tag(\"integration\") so they can be separated from unit tests in CI"
 domain = "java:testing"
 layer = "language"
@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "How are integration tests distinguished from unit tests and placed so CI can run them on separate gates?"
 default = "it-suffix-plus-tag"
-why = "Maven Failsafe Plugin runs integration tests (verify phase) using the default inclusion patterns **/IT*.java, **/*IT.java, and **/*ITCase.java — distinct from Surefire's *Test.java unit test patterns. Using the IT suffix means Failsafe picks up integration tests automatically without any custom configuration. The JUnit 5 @Tag annotation provides a second axis: build tools (Maven Surefire/Failsafe tagExpression, Gradle useJUnitPlatform tagsFilter) can filter by tag to run only fast unit tests on PR, deferring slow integration tests to a post-merge gate. Keeping integration tests separate prevents a slow database or external-service startup from blocking the unit-test gate."
+why = "Maven Failsafe Plugin runs integration tests (verify phase) using the default inclusion patterns **/IT*.java, **/*IT.java, and **/*ITCase.java: distinct from Surefire's *Test.java unit test patterns. Using the IT suffix means Failsafe picks up integration tests automatically without any custom configuration. The JUnit 5 @Tag annotation provides a second axis: build tools (Maven Surefire/Failsafe tagExpression, Gradle useJUnitPlatform tagsFilter) can filter by tag to run only fast unit tests on PR, deferring slow integration tests to a post-merge gate. Keeping integration tests separate prevents a slow database or external-service startup from blocking the unit-test gate."
 
 [[sources]]
 url = "https://maven.apache.org/surefire/maven-failsafe-plugin/examples/inclusion-exclusion.html"

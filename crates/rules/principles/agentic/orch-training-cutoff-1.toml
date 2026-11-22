@@ -1,5 +1,5 @@
 id = "ORCH-TRAINING-CUTOFF-1"
-version = 4
+version = 5
 title = "Training-data-limited decisions route to human review by category, not by confidence"
 domain = "agentic"
 layer = "universal"
@@ -17,7 +17,7 @@ title = "AGENTS.md: ORCH-TRAINING-CUTOFF-1 (training-data-limited decisions rout
 [[sources]]
 url = "https://genai.owasp.org/llm-top-10/"
 title = "OWASP Top 10 for LLM Applications: LLM09:2025 Misinformation"
-relevance = "Authority note (author-facing): low — supports the general training-data-limitation risk, not the category-routing mechanism"
+relevance = "Authority note (author-facing): low: supports the general training-data-limitation risk, not the category-routing mechanism"
 
 [decision]
 question = "When an agent's decision depends on current external facts such as dependency versions or vendor API shapes, how is it made?"

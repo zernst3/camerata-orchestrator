@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-AAA-STRUCTURE-1"
-version = 3
+version = 4
 title = "Each example follows Arrange-Act-Assert: let/subject for setup, a single action, then expect(); hooks appear before examples"
 domain = "ruby:testing"
 layer = "language"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "How should the internal structure of an RSpec example and its example group be organized?"
 default = "aaa-with-let-before"
-why = "Arrange-Act-Assert (AAA) is a universal test-structure principle: set up state (Arrange), invoke the unit under test (Act), then assert the outcome (Assert). In RSpec, the three phases map cleanly: let/let!/subject blocks declare Arranged data; the call inside the it block or a before hook is the Act; and expect().to is the Assert. Keeping these phases visually separated — let blocks at the top, subject next, before hooks below, then examples — makes it obvious at a glance what state is needed, what is exercised, and what is verified. The rubocop-rspec cops RSpec/LetBeforeExamples and RSpec/HooksBeforeExamples enforce hook/let placement; RSpec/LeadingSubject enforces that subject is the first definition. Interleaving setup inside the it block's body is allowed but tends to repeat across examples and obscures what the example is actually testing. Each example should make a single assertion so that a failure identifies the exact broken invariant without ambiguity."
+why = "Arrange-Act-Assert (AAA) is a universal test-structure principle: set up state (Arrange), invoke the unit under test (Act), then assert the outcome (Assert). In RSpec, the three phases map cleanly: let/let!/subject blocks declare Arranged data; the call inside the it block or a before hook is the Act; and expect().to is the Assert. Keeping these phases visually separated (let blocks at the top, subject next, before hooks below, then examples) makes it obvious at a glance what state is needed, what is exercised, and what is verified. The rubocop-rspec cops RSpec/LetBeforeExamples and RSpec/HooksBeforeExamples enforce hook/let placement; RSpec/LeadingSubject enforces that subject is the first definition. Interleaving setup inside the it block's body is allowed but tends to repeat across examples and obscures what the example is actually testing. Each example should make a single assertion so that a failure identifies the exact broken invariant without ambiguity."
 
 [[option]]
 id = "aaa-with-let-before"

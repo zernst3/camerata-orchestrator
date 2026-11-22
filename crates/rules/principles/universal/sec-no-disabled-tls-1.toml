@@ -1,5 +1,5 @@
 id = "SEC-NO-DISABLED-TLS-1"
-version = 2
+version = 3
 title = "TLS certificate verification is never disabled in production code; tests that disable it use a suppression with a reason"
 domain = "universal"
 layer = "universal"
@@ -25,7 +25,7 @@ title = "OWASP Transport Layer Security Cheat Sheet"
 [decision]
 question = "When is it acceptable to disable TLS certificate verification?"
 default = "never-in-production"
-why = "Disabling TLS verification (verify=False in Python requests, rejectUnauthorized:false in Node.js, InsecureSkipVerify:true in Go, NODE_TLS_REJECT_UNAUTHORIZED=0, CURLOPT_SSL_VERIFYPEER false) removes the cryptographic guarantee that the remote endpoint is who it claims to be. This opens every HTTPS call to a man-in-the-middle attack that is completely invisible to the application. The most common justification is 'self-signed cert in dev/test' — the correct fix is to add the test CA certificate to the trust store, not to disable verification globally. The gate applies a Waive policy in test scope so test infrastructure that legitimately configures a local TLS-terminating proxy does not block."
+why = "Disabling TLS verification (verify=False in Python requests, rejectUnauthorized:false in Node.js, InsecureSkipVerify:true in Go, NODE_TLS_REJECT_UNAUTHORIZED=0, CURLOPT_SSL_VERIFYPEER false) removes the cryptographic guarantee that the remote endpoint is who it claims to be. This opens every HTTPS call to a man-in-the-middle attack that is completely invisible to the application. The most common justification is 'self-signed cert in dev/test': the correct fix is to add the test CA certificate to the trust store, not to disable verification globally. The gate applies a Waive policy in test scope so test infrastructure that legitimately configures a local TLS-terminating proxy does not block."
 
 [[option]]
 id = "never-in-production"

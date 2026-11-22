@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1"
-version = 2
+version = 3
 title = "A service_role-backed client used in a user-reachable request handler must re-implement authorization explicitly"
 domain = "supabase:auth"
 layer = "platform"
@@ -12,7 +12,7 @@ inspectable = true
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Whether a user-reachable handler that constructs a service_role client also performs an explicit authorization check is a semantic judgment — it requires reading the handler's control flow, not matching a pattern — so this rule routes to the prose tier: the handler body and the client-construction call site are fed to Claude as evidence. Conformance holds when every such handler validates that the calling user is entitled to the specific action/row being performed before delegating to the service_role client; it fails when the handler trusts the caller's request parameters directly, since service_role bypasses RLS entirely and no database-level backstop exists on that path."
+qualifies = "Whether a user-reachable handler that constructs a service_role client also performs an explicit authorization check is a semantic judgment (it requires reading the handler's control flow, not matching a pattern) so this rule routes to the prose tier: the handler body and the client-construction call site are fed to Claude as evidence. Conformance holds when every such handler validates that the calling user is entitled to the specific action/row being performed before delegating to the service_role client; it fails when the handler trusts the caller's request parameters directly, since service_role bypasses RLS entirely and no database-level backstop exists on that path."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/api/api-keys"
@@ -29,7 +29,7 @@ why = """
 Supabase documents service_role as a role that, by design, "has full access to your project's
 data" and skips "any and all Row Level Security policies" (it carries the BYPASSRLS attribute).
 That is the correct behavior for trusted server-side jobs (migrations, admin tooling, scheduled
-tasks) — but the instant a service_role-backed client is constructed inside a handler that a
+tasks), but the instant a service_role-backed client is constructed inside a handler that a
 regular end user can reach (an API route, a server action, an Edge Function invoked from the
 client), the database's entire access-control layer is switched off for that code path. Whatever
 authorization the RLS policies would have enforced must now be re-implemented BY HAND in that

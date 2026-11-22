@@ -1,5 +1,5 @@
 id = "SUPABASE-EXPOSURE-MATVIEW-1"
-version = 4
+version = 5
 title = "A materialized view in an API-exposed schema cannot be row-secured; its exposure is all-or-nothing"
 domain = "supabase:exposure"
 layer = "platform"
@@ -21,7 +21,7 @@ max_severity = "high"
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a statement scan for CREATE MATERIALIZED VIEW targeting an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse). Postgres materialized views do not support Row Level Security at all — there is no policy mechanism to apply, so any exposed materialized view grants either full access to its contents or none. Conformance holds when materialized views are kept out of exposed schemas (moved to a non-exposed schema and accessed only through a RLS-capable wrapper, e.g. a security_invoker view or a function) or are deliberately, reviewably intended as fully public data."
+qualifies = "Enforced by a statement scan for CREATE MATERIALIZED VIEW targeting an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse). Postgres materialized views do not support Row Level Security at all: there is no policy mechanism to apply, so any exposed materialized view grants either full access to its contents or none. Conformance holds when materialized views are kept out of exposed schemas (moved to a non-exposed schema and accessed only through a RLS-capable wrapper, e.g. a security_invoker view or a function) or are deliberately, reviewably intended as fully public data."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0016_materialized_view_in_api"
@@ -32,20 +32,20 @@ linter = "splinter: materialized_view_in_api"
 question = "Does any materialized view sit in an API-exposed schema, where Postgres can apply no row-level security to it?"
 default = "flag-exposed-materialized-views"
 why = """
-Row Level Security policies attach to TABLES and (via security_invoker) ordinary VIEWS — Postgres
+Row Level Security policies attach to TABLES and (via security_invoker) ordinary VIEWS: Postgres
 provides no equivalent mechanism for MATERIALIZED views, which are physically-stored snapshots
 with no per-row policy hook at all. This is Splinter's materialized_view_in_api lint (0016,
 confirmed against the live database-advisors page): once a materialized view is reachable through
-PostgREST, there is no way to scope which rows a given caller sees — it is either fully open to
+PostgREST, there is no way to scope which rows a given caller sees: it is either fully open to
 whatever role can query it, or not exposed at all. This differs structurally from
-SUPABASE-RLS-VIEW-INVOKER-1 (ordinary views, which CAN be fixed with security_invoker) — a
+SUPABASE-RLS-VIEW-INVOKER-1 (ordinary views, which CAN be fixed with security_invoker): a
 materialized view has no equivalent fix short of moving it out of the exposed schema or wrapping
 its data behind a RLS-capable interface.
 
 Because the finding is unconditional given the exposure fact (there is no partial-remediation
 option beyond removing exposure or wrapping the data differently), the report should name the
 specific materialized view and let the reader judge whether its (necessarily all-or-nothing)
-content is appropriate for public access — often a rollup/aggregate view is genuinely meant to be
+content is appropriate for public access, often a rollup/aggregate view is genuinely meant to be
 public, so this ships as a high-severity finding for review, not an automatic critical.
 """
 
@@ -70,7 +70,7 @@ check) in an exposed schema that reads from it, so RLS applies at that layer. If
 intentionally. Verify by confirming `<matview>` itself is no longer directly reachable through
 the PostgREST API (only the wrapping view/function is).
 """
-why = "The finding is unconditional given the exposure fact — there is no RLS mechanism a materialized view could adopt — so naming every instance and explaining the structural limitation is the correct, honest framing rather than a probabilistic guess."
+why = "The finding is unconditional given the exposure fact, there is no RLS mechanism a materialized view could adopt, so naming every instance and explaining the structural limitation is the correct, honest framing rather than a probabilistic guess."
 
 # Design note (W22, 2026-10-20): this rule previously carried a second `[[option]]`
 # describing a REJECTED scanner/corpus design, not a client-code state. Removed — a

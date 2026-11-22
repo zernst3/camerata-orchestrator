@@ -1,5 +1,5 @@
 id = "SQL-MONEY-FLOAT-1"
-version = 4
+version = 5
 title = "Money and currency amounts are stored as numeric/decimal, never as a floating-point type"
 domain = "sql"
 layer = "universal"
@@ -16,7 +16,7 @@ candidates = { locator = "sql_tables" }
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a scan over CREATE TABLE / ALTER TABLE ADD COLUMN (and the ORM's equivalent column-type declaration) for a column whose name matches a money-shaped heuristic (amount, price, cost, fee, balance, total, subtotal, tax, charge, payout, salary, or a `_usd`/`_cents`-style currency suffix) typed as a floating-point representation (`real`, `float4`, `double precision`, `float8`, or an ORM's `Float`/`double` column type). Conformance holds when every such column uses `numeric`/`decimal` (or, for a well-understood integer-minor-units convention, an exact integer type representing cents/minor units) instead; it does not apply to columns that are genuinely non-monetary despite a superficially similar name (a `price_tier` enum-like integer, a `cost_estimate_confidence` ratio) — names this ambiguous are `needs_review`."
+qualifies = "Enforced by a scan over CREATE TABLE / ALTER TABLE ADD COLUMN (and the ORM's equivalent column-type declaration) for a column whose name matches a money-shaped heuristic (amount, price, cost, fee, balance, total, subtotal, tax, charge, payout, salary, or a `_usd`/`_cents`-style currency suffix) typed as a floating-point representation (`real`, `float4`, `double precision`, `float8`, or an ORM's `Float`/`double` column type). Conformance holds when every such column uses `numeric`/`decimal` (or, for a well-understood integer-minor-units convention, an exact integer type representing cents/minor units) instead; it does not apply to columns that are genuinely non-monetary despite a superficially similar name (a `price_tier` enum-like integer, a `cost_estimate_confidence` ratio): names this ambiguous are `needs_review`."
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/datatype-numeric.html"
@@ -31,8 +31,8 @@ question = "Is every column that represents a money or currency amount declared 
 default = "money-is-numeric-or-integer-minor-units"
 why = """
 PostgreSQL's own documentation states this as plainly as a vendor doc ever states anything: `real` and `double
-precision` are INEXACT types — 'storing and retrieving a value might show slight discrepancies' and 'comparing two
-floating-point values for equality might not always work as expected' — and the documentation explicitly recommends
+precision` are INEXACT types, 'storing and retrieving a value might show slight discrepancies' and 'comparing two
+floating-point values for equality might not always work as expected', and the documentation explicitly recommends
 `numeric` 'for storing monetary amounts and other quantities where exactness is required.' This is not a stylistic
 preference; it is CWE-1339 (Insufficient Precision or Accuracy of a Real Number) manifesting in the single domain
 where the gap between 'close enough' and 'exact' has a direct dollar cost: a running total computed by summing
@@ -41,8 +41,8 @@ with the number of operations, and `WHERE amount = 19.99` can fail to match a ro
 literal value 19.99, because neither the comparison value nor the stored value round-trips through IEEE 754 binary
 floating point exactly.
 
-The accepted alternative to `numeric`/`decimal` is an exact INTEGER representing minor units (cents) — `amount_cents
-integer` — which is also exact and sometimes preferred for arithmetic-heavy ledger systems; what is never acceptable
+The accepted alternative to `numeric`/`decimal` is an exact INTEGER representing minor units (cents), `amount_cents
+integer`, which is also exact and sometimes preferred for arithmetic-heavy ledger systems; what is never acceptable
 is a floating-point type for any column representing an amount of money, since the entire category of bug (off-by-a-
 fraction-of-a-cent totals, equality checks that silently fail) is one PostgreSQL's own type system exists to make
 impossible to write by accident.
@@ -68,7 +68,7 @@ Verify by summing a set of known decimal amounts in the new column type and conf
 expected value, including a case that would have exposed floating-point drift in the old type.
 """
 effort = "medium"
-why = "PostgreSQL's own documentation names numeric as the correct type for monetary amounts specifically because real/double precision are inexact by design — there is no legitimate case for a money column to use a type whose own documentation warns it may not even compare equal to itself after a round trip."
+why = "PostgreSQL's own documentation names numeric as the correct type for monetary amounts specifically because real/double precision are inexact by design: there is no legitimate case for a money column to use a type whose own documentation warns it may not even compare equal to itself after a round trip."
 
 [[option]]
 id = "use-floating-point-for-money-and-round-at-display-time"

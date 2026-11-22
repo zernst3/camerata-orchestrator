@@ -1,5 +1,5 @@
 id = "SEC-NO-WEAK-TOKEN-RANDOMNESS-1"
-version = 2
+version = 3
 title = "Tokens, nonces and session/access identifiers are generated from a cryptographically secure random source, never a general-purpose PRNG"
 domain = "universal"
 layer = "universal"
@@ -29,8 +29,8 @@ why = """
 A general-purpose PRNG such as JavaScript's Math.random() or Python's random module is designed
 for statistical distribution, not unpredictability: its internal state is small, often seeded from
 a predictable source (the current time), and in some implementations fully recoverable from a
-handful of observed outputs. When that generator produces a value that grants access on its own —
-a password-reset token, a session identifier, a share-link secret, an API key — an attacker who can
+handful of observed outputs. When that generator produces a value that grants access on its own
+(a password-reset token, a session identifier, a share-link secret, an API key) an attacker who can
 observe or brute-force the generator's output space can forge a valid token without ever
 compromising the underlying account. Non-security uses of a fast PRNG (UI jitter, sampling,
 load-testing) are unaffected; the defect is specifically a PRNG feeding a value that itself

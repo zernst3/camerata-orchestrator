@@ -1,5 +1,5 @@
 id = "SQL-ENUM-TEXT-CONSTRAINT-1"
-version = 4
+version = 5
 title = "A column representing a closed set of values is constrained by a native enum, a CHECK list or a lookup-table FK, never a bare unconstrained text column"
 domain = "sql"
 layer = "universal"
@@ -27,30 +27,30 @@ url = "https://www.postgresql.org/docs/current/datatype-enum.html"
 title = "PostgreSQL: Enumerated Types: a native enum type restricts a column to a static, ordered set of values"
 
 [decision]
-question = "What position does the project take on constraining a closed-set-valued column — native enum, CHECK list, or lookup-table FK — versus leaving it an unconstrained text column?"
+question = "What position does the project take on constraining a closed-set-valued column (native enum, CHECK list, or lookup-table FK) versus leaving it an unconstrained text column?"
 default = "pick-one-enum-strategy-by-volatility-and-cross-table-reuse"
 why = """
-A column like `status`, `role`, or `type` very often represents a closed, application-meaningful set of values —
-'pending/active/closed', 'admin/member/viewer' — that the application code treats as closed (a TypeScript union, a
+A column like `status`, `role`, or `type` very often represents a closed, application-meaningful set of values
+('pending/active/closed', 'admin/member/viewer') that the application code treats as closed (a TypeScript union, a
 switch statement with no default case, a constant array used for validation). Declared as a bare `text`/`varchar`
 column with no database-level constraint, that closedness is a convention enforced ONLY by the application layer
 that happens to validate it, which means a migration, a bulk import, a different service, or a typo in a literal
 string ('pedning' instead of 'pending') is silently accepted by the database and produces a row the application's
-own switch/match logic was never written to handle — exactly the kind of state that looks fine until the one code
+own switch/match logic was never written to handle: exactly the kind of state that looks fine until the one code
 path that reads it unexpectedly falls through to a default case or, worse, has none.
 
 There are three legitimate constraint mechanisms, and the right one depends on how the set changes and whether it's
 shared:
 
 - A native PostgreSQL `ENUM` type is the tightest fit when the set is small, rarely changes, and doesn't need to be
-  queried as data in its own right — but adding a new value requires a schema migration (`ALTER TYPE ... ADD
+  queried as data in its own right, but adding a new value requires a schema migration (`ALTER TYPE ... ADD
   VALUE`), and in older PostgreSQL versions that could not run inside a transaction with other DDL.
 - A `CHECK (column IN (...))` constraint is more flexible to change (an ordinary `ALTER TABLE ... DROP CONSTRAINT`
   / `ADD CONSTRAINT`) and keeps the set local to the one table, at the cost of duplicating the literal list anywhere
   else the same set is checked.
 - A foreign key to a dedicated lookup table is the most flexible: the set can be queried, joined, annotated (a
   `description` column on each status), and extended without a schema migration (just an INSERT into the lookup
-  table) — at the cost of an extra table and a join to resolve the human-readable value.
+  table), at the cost of an extra table and a join to resolve the human-readable value.
 
 This rule does not mandate one mechanism over the others (unlike a strategy rule with a single adopted default,
 this is closer in shape to SQL-AUDIT-COLUMNS-1's 'pick by semantics' framing): it requires that SOME database-level

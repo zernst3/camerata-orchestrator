@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-DESERIALIZATION-1"
-version = 4
+version = 5
 title = "Unsafe deserialization of untrusted data is never used in production code; tests that require it use a suppression with a reason"
 domain = "universal"
 layer = "universal"
@@ -34,27 +34,27 @@ influence the stream, they control what code runs.
 
 Match-set (gate-enforced):
   Python:
-    - yaml.load( without SafeLoader or FullLoader — the default YAML loader executes
+    - yaml.load( without SafeLoader or FullLoader: the default YAML loader executes
       arbitrary Python constructors (!!python/object). The carve-out is precise: a line
       containing SafeLoader or FullLoader alongside yaml.load( is safe and is NOT flagged.
-    - yaml.unsafe_load( — explicitly named unsafe; no safe variant.
-    - pickle.load( / pickle.loads( — Python's native serialisation; trivially weaponisable.
-    - cPickle.load( / cPickle.loads( — C-extension alias of pickle; same risk.
-    - _pickle.load( — CPython internal alias; same risk.
+    - yaml.unsafe_load(: explicitly named unsafe; no safe variant.
+    - pickle.load( / pickle.loads(: Python's native serialisation; trivially weaponisable.
+    - cPickle.load( / cPickle.loads(: C-extension alias of pickle; same risk.
+    - _pickle.load(: CPython internal alias; same risk.
   PHP:
-    - unserialize( — PHP's native object deserialisation. The PHP manual explicitly warns
+    - unserialize(: PHP's native object deserialisation. The PHP manual explicitly warns
       that it must never be called on untrusted input. No safe alternative exists; use JSON.
   Ruby:
-    - Marshal.load( / Marshal.restore( — Ruby's native serialisation; untrusted input can
+    - Marshal.load( / Marshal.restore(: Ruby's native serialisation; untrusted input can
       invoke arbitrary object methods during loading.
   .NET:
-    - BinaryFormatter — deprecated in .NET 5+ specifically because of this vulnerability.
-    - NetDataContractSerializer — same risk profile; same deprecation trajectory.
-    - LosFormatter — ASP.NET ViewState serialiser; the same object-graph reconstruction
+    - BinaryFormatter, deprecated in .NET 5+ specifically because of this vulnerability.
+    - NetDataContractSerializer: same risk profile; same deprecation trajectory.
+    - LosFormatter: ASP.NET ViewState serialiser; the same object-graph reconstruction
       vulnerability applies.
-    - ObjectStateFormatter — companion to LosFormatter; same risk.
+    - ObjectStateFormatter: companion to LosFormatter; same risk.
 
-Known gap — Java:
+Known gap: Java:
   Java's ObjectInputStream.readObject() is the canonical unsafe-deser sink. However, it
   fires on virtually every Java framework that uses serialisation internally (Spring, Hibernate,
   RMI, Java EE containers), producing a false-positive rate that would block legitimate commits
@@ -91,7 +91,7 @@ Certain deserializers reconstruct objects in a way that can execute attacker-con
 why = """
 Every unsafe deserialiser in the match-set reconstructs an arbitrary object graph from the
 byte stream, executing code during reconstruction. There is no safe way to call them on
-untrusted input regardless of input validation upstream — by the time the attack payload
+untrusted input regardless of input validation upstream, by the time the attack payload
 reaches the deserialiser, the execution has already begun. The safe alternatives (json,
 yaml.safe_load, protobuf) impose a schema that prevents arbitrary code paths from being
 invoked. The gate enforces the safe default and requires the code author to document a

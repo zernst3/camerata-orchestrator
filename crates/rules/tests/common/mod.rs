@@ -13,6 +13,9 @@
 //! `[decision].why`, `[decision].question`, `[[sources]].relevance`, and a NON-`violates`
 //! option's `why`.
 
+// Each gate uses a different subset of these helpers.
+#![allow(dead_code)]
+
 use camerata_rules::RuleSet;
 
 /// One client-facing text slot of one rule.
@@ -94,7 +97,6 @@ pub fn client_facing_fields(corpus: &RuleSet) -> Vec<ClientField<'_>> {
 }
 
 /// One text slot that can reach a client anywhere (see [`client_reaching_fields`]).
-#[allow(dead_code)]
 pub struct ReachingField<'a> {
     /// The rule id.
     pub rule_id: &'a str,
@@ -127,7 +129,6 @@ pub struct ReachingField<'a> {
 ///
 /// Not included: `[[sources]].relevance` and `[[sources]].url` (never in the `Rule` type; author
 /// facing only).
-#[allow(dead_code)]
 pub fn client_reaching_fields(corpus: &RuleSet) -> Vec<ReachingField<'_>> {
     fn fld<'a>(
         rule_id: &'a str,

@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-AAA-STRUCTURE-1"
-version = 3
+version = 4
 title = "Every test method follows Arrange-Act-Assert: set up preconditions, invoke the single behavior under test, then assert the outcome; each test covers exactly one behavior"
 domain = "java:testing"
 layer = "language"
@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "How is a test method body structured so it is readable, minimal, and covers exactly one behavior?"
 default = "arrange-act-assert"
-why = "Arrange-Act-Assert (AAA) is the canonical three-phase structure for unit tests: Arrange sets up all preconditions and test doubles; Act invokes exactly the one method or behavior being verified; Assert checks the outcome. Keeping these three phases visually distinct (separated by blank lines or // Arrange / // Act / // Assert comments) makes it immediately obvious what is being tested, what state is assumed, and what the expected result is. Tests that contain multiple Act calls verify multiple behaviors and should be split. Tests with no assertions (PMD: UnitTestShouldIncludeAssert) provide no value — they pass even when the code is broken. Tests with excessive assertions (PMD: UnitTestContainsTooManyAsserts) indicate the test is verifying multiple independent behaviors and should be split."
+why = "Arrange-Act-Assert (AAA) is the canonical three-phase structure for unit tests: Arrange sets up all preconditions and test doubles; Act invokes exactly the one method or behavior being verified; Assert checks the outcome. Keeping these three phases visually distinct (separated by blank lines or // Arrange / // Act / // Assert comments) makes it immediately obvious what is being tested, what state is assumed, and what the expected result is. Tests that contain multiple Act calls verify multiple behaviors and should be split. Tests with no assertions (PMD: UnitTestShouldIncludeAssert) provide no value: they pass even when the code is broken. Tests with excessive assertions (PMD: UnitTestContainsTooManyAsserts) indicate the test is verifying multiple independent behaviors and should be split."
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestshouldincludeassert"

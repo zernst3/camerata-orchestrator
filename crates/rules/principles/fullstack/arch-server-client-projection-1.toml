@@ -1,5 +1,5 @@
 id = "ARCH-SERVER-CLIENT-PROJECTION-1"
-version = 4
+version = 5
 title = "Server-rendered output and hydration payloads carry only the client-facing projected fields, never a full raw row, internal id or token"
 domain = "fullstack"
 layer = "universal"
@@ -8,7 +8,7 @@ kind = "default_with_exceptions"
 inspectable = true
 default = true
 verification = "grounded"
-qualifies = "Enforced by a scan over server component/loader/getServerSideProps-style data-fetching functions for a database query result (an ORM entity, a raw row, a `SELECT *`-shaped object) passed directly as a prop into a client component, into a serialized hydration payload, or interpolated into server-rendered HTML (a data attribute, a hidden input, an inline `<script type=\"application/json\">` state blob) with no intervening projection to an explicit, narrower shape. Conformance holds when every value crossing the server-to-client boundary (RSC serialization, SSR hydration state, server-rendered markup) is an explicitly-shaped projection naming only the fields the client view needs; it fails when a query result or ORM entity is passed through unprojected, even if the client UI currently only renders a subset of its fields — the whole object is still present in the shipped payload and inspectable via browser devtools or view-source regardless of what the UI chooses to display."
+qualifies = "Enforced by a scan over server component/loader/getServerSideProps-style data-fetching functions for a database query result (an ORM entity, a raw row, a `SELECT *`-shaped object) passed directly as a prop into a client component, into a serialized hydration payload, or interpolated into server-rendered HTML (a data attribute, a hidden input, an inline `<script type=\"application/json\">` state blob) with no intervening projection to an explicit, narrower shape. Conformance holds when every value crossing the server-to-client boundary (RSC serialization, SSR hydration state, server-rendered markup) is an explicitly-shaped projection naming only the fields the client view needs; it fails when a query result or ORM entity is passed through unprojected, even if the client UI currently only renders a subset of its fields: the whole object is still present in the shipped payload and inspectable via browser devtools or view-source regardless of what the UI chooses to display."
 
 [[sources]]
 url = "https://nextjs.org/docs/app/getting-started/server-and-client-components#how-do-server-and-client-components-work-in-nextjs"
@@ -30,8 +30,8 @@ The defining trap of a server/client boundary (React Server Components passing p
 traditional SSR framework's getServerSideProps/loader hydrating client-side state, or classic server-rendered HTML
 embedding a JSON state blob for a client script to read) is that 'the UI only displays three fields' says nothing
 about what actually CROSSES the boundary. If the loader fetches `SELECT * FROM users WHERE id = ?` and passes the
-resulting row straight into a prop, every column that row has — a password hash, an internal role flag, another
-user's foreign-key id sitting in a column the UI never reads, an audit timestamp meant for admin tooling only — is
+resulting row straight into a prop, every column that row has (a password hash, an internal role flag, another
+user's foreign-key id sitting in a column the UI never reads, an audit timestamp meant for admin tooling only) is
 serialized into the RSC payload or the hydration `<script>` blob and is visible to anyone who opens browser devtools
 or views the page source, regardless of what the rendered DOM happens to show. This is NOT a client-side bug the UI
 layer can fix by simply not rendering those fields; the data has already left the server's trust boundary the
@@ -40,7 +40,7 @@ protection once it is sitting in a `<script>` tag or a React Server Component pa
 
 The only sound fix is architectural: define an explicit, named shape for what a client view of this resource looks
 like (a narrower type, a projection function, a dedicated select-list) and apply it BEFORE the value crosses the
-boundary — inside the server component, the loader, or the page's data-fetching function — never after, and never
+boundary (inside the server component, the loader, or the page's data-fetching function) never after, and never
 by relying on the UI to simply not render the extra fields it received. This is the same discipline
 ARCH-API-DTOS-1 and ARCH-RESPONSE-FIELD-PROJECTION-1 apply to a conventional JSON API response, generalized to the
 SSR/RSC hydration channel, which carries data to the browser just as surely as a fetch response does even though it

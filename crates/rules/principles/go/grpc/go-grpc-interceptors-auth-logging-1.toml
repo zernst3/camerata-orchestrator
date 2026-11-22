@@ -1,5 +1,5 @@
 id = "GO-GRPC-INTERCEPTORS-AUTH-LOGGING-1"
-version = 3
+version = 4
 title = "Authentication, logging, error recovery and other cross-cutting concerns are implemented as interceptors, not duplicated in handler methods"
 domain = "go:grpc"
 layer = "framework"
@@ -16,7 +16,7 @@ title = "grpc-go: UnaryServerInterceptor / StreamServerInterceptor"
 [decision]
 question = "How should authentication, logging, and error recovery be applied across gRPC service methods?"
 default = "interceptors-cross-cutting"
-why = "gRPC provides unary and streaming interceptors as middleware that wraps all RPC calls. An interceptor is the idiomatic way to apply cross-cutting concerns: every call flows through the interceptor chain before reaching the handler. A logging interceptor logs the RPC method, parameters, response, and latency for all calls. An auth interceptor extracts and validates credentials from metadata and adds the authenticated principal to the context. An error recovery interceptor catches panics and converts them to proper gRPC errors. Implementing these inside each handler is duplication, error-prone (one handler forgets auth, creating a security gap), and couples business logic to infrastructure. Interceptors are also harder to test—each test would need to set up auth, logging, panic recovery. A centralized interceptor chain means one place to audit and maintain each concern, and handlers are simple functions that receive authenticated contexts and return domain errors."
+why = "gRPC provides unary and streaming interceptors as middleware that wraps all RPC calls. An interceptor is the idiomatic way to apply cross-cutting concerns: every call flows through the interceptor chain before reaching the handler. A logging interceptor logs the RPC method, parameters, response, and latency for all calls. An auth interceptor extracts and validates credentials from metadata and adds the authenticated principal to the context. An error recovery interceptor catches panics and converts them to proper gRPC errors. Implementing these inside each handler is duplication, error-prone (one handler forgets auth, creating a security gap), and couples business logic to infrastructure. Interceptors are also harder to test: each test would need to set up auth, logging, panic recovery. A centralized interceptor chain means one place to audit and maintain each concern, and handlers are simple functions that receive authenticated contexts and return domain errors."
 
 [[option]]
 id = "interceptors-cross-cutting"

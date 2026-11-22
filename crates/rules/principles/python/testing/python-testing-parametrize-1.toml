@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-PARAMETRIZE-1"
-version = 2
+version = 3
 title = "Multiple input/output variants use @pytest.mark.parametrize, not copy-paste test functions"
 domain = "python:testing"
 layer = "language"
@@ -7,13 +7,13 @@ enforcement = "structured"
 kind = "decision"
 inspectable = true
 default = true
-qualifies = "Ruff PT006 and PT007 are style checks on parametrize calls already in the code — PT006 flags a wrong argnames type (a tuple used where a plain string is expected for a single parameter) and PT007 flags a wrong values-list element type. Neither rule detects whether parametrize was used AT ALL in preference to copy-pasted test functions, or whether the parametrization is complete; a suite of N copy-pasted, non-parametrized test functions triggers no PT006/PT007 finding, because there is no parametrize call for the rule to check the style of. So the linter enforces idiomatic style once a team has already adopted parametrize, not the underlying discipline of using it instead of duplicating test functions — that part of the rule is enforced by code review, not by CI lint. Conformance for the style layer holds when PT006/PT007 pass on every parametrize call in the codebase; it fails when either rule reports an offense on an existing parametrize call."
+qualifies = "Ruff PT006 and PT007 are style checks on parametrize calls already in the code: PT006 flags a wrong argnames type (a tuple used where a plain string is expected for a single parameter) and PT007 flags a wrong values-list element type. Neither rule detects whether parametrize was used AT ALL in preference to copy-pasted test functions, or whether the parametrization is complete; a suite of N copy-pasted, non-parametrized test functions triggers no PT006/PT007 finding, because there is no parametrize call for the rule to check the style of. So the linter enforces idiomatic style once a team has already adopted parametrize, not the underlying discipline of using it instead of duplicating test functions: that part of the rule is enforced by code review, not by CI lint. Conformance for the style layer holds when PT006/PT007 pass on every parametrize call in the codebase; it fails when either rule reports an offense on an existing parametrize call."
 verification = "grounded"
 
 [decision]
 question = "How should a test that validates the same logic across multiple input/output combinations be written?"
 default = "parametrize-decorator"
-why = "pytest's @pytest.mark.parametrize decorator enables a single test function to run independently for each set of parameters, producing a separate result line in the output for each case (with the parameter values shown in brackets). This eliminates copy-paste duplication: adding a new case requires one more tuple in the params list, not a new test function. Each parametrized case fails or passes independently, so a failure in case 3 does not prevent cases 4 onward from running, giving maximum diagnostic information in a single test run. Ruff's PT006 rule flags the common mistake of wrapping a single-parameter argnames in a tuple (use a string instead), and PT007 flags wrong value types, keeping parametrize calls idiomatic. The alternative — copy-pasting test functions with hardcoded values — scales quadratically with case count, diverges over time as one copy is updated but not others, and adds noise to test output without adding diagnostic signal."
+why = "pytest's @pytest.mark.parametrize decorator enables a single test function to run independently for each set of parameters, producing a separate result line in the output for each case (with the parameter values shown in brackets). This eliminates copy-paste duplication: adding a new case requires one more tuple in the params list, not a new test function. Each parametrized case fails or passes independently, so a failure in case 3 does not prevent cases 4 onward from running, giving maximum diagnostic information in a single test run. Ruff's PT006 rule flags the common mistake of wrapping a single-parameter argnames in a tuple (use a string instead), and PT007 flags wrong value types, keeping parametrize calls idiomatic. The alternative, copy-pasting test functions with hardcoded values, scales quadratically with case count, diverges over time as one copy is updated but not others, and adds noise to test output without adding diagnostic signal."
 
 [[option]]
 id = "parametrize-decorator"

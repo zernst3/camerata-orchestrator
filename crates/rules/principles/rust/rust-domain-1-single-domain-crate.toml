@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-1"
-version = 3
+version = 4
 title = "How the domain is crated: one crate with modules by context, a crate per context or one flat crate"
 domain = "rust"
 layer = "language"
@@ -19,7 +19,7 @@ title = "The Rust Reference: Modules"
 
 [decision]
 question = "How is the domain layer crated: one domain crate with bounded contexts as internal modules, a separate crate per bounded context, or a single domain crate with no module substructure?"
-why = "All three are legitimate, and the right one follows from the domain's size and whether real bounded-context seams have emerged, not from a presumed winner. One domain crate with contexts as internal modules keeps everything in a single compilation unit while still giving each context a named home: cross-context refactors stay cheap (they are module moves, not crate-boundary changes) and there are no inter-crate cycles to manage — the natural fit at small/medium scale where no hard seam has formed yet. A separate crate per bounded context enforces the seams at the compiler level, so a context cannot reach into another's internals and each can have its own dependency set and build unit; the fit when the domain is large enough that real seams exist and isolating them is worth the inter-crate-dependency management it adds. A single flat domain crate with no module substructure is the most direct shape for a very small domain, where any partitioning would be ceremony; its cost is that it becomes a god-module as the entity count grows and 'where does this go' turns into a judgment call. Choose by how many real bounded-context seams the domain has today, noting that un-splitting later is harder than splitting later."
+why = "All three are legitimate, and the right one follows from the domain's size and whether real bounded-context seams have emerged, not from a presumed winner. One domain crate with contexts as internal modules keeps everything in a single compilation unit while still giving each context a named home: cross-context refactors stay cheap (they are module moves, not crate-boundary changes) and there are no inter-crate cycles to manage: the natural fit at small/medium scale where no hard seam has formed yet. A separate crate per bounded context enforces the seams at the compiler level, so a context cannot reach into another's internals and each can have its own dependency set and build unit; the fit when the domain is large enough that real seams exist and isolating them is worth the inter-crate-dependency management it adds. A single flat domain crate with no module substructure is the most direct shape for a very small domain, where any partitioning would be ceremony; its cost is that it becomes a god-module as the entity count grows and 'where does this go' turns into a judgment call. Choose by how many real bounded-context seams the domain has today, noting that un-splitting later is harder than splitting later."
 
 [[option]]
 id = "single-domain-crate-modules-by-bounded-context"
@@ -37,7 +37,7 @@ directive = "the project starts with a separate crate per bounded context, and b
 remediation = """
 Split the bounded context out of the shared domain crate into its own sibling crate with its own Cargo.toml, rather than keeping it as an internal module. Verify by confirming the bounded context builds and can be depended on as its own crate, independent of the rest of the domain.
 """
-why = "Enforces the bounded-context seams at the compiler level: a context cannot reach into another's internals, each crate can carry its own dependency set and compile independently, and the architecture is legible from the crate graph. The right shape once the domain is large enough that real seams exist and isolating them is worth the cost — inter-crate dependencies must be kept acyclic, and a refactor that crosses a seam is a crate-boundary change rather than a free module move."
+why = "Enforces the bounded-context seams at the compiler level: a context cannot reach into another's internals, each crate can carry its own dependency set and compile independently, and the architecture is legible from the crate graph. The right shape once the domain is large enough that real seams exist and isolating them is worth the cost: inter-crate dependencies must be kept acyclic, and a refactor that crosses a seam is a crate-boundary change rather than a free module move."
 
 [[option]]
 id = "the-project-keeps-a-single-domain-crate-but-does"
@@ -46,4 +46,4 @@ directive = "the project keeps a single domain crate but does not subdivide it i
 remediation = """
 Remove the module-level subdivision by bounded context inside the domain crate, flattening the code into one undivided module structure. Verify by confirming the domain crate has no per-bounded-context module boundary, with all domain code accessible from a single flat namespace.
 """
-why = "The most direct shape for a very small domain: with only a handful of entities, any context partitioning would be ceremony, and a flat layout keeps everything one hop away. Its trade-off is that it becomes a god-module as the entity count grows — the absence of internal structure makes 'where does this go' a judgment call at every addition and the flat mass is hard to navigate past a few dozen entities."
+why = "The most direct shape for a very small domain: with only a handful of entities, any context partitioning would be ceremony, and a flat layout keeps everything one hop away. Its trade-off is that it becomes a god-module as the entity count grows: the absence of internal structure makes 'where does this go' a judgment call at every addition and the flat mass is hard to navigate past a few dozen entities."

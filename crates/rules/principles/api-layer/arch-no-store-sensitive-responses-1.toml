@@ -1,5 +1,5 @@
 id = "ARCH-NO-STORE-SENSITIVE-RESPONSES-1"
-version = 4
+version = 5
 title = "API responses carrying auth tokens or PII set Cache-Control: no-store, so browser disk cache and shared/intermediate caches never retain them"
 domain = "api-layer"
 layer = "universal"
@@ -29,13 +29,13 @@ why = """
 `UI-AUTH-TOKEN-STORAGE-1` governs where a token lives once the client has it; this rule governs a DIFFERENT copy of
 the same value that is easy to overlook entirely: the HTTP response itself, as retained by the browser's own disk
 cache, a shared proxy sitting between the client and the server, or a CDN configured to cache by default based on
-response shape rather than content sensitivity. An endpoint can do everything right at the application layer —
-tokenized storage, HttpOnly cookies, short-lived credentials — and still have the literal HTTP response that
+response shape rather than content sensitivity. An endpoint can do everything right at the application layer
+(tokenized storage, HttpOnly cookies, short-lived credentials) and still have the literal HTTP response that
 DELIVERED the token or a user's PII sitting in a shared machine's browser disk cache, retrievable by the next
 person to use that machine, or cached at a CDN edge node if the response's caching headers do not say otherwise.
 
 Browsers and intermediate caches are permitted to cache ANY response with no explicit instruction not to, and the
-specific defaults vary by browser, proxy, and CDN configuration — relying on 'probably nothing caches this by
+specific defaults vary by browser, proxy, and CDN configuration, relying on 'probably nothing caches this by
 default' is relying on an assumption the application has no control over and cannot verify held at every layer the
 response passes through. `no-store` is the one directive that unambiguously means what it says: no cache of any
 kind, private or shared, may retain the response at all. Any login response, token-refresh response, password-reset

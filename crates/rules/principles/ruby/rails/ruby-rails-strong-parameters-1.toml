@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-STRONG-PARAMS-1"
-version = 4
+version = 5
 title = "Controllers use strong parameters to guard mass assignment"
 domain = "ruby:rails"
 layer = "framework"
@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "How does the project guard against mass-assignment vulnerabilities in controller actions?"
 default = "strong-params-permit"
-why = "Without explicit allowlisting, an attacker can POST any attribute — including privileged fields like `admin`, `role`, or `confirmed` — and have the ORM write it directly to the database. Strong Parameters moves the allowlist into the controller, the one place that already knows which fields a given action is allowed to receive. A class-level `attr_accessible` allow-list (the Rails 2/3 pattern) lives on the model, which cannot distinguish between a public form submission and an internal service call; the controller-level permit block can. Disabling the protection entirely is never the right call: no matter how trusted the frontend is, the server is the only enforcement point."
+why = "Without explicit allowlisting, an attacker can POST any attribute (including privileged fields like `admin`, `role`, or `confirmed`) and have the ORM write it directly to the database. Strong Parameters moves the allowlist into the controller, the one place that already knows which fields a given action is allowed to receive. A class-level `attr_accessible` allow-list (the Rails 2/3 pattern) lives on the model, which cannot distinguish between a public form submission and an internal service call; the controller-level permit block can. Disabling the protection entirely is never the right call: no matter how trusted the frontend is, the server is the only enforcement point."
 
 [[option]]
 id = "strong-params-permit"

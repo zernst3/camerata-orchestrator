@@ -1,5 +1,5 @@
 id = "GO-TESTING-INTEGRATION-BUILD-TAGS-1"
-version = 2
+version = 3
 title = "Integration tests are gated behind a //go:build integration build tag and live in *_integration_test.go files"
 domain = "go:testing"
 layer = "testing"
@@ -9,7 +9,7 @@ inspectable = true
 default = true
 verification = "grounded"
 
-qualifies = "Integration tests — tests that require a live database, external service, or network — are placed in *_integration_test.go files and gated with //go:build integration at the top. go test ./... runs only unit tests by default; go test -tags=integration ./... includes integration tests. This keeps the unit-test suite fast and runnable offline."
+qualifies = "Integration tests (tests that require a live database, external service, or network) are placed in *_integration_test.go files and gated with //go:build integration at the top. go test ./... runs only unit tests by default; go test -tags=integration ./... includes integration tests. This keeps the unit-test suite fast and runnable offline."
 
 [[sources]]
 url = "https://pkg.go.dev/cmd/go#hdr-Build_constraints"

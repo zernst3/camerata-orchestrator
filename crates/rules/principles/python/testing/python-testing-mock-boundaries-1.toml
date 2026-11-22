@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-MOCK-BOUNDARIES-1"
-version = 3
+version = 4
 title = "Mocks replace dependencies at the boundary where the code under test imports them, not at the definition site"
 domain = "python:testing"
 layer = "language"
@@ -13,7 +13,7 @@ verification = "grounded"
 [decision]
 question = "Where and how should mocks be applied in unit tests?"
 default = "patch-at-usage-namespace"
-why = "Python's unittest.mock documentation states explicitly: 'The key is to do the patching in the right namespace. patch where an object is looked up, which is not necessarily the same place as where it is defined.' When a module does `from requests import get` and you patch `requests.get`, the module's local name `get` still points to the real function — the patch has no effect. You must patch `mymodule.get`, the name in the namespace where the code under test looks it up. Beyond the namespace rule, mocks should only replace external dependencies: network calls, file I/O, database queries, system time, and random sources. Mocking internal functions ties tests to the implementation rather than the contract, making them brittle: every internal refactor breaks the test even though the externally observable behavior did not change. pytest's monkeypatch fixture provides a test-scoped alternative to patch() that automatically reverts the patch after the test without requiring a context manager or decorator, making it suitable for simpler attribute and environment-variable substitutions."
+why = "Python's unittest.mock documentation states explicitly: 'The key is to do the patching in the right namespace. patch where an object is looked up, which is not necessarily the same place as where it is defined.' When a module does `from requests import get` and you patch `requests.get`, the module's local name `get` still points to the real function: the patch has no effect. You must patch `mymodule.get`, the name in the namespace where the code under test looks it up. Beyond the namespace rule, mocks should only replace external dependencies: network calls, file I/O, database queries, system time, and random sources. Mocking internal functions ties tests to the implementation rather than the contract, making them brittle: every internal refactor breaks the test even though the externally observable behavior did not change. pytest's monkeypatch fixture provides a test-scoped alternative to patch() that automatically reverts the patch after the test without requiring a context manager or decorator, making it suitable for simpler attribute and environment-variable substitutions."
 
 [[option]]
 id = "patch-at-usage-namespace"

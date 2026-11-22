@@ -1,5 +1,5 @@
 id = "RUST-SEAORM-INTRA-AGGREGATE-TX-1"
-version = 3
+version = 4
 title = "Where intra-aggregate atomicity lives: inside the repository method, on a uniform unit-of-work parameter or not provided"
 domain = "rust:seaorm"
 layer = "library"
@@ -18,7 +18,7 @@ verification = "grounded"
 
 [decision]
 question = "Where does atomicity for multiple writes within a single aggregate live: inside the repository method, surfaced as a unit-of-work parameter on the repository trait, or not provided at the repository at all?"
-why = "All three are coherent positions on where an aggregate's internal write-atomicity belongs, and the right one follows from how the project divides responsibility between repository and service. Letting the repository open and commit its own transaction treats intra-aggregate atomicity as an implementation detail of that aggregate: the service never sees it, and the unit-of-work parameter is reserved for cross-aggregate coordination — the fit when the project draws a line between persistence-side invariants (the repository's job) and business-process coordination (the service's job), at the cost that two different transaction mechanisms coexist. Expressing even intra-aggregate atomicity through the same unit-of-work parameter the cross-aggregate writes use gives every transactional method one uniform signature, so there is a single transaction mechanism to learn and reason about; its trade-off is that the service must construct a unit of work even for an operation it does not coordinate, pushing a detail across the aggregate boundary. Not providing repository transaction boundaries at all keeps repositories free of transaction concerns entirely, redesigning operations as single writes or accepting and reconciling intermediate states; its trade-off is that partial-write states become a normal mode the rest of the system must defend against. Choose by where the project wants the transaction boundary to be visible."
+why = "All three are coherent positions on where an aggregate's internal write-atomicity belongs, and the right one follows from how the project divides responsibility between repository and service. Letting the repository open and commit its own transaction treats intra-aggregate atomicity as an implementation detail of that aggregate: the service never sees it, and the unit-of-work parameter is reserved for cross-aggregate coordination: the fit when the project draws a line between persistence-side invariants (the repository's job) and business-process coordination (the service's job), at the cost that two different transaction mechanisms coexist. Expressing even intra-aggregate atomicity through the same unit-of-work parameter the cross-aggregate writes use gives every transactional method one uniform signature, so there is a single transaction mechanism to learn and reason about; its trade-off is that the service must construct a unit of work even for an operation it does not coordinate, pushing a detail across the aggregate boundary. Not providing repository transaction boundaries at all keeps repositories free of transaction concerns entirely, redesigning operations as single writes or accepting and reconciling intermediate states; its trade-off is that partial-write states become a normal mode the rest of the system must defend against. Choose by where the project wants the transaction boundary to be visible."
 
 [[option]]
 id = "repository-owns-intra-aggregate-transaction"
@@ -45,7 +45,7 @@ directive = "Repository methods do not provide transaction boundaries at all; in
 remediation = """
 Redesign the multi-write intra-aggregate operation as a single write where possible, or explicitly document that callers may observe intermediate states between writes and must reconcile after the fact, rather than silently assuming atomicity the repository doesn't provide. Verify by confirming the repository method's documentation or signature makes clear it provides no transaction boundary, so callers don't wrongly assume atomicity.
 """
-why = "Keeps repositories entirely free of transaction concerns, with no transaction parameter or internal boundary anywhere — the simplest repository surface. The fit when operations can be redesigned as single writes, or when the system is already built to observe and reconcile intermediate states; its trade-off is that partial-write states become a normal mode the rest of the system has to defend against."
+why = "Keeps repositories entirely free of transaction concerns, with no transaction parameter or internal boundary anywhere: the simplest repository surface. The fit when operations can be redesigned as single writes, or when the system is already built to observe and reconcile intermediate states; its trade-off is that partial-write states become a normal mode the rest of the system has to defend against."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/advanced-query/transaction/"

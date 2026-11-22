@@ -1,5 +1,5 @@
 id = "GO-TESTING-DETERMINISTIC-NO-TIME-SLEEP-1"
-version = 3
+version = 4
 title = "Tests are deterministic: no time.Sleep, no real clocks, no random seeds; use t.TempDir and t.Setenv for isolation"
 domain = "go:testing"
 layer = "testing"
@@ -9,7 +9,7 @@ inspectable = true
 default = true
 verification = "grounded"
 
-qualifies = "A Go test that calls time.Sleep is a flaky test waiting to happen: it passes on a fast machine and fails on a loaded CI runner. Deterministic tests control all sources of non-determinism — time, randomness, environment variables, filesystem paths — through the interfaces the testing package provides (t.TempDir, t.Setenv, t.Cleanup) or by injecting a clock interface."
+qualifies = "A Go test that calls time.Sleep is a flaky test waiting to happen: it passes on a fast machine and fails on a loaded CI runner. Deterministic tests control all sources of non-determinism (time, randomness, environment variables, filesystem paths) through the interfaces the testing package provides (t.TempDir, t.Setenv, t.Cleanup) or by injecting a clock interface."
 
 [[sources]]
 url = "https://pkg.go.dev/testing#T.TempDir"

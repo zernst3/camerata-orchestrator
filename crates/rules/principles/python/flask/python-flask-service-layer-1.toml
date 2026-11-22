@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-SERVICE-LAYER-1"
-version = 3
+version = 4
 title = "Route handlers are thin; business logic lives in a service layer separate from the Flask HTTP layer"
 domain = "python:flask"
 layer = "framework"
@@ -16,7 +16,7 @@ inspectable = true
 # The ceiling is authored without touching this rule's `kind`, and is safe either way: as a
 # `decision` rule it already emits deviation rows, so the ceiling only BOUNDS rows that exist
 # today; were it ever reclassified as `defect` the ceiling becomes dead config rather than wrong
-# behaviour.
+# behavior.
 deviation_ceiling = "high"
 default = true
 verification = "grounded"
@@ -24,7 +24,7 @@ verification = "grounded"
 [decision]
 question = "Where does business logic live in a Flask application: in route handlers or in a service layer?"
 default = "service-layer"
-why = "A Flask route function is an HTTP adapter: its job is to extract input from the request, call into the application, and format the result as an HTTP response. When business rules, database queries, and external API calls accumulate inside route functions, the logic becomes testable only through the HTTP layer (via `app.test_client()`), unreachable from CLI commands or background workers without faking a request, and duplicated across routes that share workflow steps. A service layer — plain Python functions or classes that import no Flask request globals and accept plain arguments — puts logic in one place that is independently unit-testable with `pytest` and reusable from any entry point. The route function becomes: validate input, call service, format response."
+why = "A Flask route function is an HTTP adapter: its job is to extract input from the request, call into the application, and format the result as an HTTP response. When business rules, database queries, and external API calls accumulate inside route functions, the logic becomes testable only through the HTTP layer (via `app.test_client()`), unreachable from CLI commands or background workers without faking a request, and duplicated across routes that share workflow steps. A service layer, plain Python functions or classes that import no Flask request globals and accept plain arguments, puts logic in one place that is independently unit-testable with `pytest` and reusable from any entry point. The route function becomes: validate input, call service, format response."
 
 [[option]]
 id = "service-layer"

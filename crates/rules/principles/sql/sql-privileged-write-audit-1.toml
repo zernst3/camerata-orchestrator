@@ -1,5 +1,5 @@
 id = "SQL-PRIVILEGED-WRITE-AUDIT-1"
-version = 3
+version = 4
 title = "A privileged write (a role grant, a permission change, a financial adjustment, an admin override) leaves an append-only audit-log entry, not just the mutated row"
 domain = "sql"
 layer = "universal"
@@ -12,7 +12,7 @@ inspectable = true
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Whether a given write is 'privileged' enough to require an audit-log entry, and whether the code path performing it actually writes one, is a judgment call over the schema and the handler/function performing the write, not a pattern match — so this rule routes to prose: a write already identified as privileged by a neighboring rule (a role/permission grant, a SECURITY DEFINER function per SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1, a financial-adjustment endpoint, an admin-override action) is fed to Claude with the question: does this code path also insert an append-only record of who did this, to what, when, and what changed? Conformance holds when every privileged write has a matching audit-log insert in the same transaction; it fails when the ONLY trace of a privileged action is the mutated row itself, with its prior state and the identity of who changed it unrecoverable once overwritten."
+qualifies = "Whether a given write is 'privileged' enough to require an audit-log entry, and whether the code path performing it actually writes one, is a judgment call over the schema and the handler/function performing the write, not a pattern match, so this rule routes to prose: a write already identified as privileged by a neighboring rule (a role/permission grant, a SECURITY DEFINER function per SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1, a financial-adjustment endpoint, an admin-override action) is fed to Claude with the question: does this code path also insert an append-only record of who did this, to what, when, and what changed? Conformance holds when every privileged write has a matching audit-log insert in the same transaction; it fails when the ONLY trace of a privileged action is the mutated row itself, with its prior state and the identity of who changed it unrecoverable once overwritten."
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
@@ -27,17 +27,17 @@ question = "Does every privileged write (role/permission grants, financial adjus
 default = "privileged-writes-produce-an-append-only-audit-entry"
 why = """
 SQL-AUDIT-COLUMNS-1 already covers WHO created or last touched an ordinary row (created_by/modified_by-style
-columns) — but a column on the mutated row only ever holds the CURRENT state and the LAST writer. For a genuinely
-privileged action — granting a role, changing a permission, adjusting a financial balance, an admin override that
-bypasses a user's own normal constraints — that is not enough: if the row is overwritten again (or deleted), the
+columns), but a column on the mutated row only ever holds the CURRENT state and the LAST writer. For a genuinely
+privileged action (granting a role, changing a permission, adjusting a financial balance, an admin override that
+bypasses a user's own normal constraints) that is not enough: if the row is overwritten again (or deleted), the
 fact that the privileged action ever happened, who performed it, what the value was immediately before, and what it
 became, is gone. This is CWE-778 (Insufficient Logging) applied to exactly the class of action where after-the-fact
-accountability matters most — an incident investigation, a dispute over a financial adjustment, or a security review
+accountability matters most: an incident investigation, a dispute over a financial adjustment, or a security review
 asking 'who had admin granted to them and when' needs a durable record that survives the row being changed again,
 not just the row's current value.
 
 The fix is a dedicated, APPEND-ONLY audit-log table (distinct from the audit COLUMNS convention) written in the
-SAME transaction as the privileged write itself — never a best-effort write from application code after the fact,
+SAME transaction as the privileged write itself, never a best-effort write from application code after the fact,
 which can fail, be skipped by a different code path, or simply be forgotten when a second way to perform the same
 privileged action gets added later. The entry should capture who performed the action, what was changed (old and
 new values, not just the new), when, and ideally why (a reason/ticket reference where the action supports one).

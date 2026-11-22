@@ -1,5 +1,5 @@
 id = "RUST-TESTING-4"
-version = 4
+version = 5
 title = "Test bodies follow Arrange-Act-Assert (AAA): setup, execute, then assert, in that order"
 domain = "rust:testing"
 layer = "language"
@@ -20,7 +20,7 @@ title = "Rust By Example: Unit Testing (setup / execute / assert pattern)"
 [decision]
 question = "How is the body of a test structured?"
 default = "arrange-act-assert-in-order"
-why = "The Rust Book (Ch 11.1) describes the canonical three-phase test body — 'set up any needed data or state', 'run the code you want to test', and 'assert that the results are what you expect' — which corresponds directly to the Arrange-Act-Assert pattern. Structuring every test this way produces a consistent reading experience: a reviewer can immediately identify what is being set up, what is being exercised, and what is being verified. Mixing setup, execution, and assertions throughout a single test body makes it harder to identify the boundary between 'given' and 'when', blurs what the test is actually verifying, and makes the root cause of a failure less obvious. Inline comments (// Arrange, // Act, // Assert) are optional in short tests but helpful in tests where the phases are not visually obvious. A test should have exactly one Act (one call to the unit under test); a test with multiple Act-then-Assert sequences is actually multiple tests collapsed into one and should be split."
+why = "The Rust Book (Ch 11.1) describes the canonical three-phase test body ('set up any needed data or state', 'run the code you want to test', and 'assert that the results are what you expect') which corresponds directly to the Arrange-Act-Assert pattern. Structuring every test this way produces a consistent reading experience: a reviewer can immediately identify what is being set up, what is being exercised, and what is being verified. Mixing setup, execution, and assertions throughout a single test body makes it harder to identify the boundary between 'given' and 'when', blurs what the test is actually verifying, and makes the root cause of a failure less obvious. Inline comments (// Arrange, // Act, // Assert) are optional in short tests but helpful in tests where the phases are not visually obvious. A test should have exactly one Act (one call to the unit under test); a test with multiple Act-then-Assert sequences is actually multiple tests collapsed into one and should be split."
 
 [[option]]
 id = "arrange-act-assert-in-order"

@@ -1,5 +1,5 @@
 id = "PROCESS-COMMIT-DOC-1"
-version = 2
+version = 3
 title = "Commits carry a substantive body documenting the change"
 domain = "process"
 layer = "universal"
@@ -16,7 +16,7 @@ verification = "grounded"
 # This is a VCS-METADATA process rule. It validates the commit BODY (the lines
 # after the subject) and, optionally, the PR description — metadata produced at
 # commit/PR time, not the code diff.
-qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a commit-message length/body check in CI), and in Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced at layer 2 — these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (minimum body length, whether a story-id reference is required, and the story-id format) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when the commit body (lines after the subject) — and, when PR coverage is enabled, the PR description — is substantive (at least the configured minimum characters) and, when required, contains a story-id reference in the configured format; it fails on an empty or token body. Because the gate reads metadata Camerata itself authors, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to commits made outside Camerata."
+qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a commit-message length/body check in CI), and in Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced at layer 2: these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (minimum body length, whether a story-id reference is required, and the story-id format) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when the commit body (lines after the subject) (and, when PR coverage is enabled, the PR description) is substantive (at least the configured minimum characters) and, when required, contains a story-id reference in the configured format; it fails on an empty or token body. Because the gate reads metadata Camerata itself authors, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to commits made outside Camerata."
 
 [[sources]]
 url = "https://cbea.ms/git-commit/"
@@ -29,7 +29,7 @@ linter = "commitlint"
 
 [decision]
 question = "Does the project require every commit to carry a substantive body (and optionally a story-id reference), enforced over VCS metadata at the commit/PR gate and in CI?"
-why = "A commit body is where the WHY of a change is recorded — the reasoning a future reader (or an AI agent) needs but cannot recover from the diff alone. Requiring a substantive body, and optionally a story-id linking the commit to a tracked work item, keeps that context attached to the history rather than lost in a chat thread or a closed ticket. Because this is a contract over the commit BODY and PR description (metadata authored at commit/PR time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff — it is enforced at layer 4 (CI) and at Camerata's own VCS-action gate when Camerata authors the commit. The minimum length, the story-id requirement, and the story-id format are project-specific and live in project Settings (process_rule_config), not in this rule. Opting out lets terse or empty commit bodies land, which is faster but loses the rationale trail."
+why = "A commit body is where the WHY of a change is recorded: the reasoning a future reader (or an AI agent) needs but cannot recover from the diff alone. Requiring a substantive body, and optionally a story-id linking the commit to a tracked work item, keeps that context attached to the history rather than lost in a chat thread or a closed ticket. Because this is a contract over the commit BODY and PR description (metadata authored at commit/PR time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff: it is enforced at layer 4 (CI) and at Camerata's own VCS-action gate when Camerata authors the commit. The minimum length, the story-id requirement, and the story-id format are project-specific and live in project Settings (process_rule_config), not in this rule. Opting out lets terse or empty commit bodies land, which is faster but loses the rationale trail."
 
 [[option]]
 id = "require-substantive-commit-body"

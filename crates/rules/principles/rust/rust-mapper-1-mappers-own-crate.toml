@@ -1,5 +1,5 @@
 id = "RUST-MAPPER-1"
-version = 3
+version = 4
 title = "Where domain↔entity mappers live: a dedicated mapper crate, the entity crate or the domain crate"
 domain = "rust"
 layer = "language"
@@ -12,11 +12,11 @@ verification = "grounded"
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/dataMapper.html"
 title = "Martin Fowler: Patterns of Enterprise Application Architecture: Data Mapper"
-relevance = "Authority note (author-facing): medium authority — grounds a translation layer between domain and persistence in general; PoEAA does not itself mandate that layer live in its own crate"
+relevance = "Authority note (author-facing): medium authority: grounds a translation layer between domain and persistence in general; PoEAA does not itself mandate that layer live in its own crate"
 
 [decision]
 question = "Where does the translation between domain types and persistence entities live: in a dedicated mapper crate that depends on both sides, alongside the entities, or alongside the domain types?"
-why = "All three place the same translation code somewhere it can see both the domain and the entity shapes, and the right one follows from how strictly the project wants to keep its layers independent versus how much crate structure it is willing to maintain. A dedicated mapper crate that depends on both the domain and entity crates keeps each of those two sides ignorant of the other, so domain and persistence evolve independently and translation has one clear home — the strongest fit for strict hexagonal layering, at the cost of a third crate to carry. Putting mappers in the entity crate keeps translation next to the data it maps and avoids an extra crate, which is reasonable when the entity layer is already allowed to know the domain; its trade-off is that the entity crate then depends on the domain and recompiles whenever the domain changes. Putting mappers in the domain crate co-locates translation with the domain types and likewise avoids an extra crate, which suits a project that does not enforce a domain-has-no-persistence-deps boundary; its trade-off is that the domain crate then depends on the entity shapes and gains a transitive dependency on the persistence layer. Choose by how strictly the layer boundary must hold against how lean the crate graph should stay."
+why = "All three place the same translation code somewhere it can see both the domain and the entity shapes, and the right one follows from how strictly the project wants to keep its layers independent versus how much crate structure it is willing to maintain. A dedicated mapper crate that depends on both the domain and entity crates keeps each of those two sides ignorant of the other, so domain and persistence evolve independently and translation has one clear home: the strongest fit for strict hexagonal layering, at the cost of a third crate to carry. Putting mappers in the entity crate keeps translation next to the data it maps and avoids an extra crate, which is reasonable when the entity layer is already allowed to know the domain; its trade-off is that the entity crate then depends on the domain and recompiles whenever the domain changes. Putting mappers in the domain crate co-locates translation with the domain types and likewise avoids an extra crate, which suits a project that does not enforce a domain-has-no-persistence-deps boundary; its trade-off is that the domain crate then depends on the entity shapes and gains a transitive dependency on the persistence layer. Choose by how strictly the layer boundary must hold against how lean the crate graph should stay."
 
 [[option]]
 id = "mappers-live-in-their-own-crate"

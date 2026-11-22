@@ -1,5 +1,5 @@
 id = "SEC-NO-OPEN-REDIRECT-1"
-version = 2
+version = 3
 title = "A redirect target derived from user input is checked against an allowlist before the response is issued"
 domain = "universal"
 layer = "universal"
@@ -23,7 +23,7 @@ question = "Is a redirect target (a next/returnTo/redirect_uri query param, a st
 default = "allowlist-redirect-targets"
 why = """
 An open redirect lets an attacker craft a link on the victim's own trusted domain that bounces the
-browser to an attacker-controlled site — used to make phishing links and OAuth token theft look
+browser to an attacker-controlled site, used to make phishing links and OAuth token theft look
 trustworthy. The defect is almost always the same shape: a query parameter or stored value is read
 and handed straight to a 3xx redirect or a client-side location assignment with only a same-origin
 substring check (or no check at all), which attacker-controlled input such as //evil.com or

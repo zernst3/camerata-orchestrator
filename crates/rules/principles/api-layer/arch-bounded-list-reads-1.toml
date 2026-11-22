@@ -1,5 +1,5 @@
 id = "ARCH-BOUNDED-LIST-READS-1"
-version = 4
+version = 5
 title = "Every list read that serves a request is bounded by a limit or a page, so no endpoint returns a whole growing table"
 domain = "api-layer"
 layer = "universal"
@@ -19,7 +19,7 @@ default = true
 cwe = ["CWE-770"]
 # `grounded`: OWASP API Security Top 10 2023 (API4, Unrestricted Resource Consumption) names
 # missing limits on the number of records returned per request as the weakness, CWE-770 is the
-# recognised code for it, and the vendor query docs cited below document the bounding call.
+# recognized code for it, and the vendor query docs cited below document the bounding call.
 # Only the owner sets `verified`.
 verification = "grounded"
 # Routing: only files that contain a query call are sent this rule. The markers are deliberately
@@ -37,7 +37,7 @@ qualifies = "Applies to code that answers a request or runs on a schedule and re
 url = "https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/"
 title = "OWASP API Security Top 10 2023: API4:2023 Unrestricted Resource Consumption"
 
-# Source note: The recognised weakness code for an operation whose resource use is not capped; the code this rule carries in `cwe`.
+# Source note: The recognized weakness code for an operation whose resource use is not capped; the code this rule carries in `cwe`.
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/770.html"
 title = "CWE-770: Allocation of Resources Without Limits or Throttling"

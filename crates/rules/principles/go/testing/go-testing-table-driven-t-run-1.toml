@@ -1,5 +1,5 @@
 id = "GO-TESTING-TABLE-DRIVEN-T-RUN-1"
-version = 2
+version = 3
 title = "Tests with multiple input/output cases use table-driven structure with t.Run subtests"
 domain = "go:testing"
 layer = "testing"
@@ -29,7 +29,7 @@ relevance = "Go testing wiki guidance: use t.Run subtests for table-driven tests
 [decision]
 question = "How are tests with many similar cases structured?"
 default = "table-driven-with-t-run"
-why = "Copying a test function for each case produces duplication and is hard to extend. A table-driven test amortizes the test logic once across all cases; adding a new case is one line in the slice. t.Run gives each case a named subtest, which is addressable individually with go test -run TestFoo/CaseName and produces clear pass/fail attribution in -v output. Without t.Run the loop index becomes the only way to identify which case failed — the Go test wiki explicitly says never use the index as a substitute for a name."
+why = "Copying a test function for each case produces duplication and is hard to extend. A table-driven test amortizes the test logic once across all cases; adding a new case is one line in the slice. t.Run gives each case a named subtest, which is addressable individually with go test -run TestFoo/CaseName and produces clear pass/fail attribution in -v output. Without t.Run the loop index becomes the only way to identify which case failed: the Go test wiki explicitly says never use the index as a substitute for a name."
 
 [[option]]
 id = "table-driven-with-t-run"

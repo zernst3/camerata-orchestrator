@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-ANON-SIGNIN-1"
-version = 2
+version = 3
 title = "When anonymous sign-ins are enabled, every policy meant for permanent users must exclude anonymous sessions via is_anonymous"
 domain = "supabase:auth"
 layer = "platform"
@@ -28,21 +28,21 @@ question = "When anonymous sign-ins are enabled, does every RLS policy meant to 
 default = "require-is-anonymous-exclusion-on-permanent-user-policies"
 why = """
 Supabase's own anonymous sign-ins documentation states the interaction directly: anonymous users are assigned the
-SAME `authenticated` role a real signed-up user gets — `auth.uid()` is populated, `to authenticated` policies
+SAME `authenticated` role a real signed-up user gets: `auth.uid()` is populated, `to authenticated` policies
 evaluate true, and the only way to tell the two apart inside a policy predicate is the JWT's `is_anonymous` claim.
-A project that enables anonymous sign-ins (a legitimate, common pattern for frictionless onboarding — browse before
+A project that enables anonymous sign-ins (a legitimate, common pattern for frictionless onboarding: browse before
 you sign up, start a session before committing to an account) but never updates its existing `to authenticated`
 policies to check `is_anonymous` has, often without realizing it, silently extended every one of those policies to
 disposable sessions as well. For capabilities the product genuinely wants restricted to a verified, permanent
-identity — posting under a persistent profile, anything financial, anything the product would be unhappy to see an
-attacker spin up thousands of throwaway sessions to abuse — that is CWE-863 (Incorrect Authorization): the
+identity (posting under a persistent profile, anything financial, anything the product would be unhappy to see an
+attacker spin up thousands of throwaway sessions to abuse) that is CWE-863 (Incorrect Authorization): the
 disposable session receives authorization the design intended only for the permanent one.
 
 Supabase's own recommended fix is exactly this: add a RESTRICTIVE policy (not permissive, since permissive policies
 OR together and a single unscoped permissive policy would still pass) checking
 `(select (auth.jwt()->>'is_anonymous')::boolean) is false` on the tables/actions that should be permanent-user-only.
-This rule does not ask that EVERY policy exclude anonymous users — some capabilities are deliberately fine for
-anonymous sessions too (that's the entire point of enabling the feature) — it asks that the project has reviewed
+This rule does not ask that EVERY policy exclude anonymous users, some capabilities are deliberately fine for
+anonymous sessions too (that's the entire point of enabling the feature), it asks that the project has reviewed
 and deliberately annotated which policies need the exclusion, rather than having enabled anonymous sign-ins against
 an untouched policy set that predates the feature.
 """

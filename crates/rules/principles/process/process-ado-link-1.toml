@@ -1,5 +1,5 @@
 id = "PROCESS-ADO-LINK-1"
-version = 2
+version = 3
 title = "Commits and PRs reference a work-item / ticket id"
 domain = "process"
 layer = "universal"
@@ -16,7 +16,7 @@ verification = "grounded"
 # This is a VCS-METADATA process rule. It validates that the commit SUBJECT and
 # PR TITLE carry a work-item reference (e.g. `AB#123` for Azure Boards) —
 # metadata produced at commit/PR time, not the code diff.
-qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a commit-message / PR-title check in CI), and in Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced at layer 2 — these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (ticket prefix and whether the rule applies to the PR title) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when the commit subject (and, when PR coverage is enabled, the PR title) contains a work-item reference of the form `<prefix>#<id>` (e.g. `AB#123` for Azure Boards); it fails when no reference is present. Because the gate reads metadata Camerata itself authors at commit/PR time, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to commits/PRs made outside Camerata."
+qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a commit-message / PR-title check in CI), and in Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced at layer 2: these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (ticket prefix and whether the rule applies to the PR title) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when the commit subject (and, when PR coverage is enabled, the PR title) contains a work-item reference of the form `<prefix>#<id>` (e.g. `AB#123` for Azure Boards); it fails when no reference is present. Because the gate reads metadata Camerata itself authors at commit/PR time, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to commits/PRs made outside Camerata."
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/azure/devops/boards/github/link-to-from-github"
@@ -29,7 +29,7 @@ linter = "commitlint"
 
 [decision]
 question = "Does the project require every commit subject and PR title to carry a work-item / ticket reference (e.g. AB#123), enforced over VCS metadata at the commit/PR gate and in CI?"
-why = "A work-item reference in the commit subject and PR title is what lets the tracker (Azure Boards, Jira, GitHub Issues) auto-link the code change to the work item that motivated it, giving a bidirectional traceability trail from requirement to commit. Because this is a contract over the commit SUBJECT and PR TITLE (metadata authored at commit/PR time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff — it is enforced at layer 4 (CI) and at Camerata's own VCS-action gate when Camerata authors the commit or opens the PR. The ticket prefix and the PR-title application are project-specific and live in project Settings (process_rule_config), not in this rule. Opting out lets commits/PRs land without a tracked-item link, which is faster but breaks the requirement-to-code traceability the tracker provides."
+why = "A work-item reference in the commit subject and PR title is what lets the tracker (Azure Boards, Jira, GitHub Issues) auto-link the code change to the work item that motivated it, giving a bidirectional traceability trail from requirement to commit. Because this is a contract over the commit SUBJECT and PR TITLE (metadata authored at commit/PR time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff: it is enforced at layer 4 (CI) and at Camerata's own VCS-action gate when Camerata authors the commit or opens the PR. The ticket prefix and the PR-title application are project-specific and live in project Settings (process_rule_config), not in this rule. Opting out lets commits/PRs land without a tracked-item link, which is faster but breaks the requirement-to-code traceability the tracker provides."
 
 [[option]]
 id = "require-work-item-reference"

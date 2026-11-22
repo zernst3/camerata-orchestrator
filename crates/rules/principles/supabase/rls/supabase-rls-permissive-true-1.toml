@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-PERMISSIVE-TRUE-1"
-version = 5
+version = 6
 title = "A policy with USING (true) / WITH CHECK (true) targeting anon or public is a hole shaped like a policy"
 domain = "supabase:rls"
 layer = "platform"
@@ -30,7 +30,7 @@ max_severity = "high"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a statement-granular scan of CREATE POLICY statements (once SQL is split into statements, this is regex-grade — no timeline replay required, since a `true` predicate is a per-statement fact): a policy whose USING or WITH CHECK clause is the literal boolean `true`, targeting `anon` or `public` (an absent TO clause defaults to `public`), is flagged. Write-side matches (INSERT/UPDATE/DELETE, or WITH CHECK (true)) are high severity; read-side matches (SELECT, or USING (true) with no WITH CHECK) are medium and carry `needs_review`, since public read access to reference/lookup data is a legitimate, common pattern. Conformance holds when no exposed-schema policy grants unconditional true access without an explicit, reviewed justification."
+qualifies = "Enforced by a statement-granular scan of CREATE POLICY statements (once SQL is split into statements, this is regex-grade: no timeline replay required, since a `true` predicate is a per-statement fact): a policy whose USING or WITH CHECK clause is the literal boolean `true`, targeting `anon` or `public` (an absent TO clause defaults to `public`), is flagged. Write-side matches (INSERT/UPDATE/DELETE, or WITH CHECK (true)) are high severity; read-side matches (SELECT, or USING (true) with no WITH CHECK) are medium and carry `needs_review`, since public read access to reference/lookup data is a legitimate, common pattern. Conformance holds when no exposed-schema policy grants unconditional true access without an explicit, reviewed justification."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
@@ -44,7 +44,7 @@ title = "OWASP Top 10:2021: A01 Broken Access Control"
 question = "Does any policy targeting anon or public carry an unconditional USING (true) / WITH CHECK (true) predicate?"
 default = "flag-true-predicate-severity-split"
 why = """
-A policy is not a comment describing intended access control — it is the ACTUAL access control,
+A policy is not a comment describing intended access control: it is the ACTUAL access control,
 and `USING (true)` / `WITH CHECK (true)` means "this predicate always passes." Combined with a
 missing or explicit `TO anon`/`TO public` role clause (Postgres's CREATE POLICY defaults an absent
 TO clause to `public`, per the RLS guide's policy syntax), this grants unconditional access to
@@ -53,15 +53,15 @@ individual SQL statements: scan each CREATE POLICY, extract its USING/WITH CHECK
 role list, and flag a literal `true` targeting anon/public.
 
 Severity split is deliberate: WITH CHECK (true) or a true predicate on an INSERT/UPDATE/DELETE
-policy means anyone can WRITE — that is unconditionally high severity, there is no legitimate
+policy means anyone can WRITE: that is unconditionally high severity, there is no legitimate
 "public write everything" pattern. A true predicate on a SELECT-only policy (no WITH CHECK) means
-anyone can READ — this is a common and often intentional pattern (public product catalogs,
+anyone can READ: this is a common and often intentional pattern (public product catalogs,
 published blog posts, reference/lookup tables), so it ships at medium with `needs_review` rather
 than an automatic critical: the finding names the table and asks "should `<table>` really be
 publicly readable?" rather than asserting a vulnerability.
 
 FP carve-out: this rule is about POLICY predicates, not about the anon key's existence in client
-code — the anon key is designed to be public (see SUPABASE-KEY-SERVICE-ROLE-CLIENT-1's qualifies
+code: the anon key is designed to be public (see SUPABASE-KEY-SERVICE-ROLE-CLIENT-1's qualifies
 for that boundary). The risk this rule expresses is entirely about what the anon key is ALLOWED to
 do once it authenticates, which is exactly what RLS policies define.
 """

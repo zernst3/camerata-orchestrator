@@ -1,5 +1,5 @@
 id = "PROC-STORY-DOCS-1"
-version = 2
+version = 3
 title = "Per-story durable documentation keyed by story id"
 domain = "agentic"
 layer = "universal"
@@ -7,7 +7,7 @@ enforcement = "prose"
 kind = "decision"
 inspectable = false
 default = true
-qualifies = "Enforcement reality (read this before assuming you must build a doc emitter): Camerata runs a post-story documentation hook (PostStoryHook) at sign-off — a Camerata-pipeline enforcement point. Coverage by chosen option is NOT uniform today. The 'per-story-docs' default is fully implemented: the hook emits docs/<story-id>/technical/ + docs/<story-id>/user/ for you, so you do NOT build that emitter. 'mechanical-minimum' is an intentional no-op (the commit/PR record is the durable artifact, so nothing is emitted by design). 'living-central-docs' and 'adr-per-change' are RECOGNIZED but NOT yet implemented by the hook: selecting either emits no files and instead records an honest sign-off history line noting the convention is unimplemented — so if you need one of those two enforced today, you must emit it yourself. Independent of option: the hook only covers stories completed THROUGH Camerata's pipeline. If you also want this documentation enforced at layer 4 (the repo's own origin CI, catching commits made outside Camerata), that part still requires a bespoke check wired into the repo's CI — Camerata's post-story hook does not reach origin."
+qualifies = "Enforcement reality (read this before assuming you must build a doc emitter): Camerata runs a post-story documentation hook (PostStoryHook) at sign-off: a Camerata-pipeline enforcement point. Coverage by chosen option is NOT uniform today. The 'per-story-docs' default is fully implemented: the hook emits docs/<story-id>/technical/ + docs/<story-id>/user/ for you, so you do NOT build that emitter. 'mechanical-minimum' is an intentional no-op (the commit/PR record is the durable artifact, so nothing is emitted by design). 'living-central-docs' and 'adr-per-change' are RECOGNIZED but NOT yet implemented by the hook: selecting either emits no files and instead records an honest sign-off history line noting the convention is unimplemented, so if you need one of those two enforced today, you must emit it yourself. Independent of option: the hook only covers stories completed THROUGH Camerata's pipeline. If you also want this documentation enforced at layer 4 (the repo's own origin CI, catching commits made outside Camerata), that part still requires a bespoke check wired into the repo's CI: Camerata's post-story hook does not reach origin."
 # `policy`, not `grounded`: the only outside source is rated low authority and supports splitting documentation by audience; per-story-id keying is this project's own policy.
 verification = "policy"
 
@@ -18,12 +18,12 @@ title = "Decision: PostStoryHook: per-story documentation emission (PROC-STORY-D
 [[sources]]
 url = "https://diataxis.fr/"
 title = "Diátaxis: a systematic framework for technical documentation"
-relevance = "Authority note (author-facing): low — supports splitting documentation by audience/purpose, not the per-story-id keying"
+relevance = "Authority note (author-facing): low: supports splitting documentation by audience/purpose, not the per-story-id keying"
 
 [decision]
 question = "How does the project capture durable, in-repo documentation for a change (beyond the commit/PR record)?"
 default = "per-story-docs"
-why = "The commit and PR records capture WHAT changed; a governed agent needs a stable, deterministic place to put richer WHY and HOW documentation that survives history rewrites, squash merges, and future re-reads. Keying docs on the story id the dev console and unit-of-work already track gives the agent a deterministic drop location without guessing — the agent emits to docs/<story-id>/technical/ and docs/<story-id>/user/ exactly once per story. Splitting technical from user-facing content keeps developer context out of the user guide and prevents conflation of two distinct audiences. Living central docs (single TECHNICAL.md + USER_GUIDE.md) are simpler but collapse all stories into one growing file, making per-story attribution and audit difficult; ADR-per-change is precise but biased toward architecture and produces no user-facing artifact; mechanical-minimum is the lowest overhead path but leaves the repo without searchable narrative for any change."
+why = "The commit and PR records capture WHAT changed; a governed agent needs a stable, deterministic place to put richer WHY and HOW documentation that survives history rewrites, squash merges, and future re-reads. Keying docs on the story id the dev console and unit-of-work already track gives the agent a deterministic drop location without guessing: the agent emits to docs/<story-id>/technical/ and docs/<story-id>/user/ exactly once per story. Splitting technical from user-facing content keeps developer context out of the user guide and prevents conflation of two distinct audiences. Living central docs (single TECHNICAL.md + USER_GUIDE.md) are simpler but collapse all stories into one growing file, making per-story attribution and audit difficult; ADR-per-change is precise but biased toward architecture and produces no user-facing artifact; mechanical-minimum is the lowest overhead path but leaves the repo without searchable narrative for any change."
 
 [[option]]
 id = "per-story-docs"

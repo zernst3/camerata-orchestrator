@@ -1,5 +1,5 @@
 id = "GO-TESTING-BLACK-BOX-PKG-TEST-1"
-version = 2
+version = 3
 title = "Black-box tests use package foo_test to verify exported API only; white-box tests stay in package foo"
 domain = "go:testing"
 layer = "testing"
@@ -9,7 +9,7 @@ inspectable = true
 default = true
 verification = "grounded"
 
-qualifies = "Go allows two package declarations in _test.go files: package foo (white-box, can access unexported symbols) and package foo_test (black-box, only exported API). Black-box tests in package foo_test are the idiomatic choice for testing observable behaviour; white-box tests in package foo are acceptable when internal state must be asserted. The convention prevents accidental coupling of tests to unexported details."
+qualifies = "Go allows two package declarations in _test.go files: package foo (white-box, can access unexported symbols) and package foo_test (black-box, only exported API). Black-box tests in package foo_test are the idiomatic choice for testing observable behavior; white-box tests in package foo are acceptable when internal state must be asserted. The convention prevents accidental coupling of tests to unexported details."
 
 [[sources]]
 url = "https://pkg.go.dev/testing"
@@ -30,7 +30,7 @@ linter = "golangci-lint: testpackage"
 [decision]
 question = "Which package declaration do _test.go files use: package foo or package foo_test?"
 default = "black-box-by-default"
-why = "Using package foo_test for tests exercises only the exported (public) API, which is the contract callers depend on. This prevents tests from coupling to unexported implementation details that may legitimately change during refactoring. When a test needs to reach private state — for example, to validate an internal cache — package foo is acceptable, but this should be deliberate, not the default. The testpackage golangci-lint linter can enforce the black-box preference and require explicit justification for white-box tests."
+why = "Using package foo_test for tests exercises only the exported (public) API, which is the contract callers depend on. This prevents tests from coupling to unexported implementation details that may legitimately change during refactoring. When a test needs to reach private state (for example, to validate an internal cache) package foo is acceptable, but this should be deliberate, not the default. The testpackage golangci-lint linter can enforce the black-box preference and require explicit justification for white-box tests."
 
 [[option]]
 id = "black-box-by-default"
@@ -45,4 +45,4 @@ why = "Tests the public contract, prevents coupling to internals, and enables fe
 id = "white-box-always"
 label = "always use package foo (same package as source)"
 directive = "All _test.go files declare package foo, giving tests access to unexported symbols and implementation details."
-why = "Couples tests to internal implementation; tests break when unexported code is refactored even if behaviour is unchanged."
+why = "Couples tests to internal implementation; tests break when unexported code is refactored even if behavior is unchanged."

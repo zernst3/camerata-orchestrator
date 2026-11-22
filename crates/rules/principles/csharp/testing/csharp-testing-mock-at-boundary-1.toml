@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-MOCK-AT-BOUNDARY-1"
-version = 3
+version = 4
 title = "Mocks and stubs target only infrastructure boundaries (I/O, external services, time); production class internals are never mocked"
 domain = "csharp:testing"
 layer = "language"
@@ -7,13 +7,13 @@ enforcement = "prose"
 kind = "decision"
 inspectable = true
 default = true
-qualifies = "Moq (or NSubstitute) is used exclusively for interfaces and abstractions that represent external dependencies: repositories, HTTP clients, email providers, clocks, message queues. Production classes that contain pure logic are never mocked — they are tested directly. When production code depends on a static reference (DateTime.Now, File.Exists) that makes tests non-deterministic, a seam interface (e.g. IDateTimeProvider) is introduced and injected via the constructor, then stubbed in tests."
+qualifies = "Moq (or NSubstitute) is used exclusively for interfaces and abstractions that represent external dependencies: repositories, HTTP clients, email providers, clocks, message queues. Production classes that contain pure logic are never mocked: they are tested directly. When production code depends on a static reference (DateTime.Now, File.Exists) that makes tests non-deterministic, a seam interface (e.g. IDateTimeProvider) is introduced and injected via the constructor, then stubbed in tests."
 
 verification = "grounded"
 [decision]
 question = "When should mocks and stubs be used, and what should they target?"
 default = "mock-at-infrastructure-boundary"
-why = "Mocking a class that contains real business logic defeats the purpose of the test: you end up testing the mock's behavior rather than the production behavior. The correct target for mocks and stubs is the boundary between the system under test and external infrastructure (databases, network, time, file system). Microsoft's best-practices documentation demonstrates this with a concrete example: DateTime.Now makes a price-calculator test non-deterministic because results differ on different weekdays. The fix is to introduce IDateTimeProvider, inject it, and stub it in the test — giving the test full control of the system under test. Moq is the dominant .NET mocking library and is designed specifically for interface-level mocking: its API (Setup, Returns, Verify) operates on interface methods. Mocking concrete classes is possible but signals a design smell (missing interface abstraction at the boundary)."
+why = "Mocking a class that contains real business logic defeats the purpose of the test: you end up testing the mock's behavior rather than the production behavior. The correct target for mocks and stubs is the boundary between the system under test and external infrastructure (databases, network, time, file system). Microsoft's best-practices documentation demonstrates this with a concrete example: DateTime.Now makes a price-calculator test non-deterministic because results differ on different weekdays. The fix is to introduce IDateTimeProvider, inject it, and stub it in the test, giving the test full control of the system under test. Moq is the dominant .NET mocking library and is designed specifically for interface-level mocking: its API (Setup, Returns, Verify) operates on interface methods. Mocking concrete classes is possible but signals a design smell (missing interface abstraction at the boundary)."
 
 [[option]]
 id = "mock-at-infrastructure-boundary"

@@ -1,5 +1,5 @@
 id = "GO-HANDLER-SERVICE-REPOSITORY-1"
-version = 3
+version = 4
 title = "Business logic is layered: HTTP handlers call services, services call repositories; no business logic in handlers"
 domain = "go"
 layer = "architecture"
@@ -16,7 +16,7 @@ inspectable = true
 # The ceiling is authored without touching this rule's `kind`, and is safe either way: as a
 # `decision` rule it already emits deviation rows, so the ceiling only BOUNDS rows that exist
 # today; were it ever reclassified as `defect` the ceiling becomes dead config rather than wrong
-# behaviour.
+# behavior.
 deviation_ceiling = "high"
 default = true
 verification = "policy"

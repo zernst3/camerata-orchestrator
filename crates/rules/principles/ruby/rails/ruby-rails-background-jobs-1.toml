@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-BACKGROUND-JOBS-1"
-version = 3
+version = 4
 title = "Slow or external work is offloaded to background jobs, not performed inline in a request"
 domain = "ruby:rails"
 layer = "framework"
@@ -12,7 +12,7 @@ verification = "grounded"
 [decision]
 question = "Where does work that is slow, external, or unreliable (email sending, image processing, external API calls, report generation) run?"
 default = "background-jobs"
-why = "A Rails request-response cycle has a finite timeout (commonly 30 seconds at the web server, shorter at load balancers or CDNs). Performing a slow operation — sending an email, resizing an image, calling a third-party API, generating a PDF — inline in a controller action blocks the Puma thread for the duration of that operation. Under traffic, blocked threads exhaust the pool and subsequent requests queue or time out. Failures in the external operation also bubble up as 500 errors to the user, who cannot retry safely and did not need to wait in the first place. Background jobs (via ActiveJob, Sidekiq, GoodJob, or Solid Queue) run the work outside the request cycle: the controller enqueues a job and returns immediately, and the worker executes the job with retries. The user gets a fast response; failures are retried without user involvement."
+why = "A Rails request-response cycle has a finite timeout (commonly 30 seconds at the web server, shorter at load balancers or CDNs). Performing a slow operation (sending an email, resizing an image, calling a third-party API, generating a PDF) inline in a controller action blocks the Puma thread for the duration of that operation. Under traffic, blocked threads exhaust the pool and subsequent requests queue or time out. Failures in the external operation also bubble up as 500 errors to the user, who cannot retry safely and did not need to wait in the first place. Background jobs (via ActiveJob, Sidekiq, GoodJob, or Solid Queue) run the work outside the request cycle: the controller enqueues a job and returns immediately, and the worker executes the job with retries. The user gets a fast response; failures are retried without user involvement."
 
 [[option]]
 id = "background-jobs"

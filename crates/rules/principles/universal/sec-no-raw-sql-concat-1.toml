@@ -1,5 +1,5 @@
 id = "SEC-NO-RAW-SQL-CONCAT-1"
-version = 6
+version = 7
 title = "SQL queries are never built by string concatenation or format-string interpolation; use parameterized queries or a query builder"
 domain = "universal"
 layer = "universal"
@@ -29,11 +29,11 @@ why = """
 A DML statement (SELECT/INSERT/UPDATE/DELETE) string that is built by concatenating a variable
 into it, or by interpolating a value into a format string (`{}`/`{name}` inside the quoted SQL,
 or a closing quote immediately followed by `+`), lets whatever supplied that value influence the
-query's GRAMMAR, not just its data. This is CWE-89 (SQL Injection) — a query that reads
+query's GRAMMAR, not just its data. This is CWE-89 (SQL Injection): a query that reads
 "SELECT * FROM users WHERE id = " + user_input executes ATTACKER-CHOSEN SQL the moment the
 input contains SQL syntax rather than a plain id. Parameterized queries (bound placeholders:
 `$1`/`?`/named parameters) or a query builder that emits them keep every external value in the
-DATA channel, never the grammar channel, regardless of what characters it contains — the
+DATA channel, never the grammar channel, regardless of what characters it contains: the
 database driver, not string formatting, decides where the value's boundaries are.
 """
 
@@ -49,7 +49,7 @@ finding_headline = "Your `<path>` file builds a SQL query by pasting a value dir
 finding_detail = """
 When part of a query's text comes from outside input pasted straight into the SQL string, an attacker can rewrite the query itself: reading other users' data, bypassing a login check or changing and deleting records (a SQL injection). Rewrite the query in `<path>` to use a parameterized placeholder or a query-builder method, so untrusted values are always passed as data, never as part of the query text.
 """
-why = "Bound parameters are the industry-standard defense (OWASP's #1 SQL-injection prevention) because they remove the ambiguity entirely: the database driver receives the query grammar and the data values through separate channels, so no value — regardless of its content — can ever be interpreted as part of the grammar. String concatenation and format interpolation put both in the SAME channel, so escaping is the only defense, and escaping is routinely incomplete (encoding edge cases, a forgotten call site, a new special character in a future DB version)."
+why = "Bound parameters are the industry-standard defense (OWASP's #1 SQL-injection prevention) because they remove the ambiguity entirely: the database driver receives the query grammar and the data values through separate channels, so no value, regardless of its content, can ever be interpreted as part of the grammar. String concatenation and format interpolation put both in the SAME channel, so escaping is the only defense, and escaping is routinely incomplete (encoding edge cases, a forgotten call site, a new special character in a future DB version)."
 
 [[option]]
 id = "escape-then-concatenate"

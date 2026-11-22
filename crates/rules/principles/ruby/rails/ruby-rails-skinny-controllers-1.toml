@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-SKINNY-CONTROLLERS-1"
-version = 3
+version = 4
 title = "Controllers are thin HTTP adapters; business logic lives in service objects or domain models"
 domain = "ruby:rails"
 layer = "framework"
@@ -16,7 +16,7 @@ inspectable = true
 # The ceiling is authored without touching this rule's `kind`, and is safe either way: as a
 # `decision` rule it already emits deviation rows, so the ceiling only BOUNDS rows that exist
 # today; were it ever reclassified as `defect` the ceiling becomes dead config rather than wrong
-# behaviour.
+# behavior.
 deviation_ceiling = "high"
 default = true
 verification = "grounded"

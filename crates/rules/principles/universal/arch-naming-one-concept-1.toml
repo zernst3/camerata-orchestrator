@@ -1,5 +1,5 @@
 id = "ARCH-NAMING-ONE-CONCEPT-1"
-version = 5
+version = 6
 title = "A helper that does one thing exists once under one name that says what it does, and two modules do not each carry their own copy of it under different names"
 domain = "universal"
 layer = "universal"
@@ -58,5 +58,5 @@ why = "Keeping one implementation and re-exporting it during the move is a small
 id = "the-same-helper-exists-under-several-names"
 violates = true
 label = "The same helper exists under several names, in one module or in different ones"
-directive = "Write a new helper for each module that needs the behaviour, naming it as that module sees fit."
+directive = "Write a new helper for each module that needs the behavior, naming it as that module sees fit."
 why = "When one helper exists under two names, a reader cannot tell whether the two behave the same, so people copy a third version or fix one and miss the other. The bodies drift apart without any error to show for it, and code that should behave identically starts to differ because it happens to call a different name."

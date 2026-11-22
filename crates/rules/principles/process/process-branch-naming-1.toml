@@ -1,5 +1,5 @@
 id = "PROCESS-BRANCH-NAMING-1"
-version = 3
+version = 4
 title = "Branch names start with an allowed prefix"
 domain = "process"
 layer = "universal"
@@ -15,7 +15,7 @@ verification = "grounded"
 # ── Enforcement caveat (read before treating this like a normal SSOT rule) ───────
 # This is a VCS-METADATA process rule. It validates the BRANCH NAME — metadata
 # produced at branch-creation time, not the code diff.
-qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a branch-name CI step that inspects the ref), and in Camerata's own pipeline at the VCS-action gate (branch-creation time). NOT enforced at layer 2 — these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (allowed branch prefixes) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when a new branch name begins with one of the configured allowed prefixes (e.g. `feature/`, `release/`, `hotfix/`); it fails on a name with no allowed prefix. Because the gate reads metadata Camerata itself authors when it creates the branch, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to branches created outside Camerata."
+qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a branch-name CI step that inspects the ref), and in Camerata's own pipeline at the VCS-action gate (branch-creation time). NOT enforced at layer 2: these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (allowed branch prefixes) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when a new branch name begins with one of the configured allowed prefixes (e.g. `feature/`, `release/`, `hotfix/`); it fails on a name with no allowed prefix. Because the gate reads metadata Camerata itself authors when it creates the branch, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to branches created outside Camerata."
 
 [[sources]]
 url = "https://nvie.com/posts/a-successful-git-branching-model/"
@@ -27,7 +27,7 @@ title = "GitHub Actions: github.ref / branch context (CI-wirable branch-name che
 
 [decision]
 question = "Does the project require new branch names to start with an allowed prefix, enforced over VCS metadata at the branch-creation gate and in CI?"
-why = "A branch-prefix convention (`feature/`, `release/`, `hotfix/`, …) lets tooling and humans tell a branch's purpose from its name alone, and lets CI route behavior off the prefix (e.g. deploy `release/*` to staging). Because this is a contract over the branch NAME (metadata authored at branch-creation time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff — it is enforced at layer 4 (CI, via a branch-name step) and at Camerata's own VCS-action gate when Camerata creates the branch. The allowed prefix list is project-specific and lives in project Settings (process_rule_config), not in this rule. Opting out lets branches be named freely, which is simpler but forfeits prefix-driven tooling and routing."
+why = "A branch-prefix convention (`feature/`, `release/`, `hotfix/`, …) lets tooling and humans tell a branch's purpose from its name alone, and lets CI route behavior off the prefix (e.g. deploy `release/*` to staging). Because this is a contract over the branch NAME (metadata authored at branch-creation time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff: it is enforced at layer 4 (CI, via a branch-name step) and at Camerata's own VCS-action gate when Camerata creates the branch. The allowed prefix list is project-specific and lives in project Settings (process_rule_config), not in this rule. Opting out lets branches be named freely, which is simpler but forfeits prefix-driven tooling and routing."
 
 [[option]]
 id = "enforce-branch-prefix"

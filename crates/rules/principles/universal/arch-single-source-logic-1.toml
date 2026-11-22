@@ -1,5 +1,5 @@
 id = "ARCH-SINGLE-SOURCE-LOGIC-1"
-version = 5
+version = 6
 title = "An application decision such as a price, a fee, a status or a permission check is implemented in one function that every place needing it calls, never written out again in a second file"
 domain = "universal"
 layer = "universal"
@@ -62,4 +62,4 @@ id = "the-same-decision-is-written-in-several-places"
 violates = true
 label = "The same application decision is written out in several places"
 directive = "Write an application decision again in each file that needs it."
-why = "Copies of one decision drift apart. When the rule changes, the copy that is corrected in one place leaves the old rule running in the others, and nothing fails to show it: two screens quote different prices, or one path grants access that another denies. A reader cannot tell which copy is the rule, so each change has to find every copy by text search, and a copy that is missed silently keeps the old behaviour."
+why = "Copies of one decision drift apart. When the rule changes, the copy that is corrected in one place leaves the old rule running in the others, and nothing fails to show it: two screens quote different prices, or one path grants access that another denies. A reader cannot tell which copy is the rule, so each change has to find every copy by text search, and a copy that is missed silently keeps the old behavior."
