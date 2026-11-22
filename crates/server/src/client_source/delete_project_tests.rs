@@ -1623,3 +1623,78 @@ async fn files_covering_a_folder_an_onboarding_project_inspected_are_kept_and_na
         out.record.kept
     );
 }
+
+// ── shared-era draft copies: the deleted project's entries go, nothing else's ───────────────
+
+#[tokio::test]
+async fn the_shared_backup_and_old_bak_lose_the_deleted_projects_entries_and_nothing_else() {
+    let fx = fixture();
+    let pid = fx.project_id.clone();
+    let data = fx.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let backup = data.join("onboarding-draft.json.shared-backup");
+    std::fs::write(
+        &backup,
+        serde_json::json!({
+            pid.clone(): {"scan": SENT_A},
+            "other-project": {"scan": SENT_B},
+            "_cleared_at": {pid.clone(): "2026-11-19T10:00:00Z", "other-project": "2026-11-19T11:00:00Z"},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let bak = data.join("onboarding-draft.json.bak");
+    std::fs::write(&bak, serde_json::json!({pid.clone(): {"scan": SENT_A}}).to_string()).unwrap();
+    // A project whose id merely starts with this one's id is not this project.
+    let longer = data.join("onboarding-draft.json.shared-backup-1");
+    let longer_text = serde_json::json!({format!("{pid}2"): {"scan": SENT_B}}).to_string();
+    std::fs::write(&longer, &longer_text).unwrap();
+    // A copy nobody can parse stays, listed.
+    let torn = data.join("onboarding-draft.json.unreadable-1700000000");
+    std::fs::write(&torn, "{ torn").unwrap();
+
+    let out = delete_all(&fx.state, &pid, &req("Acme")).await.unwrap();
+    assert!(!out.partial, "{:?}", out.record.items);
+
+    let text = std::fs::read_to_string(&backup).unwrap();
+    assert!(!text.contains(&pid), "the project's entries are gone: {text}");
+    assert!(text.contains(SENT_B), "another project's entry stays: {text}");
+    assert!(text.contains("other-project"), "{text}");
+    assert!(!bak.exists(), "a copy left with nothing is removed");
+    assert_eq!(std::fs::read_to_string(&longer).unwrap(), longer_text);
+    assert!(torn.exists());
+    let listed: Vec<&str> = out.record.kept.iter().map(|k| k.what.as_str()).collect();
+    assert!(
+        listed.iter().any(|w| w.ends_with("unreadable-1700000000")),
+        "{listed:?}"
+    );
+    assert!(
+        !listed
+            .iter()
+            .any(|w| w.ends_with("shared-backup") || w.ends_with("shared-backup-1") || w.ends_with(".bak")),
+        "{listed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_draft_file_of_no_project_is_listed_as_a_leftover_and_never_removed() {
+    let fx = fixture();
+    let data = fx.root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let ghost = data.join("onboarding-draft-ghost.json");
+    std::fs::write(&ghost, r#"{"ghost":{"scan":1}}"#).unwrap();
+
+    let out = delete_all(&fx.state, &fx.project_id, &req("Acme"))
+        .await
+        .unwrap();
+
+    assert!(ghost.exists(), "not removed");
+    assert!(
+        out.record
+            .kept
+            .iter()
+            .any(|k| k.what.ends_with("onboarding-draft-ghost.json")),
+        "{:?}",
+        out.record.kept
+    );
+}

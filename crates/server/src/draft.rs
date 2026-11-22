@@ -609,6 +609,54 @@ impl DraftStore {
     }
 }
 
+/// Whether a draft file from before each project had its own (the shared file, its `.bak`, the
+/// one-time backup of a migration) holds `project_id`: its draft or its discard stamp. `None`
+/// when the file cannot be parsed as a draft map (so nothing can be said about it).
+pub(crate) fn shared_file_holds(path: &std::path::Path, project_id: &str) -> Option<bool> {
+    let bytes = std::fs::read(path).ok()?;
+    let map: HashMap<String, serde_json::Value> =
+        serde_json::from_str(std::str::from_utf8(&bytes).ok()?).ok()?;
+    Some(
+        map.contains_key(project_id)
+            || map
+                .get(CLEARED_KEY)
+                .and_then(|c| c.as_object())
+                .is_some_and(|o| o.contains_key(project_id)),
+    )
+}
+
+/// Rewrite a shared-era draft file without `project_id`'s draft and discard stamp (written
+/// through a temp file and a rename). A file left with no project at all is removed.
+pub(crate) fn strip_project_from_file(
+    path: &std::path::Path,
+    project_id: &str,
+) -> std::io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    let mut map: HashMap<String, serde_json::Value> = serde_json::from_str(
+        std::str::from_utf8(&bytes).map_err(std::io::Error::other)?,
+    )
+    .map_err(std::io::Error::other)?;
+    map.remove(project_id);
+    if let Some(o) = map.get_mut(CLEARED_KEY).and_then(|v| v.as_object_mut()) {
+        o.remove(project_id);
+    }
+    let stamps_left = map
+        .get(CLEARED_KEY)
+        .and_then(|c| c.as_object())
+        .is_some_and(|o| !o.is_empty());
+    let drafts_left = map.keys().any(|k| k != CLEARED_KEY);
+    if !stamps_left && !drafts_left {
+        return std::fs::remove_file(path);
+    }
+    if !stamps_left {
+        map.remove(CLEARED_KEY);
+    }
+    write_atomic(
+        path,
+        &serde_json::to_string(&map).map_err(std::io::Error::other)?,
+    )
+}
+
 /// An RFC 3339 timestamp as an instant, whatever its offset or fraction.
 fn instant(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)

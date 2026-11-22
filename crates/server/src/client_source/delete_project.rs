@@ -209,6 +209,9 @@ enum Action {
     Path(PathBuf),
     ScanCache,
     Draft,
+    /// A draft file from before each project had its own: rewritten without this project's
+    /// entries (removed when nothing else is left in it).
+    StripShared(PathBuf),
     /// This project's development console rows (units of work, stories, questions, routines,
     /// checkpoints, escalations), by the ids found when the plan was built.
     Dev(Dev, Vec<String>),
@@ -226,7 +229,7 @@ impl Action {
     fn phase(&self) -> u8 {
         match self {
             Action::Path(_) => 0,
-            Action::ScanCache | Action::Draft | Action::Dev(..) => 1,
+            Action::ScanCache | Action::Draft | Action::StripShared(_) | Action::Dev(..) => 1,
             Action::Memory => 2,
             Action::StoreFile(_) => 3,
             Action::Inspection(_) | Action::ProjectRecord => 4,
@@ -634,49 +637,67 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
     }
 
     // Each project's draft has its own file, removed above with its `.bak` and set-aside copies.
-    // What stays are the shared files from before that split: the shared file and its `.bak`
-    // (when a start has not migrated them yet), the one-time backup a migration keeps, and any
-    // shared file set aside because it could not be read. A shared file that cannot be split by
-    // project is never removed here; each is listed as a leftover when it may hold this
-    // project's data.
+    // The files from before that split (the shared file and its `.bak`, the one-time backup a
+    // migration keeps) still hold every project's drafts: the deleted project's entries are
+    // rewritten out of them, so nothing of the project is left. A copy that cannot be parsed
+    // cannot be rewritten; it is listed as a leftover that may hold this project's data, as is
+    // any shared file set aside because it could not be read.
+    let live: HashSet<String> = state.projects.list().into_iter().map(|p| p.id).collect();
     if let Ok(read) = std::fs::read_dir(&data) {
-        let mut shared: Vec<PathBuf> = read
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name().is_some_and(|n| {
-                    let n = n.to_string_lossy();
-                    n == "onboarding-draft.json"
-                        || n == "onboarding-draft.json.bak"
-                        || n.starts_with("onboarding-draft.json.shared-backup")
-                        || n.starts_with("onboarding-draft.json.unreadable-")
-                })
-            })
-            .collect();
-        shared.sort();
-        for p in shared {
-            let unreadable = p
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().contains(".unreadable-"));
-            let names_project = std::fs::read(&p).map_or(true, |bytes| {
-                String::from_utf8_lossy(&bytes).contains(&project.id)
-            });
-            if !unreadable && !names_project {
+        let mut names: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
+        names.sort();
+        for p in names {
+            let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if name.starts_with("onboarding-draft-") {
+                // A per-project file of a project that no longer exists: it cannot be told to
+                // be anyone's now, so it is left and listed.
+                let owner = state.draft.owner_of_file(&p);
+                if owner.as_ref().is_some_and(|o| !live.contains(o)) {
+                    kept.push(KeptItem {
+                        what: p.display().to_string(),
+                        why: "an onboarding draft file of a project that no longer exists; it \
+                              is not deleted: check it by hand"
+                            .to_string(),
+                    });
+                }
                 continue;
             }
-            let why = if unreadable {
-                "an onboarding draft file Camerata could not read and set aside; it names no \
-                 project, so it may include this project's data. It is not deleted: check it by \
-                 hand"
-            } else {
-                "a shared onboarding draft file from before each project had its own draft \
-                 file (kept as the one-time backup of that change); it holds this project's \
-                 draft. It is not deleted: check it by hand"
-            };
-            kept.push(KeptItem {
-                what: p.display().to_string(),
-                why: why.to_string(),
-            });
+            let shared_era = name == "onboarding-draft.json"
+                || name == "onboarding-draft.json.bak"
+                || name.starts_with("onboarding-draft.json.shared-backup");
+            let set_aside = name.starts_with("onboarding-draft.json.unreadable-");
+            if set_aside {
+                kept.push(KeptItem {
+                    what: p.display().to_string(),
+                    why: "an onboarding draft file Camerata could not read and set aside; it \
+                          names no project, so it may include this project's data. It is not \
+                          deleted: check it by hand"
+                        .to_string(),
+                });
+            } else if shared_era {
+                match crate::draft::shared_file_holds(&p, &project.id) {
+                    Some(true) => add(
+                        &mut extras,
+                        step(
+                            "shared onboarding draft copy",
+                            p.display().to_string(),
+                            1,
+                            std::fs::metadata(&p).map_or(0, |m| m.len()),
+                            Action::StripShared(p.clone()),
+                        ),
+                    ),
+                    Some(false) => {}
+                    None => kept.push(KeptItem {
+                        what: p.display().to_string(),
+                        why: "a shared onboarding draft file Camerata could not parse, so it \
+                              may hold this project's draft. It is not deleted: check it by \
+                              hand"
+                            .to_string(),
+                    }),
+                }
+            }
         }
     }
 
@@ -1200,6 +1221,12 @@ pub async fn delete_all(
                             .unwrap_or_else(|| data.join("onboarding-draft.json")),
                         &e,
                     ),
+                };
+            }
+            Action::StripShared(path) => {
+                item.outcome = match crate::draft::strip_project_from_file(&path, &project.id) {
+                    Ok(()) => PurgeOutcome::Removed,
+                    Err(e) => failed(&path, &e),
                 };
             }
             Action::Dev(dev, ids) => {
