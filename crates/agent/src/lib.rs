@@ -207,9 +207,9 @@ pub(crate) async fn stream_subprocess_with_stdin(
 
     let status = child.wait().await.map_err(AgentError::Spawn)?;
 
-    // How the prompt write ended. A broken pipe is the child closing its input early, which its
-    // exit status explains; any other failure means the prompt did not arrive whole, so the
-    // output is the answer to a truncated prompt and the run fails (and says why).
+    // How the prompt write ended. Any failure (a broken pipe, the child closing its input early,
+    // included) means the prompt did not arrive whole, so the output is the answer to a truncated
+    // prompt and the run fails (and says why); a failed exit status is reported first.
     let written = match writer {
         Some(w) => w.finish().await,
         None => Ok(()),

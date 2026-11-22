@@ -571,7 +571,8 @@ pub(crate) fn stdin_prompt(prompt: &str) -> String {
 /// argument because the OS caps the argument list (macOS `ARG_MAX`, about 1 MB) and a prompt
 /// that carries a large grounding block exceeds it ("Argument list too long"). The write runs on
 /// its own task so a child that answers before it has read everything cannot block on a full
-/// pipe; a child that exits early is reported by its exit status.
+/// pipe. A write that ends early fails the call when the child exited successfully (its answer is
+/// to a truncated prompt); a child that exited with a failure is reported by its exit status.
 pub(crate) async fn output_with_prompt(
     mut cmd: tokio::process::Command,
     prompt: &str,
@@ -588,9 +589,9 @@ pub(crate) async fn output_with_prompt(
         )
     });
     let out = child.wait_with_output().await?;
-    // A broken pipe is the child closing its input early (its exit status says why). Any other
-    // write failure means the prompt did not arrive whole: the call fails rather than return the
-    // answer to a truncated prompt.
+    // Any write failure (a broken pipe, the child closing its input early, included) means the
+    // prompt did not arrive whole: a child that exited successfully fails the call rather than
+    // return the answer to a truncated prompt; a failed exit is explained by its own status.
     if let Some(writer) = writer {
         if let Err(e) = writer.finish().await {
             eprintln!("[camerata-intake] writing the prompt to the claude CLI failed: {e}");

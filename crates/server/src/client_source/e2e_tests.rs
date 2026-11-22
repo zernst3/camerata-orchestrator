@@ -463,7 +463,7 @@ async fn a_synchronous_audit_blocks_deletion_while_it_runs() {
     let fx = &rig.fx;
     let pid = fx.project_id.clone();
     // A model that takes its time, so the request is observably in flight.
-    let slow = "#!/bin/sh\n[ \"$*\" = --version ] && { echo '2.1.321 (Claude Code)'; exit 0; }\nsleep 2\ncat \"$(dirname \"$0\")/empty.json\"\n";
+    let slow = "#!/bin/sh\n[ \"$*\" = --version ] && { echo '2.1.321 (Claude Code)'; exit 0; }\ncat > /dev/null\nsleep 2\ncat \"$(dirname \"$0\")/empty.json\"\n";
     let claude = rig.tools.path().join("claude");
     std::fs::write(&claude, slow).unwrap();
 

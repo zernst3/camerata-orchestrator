@@ -62,3 +62,22 @@ printf '%s\n' '{"session_id":"s1","result":"DONE","total_cost_usd":0.01,"permiss
         assert!(lines.contains(&flag), "{flag} is unchanged: {lines:?}");
     }
 }
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_failed_exit_with_a_large_unread_task_reports_the_exit_not_the_write() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let stub = dir.path().join("claude");
+    std::fs::write(&stub, "#!/bin/sh\necho boom >&2\nexit 1\n").expect("write stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    let _program = camerata_test_env::EnvGuard::set("CAMERATA_CLAUDE_PROGRAM", &stub);
+    let task = "a line of documentation nobody reads\n".repeat(110_000);
+
+    let err = ClaudeCliDriver::new("/tmp/mcp.json")
+        .run(&role(), &task)
+        .await
+        .expect_err("the child exited 1");
+    let text = format!("{err:?} {err}");
+    assert!(text.contains("boom"), "stderr is in the error: {text}");
+    assert!(!text.contains("not fully written"), "{text}");
+}
