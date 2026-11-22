@@ -1,6 +1,20 @@
 //! Rule-table display helpers, extracted from the rules UI. Pure functions with no rendering-framework
 //! dependency, unit-tested here.
 
+/// The deterministic floor rule ids that `propose_rules` builds inline, so the rules table can
+/// tell an inline floor rule from a corpus rule whose corpus entry has not loaded yet. The server
+/// crate pins this list equal to `onboard::AUDIT_RULES` in a test, so the two cannot drift.
+pub const INLINE_AUDIT_RULE_IDS: &[&str] = &[
+    "SEC-NO-HARDCODED-SECRETS-1",
+    "SEC-NO-RAW-SQL-CONCAT-1",
+    "ARCH-NO-SECRETS-IN-URL-1",
+    "SEC-NO-PRIVATE-KEY-1",
+    "SEC-NO-VENDOR-TOKEN-1",
+    "SEC-NO-SECRET-FILE-1",
+    "SEC-NO-DISABLED-TLS-1",
+    "SEC-NO-UNSAFE-DESERIALIZATION-1",
+];
+
 /// The verification badge `(label, css-modifier)` for a rule's `verification` value. An unrecognised
 /// value falls back to the neutral "Draft" visual (never panics).
 pub fn verif_badge(verif: &str) -> (&'static str, &'static str) {

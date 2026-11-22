@@ -32,7 +32,7 @@ title = "EJS documentation: `<%=` escapes output and `<%-` outputs the unescaped
 url = "https://api.rubyonrails.org/classes/ActionView/Helpers/OutputSafetyHelper.html"
 title = "Rails API: OutputSafetyHelper#raw outputs a string without escaping it"
 
-# Source note: States that String#html_safe marks a string as trusted so it is inserted into HTML with no further escaping, and that it is equivalent to the `raw` helper in views.
+# Source note: States that String#html_safe marks a string as trusted so it is inserted into HTML with no additional escaping.
 [[sources]]
 url = "https://api.rubyonrails.org/classes/String.html"
 title = "Rails API: String#html_safe inserts a string into HTML with no additional escaping"
@@ -62,6 +62,21 @@ title = "Pug documentation: `!{}` buffers an unescaped value into the template"
 url = "https://jinja.palletsprojects.com/en/stable/api/"
 title = "Jinja API documentation: the Environment autoescape option enables HTML autoescaping"
 
+# Source note: Defines the `<%=` tag as replaced with the result of the Ruby expression, with no escaping step.
+[[sources]]
+url = "https://docs.ruby-lang.org/en/master/ERB.html"
+title = "Ruby ERB documentation: `<%=` replaces the tag with the result of the expression"
+
+# Source note: States that autoescaping is on only for templates ending in .html, .htm, .xml and .xhtml and for .svg under render_template(), so other template names are not escaped by default.
+[[sources]]
+url = "https://flask.palletsprojects.com/en/stable/templating/"
+title = "Flask documentation: autoescaping is enabled by default only for .html, .htm, .xml, .xhtml and .svg templates"
+
+# Source note: A test in the Handlebars repository stating that `{{&` expressions are not escaped.
+[[sources]]
+url = "https://github.com/handlebars-lang/handlebars.js/blob/master/spec/basic.js"
+title = "Handlebars test suite: expressions written with `{{&` are not escaped"
+
 # Source note: Describes the `|safe` filter, the autoescape default and the `{% autoescape false %}` block.
 [[sources]]
 url = "https://jinja.palletsprojects.com/en/stable/templates/"
@@ -81,7 +96,7 @@ DOM innerHTML, Vue's v-html, and template-engine "safe"/"raw"/autoescape-off fil
 framework's default output-encoding. Server-side template engines spell the same escape hatch in
 their own syntax. EJS uses `<%-`. Rails ERB uses `raw`, `html_safe` and `<%==`. Handlebars uses
 `{{{ }}}` and `{{& }}`. Pug uses `!=` and `!{}`. Jinja and Nunjucks use the `|safe` filter. Plain ERB (outside
-Rails) and Sinatra without escape_html output `<%=` unescaped, so every `<%=` there is a raw sink.
+Rails) inserts the result of every `<%=` tag as is, so every `<%=` there is a raw sink.
 Jinja `{% autoescape false %}` switches escaping off for a whole block. A Jinja Environment created
 without autoescape (the library default) leaves every template unescaped, and Flask autoescapes only
 .html, .htm, .xml, .xhtml and .svg templates, so .j2, .jinja and .jinja2 files are unescaped there
@@ -104,7 +119,7 @@ Wrap the value passed to the raw-HTML sink (dangerouslySetInnerHTML, innerHTML, 
 or Jinja and Nunjucks `|safe`) in an
 allowlist sanitizer such as DOMPurify.sanitize(...) at the point of use. If the content never
 needs to carry real markup, switch to the engine's default escaped output instead (EJS `<%=`,
-Rails ERB `<%=` without `raw`, plain ERB with `ERB::Util.html_escape` around the value, Handlebars
+Rails ERB `<%=` without `raw`, plain ERB with an HTML escape helper such as `ERB::Util.html_escape` around the value, Handlebars
 `{{ }}`, Pug `=` and `#{}` or Jinja and Nunjucks with autoescape turned on and no `|safe`). Verify by confirming a payload like
 <img src=x onerror=alert(1)> renders as inert text or is stripped, never executes.
 """

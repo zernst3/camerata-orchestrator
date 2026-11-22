@@ -2228,6 +2228,8 @@ fn classify_ai_finding_returns_none_for_an_unmapped_defect() {
 /// which is the whole point (see `resolve_citation`'s `is_external_source_url`, which this
 /// complements with a stronger "is it actually a recognized authority" check).
 fn is_known_authority_url(url: &str) -> bool {
+    // A bare host admits any page on it. An entry with a path admits only URLs that start with
+    // that exact page, so a documentation citation cannot widen to a whole site.
     const KNOWN_AUTHORITY_HOSTS: &[&str] = &[
         "cwe.mitre.org",
         "owasp.org",
@@ -2236,18 +2238,30 @@ fn is_known_authority_url(url: &str) -> bool {
         "react.dev",
         "developer.mozilla.org",
         "postgrest.org",
-        "github.com/mde/ejs",
-        "api.rubyonrails.org",
-        "guides.rubyonrails.org",
-        "handlebarsjs.com",
-        "pugjs.org",
-        "jinja.palletsprojects.com",
-        "mozilla.github.io/nunjucks",
+        "github.com/mde/ejs/blob/main/README.md",
+        "api.rubyonrails.org/classes/ActionView/Helpers/OutputSafetyHelper.html",
+        "api.rubyonrails.org/classes/String.html",
+        "guides.rubyonrails.org/active_support_core_extensions.html",
+        "handlebarsjs.com/guide/expressions.html",
+        "github.com/handlebars-lang/handlebars.js/blob/master/spec/basic.js",
+        "pugjs.org/language/code.html",
+        "pugjs.org/language/interpolation.html",
+        "jinja.palletsprojects.com/en/stable/templates/",
+        "jinja.palletsprojects.com/en/stable/api/",
+        "mozilla.github.io/nunjucks/templating.html",
+        "docs.ruby-lang.org/en/master/ERB.html",
+        "flask.palletsprojects.com/en/stable/templating/",
     ];
     is_external_source_url(url)
-        && KNOWN_AUTHORITY_HOSTS.iter().any(|host| {
-            url.starts_with(&format!("https://{host}/"))
-                || url.starts_with(&format!("http://{host}/"))
+        && KNOWN_AUTHORITY_HOSTS.iter().any(|entry| {
+            ["https", "http"].iter().any(|scheme| {
+                let prefix = format!("{scheme}://{entry}");
+                if entry.contains('/') {
+                    url.starts_with(&prefix)
+                } else {
+                    url.starts_with(&format!("{prefix}/"))
+                }
+            })
         })
 }
 
