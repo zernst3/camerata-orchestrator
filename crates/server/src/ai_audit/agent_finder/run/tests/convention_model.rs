@@ -537,3 +537,39 @@ async fn the_convention_ledger_finds_a_finder_row_lost_after_tagging() {
         .check_finder_rows_kept(&extras.conventions, &kept, &[victim])
         .is_empty());
 }
+
+/// Round 2 item 7: an unrelated row at the same place does not hide a lost finder row; the match
+/// is on the rule as well as the place.
+#[tokio::test]
+async fn an_unrelated_row_at_the_same_place_does_not_mask_a_lost_finder_row() {
+    let (rows, _, _, failed, _, extras) = hearth(
+        json!({
+            "rule": PAR, "answer": "problems", "problems": [1, 2],
+            "options": [
+                {"id": "seq", "count": 4, "places": []},
+                {"id": "par", "count": 1, "places": []}
+            ]
+        }),
+        true,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let victim = rows
+        .iter()
+        .find(|f| f.line == 17)
+        .expect("the listings row")
+        .clone();
+    let mut kept: Vec<_> = rows
+        .iter()
+        .filter(|f| !(f.path == victim.path && f.line == victim.line))
+        .cloned()
+        .collect();
+    // An unrelated row (another rule) at the very place of the lost one.
+    let mut other = victim.clone();
+    other.rule_id = "SOMETHING-ELSE-1".into();
+    other.captures.clear();
+    kept.push(other);
+    let mut block = crate::scan_ledger::ConventionsBlock::from_records(&extras.conventions, &rows);
+    let lost = block.check_finder_rows_kept(&extras.conventions, &kept, &[]);
+    assert_eq!(lost.len(), 1, "the loss is not masked: {lost:?}");
+}
