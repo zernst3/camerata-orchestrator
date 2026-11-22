@@ -2311,5 +2311,7 @@ async fn rule_on(
 }
 
 /// The screen's inspection signal, shared as context.
+/// Only the click tests read it.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::cockpit) struct InspectionSignal(pub Signal<Option<ScanReportView>>);
