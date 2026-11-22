@@ -10,7 +10,7 @@
 //! held is the export: it is refused until the row is put back (it then sits in its rule node,
 //! held as a restore until decided) or a correction confirms the throw-out was right.
 
-use camerata_api_types::package_paths::{INSPECTION_JSON};
+use camerata_api_types::package_paths::INSPECTION_JSON;
 use std::collections::HashSet;
 
 use super::Problem;

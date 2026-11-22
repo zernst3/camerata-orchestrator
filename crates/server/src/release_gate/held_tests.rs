@@ -342,7 +342,10 @@ fn every_export_carries_reviewer_edited_and_the_edit_ids() {
     };
     // findings.json and the JSON dataset.
     for (name, rows) in [
-        ("json/inspection.json", parse(&findings_json)["findings"].clone()),
+        (
+            "json/inspection.json",
+            parse(&findings_json)["findings"].clone(),
+        ),
         (
             "json/all-findings.json",
             parse(&entries["json/all-findings.json"]),
@@ -512,7 +515,8 @@ fn an_edit_never_reaches_client_output_as_internal_text() {
     }
     // The merged row says only where it points.
     let findings =
-        String::from_utf8_lossy(&read_zip_entries(&zip).unwrap()["json/inspection.json"]).into_owned();
+        String::from_utf8_lossy(&read_zip_entries(&zip).unwrap()["json/inspection.json"])
+            .into_owned();
     assert!(findings.contains("Merged into src/db.rs:12"), "{findings}");
     // The rows whose reasons are secret are in the package, so the secrets could have leaked: the
     // acknowledged Ignored row (as accepted risk, with the decision's own reason), the finding
@@ -868,13 +872,16 @@ fn export_gate_view_equals_release_gate_refusals() {
     assert_eq!(
         kind(HoldReason::EngineCheckNoWithoutCorrection),
         sorted(
-            located_in(CheckId::EngineCheckNoWithoutCorrection, "json/inspection.json")
-                .into_iter()
-                .chain(located_in(
-                    CheckId::EngineCheckNoWithoutCorrection,
-                    "thrown-out findings"
-                ))
-                .collect()
+            located_in(
+                CheckId::EngineCheckNoWithoutCorrection,
+                "json/inspection.json"
+            )
+            .into_iter()
+            .chain(located_in(
+                CheckId::EngineCheckNoWithoutCorrection,
+                "thrown-out findings"
+            ))
+            .collect()
         )
     );
     assert_eq!(

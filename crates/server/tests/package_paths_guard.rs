@@ -58,7 +58,9 @@ fn forbidden() -> Vec<(&'static str, Regex)> {
 fn next_is_module(lines: &[&str], index: usize) -> bool {
     lines.get(index + 1).is_some_and(|next| {
         let next = next.trim_start();
-        next.starts_with("mod ") || next.starts_with("pub mod ") || next.starts_with("pub(crate) mod ")
+        next.starts_with("mod ")
+            || next.starts_with("pub mod ")
+            || next.starts_with("pub(crate) mod ")
     })
 }
 
@@ -103,7 +105,11 @@ fn no_package_path_is_spelled_outside_the_paths_module() {
     let mut report = Vec::new();
     let mut scanned = 0;
     for file in files {
-        let display = file.strip_prefix(repo_crates()).unwrap().display().to_string();
+        let display = file
+            .strip_prefix(repo_crates())
+            .unwrap()
+            .display()
+            .to_string();
         let display = display.replace("../", "");
         if display.ends_with("api-types/src/package_paths.rs") || is_test_file(&file) {
             continue;
@@ -114,7 +120,10 @@ fn no_package_path_is_spelled_outside_the_paths_module() {
             report.push(format!("{display}:{line}: spells {name} as a literal"));
         }
     }
-    assert!(scanned > 100, "the scan found only {scanned} files: the crate layout moved");
+    assert!(
+        scanned > 100,
+        "the scan found only {scanned} files: the crate layout moved"
+    );
     assert!(
         report.is_empty(),
         "package paths are named through camerata_api_types::package_paths, never spelled:\n{}",
@@ -126,9 +135,16 @@ fn no_package_path_is_spelled_outside_the_paths_module() {
 fn the_guard_catches_a_literal_and_ignores_comments_and_the_test_module() {
     let forbidden = forbidden();
     let code = "let a = \"findings.json\";\n// findings.json in a comment\nlet b = \"json/x.json\";\nlet ok = \"all-findings\";\n#[cfg(test)]\nmod tests { let t = \"findings.json\"; }\n";
-    let hits: Vec<_> = offences(code, &forbidden).into_iter().map(|(l, n)| (l, n)).collect();
+    let hits: Vec<_> = offences(code, &forbidden)
+        .into_iter()
+        .map(|(l, n)| (l, n))
+        .collect();
     assert_eq!(hits, vec![(1, "findings.json"), (3, "a json/ path")]);
     let prose = "\"the rows of json/inspection.json\"";
     assert!(!offences(prose, &forbidden).is_empty());
-    assert!(offences("concat!(\"a \", camerata_api_types::pkg_inspection_json!())", &forbidden).is_empty());
+    assert!(offences(
+        "concat!(\"a \", camerata_api_types::pkg_inspection_json!())",
+        &forbidden
+    )
+    .is_empty());
 }

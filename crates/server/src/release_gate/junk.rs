@@ -11,11 +11,11 @@
 //! Wording judgments (`junk_finding::WordingFlag`) never reach this check. They are review flags
 //! on the row and refuse nothing.
 
-use camerata_api_types::package_paths::{INSPECTION_JSON};
 use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::junk_finding::JUNK_CONTENT_CAPTURE;
 use crate::onboard::Finding;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// The rows marked as junk that `decisions` has not decided: what [`junk_without_decision`]
 /// refuses, as rows (the review screen's export panel lists these same rows).

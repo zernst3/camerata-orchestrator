@@ -1,8 +1,8 @@
 //! The serde shapes of the report JSON (cover, summary, matrix, sites, groups, methodology)
 //! and the small helpers that sit beside them.
 
-use camerata_api_types::package_paths::INSPECTION_JSON;
 use super::*;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// Real pluralization for a count + noun pair (`"1 site"` / `"3 sites"`), replacing the
 /// `"N thing(s)"` CLI-ism that reads as sloppy in a flagship client PDF.

@@ -4876,9 +4876,17 @@ fn manifest_file_facts(path: &str) -> (String, Option<String>) {
     } else if path == TICKETS_CSV {
         "One ticket for each fix, for a Jira, Linear or GitHub Issues importer."
     } else if path == ALL_FINDINGS_CSV {
-        concat!("Every row that was not ruled out, the same rows as ", camerata_api_types::pkg_inspection_json!(), ", as one CSV table for tools that do not read Excel.")
+        concat!(
+            "Every row that was not ruled out, the same rows as ",
+            camerata_api_types::pkg_inspection_json!(),
+            ", as one CSV table for tools that do not read Excel."
+        )
     } else if path == ALL_FINDINGS_JSON {
-        concat!("Every row that was not ruled out, the same rows as ", camerata_api_types::pkg_inspection_json!(), ", as one flat JSON list for tools.")
+        concat!(
+            "Every row that was not ruled out, the same rows as ",
+            camerata_api_types::pkg_inspection_json!(),
+            ", as one flat JSON list for tools."
+        )
     } else if path.starts_with(CSV_DIR) {
         "One table of the workbook as a CSV file, for tools that do not read Excel."
     } else if path.starts_with(JSON_DIR) {

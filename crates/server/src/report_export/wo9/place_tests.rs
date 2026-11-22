@@ -202,7 +202,7 @@ fn the_gate_refuses_a_carried_row_whose_carrier_is_missing_or_elsewhere_and_acce
     });
     let problems = crate::release_gate::place_archive_problems(&missing);
     assert!(
-        problems_text(&problems).contains("is not a row of findings.json"),
+        problems_text(&problems).contains("is not a row of json/inspection.json"),
         "{problems:?}"
     );
     // A carrier at another place.
@@ -438,7 +438,7 @@ fn the_gate_refuses_an_all_problems_sheet_with_fewer_rows_than_places() {
     });
     let problems = crate::release_gate::place_archive_problems(&moved);
     assert!(
-        problems_text(&problems).contains("has 2 rows and findings.json has 3 places"),
+        problems_text(&problems).contains("has 2 rows and json/inspection.json has 3 places"),
         "{}",
         problems_text(&problems)
     );

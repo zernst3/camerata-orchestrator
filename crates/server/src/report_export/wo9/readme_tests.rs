@@ -175,10 +175,10 @@ fn the_readme_describes_findings_json_as_every_row_not_ruled_out() {
     for readme in client_readmes() {
         let text = flat(&readme);
         let paragraph = text
-            .split(" findings.json ")
+            .split(" json/inspection.json ")
             .nth(1)
-            .and_then(|rest| rest.split(" decisions.json ").next())
-            .expect("the README describes findings.json");
+            .and_then(|rest| rest.split(" json/decisions.json ").next())
+            .expect("the README describes json/inspection.json");
         assert!(
             !paragraph.contains("same rows as the workbook"),
             "{paragraph}"

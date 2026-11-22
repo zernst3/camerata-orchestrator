@@ -165,7 +165,10 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         names.iter().any(|n| n.ends_with("-findings.xlsx")),
         "{names:?}"
     );
-    assert!(names.contains(&"json/inspection.json".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"json/inspection.json".to_string()),
+        "{names:?}"
+    );
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
     let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
@@ -383,7 +386,10 @@ fn the_manifest_purposes_use_the_client_vocabulary() {
                 && !purpose.to_lowercase().contains("xlsx"),
             "{path}: {purpose:?} calls it a workbook table"
         );
-        assert!(purpose.contains("json/inspection.json"), "{path}: {purpose:?}");
+        assert!(
+            purpose.contains("json/inspection.json"),
+            "{path}: {purpose:?}"
+        );
     }
     for old in [
         "manifest",

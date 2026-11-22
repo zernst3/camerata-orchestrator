@@ -175,7 +175,7 @@ fn any_other_oversized_text_cell_is_cut_with_a_pointer_instead_of_aborting() {
     let detail = cell_by_header(&bytes, "All problems", "More detail", 1);
     assert!(detail.chars().count() < EXCEL_CELL_LIMIT);
     assert!(
-        detail.contains("full text is in findings.json"),
+        detail.contains("full text is in json/inspection.json"),
         "the cut must say where the full text is"
     );
 }

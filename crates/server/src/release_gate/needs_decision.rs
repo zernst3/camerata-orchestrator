@@ -29,11 +29,11 @@
 //! of group decisions ([`super::holds`]), decided or not, so a later group decision cannot
 //! overwrite a decision made in person.
 
-use camerata_api_types::package_paths::{INSPECTION_JSON};
 use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::onboard::Finding;
 use crate::report_export::ReviewedReport;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// Why a row needs a decision of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

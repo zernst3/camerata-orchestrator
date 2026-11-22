@@ -13,7 +13,7 @@
 //! row? Moving to the decision store is a new implementation of that trait and nothing else here
 //! changes.
 
-use camerata_api_types::package_paths::{INSPECTION_JSON};
+use camerata_api_types::package_paths::INSPECTION_JSON;
 use std::collections::HashMap;
 
 use super::Problem;

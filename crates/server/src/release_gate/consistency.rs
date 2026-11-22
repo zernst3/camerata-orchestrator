@@ -3,7 +3,10 @@
 //! production, and the export tests call these same functions and assert on what they return.
 //! A test that re-implemented a comparison would be testing its own copy.
 
-use camerata_api_types::package_paths::{MANIFEST_JSON, README_TXT, INSPECTION_JSON, DECISIONS_JSON, ALL_FINDINGS_JSON, ALL_FINDINGS_CSV, DEVIATIONS_JSON, FALSE_POSITIVES_JSON, json_path, csv_path};
+use camerata_api_types::package_paths::{
+    csv_path, json_path, ALL_FINDINGS_CSV, ALL_FINDINGS_JSON, DECISIONS_JSON, DEVIATIONS_JSON,
+    FALSE_POSITIVES_JSON, INSPECTION_JSON, MANIFEST_JSON, README_TXT,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -54,12 +57,7 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
     let xlsx = format!("{stem}-findings.xlsx");
     expected.insert(pdf.clone());
     expected.insert(xlsx.clone());
-    for fixed in [
-        INSPECTION_JSON,
-        DECISIONS_JSON,
-        README_TXT,
-        MANIFEST_JSON,
-    ] {
+    for fixed in [INSPECTION_JSON, DECISIONS_JSON, README_TXT, MANIFEST_JSON] {
         expected.insert(fixed.to_string());
     }
     for dataset in DATASETS {
@@ -114,12 +112,7 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
             ));
         }
     }
-    for fixed in [
-        INSPECTION_JSON,
-        DECISIONS_JSON,
-        README_TXT,
-        MANIFEST_JSON,
-    ] {
+    for fixed in [INSPECTION_JSON, DECISIONS_JSON, README_TXT, MANIFEST_JSON] {
         if entries.get(fixed).is_some_and(Vec::is_empty) {
             problems.push(problem(fixed, DATASET_SET, "the file is empty"));
         }
@@ -257,10 +250,9 @@ pub fn dataset_parity_problems(entries: &Entries) -> Vec<Problem> {
         };
         problems.extend(compare_csv_to_json(dataset, csv, json));
     }
-    if let (Some(findings), Some(all)) = (
-        entries.get(INSPECTION_JSON),
-        entries.get(ALL_FINDINGS_JSON),
-    ) {
+    if let (Some(findings), Some(all)) =
+        (entries.get(INSPECTION_JSON), entries.get(ALL_FINDINGS_JSON))
+    {
         match (serde_json::from_slice::<Value>(findings), rows_of(all)) {
             (Ok(doc), Ok(all_rows)) => {
                 let findings_rows = doc
@@ -277,14 +269,23 @@ pub fn dataset_parity_problems(entries: &Entries) -> Vec<Problem> {
                     problems.push(problem(
                         INSPECTION_JSON,
                         &format!("findings[{at}]"),
-                        concat!(camerata_api_types::pkg_inspection_json!(), " disagrees with ", camerata_api_types::pkg_all_findings_json!()),
+                        concat!(
+                            camerata_api_types::pkg_inspection_json!(),
+                            " disagrees with ",
+                            camerata_api_types::pkg_all_findings_json!()
+                        ),
                     ));
                 }
             }
             _ => problems.push(problem(
                 INSPECTION_JSON,
                 DATASET_PARITY,
-                concat!(camerata_api_types::pkg_inspection_json!(), " or ", camerata_api_types::pkg_all_findings_json!(), " does not parse"),
+                concat!(
+                    camerata_api_types::pkg_inspection_json!(),
+                    " or ",
+                    camerata_api_types::pkg_all_findings_json!(),
+                    " does not parse"
+                ),
             )),
         }
     }
@@ -401,14 +402,21 @@ pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Pr
         problems.push(problem(
             INSPECTION_JSON,
             &describe(row),
-            concat!("a row the PDF renders is missing from ", camerata_api_types::pkg_inspection_json!()),
+            concat!(
+                "a row the PDF renders is missing from ",
+                camerata_api_types::pkg_inspection_json!()
+            ),
         ));
     }
     for row in json.difference(&pdf) {
         problems.push(problem(
             "PDF data",
             &describe(row),
-            concat!("a row in ", camerata_api_types::pkg_inspection_json!(), " is missing from the PDF"),
+            concat!(
+                "a row in ",
+                camerata_api_types::pkg_inspection_json!(),
+                " is missing from the PDF"
+            ),
         ));
     }
     problems
@@ -892,15 +900,25 @@ pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) ->
             (Some(_), None) => problems.push(problem(
                 INSPECTION_JSON,
                 PATTERNS,
-                concat!("the report has a patterns section and ", camerata_api_types::pkg_inspection_json!(), " has no patterns_across_services key"),
+                concat!(
+                    "the report has a patterns section and ",
+                    camerata_api_types::pkg_inspection_json!(),
+                    " has no patterns_across_services key"
+                ),
             )),
             (None, Some(_)) => problems.push(problem(
                 INSPECTION_JSON,
                 PATTERNS,
-                concat!(camerata_api_types::pkg_inspection_json!(), " has a patterns_across_services key and the report has no such section"),
+                concat!(
+                    camerata_api_types::pkg_inspection_json!(),
+                    " has a patterns_across_services key and the report has no such section"
+                ),
             )),
             (Some(want), Some(got)) => {
-                let rows = got.get("rows").and_then(Value::as_array).map_or(0, Vec::len);
+                let rows = got
+                    .get("rows")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
                 if rows != want.rows.len() {
                     problems.push(problem(
                         INSPECTION_JSON,
@@ -1398,7 +1416,10 @@ pub fn verify_manifest(entries: &Entries) -> Vec<Problem> {
         return vec![problem(
             MANIFEST_JSON,
             "manifest",
-            concat!("the package has no ", camerata_api_types::pkg_manifest_json!()),
+            concat!(
+                "the package has no ",
+                camerata_api_types::pkg_manifest_json!()
+            ),
         )];
     };
     let Ok(manifest) = serde_json::from_slice::<Value>(manifest_bytes) else {
@@ -1613,7 +1634,10 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
         problems.push(problem(
             README_TXT,
             what,
-            concat!("the README's provenance line disagrees with ", camerata_api_types::pkg_manifest_json!()),
+            concat!(
+                "the README's provenance line disagrees with ",
+                camerata_api_types::pkg_manifest_json!()
+            ),
         ));
     };
     let parsed = parse_readme_provenance(readme);
@@ -1761,7 +1785,11 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
                     problems.push(problem(
                         README_TXT,
                         &format!("inspection.{key}"),
-                        concat!("a value in ", camerata_api_types::pkg_manifest_json!(), " is not in the README"),
+                        concat!(
+                            "a value in ",
+                            camerata_api_types::pkg_manifest_json!(),
+                            " is not in the README"
+                        ),
                     ));
                 }
             }
@@ -1995,7 +2023,9 @@ pub fn place_archive_problems(entries: &Entries) -> Vec<Problem> {
             problems.push(problem(
                 INSPECTION_JSON,
                 &at,
-                format!("the row is carried by {carrier_id}, which is not a row of {INSPECTION_JSON}"),
+                format!(
+                    "the row is carried by {carrier_id}, which is not a row of {INSPECTION_JSON}"
+                ),
             ));
             continue;
         };

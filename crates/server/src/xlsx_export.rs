@@ -68,7 +68,7 @@
 //! headline to appear verbatim somewhere in the workbook, so a kind whose sheet forgot to
 //! render a headline column would be a PARITY FAULT, by name.
 
-use camerata_api_types::package_paths::{ALL_FINDINGS_JSON, JSON_DIR, json_path, csv_path};
+use camerata_api_types::package_paths::{csv_path, json_path, ALL_FINDINGS_JSON, JSON_DIR};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
@@ -814,8 +814,16 @@ fn possible_duplicate_counts(rows: &[FindingRow]) -> (usize, usize) {
 /// What a cell ends with when prose (not a site list) had to be cut to fit. The full text is in
 /// `findings.json` and the `json/` and `csv/` files of the same export, none of which has a cell
 /// limit.
-const CELL_CUT_POINTER: &str = concat!("\n[cut to fit Excel's 32,767-character cell limit: the full text \
-     is in ", camerata_api_types::pkg_inspection_json!(), " and the files in ", camerata_api_types::pkg_json_dir!(), " and ", camerata_api_types::pkg_csv_dir!(), " of this export]");
+const CELL_CUT_POINTER: &str = concat!(
+    "\n[cut to fit Excel's 32,767-character cell limit: the full text \
+     is in ",
+    camerata_api_types::pkg_inspection_json!(),
+    " and the ",
+    camerata_api_types::pkg_json_dir!(),
+    " and ",
+    camerata_api_types::pkg_csv_dir!(),
+    " files of this export]"
+);
 
 /// `text` as a cell may hold it: unchanged when it fits, otherwise cut on a character boundary
 /// with [`CELL_CUT_POINTER`] at the end. The last line of defence for every cell this module

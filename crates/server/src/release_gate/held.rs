@@ -21,14 +21,14 @@
 //! The merge check reads the package itself: the merged rows of `findings.json` and the records of
 //! `decisions.json`, so what is checked is what the client receives. They are mechanical and hard.
 
-use camerata_api_types::package_paths::DECISIONS_JSON;
-use camerata_api_types::package_paths::{INSPECTION_JSON};
 use super::evidence::ReviewerDecisions;
 use super::Problem;
 use crate::engine_discard::ENGINE_RESTORED_CAPTURE;
 use crate::onboard::Finding;
 use crate::report_export::decisions_file::{DecisionRowJson, DECISIONS_FILE};
 use crate::report_export::unfold::UNFOLDED_FROM_CAPTURE;
+use camerata_api_types::package_paths::DECISIONS_JSON;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// One problem per merged row that has no decision record naming it, that state and a reason,
 /// and one per site a live group decision covers that has no per-site record. Read from the

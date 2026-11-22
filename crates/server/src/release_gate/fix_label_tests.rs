@@ -182,7 +182,8 @@ fn the_gate_refuses_an_unlabelled_or_misnamed_fix() {
         let mut tampered = entries.clone();
         // The same edit in findings.json and all-findings.json, so the parity check passes and
         // only the label check can notice.
-        let mut doc: Value = serde_json::from_slice(&tampered["json/inspection.json"]).expect("parses");
+        let mut doc: Value =
+            serde_json::from_slice(&tampered["json/inspection.json"]).expect("parses");
         let mut all: Vec<Value> =
             serde_json::from_slice(&tampered["json/all-findings.json"]).expect("parses");
         for rows in [doc["findings"].as_array_mut().unwrap(), &mut all] {

@@ -667,7 +667,7 @@ fn the_failure_block_has_the_documented_shape() {
         "EXPORT BLOCKED by the release gate for acme-inspection (1 problem)"
     );
     assert!(
-        display.contains("findings.json \u{203a} a_field_added_tomorrow"),
+        display.contains("json/inspection.json \u{203a} a_field_added_tomorrow"),
         "{display}"
     );
     assert!(

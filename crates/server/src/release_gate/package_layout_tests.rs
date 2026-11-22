@@ -14,10 +14,26 @@ use super::*;
 fn a_real_package_holds_the_inspection_and_the_decisions_under_json_and_none_at_the_top() {
     let released = release(package()).expect("a clean package clears the gate");
     let entries = read_zip_entries(&released.bytes).expect("zip");
-    assert!(entries.contains_key("json/inspection.json"), "{:?}", entries.keys());
-    assert!(entries.contains_key("json/decisions.json"), "{:?}", entries.keys());
-    assert!(!entries.contains_key("findings.json"), "{:?}", entries.keys());
-    assert!(!entries.contains_key("decisions.json"), "{:?}", entries.keys());
+    assert!(
+        entries.contains_key("json/inspection.json"),
+        "{:?}",
+        entries.keys()
+    );
+    assert!(
+        entries.contains_key("json/decisions.json"),
+        "{:?}",
+        entries.keys()
+    );
+    assert!(
+        !entries.contains_key("findings.json"),
+        "{:?}",
+        entries.keys()
+    );
+    assert!(
+        !entries.contains_key("decisions.json"),
+        "{:?}",
+        entries.keys()
+    );
     assert!(entries.contains_key("manifest.json"));
     assert!(entries.contains_key("README.txt"));
     // The only files at the top level are the manifest, the README, the PDF and the workbook.
@@ -40,14 +56,19 @@ fn the_manifest_lists_every_file_with_its_checksum_at_its_real_path() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&entries[MANIFEST_JSON]).expect("manifest parses");
     let listed = manifest["files"].as_array().expect("files list");
-    let paths: std::collections::BTreeSet<&str> =
-        listed.iter().map(|f| f["path"].as_str().expect("path")).collect();
+    let paths: std::collections::BTreeSet<&str> = listed
+        .iter()
+        .map(|f| f["path"].as_str().expect("path"))
+        .collect();
     let present: std::collections::BTreeSet<&str> = entries
         .keys()
         .map(String::as_str)
         .filter(|n| *n != MANIFEST_JSON)
         .collect();
-    assert_eq!(paths, present, "the manifest lists exactly the files of the ZIP");
+    assert_eq!(
+        paths, present,
+        "the manifest lists exactly the files of the ZIP"
+    );
     for file in listed {
         let path = file["path"].as_str().expect("path");
         let digest = Sha256::digest(&entries[path]);
@@ -82,7 +103,11 @@ fn the_gate_accepts_the_new_layout_and_refuses_a_file_missing_from_the_manifest(
     let released = release(package()).expect("clean");
     let entries = read_zip_entries(&released.bytes).expect("zip");
     let report = audit_zip(&rezip(&entries), None);
-    assert!(report.problems().next().is_none(), "{:?}", report.problems().collect::<Vec<_>>());
+    assert!(
+        report.problems().next().is_none(),
+        "{:?}",
+        report.problems().collect::<Vec<_>>()
+    );
 
     // The inspection file is in the ZIP but the manifest does not list it.
     let mut edited = entries.clone();

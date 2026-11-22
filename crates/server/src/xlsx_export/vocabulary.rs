@@ -10,7 +10,6 @@
 //! not people, and renaming them would break whatever reads them. Everything a person reads is
 //! named from this module.
 
-use camerata_api_types::package_paths::{INSPECTION_JSON};
 use camerata_api_types::review::FpReason;
 
 /// Excel refuses a sheet name over this many characters.
@@ -1592,12 +1591,7 @@ pub const INTERNAL_TERMS: &[&str] = &[POSSIBLE_FALSE_POSITIVE, POSSIBLE_DUPLICAT
 /// retired word written with capitals in the table (an id header) is matched as written.
 pub fn banned_synonym_in(text: &str) -> Option<(&'static str, &'static str)> {
     let mut cleaned = text.to_string();
-    for file in [
-        "all-findings",
-        INSPECTION_JSON,
-        "findings.xlsx",
-        "false-positives",
-    ] {
+    for file in ["all-findings", "findings.xlsx", "false-positives"] {
         cleaned = cleaned.replace(file, " ");
     }
     let mut lower = cleaned.to_lowercase();
@@ -1852,7 +1846,7 @@ mod tests {
             Some(("deviation", "Departure"))
         );
         assert_eq!(banned_synonym_in("a website"), None);
-        assert_eq!(banned_synonym_in("see findings.json"), None);
+        assert_eq!(banned_synonym_in("see json/inspection.json"), None);
     }
 
     /// A word an owned concept uses is not retired: "pattern" names the Patterns across services

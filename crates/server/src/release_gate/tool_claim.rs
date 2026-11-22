@@ -7,10 +7,10 @@
 //! the model and the ledger records it as run, so a summary that called it unchecked would
 //! understate the report, and a ledger gap that the summary never mentions would hide one.
 
-use camerata_api_types::package_paths::{INSPECTION_JSON};
 use super::Problem;
 use crate::onboard::ScanReport;
 use crate::report_export::{AuditReportJson, NO_PREVIEW_TOOL_LINE};
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 /// Whether the ledger leaves the rule named by an "unrouted" note unchecked: no entry of it ran.
 fn left_unchecked(report: &ScanReport, rule_id: &str) -> bool {

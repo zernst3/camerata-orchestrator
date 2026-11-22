@@ -17,7 +17,9 @@
 //! 6. (work order D, flag off, not built: it needs the status words D introduces.)
 //! 7. (work order D, flag off) Every folded row names its head in `carried_by`.
 
-use camerata_api_types::package_paths::{INSPECTION_JSON, ALL_FINDINGS_JSON, TICKETS_CSV, FALSE_POSITIVES_JSON, DEPENDENCIES_JSON};
+use camerata_api_types::package_paths::{
+    ALL_FINDINGS_JSON, DEPENDENCIES_JSON, FALSE_POSITIVES_JSON, INSPECTION_JSON, TICKETS_CSV,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -455,7 +457,10 @@ pub(super) fn counts_problems_with(
         None => problems.push(problem(
             INSPECTION_JSON,
             COUNTS,
-            concat!(camerata_api_types::pkg_inspection_json!(), " has no counts object"),
+            concat!(
+                camerata_api_types::pkg_inspection_json!(),
+                " has no counts object"
+            ),
         )),
         Some(object) => {
             for (field, printed, want) in differences(&object, &recounted) {
@@ -896,7 +901,10 @@ fn summary_problems(findings_json: Option<&Value>, want: &ReportCounts) -> Vec<P
         return vec![problem(
             INSPECTION_JSON,
             "summary",
-            concat!(camerata_api_types::pkg_inspection_json!(), " has no summary object"),
+            concat!(
+                camerata_api_types::pkg_inspection_json!(),
+                " has no summary object"
+            ),
         )];
     };
     let mut out = Vec::new();
@@ -928,7 +936,10 @@ fn summary_problems(findings_json: Option<&Value>, want: &ReportCounts) -> Vec<P
             out.push(problem(
                 INSPECTION_JSON,
                 &format!("summary.{retired}"),
-                concat!(camerata_api_types::pkg_inspection_json!(), " summary holds a retired row tally"),
+                concat!(
+                    camerata_api_types::pkg_inspection_json!(),
+                    " summary holds a retired row tally"
+                ),
             ));
         }
     }

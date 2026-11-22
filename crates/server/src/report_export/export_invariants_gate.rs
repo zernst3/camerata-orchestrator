@@ -124,10 +124,10 @@
 //      phrase) stays healthy. STANDING (passes):
 //      `evidence_negating_rule_requirement_is_held_not_healthy_positive_twin_stays_healthy`.
 
-use camerata_api_types::package_paths::INSPECTION_JSON;
 use super::*;
 use crate::onboard::{AuditedRef, LanguageVolume, ScanProvenance};
 use crate::xlsx_export;
+use camerata_api_types::package_paths::INSPECTION_JSON;
 
 // ── Fixture builders (own copies, matching the convention every test module in this
 // crate already follows — `report_export::tests` and `xlsx_export::tests` each keep their
@@ -2147,12 +2147,18 @@ async fn req_d2_candidates_reviewed_cover_totals_and_hedge_counts_reconcile_agai
     );
     assert_eq!(
         findings_export.summary.candidates_reviewed, total_rows,
-        concat!(camerata_api_types::pkg_inspection_json!(), "'s summary must reconcile against the same sealed row count")
+        concat!(
+            camerata_api_types::pkg_inspection_json!(),
+            "'s summary must reconcile against the same sealed row count"
+        )
     );
     assert_eq!(
         findings_export.summary.held_for_review, held_for_review_total,
-        concat!(camerata_api_types::pkg_inspection_json!(), "'s summary must report the SAME held-for-review count as the PDF, \
-             never its own independently-recomputed one")
+        concat!(
+            camerata_api_types::pkg_inspection_json!(),
+            "'s summary must report the SAME held-for-review count as the PDF, \
+             never its own independently-recomputed one"
+        )
     );
 }
 

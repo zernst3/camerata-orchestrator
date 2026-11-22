@@ -175,7 +175,10 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         names.iter().any(|n| n.ends_with("-findings.xlsx")),
         "{names:?}"
     );
-    assert!(names.contains(&"json/inspection.json".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"json/inspection.json".to_string()),
+        "{names:?}"
+    );
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
     // 22c: the manifest states the quote basis exactly as `camerata count` does (the same
