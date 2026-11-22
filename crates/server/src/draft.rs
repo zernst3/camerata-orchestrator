@@ -25,6 +25,9 @@ fn sibling(path: &std::path::Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// An unreadable-file notice: the project it is for (`None`: every project) and its words.
+type Notice = (Option<String>, String);
+
 /// A project id as a file-name part (`inspections::file_stem`: injective, and never empty, so no
 /// id gets `onboarding-draft-.json`).
 fn file_part(project_id: &str) -> String {
@@ -99,7 +102,7 @@ pub struct DraftStore {
     /// Set when the file on disk could not be read at start and was set aside; the operator is
     /// told once, on the next read of the draft ([`Self::take_unreadable_notice`]). Each is for the
     /// project whose file it was, or for every project (`None`) when a shared file was set aside.
-    notice: Arc<Mutex<Vec<(Option<String>, String)>>>,
+    notice: Arc<Mutex<Vec<Notice>>>,
 }
 
 impl DraftStore {
@@ -120,7 +123,7 @@ impl DraftStore {
     /// that cannot be read is moved to its `.unreadable-<seconds>` name instead, so a second
     /// start finds nothing to redo.
     pub fn at(path: PathBuf, live_ids: &[String]) -> Self {
-        let mut notices: Vec<(Option<String>, String)> = Vec::new();
+        let mut notices: Vec<Notice> = Vec::new();
         let mut mem: HashMap<String, serde_json::Value> = HashMap::new();
         let store = Self {
             path: Some(Arc::new(path.clone())),
