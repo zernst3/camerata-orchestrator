@@ -53,7 +53,7 @@ url = "https://mozilla.github.io/nunjucks/templating.html"
 title = "Nunjucks documentation: autoescaping and the `safe` filter"
 
 [decision]
-question = "Is user- or attacker-influenced data ever written into the DOM through a raw-HTML sink (dangerouslySetInnerHTML, innerHTML, document.write, v-html, a raw-output template tag such as EJS `<%-`, ERB `raw`, `html_safe` or `<%==`, Handlebars `{{{ }}}`, Pug `!=`, or Jinja and Nunjucks `|safe`, or an autoescape-disabled template block) without first passing through an HTML sanitizer?"
+question = "Is user- or attacker-influenced data ever written into the DOM through a raw-HTML sink (dangerouslySetInnerHTML, innerHTML, document.write, v-html, an autoescape-disabled template block or a raw-output template tag such as EJS `<%-`, ERB `raw`, `html_safe` or `<%==`, Handlebars `{{{ }}}`, Pug `!=` or Jinja and Nunjucks `|safe`) without first passing through an HTML sanitizer?"
 default = "sanitize-before-raw-html-sink"
 why = """
 A raw-HTML sink renders its argument as markup, not text: React's dangerouslySetInnerHTML, plain
@@ -76,8 +76,8 @@ id = "sanitize-before-raw-html-sink"
 label = "Sanitize with an allowlist HTML sanitizer immediately before any raw-HTML sink"
 directive = "Any value reaching dangerouslySetInnerHTML, innerHTML, document.write, v-html, an EJS `<%-` tag, an ERB `raw` call, `html_safe` call or `<%==` tag, a Handlebars `{{{ }}}` expression, a Pug `!=` line, a Jinja or Nunjucks `|safe` filter or an autoescape-disabled template block (Jinja `{% autoescape false %}` or a Nunjucks environment with autoescaping off) is passed through an allowlist HTML sanitizer (e.g. DOMPurify) at the point of use; content that never needs to carry real markup is rendered as plain escaped text instead of routed through a raw-HTML sink at all."
 remediation = """
-Wrap the value passed to the raw-HTML sink (dangerouslySetInnerHTML, innerHTML, EJS `<%-`, ERB `raw`, `html_safe` or `<%==`, Handlebars
-`{{{ }}}`, Pug `!=`, Jinja or Nunjucks `|safe`, or an autoescape-disabled template block) in an
+Wrap the value passed to the raw-HTML sink (dangerouslySetInnerHTML, innerHTML, an autoescape-disabled template block, EJS `<%-`, ERB `raw`,
+`html_safe` or `<%==`, Handlebars `{{{ }}}`, Pug `!=` or Jinja and Nunjucks `|safe`) in an
 allowlist sanitizer such as DOMPurify.sanitize(...) at the point of use. If the content never
 needs to carry real markup, switch to the engine's default escaped output instead (EJS `<%=`,
 ERB `<%=` without `raw`, Handlebars `{{ }}`, Pug `=`, or Jinja and Nunjucks with autoescape on and no `|safe`). Verify by confirming a payload like
