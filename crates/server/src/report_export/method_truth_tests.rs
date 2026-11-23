@@ -337,14 +337,15 @@ fn the_method_text_and_the_about_sheet_list_the_inspected_file_types() {
     let note = &json.methodology.deterministic_note;
     assert!(
         note.contains(
-            "The inspection reads code and configuration, server-side templates and HTML, \
-             build-runner files (Makefile, Procfile and Justfile), Markdown documentation and \
-             stylesheets (CSS, SCSS and Less)."
+            "The inspection reads code and configuration, HTML and server-side templates \
+             (.html, .htm, .ejs, .erb, .hbs, .pug, .njk, .j2, .jinja and .jinja2), \
+             build-runner files (Makefile, GNUmakefile, Procfile and Justfile), Markdown \
+             documentation (.md and .mdx) and stylesheets (.css, .scss and .less)."
         ),
         "{note}"
     );
     assert!(
-        note.contains("listed under Coverage as generated: scanned for secrets only, not billed."),
+        note.contains("listed under Coverage as generated: searched for secrets only, not billed."),
         "{note}"
     );
 
@@ -357,9 +358,44 @@ fn the_method_text_and_the_about_sheet_list_the_inspected_file_types() {
     assert_eq!(
         row.get(1).map(String::as_str),
         Some(
-            "Code and configuration, server-side templates and HTML, build-runner files \
-             (Makefile, Procfile and Justfile), Markdown documentation and stylesheets (CSS, SCSS \
-             and Less)"
+            "Code and configuration, HTML and server-side templates (.html, .htm, .ejs, .erb, \
+             .hbs, .pug, .njk, .j2, .jinja and .jinja2), build-runner files (Makefile, \
+             GNUmakefile, Procfile and Justfile), Markdown documentation (.md and .mdx) and \
+             stylesheets (.css, .scss and .less)"
         )
     );
+}
+
+/// Round 1 fix 2: the sentence names exactly the admitted types. Every extension the admission
+/// lists carry is in it, and a type that is not admitted (Razor, Twig, Liquid, JSP, reStructuredText)
+/// is not claimed.
+#[test]
+fn the_inspected_types_sentence_names_every_admitted_type_and_no_unadmitted_one() {
+    let sentence = crate::onboard::files::inspected_types();
+    for ext in [
+        "html", "htm", "ejs", "erb", "hbs", "pug", "njk", "j2", "jinja", "jinja2", "md", "mdx",
+        "css", "scss", "less",
+    ] {
+        assert!(sentence.contains(&format!(".{ext}")), "{ext}: {sentence}");
+        assert!(
+            crate::onboard::files::text_kind(&format!("a/file.{ext}")).is_some(),
+            "{ext} is admitted"
+        );
+    }
+    for name in ["Makefile", "GNUmakefile", "Procfile", "Justfile"] {
+        assert!(sentence.contains(name), "{name}: {sentence}");
+        assert!(crate::onboard::files::text_kind(name).is_some(), "{name}");
+    }
+    // What the sentence does not name is not admitted.
+    for ext in [
+        "cshtml", "razor", "twig", "liquid", "mustache", "haml", "slim", "jsp", "sass", "markdown",
+        "rst", "mk",
+    ] {
+        assert!(!sentence.contains(&format!(".{ext}")), "{ext}: {sentence}");
+        assert!(
+            crate::onboard::files::text_kind(&format!("a/file.{ext}")).is_none(),
+            "{ext} is not admitted"
+        );
+    }
+    assert!(crate::onboard::files::text_kind("Makefile.am").is_none());
 }

@@ -358,6 +358,7 @@ fn report_from_walk_with(
             excluded_by_agreement: extracted.excluded_by_agreement,
             long_line: extracted.skipped_long_line,
             generated: extracted.generated,
+            generated_unsearched: Vec::new(),
             excluded_never_read: never_read,
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
@@ -421,6 +422,7 @@ fn a_generated_file_is_named_in_coverage_as_scanned_for_secrets_only_and_not_bil
             excluded_by_agreement: Vec::new(),
             long_line: Vec::new(),
             generated: extracted.generated,
+            generated_unsearched: Vec::new(),
             excluded_never_read: Vec::new(),
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
@@ -442,14 +444,70 @@ fn a_generated_file_is_named_in_coverage_as_scanned_for_secrets_only_and_not_bil
     assert_eq!(gaps.skipped_files[0].reason_code, SkipReason::Generated);
     assert_eq!(
         gaps.skipped_files[0].reason,
-        "generated: scanned for secrets only, not billed"
+        "generated: searched for secrets only, not billed"
     );
     assert_eq!(
         gaps.skipped_summary.as_deref(),
         Some(
-            "1 file was not read for the inspection: 1 generated: scanned for secrets only, \
-             not billed. 1 of these files was still searched for secrets."
+            "1 file was not read for the inspection: 1 generated (searched for secrets only, \
+             not billed). 1 of these files was still searched for secrets."
         )
+    );
+}
+
+/// Round 1 fix 3: Coverage never says a generated file was searched for secrets when it was not.
+/// The label follows what ran: searched, or (floor off, over the search ceiling, not text) not
+/// searched. The summary line carries one colon, not two.
+#[test]
+fn a_generated_file_that_was_not_searched_is_worded_as_not_searched() {
+    let sizes = HashMap::new();
+    let mut list = SkippedFileList::default();
+    list.record_repo(
+        "owner/repo",
+        RepoSkips {
+            oversize: Vec::new(),
+            beyond_cap: Vec::new(),
+            not_text: Vec::new(),
+            excluded_by_agreement: Vec::new(),
+            long_line: Vec::new(),
+            generated: vec!["a/Searched.Designer.cs".to_string()],
+            generated_unsearched: vec!["b/Not.Designer.cs".to_string()],
+            excluded_never_read: Vec::new(),
+            sizes: &sizes,
+            file_cap: 20_000,
+        },
+    );
+    let totals = list.totals();
+    assert_eq!((totals.generated, totals.generated_unsearched), (1, 1));
+    assert_eq!(totals.total(), 2);
+    assert_eq!(
+        SkipReason::Generated.label(),
+        "generated: searched for secrets only, not billed"
+    );
+    assert_eq!(
+        SkipReason::GeneratedUnsearched.label(),
+        "generated: not read, not billed, not searched for secrets"
+    );
+    // The floor did not run: no sentence claims a search.
+    let sentence = super::coverage_gaps::skipped_summary_sentence(&totals, &[]).unwrap();
+    assert_eq!(
+        sentence,
+        "2 files were not read for the inspection: 1 generated (searched for secrets only, not \
+         billed), 1 generated (not read, not billed, not searched for secrets)."
+    );
+    assert_eq!(sentence.matches(':').count(), 1, "{sentence}");
+    let (listed, _) = list.finish();
+    let reason_of = |path: &str| {
+        listed
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.reason)
+            .unwrap()
+    };
+    assert_eq!(reason_of("a/Searched.Designer.cs"), SkipReason::Generated);
+    assert_eq!(
+        reason_of("b/Not.Designer.cs"),
+        SkipReason::GeneratedUnsearched
     );
 }
 
@@ -830,6 +888,7 @@ fn a_never_read_pattern_is_counted_once_and_is_not_a_file() {
                 excluded_by_agreement: Vec::new(),
                 long_line: Vec::new(),
                 generated: Vec::new(),
+                generated_unsearched: Vec::new(),
                 excluded_never_read: vec!["*/node_modules/**".to_string()],
                 sizes: &sizes,
                 file_cap: 20_000,

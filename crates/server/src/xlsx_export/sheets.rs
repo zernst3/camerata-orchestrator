@@ -1994,7 +1994,7 @@ pub(super) fn write_start_here(
     )?;
     r += 1;
     ws.write_text(r, 0, v::P_FILE_TYPES)?;
-    let types = crate::onboard::files::INSPECTED_TYPES;
+    let types = crate::onboard::files::inspected_types();
     let mut chars = types.chars();
     let sentence_case: String = chars
         .next()

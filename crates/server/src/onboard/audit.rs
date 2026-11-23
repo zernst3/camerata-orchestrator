@@ -1345,6 +1345,13 @@ mod docs_secret_tests {
         let readme = "# Setup\n\n    GITHUB_TOKEN=ghp_your_token_here\n    ANTHROPIC_API_KEY=<your-api-key>\n";
         let findings = audit_files("o/r", &[("README.md".to_string(), readme.to_string())]);
         assert!(findings.is_empty(), "{findings:#?}");
+        // The labeled twin is not masked on its way to the model either: the model sees the
+        // placeholder as written, so it cannot mistake a masked value for a real one.
+        let model = crate::onboard::redact::files_for_model_with(
+            &[("README.md".to_string(), readme.to_string())],
+            true,
+        );
+        assert_eq!(model[0].1, readme, "the placeholder stays as written");
     }
 
     #[test]

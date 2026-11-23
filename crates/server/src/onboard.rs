@@ -819,6 +819,16 @@ pub struct CoverageNote {
 /// carries it.
 pub const REPOSITORY_READ_PASS: &str = "repository read";
 
+/// Split a repo's generated files into the ones the secret checks searched and the ones they did
+/// not: with the floor off `searched` is empty, and a file over the search ceiling or not text
+/// never got into it. Coverage words each group for what actually ran.
+pub(crate) fn split_generated_by_search(
+    generated: Vec<String>,
+    searched: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    generated.into_iter().partition(|p| searched.contains(p))
+}
+
 /// What a repo that could not be inspected leaves behind: see
 /// [`ScanReport::note_repo_not_inspected`]. Split into its three destinations so the scan loop,
 /// which holds them as separate locals, and the report method share one implementation.
@@ -2664,9 +2674,14 @@ pub async fn audit_repos_with_llm_controlled(
                     })
                     .map(|(_, p)| p.clone())
                     .collect();
+                // A generated file is "searched" only when the secret pass opened it; with the
+                // floor off, over the search ceiling or not text it is named, not searched.
+                let (generated, generated_unsearched) =
+                    split_generated_by_search(generated, &secret_searched_oversize);
                 skipped_files_total.record_repo(
                     spec,
                     crate::scan_ledger::RepoSkips {
+                        generated_unsearched,
                         excluded_never_read: never_read_patterns,
                         oversize: skipped_oversize,
                         beyond_cap: skipped_beyond_cap,

@@ -522,7 +522,11 @@ fn file_warnings(w: &WalkChecks, floor_on: bool) -> Vec<String> {
             } else {
                 "lines"
             },
-            super::files::generated_label(),
+            if floor_on {
+                super::files::generated_label()
+            } else {
+                super::files::generated_unsearched_label()
+            },
             w.generated.join("; "),
             if floor_on {
                 "A key in one of them is still a finding."
@@ -839,7 +843,7 @@ mod tests {
         assert_eq!(refusal, None);
         assert_eq!(
             warnings,
-            ["2 files (5 lines), generated: scanned for secrets only, not billed: \
+            ["2 files (5 lines), generated: searched for secrets only, not billed: \
               app/Migrations/Init.Designer.cs; app/pb/api.go. A key in one of them is still a finding."]
         );
         // With the floor off nothing searches them, and the warning says so.
