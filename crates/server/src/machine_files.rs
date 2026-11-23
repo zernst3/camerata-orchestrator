@@ -285,7 +285,7 @@ fn finish_csv_rows(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
                 _ => {}
             }
         }
-        writer.write_record(&out)?;
+        writer.write_record(crate::csv_cell::safe_record(&out))?;
     }
     Ok(writer.into_inner()?)
 }

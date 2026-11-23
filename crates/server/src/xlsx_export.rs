@@ -2909,7 +2909,7 @@ fn json_array_to_csv(value: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
                 Some(other) => serde_json::to_string(other).unwrap_or_default(),
             })
             .collect();
-        wtr.write_record(&record)?;
+        wtr.write_record(crate::csv_cell::safe_record(&record))?;
     }
     Ok(wtr.into_inner()?)
 }
