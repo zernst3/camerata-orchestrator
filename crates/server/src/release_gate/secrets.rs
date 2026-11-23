@@ -520,17 +520,27 @@ pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
     // Parts a reader can open that are neither a cell nor a header: cell comments, the document
     // properties (title, author, keywords), drawings and charts. Their text is scanned both as
     // runs joined and as runs apart, so a key split across two runs is still one key.
-    if let Ok(parts) = xlsx_extra_texts(bytes) {
-        for (part, joined, apart) in parts {
-            let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-            for text in [&joined, &apart] {
-                for p in scan_text(file, &format!("workbook part {part}"), text, false) {
-                    if seen.insert((p.message.clone(), p.evidence.clone())) {
-                        problems.push(p);
+    match xlsx_extra_texts(bytes) {
+        Ok(parts) => {
+            for (part, joined, apart) in parts {
+                let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+                for text in [&joined, &apart] {
+                    for p in scan_text(file, &format!("workbook part {part}"), text, false) {
+                        if seen.insert((p.message.clone(), p.evidence.clone())) {
+                            problems.push(p);
+                        }
                     }
                 }
             }
         }
+        Err(e) => problems.push(Problem::new(
+            file,
+            "workbook",
+            format!(
+                "a workbook part could not be read, so it could not be checked for secrets: {e}"
+            ),
+            None,
+        )),
     }
     if let Ok(strings) = xlsx_strings(bytes) {
         let already: HashSet<(String, Option<String>)> = problems
