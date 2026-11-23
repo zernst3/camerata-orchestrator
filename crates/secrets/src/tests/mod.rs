@@ -2,6 +2,7 @@
 //! runtime by [`crate::fixtures`]; this crate's source contains no secret-shaped literal.
 
 mod client_masking;
+mod client_twins;
 mod detection;
 mod detector_edges;
 mod false_alarms;

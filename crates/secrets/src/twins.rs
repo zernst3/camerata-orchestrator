@@ -185,17 +185,84 @@ fn placeholder_word(body: &str, delimited_only: bool) -> Option<&'static str> {
     })
 }
 
+/// `body` with every placeholder word replaced by `_` (a separator), case kept elsewhere.
+fn without_placeholder_words(body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    let mut covered = vec![false; body.len()];
+    for word in PLACEHOLDER_WORDS {
+        for (start, _) in lower.match_indices(word) {
+            covered[start..start + word.len()].fill(true);
+        }
+    }
+    body.bytes()
+        .zip(covered)
+        .map(|(b, hit)| if hit { '_' } else { char::from(b) })
+        .collect()
+}
+
+/// A segment of a human-written value (split at every non-alphanumeric byte) that reads as random
+/// text, not as a word: six or more characters mixing letters and digits (`8842xQ`) or mixing
+/// case inside one word (`MyCorp`, `Kx9mQ2vLp3Zr`). `Dummy`, `PASSWORD`, `v2` and `1234` are not.
+fn is_random_segment(segment: &str) -> bool {
+    segment.len() >= 6
+        && ((segment.bytes().any(|b| b.is_ascii_alphabetic())
+            && segment.bytes().any(|b| b.is_ascii_digit()))
+            || !is_name_word(segment))
+}
+
+/// Whether a single-case body still reads as a placeholder: a placeholder word opens or closes
+/// it (`EXAMPLEONLY00000`, `IOSFODNN7EXAMPLE`: the documented AWS style), or once every
+/// placeholder word is taken out each run left is letters only or digits only (`yourkeyhere`,
+/// `CHANGE_ME_TO_A_REAL_KEY_1234`). A word buried between random runs (`kx9fake2mq8vlp3`) is
+/// neither.
+fn single_case_is_plain_placeholder(body: &str) -> bool {
+    if placeholder_word(body, false).is_none() {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    if PLACEHOLDER_WORDS
+        .iter()
+        .any(|word| lower.starts_with(word) || lower.ends_with(word))
+    {
+        return true;
+    }
+    without_placeholder_words(body)
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .all(|run| {
+            run.bytes().all(|b| b.is_ascii_alphabetic()) || run.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// Whether `value` carries a placeholder word AND that word holds under the client rule (see
+/// [`placeholder_holds_for_client`]).
+pub(crate) fn has_placeholder_that_holds(shape: SecretShape, value: &str) -> bool {
+    let body = &value[prefix_of(shape, value).len()..];
+    placeholder_word(body, false).is_some() && placeholder_holds_for_client(shape, value)
+}
+
 /// Whether the placeholder twin on `value` still holds under the CLIENT rule: the body is
-/// single-case, or some placeholder word is set apart by a SEPARATOR (a non-alphanumeric byte) or
-/// by the start or end of the body. A case change or a digit next to the word is not enough, as it
-/// is for a vendor body: a word buried in mixed-case random text (`Kx9fakeT2mQ8vLp3Zr7wYn5Bd1Hs`)
-/// proves nothing, so a client package masks it.
+/// single-case and plain placeholder text, or some placeholder word is set apart by a SEPARATOR
+/// (a non-alphanumeric byte) or by the start or end of the body. A case change or a digit next to
+/// the word is not enough, as it is for a vendor body: a word buried in mixed-case random text
+/// (`Kx9fakeT2mQ8vLp3Zr7wYn5Bd1Hs`) proves nothing, so a client package masks it.
+///
+/// A human-written value (a context shape: `password = "..."`, a bearer token) is also masked
+/// when any of its segments reads as random text: `MyCorp-Dummy-8842xQ-Prod-Main` has a delimited
+/// `Dummy` and a real-looking password around it. A vendor body is random by nature, so only the
+/// placeholder word is judged there.
 pub(crate) fn placeholder_holds_for_client(shape: SecretShape, value: &str) -> bool {
     let body = &value[prefix_of(shape, value).len()..];
+    if is_context_shaped(shape)
+        && without_placeholder_words(body)
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(is_random_segment)
+    {
+        return false;
+    }
     let single_case = !body.bytes().any(|b| b.is_ascii_lowercase())
         || !body.bytes().any(|b| b.is_ascii_uppercase());
     if single_case {
-        return placeholder_word(body, false).is_some();
+        return single_case_is_plain_placeholder(body);
     }
     let bytes = body.as_bytes();
     let lower = body.to_ascii_lowercase();
@@ -423,6 +490,94 @@ pub(crate) fn names_a_secret(before_value: &str) -> bool {
         .any(|word| lower.contains(word))
 }
 
+/// Words that make a bare `key` a credential (`api_key`, `accessKey`, `AUTH_KEY`). A bare `key` or
+/// a `STORAGE_KEY`, `queryKey` is a name in code, not a credential.
+const KEY_QUALIFIERS: &[&str] = &[
+    "api",
+    "access",
+    "auth",
+    "private",
+    "signing",
+    "encryption",
+    "license",
+    "master",
+    "session",
+];
+
+/// Single words that already hold the qualifier (`apikey`, `accesskey`).
+const KEY_COMPOUNDS: &[&str] = &[
+    "apikey",
+    "apikeys",
+    "accesskey",
+    "accesskeys",
+    "authkey",
+    "privatekey",
+    "signingkey",
+    "encryptionkey",
+    "licensekey",
+    "masterkey",
+    "sessionkey",
+    "authtoken",
+    "accesstoken",
+    "apitoken",
+];
+
+/// The words of `text`, lowercased, split on anything that is not a letter or digit and at a
+/// camel-case boundary (`apiKey` is `api`, `key`; `APIKey` is `api`, `key`).
+fn identifier_words(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        let boundary = c.is_ascii_uppercase()
+            && i > 0
+            && (chars[i - 1].is_ascii_lowercase()
+                || (chars[i - 1].is_ascii_uppercase()
+                    && chars.get(i + 1).is_some_and(char::is_ascii_lowercase)));
+        if boundary && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push(c.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// Whether `before_value` names something whose value may be a passphrase that READS like a name
+/// (a diceware phrase on an `api_token` or `apiKey` identifier): everything [`names_a_secret`]
+/// names, plus an identifier that ENDS in the word `token` (or `tokens`), in a compound such as
+/// `apikey`, or in a `key` qualified as a credential (`api_key`, `accessKey`, `AUTH_KEY`). Whole
+/// words only, so `monkey`, `keyboard` and `author` do not count; the identifier's last word
+/// only, so `tokenName`, `api_key_header` and `STORAGE_KEY` (names in code) stay readable.
+fn names_a_passphrase_holder(before_value: &str) -> bool {
+    if names_a_secret(before_value) {
+        return true;
+    }
+    // The identifier is what sits in front of the assignment (`=`, `:`).
+    let identifier = before_value
+        .split([':', '='])
+        .next()
+        .unwrap_or(before_value);
+    let words = identifier_words(identifier);
+    let Some((last, before)) = words.split_last() else {
+        return false;
+    };
+    matches!(last.as_str(), "token" | "tokens")
+        || KEY_COMPOUNDS.contains(&last.as_str())
+        || (matches!(last.as_str(), "key" | "keys")
+            && before
+                .last()
+                .is_some_and(|word| KEY_QUALIFIERS.contains(&word.as_str())))
+}
+
 /// The fewest characters a sealed-secret ciphertext value has (a real one is hundreds).
 const SEALED_CIPHERTEXT_MIN_LEN: usize = 200;
 
@@ -532,7 +687,7 @@ pub(crate) fn classify(
     // A readable name is code (`STORAGE_KEY`, `queryKey`); on a password-like identifier the same
     // shape is a passphrase.
     if shape == SecretShape::NamedSecretLiteral
-        && !names_a_secret(before_value)
+        && !names_a_passphrase_holder(before_value)
         && is_readable_name(value)
     {
         return Some(Twin::ReadableName);

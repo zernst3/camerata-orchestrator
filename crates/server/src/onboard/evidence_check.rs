@@ -184,8 +184,15 @@ fn snippet_near_line_indexed(file: &IndexedFile<'_>, snippet: &str, line: usize)
     if normalise(window).contains(&needle) {
         return true;
     }
-    let redacted = crate::onboard::redact::redact_visible_for_client(window);
-    normalise(&redacted).contains(&needle)
+    // Two redactions: the client one (every secret and a documentation key masked) and the model
+    // one (a documentation key left readable). A snippet that mixes a masked real secret with a
+    // readable documentation key, as an older stored row does, only matches the second.
+    let for_client = crate::onboard::redact::redact_visible_for_client(window);
+    if normalise(&for_client).contains(&needle) {
+        return true;
+    }
+    let for_model = crate::onboard::redact::redact_visible(window);
+    normalise(&for_model).contains(&needle)
 }
 
 /// Where the check reads files from: the scanned files in memory first, then the repo folder on

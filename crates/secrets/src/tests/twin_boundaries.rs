@@ -122,12 +122,16 @@ fn mixed_case_segments_are_not_a_readable_name() {
 
 #[test]
 fn a_lower_then_upper_segment_is_not_a_name_word() {
+    // `tokenName`, not `token`: an identifier that ENDS in `token` holds a passphrase (item 34).
     assert_secret(
-        &literal("token", &["qWRTPLKJHG-zXCVBN", "MLKJ-hGFDSPLKJH"]),
+        &literal("tokenName", &["qWRTPLKJHG-zXCVBN", "MLKJ-hGFDSPLKJH"]),
         SecretShape::NamedSecretLiteral,
     );
     assert_eq!(
-        twin_of(&literal("token", &["Qwrtplkjhg-ZXCVBN", "MLKJ-hgfdsplkjh"])),
+        twin_of(&literal(
+            "tokenName",
+            &["Qwrtplkjhg-ZXCVBN", "MLKJ-hgfdsplkjh"]
+        )),
         Twin::ReadableName
     );
 }
