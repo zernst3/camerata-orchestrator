@@ -10,6 +10,7 @@
 pub mod adopt;
 pub mod backend;
 pub mod convention_view;
+pub mod csv_cell;
 pub mod decision_memory;
 pub mod decision_sync;
 pub mod decisions;
