@@ -323,3 +323,43 @@ fn the_severity_paragraph_follows_the_finder_that_ran() {
         "{note}"
     );
 }
+
+/// V1 item 32: the method text and the workbook's About sheet list the file types the inspection
+/// reads, and the method text names the one exception (generated files) in the phrase Coverage
+/// uses, so the PDF and the workbook speak one language.
+#[test]
+fn the_method_text_and_the_about_sheet_list_the_inspected_file_types() {
+    let report = mixed_report();
+    let sealed = report.seal();
+    let dispositions = HashMap::new();
+    let reviewed = ReviewedReport::unreviewed(&sealed, &dispositions);
+    let json = build_report_json(&reviewed, None, &empty_opts());
+    let note = &json.methodology.deterministic_note;
+    assert!(
+        note.contains(
+            "The inspection reads code and configuration, server-side templates and HTML, \
+             build-runner files (Makefile, Procfile and Justfile), Markdown documentation and \
+             stylesheets (CSS, SCSS and Less)."
+        ),
+        "{note}"
+    );
+    assert!(
+        note.contains("listed under Coverage as generated: scanned for secrets only, not billed."),
+        "{note}"
+    );
+
+    let xlsx = crate::xlsx_export::build_workbook(&reviewed, None, &empty_opts()).unwrap();
+    let grid = xlsx_sheet_grid(&xlsx, v::START_HERE).expect("Start here");
+    let row = grid
+        .iter()
+        .find(|r| r.first().is_some_and(|c| c == v::P_FILE_TYPES))
+        .expect("the file types row");
+    assert_eq!(
+        row.get(1).map(String::as_str),
+        Some(
+            "Code and configuration, server-side templates and HTML, build-runner files \
+             (Makefile, Procfile and Justfile), Markdown documentation and stylesheets (CSS, SCSS \
+             and Less)"
+        )
+    );
+}

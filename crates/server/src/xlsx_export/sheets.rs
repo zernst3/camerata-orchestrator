@@ -1993,6 +1993,15 @@ pub(super) fn write_start_here(
         ),
     )?;
     r += 1;
+    ws.write_text(r, 0, v::P_FILE_TYPES)?;
+    let types = crate::onboard::files::INSPECTED_TYPES;
+    let mut chars = types.chars();
+    let sentence_case: String = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    ws.write_text(r, 1, sentence_case)?;
+    r += 1;
     if let Some(volume) = code_volume_label(report) {
         ws.write_text(r, 0, v::P_CODE_VOLUME)?;
         ws.write_text(r, 1, volume)?;

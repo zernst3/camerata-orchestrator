@@ -23,10 +23,26 @@ pub fn long_line_label() -> String {
     )
 }
 
+/// The file types the inspection reads, as the method text and the workbook's About sheet state
+/// them. One list in words, kept beside the lists it describes ([`text_kind`], `CODE_EXTS`).
+pub const INSPECTED_TYPES: &str = "code and configuration, server-side templates and HTML, \
+    build-runner files (Makefile, Procfile and Justfile), Markdown documentation and \
+    stylesheets (CSS, SCSS and Less)";
+
+/// The method text's sentence on what the inspection reads and the one exception to "everything
+/// read is billed".
+pub fn inspected_types_sentence() -> String {
+    format!(
+        "The inspection reads {INSPECTED_TYPES}. A file that declares itself generated in a \
+         comment near its top is listed under Coverage as {}.",
+        generated_label()
+    )
+}
+
 /// The reason a file that declares itself generated is not read, as Coverage, `camerata count` and
 /// the pre-start check state it. One phrase, so no surface words it differently.
 pub fn generated_label() -> String {
-    "generated: scanned for secrets only, not billed".to_string()
+    camerata_api_types::audit::GENERATED_FILES_LABEL.to_string()
 }
 
 /// Files larger than this are not read for the inspection. An admitted text file over it (and not
