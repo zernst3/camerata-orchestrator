@@ -502,7 +502,47 @@ const KEY_QUALIFIERS: &[&str] = &[
     "license",
     "master",
     "session",
+    "client",
+    "consumer",
+    "app",
+    "service",
+    "role",
+    "jwt",
+    "ssh",
+    "deploy",
+    "hmac",
+    "webhook",
+    "crypto",
+    "stripe",
+    "bot",
 ];
+
+/// Trailing words that say which copy of a credential an identifier names, not what it is
+/// (`API_KEY_PROD`, `API_TOKEN_STAGING`, `access_token_value`). Dropped before the last word is
+/// read, with any all-digit word and any `v<digits>` word.
+const NAME_SUFFIX_WORDS: &[&str] = &[
+    "prod",
+    "production",
+    "staging",
+    "stage",
+    "dev",
+    "test",
+    "live",
+    "value",
+    "default",
+    "primary",
+    "secondary",
+    "old",
+    "new",
+];
+
+fn is_suffix_word(word: &str) -> bool {
+    NAME_SUFFIX_WORDS.contains(&word)
+        || (!word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()))
+        || word
+            .strip_prefix('v')
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
 
 /// Single words that already hold the qualifier (`apikey`, `accesskey`).
 const KEY_COMPOUNDS: &[&str] = &[
@@ -551,6 +591,35 @@ fn identifier_words(text: &str) -> Vec<String> {
     words
 }
 
+/// Whether `after_name` (the text after an identifier) assigns it: closing quotes or a bracket
+/// and spaces, then `:`, `=` or `=>`.
+fn is_assigned(after_name: &str) -> bool {
+    after_name
+        .trim_start_matches(|c: char| matches!(c, '"' | '\'' | ']' | ' ' | '\t'))
+        .starts_with([':', '='])
+}
+
+/// `before_value` with the identifier it starts in widened to the left: the quoted pattern's
+/// identifier class stops at `-` and `.`, so `"x-api-key": "..."` matches from `key`. The
+/// widening reads the line in front of the match over `[A-Za-z0-9_.-]`.
+fn identifier_head(before_value: &str, context: &TwinContext<'_>) -> String {
+    let head = context.line_prefix.strip_suffix(before_value).unwrap_or("");
+    let kept = head
+        .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .len();
+    let lead = &head[kept..];
+    // Widen only when the name is being assigned (`"x-api-key": "..."`, `headers["X-Api-Key"] =`,
+    // `'api-key' => '...'`): a quoted string in a list (`["SEC-NO-TOKEN-1", "..."]`) is a value.
+    let end = before_value
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .unwrap_or(before_value.len());
+    if is_assigned(&before_value[end..]) {
+        format!("{lead}{before_value}")
+    } else {
+        before_value.to_string()
+    }
+}
+
 /// Whether `before_value` names something whose value may be a passphrase that READS like a name
 /// (a diceware phrase on an `api_token` or `apiKey` identifier): everything [`names_a_secret`]
 /// names, plus an identifier that ENDS in the word `token` (or `tokens`), in a compound such as
@@ -561,17 +630,26 @@ fn names_a_passphrase_holder(before_value: &str) -> bool {
     if names_a_secret(before_value) {
         return true;
     }
-    // The identifier is what sits in front of the assignment (`=`, `:`).
-    let identifier = before_value
-        .split([':', '='])
-        .next()
-        .unwrap_or(before_value);
-    let words = identifier_words(identifier);
+    // The identifier is the name the text opens with, up to the first quote, space or operator.
+    let end = before_value
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .unwrap_or(before_value.len());
+    let identifier = &before_value[..end];
+    // Only a name that is being assigned: `TOKEN-1` in a list of strings is a value.
+    if !is_assigned(&before_value[end..]) {
+        return false;
+    }
+    let mut words = identifier_words(identifier);
+    while words.len() > 1 && words.last().is_some_and(|w| is_suffix_word(w)) {
+        words.pop();
+    }
     let Some((last, before)) = words.split_last() else {
         return false;
     };
-    matches!(last.as_str(), "token" | "tokens")
-        || KEY_COMPOUNDS.contains(&last.as_str())
+    matches!(
+        last.as_str(),
+        "token" | "tokens" | "pass" | "auth" | "bearer"
+    ) || KEY_COMPOUNDS.contains(&last.as_str())
         || (matches!(last.as_str(), "key" | "keys")
             && before
                 .last()
@@ -687,7 +765,7 @@ pub(crate) fn classify(
     // A readable name is code (`STORAGE_KEY`, `queryKey`); on a password-like identifier the same
     // shape is a passphrase.
     if shape == SecretShape::NamedSecretLiteral
-        && !names_a_passphrase_holder(before_value)
+        && !names_a_passphrase_holder(&identifier_head(before_value, context))
         && is_readable_name(value)
     {
         return Some(Twin::ReadableName);

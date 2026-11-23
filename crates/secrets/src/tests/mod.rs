@@ -3,6 +3,7 @@
 
 mod client_masking;
 mod client_twins;
+mod client_twins_r1;
 mod detection;
 mod detector_edges;
 mod false_alarms;
