@@ -388,7 +388,8 @@ pub fn file_in_scope(path: &str, content: &str, scope: &Scope) -> bool {
             kinds,
         } => {
             kind.is_none_or(|k| kinds.contains(k))
-                && language.is_none_or(|l| file_language(path).is_some_and(|f| language_covers(l, f)))
+                && language
+                    .is_none_or(|l| file_language(path).is_some_and(|f| language_covers(l, f)))
                 && declared_scope_matches(path, content, applies)
         }
     }
@@ -744,7 +745,11 @@ mod tests {
         assert_eq!(rust_files[0].0, "a.rs");
 
         let arch_files = files_for_rule(&r("ARCH-1"), true, &files);
-        assert_eq!(arch_files.len(), 3, "the Markdown file is not judged by ARCH-1");
+        assert_eq!(
+            arch_files.len(),
+            3,
+            "the Markdown file is not judged by ARCH-1"
+        );
     }
 
     #[test]
@@ -1199,7 +1204,11 @@ mod tests {
 
     #[test]
     fn a_template_or_html_page_is_judged_by_the_web_and_secret_rules_only() {
-        for path in ["views/page.ejs", "app/views/x.html.erb", "public/index.html"] {
+        for path in [
+            "views/page.ejs",
+            "app/views/x.html.erb",
+            "public/index.html",
+        ] {
             assert_eq!(
                 rules_sent(path, SAMPLE_IDS),
                 [
@@ -1263,14 +1272,21 @@ mod tests {
         assert!(!file_in_scope("README.md", "", &scope_of(&rule, true)));
         assert!(file_in_scope("notes.txt", "", &scope_of(&rule, true)));
         let table_rule = scoped("SEC-NO-UNSAFE-HTML-SINK-1", &[], &["rust"]);
-        assert!(file_in_scope("views/p.ejs", "", &scope_of(&table_rule, true)));
-        assert!(!file_in_scope("README.md", "", &scope_of(&table_rule, true)));
+        assert!(file_in_scope(
+            "views/p.ejs",
+            "",
+            &scope_of(&table_rule, true)
+        ));
+        assert!(!file_in_scope(
+            "README.md",
+            "",
+            &scope_of(&table_rule, true)
+        ));
     }
 
     #[tokio::test]
     async fn the_routing_table_names_only_corpus_rules() {
-        let (corpus, _) =
-            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        let (corpus, _) = camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
         for (id, kinds) in TEXT_ROUTES {
             assert!(corpus.get_by_id(id).is_some(), "{id} is not a corpus rule");
             assert_ne!(*kinds, TextKinds::NONE, "{id}");

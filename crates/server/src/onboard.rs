@@ -2634,7 +2634,11 @@ pub async fn audit_repos_with_llm_controlled(
                 let unread_paths: Vec<String> = skipped_oversize
                     .iter()
                     .filter(|p| !secret_searched_oversize.contains(*p))
-                    .chain(generated.iter().filter(|p| !secret_searched_oversize.contains(*p)))
+                    .chain(
+                        generated
+                            .iter()
+                            .filter(|p| !secret_searched_oversize.contains(*p)),
+                    )
                     .chain(&skipped_beyond_cap)
                     .chain(&skipped_unreadable)
                     .cloned()
@@ -2839,7 +2843,7 @@ pub async fn audit_repos_with_llm_controlled(
                             &crate::jobs::progress_tool_key(spec, "architectural", multi_repo),
                         );
                     }
-                    // Reference text (HTML, components, docs) is handed to the architectural
+                    // Reference text (generated code) is handed to the architectural
                     // tier ONLY, and only when an armed rule needs it: the AI digest and the
                     // secrets floor above and below keep reading `files` alone.
                     let arch_armed = architectural::withhold_on_incomplete_scan(
