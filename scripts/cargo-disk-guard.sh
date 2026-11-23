@@ -11,7 +11,8 @@
 # disk pressure.
 #
 # Everything it deletes is regenerable build output or an already-merged worktree. It never
-# touches a worktree with uncommitted changes, never deletes an unmerged branch's source, and
+# touches a worktree with uncommitted changes, never deletes any branch, never removes
+# a worktree with no commits of its own, and
 # never touches anything a running cargo/rustc uses, whose branch committed in the last
 # ACTIVE_MINUTES, or that has modified tracked files.
 #
@@ -87,47 +88,76 @@ free_gib() {
     df -g "$VOLUME" 2>/dev/null | awk 'NR==2 {print $4}'
 }
 
-# Running cargo/rustc processes, collected ONCE at start (before the guard's own cargo-sweep
-# runs, so the guard never counts itself). APFS-cloned targets and sweeps rewrite file mtimes,
-# so mtimes say nothing about activity; a live process does. Matches the exact command name, so
-# "cargo-sweep" and "cargo-disk-guard" do not count. Works without root (own processes).
-PROC_PIDS="$(ps -axo pid=,command= 2>/dev/null | awk '{n=$2; sub(/.*\//,"",n); if (n=="cargo" || n=="rustc") print $1}' | paste -sd, -)"
+# ── activity detection ──────────────────────────────────────────────────────────────────────
+# APFS-cloned targets and cargo-sweep rewrite file mtimes, so mtimes under target/ say nothing.
+# Activity is: ANY process of this user with its cwd inside the path or a command line that
+# mentions a path inside it (cargo, rustc, cargo-nextest, a test binary under target/, a browser
+# started by tests, an agent session); OR its branch's last commit is newer than ACTIVE_MINUTES;
+# OR a tracked file is modified; OR any file outside target/ and .git, or the worktree's git
+# admin files (HEAD, index), changed within ACTIVE_MINUTES. Fail closed: if ps, lsof or git
+# fails, the path counts as active, and the whole run aborts when ps or lsof cannot run.
+# The guard's own process tree (including the cargo-sweep it starts) never counts.
+LSOF="${CARGO_GUARD_LSOF:-lsof}"
+ME_USER="${USER:-$(id -un)}"
 PROC_CWDS=""
-[ -n "$PROC_PIDS" ] && PROC_CWDS="$(lsof -a -d cwd -p "$PROC_PIDS" -Fn 2>/dev/null | grep '^n' | cut -c2-)"
-PROC_ARGS="$(ps -axo command= 2>/dev/null | awk '{n=$1; sub(/.*\//,"",n); if (n=="cargo" || n=="rustc") print $0 " "}')"
+PROC_ARGS=""
+collect_procs() {
+    local table excl
+    command -v "$LSOF" >/dev/null 2>&1 || { log "ABORT: lsof not found, cannot detect running builds"; exit 1; }
+    table="$(ps -axo pid=,ppid=,command= 2>/dev/null)" || { log "ABORT: ps failed"; exit 1; }
+    [ -n "$table" ] || { log "ABORT: ps returned nothing"; exit 1; }
+    excl="$(printf '%s\n' "$table" | awk -v me="$$" '{pp[$1]=$2} END{ex[me]=1; ch=1; while(ch){ch=0; for(p in pp) if(!(p in ex) && (pp[p] in ex)){ex[p]=1; ch=1}} for(p in ex) printf "%s ", p}')"
+    PROC_ARGS="$(printf '%s\n' "$table" | awk -v ex=" $excl " 'index(ex, " " $1 " ")==0 {sub(/^ *[0-9]+ +[0-9]+ +/,""); print $0 " "}')"
+    local out
+    out="$("$LSOF" -a -d cwd -u "$ME_USER" -Fpn 2>/dev/null)" || { log "ABORT: lsof failed, cannot detect running builds"; exit 1; }
+    PROC_CWDS="$(printf '%s\n' "$out" | awk -v ex=" $excl " '/^p/ {skip = (index(ex, " " substr($0,2) " ")>0); next} /^n/ && !skip {print substr($0,2)}')"
+}
+collect_procs
 
 # Tracked files modified in git checkout $1 (untracked files do not count; same ignores as the
-# dirty check below plus .claude/settings.json).
+# dirty check plus .claude/settings.json). Returns 2 when git itself fails.
 tracked_dirty() {
-    git -C "$1" status --porcelain --untracked-files=no 2>/dev/null |
-        grep -v -e ' sample-report/' -e ' \.claude/settings\.json$' | head -1
+    local st
+    st="$(git -C "$1" status --porcelain --untracked-files=no 2>/dev/null)" || return 2
+    printf '%s\n' "$st" | grep -v -e '^$' -e ' sample-report/' -e ' \.claude/settings\.json$' | head -1
 }
 
-# Sets ACTIVE_WHY and returns 0 when $1 is in use: a running cargo/rustc has its cwd or its
-# arguments (--manifest-path, --target-dir) inside it, OR its branch's last commit is newer than
-# ACTIVE_MINUTES, OR a tracked file is modified. Never looks at file mtimes.
+# Sets ACTIVE_WHY and returns 0 when $1 is in use (see above); 1 when idle.
 is_active() {
-    local d c ct now
-    d="$(cd -P "$1" 2>/dev/null && pwd)" || d="$1"
+    local d c ct now gd td rc
+    d="$(cd -P "$1" 2>/dev/null && pwd)" || { ACTIVE_WHY="cannot resolve path"; return 0; }
     while IFS= read -r c; do
         [ -n "$c" ] || continue
-        case "$c/" in "$d/"*) ACTIVE_WHY="running cargo/rustc cwd $c"; return 0 ;; esac
+        case "$c/" in "$d/"*) ACTIVE_WHY="a running process has its cwd at $c"; return 0 ;; esac
     done <<GUARD_EOF
 $PROC_CWDS
 GUARD_EOF
     if [ -n "$PROC_ARGS" ] && printf '%s\n' "$PROC_ARGS" | grep -qF -e "$d/" -e "$d "; then
-        ACTIVE_WHY="running cargo/rustc references it"
+        ACTIVE_WHY="a running process command line mentions it"
         return 0
     fi
-    if [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" = "$d" ]; then
+    if [ -e "$d/.git" ]; then
+        if [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" != "$d" ]; then
+            ACTIVE_WHY="git failed"; return 0
+        fi
         ct="$(git -C "$d" log -1 --format=%ct 2>/dev/null)"
+        [ -n "$ct" ] || { ACTIVE_WHY="git failed"; return 0; }
         now="$(date +%s)"
-        if [ -n "$ct" ] && [ $(( (now - ct) / 60 )) -lt "$ACTIVE_MINUTES" ]; then
+        if [ $(( (now - ct) / 60 )) -lt "$ACTIVE_MINUTES" ]; then
             ACTIVE_WHY="last commit under ${ACTIVE_MINUTES} min old"
             return 0
         fi
-        if [ -n "$(tracked_dirty "$d")" ]; then
-            ACTIVE_WHY="tracked files modified"
+        td="$(tracked_dirty "$d")"; rc=$?
+        if [ "$rc" = 2 ]; then ACTIVE_WHY="git failed"; return 0; fi
+        if [ -n "$td" ]; then ACTIVE_WHY="tracked files modified"; return 0; fi
+        gd="$(git -C "$d" rev-parse --absolute-git-dir 2>/dev/null)" || { ACTIVE_WHY="git failed"; return 0; }
+        [ "$ACTIVE_MINUTES" -gt 0 ] 2>/dev/null || { ACTIVE_WHY=""; return 1; }  # BSD find treats -mmin -0 as "now"
+        if [ -n "$(find "$gd" -maxdepth 1 \( -name HEAD -o -name index \) -mmin "-$ACTIVE_MINUTES" -print -quit 2>/dev/null)" ]; then
+            ACTIVE_WHY="git HEAD/index changed under ${ACTIVE_MINUTES} min ago"
+            return 0
+        fi
+        if [ -n "$(find "$d" \( -name target -o -name .git \) -prune -o -type f -mmin "-$ACTIVE_MINUTES" -print -quit 2>/dev/null)" ]; then
+            ACTIVE_WHY="a file changed under ${ACTIVE_MINUTES} min ago"
             return 0
         fi
     fi
@@ -135,7 +165,21 @@ GUARD_EOF
     return 1
 }
 
+# Re-check right before a removal: processes may have started since the run began.
+still_idle() {
+    collect_procs
+    if is_active "$1"; then log "keep $1: became active ($ACTIVE_WHY)"; return 1; fi
+    return 0
+}
+
+# Only regenerable build output goes through here: a target/ dir or something under one, never a
+# symlink.
 remove_path() {
+    case "$1" in
+        */target|*/target/*) ;;
+        *) log "REFUSED to remove $1: not a target/ path"; return ;;
+    esac
+    if [ -L "$1" ]; then log "REFUSED to remove $1: symlink"; return; fi
     if [ "$DRY_RUN" = 1 ]; then
         log "[dry-run] would remove $1 ($(du -sh "$1" 2>/dev/null | cut -f1))"
     else
@@ -144,41 +188,77 @@ remove_path() {
     fi
 }
 
+# True when the tip of branch $1 is a real merge into a MERGE_TARGET: reachable from the target
+# but NOT on its first-parent line. A branch with no work of its own (fresh, or still sitting at
+# an old base) sits on that line, so it never counts as merged.
+branch_merged() {
+    local br="$1" tip target fp
+    tip="$(git -C "$ORCH_REPO" rev-parse --verify -q "refs/heads/$br" 2>/dev/null)" || return 1
+    for target in $MERGE_TARGETS; do
+        git -C "$ORCH_REPO" rev-parse --verify -q "$target" >/dev/null || continue
+        git -C "$ORCH_REPO" merge-base --is-ancestor "$tip" "$target" 2>/dev/null || continue
+        fp="$(git -C "$ORCH_REPO" rev-list --first-parent "$target" 2>/dev/null)" || continue
+        printf '%s\n' "$fp" | grep -qx "$tip" && continue
+        return 0
+    done
+    return 1
+}
+
 log "start; free=$(free_gib) GiB"
 
-# ── 1. agent worktrees ─────────────────────────────────────────────────────────────────────
+# ── 1. worktrees ───────────────────────────────────────────────────────────────────────────
+# Removes only whole worktrees (git worktree remove, no force) that are merged, clean, have work
+# of their own and are idle. Branches are NEVER deleted (branch cleanup is manual).
 if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
     for wt in "$ORCH_REPO"/.claude/worktrees/*; do
+        [ -e "$wt" ] || continue
+        if [ -L "$wt" ]; then log "keep $wt: symlink, ignored"; continue; fi
         [ -d "$wt" ] || continue
         [ -e "$wt/.git" ] || continue
         if is_active "$wt"; then
             log "keep worktree $wt: active ($ACTIVE_WHY)"
             continue
         fi
+        gd="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)"
+        if [ -n "$gd" ] && [ -e "$gd/locked" ]; then
+            log "keep worktree $wt: locked"
+            continue
+        fi
         branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-        dirty="$(git -C "$wt" status --porcelain 2>/dev/null | grep -v -e ' sample-report/' -e ' \.claude/settings\.json$' | head -1)"
+        if ! st="$(git -C "$wt" status --porcelain 2>/dev/null)"; then
+            log "keep worktree $wt: git status failed"
+            continue
+        fi
+        dirty="$(printf '%s\n' "$st" | grep -v -e '^$' -e ' sample-report/' -e ' \.claude/settings\.json$' | head -1)"
         merged=0
-        for target in $MERGE_TARGETS; do
-            if git -C "$ORCH_REPO" rev-parse --verify -q "$target" >/dev/null &&
-                git -C "$ORCH_REPO" merge-base --is-ancestor "$branch" "$target" 2>/dev/null; then
-                merged=1
-            fi
-        done
-        if [ "$merged" = 1 ] && [ -z "$dirty" ] && [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
+        if [ -n "$branch" ] && [ "$branch" != "HEAD" ] && branch_merged "$branch"; then merged=1; fi
+        why="merged=$merged, dirty=$([ -n "$dirty" ] && echo yes || echo no), branch=$branch"
+        if [ "$merged" = 1 ] && [ -z "$dirty" ]; then
             if [ "$DRY_RUN" = 1 ]; then
-                log "[dry-run] would remove merged worktree $wt (branch $branch): merged, clean, idle"
+                log "[dry-run] would remove merged worktree $wt (branch $branch): merged, clean, idle, has own commits"
+                log "branch kept: $branch (branch cleanup is manual)"
             else
-                log "removing merged worktree $wt (branch $branch, $(du -sh "$wt" 2>/dev/null | cut -f1))"
-                git -C "$ORCH_REPO" worktree unlock "$wt" 2>/dev/null
-                git -C "$ORCH_REPO" worktree remove --force "$wt" &&
-                    git -C "$ORCH_REPO" branch -D "$branch" >/dev/null 2>&1
+                still_idle "$wt" || continue
+                sz="$(du -sh "$wt" 2>/dev/null | cut -f1)"
+                ign="$(git -C "$wt" status --porcelain --ignored 2>/dev/null | grep '^!!' | grep -v ' target/$' | head -5)"
+                [ -z "$ign" ] || log "ignored files that go with $wt: $(printf '%s' "$ign" | tr '\n' ' ')"
+                if git -C "$ORCH_REPO" worktree remove "$wt" 2>/dev/null; then
+                    log "removed merged worktree $wt (branch $branch, $sz)"
+                    log "branch kept: $branch (branch cleanup is manual)"
+                else
+                    log "keep worktree $wt: git refused to remove it"
+                fi
             fi
         elif [ -d "$wt/target" ]; then
-            # Unmerged or dirty, but idle: keep the source, drop the regenerable build output.
-            log "keep worktree $wt source: not removable (merged=$merged, dirty=$([ -n "$dirty" ] && echo yes || echo no), branch=$branch); dropping idle target/"
-            remove_path "$wt/target"
+            free="$(free_gib)"
+            if [ -n "$free" ] && [ "$free" -lt "$TIER1_GIB" ]; then
+                log "keep worktree $wt source ($why); dropping idle target/ (free ${free} GiB < ${TIER1_GIB})"
+                if [ "$DRY_RUN" = 1 ] || still_idle "$wt"; then remove_path "$wt/target"; fi
+            else
+                log "keep worktree $wt ($why); target/ kept (free ${free} GiB >= ${TIER1_GIB})"
+            fi
         else
-            log "keep worktree $wt: not removable (merged=$merged, dirty=$([ -n "$dirty" ] && echo yes || echo no), branch=$branch)"
+            log "keep worktree $wt: not removable ($why)"
         fi
     done
     [ "$DRY_RUN" = 1 ] || git -C "$ORCH_REPO" worktree prune 2>/dev/null
@@ -218,7 +298,9 @@ if [ -n "$free" ] && [ "$free" -lt "$TIER2_GIB" ]; then
     echo "$IDLE_TARGETS" | while read -r t; do
         [ -n "$t" ] || continue
         for sub in "$t"/*/incremental "$t/release"; do
-            [ -d "$sub" ] && remove_path "$sub"
+            [ -d "$sub" ] || continue
+            [ "$DRY_RUN" = 1 ] || still_idle "$(dirname "$t")" || break
+            remove_path "$sub"
         done
     done
 fi
@@ -227,7 +309,9 @@ free="$(free_gib)"
 if [ -n "$free" ] && [ "$free" -lt "$TIER3_GIB" ]; then
     log "tier 3 (free ${free} GiB < ${TIER3_GIB}): whole target/ of idle repos"
     echo "$IDLE_TARGETS" | while read -r t; do
-        [ -n "$t" ] && [ -d "$t" ] && remove_path "$t"
+        [ -n "$t" ] && [ -d "$t" ] || continue
+        [ "$DRY_RUN" = 1 ] || still_idle "$(dirname "$t")" || continue
+        remove_path "$t"
     done
 fi
 
