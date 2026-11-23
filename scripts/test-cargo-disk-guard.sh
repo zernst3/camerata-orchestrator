@@ -10,6 +10,7 @@ echo "temp folder: $T"
 ORCH="$T/orch"; WT="$ORCH/.claude/worktrees"
 g() { git -C "$ORCH" -c user.email=t@t -c user.name=t "$@"; }
 gw() { local d="$1"; shift; git -C "$d" -c user.email=t@t -c user.name=t "$@"; }
+[ -n "$T" ] || exit 1
 mkdir -p "$ORCH" "$T/bin" && cd "$ORCH" || exit 1
 git init -q -b main . && echo a > f.txt && echo 'target/' > .gitignore && g add f.txt .gitignore && g commit -q -m init
 mkdir -p "$WT"
@@ -28,6 +29,9 @@ mkbranch "backup/x" "$WT/bk"
 mkbranch "ext" "$T/ext"; ln -s "$T/ext" "$WT/link"
 g worktree add -q -b um "$WT/um" main
 gw "$WT/um" commit -q --allow-empty -m "unmerged work"
+g worktree add -q -b uo "$WT/uo" main   # unmerged, last commit 2 days old
+GIT_AUTHOR_DATE="2020-01-01T00:00:00" GIT_COMMITTER_DATE="2020-01-01T00:00:00" gw "$WT/uo" commit -q --allow-empty -m "old unmerged work"
+mkdir -p "$WT/uo/target"
 g checkout -q --detach; g worktree add -q "$WT/wm" main   # a worktree sitting on main itself
 g worktree lock "$WT/wl"
 echo changed >> "$WT/md/f.txt"       # merged, tracked file modified
@@ -36,7 +40,7 @@ echo new > "$WT/mu/untracked.txt"    # merged, untracked file only
 GD="$(git -C "$WT/gf" rev-parse --absolute-git-dir)"; echo garbage > "$GD/index"
 git init -q -b main "$T/other" && echo s > "$T/other/src.txt" && git -C "$T/other" add src.txt && git -C "$T/other" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$WT/mc/target" "$WT/um/target" "$WT/run/target" "$T/other/target" "$WT/mc/target/x"
-for d in "$WT/mc/target" "$WT/um/target" "$WT/run/target" "$T/other/target"; do echo "Signature: 8a477f597d28d172789f06886806bc55" > "$d/CACHEDIR.TAG"; done
+for d in "$WT/mc/target" "$WT/um/target" "$WT/run/target" "$WT/uo/target" "$T/other/target"; do echo "Signature: 8a477f597d28d172789f06886806bc55" > "$d/CACHEDIR.TAG"; done
 # stand-ins for running builds. A symlink named cargo gives sleep that process name.
 ln -s /bin/sleep "$T/bin/cargo"
 printf '#!/bin/bash\nsleep 120\n' > "$T/bin/rustc"; chmod +x "$T/bin/rustc"
@@ -52,7 +56,7 @@ sleep 1
 runguard() { # extra env first via env, args after
     CARGO_GUARD_REPOS_ROOT="$T" CARGO_GUARD_ORCH_REPO="$ORCH" CARGO_GUARD_MERGE_TARGETS=main \
     CARGO_GUARD_ACTIVE_MINUTES=0 CARGO_GUARD_STAMP="$T/stamp" CARGO_GUARD_VOLUME="$T" \
-    CARGO_GUARD_TIER1_GIB="${TIER:-0}" CARGO_GUARD_TIER2_GIB="${TIER:-0}" CARGO_GUARD_TIER3_GIB="${TIER:-0}" \
+    CARGO_GUARD_TIER1_GIB="${T1:-${TIER:-0}}" CARGO_GUARD_TIER2_GIB="${T2:-${TIER:-0}}" CARGO_GUARD_TIER3_GIB="${T3:-${TIER:-0}}" \
     bash "$GUARD" "$@" 2>&1
 }
 out="$(runguard --dry-run)"
@@ -90,9 +94,17 @@ CARGO_GUARD_LSOF=/nonexistent/lsof runguard >/dev/null; rc=$?
 out5="$(CARGO_GUARD_ACTIVE_MINUTES=5 bash -c 'true'; CARGO_GUARD_REPOS_ROOT="$T" CARGO_GUARD_ORCH_REPO="$ORCH" CARGO_GUARD_MERGE_TARGETS=main CARGO_GUARD_ACTIVE_MINUTES=5 CARGO_GUARD_STAMP="$T/stamp" CARGO_GUARD_VOLUME="$T" CARGO_GUARD_TIER1_GIB=0 CARGO_GUARD_TIER2_GIB=0 CARGO_GUARD_TIER3_GIB=0 bash "$GUARD" --dry-run 2>&1)"
 echo "$out5" | grep -qF "would remove merged worktree" && r=removed || r=none; ok "recent activity keeps all" none "$r"
 
+# um/target (fresh unmerged) and uo/target (unmerged, 2 days old) under the tier rules, dry-run
+tgt() { runguard --dry-run > "$T/tgt.out"; grep -qF "would remove $WT/$1/target" "$T/tgt.out" && echo drop || echo keep; }
+ok "above thresholds: um/target kept" keep "$(T1=0 T2=0 T3=0 tgt um)"
+ok "below tier1 only: fresh um/target kept" keep "$(T1=100000 T2=0 T3=0 tgt um)"
+ok "below tier1 only: 2-day-old uo/target dropped" drop "$(T1=100000 T2=0 T3=0 tgt uo)"
+ok "above thresholds: uo/target kept" keep "$(T1=0 T2=0 T3=0 tgt uo)"
+ok "below tier2: fresh um/target dropped" drop "$(T1=100000 T2=100000 T3=0 tgt um)"
+
 # REAL pass inside the temp repo only, with real (huge) thresholds so every tier fires
 TIER=100000 runguard | sed 's/^/  real: /'
-for b in main backup/x fr fo mc md mu run ra tb gf wl sp um ext; do
+for b in main backup/x uo fr fo mc md mu run ra tb gf wl sp um ext; do
     git -C "$ORCH" rev-parse --verify -q "refs/heads/$b" >/dev/null && r=exists || r=deleted
     ok "branch $b survives" exists "$r"
 done

@@ -251,11 +251,16 @@ if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
             fi
         elif [ -d "$wt/target" ]; then
             free="$(free_gib)"
-            if [ -n "$free" ] && [ "$free" -lt "$TIER1_GIB" ]; then
-                log "keep worktree $wt source ($why); dropping idle target/ (free ${free} GiB < ${TIER1_GIB})"
+            ct="$(git -C "$wt" log -1 --format=%ct 2>/dev/null)"
+            age_h=0; [ -n "$ct" ] && age_h=$(( ($(date +%s) - ct) / 3600 ))
+            drop=0
+            if [ -n "$free" ] && [ "$free" -lt "$TIER2_GIB" ]; then drop=1
+            elif [ -n "$free" ] && [ "$free" -lt "$TIER1_GIB" ] && [ -n "$ct" ] && [ "$age_h" -ge 24 ]; then drop=1; fi
+            if [ "$drop" = 1 ]; then
+                log "keep worktree $wt source ($why); dropping idle target/ (free ${free} GiB, last commit ${age_h} h old)"
                 if [ "$DRY_RUN" = 1 ] || still_idle "$wt"; then remove_path "$wt/target"; fi
             else
-                log "keep worktree $wt ($why); target/ kept (free ${free} GiB >= ${TIER1_GIB})"
+                log "keep worktree $wt ($why); target/ kept (free ${free} GiB, tier 1 ${TIER1_GIB}, tier 2 ${TIER2_GIB}, last commit ${age_h} h old; needs free < tier 2, or free < tier 1 and commit over 24 h old)"
             fi
         else
             log "keep worktree $wt: not removable ($why)"
