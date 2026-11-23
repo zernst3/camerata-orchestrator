@@ -3171,6 +3171,8 @@ pub(crate) async fn start_audit_job(
                                 store.add_note(&notice);
                             }
                             Err(why) => {
+                                // A resume refused before any work leaves no segment of its own.
+                                store.discard_segment();
                                 body_jobs.fail(&body_jid, why);
                                 return;
                             }
@@ -3182,6 +3184,7 @@ pub(crate) async fn start_audit_job(
                             }
                             Ok(None) => {}
                             Err(why) => {
+                                store.discard_segment();
                                 body_jobs.fail(&body_jid, why);
                                 return;
                             }
@@ -3204,6 +3207,7 @@ pub(crate) async fn start_audit_job(
                             &ids,
                             &run_controls,
                         ) {
+                            store.discard_segment();
                             body_jobs.fail(&body_jid, format!("{why} {APP_CLIENT_LOCK_FIX}"));
                             return;
                         }
@@ -3219,6 +3223,7 @@ pub(crate) async fn start_audit_job(
                             &run_controls,
                             crate::claude_version::check_run_models,
                         ) {
+                            store.discard_segment();
                             body_jobs.fail(&body_jid, why);
                             return;
                         }

@@ -904,6 +904,7 @@ async fn read_cli_stream_capturing(
     Ok(LlmResponse {
         reported_model,
         cli_cost_usd: cost,
+        elapsed_ms: None,
         text: full,
         model: model.to_string(),
         backend: "cli".to_string(),
@@ -1387,6 +1388,7 @@ fn messages_response(
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text,
         model: model.to_string(),
         backend: backend.to_string(),
@@ -2214,13 +2216,17 @@ impl Llm {
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req)?;
+        let started = std::time::Instant::now();
         // CHOKEPOINT: every streaming call records into the cumulative ledger (success folds
         // usage + clears the rate-limit flag; failure runs the rate-limit detector). The `_`
         // arm delegates to `complete`, which records there — so guard against double-counting
         // by only recording the directly-served arms here.
         let result = match (self.vendor, self.backend) {
             (Vendor::Anthropic, Backend::Cli) => {
-                let r = self.complete_cli_streaming(&req, &model, on_delta).await;
+                let r = stamp_elapsed(
+                    self.complete_cli_streaming(&req, &model, on_delta).await,
+                    started,
+                );
                 if let Ok(resp) = &r {
                     self.ledger_record(resp);
                 }
@@ -2229,9 +2235,11 @@ impl Llm {
             (Vendor::Anthropic, Backend::Api) => {
                 // Streamed end to end: each text delta reaches `on_delta` as it arrives, so the
                 // listener is never handed the whole reply at once at the end.
-                let r = self
-                    .complete_api_streaming(self.messages_url(), &req, &model, on_delta)
-                    .await;
+                let r = stamp_elapsed(
+                    self.complete_api_streaming(self.messages_url(), &req, &model, on_delta)
+                        .await,
+                    started,
+                );
                 if let Ok(resp) = &r {
                     self.ledger_record(resp);
                 }
@@ -2255,6 +2263,7 @@ impl Llm {
     /// request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req)?;
+        let started = std::time::Instant::now();
         // CHOKEPOINT: fold every completion into the cumulative ledger. Success records usage
         // + clears the rate-limit flag; failure runs the provider-agnostic rate-limit detector.
         let result = match self.vendor {
@@ -2283,6 +2292,7 @@ impl Llm {
                 self.vendor.label()
             ),
         };
+        let result = stamp_elapsed(result, started);
         match &result {
             Ok(resp) => self.ledger_record(resp),
             Err(e) => self.ledger_note_failure(&e.to_string()),
@@ -3547,6 +3557,7 @@ impl OpenRouterCompleter {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: output,
             model: model_returned,
             backend: "openrouter/api".to_string(),
@@ -3561,6 +3572,26 @@ impl OpenRouterCompleter {
     }
 }
 
+/// Stamp a finished backend call with how long it took. Called once where each backend call
+/// returns (`Llm::complete`, `Llm::complete_streaming`, `OpenRouterCompleter::complete`), so
+/// every response the engine meters carries `elapsed_ms`. A failed call has no response to stamp.
+fn stamp_elapsed(
+    mut result: anyhow::Result<LlmResponse>,
+    started: std::time::Instant,
+) -> anyhow::Result<LlmResponse> {
+    let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match &mut result {
+        Ok(resp) => resp.elapsed_ms = Some(elapsed),
+        // A failed call still waited: a typed transport failure carries how long.
+        Err(e) => {
+            if let Some(failure) = e.downcast_mut::<crate::failure::LlmCallFailure>() {
+                failure.elapsed_ms = Some(elapsed);
+            }
+        }
+    }
+    result
+}
+
 #[async_trait::async_trait]
 impl LlmPort for OpenRouterCompleter {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
@@ -3571,7 +3602,8 @@ impl LlmPort for OpenRouterCompleter {
         } else {
             req.model.clone()
         };
-        self.call_api(&req, &model).await
+        let started = std::time::Instant::now();
+        stamp_elapsed(self.call_api(&req, &model).await, started)
     }
 
     async fn complete_streaming(
@@ -4516,6 +4548,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-haiku-5-5".to_string(),
             backend: "api".to_string(),
@@ -5035,6 +5068,7 @@ malformed line, not json
                 response: Some(LlmResponse {
                     reported_model: None,
                     cli_cost_usd: None,
+                    elapsed_ms: None,
                     text: "text A".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),
@@ -5060,6 +5094,7 @@ malformed line, not json
                 response: Some(LlmResponse {
                     reported_model: None,
                     cli_cost_usd: None,
+                    elapsed_ms: None,
                     text: "text B".to_string(),
                     model: "m".to_string(),
                     backend: "api/batch".to_string(),

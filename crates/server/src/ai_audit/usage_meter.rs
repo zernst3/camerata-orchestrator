@@ -803,6 +803,13 @@ impl UsageMeter {
         self.health.note_success();
     }
 
+    /// A Message Batches round of `stage` ended (its results were read): its time joins the
+    /// stage's figures ([`crate::stage_telemetry::StageMeter::record_batch_round`]).
+    pub fn record_batch_round(&self, stage: Stage, started_unix_ms: u64, ended_unix_ms: u64) {
+        self.stages
+            .record_batch_round(stage, started_unix_ms, ended_unix_ms);
+    }
+
     /// Count a call that got no answer but may have been billed (it timed out): `r` carries the
     /// cost it counts at. Unlike [`Self::record_stage`] it proves nothing about the provider
     /// being reachable, so the outage streak is left alone.
@@ -989,6 +996,10 @@ impl UsageMeter {
         if let Some(billed) = crate::llm::refusal_billed(error) {
             self.stages.record(stage, billed);
             self.record(stage, billed);
+        }
+        // How long a failed call waited counts toward the stage's run figures.
+        if let Some(ms) = crate::failure::elapsed_ms_of(error) {
+            self.stages.record_failed_time(stage, ms);
         }
         // The outage stop watches every failed call, after the transport's own retries.
         self.health

@@ -254,6 +254,7 @@ fn seed(
         plan: Vec::new(),
         incomplete_reasons: Vec::new(),
         notes: Vec::new(),
+        segments: Vec::new(),
     };
     put(
         run_dir.join("run.json"),
@@ -1576,6 +1577,7 @@ fn put_run(fx: &Fx, run_id: &str, project_id: Option<&str>) -> PathBuf {
         plan: Vec::new(),
         incomplete_reasons: Vec::new(),
         notes: Vec::new(),
+        segments: Vec::new(),
     };
     let run_json = run_dir.join("run.json");
     write(&run_json, &serde_json::to_string(&record).unwrap());

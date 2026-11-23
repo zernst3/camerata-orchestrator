@@ -27,6 +27,7 @@ fn ok_reply() -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: "{\"findings\":[]}".to_string(),
         model: "stub".to_string(),
         backend: "stub".to_string(),

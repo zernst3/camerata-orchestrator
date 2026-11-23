@@ -881,6 +881,7 @@ fn response_from(line: &AbsorbedLine) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: line.text.clone(),
         model: line.model.clone(),
         backend: line.backend.clone(),
@@ -899,6 +900,7 @@ fn usage_only(resp: &LlmResponse) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: resp.model.clone(),
         backend: resp.backend.clone(),
@@ -1227,7 +1229,8 @@ impl Aimd {
 enum Called {
     /// Not admitted, for the reason the refusal itself carried.
     Refused(super::usage_meter::RefusalCause),
-    Done(Result<LlmResponse, anyhow::Error>),
+    /// Boxed: `LlmResponse` is large enough that the unboxed variant trips the size lint.
+    Done(Result<Box<LlmResponse>, anyhow::Error>),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1331,7 +1334,7 @@ async fn run_parallel<S>(
                         }
                     }
                     drop(permit);
-                    (work, Called::Done(result))
+                    (work, Called::Done(result.map(Box::new)))
                 }
                 .boxed(),
             );
@@ -1377,7 +1380,7 @@ async fn run_parallel<S>(
             }
             Called::Done(Ok(resp)) => {
                 aimd.on_success();
-                if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, &work, resp, None)
+                if let Settled::Retry(again) = settle_reply(stage, s, ctx, book, &work, *resp, None)
                 {
                     queue.push_front(again);
                 }

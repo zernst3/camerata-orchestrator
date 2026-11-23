@@ -21,6 +21,7 @@ pub(super) fn response(text: &str, backend: &str, model: &str) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: text.to_string(),
         model: model.to_string(),
         backend: backend.to_string(),

@@ -299,6 +299,10 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
         Some(project.id.as_str()),
         "a scan started from the cockpit records the project it was started in"
     );
+    // The app's scan job records the wall-clock segment of its session (run figures).
+    let first_segments = record.segments.clone();
+    assert_eq!(first_segments.len(), 1, "{first_segments:?}");
+    assert!(first_segments[0].finished_unix_ms >= first_segments[0].started_unix_ms);
     let audit_calls_before = stage_calls(&log).iter().filter(|s| *s == "audit").count();
     assert!(audit_calls_before > 0);
 
@@ -384,6 +388,11 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     );
     let record = crate::run_store::read_record(&run_id).unwrap();
     assert_eq!(record.status, crate::run_store::RunStatus::Complete);
+    assert_eq!(record.segments.len(), 2, "the resume appended a segment");
+    assert_eq!(
+        record.segments[0], first_segments[0],
+        "the first segment is kept as it was"
+    );
 
     // ── A complete run: the plan says so and the resume endpoint starts nothing ───────────
     let plan = body_json(
@@ -1256,6 +1265,7 @@ async fn a_cockpit_resume_is_refused_when_the_kept_group_review_model_is_not_all
         .unwrap();
     std::fs::remove_file(&rig.group_review_down).unwrap();
     let calls_before = stage_calls(&rig.log).len();
+    let segments_before = crate::run_store::read_record(&rig.run_id).unwrap().segments;
 
     let resume = run_resume_start(
         State(rig.state.clone()),
@@ -1282,6 +1292,11 @@ async fn a_cockpit_resume_is_refused_when_the_kept_group_review_model_is_not_all
         stage_calls(&rig.log).len(),
         calls_before,
         "no model call was made"
+    );
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().segments,
+        segments_before,
+        "a refused resume leaves no segment of its own"
     );
 }
 

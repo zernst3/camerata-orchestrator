@@ -62,6 +62,7 @@ async fn usage_endpoint_shape_and_accumulation() {
         &crate::llm::LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-opus-5".to_string(),
             backend: "cli".to_string(),
@@ -80,6 +81,7 @@ async fn usage_endpoint_shape_and_accumulation() {
         &crate::llm::LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-sonnet-5".to_string(),
             backend: "api".to_string(),

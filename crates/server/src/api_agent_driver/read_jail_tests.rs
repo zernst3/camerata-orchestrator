@@ -250,6 +250,7 @@ impl LlmPort for OneShotRead {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "stub".into(),
             backend: "stub".into(),

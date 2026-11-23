@@ -460,6 +460,7 @@ async fn stored_spend_and_new_spend_add_up_against_the_limit() {
         &LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),

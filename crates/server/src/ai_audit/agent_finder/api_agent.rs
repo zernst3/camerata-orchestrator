@@ -291,6 +291,7 @@ impl ApiPieceAgent {
         let mut retries = 0usize;
         loop {
             let mut record = AttemptRecord::new("api", &self.model);
+            let attempt_started = std::time::Instant::now();
             let (class, message, status, retryable, retry_after, overloaded) = match self
                 .post(body, use_caching)
                 .await
@@ -310,7 +311,7 @@ impl ApiPieceAgent {
                     // price it from: it counts once, at the request's cost ceiling. A failure
                     // that never reached the model counts nothing.
                     if e.to_ascii_lowercase().contains("timed out") {
-                        self.count_timed_out_call(body);
+                        self.count_timed_out_call(body, attempt_started.elapsed());
                     }
                     (
                         FailureClass::Transport,
@@ -382,7 +383,7 @@ impl ApiPieceAgent {
 
     /// Record a call that timed out on the meter at the request's cost ceiling (the most it
     /// could have cost). The agent meters its own turns, so this is the only place it is counted.
-    fn count_timed_out_call(&self, body: &Value) {
+    fn count_timed_out_call(&self, body: &Value, waited: Duration) {
         let Some(meter) = &self.meter else { return };
         let cost = crate::api_agent_driver::request_ceiling_usd_for_body(&self.model, body);
         meter.record_unanswered(
@@ -390,6 +391,7 @@ impl ApiPieceAgent {
             &LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: Some(u64::try_from(waited.as_millis()).unwrap_or(u64::MAX)),
                 text: String::new(),
                 model: self.model.clone(),
                 backend: "anthropic/api/agentic".to_string(),

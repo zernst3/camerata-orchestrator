@@ -85,6 +85,7 @@ impl LlmPort for ObedientModel {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: self
                 .reply
                 .clone()

@@ -43,6 +43,7 @@ impl LlmPort for Spendthrift {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: PRICED_MODEL.to_string(),
             backend: "stub".to_string(),
@@ -188,6 +189,7 @@ async fn a_turn_whose_cost_cannot_be_known_stops_a_limited_run() {
             Ok(LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text,
                 model: PRICED_MODEL.to_string(),
                 backend: "stub".to_string(),

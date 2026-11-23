@@ -32,6 +32,8 @@ type Reply = Result<LlmResponse, AnthropicPostError>;
 struct ScriptedWire {
     script: Mutex<VecDeque<Reply>>,
     bodies: Mutex<Vec<Value>>,
+    /// How long each send takes before it answers (zero unless a test says so).
+    pause: Duration,
 }
 
 impl ScriptedWire {
@@ -39,6 +41,16 @@ impl ScriptedWire {
         Arc::new(Self {
             script: Mutex::new(script.into()),
             bodies: Mutex::new(Vec::new()),
+            pause: Duration::ZERO,
+        })
+    }
+
+    /// A wire whose every send takes `pause` before it answers.
+    fn slow(script: Vec<Reply>, pause: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            script: Mutex::new(script.into()),
+            bodies: Mutex::new(Vec::new()),
+            pause,
         })
     }
 
@@ -55,6 +67,9 @@ impl ScriptedWire {
 impl FinderWire for ScriptedWire {
     async fn send(&self, body: &Value, _use_caching: bool) -> Reply {
         self.bodies.lock().expect("lock").push(body.clone());
+        if !self.pause.is_zero() {
+            tokio::time::sleep(self.pause).await;
+        }
         self.script
             .lock()
             .expect("lock")
@@ -77,6 +92,7 @@ fn response(v: &Value, input: u64, output: u64, cache_read: u64) -> LlmResponse 
         truncated: false,
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
     }
 }
 
@@ -1760,4 +1776,29 @@ async fn a_call_that_never_reached_the_model_counts_nothing() {
     assert_eq!(bodies.len(), 1);
     assert!(spent.abs() < 1e-12, "a 400 costs nothing, got {spent}");
     assert!(baseline > 0.0);
+}
+
+/// A call that timed out waited, and the wait is in the finder stage's busy time (the call is
+/// counted at its ceiling, so it is one of the stage's calls).
+#[tokio::test]
+async fn a_timed_out_call_carries_the_time_it_waited_into_the_stage_figures() {
+    let wire = ScriptedWire::slow(
+        vec![network_timeout(), text_reply("done")],
+        Duration::from_millis(40),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, _) = metered(&wire, &meter);
+    let _ = agent.run(&room(), "Review.", &limits()).await;
+    let t = meter.stage_telemetry(0);
+    let finder = &t
+        .stages
+        .iter()
+        .find(|s| s.stage == Stage::Finder)
+        .expect("the finder stage ran")
+        .usage;
+    assert!(
+        finder.busy_ms >= 40,
+        "the timed-out call's wait is counted: {}",
+        finder.busy_ms
+    );
 }

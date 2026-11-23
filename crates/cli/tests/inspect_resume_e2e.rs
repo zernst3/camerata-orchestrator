@@ -165,6 +165,7 @@ impl Scripted {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),
@@ -774,6 +775,11 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
         record.status,
         camerata_server::run_store::RunStatus::Incomplete
     );
+    // `camerata inspect` records the wall-clock segment of its session (run figures), even for
+    // a run that ended on an error.
+    let first_segments = record.segments.clone();
+    assert_eq!(first_segments.len(), 1, "{first_segments:?}");
+    assert!(first_segments[0].finished_unix_ms >= first_segments[0].started_unix_ms);
     let remaining: Vec<PartKind> = record.remaining_parts().iter().map(|p| p.kind).collect();
     assert!(remaining.contains(&PartKind::Fix), "{remaining:?}");
     assert!(!remaining.contains(&PartKind::Scan), "{remaining:?}");
@@ -851,6 +857,11 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
     let done = camerata_server::run_store::read_record(&run_id).unwrap();
     assert_eq!(done.status, camerata_server::run_store::RunStatus::Complete);
     assert!(done.attempt >= 2);
+    assert_eq!(done.segments.len(), 2, "the resume appended a segment");
+    assert_eq!(
+        done.segments[0], first_segments[0],
+        "the first is kept as it was"
+    );
     assert_same_exports(&export, &baseline_export);
     // The resume rewrote the note for the completed run, and the released zip carries none of it.
     let resumed_note = advisory_beside(&ledger);

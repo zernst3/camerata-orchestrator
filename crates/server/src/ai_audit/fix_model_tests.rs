@@ -92,6 +92,7 @@ impl LlmPort for Recorder {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: r#"{"fixes":[]}"#.to_string(),
             model: req.model.clone(),
             backend: "stub".to_string(),

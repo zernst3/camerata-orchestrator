@@ -120,6 +120,44 @@ pub struct StageUsage {
     /// written before this existed.
     #[serde(default)]
     pub models: BTreeMap<String, u64>,
+    /// Sum of the calls' `elapsed_ms`: the time the stage's calls were in flight, added up. With
+    /// calls running in parallel this exceeds the stage's wall-clock span (see
+    /// `first_call_unix_ms` / `last_call_unix_ms`). A call with no timing (a record replayed from
+    /// a checkpoint, the CLI finder's per-turn records) adds nothing. Includes the attempts later
+    /// marked wasted, exactly as `calls` and the token fields do; `wasted_busy_ms` is the subset.
+    /// Operator-only; never exported.
+    #[serde(default)]
+    pub busy_ms: u64,
+    /// The part of `busy_ms` spent on attempts whose output was thrown away. A SUBSET of
+    /// `busy_ms`, never added to totals twice.
+    #[serde(default)]
+    pub wasted_busy_ms: u64,
+    /// Unix milliseconds at which the stage's earliest timed call started (a call's start is its
+    /// end stamp minus its `elapsed_ms`). `None` until a timed call is recorded.
+    #[serde(default)]
+    pub first_call_unix_ms: Option<u64>,
+    /// Unix milliseconds at which the stage's latest timed call ended.
+    #[serde(default)]
+    pub last_call_unix_ms: Option<u64>,
+    /// Milliseconds this session spent waiting on Message Batches rounds of the stage (from the
+    /// round's submission, or from the poll a resume started, to the results being read). Kept
+    /// apart from `busy_ms`: a batch row has no per-call time, and the wait is the provider's
+    /// queue, not a call in flight. The rounds also move `first_call_unix_ms` and
+    /// `last_call_unix_ms`. Operator-only; never exported.
+    #[serde(default)]
+    pub batch_wait_ms: u64,
+    /// Milliseconds spent in calls that failed with no billed reply (a timeout, an HTTP error),
+    /// kept apart from `busy_ms`, which belongs to calls counted in `calls`. A timed-out call
+    /// that is counted at its cost ceiling (`record_unanswered`) is in `busy_ms` instead.
+    #[serde(default)]
+    pub failed_busy_ms: u64,
+}
+
+/// Wall-clock now, in Unix milliseconds. The one clock the run figures read.
+pub fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The key a call is counted under in [`StageUsage::models`]: the served model id when the
@@ -140,7 +178,7 @@ impl StageUsage {
         self.cost_reported_calls == self.calls
     }
 
-    fn fold(&mut self, r: &LlmResponse) {
+    fn fold(&mut self, r: &LlmResponse, ended_unix_ms: u64) {
         self.calls += 1;
         self.input_tokens += r.input_tokens.unwrap_or(0);
         self.output_tokens += r.output_tokens.unwrap_or(0);
@@ -151,6 +189,16 @@ impl StageUsage {
             self.cost_reported_calls += 1;
         }
         *self.models.entry(model_key(r)).or_default() += 1;
+        if let Some(ms) = r.elapsed_ms {
+            self.busy_ms = self.busy_ms.saturating_add(ms);
+            let started = ended_unix_ms.saturating_sub(ms);
+            self.first_call_unix_ms =
+                Some(self.first_call_unix_ms.map_or(started, |t| t.min(started)));
+            self.last_call_unix_ms = Some(
+                self.last_call_unix_ms
+                    .map_or(ended_unix_ms, |t| t.max(ended_unix_ms)),
+            );
+        }
     }
 
     fn fold_wasted(&mut self, r: &LlmResponse, share: f64) {
@@ -160,6 +208,7 @@ impl StageUsage {
         self.wasted_input_tokens += prorate(r.input_tokens);
         self.wasted_output_tokens += prorate(r.output_tokens);
         self.wasted_cost_usd += r.cost_usd.unwrap_or(0.0) * share;
+        self.wasted_busy_ms += prorate(r.elapsed_ms);
     }
 
     fn add(&mut self, other: &StageUsage) {
@@ -177,6 +226,18 @@ impl StageUsage {
         for (model, calls) in &other.models {
             *self.models.entry(model.clone()).or_default() += calls;
         }
+        self.busy_ms = self.busy_ms.saturating_add(other.busy_ms);
+        self.wasted_busy_ms = self.wasted_busy_ms.saturating_add(other.wasted_busy_ms);
+        self.batch_wait_ms = self.batch_wait_ms.saturating_add(other.batch_wait_ms);
+        self.failed_busy_ms = self.failed_busy_ms.saturating_add(other.failed_busy_ms);
+        self.first_call_unix_ms = match (self.first_call_unix_ms, other.first_call_unix_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.last_call_unix_ms = match (self.last_call_unix_ms, other.last_call_unix_ms) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
     }
 
     /// `model xN, other xM`, in model-id order. Empty when no call recorded a model.
@@ -529,7 +590,40 @@ pub struct StageMeter {
 impl StageMeter {
     /// Fold one completion into `stage`.
     pub fn record(&self, stage: Stage, r: &LlmResponse) {
-        self.with_stage(stage, |u| u.fold(r));
+        self.record_at(stage, r, now_unix_ms());
+    }
+
+    /// [`Self::record`] with the call's end time given (Unix ms), so a test can state it.
+    pub fn record_at(&self, stage: Stage, r: &LlmResponse, ended_unix_ms: u64) {
+        self.with_stage(stage, |u| u.fold(r, ended_unix_ms));
+    }
+
+    /// A call of `stage` failed after `elapsed_ms` with no reply to bill: adds the wait to
+    /// `failed_busy_ms`.
+    pub fn record_failed_time(&self, stage: Stage, elapsed_ms: u64) {
+        self.with_stage(stage, |u| {
+            u.failed_busy_ms = u.failed_busy_ms.saturating_add(elapsed_ms);
+        });
+    }
+
+    /// One Message Batches round of `stage`, from `started_unix_ms` to `ended_unix_ms` (its
+    /// results read): widens the stage's first and last stamps to cover the round and adds the
+    /// wait to `batch_wait_ms`. Batch rows carry no per-call time, so this is the stage's timing
+    /// in batch mode.
+    pub fn record_batch_round(&self, stage: Stage, started_unix_ms: u64, ended_unix_ms: u64) {
+        self.with_stage(stage, |u| {
+            u.batch_wait_ms = u
+                .batch_wait_ms
+                .saturating_add(ended_unix_ms.saturating_sub(started_unix_ms));
+            u.first_call_unix_ms = Some(
+                u.first_call_unix_ms
+                    .map_or(started_unix_ms, |t| t.min(started_unix_ms)),
+            );
+            u.last_call_unix_ms = Some(
+                u.last_call_unix_ms
+                    .map_or(ended_unix_ms, |t| t.max(ended_unix_ms)),
+            );
+        });
     }
 
     /// Mark a completion that [`Self::record`] already counted as one whose output was thrown

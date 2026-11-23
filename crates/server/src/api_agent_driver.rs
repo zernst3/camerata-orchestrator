@@ -1404,6 +1404,7 @@ async fn call_openrouter_with_tools(
     policy: &crate::provider_policy::ProviderPolicy,
     registry: &crate::model_registry::ModelRegistry,
 ) -> anyhow::Result<LlmResponse> {
+    let started = std::time::Instant::now();
     // Resolve the provider-safety constraint BEFORE building the request body — see
     // `crate::provider_policy::provider_constraint_for_request` for the fail-closed
     // contract (never an unconstrained request while safe_mode is on).
@@ -1473,6 +1474,7 @@ async fn call_openrouter_with_tools(
     Ok(LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         text: raw_json,
         model: model_returned,
         backend: "openrouter/api/agentic".to_string(),
@@ -1731,6 +1733,7 @@ pub(crate) async fn post_anthropic_body_to(
     body: &Value,
     use_caching: bool,
 ) -> Result<LlmResponse, AnthropicPostError> {
+    let started = std::time::Instant::now();
     let model = body["model"].as_str().unwrap_or_default().to_string();
     let mut builder = client
         .post(url)
@@ -1780,6 +1783,7 @@ pub(crate) async fn post_anthropic_body_to(
     Ok(LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         text: raw_json,
         model: model_returned,
         backend: "anthropic/api/agentic".to_string(),
@@ -3919,6 +3923,7 @@ mod tests {
             Ok(LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: self.0.clone(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -4003,6 +4008,7 @@ mod tests {
             Ok(LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: raw,
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -4520,6 +4526,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({
                 "message": {"role": "assistant", "content": "Task complete!"}
             })
@@ -4545,6 +4552,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({
                 "message": {
                     "role": "assistant",
@@ -4585,6 +4593,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({
                 "content": [
                     {
@@ -4622,6 +4631,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: "plain response with no JSON".to_string(),
             model: "m".into(),
             backend: "b".into(),
@@ -4887,6 +4897,7 @@ mod tests {
             Ok(LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: tc.to_string(),
                 model: "stub".to_string(),
                 backend: "stub".to_string(),
@@ -5209,6 +5220,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: "t".to_string(),
             model: "m".to_string(),
             backend: "stub".to_string(),
@@ -5787,6 +5799,7 @@ mod tests {
         let resp = LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({
                 "id": "msg_01",
                 "type": "message",

@@ -23,6 +23,7 @@ impl LlmPort for Recorder {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: r#"{"findings":[{"rule":"ARCH-NO-DIRECT-DB-1","severity":"high","path":"src/a.rs","code":"db.execute(query)","title":"direct DB call","detail":"controller calls the database directly"}],"verdicts":[]}"#
                 .to_string(),
             model: "stub".to_string(),
