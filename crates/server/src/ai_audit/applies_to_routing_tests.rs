@@ -64,8 +64,8 @@ fn files() -> Vec<(String, String)> {
         file("supabase/migrations/1.sql"),
         file("src/app.tsx"),
         file("src/main.rs"),
-        file("README.md"),
-        file("Makefile"),
+        file("notes.txt"),
+        file("Dockerfile"),
     ];
     files.sort_by(|a, b| a.0.cmp(&b.0));
     files
@@ -217,7 +217,7 @@ async fn a_declared_scope_sends_the_rule_only_with_matching_files_when_the_switc
     let (rec, _) = run(&rules, true).await;
     let pairs = rule_file_pairs(&sent_pairs(&rec));
     assert!(has(&pairs, "supabase/migrations/1.sql", "SUPA-RLS-1"));
-    for other in ["src/app.tsx", "src/main.rs", "README.md", "Makefile"] {
+    for other in ["src/app.tsx", "src/main.rs", "notes.txt", "Dockerfile"] {
         assert!(
             !has(&pairs, other, "SUPA-RLS-1"),
             "SUPA-RLS-1 must not be sent with {other}"
@@ -256,11 +256,11 @@ async fn an_unknown_language_chunk_still_gets_a_language_scoped_rule() {
     let pairs = rule_file_pairs(&sent_pairs(&rec));
     assert!(has(&pairs, "src/main.rs", "LANG-ONLY-1"));
     assert!(
-        has(&pairs, "Makefile", "LANG-ONLY-1"),
+        has(&pairs, "Dockerfile", "LANG-ONLY-1"),
         "an extensionless file has an unknown language: the rule is sent"
     );
     assert!(
-        has(&pairs, "README.md", "LANG-ONLY-1"),
+        has(&pairs, "notes.txt", "LANG-ONLY-1"),
         "an unrecognized extension is an unknown language: the rule is sent"
     );
     assert!(
@@ -479,7 +479,7 @@ async fn an_incremental_scan_does_not_report_a_rule_not_assessed_when_the_full_r
         not_assessed(&go(Some(full)).await).is_empty(),
         "the repo has SQL (unchanged): not reported"
     );
-    let no_sql = vec![file("src/main.rs"), file("README.md")];
+    let no_sql = vec![file("src/main.rs"), file("notes.txt")];
     assert_eq!(
         not_assessed(&go(Some(no_sql)).await),
         vec!["SUPA-RLS-1".to_string()],

@@ -23,6 +23,12 @@ pub fn long_line_label() -> String {
     )
 }
 
+/// The reason a file that declares itself generated is not read, as Coverage, `camerata count` and
+/// the pre-start check state it. One phrase, so no surface words it differently.
+pub fn generated_label() -> String {
+    "generated: scanned for secrets only, not billed".to_string()
+}
+
 /// Files larger than this are not read for the inspection. An admitted text file over it (and not
 /// excluded by agreement) is a pre-start warning, never a refusal, and is listed under Coverage;
 /// the secret checks still search it up to [`MAX_SECRET_SCAN_BYTES`].
@@ -338,7 +344,7 @@ pub(crate) fn has_code_ext(path: &str) -> bool {
 /// deterministic secrets floor (`onboard::audit::AUDIT_RULES`, run over every admitted file
 /// with no extension filter of its own — see `onboard::audit::audit_files`).
 pub(crate) fn is_admissible_text(path: &str) -> bool {
-    if has_code_ext(path) {
+    if has_code_ext(path) || text_kind(path).is_some() {
         return true;
     }
     let basename = path.rsplit('/').next().unwrap_or(path);
@@ -357,18 +363,32 @@ pub(crate) fn is_admissible_text(path: &str) -> bool {
     }
 }
 
-/// Extensions of REFERENCE TEXT: files that are not audited as code and carry no committed-secret
-/// signal of their own, but whose text can REFER to a source file by name (a `<script src>` in
-/// HTML, a run instruction in a README, a stylesheet `@import`; Vue, Svelte and Astro components
-/// are audited source now (H8) and reach the dead-code rule with the audited files). The dead-code rule needs them to see that a file is still used; nothing else
-/// reads them. See [`ExtractedRepo::reference_files`].
-const REFERENCE_TEXT_EXTS: &[&str] = &[
-    "html", "htm", "md", "mdx", "css", "scss", "less", "ejs", "erb", "hbs", "pug", "njk", "j2",
-    "jinja", "jinja2",
-];
+/// The kinds of hand-written text that are inspected as well as code (V1 item 32): every
+/// hand-written file is inspected and every inspected file is billed. Each kind names the rules
+/// it receives in `scan_routing`, so a README is never judged against code rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextKind {
+    /// Server-side templates and HTML pages.
+    Markup,
+    /// Build-runner files (Makefile family, Procfile, Justfile).
+    Build,
+    /// Markdown and MDX documentation.
+    Docs,
+    /// CSS, SCSS and Less stylesheets.
+    Styles,
+}
 
-/// Extensionless build-runner files that name the scripts and sources they run.
-const REFERENCE_TEXT_BASENAMES: &[&str] = &[
+/// Extensions of server-side templates and HTML.
+const MARKUP_EXTS: &[&str] = &[
+    "html", "htm", "ejs", "erb", "hbs", "pug", "njk", "j2", "jinja", "jinja2",
+];
+/// Extensions of Markdown documentation.
+const DOCS_EXTS: &[&str] = &["md", "mdx"];
+/// Extensions of stylesheets.
+const STYLES_EXTS: &[&str] = &["css", "scss", "less"];
+
+/// Extensionless build-runner files, which also name the scripts and sources they run.
+const BUILD_BASENAMES: &[&str] = &[
     "Makefile",
     "GNUmakefile",
     "makefile",
@@ -377,27 +397,38 @@ const REFERENCE_TEXT_BASENAMES: &[&str] = &[
     "justfile",
 ];
 
-/// Safety net for the reference list, separate from [`HARD_CAP_FILES`] so documentation-heavy
-/// repos do not crowd out code. Hitting it marks the list incomplete
-/// ([`ExtractedRepo::reference_truncated`]), which disables every rule that reasons from
-/// absence, exactly like [`ExtractedRepo::truncated`].
-pub(crate) const HARD_CAP_REFERENCE_FILES: usize = 20_000;
-
-/// True when `path` is reference text (see [`REFERENCE_TEXT_EXTS`]).
-pub(crate) fn is_reference_text(path: &str) -> bool {
+/// The [`TextKind`] of `path`, or `None` when it is code or config (not one of the kinds admitted
+/// by item 32). The one list every reader uses: admission ([`is_admissible_text`]) and rule
+/// routing (`scan_routing`) both ask this function.
+pub fn text_kind(path: &str) -> Option<TextKind> {
     let basename = path.rsplit('/').next().unwrap_or(path);
-    if REFERENCE_TEXT_BASENAMES.contains(&basename) {
-        return true;
+    if BUILD_BASENAMES.contains(&basename) {
+        return Some(TextKind::Build);
     }
-    match basename.rsplit_once('.') {
-        Some((stem, ext)) => {
-            !stem.is_empty() && REFERENCE_TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str())
-        }
-        None => false,
+    let (stem, ext) = basename.rsplit_once('.')?;
+    if stem.is_empty() {
+        return None;
+    }
+    let ext = ext.to_ascii_lowercase();
+    let ext = ext.as_str();
+    if MARKUP_EXTS.contains(&ext) {
+        Some(TextKind::Markup)
+    } else if DOCS_EXTS.contains(&ext) {
+        Some(TextKind::Docs)
+    } else if STYLES_EXTS.contains(&ext) {
+        Some(TextKind::Styles)
+    } else {
+        None
     }
 }
 
-/// Collects reference text under the same noise, size and UTF-8 rules as the audited files.
+/// Safety net for the reference list, separate from [`HARD_CAP_FILES`]. Hitting it marks the list
+/// incomplete ([`ExtractedRepo::reference_truncated`]), which disables every rule that reasons
+/// from absence, exactly like [`ExtractedRepo::truncated`].
+pub(crate) const HARD_CAP_REFERENCE_FILES: usize = 20_000;
+
+/// Collects reference text: generated code the audit admission pruned as noise, kept for the
+/// dead-code rule (the file that imports a hand-written file is often generated).
 struct ReferenceSink {
     files: Vec<(String, String)>,
     truncated: bool,
@@ -413,17 +444,9 @@ impl ReferenceSink {
         }
     }
 
-    /// Offer `rel` (read from `full`) when it is reference text that audit admission skipped.
-    /// A file over the size limit or not valid UTF-8 is dropped, like any other file; a list
-    /// that is already full is marked truncated instead of growing.
-    fn offer(&mut self, rel: &str, full: &std::path::Path) {
-        if is_reference_text(rel) {
-            self.accept(rel, full);
-        }
-    }
-
-    /// Take `rel` as reference text whatever its name: generated code that audit admission
-    /// pruned ([`is_generated_only_noise`]).
+    /// Take `rel` (read from `full`) as reference text: generated code that audit admission
+    /// pruned ([`is_generated_only_noise`]). A file over the size limit or not valid UTF-8 is
+    /// dropped; a list that is already full is marked truncated instead of growing.
     fn accept(&mut self, rel: &str, full: &std::path::Path) {
         if self.files.len() >= self.cap {
             self.truncated = true;
@@ -605,6 +628,13 @@ pub struct ExtractedRepo {
     /// have read: not read, not counted, listed by path under Coverage as "excluded by
     /// agreement". Their sizes are in `skipped_sizes`.
     pub excluded_by_agreement: Vec<String>,
+    /// Admitted files that declare themselves generated ([`declares_generated`]): not read for
+    /// the inspection, not billed, not counted, never sent to a model. The deterministic floor
+    /// still searches each for secrets, and `camerata count` and the pre-start check list them
+    /// with their lines. Their sizes are in `skipped_sizes`. The one exception to "every
+    /// inspected file is billed": it does not reach dependencies, build output, lockfiles or
+    /// files excluded by agreement.
+    pub generated: Vec<String>,
     /// The indexes (into the project's list) of every pattern that matched at least one walked
     /// file, of any kind. A pattern in no repo's list of these matches nothing.
     pub matched_patterns: Vec<usize>,
@@ -660,6 +690,7 @@ impl ExtractedRepo {
         self.reference_files.sort_by(|a, b| a.0.cmp(&b.0));
         self.excluded_noise_paths.sort();
         self.excluded_by_agreement.sort();
+        self.generated.sort();
         self
     }
 
@@ -822,6 +853,7 @@ struct WalkSink {
     admitted: AdmittedSink,
     excluded_noise_paths: Vec<String>,
     reference: ReferenceSink,
+    generated: Vec<String>,
 }
 
 impl WalkSink {
@@ -834,11 +866,12 @@ impl WalkSink {
             admitted: AdmittedSink::new(cap),
             excluded_noise_paths: Vec::new(),
             reference: ReferenceSink::new(HARD_CAP_REFERENCE_FILES),
+            generated: Vec::new(),
         }
     }
 
-    /// Classify `rel` (at `full`): counted as excluded noise, offered as reference text, or
-    /// admitted for reading. `len` is asked for only when the file is admissible; `None` (a
+    /// Classify `rel` (at `full`): counted as excluded noise, listed as generated, or admitted
+    /// for reading. `len` is asked for only when the file is admissible; `None` (a
     /// size that cannot be read, or an entry that is gone) skips it.
     fn classify(&mut self, rel: String, full: &std::path::Path, len: impl FnOnce() -> Option<u64>) {
         // Belt-and-suspenders: noise denylist on top of gitignore (catches projects whose
@@ -846,7 +879,7 @@ impl WalkSink {
         let noise = is_noise_path(&rel, &self.extra_dirs);
         let admissible = is_admissible_text(&rel);
         // The project's exclusion list decides first and for every reader: a file named there is
-        // neither read nor offered as reference text, and one the run would otherwise have read
+        // not read, and one the run would otherwise have read
         // is named, with its size, so the report lists it as excluded by agreement.
         let hits = self.scope.matching(&rel);
         self.matched_patterns.extend(hits.iter().copied());
@@ -864,12 +897,20 @@ impl WalkSink {
         if noise && admissible {
             self.excluded_noise_paths.push(rel.clone());
         }
-        if !noise && !admissible {
-            self.reference.offer(&rel, full);
-        } else if noise && admissible && is_generated_only_noise(&rel, &self.extra_dirs) {
+        if noise && admissible && is_generated_only_noise(&rel, &self.extra_dirs) {
             self.reference.accept(&rel, full);
         }
         if noise || !admissible {
+            return;
+        }
+        // A file that declares itself generated in a comment near its top is not read for the
+        // inspection, billed or counted: everything in it derives from hand-written sources that
+        // are inspected. It is listed, and the secret checks still search it.
+        if may_declare_generated(&rel) && declares_generated(full) {
+            if let Some(len) = len() {
+                self.admitted.sizes.insert(rel.clone(), len);
+                self.generated.push(rel);
+            }
             return;
         }
         // Past the cap the walk continues, naming each further admissible file instead of
@@ -890,6 +931,7 @@ impl WalkSink {
             skipped_unreadable: self.admitted.unreadable,
             skipped_long_line: self.admitted.long_line,
             long_line_contents: self.admitted.long_line_contents,
+            generated: self.generated,
             skipped_sizes: self.admitted.sizes,
             file_cap: self.admitted.cap,
             excluded_noise: self.excluded_noise_paths.len(),
@@ -899,6 +941,74 @@ impl WalkSink {
         }
         .sorted()
     }
+}
+
+/// How much of the start of a file is searched for a generated-file marker.
+const GENERATED_HEADER_BYTES: usize = 1024;
+
+/// Whether `path` is a file type that can carry a generated-file marker. Markdown and MDX are
+/// prose where a `#` heading or a quoted tool name is not a declaration, so they never do.
+fn may_declare_generated(path: &str) -> bool {
+    text_kind(path) != Some(TextKind::Docs)
+}
+
+/// The start of the file at `full` (at most [`GENERATED_HEADER_BYTES`] bytes), decoded.
+fn read_header(full: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(GENERATED_HEADER_BYTES);
+    std::fs::File::open(full)
+        .ok()?
+        .take(GENERATED_HEADER_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if matches!(bytes.as_slice(), [0xFF, 0xFE, ..] | [0xFE, 0xFF, ..]) {
+        bytes.truncate(bytes.len() & !1);
+        return decode_text(&bytes);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Whether the file at `full` declares itself generated: a comment in its first
+/// [`GENERATED_HEADER_BYTES`] bytes carries a marker its tool writes ([`header_declares_generated`]).
+pub(crate) fn declares_generated(full: &std::path::Path) -> bool {
+    read_header(full).is_some_and(|head| header_declares_generated(&head))
+}
+
+/// Whether `head` (the start of a file) carries a standard generated-file marker in a comment:
+/// .NET `<auto-generated` (EF Designer and ModelSnapshot, resx Designer), the Go convention
+/// `// Code generated ... DO NOT EDIT.` (the whole line, exactly), or `@generated`. This is the
+/// generating tool's own declaration, never a guess about content; a marker in code or in prose
+/// does not count.
+pub(crate) fn header_declares_generated(head: &str) -> bool {
+    let head = head.strip_prefix('\u{feff}').unwrap_or(head);
+    head.lines().any(|line| {
+        let line = line.trim();
+        let Some(body) = comment_body(line) else {
+            return false;
+        };
+        // Go: the line is `// Code generated <anything> DO NOT EDIT.` and nothing else.
+        if line.starts_with("// Code generated ") && line.ends_with(" DO NOT EDIT.") {
+            return true;
+        }
+        if body.contains("<auto-generated") {
+            return true;
+        }
+        match body.find("@generated") {
+            Some(at) => !body[at + "@generated".len()..]
+                .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'),
+            None => false,
+        }
+    })
+}
+
+/// The text of a comment line, or `None` when `line` (trimmed) does not start one: `//`, `/*`,
+/// a continuation `*`, `#`, `--`, `'` (Visual Basic), `;`, `<!--` or `%`.
+fn comment_body(line: &str) -> Option<&str> {
+    const LEADS: &[&str] = &["//", "/*", "*", "<!--", "#", "--", "'", ";", "%"];
+    LEADS
+        .iter()
+        .find_map(|lead| line.strip_prefix(lead))
+        .map(str::trim_start)
 }
 
 /// The text in `bytes`: UTF-8, or UTF-16 announced by a byte order mark. `None` for anything else
@@ -1240,36 +1350,38 @@ mod tests {
         );
     }
 
-    // ── reference text tier ────────────────────────────────────────────────────
+    // ── inspected text kinds (V1 item 32): templates, HTML, build runners, docs, styles ───────
 
     #[test]
-    fn reference_text_covers_markup_components_docs_styles_templates_and_runners() {
-        for yes in [
-            "index.html",
-            "pages/x.htm",
-            "README.md",
-            "docs/guide.mdx",
-            "styles/a.css",
-            "styles/a.scss",
-            "styles/a.less",
-            "views/layout.ejs",
-            "app/views/home/index.html.erb",
-            "views/p.hbs",
-            "views/p.pug",
-            "views/p.njk",
-            "templates/p.j2",
-            "templates/p.jinja",
-            "templates/p.jinja2",
-            "Makefile",
-            "sub/Procfile",
-            "Justfile",
-            "justfile",
-            "INDEX.HTML",
+    fn the_inspected_text_kinds_cover_markup_docs_styles_templates_and_runners() {
+        for (yes, kind) in [
+            ("index.html", TextKind::Markup),
+            ("pages/x.htm", TextKind::Markup),
+            ("INDEX.HTML", TextKind::Markup),
+            ("views/layout.ejs", TextKind::Markup),
+            ("app/views/home/index.html.erb", TextKind::Markup),
+            ("views/p.hbs", TextKind::Markup),
+            ("views/p.pug", TextKind::Markup),
+            ("views/p.njk", TextKind::Markup),
+            ("templates/p.j2", TextKind::Markup),
+            ("templates/p.jinja", TextKind::Markup),
+            ("templates/p.jinja2", TextKind::Markup),
+            ("README.md", TextKind::Docs),
+            ("docs/guide.mdx", TextKind::Docs),
+            ("styles/a.css", TextKind::Styles),
+            ("styles/a.scss", TextKind::Styles),
+            ("styles/a.less", TextKind::Styles),
+            ("Makefile", TextKind::Build),
+            ("GNUmakefile", TextKind::Build),
+            ("sub/Procfile", TextKind::Build),
+            ("Justfile", TextKind::Build),
+            ("justfile", TextKind::Build),
         ] {
-            assert!(is_reference_text(yes), "{yes}");
+            assert_eq!(text_kind(yes), Some(kind), "{yes}");
+            assert!(is_admissible_text(yes), "{yes} must be inspected");
         }
         for no in [
-            // Single-file components are audited source now (H8), not reference text.
+            // Single-file components are audited source (H8), a language of their own.
             "src/App.vue",
             "src/Page.svelte",
             "src/pages/index.astro",
@@ -1282,36 +1394,8 @@ mod tests {
             "src/htmlparser.ts",
             "Cargo.toml",
         ] {
-            assert!(!is_reference_text(no), "{no}");
+            assert_eq!(text_kind(no), None, "{no}");
         }
-    }
-
-    #[test]
-    fn reference_text_is_not_audit_input() {
-        for path in ["index.html", "README.md", "a.css", "Makefile"] {
-            assert!(
-                !is_admissible_text(path),
-                "{path} must stay out of the audited file list"
-            );
-        }
-    }
-
-    fn reference_fixture(root: &std::path::Path) {
-        write(root, "src/a.ts", "export const a = 1;\n");
-        write(root, "index.html", "<script src=\"/src/a.ts\"></script>\n");
-        write(
-            root,
-            "views/page.ejs",
-            "<script src=\"/src/a.ts\"></script>\n",
-        );
-        // A secret-shaped literal in prose: reference text is not read by the secrets floor.
-        let readme = concat!("Run it.\nAPI_KEY=\"Zq9Xk3Pm7Rt2", "Vw5Yb8Nc4Jd6Hf1Ga0\"\n");
-        write(root, "README.md", readme);
-        write(root, "Makefile", "run:\n\tnode src/a.ts\n");
-        write(root, "styles/a.css", "body { color: red; }\n");
-        write(root, "node_modules/x/README.md", "vendored\n");
-        write(root, ".camerata-cache/notes.md", "engine output\n");
-        write(root, "docs/huge.md", &"x".repeat(MAX_FILE_BYTES + 1));
     }
 
     fn reference_paths(extracted: &ExtractedRepo) -> Vec<String> {
@@ -1324,62 +1408,79 @@ mod tests {
         v
     }
 
-    fn expect_reference_tier(extracted: &ExtractedRepo) {
-        // The audited list, which feeds the AI digest and the secrets floor, is exactly what it
-        // was before the tier existed.
-        assert_eq!(paths(extracted), ["src/a.ts"]);
-        assert_eq!(extracted.excluded_noise, 0);
+    /// Planted problems in each new kind, a clean doc and a clean stylesheet, and the paths that
+    /// must stay out (vendored, engine output, over the read limit).
+    fn inspected_text_fixture(root: &std::path::Path) {
+        write(root, "src/a.ts", "export const a = 1;\n");
+        write(root, "index.html", "<script src=\"/src/a.ts\"></script>\n");
+        write(
+            root,
+            "views/page.ejs",
+            "<h1><%- comment.body %></h1>\n",
+        );
+        let readme = concat!("Run it.\nAPI_KEY=\"Zq9Xk3Pm7Rt2", "Vw5Yb8Nc4Jd6Hf1Ga0\"\n");
+        write(root, "README.md", readme);
+        write(root, "Makefile", "run:\n\tnode src/a.ts\n");
+        write(root, "styles/a.css", "body { color: red; }\n");
+        write(root, "node_modules/x/README.md", "vendored\n");
+        write(root, ".camerata-cache/notes.md", "engine output\n");
+        write(root, "docs/huge.md", &"x".repeat(MAX_FILE_BYTES + 1));
+    }
+
+    fn expect_inspected_text(extracted: &ExtractedRepo) {
+        // Every hand-written file is in the audited list, the one list every reader uses; noise
+        // dirs, engine artifacts and the over-limit file are not.
         assert_eq!(
-            reference_paths(extracted),
+            paths(extracted),
             [
                 "Makefile",
                 "README.md",
                 "index.html",
+                "src/a.ts",
                 "styles/a.css",
                 "views/page.ejs"
-            ],
-            "noise dirs, engine artifacts and oversized files are excluded from the tier too"
+            ]
         );
-        assert!(!extracted.reference_truncated);
+        assert_eq!(extracted.skipped_oversize, ["docs/huge.md"]);
+        assert!(extracted.reference_files.is_empty());
         assert!(!extracted.truncated);
 
-        // The digest input is byte-for-byte the digest of the audited files alone.
+        // The digest the model sees carries them.
         let nonce = crate::prompt_frame::FrameNonce::generate();
-        let expected = crate::ai_audit::build_digest(
-            &[("src/a.ts".to_string(), "export const a = 1;\n".to_string())],
-            &nonce,
-        );
-        assert_eq!(
-            crate::ai_audit::build_digest(&extracted.files, &nonce),
-            expected
-        );
+        let digest = crate::ai_audit::build_digest(&extracted.files, &nonce);
+        assert!(digest.contains("README.md") && digest.contains("views/page.ejs"));
 
-        // The secrets floor reads only the audited files, so the literal in the README is not a
-        // finding, and nothing about the floor's input changed.
+        // The deterministic floor reads them: the key pasted into the README is a finding.
         let findings = crate::onboard::audit::audit_files("o/r", &extracted.files);
         assert!(
-            findings.iter().all(|f| f.path != "README.md"),
+            findings.iter().any(|f| f.path == "README.md"),
             "{findings:#?}"
         );
     }
 
     #[test]
-    fn reference_text_is_collected_apart_from_audited_files_in_a_non_git_tree() {
+    fn inspected_text_is_admitted_with_the_audited_files_in_a_non_git_tree() {
         let dir = tempfile::tempdir().unwrap();
-        reference_fixture(dir.path());
-        expect_reference_tier(&scan(dir.path()));
+        inspected_text_fixture(dir.path());
+        expect_inspected_text(&scan(dir.path()));
     }
 
     #[test]
-    fn reference_text_is_collected_apart_from_audited_files_in_a_git_tree() {
+    fn inspected_text_is_admitted_with_the_audited_files_in_a_git_tree() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
-        reference_fixture(dir.path());
-        expect_reference_tier(&scan(dir.path()));
+        inspected_text_fixture(dir.path());
+        let extracted = scan(dir.path());
+        expect_inspected_text(&extracted);
+        // The git walk names a vendored or engine-written doc as noise, as it does a vendored .js.
+        assert_eq!(
+            extracted.excluded_noise_paths,
+            [".camerata-cache/notes.md", "node_modules/x/README.md"]
+        );
     }
 
     #[test]
-    fn a_git_tracked_but_gitignored_reference_file_is_still_collected() {
+    fn a_git_tracked_but_gitignored_doc_is_still_inspected() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
@@ -1397,27 +1498,254 @@ mod tests {
         assert!(git(&["add", "-f", "src/a.ts", "docs/guide.md"]));
         write(root, ".gitignore", "docs/\n");
         let extracted = scan(root);
-        assert_eq!(reference_paths(&extracted), ["docs/guide.md"]);
+        assert!(paths(&extracted).contains(&"docs/guide.md".to_string()));
+    }
+
+    #[test]
+    fn an_agreed_exclusion_leaves_a_huge_doc_out_of_the_inspection() {
+        let dir = tempfile::tempdir().unwrap();
+        inspected_text_fixture(dir.path());
+        let extracted = scan_excluding(dir.path(), &["app/docs/huge.md"]);
+        assert!(extracted.skipped_oversize.is_empty());
+        assert_eq!(extracted.excluded_by_agreement, ["docs/huge.md"]);
+        assert!(!paths(&extracted).contains(&"docs/huge.md".to_string()));
     }
 
     #[test]
     fn the_reference_list_marks_itself_truncated_instead_of_growing_past_its_cap() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["a.md", "b.md", "c.md"] {
+        for name in ["a.gen.ts", "b.gen.ts", "c.gen.ts"] {
             write(dir.path(), name, "text\n");
         }
         let mut sink = ReferenceSink::new(2);
-        for name in ["a.md", "b.md", "c.md", "src/skip.ts"] {
-            sink.offer(name, &dir.path().join(name));
+        for name in ["a.gen.ts", "b.gen.ts", "c.gen.ts"] {
+            sink.accept(name, &dir.path().join(name));
         }
         assert_eq!(sink.files.len(), 2);
         assert!(sink.truncated);
 
         let mut roomy = ReferenceSink::new(10);
-        roomy.offer("a.md", &dir.path().join("a.md"));
-        roomy.offer("missing.md", &dir.path().join("missing.md"));
+        roomy.accept("a.gen.ts", &dir.path().join("a.gen.ts"));
+        roomy.accept("missing.gen.ts", &dir.path().join("missing.gen.ts"));
         assert_eq!(roomy.files.len(), 1);
         assert!(!roomy.truncated);
+    }
+
+    // ── self-declared generated files (V1 item 32) ───────────────────────────────────────────
+
+    const PLANTED_KEY: &str = "ghp_0123456789012345678901234567890123456";
+
+    #[test]
+    fn a_comment_near_the_top_with_a_tools_marker_declares_a_file_generated() {
+        for head in [
+            "// <auto-generated />\nusing System;\n",
+            "\u{feff}// <auto-generated />\nusing System;\n",
+            "//------------------------------------------------------------------------------\n// <auto-generated>\n//     This code was generated by a tool.\n// </auto-generated>\n",
+            "' <auto-generated>\nImports System\n",
+            "<!-- <auto-generated> -->\n<root/>\n",
+            "// Code generated by protoc-gen-go. DO NOT EDIT.\npackage pb\n",
+            "// Code generated from schema.sql by sqlc. DO NOT EDIT.\r\npackage db\n",
+            "// @generated SignedSource<<abc>>\nexport {};\n",
+            "/* @generated */\nexport {};\n",
+            "# @generated by thrift\nimport x\n",
+            "/**\n * @generated\n */\n",
+        ] {
+            assert!(header_declares_generated(head), "{head:?}");
+        }
+    }
+
+    #[test]
+    fn a_marker_that_is_not_the_tools_declaration_does_not_count() {
+        for head in [
+            // Not a comment: the text is data or code.
+            "const m = \"<auto-generated\";\n",
+            "let s = \"@generated\";\n",
+            // The Go convention is the whole line, ending in DO NOT EDIT.
+            "// Code generated by hand, edit freely\npackage a\n",
+            "// Code generated by x. do not edit\npackage a\n",
+            "package a // Code generated by x. DO NOT EDIT.\n",
+            // A word that merely starts with the marker.
+            "// @generatedby me\n",
+            "// regenerated\nfn main() {}\n",
+            "fn main() {}\n",
+        ] {
+            assert!(!header_declares_generated(head), "{head:?}");
+        }
+        // Past the first kilobyte the marker is not in the header.
+        let late = format!("{}\n// <auto-generated />\n", "// pad\n".repeat(200));
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.cs", &late);
+        assert!(!declares_generated(&dir.path().join("a.cs")));
+        write(dir.path(), "b.cs", "// <auto-generated />\nclass B {}\n");
+        assert!(declares_generated(&dir.path().join("b.cs")));
+    }
+
+    /// An EF Core project (migration with no marker, its Designer and the model snapshot with the
+    /// marker EF writes), a Go generated file, an `@generated` file, near misses that must stay
+    /// read, and a key baked into a generated file.
+    fn declared_generated_fixture(root: &std::path::Path) {
+        write(
+            root,
+            "Migrations/20240101_Init.cs",
+            "public partial class Init : Migration\n{\n    protected override void Up(MigrationBuilder mb) { }\n}\n",
+        );
+        write(
+            root,
+            "Migrations/20240101_Init.Designer.cs",
+            "// <auto-generated />\nnamespace A;\n\n[Migration(\"20240101_Init\")]\npartial class Init { }\n",
+        );
+        write(
+            root,
+            "Migrations/AppDbContextModelSnapshot.cs",
+            &format!(
+                "// <auto-generated />\nclass Snap\n{{\n    const string Token = \"{PLANTED_KEY}\";\n}}\n"
+            ),
+        );
+        write(
+            root,
+            "internal/pb/api.go",
+            "// Code generated by protoc-gen-go. DO NOT EDIT.\npackage pb\n\nvar A = 1\n",
+        );
+        write(
+            root,
+            "web/schema.ts",
+            "// @generated SignedSource<<abc>>\nexport const s = 1;\n",
+        );
+        // Near misses stay inspected and counted.
+        write(root, "internal/hand.go", "// Code generated by hand\npackage hand\n");
+        write(root, "web/quoted.ts", "export const m = \"@generated\";\n");
+        write(
+            root,
+            "docs/generated-notes.md",
+            "# @generated\n\nThis page describes the generated files.\n",
+        );
+    }
+
+    fn expect_declared_generated(extracted: &ExtractedRepo) {
+        assert_eq!(
+            paths(extracted),
+            [
+                "Migrations/20240101_Init.cs",
+                "docs/generated-notes.md",
+                "internal/hand.go",
+                "web/quoted.ts"
+            ],
+            "only hand-written files are read, billed and counted"
+        );
+        assert_eq!(
+            extracted.generated,
+            [
+                "Migrations/20240101_Init.Designer.cs",
+                "Migrations/AppDbContextModelSnapshot.cs",
+                "internal/pb/api.go",
+                "web/schema.ts"
+            ]
+        );
+        assert!(extracted.skipped_sizes.contains_key("web/schema.ts"));
+        assert_eq!(extracted.excluded_noise, 0, "generated is not noise");
+        assert!(extracted.skipped_oversize.is_empty());
+        assert!(!extracted.truncated);
+    }
+
+    #[test]
+    fn declared_generated_files_are_listed_and_not_read_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        declared_generated_fixture(dir.path());
+        expect_declared_generated(&scan(dir.path()));
+    }
+
+    #[test]
+    fn declared_generated_files_are_listed_and_not_read_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        declared_generated_fixture(dir.path());
+        expect_declared_generated(&scan(dir.path()));
+    }
+
+    #[test]
+    fn a_tracked_but_gitignored_generated_file_is_still_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            matches!(
+                std::process::Command::new("git").args(args).current_dir(root).status(),
+                Ok(s) if s.success()
+            )
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git on PATH: the union path is not exercisable here
+        }
+        declared_generated_fixture(root);
+        assert!(git(&["add", "-f", "."]));
+        write(root, ".gitignore", "Migrations/\n");
+        let extracted = scan(root);
+        assert!(
+            extracted
+                .generated
+                .contains(&"Migrations/20240101_Init.Designer.cs".to_string()),
+            "{:?}",
+            extracted.generated
+        );
+        assert!(!paths(&extracted).contains(&"Migrations/20240101_Init.Designer.cs".to_string()));
+    }
+
+    #[test]
+    fn a_generated_file_over_the_read_limit_is_generated_not_over_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.rs", "fn a() {}\n");
+        let big = format!("// <auto-generated />\n{}", "var x = 1;\n".repeat(120_000));
+        assert!(big.len() > MAX_FILE_BYTES);
+        write(dir.path(), "Migrations/Big.Designer.cs", &big);
+        let extracted = scan(dir.path());
+        assert_eq!(extracted.generated, ["Migrations/Big.Designer.cs"]);
+        assert!(extracted.skipped_oversize.is_empty());
+        assert!(extracted.over_limit_files().is_empty(), "no warning for it");
+        assert_eq!(
+            extracted.skipped_sizes.get("Migrations/Big.Designer.cs").copied(),
+            Some(big.len() as u64)
+        );
+    }
+
+    #[test]
+    fn an_agreed_exclusion_wins_over_a_generated_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        declared_generated_fixture(dir.path());
+        let extracted = scan_excluding(dir.path(), &["app/Migrations/**"]);
+        assert_eq!(extracted.generated, ["internal/pb/api.go", "web/schema.ts"]);
+        assert_eq!(
+            extracted.excluded_by_agreement,
+            [
+                "Migrations/20240101_Init.Designer.cs",
+                "Migrations/20240101_Init.cs",
+                "Migrations/AppDbContextModelSnapshot.cs"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_key_in_a_generated_file_is_one_masked_finding_and_nothing_else_is() {
+        let dir = tempfile::tempdir().unwrap();
+        declared_generated_fixture(dir.path());
+        let extracted = scan(dir.path());
+        let mut findings = Vec::new();
+        for rel in &extracted.generated {
+            match read_for_secret_search(dir.path(), rel) {
+                SecretRead::Text(text) => {
+                    findings.extend(crate::onboard::audit::secret_findings_in("o/r", rel, &text))
+                }
+                other => panic!("{rel}: {other:?}"),
+            }
+        }
+        // One place: the floor may name it under more than one secret rule, as it does anywhere.
+        let places: std::collections::BTreeSet<(&str, usize)> =
+            findings.iter().map(|f| (f.path.as_str(), f.line)).collect();
+        assert_eq!(
+            places.into_iter().collect::<Vec<_>>(),
+            [("Migrations/AppDbContextModelSnapshot.cs", 4)],
+            "{findings:#?}"
+        );
+        let shown = format!("{findings:?}");
+        assert!(!shown.contains(PLANTED_KEY), "the key is masked: {shown}");
     }
 
     // ── module-variant extensions ───────────────────────────────────────────────
@@ -1857,7 +2185,7 @@ mod tests {
         }
         write(
             root,
-            "README.md",
+            "assets/logo.png",
             "not admissible, never counted against the cap\n",
         );
     }
@@ -1962,7 +2290,7 @@ mod tests {
         ] {
             assert!(is_admissible_text(yes), "{yes} must be audited");
         }
-        for no in ["README", "notes", "keys/id_rsa.pub", "logo.png", "Makefile"] {
+        for no in ["README", "notes", "keys/id_rsa.pub", "logo.png", "Makefile.bak"] {
             assert!(!is_admissible_text(no), "{no} must stay out");
         }
     }
@@ -2134,7 +2462,7 @@ mod tests {
         // The noise file in the folder is named too: an agreed exclusion wins over noise.
         assert_eq!(
             extracted.excluded_by_agreement,
-            ["seeds/data.js", "seeds/package-lock.json"]
+            ["seeds/data.js", "seeds/notes.md", "seeds/package-lock.json"]
         );
         assert_eq!(
             extracted.skipped_sizes.get("seeds/data.js").copied(),
@@ -2204,13 +2532,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         exclusion_fixture(dir.path());
         let extracted = scan(dir.path());
-        assert_eq!(paths(&extracted), ["seeds/data.js", "src/a.rs"]);
+        assert_eq!(
+            paths(&extracted),
+            ["seeds/data.js", "seeds/notes.md", "src/a.rs"],
+            "a doc is read like any other hand-written file"
+        );
         assert!(extracted.excluded_by_agreement.is_empty());
         assert_eq!(extracted.excluded_noise_paths, ["seeds/package-lock.json"]);
-        assert!(extracted
-            .reference_files
-            .iter()
-            .any(|(p, _)| p == "seeds/notes.md"));
     }
 
     /// RULING (coordinator, round 1 item 5): an agreed exclusion wins over every other class.

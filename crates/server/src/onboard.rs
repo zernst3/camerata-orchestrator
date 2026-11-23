@@ -2577,6 +2577,7 @@ pub async fn audit_repos_with_llm_controlled(
                     excluded_noise,
                     excluded_noise_paths: _,
                     excluded_by_agreement,
+                    generated,
                 },
                 noise_lines,
             )) => {
@@ -2596,7 +2597,10 @@ pub async fn audit_repos_with_llm_controlled(
                 let mut oversize_not_text = 0usize;
                 let mut oversize_grown = 0usize;
                 if run_deterministic {
-                    for rel in &secret_searchable {
+                    // A file that declares itself generated is searched the same way: its
+                    // contents are never read for the inspection, but a key baked into it is
+                    // a normal finding.
+                    for rel in secret_searchable.iter().chain(&generated) {
                         let (root, path) = (repo_root_for_history.clone(), rel.clone());
                         let repo_name = spec.to_string();
                         let read =
@@ -2630,6 +2634,7 @@ pub async fn audit_repos_with_llm_controlled(
                 let unread_paths: Vec<String> = skipped_oversize
                     .iter()
                     .filter(|p| !secret_searched_oversize.contains(*p))
+                    .chain(generated.iter().filter(|p| !secret_searched_oversize.contains(*p)))
                     .chain(&skipped_beyond_cap)
                     .chain(&skipped_unreadable)
                     .cloned()
@@ -2664,6 +2669,7 @@ pub async fn audit_repos_with_llm_controlled(
                         not_text: skipped_unreadable,
                         excluded_by_agreement,
                         long_line: skipped_long_line,
+                        generated,
                         sizes: &skipped_sizes,
                         file_cap,
                     },
@@ -3495,7 +3501,8 @@ pub async fn audit_repos_with_llm_controlled(
                                     let kind = match group.scope {
                                         crate::scan_routing::Scope::Language(_) => "language",
                                         crate::scan_routing::Scope::Declared { .. } => "declared",
-                                        crate::scan_routing::Scope::All => continue,
+                                        crate::scan_routing::Scope::All
+                                        | crate::scan_routing::Scope::AllWith(_) => continue,
                                     };
                                     let evaluated = crate::scan_routing::files_in_scope(
                                         &part.changed,
@@ -4944,7 +4951,7 @@ mod tests {
         fs::create_dir_all(base.join("src")).unwrap();
         fs::create_dir_all(base.join("node_modules/x")).unwrap();
         fs::write(base.join("src/main.rs"), "fn main() {}\n").unwrap();
-        fs::write(base.join("README.md"), "# readme").unwrap(); // not a code ext -> skipped
+        fs::write(base.join("logo.png"), "# readme").unwrap(); // not an inspected type -> skipped
         fs::write(base.join("node_modules/x/index.js"), "noise").unwrap(); // noise dir -> skipped
 
         let extracted =

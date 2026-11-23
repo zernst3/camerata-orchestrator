@@ -249,6 +249,7 @@ pub(super) fn skipped_summary_sentence(
         SkipReason::NotText,
         SkipReason::ExcludedByAgreement,
         SkipReason::LongLine,
+        SkipReason::Generated,
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)

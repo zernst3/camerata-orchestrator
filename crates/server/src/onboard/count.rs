@@ -39,6 +39,11 @@ pub struct RepoCount {
     /// and the non-blank lines in them.
     pub excluded_noise_files: usize,
     pub excluded_noise_lines: usize,
+    /// Files that declare themselves generated (a tool's marker in a comment near the top): not
+    /// read for the inspection, so not in the total above and not billed; the secret checks still
+    /// search them. Counted here, with their non-blank lines, so a quote shows what was left out.
+    pub generated_files: usize,
+    pub generated_lines: usize,
     /// The file cap was hit: the counts cover only the first files read.
     pub truncated: bool,
     /// Every file the inspection does NOT read, grouped by why, so a quote is set from the
@@ -107,6 +112,8 @@ pub fn count_repo(root: &Path, scope: &RepoScope) -> anyhow::Result<RepoCount> {
         total_lines,
         excluded_noise_files: extracted.excluded_noise,
         excluded_noise_lines,
+        generated_files: extracted.generated.len(),
+        generated_lines: non_blank_lines_in_files(root, &extracted.generated),
         truncated: extracted.truncated,
         not_read,
         unmatched_patterns: scope
@@ -160,6 +167,7 @@ fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup>
         (SkipReason::BeyondFileCap, &extracted.skipped_beyond_cap),
         (SkipReason::NotText, &extracted.skipped_unreadable),
         (SkipReason::LongLine, &extracted.skipped_long_line),
+        (SkipReason::Generated, &extracted.generated),
     ]
     .into_iter()
     .filter(|(_, paths)| !paths.is_empty())
@@ -185,7 +193,14 @@ fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup>
 /// (`audit_repos` records it on the report for the export's manifest), so both state the same
 /// figure. A file that cannot be read counts zero. Blocking IO.
 pub(crate) fn excluded_noise_lines(root: &Path, excluded_noise_paths: &[String]) -> usize {
-    excluded_noise_paths
+    non_blank_lines_in_files(root, excluded_noise_paths)
+}
+
+/// The non-blank lines in the files at `paths` (relative to `root`), counted as
+/// [`excluded_noise_lines`] counts: a file that cannot be read counts zero. Also used for the
+/// generated files, which are not read for the inspection but are sized for the quote.
+pub(crate) fn non_blank_lines_in_files(root: &Path, paths: &[String]) -> usize {
+    paths
         .iter()
         .filter_map(|rel| std::fs::read(root.join(rel)).ok())
         .map(|bytes| non_blank_lines(&String::from_utf8_lossy(&bytes)))
@@ -213,6 +228,10 @@ impl RepoCount {
         out.push_str(&format!(
             "excluded as noise: {} files, {} lines\n",
             self.excluded_noise_files, self.excluded_noise_lines
+        ));
+        out.push_str(&format!(
+            "generated, not billed: {} files, {} lines\n",
+            self.generated_files, self.generated_lines
         ));
         if self.truncated {
             out.push_str("note: file cap reached, counts are partial\n");
