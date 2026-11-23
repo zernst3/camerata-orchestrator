@@ -265,7 +265,7 @@ async fn the_run_finds_both_keys_and_nothing_else_and_names_the_generated_files(
     let summary = inspection["coverage"]["skipped_summary"].as_str().unwrap();
     assert!(
         summary.starts_with(
-            "4 files were not read for the inspection: 4 generated: searched for secrets only, not billed."
+            "4 files were not read for the inspection: 4 generated (searched for secrets only, not billed)."
         ),
         "{summary}"
     );
