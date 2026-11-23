@@ -162,8 +162,9 @@ fn req_w17_layer_is_untouched_on_every_corpus_rule() {
         // (a new rule, not a re-labelled one).
         ("language", 93),
         ("library", 34),
-        // 35 plus the 13 Firebase rules (MASTER-SEQUENCE item 24), all `platform`.
-        ("platform", 48),
+        // 35 plus the 13 Firebase rules (MASTER-SEQUENCE item 24), all `platform`, plus the eight
+        // IAC-TERRAFORM-* rules (new rules, not re-labelled ones).
+        ("platform", 56),
         ("testing", 7),
         // 136 plus UI-STATE-SHAPE-1 (W29 Wave D), TESTING-MEANINGFUL-ASSERTION-1 (22e) and
         // SEC-NO-AI-REVIEWER-INSTRUCTIONS-1 (prompt-injection defense), SEC-NO-END-OF-LIFE-RUNTIME-1
