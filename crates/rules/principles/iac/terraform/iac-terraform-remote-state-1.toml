@@ -1,7 +1,7 @@
 id = "IAC-TERRAFORM-REMOTE-STATE-1"
 version = 1
 title = "Terraform state is kept in a remote backend with locking turned on"
-domain = "iac"
+domain = "iac:terraform"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"

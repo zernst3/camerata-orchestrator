@@ -1,7 +1,7 @@
 id = "IAC-TERRAFORM-DELETION-PROTECTION-1"
 version = 1
 title = "Production databases defined in Terraform have deletion protection turned on and keep a final snapshot"
-domain = "iac"
+domain = "iac:terraform"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"

@@ -1,7 +1,7 @@
 id = "IAC-TERRAFORM-DATABASE-EXPOSURE-1"
 version = 1
 title = "Managed databases defined in Terraform are not publicly accessible"
-domain = "iac"
+domain = "iac:terraform"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"

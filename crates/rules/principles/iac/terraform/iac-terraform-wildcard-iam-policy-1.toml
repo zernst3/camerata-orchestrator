@@ -1,7 +1,7 @@
 id = "IAC-TERRAFORM-WILDCARD-IAM-POLICY-1"
 version = 1
 title = "Access policies defined in Terraform never allow every action on every resource"
-domain = "iac"
+domain = "iac:terraform"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"

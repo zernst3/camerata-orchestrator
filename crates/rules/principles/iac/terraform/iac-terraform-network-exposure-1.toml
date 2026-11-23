@@ -1,7 +1,7 @@
 id = "IAC-TERRAFORM-NETWORK-EXPOSURE-1"
 version = 1
 title = "Network rules defined in Terraform never open administration or database ports to the whole internet"
-domain = "iac"
+domain = "iac:terraform"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"

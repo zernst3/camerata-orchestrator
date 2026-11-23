@@ -1,7 +1,7 @@
 id = "IAC-TERRAFORM-ENCRYPTION-AT-REST-1"
 version = 1
 title = "Databases and disk volumes defined in Terraform are encrypted at rest"
-domain = "iac"
+domain = "iac:terraform"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
