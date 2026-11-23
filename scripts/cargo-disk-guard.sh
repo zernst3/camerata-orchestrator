@@ -12,11 +12,12 @@
 #
 # Everything it deletes is regenerable build output or an already-merged worktree. It never
 # touches a worktree with uncommitted changes, never deletes an unmerged branch's source, and
-# never touches anything modified in the last ACTIVE_MINUTES (a running agent or build).
+# never touches anything a running cargo/rustc uses, whose branch committed in the last
+# ACTIVE_MINUTES, or that has modified tracked files.
 #
 # Tiers (free space on the data volume):
-#   always          remove merged, idle agent worktrees (+ their branches); drop the target/
-#                   of idle, unmerged agent worktrees
+#   always          remove merged, idle worktrees under .claude/worktrees/ (any name, + their
+#                   branches); drop the target/ of idle, unmerged ones
 #   < TIER1_GIB     cargo-sweep --time 1 across REPOS_ROOT
 #   < TIER2_GIB     delete target/*/incremental and target/release in idle repos
 #   < TIER3_GIB     delete the whole target/ of every idle repo (full rebuild next time)
@@ -86,9 +87,52 @@ free_gib() {
     df -g "$VOLUME" 2>/dev/null | awk 'NR==2 {print $4}'
 }
 
-# True when nothing under $1 changed in the last ACTIVE_MINUTES (no running agent or build).
-is_idle() {
-    [ -z "$(find "$1" -mmin "-$ACTIVE_MINUTES" -print -quit 2>/dev/null)" ]
+# Running cargo/rustc processes, collected ONCE at start (before the guard's own cargo-sweep
+# runs, so the guard never counts itself). APFS-cloned targets and sweeps rewrite file mtimes,
+# so mtimes say nothing about activity; a live process does. Matches the exact command name, so
+# "cargo-sweep" and "cargo-disk-guard" do not count. Works without root (own processes).
+PROC_PIDS="$(ps -axo pid=,command= 2>/dev/null | awk '{n=$2; sub(/.*\//,"",n); if (n=="cargo" || n=="rustc") print $1}' | paste -sd, -)"
+PROC_CWDS=""
+[ -n "$PROC_PIDS" ] && PROC_CWDS="$(lsof -a -d cwd -p "$PROC_PIDS" -Fn 2>/dev/null | grep '^n' | cut -c2-)"
+PROC_ARGS="$(ps -axo command= 2>/dev/null | awk '{n=$1; sub(/.*\//,"",n); if (n=="cargo" || n=="rustc") print $0 " "}')"
+
+# Tracked files modified in git checkout $1 (untracked files do not count; same ignores as the
+# dirty check below plus .claude/settings.json).
+tracked_dirty() {
+    git -C "$1" status --porcelain --untracked-files=no 2>/dev/null |
+        grep -v -e ' sample-report/' -e ' \.claude/settings\.json$' | head -1
+}
+
+# Sets ACTIVE_WHY and returns 0 when $1 is in use: a running cargo/rustc has its cwd or its
+# arguments (--manifest-path, --target-dir) inside it, OR its branch's last commit is newer than
+# ACTIVE_MINUTES, OR a tracked file is modified. Never looks at file mtimes.
+is_active() {
+    local d c ct now
+    d="$(cd -P "$1" 2>/dev/null && pwd)" || d="$1"
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        case "$c/" in "$d/"*) ACTIVE_WHY="running cargo/rustc cwd $c"; return 0 ;; esac
+    done <<GUARD_EOF
+$PROC_CWDS
+GUARD_EOF
+    if [ -n "$PROC_ARGS" ] && printf '%s\n' "$PROC_ARGS" | grep -qF -e "$d/" -e "$d "; then
+        ACTIVE_WHY="running cargo/rustc references it"
+        return 0
+    fi
+    if [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" = "$d" ]; then
+        ct="$(git -C "$d" log -1 --format=%ct 2>/dev/null)"
+        now="$(date +%s)"
+        if [ -n "$ct" ] && [ $(( (now - ct) / 60 )) -lt "$ACTIVE_MINUTES" ]; then
+            ACTIVE_WHY="last commit under ${ACTIVE_MINUTES} min old"
+            return 0
+        fi
+        if [ -n "$(tracked_dirty "$d")" ]; then
+            ACTIVE_WHY="tracked files modified"
+            return 0
+        fi
+    fi
+    ACTIVE_WHY=""
+    return 1
 }
 
 remove_path() {
@@ -104,14 +148,15 @@ log "start; free=$(free_gib) GiB"
 
 # ── 1. agent worktrees ─────────────────────────────────────────────────────────────────────
 if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
-    for wt in "$ORCH_REPO"/.claude/worktrees/agent-*; do
+    for wt in "$ORCH_REPO"/.claude/worktrees/*; do
         [ -d "$wt" ] || continue
-        if ! is_idle "$wt"; then
-            log "skip active worktree $wt"
+        [ -e "$wt/.git" ] || continue
+        if is_active "$wt"; then
+            log "keep worktree $wt: active ($ACTIVE_WHY)"
             continue
         fi
         branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-        dirty="$(git -C "$wt" status --porcelain 2>/dev/null | grep -v ' sample-report/' | head -1)"
+        dirty="$(git -C "$wt" status --porcelain 2>/dev/null | grep -v -e ' sample-report/' -e ' \.claude/settings\.json$' | head -1)"
         merged=0
         for target in $MERGE_TARGETS; do
             if git -C "$ORCH_REPO" rev-parse --verify -q "$target" >/dev/null &&
@@ -121,7 +166,7 @@ if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
         done
         if [ "$merged" = 1 ] && [ -z "$dirty" ] && [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
             if [ "$DRY_RUN" = 1 ]; then
-                log "[dry-run] would remove merged worktree $wt (branch $branch)"
+                log "[dry-run] would remove merged worktree $wt (branch $branch): merged, clean, idle"
             else
                 log "removing merged worktree $wt (branch $branch, $(du -sh "$wt" 2>/dev/null | cut -f1))"
                 git -C "$ORCH_REPO" worktree unlock "$wt" 2>/dev/null
@@ -130,7 +175,10 @@ if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
             fi
         elif [ -d "$wt/target" ]; then
             # Unmerged or dirty, but idle: keep the source, drop the regenerable build output.
+            log "keep worktree $wt source: not removable (merged=$merged, dirty=$([ -n "$dirty" ] && echo yes || echo no), branch=$branch); dropping idle target/"
             remove_path "$wt/target"
+        else
+            log "keep worktree $wt: not removable (merged=$merged, dirty=$([ -n "$dirty" ] && echo yes || echo no), branch=$branch)"
         fi
     done
     [ "$DRY_RUN" = 1 ] || git -C "$ORCH_REPO" worktree prune 2>/dev/null
@@ -144,10 +192,11 @@ list_targets() {
         sed 's|/CACHEDIR.TAG$||'
 }
 
-# Decide idleness ONCE, before any tier runs: cargo-sweep (tier 1) rewrites files inside the
-# targets it trims, which would otherwise make every swept target look "active" to tiers 2-3.
+# Decide idleness ONCE, before any tier runs. Activity is a live cargo/rustc process (collected
+# above, before cargo-sweep runs), a recent commit, or modified tracked files in the owning
+# checkout; never file mtimes, which APFS clones and cargo-sweep itself rewrite.
 IDLE_TARGETS="$(list_targets | while read -r t; do
-    if is_idle "$t"; then echo "$t"; else log "skip active $t" >&2; fi
+    if is_active "$(dirname "$t")"; then log "skip active $t ($ACTIVE_WHY)" >&2; else echo "$t"; fi
 done)"
 
 free="$(free_gib)"
