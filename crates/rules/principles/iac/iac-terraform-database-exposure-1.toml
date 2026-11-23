@@ -1,0 +1,84 @@
+id = "IAC-TERRAFORM-DATABASE-EXPOSURE-1"
+version = 1
+title = "Managed databases defined in Terraform are not publicly accessible"
+domain = "iac"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-668"]
+# Where this rule can apply, so the scan sends it only with Terraform files. The subject is a
+# resource block in Terraform configuration or a value in a Terraform variables file.
+applies_to = { paths = ["**/*.tf", "**/*.tf.json", "**/*.tfvars", "**/*.tfvars.json"] }
+# Severity floor. A database with a public address is one credential away from a full data breach,
+# so a located finding is never rated below high.
+min_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "Applies to managed database resources declared in Terraform: Amazon RDS instances and clusters, Amazon Redshift clusters and the Google Cloud SQL and Azure database equivalents. The subject is whether the database itself is given a public address or public network access. Which source addresses a security group lets through is the subject of IAC-TERRAFORM-NETWORK-EXPOSURE-1. An unset `publicly_accessible` argument is not a fault. An Azure server is a fault only when public network access is enabled and a firewall rule also opens it to every address. The setting can arrive through a variable, so a variable default or a variables file value counts when it feeds the public access argument. No mechanical detector ships for this rule; coverage comes from reading the Terraform files."
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/rds-controls.html"
+title = "AWS Security Hub controls for Amazon RDS: RDS.2, RDS DB instances should prohibit public access, as determined by the PubliclyAccessible configuration (maps to CIS AWS Foundations Benchmark v3.0.0 recommendation 2.3.3)"
+
+[[sources]]
+url = "https://www.cisecurity.org/benchmark/amazon_web_services"
+title = "CIS Amazon Web Services Foundations Benchmark v3.0.0, recommendation 2.3.3: Ensure that public access is not given to RDS Instance"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html"
+title = "Amazon RDS User Guide: Working with a DB instance in a VPC (hiding a DB instance in a VPC from the internet)"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/668.html"
+title = "CWE-668: Exposure of Resource to Wrong Sphere"
+
+[decision]
+question = "Does any database this Terraform configuration creates have a public address or public network access?"
+default = "databases-reachable-only-from-private-networks"
+why = """
+A managed database marked publicly accessible is given an address that resolves from anywhere on
+the internet. From then on the only protections are the firewall rules in front of it and the
+strength of its passwords, and both are easy to weaken by accident. A database holds the data the
+whole product exists to protect, and almost nothing outside the application needs to connect to it
+directly. Keeping it on private subnets with no public address means that a mistake in a firewall
+rule or a leaked password is not enough by itself to reach the data.
+"""
+
+[[option]]
+id = "databases-reachable-only-from-private-networks"
+label = "Every managed database has public access turned off and sits on private subnets"
+directive = """
+No managed database declared in Terraform is reachable from the public internet. For Amazon RDS
+and Amazon Redshift, `aws_db_instance`, `aws_rds_cluster_instance` and `aws_redshift_cluster`
+resources set `publicly_accessible = false` or leave it unset. RDS subnet groups contain only
+private subnets. For Google Cloud SQL, the instance uses a private network, or it has no
+authorized network of `0.0.0.0/0`. For Azure database servers, `public_network_access_enabled` is
+`false`, or no firewall rule opens the server to every address. People who need direct access for
+maintenance connect through a bastion host, a VPN or a session manager service.
+"""
+remediation = """
+Set `publicly_accessible = false` on the database in `<path>`, or the equivalent argument for
+your cloud provider, and place it in a subnet group made of private subnets. If the value comes
+from a variable, change the default and every variables file that sets it. Give people who need
+direct access a bastion host, a VPN or a session manager route instead. Verify by running
+`terraform plan` and confirming the change, then confirm the database endpoint does not accept a
+connection from outside the private network.
+"""
+effort = "medium"
+why = "A database with no public address cannot be reached by an outside attacker even when a password leaks or a firewall rule is loosened by mistake."
+
+[[option]]
+id = "database-has-a-public-address"
+violates = true
+label = "A managed database is publicly accessible"
+directive = "A managed database is declared with public access turned on. The forms are `publicly_accessible = true` on an Amazon RDS or Amazon Redshift resource, a Google Cloud SQL public IPv4 address with an authorized network of `0.0.0.0/0` and an Azure server with public network access enabled together with a firewall rule open to every address."
+remediation = """
+Set `publicly_accessible = false` on the database in `<path>`, or the equivalent argument for
+your cloud provider, and place it in a subnet group made of private subnets. Give people who need
+direct access a bastion host, a VPN or a session manager route instead. Verify by running
+`terraform plan` and confirming the change, then confirm the database endpoint does not accept a
+connection from outside the private network.
+"""
+effort = "medium"
+why = "The database endpoint resolves and answers from the public internet, so one leaked password or one loosened firewall rule gives an outsider direct access to every record it holds."

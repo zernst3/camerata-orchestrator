@@ -1,0 +1,87 @@
+id = "IAC-TERRAFORM-NETWORK-EXPOSURE-1"
+version = 1
+title = "Network rules defined in Terraform never open administration or database ports to the whole internet"
+domain = "iac"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-284"]
+# Where this rule can apply, so the scan sends it only with Terraform files. The subject is a
+# resource block in Terraform configuration or a value in a Terraform variables file.
+applies_to = { paths = ["**/*.tf", "**/*.tf.json", "**/*.tfvars", "**/*.tfvars.json"] }
+# Severity floor. An administration or database port reachable from every address is attacked
+# within minutes of creation, so a located finding is never rated below high.
+min_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "Applies to inbound rules on security groups and firewalls declared in Terraform: AWS security groups and their rule resources, Google Cloud firewall rules and Azure network security rules. The ports in scope are remote administration (SSH on 22 and Remote Desktop on 3389) and database or cache ports (for example 3306, 5432, 1433, 1521, 27017 and 6379), plus any rule that opens every port. Public web ports 80 and 443 on a load balancer or web server are outside the rule. The source range can arrive through a variable, so a variable default or a variables file value of `0.0.0.0/0` counts when it feeds an in scope rule. No mechanical detector ships for this rule; coverage comes from reading the Terraform files."
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"
+title = "AWS Security Hub controls for Amazon EC2: EC2.19 (security groups should not allow unrestricted access to ports with high risk) with EC2.53 and EC2.54 (no ingress from 0.0.0.0/0 or ::/0 to remote server administration ports; these map to CIS AWS Foundations Benchmark v3.0.0 recommendations 5.2 and 5.3)"
+
+[[sources]]
+url = "https://www.cisecurity.org/benchmark/amazon_web_services"
+title = "CIS Amazon Web Services Foundations Benchmark v3.0.0, recommendation 5.2: Ensure no security groups allow ingress from 0.0.0.0/0 to remote server administration ports"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/vpc/latest/userguide/security-group-rules.html"
+title = "Amazon VPC User Guide: Security group rules"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/284.html"
+title = "CWE-284: Improper Access Control"
+
+[decision]
+question = "Which source addresses can reach the administration and database ports this Terraform configuration opens?"
+default = "admin-and-database-ports-restricted-to-known-sources"
+why = """
+The address range `0.0.0.0/0` means every IPv4 address and `::/0` means every IPv6 address. An
+inbound rule with either range on SSH, Remote Desktop or a database port puts that service in
+front of every scanner on the internet, which find new hosts within minutes and try stolen and
+default passwords against them continuously. The network rule is often the only thing between
+those attempts and the service, because a database or an administration login was built to be
+reached from inside a private network. Limiting the source to a known range, a bastion host, a
+VPN or another security group removes the exposure without changing how the team works.
+"""
+
+[[option]]
+id = "admin-and-database-ports-restricted-to-known-sources"
+label = "Inbound rules for administration and database ports name specific source ranges or security groups"
+directive = """
+No inbound rule declared in Terraform allows `0.0.0.0/0` or `::/0` to reach a remote
+administration port (SSH on 22, Remote Desktop on 3389), a database or cache port (for example
+3306, 5432, 1433, 1521, 27017 or 6379) or every port at once. This covers `ingress` blocks on
+`aws_security_group`, `aws_security_group_rule` and `aws_vpc_security_group_ingress_rule`
+resources, `source_ranges` on `google_compute_firewall` and `source_address_prefix` values of `*`
+or `Internet` on `azurerm_network_security_rule`. Administration access comes from a named office
+or VPN range, a bastion host or a session manager service. Databases accept connections only from
+the security groups or subnets of the applications that use them. Only public web ports on a load
+balancer or web server are open to every address.
+"""
+remediation = """
+Replace the `0.0.0.0/0` or `::/0` source on the rule in `<path>` with the specific address range,
+security group or subnet that needs the access, or remove the rule and reach the host through a
+bastion, a VPN or a session manager service. If the range comes from a variable, change the
+default and every variables file that sets it. Verify by running `terraform plan` and confirming
+the rule no longer lists an open range, then confirm the port does not answer from an address
+outside the allowed range.
+"""
+effort = "low"
+why = "Naming the source keeps administration and database services off the public internet, so a weak password or an unpatched service cannot be reached by an outside attacker."
+
+[[option]]
+id = "admin-or-database-ports-open-to-the-internet"
+violates = true
+label = "An inbound rule opens an administration port, a database port or every port to every internet address"
+directive = "An inbound security group or firewall rule allows `0.0.0.0/0` or `::/0` on every port or on a port used for remote administration, a database or a cache."
+remediation = """
+Replace the `0.0.0.0/0` or `::/0` source on the rule in `<path>` with the specific address range,
+security group or subnet that needs the access, or remove the rule and reach the host through a
+bastion, a VPN or a session manager service. Verify by running `terraform plan` and confirming the
+rule no longer lists an open range, then confirm the port does not answer from an address outside
+the allowed range.
+"""
+effort = "low"
+why = "Every scanner on the internet can reach the service. Automated password guessing and exploit attempts begin within minutes of the rule being applied. One weak credential or one unpatched flaw then gives an outsider a login on the host or direct access to the data."
