@@ -158,14 +158,52 @@ fn the_quote_count_bills_the_eight_hand_written_files_and_lists_the_generated_on
     assert_eq!(v["generated_files"], 4, "{json}");
     assert_eq!(v["generated_lines"], 8, "{json}");
     assert_eq!(v["excluded_noise_files"], 0, "{json}");
+    // Round 1: the files with no recognized language are split by kind, so a quote reads right
+    // (before: one row, "other (config)", 6 files and 9 lines, which called docs and templates
+    // config). The two code files (app.js, Init.cs) are the languages.
+    let kinds: Vec<(String, u64, u64)> = v["other_by_kind"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["kind"].as_str().unwrap().to_string(),
+                k["files"].as_u64().unwrap(),
+                k["lines"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("docs".to_string(), 2, 4),
+            ("templates".to_string(), 2, 2),
+            ("styles".to_string(), 1, 1),
+            ("build files".to_string(), 1, 2),
+        ],
+        "{json}"
+    );
+    assert_eq!(
+        (v["other_files"].as_u64(), v["other_lines"].as_u64()),
+        (Some(6), Some(9))
+    );
 
     let text = run_count(&count_args(repo.path(), false)).unwrap();
+    for row in [
+        "other: docs",
+        "other: templates",
+        "other: styles",
+        "other: build files",
+    ] {
+        assert!(text.contains(row), "{row}: {text}");
+    }
+    assert!(!text.contains("other (config)"), "{text}");
     assert!(
         text.contains("generated, not billed: 4 files, 8 lines"),
         "{text}"
     );
     assert!(
-        text.contains("not read, generated: scanned for secrets only, not billed (4 files):"),
+        text.contains("not read, generated: searched for secrets only, not billed (4 files):"),
         "{text}"
     );
     for path in [
@@ -220,14 +258,14 @@ async fn the_run_finds_both_keys_and_nothing_else_and_names_the_generated_files(
     for row in skipped {
         assert_eq!(
             row["reason"],
-            "generated: scanned for secrets only, not billed"
+            "generated: searched for secrets only, not billed"
         );
         assert_eq!(row["reason_code"], "generated");
     }
     let summary = inspection["coverage"]["skipped_summary"].as_str().unwrap();
     assert!(
         summary.starts_with(
-            "4 files were not read for the inspection: 4 generated: scanned for secrets only, not billed."
+            "4 files were not read for the inspection: 4 generated: searched for secrets only, not billed."
         ),
         "{summary}"
     );
