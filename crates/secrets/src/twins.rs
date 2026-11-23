@@ -595,7 +595,7 @@ fn identifier_words(text: &str) -> Vec<String> {
 /// and spaces, then `:`, `=` or `=>`.
 fn is_assigned(after_name: &str) -> bool {
     after_name
-        .trim_start_matches(|c: char| matches!(c, '"' | '\'' | ']' | ' ' | '\t'))
+        .trim_start_matches(['"', '\'', ']', ' ', '\t'])
         .starts_with([':', '='])
 }
 
