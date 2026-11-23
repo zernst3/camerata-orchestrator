@@ -1329,6 +1329,10 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
     stage_fixture(repo.path());
     let run_id = {
         let store = rs::RunStore::create(rs::NewRun {
+            pin: camerata_server::run_store::engine_pin::EnginePin::for_run(
+                None,
+                &Default::default(),
+            ),
             project_key: camerata_server::scan_cache::state_dir::repo_state_key(repo.path()),
             repos: vec![("acme/one".to_string(), repo.path().to_path_buf())],
             models: rs::ModelsRecord {
@@ -1566,4 +1570,139 @@ async fn a_resume_with_a_different_explicit_group_review_model_is_refused() {
     });
     let (result, _) = resume_with_preflight(&llm, &run_id, export.clone()).await;
     result.expect("the same model is accepted");
+}
+
+// ── The engine pin (V1 item 39): the build that starts an inspection finishes it ─────────────
+
+/// The refusal a resume gives for a saved record patched by `patch`: the plain text, with no
+/// model call made and no export written.
+async fn refused_resume_after(
+    test: &str,
+    patch: impl FnOnce(&mut serde_json::Value),
+) -> Option<String> {
+    if !typst_available(test) {
+        return None;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let down = Outage {
+        group_review: true,
+        ..Outage::default()
+    };
+    let (llm, run_id) = interrupted_run(repo.path(), &export, down).await;
+    patch_saved_run(&run_id, patch);
+    let calls_before = llm.calls();
+    let (result, _) = resume_with_preflight(&llm, &run_id, export.clone()).await;
+    let Err(InspectError::Failed(why)) = result else {
+        panic!("this resume must be refused in plain words");
+    };
+    assert_eq!(llm.calls(), calls_before, "no model call was made");
+    assert!(!export.exists());
+    Some(why)
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_on_another_build_is_refused_with_no_model_call() {
+    let patch = |v: &mut serde_json::Value| {
+        v["pin"]["build"]["commit"] = serde_json::json!("1234567890abcdef1234567890abcdef12345678");
+    };
+    let Some(why) = refused_resume_after("a_resume_on_another_build", patch).await else {
+        return;
+    };
+    assert!(why.contains("started on build 1234567890ab"), "{why}");
+    assert!(why.contains("must finish it"), "{why}");
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_saved_run_with_no_pin_is_refused_at_resume() {
+    let Some(why) = refused_resume_after("a_saved_run_with_no_pin", |v| {
+        v["pin"] = serde_json::Value::Null;
+    })
+    .await
+    else {
+        return;
+    };
+    assert!(
+        why.contains("before Camerata recorded which build ran it"),
+        "{why}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_after_the_rule_library_changed_is_refused() {
+    let Some(why) = refused_resume_after("a_resume_after_the_rule_library_changed", |v| {
+        v["pin"]["corpus_version"] = serde_json::json!("sha256:not-this-library");
+    })
+    .await
+    else {
+        return;
+    };
+    assert!(why.contains("rule library changed"), "{why}");
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_after_the_prompt_schema_changed_is_refused() {
+    let Some(why) = refused_resume_after("a_resume_after_the_prompt_schema_changed", |v| {
+        v["pin"]["build"]["prompt_schema"] = serde_json::json!(9999);
+    })
+    .await
+    else {
+        return;
+    };
+    assert!(
+        why.contains("questions Camerata asks the model changed"),
+        "{why}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resume_naming_another_clone_judge_than_the_run_started_on_is_refused() {
+    let Some(why) = refused_resume_after("a_resume_naming_another_clone_judge", |v| {
+        v["pin"]["clone_judge_model"] = serde_json::json!("claude-haiku-5-5");
+        v["args"]["clone_judge_model"] = serde_json::json!("claude-sonnet-5-5");
+    })
+    .await
+    else {
+        return;
+    };
+    assert!(
+        why.contains("claude-haiku-5-5") && why.contains("claude-sonnet-5-5"),
+        "{why}"
+    );
+}
+
+/// A client inspection started through the production entry is refused at once on a build that
+/// has uncommitted changes or no commit, before any key lookup or model call; on a clean build it
+/// goes on, so this only asserts the refusal when the running build is one of those.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_client_inspection_is_refused_at_start_on_a_dirty_or_commitless_build() {
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    if camerata_server::ENGINE_COMMIT.is_some() && !camerata_server::ENGINE_DIRTY {
+        return;
+    }
+    // A made-up key, so the key check (which comes first) passes and the build check is reached.
+    let _key = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test-not-a-real-key");
+    let err = camerata::inspect_cmd::run_inspect_with_store(
+        args(&[repo.path()], &["acme/one"], &out.path().join("x.zip")),
+        &store(),
+    )
+    .await
+    .expect_err("refused");
+    assert!(
+        err.to_string()
+            .contains("cannot start an inspection for a client"),
+        "{err}"
+    );
 }

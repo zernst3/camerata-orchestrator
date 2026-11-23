@@ -1120,12 +1120,17 @@ pub async fn run_inspect_pipeline_with(
     } else {
         camerata_server::scan_cache::state_dir::project_state_key(&args.repo_dirs())
     };
+    // The build and rule library this run starts on, read from the running binary and the rules it
+    // loaded, never from the folder it runs in.
+    let engine_pin =
+        camerata_server::run_store::engine_pin::EnginePin::for_run(corpus.as_ref(), &controls);
     let resumed: Option<(Arc<camerata_server::run_store::RunStore>, String)> = match &seams.resume {
         Some(run_id) => Some(open_for_resume(
             run_id,
             &sources,
             &ai_scan_key,
             &models_record,
+            &engine_pin,
         )?),
         None => None,
     };
@@ -1140,6 +1145,13 @@ pub async fn run_inspect_pipeline_with(
             .hold_group_review_model(&mut controls, args.group_review_model.as_deref())
             .map_err(InspectError::Failed)?;
         group_review_notice = Some(notice);
+        // The clone check stays on the model the run started with.
+        if let Some(line) = store
+            .hold_clone_judge_model(&mut controls)
+            .map_err(InspectError::Failed)?
+        {
+            group_review_notice = group_review_notice.map(|n| format!("{n}\n{line}"));
+        }
         // An agent finder run finishes its remaining pieces on the finder model it started with.
         if let Some(line) = store
             .hold_finder_model(&mut controls)
@@ -1364,6 +1376,7 @@ pub async fn run_inspect_pipeline_with(
                 include_alternatives: corpus.is_some(),
                 origin: camerata_server::run_store::RunOrigin::Cli,
                 project_id: None,
+                pin: engine_pin.clone(),
             }) {
                 Ok(store) => {
                     if let Some(prior) = &incremental_prior {
@@ -1809,15 +1822,16 @@ fn open_for_resume(
     sources: &[(String, PathBuf)],
     ai_scan_key: &camerata_server::scan_cache::AiScanKey,
     models: &camerata_server::run_store::ModelsRecord,
+    pin: &camerata_server::run_store::engine_pin::EnginePin,
 ) -> Result<(Arc<camerata_server::run_store::RunStore>, String), InspectError> {
-    camerata_server::run_store::open_for_resume(run_id, sources, ai_scan_key, models).map_err(|e| {
-        match e {
+    camerata_server::run_store::open_for_resume(run_id, sources, ai_scan_key, models, pin).map_err(
+        |e| match e {
             camerata_server::run_store::RunStoreError::AlreadyComplete(m) => {
                 InspectError::AlreadyComplete(m)
             }
             other => InspectError::Failed(other.to_string()),
-        }
-    })
+        },
+    )
 }
 
 /// The end of an attempt: tell the store which parts failed and whether the run is complete.
@@ -2224,6 +2238,16 @@ pub async fn run_inspect_with_store(
 ) -> Result<InspectOutcome, InspectError> {
     let has_api_key = api_key_present(store);
     require_api_key_for_client_inspection(args.backend, has_api_key)?;
+    // A client inspection is not started on a build with uncommitted changes or no commit, so the
+    // build that starts it can be named exactly. Checked at the production start only (after the
+    // key check); a resume goes through `resume_inspect`, and the scripted test entries are not
+    // refused.
+    if let Some(why) = camerata_server::run_store::engine_pin::client_start_refusal(
+        args.client_engagement,
+        &camerata_server::run_store::engine_pin::BuildId::current(),
+    ) {
+        return Err(InspectError::Failed(why));
+    }
     run_inspect_pipeline(args, has_api_key, store).await
 }
 

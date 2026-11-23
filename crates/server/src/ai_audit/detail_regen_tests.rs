@@ -2394,6 +2394,7 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
         let _g = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", dir.path());
         let repo = tempfile::tempdir().unwrap();
         let store = crate::run_store::RunStore::create(crate::run_store::NewRun {
+            pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
             project_key: "p".to_string(),
             repos: vec![(REPO.to_string(), repo.path().to_path_buf())],
             models: crate::run_store::ModelsRecord {

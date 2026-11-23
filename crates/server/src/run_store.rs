@@ -36,6 +36,7 @@
 //! individual model calls of a stage are recorded as the stage reaches them, because how many
 //! there are (files in a chunk, findings in a batch) depends on the stage before it.
 
+pub mod engine_pin;
 pub mod journal;
 
 use std::path::{Path, PathBuf};
@@ -474,6 +475,10 @@ pub struct RunRecord {
     /// How many times a process has worked on the run: 1 for the first, 2 after one resume.
     pub attempt: u32,
     pub engine_version: String,
+    /// The build, rule library and clone judge model the run started on (see [`engine_pin`]). `None`
+    /// for a run saved before it was recorded, which cannot be resumed.
+    #[serde(default)]
+    pub pin: Option<engine_pin::EnginePin>,
     /// Names the project (the repos together) so the cleanup and `latest` can find its runs.
     pub project_key: String,
     pub repos: Vec<RepoRecord>,
@@ -943,6 +948,8 @@ pub struct NewRun {
     pub origin: RunOrigin,
     /// The cockpit project the run is started in (`None` for the command line).
     pub project_id: Option<String>,
+    /// The build and rule library this run starts on, from [`engine_pin::EnginePin::for_run`].
+    pub pin: engine_pin::EnginePin,
 }
 
 /// A fresh run id: the time, then six random hex digits.
@@ -1030,6 +1037,7 @@ impl RunStore {
             project_id: new.project_id,
             attempt: 1,
             engine_version: engine_version(),
+            pin: Some(new.pin),
             project_key: new.project_key,
             repos,
             rules_fingerprint: new.ai_scan_key.directives_fingerprint.clone(),
@@ -1153,6 +1161,18 @@ impl RunStore {
         controls: &mut crate::cost_cap::RunControls,
     ) -> Result<Option<String>, String> {
         self.record().models.hold_finder_model(controls)
+    }
+
+    /// [`engine_pin::EnginePin::hold_clone_judge_model`] for this run. A run saved without a pin
+    /// holds nothing (it cannot be resumed at all).
+    pub fn hold_clone_judge_model(
+        &self,
+        controls: &mut crate::cost_cap::RunControls,
+    ) -> Result<Option<String>, String> {
+        match self.record().pin {
+            Some(pin) => pin.hold_clone_judge_model(controls),
+            None => Ok(None),
+        }
     }
 
     /// [`ModelsRecord::hold_finder`] for this run.
@@ -1643,6 +1663,10 @@ pub struct ResumeCheck<'a> {
     pub models: &'a ModelsRecord,
     /// The state of each repo folder as it stands now, by repo name.
     pub trees: Vec<(String, TreeState)>,
+    /// The running binary's build ([`engine_pin::BuildId::current`]).
+    pub build: &'a engine_pin::BuildId,
+    /// The digest of the rule library now loaded; `None` when it is not loaded yet (the preview).
+    pub corpus_version: Option<&'a str>,
 }
 
 /// Decide whether `check.record` may be resumed. The refusal is a plain sentence naming what
@@ -1657,15 +1681,8 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
         )));
     }
     let refuse = |why: String| Err(RunStoreError::Refused(why));
-    if record.engine_version != engine_version() {
-        return refuse(format!(
-            "run {} was made by another version of Camerata ({} instead of {}); its saved \
-             replies answer a different question, so start a new run",
-            record.run_id,
-            record.engine_version,
-            engine_version()
-        ));
-    }
+    engine_pin::check_pin(record.pin.as_ref(), check.build, check.corpus_version)
+        .map_err(RunStoreError::Refused)?;
     for saved in &record.repos {
         let Some((_, now)) = check.trees.iter().find(|(name, _)| *name == saved.name) else {
             return refuse(format!(
@@ -1800,6 +1817,7 @@ pub fn open_for_resume(
     sources: &[(String, PathBuf)],
     ai_scan_key: &AiScanKey,
     models: &ModelsRecord,
+    pin: &engine_pin::EnginePin,
 ) -> Result<(Arc<RunStore>, String), RunStoreError> {
     let record = read_record(run_id)?;
     let trees = sources
@@ -1811,9 +1829,14 @@ pub fn open_for_resume(
         ai_scan_key,
         models,
         trees,
+        build: &pin.build,
+        corpus_version: Some(&pin.corpus_version),
     })?;
     let estimate = estimate_resume(run_id)?;
     let store = RunStore::open(run_id)?;
+    if let Some(note) = engine_pin::dirty_note(record.pin.as_ref(), &pin.build) {
+        store.add_note(&note);
+    }
     Ok((store, estimate.render()))
 }
 
@@ -1831,8 +1854,8 @@ pub struct ResumePreview {
 }
 
 /// The preview for `run_id`. The checks that need only the run and the folders (complete, in use,
-/// another version of Camerata, a commit or file that changed) are made here; the models and the
-/// rules are compared when the resume starts, and refuse then.
+/// another build of Camerata, a commit or file that changed) are made here; the models and the
+/// rules (the rule library included) are compared when the resume starts, and refuse then.
 pub fn preview_resume(run_id: &str) -> Result<ResumePreview, RunStoreError> {
     let dir = runs_dir().join(run_id);
     let record = load_record(&dir)?;
@@ -1847,6 +1870,8 @@ pub fn preview_resume(run_id: &str) -> Result<ResumePreview, RunStoreError> {
         ai_scan_key: &record.ai_scan_key,
         models: &record.models,
         trees,
+        build: &engine_pin::BuildId::current(),
+        corpus_version: None,
     })
     .err()
     .map(|e| e.to_string());
