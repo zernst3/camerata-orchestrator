@@ -488,6 +488,11 @@ async fn generated_files_are_counted_with_their_lines_before_the_start_and_start
     let mut body = sizes(serde_json::json!([]));
     body[0]["generated_files"] = serde_json::json!(3);
     body[0]["generated_lines"] = serde_json::json!(12_345);
+    body[0]["generated_paths"] = serde_json::json!([
+        "Migrations/Init.Designer.cs",
+        "Migrations/AppDbContextModelSnapshot.cs",
+        "web/schema.ts"
+    ]);
     Mock::given(method("POST"))
         .and(path("/api/onboard/preflight"))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
@@ -500,7 +505,12 @@ async fn generated_files_are_counted_with_their_lines_before_the_start_and_start
     pump(&mut vdom, &mut seen, 1_200).await;
     let html = dioxus_ssr::render(&vdom);
     assert!(
-        html.contains("3 files (12,345 lines) will not be read for the inspection, generated: scanned for secrets only, not billed."),
+        html.contains("3 files (12,345 lines) will not be read for the inspection, generated: searched for secrets only, not billed."),
+        "{html}"
+    );
+    // Round 1: the pre-start check names the files, as the command line does.
+    assert!(
+        html.contains("Generated: Migrations/Init.Designer.cs; Migrations/AppDbContextModelSnapshot.cs; web/schema.ts."),
         "{html}"
     );
     assert!(

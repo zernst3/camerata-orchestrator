@@ -1021,10 +1021,14 @@ pub fn OverLimitNotice(
     let text = camerata_ui_core::readiness::over_limit_text(&block, floor_on);
     let unmatched_text = camerata_ui_core::readiness::unmatched_text(&block);
     let generated_text = camerata_ui_core::readiness::generated_text(&block, floor_on);
+    let generated_paths = camerata_ui_core::readiness::generated_paths_text(&block);
     rsx! {
         div { class: "scan-block-hint over-limit-notice", role: "alert",
             if !generated_text.is_empty() {
                 p { class: "generated-files-note", "{generated_text}" }
+            }
+            if !generated_paths.is_empty() {
+                p { class: "generated-files-paths", "{generated_paths}" }
             }
             if !text.is_empty() {
                 p { "{text}" }

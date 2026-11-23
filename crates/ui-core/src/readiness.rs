@@ -218,9 +218,20 @@ pub struct OverLimitBlock {
     /// not read, not billed, searched for secrets only. A statement, never a hold.
     pub generated_files: usize,
     pub generated_lines: usize,
+    /// The generated files' paths (repo-qualified when several repos are read), for the list.
+    pub generated_paths: Vec<String>,
 }
 
+/// How many generated paths the pre-start check names before it says how many more there are.
+pub const GENERATED_PATHS_SHOWN: usize = 10;
+
 impl OverLimitBlock {
+    /// This block with the generated files' paths the server named.
+    pub fn with_generated_paths(mut self, paths: Vec<String>) -> Self {
+        self.generated_paths = paths;
+        self
+    }
+
     /// This block with the generated files and lines the server counted.
     pub fn with_generated(mut self, files: usize, lines: usize) -> Self {
         self.generated_files = files;
@@ -261,6 +272,7 @@ pub fn over_limit_block(
             secret_limit: String::new(),
             generated_files: 0,
             generated_lines: 0,
+            generated_paths: Vec::new(),
         })
 }
 
@@ -290,6 +302,29 @@ pub fn generated_text(block: &OverLimitBlock, floor_on: bool) -> String {
         )
     } else {
         format!("{what} or billed, and are not searched for secrets in this run: the security floor is off.")
+    }
+}
+
+/// The generated files by path, as `camerata count` and the command line's warning name them, up
+/// to [`GENERATED_PATHS_SHOWN`] and then how many more. Empty when there are none.
+pub fn generated_paths_text(block: &OverLimitBlock) -> String {
+    if block.generated_paths.is_empty() {
+        return String::new();
+    }
+    let shown = block
+        .generated_paths
+        .iter()
+        .take(GENERATED_PATHS_SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    match block
+        .generated_paths
+        .len()
+        .saturating_sub(GENERATED_PATHS_SHOWN)
+    {
+        0 => format!("Generated: {shown}."),
+        more => format!("Generated: {shown}; and {more} more."),
     }
 }
 
@@ -774,6 +809,24 @@ mod tests {
         assert!(with_unmatched.blocks());
     }
 
+    /// Round 1: the generated files are named by path, capped, with how many more.
+    #[test]
+    fn the_generated_paths_are_listed_up_to_the_cap_and_then_counted() {
+        assert!(generated_paths_text(&OverLimitBlock::default()).is_empty());
+        let few = OverLimitBlock::default()
+            .with_generated(2, 5)
+            .with_generated_paths(vec!["a/One.Designer.cs".into(), "b/two.go".into()]);
+        assert_eq!(
+            generated_paths_text(&few),
+            "Generated: a/One.Designer.cs; b/two.go."
+        );
+        let many: Vec<String> = (0..13).map(|i| format!("g/f{i}.cs")).collect();
+        let text = generated_paths_text(&OverLimitBlock::default().with_generated_paths(many));
+        assert!(text.contains("g/f9.cs"), "{text}");
+        assert!(!text.contains("g/f10.cs"), "{text}");
+        assert!(text.ends_with("; and 3 more."), "{text}");
+    }
+
     /// With the security floor off the warning must not say the file is searched; and the ceiling
     /// is the one the server sends, printed as "over 20 MB".
     #[test]
@@ -806,7 +859,7 @@ mod tests {
         let block = OverLimitBlock::default().with_generated(1, 1);
         assert_eq!(
             generated_text(&block, true),
-            "1 file (1 line) will not be read for the inspection, generated: scanned for secrets only, not billed."
+            "1 file (1 line) will not be read for the inspection, generated: searched for secrets only, not billed."
         );
         let block = OverLimitBlock::default().with_generated(4, 1_234_567);
         assert!(generated_text(&block, true).starts_with("4 files (1,234,567 lines)"));

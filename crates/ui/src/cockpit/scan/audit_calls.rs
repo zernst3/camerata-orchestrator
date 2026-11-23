@@ -423,6 +423,9 @@ pub(in crate::cockpit) struct RepoSizeView {
     pub generated_files: usize,
     #[serde(default)]
     pub generated_lines: usize,
+    /// The generated files' paths, as the server names them.
+    #[serde(default)]
+    pub generated_paths: Vec<String>,
     /// The read limit as a person reads it ("1 MB"), as the engine states it.
     #[serde(default)]
     pub read_limit: String,
@@ -541,6 +544,10 @@ pub(in crate::cockpit) fn over_limit_block_of(
         .unwrap_or_default();
     let generated_files: usize = sizes.iter().map(|s| s.generated_files).sum();
     let generated_lines: usize = sizes.iter().map(|s| s.generated_lines).sum();
+    let generated_paths: Vec<String> = sizes
+        .iter()
+        .flat_map(|s| s.generated_paths.iter().cloned())
+        .collect();
     camerata_ui_core::readiness::over_limit_block(limit, files, unmatched, notes, unchecked, warned)
         // Generated files alone still make a block: it is a statement for the quote, not a hold.
         .or_else(|| {
@@ -550,6 +557,7 @@ pub(in crate::cockpit) fn over_limit_block_of(
             block
                 .with_secret_limit(secret_limit)
                 .with_generated(generated_files, generated_lines)
+                .with_generated_paths(generated_paths)
         })
 }
 
