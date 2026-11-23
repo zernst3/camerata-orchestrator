@@ -206,3 +206,29 @@ fn a_quoted_string_in_a_list_is_still_a_value() {
     readable_for_client("  storage_key: app-preferences-sidebar-collapsed");
     readable_for_client("export STORAGE_KEY=app-preferences-sidebar-collapsed");
 }
+
+// ---- 11 and 12: braces before the credential name; export and dash spelled differently ---------
+
+#[test]
+fn a_credential_name_after_a_brace_still_holds_a_passphrase() {
+    let mut readable = Vec::new();
+    for text in [
+        format!("function getKey() {{ return apiToken || \"{PHRASE}\" }}"),
+        format!("class TokenStore {{ static apiKey = \"{PHRASE}\" }}"),
+        format!("switch (key) {{ case \"api_token\": return \"{PHRASE}\" }}"),
+        format!("export\tAPI_KEY_PROD={PHRASE}"),
+        format!("EXPORT API_KEY={PHRASE}"),
+        format!("-\tAPI_TOKEN={PHRASE}"),
+        format!("-   API_TOKEN={PHRASE}"),
+        // Still held from round 2.
+        format!("public string ApiKey {{ get; }} = \"{PHRASE}\";"),
+    ] {
+        if detect_secrets(&text).len() != 1 || redact_for_client(&text).text.contains(PHRASE) {
+            readable.push(text);
+        }
+    }
+    assert!(readable.is_empty(), "shipped readable: {readable:#?}");
+    readable_for_client(
+        "for rule in [\"SEC-NO-VENDOR-TOKEN-1\", \"SEC-NO-HARDCODED-SECRETS-1\"] {",
+    );
+}

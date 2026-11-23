@@ -602,16 +602,22 @@ fn is_assigned(after_name: &str) -> bool {
 /// `before_value` without what the unquoted pattern puts in front of the name: indentation,
 /// `export ` and a list dash (`  - export API_KEY=` is `API_KEY=`).
 fn strip_line_prefix(before_value: &str) -> &str {
+    let blank = |c: char| c == ' ' || c == '\t';
     let mut rest = before_value.trim_start();
     loop {
-        let next = rest
-            .strip_prefix("export ")
-            .or_else(|| rest.strip_prefix("- "))
-            .map(str::trim_start);
-        match next {
-            Some(next) => rest = next,
-            None => return rest,
+        // `export` or `-`, any case, then at least one space or tab.
+        let after = if rest.is_char_boundary(6) && rest[..6].eq_ignore_ascii_case("export") {
+            &rest[6..]
+        } else if let Some(after) = rest.strip_prefix('-') {
+            after
+        } else {
+            return rest;
+        };
+        let trimmed = after.trim_start_matches(blank);
+        if trimmed.len() == after.len() {
+            return rest;
         }
+        rest = trimmed;
     }
 }
 
@@ -651,30 +657,38 @@ fn names_a_passphrase_holder(before_value: &str) -> bool {
     }
     let stripped = strip_line_prefix(before_value);
     let end = identifier_len(stripped);
-    let assigned = is_assigned(&stripped[end..]);
-    let mut words = if assigned {
+    if is_assigned(&stripped[end..]) {
         // A name being assigned: the whole identifier (kebab and dotted included), read without
         // its environment or version suffix (`API_KEY_PROD`, `apiKeyV2`).
         let mut words = identifier_words(&stripped[..end]);
         while words.len() > 1 && words.last().is_some_and(|w| is_suffix_word(w)) {
             words.pop();
         }
-        words
-    } else {
-        // Not assigned (a fallback `|| "..."`, a call argument, an accessor): the words in front
-        // of the first `:` or `=`, as the last word. A string in a list (`"SEC-NO-TOKEN-1"`)
-        // ends in `1`, so it stays a value.
-        let head = stripped.split([':', '=', '{']).next().unwrap_or(stripped);
-        let mut words = identifier_words(head);
-        while words.len() > 1
-            && words
-                .last()
-                .is_some_and(|w| matches!(w.as_str(), "or" | "and"))
-        {
-            words.pop();
-        }
-        words
-    };
+        return last_word_holds(words);
+    }
+    // Not assigned (a fallback `|| "..."`, a call argument, an accessor, a `case`): either the
+    // words in front of the first `:` or `=` (a name before a brace is not the credential:
+    // `class TokenStore { static apiKey = "..." }`) or the words in front of the first `{` (an
+    // accessor: `ApiKey { get; } = "..."`) name a holder. A string in a list (`"SEC-NO-TOKEN-1"`)
+    // ends in `1`, so it stays a value.
+    [[':', '='].as_slice(), ['{'].as_slice()]
+        .iter()
+        .any(|cuts| {
+            let head = stripped.split(*cuts).next().unwrap_or(stripped);
+            let mut words = identifier_words(head);
+            while words.len() > 1
+                && words
+                    .last()
+                    .is_some_and(|w| matches!(w.as_str(), "or" | "and"))
+            {
+                words.pop();
+            }
+            last_word_holds(words)
+        })
+}
+
+/// Whether the last of `words` is a credential word, or a `key` qualified as one.
+fn last_word_holds(mut words: Vec<String>) -> bool {
     let Some(last) = words.pop() else {
         return false;
     };
