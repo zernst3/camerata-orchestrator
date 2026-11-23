@@ -10,6 +10,7 @@ mod false_alarms;
 mod firebase_spans;
 mod json_walk;
 mod model_input;
+mod prose_credentials;
 mod redaction;
 mod rules;
 mod source_hygiene;
