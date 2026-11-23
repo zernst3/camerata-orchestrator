@@ -478,6 +478,7 @@ pub const GAP_LEFT_TO_CI: &str = "Rule left to your CI";
 
 pub const P_REPOS_INSPECTED: &str = "Repos inspected";
 pub const P_FILES_SCANNED: &str = "Files scanned";
+pub const P_FILE_TYPES: &str = "File types inspected";
 pub const P_CODE_VOLUME: &str = "Code volume";
 pub const P_GENERATED: &str = "Generated";
 pub const P_WHAT_WE_CHECKED: &str = "What we checked";

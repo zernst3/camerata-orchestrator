@@ -495,6 +495,19 @@ pub struct RuleConvention {
     pub finder_rows: Vec<FinderRowRef>,
 }
 
+/// The reason a file that declares itself generated is not read for the inspection, as every
+/// surface states it (Coverage, `camerata count`, the pre-start check). One phrase in one place,
+/// so no surface words it differently.
+///
+/// This is the one place the wording lives ("searched", Zach 2026-11-23): flip a word here and
+/// every surface follows. The second phrase is for a generated file the secret checks did NOT
+/// search (floor off, over the search ceiling, not text), so Coverage never claims a search that
+/// did not happen.
+pub const GENERATED_FILES_LABEL: &str = "generated: searched for secrets only, not billed";
+/// The reason for a generated file that was not searched for secrets either.
+pub const GENERATED_UNSEARCHED_LABEL: &str =
+    "generated: not read, not billed, not searched for secrets";
+
 #[cfg(test)]
 mod tests {
     use super::*;

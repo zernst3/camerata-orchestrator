@@ -33,6 +33,12 @@ pub struct RepoScanFacts {
     pub over_limit: Vec<crate::onboard::files::OverLimitFile>,
     /// The patterns of the project's Excluded by agreement list this repo's files matched.
     pub matched_patterns: Vec<usize>,
+    /// Files that declare themselves generated: not read, not billed, searched for secrets only.
+    /// The count and the non-blank lines in them, so the pre-start check shows what was left out.
+    pub generated_files: usize,
+    pub generated_lines: usize,
+    /// The generated files' paths, in path order, so the pre-start check names them.
+    pub generated_paths: Vec<String>,
 }
 
 /// Read each source the way the scan does and count what the AI tier will be given. A source
@@ -63,11 +69,15 @@ pub async fn gather_scan_facts(
         let dir = dir.clone();
         let repo_scope = scope.for_repo(spec);
         let read = tokio::task::spawn_blocking(move || {
-            crate::onboard::files::read_local_repo_files(&dir, &repo_scope)
+            crate::onboard::files::read_local_repo_files(&dir, &repo_scope).map(|extracted| {
+                let generated_lines =
+                    crate::onboard::count::non_blank_lines_in_files(&dir, &extracted.generated);
+                (extracted, generated_lines)
+            })
         })
         .await;
-        let extracted = match read {
-            Ok(Ok(extracted)) => extracted,
+        let (extracted, generated_lines) = match read {
+            Ok(Ok(read)) => read,
             Ok(Err(e)) => {
                 out.push(unreadable(spec, &e.to_string()));
                 continue;
@@ -91,6 +101,8 @@ pub async fn gather_scan_facts(
         let code_chars = extracted.files.iter().map(|(_, c)| c.len()).sum();
         let over_limit = extracted.over_limit_files();
         let matched_patterns = extracted.matched_patterns.clone();
+        let generated_files = extracted.generated.len();
+        let generated_paths = extracted.generated.clone();
         out.push(RepoScanFacts {
             repo: spec.to_string(),
             files: extracted.files,
@@ -100,6 +112,9 @@ pub async fn gather_scan_facts(
             read_error: None,
             over_limit,
             matched_patterns,
+            generated_files,
+            generated_lines,
+            generated_paths,
         });
     }
     out
@@ -116,6 +131,9 @@ fn unreadable(spec: &str, why: &str) -> RepoScanFacts {
         read_error: Some(why.to_string()),
         over_limit: Vec::new(),
         matched_patterns: Vec::new(),
+        generated_files: 0,
+        generated_lines: 0,
+        generated_paths: Vec::new(),
     }
 }
 
@@ -137,6 +155,16 @@ pub struct RepoSizeWire {
     /// before an inspection starts and holds Start until each is excluded.
     #[serde(default)]
     pub over_limit: Vec<crate::onboard::files::OverLimitFile>,
+    /// Files that declare themselves generated and the non-blank lines in them: not read, not
+    /// billed, searched for secrets only. The desktop states both before an inspection starts.
+    #[serde(default)]
+    pub generated_files: usize,
+    #[serde(default)]
+    pub generated_lines: usize,
+    /// The generated files' paths, in the form the exclusion list uses, so the desktop names
+    /// them (capped there) as the command line does.
+    #[serde(default)]
+    pub generated_paths: Vec<String>,
     /// The read limit as a person reads it ("1 MB"), from the engine's own constant, so the
     /// desktop never states a number the engine does not apply.
     #[serde(default)]
@@ -215,6 +243,13 @@ pub fn repo_sizes(
                         ..o.clone()
                     })
                     .collect(),
+                generated_files: f.generated_files,
+                generated_lines: f.generated_lines,
+                generated_paths: f
+                    .generated_paths
+                    .iter()
+                    .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
+                    .collect(),
                 read_limit: crate::onboard::files::max_file_label(),
                 secret_search_limit: crate::onboard::files::secret_scan_label(),
                 unmatched_patterns: Vec::new(),
@@ -238,6 +273,9 @@ pub fn repo_sizes(
                 ),
                 agent_finder: None,
                 over_limit: Vec::new(),
+                generated_files: 0,
+                generated_lines: 0,
+                generated_paths: Vec::new(),
                 read_limit: crate::onboard::files::max_file_label(),
                 secret_search_limit: crate::onboard::files::secret_scan_label(),
                 unmatched_patterns: Vec::new(),

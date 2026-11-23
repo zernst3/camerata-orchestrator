@@ -1101,6 +1101,14 @@ pub struct SkippedTotals {
     /// Files with a line longer than the room's read page: not read.
     #[serde(default)]
     pub long_line: usize,
+    /// Files that declare themselves generated: not read, billed or counted; the secret checks
+    /// searched each. The one stated exception to read equals billed.
+    #[serde(default)]
+    pub generated: usize,
+    /// Generated files the secret checks did NOT search (the floor was off, the file is over the
+    /// secret search ceiling or is not text): not read, billed or counted either.
+    #[serde(default)]
+    pub generated_unsearched: usize,
     /// Patterns in Excluded by agreement that match only files never read anyway. Patterns, not
     /// files: each is counted once per run, however many repos it was recorded for.
     #[serde(default)]
@@ -1132,6 +1140,8 @@ impl SkippedTotals {
             SkipReason::NotText => self.not_text,
             SkipReason::ExcludedByAgreement => self.excluded_by_agreement,
             SkipReason::LongLine => self.long_line,
+            SkipReason::Generated => self.generated,
+            SkipReason::GeneratedUnsearched => self.generated_unsearched,
             SkipReason::ExcludedNeverRead => self.excluded_never_read,
         }
     }
@@ -1144,6 +1154,8 @@ impl SkippedTotals {
             + self.not_text
             + self.excluded_by_agreement
             + self.long_line
+            + self.generated
+            + self.generated_unsearched
     }
 
     fn add(&mut self, reason: SkipReason) {
@@ -1153,6 +1165,8 @@ impl SkippedTotals {
             SkipReason::NotText => self.not_text += 1,
             SkipReason::ExcludedByAgreement => self.excluded_by_agreement += 1,
             SkipReason::LongLine => self.long_line += 1,
+            SkipReason::Generated => self.generated += 1,
+            SkipReason::GeneratedUnsearched => self.generated_unsearched += 1,
             SkipReason::ExcludedNeverRead => self.excluded_never_read += 1,
         }
     }
@@ -1310,6 +1324,12 @@ pub struct RepoSkips<'a> {
     pub excluded_by_agreement: Vec<String>,
     /// Files with a line longer than the room's read page.
     pub long_line: Vec<String>,
+    /// Files that declare themselves generated (`onboard::files::declares_generated`) and whose
+    /// contents the secret checks searched.
+    pub generated: Vec<String>,
+    /// Files that declare themselves generated and were NOT searched for secrets (floor off, over
+    /// the secret search ceiling, or not text).
+    pub generated_unsearched: Vec<String>,
     /// Excluded by agreement patterns that match only files never read anyway: listed by the
     /// pattern, so the client sees the exclusion removed nothing that would have been read.
     pub excluded_never_read: Vec<String>,
@@ -1354,6 +1374,8 @@ impl SkippedFileList {
             (skips.not_text, SkipReason::NotText),
             (skips.excluded_by_agreement, SkipReason::ExcludedByAgreement),
             (skips.long_line, SkipReason::LongLine),
+            (skips.generated, SkipReason::Generated),
+            (skips.generated_unsearched, SkipReason::GeneratedUnsearched),
             (skips.excluded_never_read, SkipReason::ExcludedNeverRead),
         ] {
             for path in paths {
@@ -1431,6 +1453,12 @@ pub enum SkipReason {
     ExcludedByAgreement,
     /// A line longer than the room's read page: the file cannot be read in full.
     LongLine,
+    /// The file declares itself generated in a comment near its top (a tool's own marker): it is
+    /// not read for the inspection, billed or counted, but the secret checks searched it.
+    Generated,
+    /// A generated file the secret checks did not search: the deterministic floor was off, the
+    /// file is over the secret search ceiling, or it is not text.
+    GeneratedUnsearched,
     /// An Excluded by agreement pattern that matches only files Camerata never reads anyway: the
     /// exclusion removed nothing that would have been read or billed.
     ExcludedNeverRead,
@@ -1448,6 +1476,8 @@ impl SkipReason {
             SkipReason::NotText => "not UTF-8 text".to_string(),
             SkipReason::ExcludedByAgreement => "excluded by agreement".to_string(),
             SkipReason::LongLine => crate::onboard::files::long_line_label(),
+            SkipReason::Generated => crate::onboard::files::generated_label(),
+            SkipReason::GeneratedUnsearched => crate::onboard::files::generated_unsearched_label(),
             SkipReason::ExcludedNeverRead => {
                 "excluded by agreement; nothing here is read by default".to_string()
             }
@@ -4512,6 +4542,8 @@ mod tests {
                 not_text: Vec::new(),
                 excluded_by_agreement: vec!["seeds/data.js".to_string()],
                 long_line: Vec::new(),
+                generated: Vec::new(),
+                generated_unsearched: Vec::new(),
                 excluded_never_read: Vec::new(),
                 sizes: &sizes,
                 file_cap: 20_000,

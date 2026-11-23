@@ -46,6 +46,8 @@ use std::collections::BTreeMap;
 
 use camerata_rules::{AppliesTo, Candidates};
 
+use crate::onboard::files::{text_kind, TextKind};
+
 /// One rule as the audit passes and the router see it: the id and chosen directive the prompt is
 /// built from, plus the routing metadata the corpus declares for it. Passed through `audit_repo`,
 /// `plan_routes` and `run_routed_passes` whole (not as `(id, directive)` pairs) so a new piece of
@@ -145,9 +147,85 @@ pub enum Scope {
         language: Option<&'static str>,
         /// The rule's declared scope.
         applies: AppliesTo,
+        /// The admitted text kinds the routing table sends the rule to.
+        kinds: TextKinds,
     },
-    /// Cross-cutting / unknown — audit every file (the safe default; never causes a miss).
+    /// Cross-cutting / unknown — audit every code and config file (the safe default; never
+    /// causes a miss). Not the admitted documents, templates, stylesheets and build runners
+    /// ([`TextKind`]): those go only to the rules [`text_kinds_for`] names.
     All,
+    /// Like [`Scope::All`], and also the admitted text of the named kinds: the rule is one the
+    /// routing table sends to templates, build runners, documents or stylesheets.
+    AllWith(TextKinds),
+}
+
+/// A set of [`TextKind`]s: which kinds of admitted text (V1 item 32) a rule is judged against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct TextKinds(u8);
+
+impl TextKinds {
+    /// No kind: the rule is judged against code and config only.
+    pub const NONE: TextKinds = TextKinds(0);
+    const MARKUP: TextKinds = TextKinds(1);
+    const BUILD: TextKinds = TextKinds(2);
+    const DOCS: TextKinds = TextKinds(4);
+    const STYLES: TextKinds = TextKinds(8);
+    const EVERY: TextKinds = TextKinds(15);
+
+    /// Whether `kind` is in the set.
+    pub fn contains(self, kind: TextKind) -> bool {
+        let bit = match kind {
+            TextKind::Markup => Self::MARKUP,
+            TextKind::Build => Self::BUILD,
+            TextKind::Docs => Self::DOCS,
+            TextKind::Styles => Self::STYLES,
+        };
+        self.0 & bit.0 != 0
+    }
+}
+
+/// THE routing table for the admitted text kinds (one table, no second mechanism): the rules each
+/// kind is judged against. A rule that is not listed is judged against code and config only, so a
+/// README, a stylesheet, a template or a Makefile is never judged against a code rule.
+///
+/// * Secrets rules reach every kind: a key is as real in a README or a stylesheet as in code.
+/// * Templates and HTML: the web and injection rules (the raw-output sink, CSRF on forms, open
+///   redirects, a token kept in browser storage by an inline script).
+/// * The Makefile family: the shell, secrets and CI rules (command injection, disabled TLS, and
+///   every CI/CD rule).
+/// * Markdown: the instruction-to-an-AI-reviewer rule as well, since a README is where one is
+///   planted. CSS: secrets only.
+const TEXT_ROUTES: &[(&str, TextKinds)] = &[
+    ("SEC-NO-HARDCODED-SECRETS-1", TextKinds::EVERY),
+    ("SEC-NO-PRIVATE-KEY-1", TextKinds::EVERY),
+    ("SEC-NO-VENDOR-TOKEN-1", TextKinds::EVERY),
+    ("SEC-NO-SECRET-FILE-1", TextKinds::EVERY),
+    ("ARCH-NO-SECRETS-IN-URL-1", TextKinds::EVERY),
+    ("SEC-NO-AI-REVIEWER-INSTRUCTIONS-1", TextKinds::DOCS),
+    ("SEC-NO-UNSAFE-HTML-SINK-1", TextKinds::MARKUP),
+    ("SEC-CSRF-SERVER-RENDERED-FORMS-1", TextKinds::MARKUP),
+    ("SEC-NO-OPEN-REDIRECT-1", TextKinds::MARKUP),
+    ("UI-AUTH-TOKEN-STORAGE-1", TextKinds::MARKUP),
+    ("SEC-NO-COMMAND-INJECTION-1", TextKinds::BUILD),
+    ("SEC-NO-DISABLED-TLS-1", TextKinds::BUILD),
+    ("CICD-BUILD-PROVENANCE-1", TextKinds::BUILD),
+    ("CICD-CODEQL-SECURITY-SCAN-1", TextKinds::BUILD),
+    ("CICD-DEPENDENCY-AUDIT-1", TextKinds::BUILD),
+    ("CICD-LEAST-PRIVILEGE-TOKEN-1", TextKinds::BUILD),
+    ("CICD-NO-SECRET-LOGGING-1", TextKinds::BUILD),
+    ("CICD-NO-SECRETS-ON-FORK-PR-1", TextKinds::BUILD),
+    ("CICD-PIN-THIRD-PARTY-ACTIONS-1", TextKinds::BUILD),
+    ("CICD-PRIVILEGED-DEPLOY-GATE-1", TextKinds::BUILD),
+    ("CICD-SECRETS-VIA-SECRETS-STORE-1", TextKinds::BUILD),
+    ("CICD-SEMGREP-SECURITY-SCAN-1", TextKinds::BUILD),
+];
+
+/// The kinds of admitted text `rule_id` is judged against, from [`TEXT_ROUTES`].
+pub fn text_kinds_for(rule_id: &str) -> TextKinds {
+    TEXT_ROUTES
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(rule_id))
+        .map_or(TextKinds::NONE, |(_, kinds)| *kinds)
 }
 
 /// Map a file extension (lowercase, no dot) to its canonical language key, if known. The one
@@ -235,7 +313,10 @@ pub fn rule_scope(rule_id: &str) -> Scope {
             return Scope::Language(lang);
         }
     }
-    Scope::All
+    match text_kinds_for(rule_id) {
+        TextKinds::NONE => Scope::All,
+        kinds => Scope::AllWith(kinds),
+    }
 }
 
 /// The full scope of `rule`: its id-prefix language, narrowed by its declared `applies_to` when
@@ -250,6 +331,7 @@ pub fn scope_of(rule: &AuditRule, applies_to_routing: bool) -> Scope {
                 _ => None,
             },
             applies: applies.clone(),
+            kinds: text_kinds_for(&rule.id),
         },
         _ => by_id,
     }
@@ -293,11 +375,21 @@ fn declared_scope_matches(path: &str, content: &str, applies: &AppliesTo) -> boo
 /// sql, sh) are matched by [`Scope::All`] but NOT by any id-prefix language scope (a `RUST-` rule
 /// has no business in a `.sql` file). A declared scope follows [`declared_scope_matches`].
 pub fn file_in_scope(path: &str, content: &str, scope: &Scope) -> bool {
+    // An admitted template, document, stylesheet or build runner is in a scope only when the
+    // routing table sends the rule to its kind; every other scope is about code and config.
+    let kind = text_kind(path);
     match scope {
-        Scope::All => true,
+        Scope::All => kind.is_none(),
+        Scope::AllWith(kinds) => kind.is_none_or(|k| kinds.contains(k)),
         Scope::Language(lang) => file_language(path).is_some_and(|f| language_covers(lang, f)),
-        Scope::Declared { language, applies } => {
-            language.is_none_or(|l| file_language(path).is_some_and(|f| language_covers(l, f)))
+        Scope::Declared {
+            language,
+            applies,
+            kinds,
+        } => {
+            kind.is_none_or(|k| kinds.contains(k))
+                && language
+                    .is_none_or(|l| file_language(path).is_some_and(|f| language_covers(l, f)))
                 && declared_scope_matches(path, content, applies)
         }
     }
@@ -446,10 +538,20 @@ pub fn plan_routes(
         // for declared scopes, "2" for All (last).
         let key = match &scope {
             Scope::Language(l) => format!("0:{l}"),
-            Scope::Declared { language, applies } => {
-                format!("1:{}:{}", language.unwrap_or("-"), applies.canonical_key())
+            Scope::Declared {
+                language,
+                applies,
+                kinds,
+            } => {
+                format!(
+                    "1:{}:{}:{}",
+                    language.unwrap_or("-"),
+                    applies.canonical_key(),
+                    kinds.0
+                )
             }
-            Scope::All => "2".to_string(),
+            Scope::AllWith(kinds) => format!("2:{}", kinds.0),
+            Scope::All => "3".to_string(),
         };
         by_scope
             .entry(key)
@@ -632,9 +734,10 @@ mod tests {
         let plan1 = plan_routes(&rust_rule, &files, true);
         assert_eq!(plan1.routed_chars, 100);
 
-        // ARCH-1 sees ALL files (even unknown languages).
+        // ARCH-1 sees every code and config file (even unknown languages), but not the admitted
+        // Markdown: a README is never judged against a code rule (V1 item 32).
         let plan2 = plan_routes(&arch_rule, &files, true);
-        assert_eq!(plan2.routed_chars, 250); // 100 + 50 + 75 + 25
+        assert_eq!(plan2.routed_chars, 200); // 100 + 75 + 25, not the 50 of b.md
 
         // Files_for_rule filters correctly.
         let rust_files = files_for_rule(&r("RUST-1"), true, &files);
@@ -642,7 +745,11 @@ mod tests {
         assert_eq!(rust_files[0].0, "a.rs");
 
         let arch_files = files_for_rule(&r("ARCH-1"), true, &files);
-        assert_eq!(arch_files.len(), 4);
+        assert_eq!(
+            arch_files.len(),
+            3,
+            "the Markdown file is not judged by ARCH-1"
+        );
     }
 
     #[test]
@@ -775,7 +882,7 @@ mod tests {
     #[test]
     fn a_file_with_an_unknown_language_is_sent_a_language_scoped_rule() {
         let rule = scoped("X-1", &[], &["rust"]);
-        for unknown in ["Makefile", "README.md", "config/app.yaml", ".env", ""] {
+        for unknown in ["Dockerfile", "notes.txt", "config/app.yaml", ".env", ""] {
             assert!(
                 file_in_scope(unknown, "", &scope_of(&rule, true)),
                 "`{unknown}` has no recognized language: the rule must be sent"
@@ -787,8 +894,8 @@ mod tests {
     #[test]
     fn a_paths_only_scope_does_not_send_unmatched_unknown_files() {
         let rule = scoped("X-1", &["**/*.sql"], &[]);
-        assert!(!file_in_scope("README.md", "", &scope_of(&rule, true)));
-        assert!(!file_in_scope("Makefile", "", &scope_of(&rule, true)));
+        assert!(!file_in_scope("notes.txt", "", &scope_of(&rule, true)));
+        assert!(!file_in_scope("Dockerfile", "", &scope_of(&rule, true)));
     }
 
     #[test]
@@ -902,9 +1009,9 @@ mod tests {
     #[test]
     fn a_marker_scope_alone_has_no_language_part_so_unmatched_unknown_files_are_out() {
         let rule = with_markers("SQL-1", &[], &["create policy"]);
-        assert!(!file_in_scope("README.md", "hello", &scope_of(&rule, true)));
+        assert!(!file_in_scope("notes.txt", "hello", &scope_of(&rule, true)));
         assert!(file_in_scope(
-            "README.md",
+            "notes.txt",
             "see CREATE POLICY",
             &scope_of(&rule, true)
         ));
@@ -1064,6 +1171,125 @@ mod tests {
             ("cxx", "cpp"),
         ] {
             assert_eq!(lang_for_extension(ext), Some(lang), "{ext}");
+        }
+    }
+    // ── V1 item 32: rule routing for the admitted text kinds ──────────────────────────────
+
+    /// The ids of `rules` that are sent `path` (one table: `TEXT_ROUTES`).
+    fn rules_sent<'a>(path: &str, ids: &[&'a str]) -> Vec<&'a str> {
+        let file = vec![f(path, 10)];
+        ids.iter()
+            .copied()
+            .filter(|id| !files_for_rule(&r(id), true, &file).is_empty())
+            .collect()
+    }
+
+    /// One id of every family: code (ARCH, SQL, API, PROC, UI), the language-pinned ones, and the
+    /// ids the table names.
+    const SAMPLE_IDS: &[&str] = &[
+        "ARCH-STRICT-LAYERING-1",
+        "ARCH-NO-SECRETS-IN-URL-1",
+        "SQL-DB-INDEX-2",
+        "RUST-DIOXUS-2",
+        "JAVASCRIPT-REACT-HOOKS-1",
+        "UI-STATE-SHAPE-1",
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        "SEC-NO-HARDCODED-SECRETS-1",
+        "SEC-NO-UNSAFE-HTML-SINK-1",
+        "SEC-CSRF-SERVER-RENDERED-FORMS-1",
+        "SEC-NO-COMMAND-INJECTION-1",
+        "SEC-NO-AI-REVIEWER-INSTRUCTIONS-1",
+        "CICD-LEAST-PRIVILEGE-TOKEN-1",
+    ];
+
+    #[test]
+    fn a_template_or_html_page_is_judged_by_the_web_and_secret_rules_only() {
+        for path in [
+            "views/page.ejs",
+            "app/views/x.html.erb",
+            "public/index.html",
+        ] {
+            assert_eq!(
+                rules_sent(path, SAMPLE_IDS),
+                [
+                    "ARCH-NO-SECRETS-IN-URL-1",
+                    "SEC-NO-HARDCODED-SECRETS-1",
+                    "SEC-NO-UNSAFE-HTML-SINK-1",
+                    "SEC-CSRF-SERVER-RENDERED-FORMS-1",
+                ],
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_makefile_is_judged_by_the_shell_secret_and_ci_rules_only() {
+        for path in ["Makefile", "sub/Procfile", "Justfile"] {
+            assert_eq!(
+                rules_sent(path, SAMPLE_IDS),
+                [
+                    "ARCH-NO-SECRETS-IN-URL-1",
+                    "SEC-NO-HARDCODED-SECRETS-1",
+                    "SEC-NO-COMMAND-INJECTION-1",
+                    "CICD-LEAST-PRIVILEGE-TOKEN-1",
+                ],
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_readme_is_never_judged_against_a_code_rule_and_a_stylesheet_only_for_secrets() {
+        assert_eq!(
+            rules_sent("README.md", SAMPLE_IDS),
+            [
+                "ARCH-NO-SECRETS-IN-URL-1",
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "SEC-NO-AI-REVIEWER-INSTRUCTIONS-1",
+            ]
+        );
+        assert_eq!(
+            rules_sent("styles/site.scss", SAMPLE_IDS),
+            ["ARCH-NO-SECRETS-IN-URL-1", "SEC-NO-HARDCODED-SECRETS-1"]
+        );
+    }
+
+    #[test]
+    fn code_files_keep_every_rule_they_had() {
+        let all_code: Vec<&str> = SAMPLE_IDS
+            .iter()
+            .copied()
+            .filter(|id| !id.starts_with("RUST-") && !id.starts_with("JAVASCRIPT-"))
+            .collect();
+        assert_eq!(rules_sent("src/db.sql", SAMPLE_IDS), all_code);
+    }
+
+    #[test]
+    fn a_declared_scope_cannot_send_a_rule_to_a_kind_the_table_does_not_name() {
+        // A rule that declares a language scope matches a file of unknown language; for an
+        // admitted document the table decides first.
+        let rule = scoped("X-1", &[], &["rust"]);
+        assert!(!file_in_scope("README.md", "", &scope_of(&rule, true)));
+        assert!(file_in_scope("notes.txt", "", &scope_of(&rule, true)));
+        let table_rule = scoped("SEC-NO-UNSAFE-HTML-SINK-1", &[], &["rust"]);
+        assert!(file_in_scope(
+            "views/p.ejs",
+            "",
+            &scope_of(&table_rule, true)
+        ));
+        assert!(!file_in_scope(
+            "README.md",
+            "",
+            &scope_of(&table_rule, true)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_routing_table_names_only_corpus_rules() {
+        let (corpus, _) = camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        for (id, kinds) in TEXT_ROUTES {
+            assert!(corpus.get_by_id(id).is_some(), "{id} is not a corpus rule");
+            assert_ne!(*kinds, TextKinds::NONE, "{id}");
         }
     }
 }

@@ -379,6 +379,11 @@ struct WalkChecks {
     named: Vec<String>,
     /// Files over the secret search ceiling: checked by name only.
     name_only: Vec<String>,
+    /// Files that declare themselves generated, as `repo/path` in pattern form: not read, not
+    /// billed, searched for secrets only.
+    generated: Vec<String>,
+    /// The non-blank lines in the files of `generated`.
+    generated_lines: usize,
     unmatched: Vec<String>,
     warned: Vec<(String, String)>,
     unchecked: Vec<(String, String)>,
@@ -390,12 +395,17 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
     let repos: Vec<String> = sources.iter().map(|(s, _)| s.clone()).collect();
     let mut named: Vec<String> = Vec::new();
     let mut name_only: Vec<String> = Vec::new();
+    let mut generated: Vec<String> = Vec::new();
+    let mut generated_lines = 0usize;
     let mut read_ok: Vec<String> = Vec::new();
     let mut matched = vec![false; scope.patterns().len()];
     for (spec, dir) in sources {
         let (dir, repo_scope) = (dir.clone(), scope.for_repo(spec));
-        let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
-            super::files::read_local_repo_files(&dir, &repo_scope)
+        let Ok(Ok((extracted, lines))) = tokio::task::spawn_blocking(move || {
+            super::files::read_local_repo_files(&dir, &repo_scope).map(|extracted| {
+                let lines = super::count::non_blank_lines_in_files(&dir, &extracted.generated);
+                (extracted, lines)
+            })
         })
         .await
         else {
@@ -407,6 +417,13 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
         for i in &extracted.matched_patterns {
             matched[*i] = true;
         }
+        generated.extend(
+            extracted
+                .generated
+                .iter()
+                .map(|path| pattern_form(&repos, spec, path)),
+        );
+        generated_lines += lines;
         for f in extracted.over_limit_files() {
             let why = if f.reason.is_empty() {
                 String::new()
@@ -429,6 +446,8 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
     WalkChecks {
         named,
         name_only,
+        generated,
+        generated_lines,
         unmatched: checks.unmatched,
         warned: checks.warned,
         unchecked: checks.unchecked,
@@ -490,6 +509,32 @@ pub async fn over_limit_warnings(
 /// not text, only the file name is checked.
 fn file_warnings(w: &WalkChecks, floor_on: bool) -> Vec<String> {
     let mut out = Vec::new();
+    // Self-declared generated files: not read and not billed, so the quote shows what was left
+    // out, by count and lines. Searched for secrets like an over-limit file, in the same words.
+    if !w.generated.is_empty() {
+        let n = w.generated.len();
+        out.push(format!(
+            "{n} {} ({} {}), {}: {}. {}",
+            if n == 1 { "file" } else { "files" },
+            crate::report_export::coverage_gaps::group_digits(w.generated_lines),
+            if w.generated_lines == 1 {
+                "line"
+            } else {
+                "lines"
+            },
+            if floor_on {
+                super::files::generated_label()
+            } else {
+                super::files::generated_unsearched_label()
+            },
+            w.generated.join("; "),
+            if floor_on {
+                "A key in one of them is still a finding."
+            } else {
+                "They are not searched for secrets in this run: the security floor is off."
+            }
+        ));
+    }
     let mut part = |list: &[String], qualifier: &str, tail_one: &str, tail_each: &str| {
         if list.is_empty() {
             return;
@@ -538,11 +583,9 @@ fn file_warnings(w: &WalkChecks, floor_on: bool) -> Vec<String> {
 
 fn refusal_text(w: WalkChecks, with_unmatched: bool, repos: &[String]) -> Option<String> {
     let WalkChecks {
-        named: _,
-        name_only: _,
         unmatched,
         unchecked,
-        warned: _,
+        ..
     } = w;
     let (unmatched, unchecked) = if with_unmatched {
         (unmatched, unchecked)
@@ -773,6 +816,46 @@ mod tests {
         assert!(!text.contains("huge.js"), "{text}");
         let both = scope(&["app/seeds/**", "app/src/big.rs"]);
         assert_eq!(start_checks(&sources, &both).await, (None, Vec::new()));
+    }
+
+    /// V1 item 32: files that declare themselves generated are listed in the pre-start check with
+    /// their count and lines, in the phrase Coverage uses, and never hold a start.
+    #[tokio::test]
+    async fn generated_files_are_listed_with_count_and_lines_and_never_hold_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        for (rel, text) in [
+            ("src/a.rs", "fn a() {}\n"),
+            (
+                "Migrations/Init.Designer.cs",
+                "// <auto-generated />\nclass A {}\n\nclass B {}\n",
+            ),
+            (
+                "pb/api.go",
+                "// Code generated by x. DO NOT EDIT.\npackage pb\n",
+            ),
+        ] {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let sources = vec![("acme/app".to_string(), dir.path().to_path_buf())];
+        let (refusal, warnings) = start_checks(&sources, &ScanScope::none()).await;
+        assert_eq!(refusal, None);
+        assert_eq!(
+            warnings,
+            ["2 files (5 lines), generated: searched for secrets only, not billed: \
+              app/Migrations/Init.Designer.cs; app/pb/api.go. A key in one of them is still a finding."]
+        );
+        // With the floor off nothing searches them, and the warning says so.
+        let (_, off) = start_checks_for(&sources, &ScanScope::none(), false).await;
+        assert!(
+            off[0].contains("not searched for secrets in this run"),
+            "{off:?}"
+        );
+        // An agreed exclusion is never opened and is no longer listed.
+        let (refusal, warnings) = start_checks(&sources, &scope(&["app/pb/**"])).await;
+        assert_eq!(refusal, None);
+        assert!(warnings[0].starts_with("1 file (3 lines)"), "{warnings:?}");
     }
 
     /// With the security floor off (AI only), the warning must not say the file is searched.

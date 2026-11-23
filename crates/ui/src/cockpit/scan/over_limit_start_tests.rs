@@ -477,6 +477,49 @@ async fn a_file_with_a_long_line_is_listed_with_its_reason_and_start_stays_on() 
     );
 }
 
+/// V1 item 32: files that declare themselves generated are counted with their lines in the
+/// pre-start check, in the one phrase Coverage uses, and Start stays on. The numbers come from the
+/// preflight wire exactly as the server sends them.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn generated_files_are_counted_with_their_lines_before_the_start_and_start_stays_on() {
+    let server = MockServer::start().await;
+    stub_screen(&server).await;
+    let mut body = sizes(serde_json::json!([]));
+    body[0]["generated_files"] = serde_json::json!(3);
+    body[0]["generated_lines"] = serde_json::json!(12_345);
+    body[0]["generated_paths"] = serde_json::json!([
+        "Migrations/Init.Designer.cs",
+        "Migrations/AppDbContextModelSnapshot.cs",
+        "web/schema.ts"
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/api/onboard/preflight"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut vdom = VirtualDom::new(results);
+    let mut seen = Seen::default();
+    seen.take(&vdom.rebuild_to_vec());
+    pump(&mut vdom, &mut seen, 1_200).await;
+    let html = dioxus_ssr::render(&vdom);
+    assert!(
+        html.contains("3 files (12,345 lines) will not be read for the inspection, generated: searched for secrets only, not billed."),
+        "{html}"
+    );
+    // Round 1: the pre-start check names the files, as the command line does.
+    assert!(
+        html.contains("Generated: Migrations/Init.Designer.cs; Migrations/AppDbContextModelSnapshot.cs; web/schema.ts."),
+        "{html}"
+    );
+    assert!(
+        !start_button_tag(&html).contains("disabled"),
+        "{}",
+        start_button_tag(&html)
+    );
+}
+
 /// Zach's ruling: a pattern in a never-read folder is a warning with a Remove pattern action,
 /// and Start stays on.
 #[tokio::test(flavor = "current_thread")]

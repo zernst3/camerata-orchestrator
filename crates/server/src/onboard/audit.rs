@@ -1321,3 +1321,51 @@ mod hold_scope_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod docs_secret_tests {
+    use super::*;
+
+    /// V1 item 32: the floor runs over admitted documents. A key pasted into a README is a
+    /// finding, masked; the placeholders a docs page shows stay twins and are no finding.
+    #[test]
+    fn a_key_pasted_into_a_readme_is_flagged_and_masked() {
+        let key = "ghp_0123456789012345678901234567890123456";
+        let readme = format!("# Setup\n\nExport your token:\n\n    GITHUB_TOKEN={key}\n");
+        let findings = audit_files("o/r", &[("README.md".to_string(), readme)]);
+        assert!(!findings.is_empty(), "the README key must be a finding");
+        for f in &findings {
+            assert_eq!(f.path, "README.md");
+            assert!(!format!("{f:?}").contains(key), "masked: {f:?}");
+        }
+    }
+
+    #[test]
+    fn a_docs_placeholder_in_a_readme_stays_a_twin_and_is_no_finding() {
+        let readme = "# Setup\n\n    GITHUB_TOKEN=ghp_your_token_here\n    ANTHROPIC_API_KEY=<your-api-key>\n";
+        let findings = audit_files("o/r", &[("README.md".to_string(), readme.to_string())]);
+        assert!(findings.is_empty(), "{findings:#?}");
+        // The labeled twin is not masked on its way to the model either: the model sees the
+        // placeholder as written, so it cannot mistake a masked value for a real one.
+        let model = crate::onboard::redact::files_for_model_with(
+            &[("README.md".to_string(), readme.to_string())],
+            true,
+        );
+        assert_eq!(model[0].1, readme, "the placeholder stays as written");
+    }
+
+    #[test]
+    fn a_clean_doc_and_a_clean_stylesheet_produce_no_row() {
+        let files = vec![
+            (
+                "docs/guide.md".to_string(),
+                "# Guide\n\nRun `make test`. See the API reference.\n".to_string(),
+            ),
+            (
+                "styles/site.css".to_string(),
+                "body { color: #333; background: url(\"/img/bg.png\"); }\n".to_string(),
+            ),
+        ];
+        assert!(audit_files("o/r", &files).is_empty());
+    }
+}

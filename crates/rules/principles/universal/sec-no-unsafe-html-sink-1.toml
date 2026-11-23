@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-HTML-SINK-1"
-version = 5
+version = 6
 title = "User- or attacker-influenced data is never rendered through a raw-HTML sink without sanitization"
 domain = "universal"
 layer = "universal"
@@ -9,6 +9,7 @@ inspectable = true
 cwe = ["CWE-79"]
 default = true
 verification = "grounded"
+qualifies = "A mix of a deterministic search and the model's own read. Source files in a language the preview checks cover are matched by a taint-tracking cross-site scripting search (semgrep taint-xss rules) for the common raw-HTML sinks. Server-side templates and HTML pages (EJS, ERB, Handlebars, Pug, Nunjucks, Jinja and plain HTML) are outside those rules, which cover source languages only, so the raw-output syntax of each template engine is judged by the model's semantic read of the template and has no deterministic check behind it. A template finding is therefore a judgment, reported at the line of the raw-output tag, and a template with no finding is not proof that no attacker-influenced value reaches it from the code that renders it."
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/79.html"

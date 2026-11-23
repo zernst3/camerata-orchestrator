@@ -492,6 +492,9 @@ mod tests {
             multi_option_rules: 2,
             read_error: None,
             over_limit: Vec::new(),
+            generated_files: 0,
+            generated_lines: 0,
+            generated_paths: Vec::new(),
             matched_patterns: Vec::new(),
         }
     }
@@ -863,6 +866,9 @@ mod tests {
             multi_option_rules: 0,
             read_error: None,
             over_limit: Vec::new(),
+            generated_files: 0,
+            generated_lines: 0,
+            generated_paths: Vec::new(),
             matched_patterns: Vec::new(),
         }
     }

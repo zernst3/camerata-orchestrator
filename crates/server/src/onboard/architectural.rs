@@ -113,8 +113,9 @@ pub fn emitted_count(findings: &[Finding], rule_id: &str) -> usize {
 }
 
 /// Armed rules that reason from the ABSENCE of a reference and so must see reference text
-/// (HTML, single-file components, Markdown, stylesheets, templates, build-runner files) as well
-/// as code: a `<script src>` or a component import is the only evidence a file is still used.
+/// (generated code, which is often the only importer of a hand-written file) as well as the
+/// audited files, which include HTML, templates, Markdown, stylesheets and build-runner files: a
+/// `<script src>` or a component import is the only evidence a file is still used.
 const RULES_NEEDING_REFERENCE_TEXT: &[&str] = &[camerata_checks::dead_code_checker::RULE_DEAD_CODE];
 
 /// The file list the architectural tier is handed: the audited `files`, plus the scan's

@@ -381,6 +381,7 @@ fn advisory_disabled_only_in_language_groups_not_in_all_group() {
             Scope::Declared { .. } => {
                 unreachable!("no rule in this fixture declares applies_to")
             }
+            Scope::AllWith(_) => unreachable!("no rule in this fixture is routed to text kinds"),
         }
     }
 }

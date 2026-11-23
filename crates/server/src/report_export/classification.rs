@@ -992,6 +992,14 @@ pub(crate) const NOT_ASSESSED_LINE: &str =
 
 /// The first method paragraph, for the finder that ran.
 pub(crate) fn deterministic_note_for(finder: FinderRan) -> String {
+    format!(
+        "{} {}",
+        deterministic_checks_note(finder),
+        crate::onboard::files::inspected_types_sentence()
+    )
+}
+
+fn deterministic_checks_note(finder: FinderRan) -> String {
     match finder {
         FinderRan::Engine => "Camerata runs a two-tier engine. A deterministic security floor \
              (proven-defect SAST rules plus a migration-timeline replay for Supabase Row Level \

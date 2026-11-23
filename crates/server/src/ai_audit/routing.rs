@@ -106,7 +106,7 @@ pub(super) fn routed_units(
                     ),
                     "no file in this scan's file set is one this rule applies to".to_string(),
                 ),
-                Scope::All => (
+                Scope::All | Scope::AllWith(_) => (
                     "pass[all]".to_string(),
                     "no files matched this scan's file set".to_string(),
                 ),

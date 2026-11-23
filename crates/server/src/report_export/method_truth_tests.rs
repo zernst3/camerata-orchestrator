@@ -323,3 +323,79 @@ fn the_severity_paragraph_follows_the_finder_that_ran() {
         "{note}"
     );
 }
+
+/// V1 item 32: the method text and the workbook's About sheet list the file types the inspection
+/// reads, and the method text names the one exception (generated files) in the phrase Coverage
+/// uses, so the PDF and the workbook speak one language.
+#[test]
+fn the_method_text_and_the_about_sheet_list_the_inspected_file_types() {
+    let report = mixed_report();
+    let sealed = report.seal();
+    let dispositions = HashMap::new();
+    let reviewed = ReviewedReport::unreviewed(&sealed, &dispositions);
+    let json = build_report_json(&reviewed, None, &empty_opts());
+    let note = &json.methodology.deterministic_note;
+    assert!(
+        note.contains(
+            "The inspection reads code and configuration, HTML and server-side templates \
+             (.html, .htm, .ejs, .erb, .hbs, .pug, .njk, .j2, .jinja and .jinja2), \
+             build-runner files (Makefile, GNUmakefile, Procfile and Justfile), Markdown \
+             documentation (.md and .mdx) and stylesheets (.css, .scss and .less)."
+        ),
+        "{note}"
+    );
+    assert!(
+        note.contains("listed under Coverage as generated: searched for secrets only, not billed."),
+        "{note}"
+    );
+
+    let xlsx = crate::xlsx_export::build_workbook(&reviewed, None, &empty_opts()).unwrap();
+    let grid = xlsx_sheet_grid(&xlsx, v::START_HERE).expect("Start here");
+    let row = grid
+        .iter()
+        .find(|r| r.first().is_some_and(|c| c == v::P_FILE_TYPES))
+        .expect("the file types row");
+    assert_eq!(
+        row.get(1).map(String::as_str),
+        Some(
+            "Code and configuration, HTML and server-side templates (.html, .htm, .ejs, .erb, \
+             .hbs, .pug, .njk, .j2, .jinja and .jinja2), build-runner files (Makefile, \
+             GNUmakefile, Procfile and Justfile), Markdown documentation (.md and .mdx) and \
+             stylesheets (.css, .scss and .less)"
+        )
+    );
+}
+
+/// Round 1 fix 2: the sentence names exactly the admitted types. Every extension the admission
+/// lists carry is in it, and a type that is not admitted (Razor, Twig, Liquid, JSP, reStructuredText)
+/// is not claimed.
+#[test]
+fn the_inspected_types_sentence_names_every_admitted_type_and_no_unadmitted_one() {
+    let sentence = crate::onboard::files::inspected_types();
+    for ext in [
+        "html", "htm", "ejs", "erb", "hbs", "pug", "njk", "j2", "jinja", "jinja2", "md", "mdx",
+        "css", "scss", "less",
+    ] {
+        assert!(sentence.contains(&format!(".{ext}")), "{ext}: {sentence}");
+        assert!(
+            crate::onboard::files::text_kind(&format!("a/file.{ext}")).is_some(),
+            "{ext} is admitted"
+        );
+    }
+    for name in ["Makefile", "GNUmakefile", "Procfile", "Justfile"] {
+        assert!(sentence.contains(name), "{name}: {sentence}");
+        assert!(crate::onboard::files::text_kind(name).is_some(), "{name}");
+    }
+    // What the sentence does not name is not admitted.
+    for ext in [
+        "cshtml", "razor", "twig", "liquid", "mustache", "haml", "slim", "jsp", "sass", "markdown",
+        "rst", "mk",
+    ] {
+        assert!(!sentence.contains(&format!(".{ext}")), "{ext}: {sentence}");
+        assert!(
+            crate::onboard::files::text_kind(&format!("a/file.{ext}")).is_none(),
+            "{ext} is not admitted"
+        );
+    }
+    assert!(crate::onboard::files::text_kind("Makefile.am").is_none());
+}

@@ -168,7 +168,7 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// `n` with a comma between each group of three digits ("20,000").
-fn group_digits(n: usize) -> String {
+pub(crate) fn group_digits(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -249,6 +249,8 @@ pub(super) fn skipped_summary_sentence(
         SkipReason::NotText,
         SkipReason::ExcludedByAgreement,
         SkipReason::LongLine,
+        SkipReason::Generated,
+        SkipReason::GeneratedUnsearched,
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)
@@ -256,7 +258,7 @@ pub(super) fn skipped_summary_sentence(
         let label = if r == SkipReason::BeyondFileCap {
             beyond.clone()
         } else {
-            r.label()
+            in_a_list(&r.label())
         };
         format!("{} {label}", totals.of(r))
     })
@@ -275,6 +277,16 @@ pub(super) fn skipped_summary_sentence(
         sentence.push_str(&patterns);
     }
     Some(sentence)
+}
+
+/// A reason that carries its own colon ("generated: searched for secrets only, not billed"),
+/// worded for the middle of the summary line, where a second colon would read badly:
+/// "generated (searched for secrets only, not billed)".
+fn in_a_list(label: &str) -> String {
+    match label.split_once(": ") {
+        Some((head, rest)) => format!("{head} ({rest})"),
+        None => label.to_string(),
+    }
 }
 
 /// The sentence for Excluded by agreement patterns that match only files never read: patterns,

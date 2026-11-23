@@ -417,6 +417,15 @@ pub(in crate::cockpit) struct RepoSizeView {
     /// check lists them as a warning and leaves Start on.
     #[serde(default)]
     pub over_limit: Vec<OverLimitSizeView>,
+    /// Files that declare themselves generated, and the lines in them: not read, not billed,
+    /// searched for secrets only. The pre-start check states both.
+    #[serde(default)]
+    pub generated_files: usize,
+    #[serde(default)]
+    pub generated_lines: usize,
+    /// The generated files' paths, as the server names them.
+    #[serde(default)]
+    pub generated_paths: Vec<String>,
     /// The read limit as a person reads it ("1 MB"), as the engine states it.
     #[serde(default)]
     pub read_limit: String,
@@ -533,8 +542,23 @@ pub(in crate::cockpit) fn over_limit_block_of(
         .map(|s| s.secret_search_limit.as_str())
         .find(|l| !l.is_empty())
         .unwrap_or_default();
+    let generated_files: usize = sizes.iter().map(|s| s.generated_files).sum();
+    let generated_lines: usize = sizes.iter().map(|s| s.generated_lines).sum();
+    let generated_paths: Vec<String> = sizes
+        .iter()
+        .flat_map(|s| s.generated_paths.iter().cloned())
+        .collect();
     camerata_ui_core::readiness::over_limit_block(limit, files, unmatched, notes, unchecked, warned)
-        .map(|block| block.with_secret_limit(secret_limit))
+        // Generated files alone still make a block: it is a statement for the quote, not a hold.
+        .or_else(|| {
+            (generated_files > 0).then(camerata_ui_core::readiness::OverLimitBlock::default)
+        })
+        .map(|block| {
+            block
+                .with_secret_limit(secret_limit)
+                .with_generated(generated_files, generated_lines)
+                .with_generated_paths(generated_paths)
+        })
 }
 
 /// Remove one pattern from Excluded by agreement (`POST /api/projects/:id/scan-exclusions/remove`).

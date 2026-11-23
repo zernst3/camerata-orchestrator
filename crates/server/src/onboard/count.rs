@@ -24,14 +24,41 @@ pub struct LanguageCount {
     pub lines: usize,
 }
 
+/// Counted files and lines of one kind of file that has no recognized language.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OtherKindCount {
+    /// "config", "docs", "templates", "styles" or "build files".
+    pub kind: &'static str,
+    pub files: usize,
+    pub lines: usize,
+}
+
+/// The kind a counted file with no recognized language is shown under, in the order a quote lists
+/// them. Taken from the same [`super::files::text_kind`] admission and routing use.
+const OTHER_KINDS: [&str; 5] = ["config", "docs", "templates", "styles", "build files"];
+
+fn other_kind_of(path: &str) -> &'static str {
+    use super::files::TextKind;
+    match super::files::text_kind(path) {
+        None => "config",
+        Some(TextKind::Docs) => "docs",
+        Some(TextKind::Markup) => "templates",
+        Some(TextKind::Styles) => "styles",
+        Some(TextKind::Build) => "build files",
+    }
+}
+
 /// The inspection's file filter applied to one repo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepoCount {
     /// Counted files and non-blank lines per recognized language, sorted by language.
     pub languages: Vec<LanguageCount>,
-    /// Counted files with no recognized language (config, text, key material).
+    /// Counted files with no recognized language (config, docs, templates, styles, build files,
+    /// key material): the total, and the same files split by kind below.
     pub other_files: usize,
     pub other_lines: usize,
+    /// The other files by kind, in the order a quote lists them; a kind with no file is absent.
+    pub other_by_kind: Vec<OtherKindCount>,
     /// Everything the inspection reads: the languages plus the other bucket.
     pub total_files: usize,
     pub total_lines: usize,
@@ -39,6 +66,11 @@ pub struct RepoCount {
     /// and the non-blank lines in them.
     pub excluded_noise_files: usize,
     pub excluded_noise_lines: usize,
+    /// Files that declare themselves generated (a tool's marker in a comment near the top): not
+    /// read for the inspection, so not in the total above and not billed; the secret checks still
+    /// search them. Counted here, with their non-blank lines, so a quote shows what was left out.
+    pub generated_files: usize,
+    pub generated_lines: usize,
     /// The file cap was hit: the counts cover only the first files read.
     pub truncated: bool,
     /// Every file the inspection does NOT read, grouped by why, so a quote is set from the
@@ -96,6 +128,23 @@ pub fn count_repo(root: &Path, scope: &RepoScope) -> anyhow::Result<RepoCount> {
     let lang_files: usize = languages.iter().map(|l| l.files).sum();
     let lang_lines: usize = languages.iter().map(|l| l.lines).sum();
 
+    let mut kinds: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    for (path, content) in &extracted.files {
+        if lang_for_ext(path).is_none() {
+            let entry = kinds.entry(other_kind_of(path)).or_default();
+            entry.0 += 1;
+            entry.1 += non_blank_lines(content);
+        }
+    }
+    let other_by_kind: Vec<OtherKindCount> = OTHER_KINDS
+        .into_iter()
+        .filter_map(|kind| {
+            kinds
+                .get(kind)
+                .map(|&(files, lines)| OtherKindCount { kind, files, lines })
+        })
+        .collect();
+
     let excluded_noise_lines = excluded_noise_lines(root, &extracted.excluded_noise_paths);
     let not_read = not_read_groups(&extracted);
 
@@ -103,10 +152,13 @@ pub fn count_repo(root: &Path, scope: &RepoScope) -> anyhow::Result<RepoCount> {
         languages,
         other_files: extracted.files.len() - lang_files,
         other_lines: total_lines - lang_lines,
+        other_by_kind,
         total_files: extracted.files.len(),
         total_lines,
         excluded_noise_files: extracted.excluded_noise,
         excluded_noise_lines,
+        generated_files: extracted.generated.len(),
+        generated_lines: non_blank_lines_in_files(root, &extracted.generated),
         truncated: extracted.truncated,
         not_read,
         unmatched_patterns: scope
@@ -160,6 +212,7 @@ fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup>
         (SkipReason::BeyondFileCap, &extracted.skipped_beyond_cap),
         (SkipReason::NotText, &extracted.skipped_unreadable),
         (SkipReason::LongLine, &extracted.skipped_long_line),
+        (SkipReason::Generated, &extracted.generated),
     ]
     .into_iter()
     .filter(|(_, paths)| !paths.is_empty())
@@ -185,7 +238,14 @@ fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup>
 /// (`audit_repos` records it on the report for the export's manifest), so both state the same
 /// figure. A file that cannot be read counts zero. Blocking IO.
 pub(crate) fn excluded_noise_lines(root: &Path, excluded_noise_paths: &[String]) -> usize {
-    excluded_noise_paths
+    non_blank_lines_in_files(root, excluded_noise_paths)
+}
+
+/// The non-blank lines in the files at `paths` (relative to `root`), counted as
+/// [`excluded_noise_lines`] counts: a file that cannot be read counts zero. Also used for the
+/// generated files, which are not read for the inspection but are sized for the quote.
+pub fn non_blank_lines_in_files(root: &Path, paths: &[String]) -> usize {
+    paths
         .iter()
         .filter_map(|rel| std::fs::read(root.join(rel)).ok())
         .map(|bytes| non_blank_lines(&String::from_utf8_lossy(&bytes)))
@@ -202,10 +262,14 @@ impl RepoCount {
                 l.language, l.files, l.lines
             ));
         }
-        out.push_str(&format!(
-            "{:<18} {:>6} {:>11}\n",
-            "other (config)", self.other_files, self.other_lines
-        ));
+        for k in &self.other_by_kind {
+            out.push_str(&format!(
+                "{:<18} {:>6} {:>11}\n",
+                format!("other: {}", k.kind),
+                k.files,
+                k.lines
+            ));
+        }
         out.push_str(&format!(
             "{:<18} {:>6} {:>11}\n",
             "TOTAL", self.total_files, self.total_lines
@@ -213,6 +277,10 @@ impl RepoCount {
         out.push_str(&format!(
             "excluded as noise: {} files, {} lines\n",
             self.excluded_noise_files, self.excluded_noise_lines
+        ));
+        out.push_str(&format!(
+            "generated, not billed: {} files, {} lines\n",
+            self.generated_files, self.generated_lines
         ));
         if self.truncated {
             out.push_str("note: file cap reached, counts are partial\n");
@@ -466,6 +534,72 @@ mod tests {
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["not_read"][0]["reason"], "excluded by agreement");
         assert_eq!(v["not_read"][0]["files"][0]["path"], "seeds/more.js");
+    }
+
+    /// V1 item 32: generated files are listed (count, lines and each path) and are not in the
+    /// billed total.
+    #[test]
+    fn the_count_lists_generated_files_with_lines_and_does_not_bill_them() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/main.rs", "fn main() {}\n");
+        write(dir.path(), "README.md", "# Title\n\ntext\n");
+        write(
+            dir.path(),
+            "Migrations/Init.Designer.cs",
+            "// <auto-generated />\nclass A {}\n\nclass B {}\n",
+        );
+        let c = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
+        assert_eq!(
+            (c.total_files, c.total_lines),
+            (2, 3),
+            "billed: main.rs and README.md"
+        );
+        assert_eq!((c.generated_files, c.generated_lines), (1, 3));
+        assert_eq!(c.not_read.len(), 1);
+        assert_eq!(
+            c.not_read[0].reason,
+            "generated: searched for secrets only, not billed"
+        );
+        assert_eq!(c.not_read[0].files[0].path, "Migrations/Init.Designer.cs");
+        assert!(c
+            .to_text()
+            .contains("generated, not billed: 1 files, 3 lines"));
+    }
+
+    /// Round 1: the files with no recognized language are shown by kind, not all as "config".
+    #[test]
+    fn the_other_files_are_split_by_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/main.rs", "fn main() {}\n");
+        write(dir.path(), "config.yaml", "a: 1\nb: 2\n"); // config, 2
+        write(dir.path(), "README.md", "# T\n\ntext\n"); // docs, 2
+        write(dir.path(), "views/p.ejs", "<p></p>\n"); // templates, 1
+        write(dir.path(), "public/i.html", "<p></p>\n<p></p>\n"); // templates, 2
+        write(dir.path(), "site.css", "a { b: c }\n"); // styles, 1
+        write(dir.path(), "Makefile", "all:\n\ttrue\n"); // build files, 2
+        let c = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
+        let kinds: Vec<(&str, usize, usize)> = c
+            .other_by_kind
+            .iter()
+            .map(|k| (k.kind, k.files, k.lines))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("config", 1, 2),
+                ("docs", 1, 2),
+                ("templates", 2, 3),
+                ("styles", 1, 1),
+                ("build files", 1, 2),
+            ]
+        );
+        // The kinds add up to the one other bucket, so the total is unchanged.
+        assert_eq!(c.other_files, 6);
+        assert_eq!(c.other_lines, 10);
+        assert_eq!(c.total_files, 7);
+        let text = c.to_text();
+        assert!(text.contains("other: templates"), "{text}");
+        assert!(!text.contains("other (config)"), "{text}");
     }
 
     #[test]

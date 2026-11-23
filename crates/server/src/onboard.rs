@@ -819,6 +819,16 @@ pub struct CoverageNote {
 /// carries it.
 pub const REPOSITORY_READ_PASS: &str = "repository read";
 
+/// Split a repo's generated files into the ones the secret checks searched and the ones they did
+/// not: with the floor off `searched` is empty, and a file over the search ceiling or not text
+/// never got into it. Coverage words each group for what actually ran.
+pub(crate) fn split_generated_by_search(
+    generated: Vec<String>,
+    searched: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    generated.into_iter().partition(|p| searched.contains(p))
+}
+
 /// What a repo that could not be inspected leaves behind: see
 /// [`ScanReport::note_repo_not_inspected`]. Split into its three destinations so the scan loop,
 /// which holds them as separate locals, and the report method share one implementation.
@@ -2577,6 +2587,7 @@ pub async fn audit_repos_with_llm_controlled(
                     excluded_noise,
                     excluded_noise_paths: _,
                     excluded_by_agreement,
+                    generated,
                 },
                 noise_lines,
             )) => {
@@ -2596,7 +2607,10 @@ pub async fn audit_repos_with_llm_controlled(
                 let mut oversize_not_text = 0usize;
                 let mut oversize_grown = 0usize;
                 if run_deterministic {
-                    for rel in &secret_searchable {
+                    // A file that declares itself generated is searched the same way: its
+                    // contents are never read for the inspection, but a key baked into it is
+                    // a normal finding.
+                    for rel in secret_searchable.iter().chain(&generated) {
                         let (root, path) = (repo_root_for_history.clone(), rel.clone());
                         let repo_name = spec.to_string();
                         let read =
@@ -2630,6 +2644,11 @@ pub async fn audit_repos_with_llm_controlled(
                 let unread_paths: Vec<String> = skipped_oversize
                     .iter()
                     .filter(|p| !secret_searched_oversize.contains(*p))
+                    .chain(
+                        generated
+                            .iter()
+                            .filter(|p| !secret_searched_oversize.contains(*p)),
+                    )
                     .chain(&skipped_beyond_cap)
                     .chain(&skipped_unreadable)
                     .cloned()
@@ -2655,15 +2674,21 @@ pub async fn audit_repos_with_llm_controlled(
                     })
                     .map(|(_, p)| p.clone())
                     .collect();
+                // A generated file is "searched" only when the secret pass opened it; with the
+                // floor off, over the search ceiling or not text it is named, not searched.
+                let (generated, generated_unsearched) =
+                    split_generated_by_search(generated, &secret_searched_oversize);
                 skipped_files_total.record_repo(
                     spec,
                     crate::scan_ledger::RepoSkips {
+                        generated_unsearched,
                         excluded_never_read: never_read_patterns,
                         oversize: skipped_oversize,
                         beyond_cap: skipped_beyond_cap,
                         not_text: skipped_unreadable,
                         excluded_by_agreement,
                         long_line: skipped_long_line,
+                        generated,
                         sizes: &skipped_sizes,
                         file_cap,
                     },
@@ -2833,7 +2858,7 @@ pub async fn audit_repos_with_llm_controlled(
                             &crate::jobs::progress_tool_key(spec, "architectural", multi_repo),
                         );
                     }
-                    // Reference text (HTML, components, docs) is handed to the architectural
+                    // Reference text (generated code) is handed to the architectural
                     // tier ONLY, and only when an armed rule needs it: the AI digest and the
                     // secrets floor above and below keep reading `files` alone.
                     let arch_armed = architectural::withhold_on_incomplete_scan(
@@ -3495,7 +3520,8 @@ pub async fn audit_repos_with_llm_controlled(
                                     let kind = match group.scope {
                                         crate::scan_routing::Scope::Language(_) => "language",
                                         crate::scan_routing::Scope::Declared { .. } => "declared",
-                                        crate::scan_routing::Scope::All => continue,
+                                        crate::scan_routing::Scope::All
+                                        | crate::scan_routing::Scope::AllWith(_) => continue,
                                     };
                                     let evaluated = crate::scan_routing::files_in_scope(
                                         &part.changed,
@@ -4945,7 +4971,7 @@ mod tests {
         fs::create_dir_all(base.join("src")).unwrap();
         fs::create_dir_all(base.join("node_modules/x")).unwrap();
         fs::write(base.join("src/main.rs"), "fn main() {}\n").unwrap();
-        fs::write(base.join("README.md"), "# readme").unwrap(); // not a code ext -> skipped
+        fs::write(base.join("logo.png"), "# readme").unwrap(); // not an inspected type -> skipped
         fs::write(base.join("node_modules/x/index.js"), "noise").unwrap(); // noise dir -> skipped
 
         let extracted =
