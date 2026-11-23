@@ -273,7 +273,12 @@ fn a_misconfigured_fixture_fails_loudly_instead_of_skipping() {
 /// deterministic and full-grade scans so they audit the identical rule set (differing only in
 /// whether the AI tier is switched on).
 async fn recommended_selection(sources: &[(String, PathBuf)]) -> Vec<SelectedRule> {
-    let phase1 = onboard::scan_repos(sources, Vec::new()).await;
+    let phase1 = onboard::scan_repos(
+        sources,
+        Vec::new(),
+        &camerata_server::onboard::scope::ScanScope::none(),
+    )
+    .await;
     assert!(
         !phase1.stacks.is_empty(),
         "Phase-1 stack detection must see the fixture's files: {phase1:?}"

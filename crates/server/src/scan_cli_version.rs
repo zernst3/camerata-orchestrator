@@ -91,6 +91,7 @@ mod tests {
     #[test]
     fn the_agent_finders_model_reaches_the_claude_code_version_check() {
         let controls = RunControls {
+            scope: Default::default(),
             finder: crate::ai_audit::agent_finder::FinderChoice::Agent,
             finder_model: Some("claude-finder-pick".to_string()),
             ..RunControls::default()

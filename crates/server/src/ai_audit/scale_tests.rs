@@ -151,7 +151,11 @@ fn framed_paths(prompt: &str, nonce: &crate::prompt_frame::FrameNonce, out: &mut
 async fn scale_run(n: usize) {
     let dir = tempfile::tempdir().unwrap();
     write_repo(dir.path(), n);
-    let extracted = crate::onboard::files::read_local_repo_files(dir.path()).unwrap();
+    let extracted = crate::onboard::files::read_local_repo_files(
+        dir.path(),
+        &crate::onboard::scope::RepoScope::none(),
+    )
+    .unwrap();
     assert_eq!(extracted.files.len(), n, "every generated file is read");
     let mut files = crate::onboard::redact::files_for_model(&extracted.files);
     files.sort_by(|a, b| a.0.cmp(&b.0));

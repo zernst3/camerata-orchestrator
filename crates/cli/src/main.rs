@@ -247,6 +247,13 @@ enum Command {
         /// dropped.
         #[arg(long)]
         consensus: bool,
+        /// A file the client and the operator agreed is not part of the inspection (repeat for
+        /// more). A glob matched against `<repo name>/<path within the repo>`, for example
+        /// `acme-field-data/seeds/**`. An excluded file is not read, counted or billed;
+        /// the report lists it as excluded by agreement. A file over the 1 MB read limit stops
+        /// the run until it is excluded here.
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
         /// Which finder reviews the code: `agent` (the default: one review agent for each piece
         /// of code, with the rules as its checklist; the files it read come from its tool trace)
         /// or `engine` (the scan passes, then the calibration stage). The agent finder
@@ -377,6 +384,15 @@ enum Command {
         /// Print JSON instead of the plain-text table.
         #[arg(long)]
         json: bool,
+        /// A file agreed to be outside the inspection (repeat for more): a glob matched against
+        /// `<repo name>/<path within the repo>`, the repo name being the folder's name. Counted
+        /// as excluded by agreement, not billed. Same patterns as `camerata inspect --exclude`.
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// The repo's name as OWNER/REPO, the same flag `camerata inspect` takes, so a pattern
+        /// means the same files in both. Without it the folder's own name.
+        #[arg(long = "repo-name")]
+        repo_name: Option<String>,
     },
 
     /// Compare two inspections of the SAME fixture: exit 1 when cost per 1K counted lines rose
@@ -572,6 +588,7 @@ async fn main() -> anyhow::Result<()> {
             internal,
             run_client_tooling,
             consensus,
+            exclude,
             finder,
             finder_model,
             finder_force_pieces,
@@ -614,6 +631,7 @@ async fn main() -> anyhow::Result<()> {
                     force_pieces: finder_force_pieces,
                     compare_with,
                 },
+                exclude,
             })
             .await
         }
@@ -657,10 +675,20 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
-        Command::Count { repo, json } => {
+        Command::Count {
+            repo,
+            json,
+            exclude,
+            repo_name,
+        } => {
             println!(
                 "{}",
-                camerata::count_cmd::run_count(&CountArgs { repo, json })?
+                camerata::count_cmd::run_count(&CountArgs {
+                    repo,
+                    json,
+                    exclude,
+                    repo_name
+                })?
             );
             Ok(())
         }
@@ -1324,12 +1352,14 @@ mod cli_parse_tests {
                 internal,
                 run_client_tooling,
                 consensus,
+                exclude,
                 finder,
                 finder_model,
                 finder_force_pieces,
                 compare_with,
                 resume,
             } => {
+                assert!(exclude.is_empty(), "nothing is excluded unless agreed");
                 assert!(resume.is_none(), "a new run unless --resume is given");
                 assert_eq!(
                     finder,

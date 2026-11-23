@@ -491,6 +491,8 @@ mod tests {
                 .collect(),
             multi_option_rules: 2,
             read_error: None,
+            over_limit: Vec::new(),
+            matched_patterns: Vec::new(),
         }
     }
 
@@ -860,6 +862,8 @@ mod tests {
             semantic: Vec::new(),
             multi_option_rules: 0,
             read_error: None,
+            over_limit: Vec::new(),
+            matched_patterns: Vec::new(),
         }
     }
 

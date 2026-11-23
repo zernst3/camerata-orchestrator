@@ -21,6 +21,10 @@ pub const MAX_WRITE_BYTES: usize = 1_000_000;
 /// The most bytes of text one Read returns (the numbered lines together). A read that would pass
 /// it stops at the last whole line that fits.
 pub const MAX_READ_BYTES: usize = 100_000;
+/// The longest line, in bytes, a Read page can carry: the page limit less the line number, tab and
+/// line feed the page adds. An admitted file with a longer line cannot be read in full, so the
+/// walk treats it like an over-limit file ([`crate::onboard::files::long_line_label`]).
+pub const MAX_READ_LINE_BYTES: usize = MAX_READ_BYTES - 16;
 /// The most distinct files the agent may write. Writing a path again replaces it and does not
 /// count twice.
 pub const MAX_WRITE_FILES: usize = 200;
@@ -33,6 +37,17 @@ pub const RESERVED_DIR: &str = "_camerata";
 pub const CODE_DIR: &str = "code";
 /// The longest line, in characters, the Read tool returns whole. Claude Code cuts a longer line.
 pub const MAX_READ_LINE_CHARS: usize = 2_000;
+
+/// How many Read calls it takes to read `text` whole: a Read returns at most
+/// [`MAX_READ_LINES`] lines and [`MAX_READ_BYTES`] bytes, so the larger of the two page counts,
+/// and at least one. The turn limit of a piece ([`super::PieceLimits::turns_for_reading`]) is
+/// built from this, so a file at the read limit (1 MiB) is never given fewer turns than its
+/// own reading needs.
+pub fn read_pages(text: &str) -> usize {
+    let by_lines = text.lines().count().div_ceil(MAX_READ_LINES);
+    let by_bytes = text.len().div_ceil(MAX_READ_BYTES);
+    by_lines.max(by_bytes).max(1)
+}
 
 /// Why a tool call was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

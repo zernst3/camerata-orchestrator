@@ -122,6 +122,7 @@ fn args(repo: &Path, export: &Path, backend: ProjectBackend) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 

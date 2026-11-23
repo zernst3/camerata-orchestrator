@@ -6,6 +6,7 @@ use crate::cost_checkpoint::{CheckpointPlan, CheckpointSettings, CheckpointSink,
 
 fn meter(limit: f64, later: f64, assumed: Option<usize>, spent: f64) -> UsageMeter {
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(limit),
         checkpoint: CheckpointSettings {
             plan: Some(CheckpointPlan {
@@ -136,6 +137,7 @@ fn pay(m: &UsageMeter, usd: f64) {
 
 fn plain(limit: f64, plan: CheckpointPlan, folder: Option<&std::path::Path>) -> RunControls {
     RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(limit),
         checkpoint: CheckpointSettings {
             plan: Some(plan),

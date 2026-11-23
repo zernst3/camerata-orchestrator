@@ -300,6 +300,7 @@ fn eff(batch_default: bool) -> EfficiencyConfig {
 
 fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,

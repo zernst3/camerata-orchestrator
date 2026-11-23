@@ -332,7 +332,9 @@ pub async fn run_repeatability_with(
         .unwrap_or("repo")
         .to_string();
     let sources = vec![(repo_spec, args.repo.clone())];
-    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
+    // Repeatability measures the default configuration, which excludes nothing.
+    let no_exclusions = camerata_server::onboard::scope::ScanScope::none();
+    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new(), &no_exclusions).await;
     let selected = curated_rule_selection(&scan.proposed_rules);
     let (_ai_only, _excluded, _preview, corpus, _load_failures) =
         camerata_server::split_scannable_rules(selected.clone()).await;
@@ -350,8 +352,13 @@ pub async fn run_repeatability_with(
         .filter(|m| !m.trim().is_empty());
 
     // ── The estimate, printed first ──────────────────────────────────────────────────────
-    let facts =
-        camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref()).await;
+    let facts = camerata_server::preflight::gather_scan_facts(
+        &sources,
+        &selected,
+        corpus.as_ref(),
+        &no_exclusions,
+    )
+    .await;
     let exact = if seams.llm.is_none() && matches!(backend_resolution, BackendResolution::Api) {
         let llm =
             camerata_server::onboard::build_llm(creds, camerata_server::llm::Backend::Api, None);
@@ -413,6 +420,7 @@ pub async fn run_repeatability_with(
         }
     }
     let controls = camerata_server::cost_cap::RunControls {
+        scope: Default::default(),
         stored_spend_usd: 0.0,
         review: Default::default(),
         efficiency,

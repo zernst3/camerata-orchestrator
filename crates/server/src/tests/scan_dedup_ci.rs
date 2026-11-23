@@ -2695,6 +2695,7 @@ async fn semgrep_covered_rule_never_reads_verified_clean_when_the_pass_does_not_
         Some(&corpus),
         None,
         crate::client_lock::ClientTooling::INTERNAL,
+        &crate::onboard::scope::ScanScope::none(),
     )
     .await;
 

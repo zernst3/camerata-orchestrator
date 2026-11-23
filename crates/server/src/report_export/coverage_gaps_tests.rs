@@ -83,7 +83,7 @@ fn coverage_gaps_list_failed_ai_passes_and_skipped_files_by_path() {
     );
     assert_eq!(
         gaps.skipped_files[0].reason,
-        "over the 400 KB file size limit"
+        format!("over the {} file size limit", max_file_label())
     );
     assert_eq!(gaps.skipped_files[1].reason, "beyond the 20,000-file limit");
 }
@@ -323,12 +323,22 @@ async fn the_pdf_says_and_k_more() {
 
 // ── M5 item 3: no file is skipped silently: its name, size and reason, and the totals ─────────
 
-use crate::onboard::files::{read_local_repo_files, read_local_repo_files_capped, MAX_FILE_BYTES};
+use crate::onboard::files::{
+    max_file_label, read_local_repo_files, read_local_repo_files_capped, MAX_FILE_BYTES,
+};
 use crate::scan_ledger::{RepoSkips, SkippedFileList};
 
 /// A report whose ledger holds exactly what the real walk of `root` skipped, recorded the way the
 /// scan records it (`SkippedFileList::record_repo`).
 fn report_from_walk(extracted: crate::onboard::files::ExtractedRepo) -> crate::onboard::ScanReport {
+    report_from_walk_with(extracted, Vec::new())
+}
+
+/// [`report_from_walk`] with Excluded by agreement patterns that match only files never read.
+fn report_from_walk_with(
+    extracted: crate::onboard::files::ExtractedRepo,
+    never_read: Vec<String>,
+) -> crate::onboard::ScanReport {
     let mut report = report_with(
         vec![finding(
             "SEC-NO-HARDCODED-SECRETS-1",
@@ -345,6 +355,9 @@ fn report_from_walk(extracted: crate::onboard::files::ExtractedRepo) -> crate::o
             oversize: extracted.skipped_oversize,
             beyond_cap: extracted.skipped_beyond_cap,
             not_text: extracted.skipped_unreadable,
+            excluded_by_agreement: extracted.excluded_by_agreement,
+            long_line: extracted.skipped_long_line,
+            excluded_never_read: never_read,
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
         },
@@ -380,7 +393,8 @@ fn a_file_over_max_file_bytes_appears_in_coverage_with_its_size_and_reason() {
             ("src/huge.rs", MAX_FILE_BYTES + 1_000),
         ],
     );
-    let extracted = read_local_repo_files(dir.path()).unwrap();
+    let extracted =
+        read_local_repo_files(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
     assert_eq!(extracted.skipped_oversize, ["src/huge.rs"]);
 
     let gaps = coverage_gaps(&report_from_walk(extracted));
@@ -388,13 +402,22 @@ fn a_file_over_max_file_bytes_appears_in_coverage_with_its_size_and_reason() {
     let row = &gaps.skipped_files[0];
     assert_eq!(row.path, "src/huge.rs");
     assert_eq!(row.reason_code, SkipReason::Oversize);
-    assert_eq!(row.reason, "over the 400 KB file size limit");
+    assert_eq!(
+        row.reason,
+        format!("over the {} file size limit", max_file_label())
+    );
     assert_eq!(row.size_bytes, Some((MAX_FILE_BYTES + 1_000) as u64));
-    assert_eq!(row.size, "401 KB");
+    assert_eq!(row.size, "1.1 MB");
     // The count is in the Coverage summary.
     assert_eq!(
         gaps.skipped_summary.as_deref(),
-        Some("1 file was not scanned: 1 over the 400 KB file size limit.")
+        Some(
+            format!(
+                "1 file was not read for the inspection: 1 over the {} file size limit.",
+                max_file_label()
+            )
+            .as_str()
+        )
     );
     assert!(gaps.file_limit_notes.is_empty());
 }
@@ -405,12 +428,14 @@ fn a_repo_over_a_lowered_file_cap_discloses_the_unscanned_count() {
     let files: Vec<(String, usize)> = (0..7).map(|i| (format!("src/f{i}.rs"), 10)).collect();
     let refs: Vec<(&str, usize)> = files.iter().map(|(p, n)| (p.as_str(), *n)).collect();
     write_tree(dir.path(), &refs);
-    let extracted = read_local_repo_files_capped(dir.path(), 3).unwrap();
+    let extracted =
+        read_local_repo_files_capped(dir.path(), 3, &crate::onboard::scope::RepoScope::none())
+            .unwrap();
     assert!(extracted.truncated);
     assert_eq!(extracted.files.len(), 3);
 
     let gaps = coverage_gaps(&report_from_walk(extracted));
-    // The limit is stated for the run, with the number of files not scanned. It is the limit
+    // The limit is stated for the run, with the number of files not read for the inspection. It is the limit
     // that was applied (3 here), not the production one.
     assert_eq!(
         gaps.file_limit_notes.len(),
@@ -421,7 +446,7 @@ fn a_repo_over_a_lowered_file_cap_discloses_the_unscanned_count() {
     assert_eq!(
         gaps.file_limit_notes[0],
         "owner/repo reached the 3-file limit, so the scan read the first 3 files in path order. \
-         4 files were not scanned."
+         4 files were not read for the inspection."
     );
     // And each of them is named, with its size and the same limit as its reason.
     assert_eq!(gaps.skipped_files.len(), 4);
@@ -432,7 +457,7 @@ fn a_repo_over_a_lowered_file_cap_discloses_the_unscanned_count() {
     }));
     assert_eq!(
         gaps.skipped_summary.as_deref(),
-        Some("4 files were not scanned: 4 beyond the 3-file limit.")
+        Some("4 files were not read for the inspection: 4 beyond the 3-file limit.")
     );
 }
 
@@ -443,8 +468,12 @@ fn the_totals_count_every_skipped_file_including_those_past_the_named_list() {
     assert_eq!(
         gaps.skipped_summary.as_deref(),
         Some(
-            "3700 files were not scanned: 2500 over the 400 KB file size limit, 1200 beyond the \
-             20,000-file limit."
+            format!(
+                "3700 files were not read for the inspection: 2500 over the {} file size limit, 1200 beyond the \
+                 20,000-file limit.",
+                max_file_label()
+            )
+            .as_str()
         )
     );
 }
@@ -461,7 +490,9 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
             ("big.json", MAX_FILE_BYTES + 2_000),
         ],
     );
-    let extracted = read_local_repo_files_capped(dir.path(), 2).unwrap();
+    let extracted =
+        read_local_repo_files_capped(dir.path(), 2, &crate::onboard::scope::RepoScope::none())
+            .unwrap();
     let report = report_from_walk(extracted);
     let sealed = report.seal();
     let json = build_report_json(
@@ -472,8 +503,11 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
 
     // The PDF's data.
     let data = render_data_json(&json).expect("renders");
-    assert!(data.contains("402 KB"), "{data}");
-    assert!(data.contains("files were not scanned"), "{data}");
+    assert!(data.contains("1.1 MB"), "{data}");
+    assert!(
+        data.contains("files were not read for the inspection"),
+        "{data}"
+    );
     assert!(data.contains("reached the 2-file limit"), "{data}");
 
     // json/inspection.json.
@@ -507,9 +541,114 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
     let all = crate::release_gate::xlsx_strings(&bytes)
         .expect("a workbook")
         .join("\n");
-    assert!(all.contains("402 KB"), "{all}");
-    assert!(all.contains("files were not scanned"), "{all}");
+    assert!(all.contains("1.1 MB"), "{all}");
+    assert!(
+        all.contains("files were not read for the inspection"),
+        "{all}"
+    );
     assert!(all.contains("reached the 2-file limit"), "{all}");
+}
+
+/// Round 1 item 13: "excluded by agreement" reaches the PDF's data, the workbook's Coverage
+/// sheet and (when typst is installed) the rendered PDF text, not only `coverage_gaps` and JSON.
+#[tokio::test]
+async fn every_renderer_says_excluded_by_agreement() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(dir.path(), &[("a.rs", 10), ("seeds/data.json", 40)]);
+    let scope = crate::onboard::scope::ScanScope::from_patterns(&["app/seeds/**".to_string()])
+        .unwrap()
+        .for_repo("acme/app");
+    let extracted = crate::onboard::files::read_local_repo_files(dir.path(), &scope).unwrap();
+    let report = report_from_walk(extracted);
+    let sealed = report.seal();
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    let data = render_data_json(&json).expect("renders");
+    assert!(data.contains("excluded by agreement"), "{data}");
+    assert!(data.contains("seeds/data.json"), "{data}");
+
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
+    let all = crate::release_gate::xlsx_strings(&bytes)
+        .expect("a workbook")
+        .join("\n");
+    assert!(all.contains("excluded by agreement"), "{all}");
+    assert!(all.contains("seeds/data.json"), "{all}");
+
+    if which_typst().is_none() {
+        eprintln!("skipping the PDF half: typst not on PATH");
+        return;
+    }
+    let pdf = compile_pdf(&json).await.expect("the PDF compiles");
+    let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
+    assert!(text.contains("excluded by agreement"), "{text}");
+}
+
+/// Zach's ruling (round 2): a pattern that matches only files never read is listed in the package,
+/// marked as having removed nothing read or billed, in the JSON, the PDF data, the workbook and
+/// (typst installed) the PDF text; the marking passes the client text gates.
+#[tokio::test]
+async fn a_never_read_pattern_is_listed_with_its_marking_in_every_renderer() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(dir.path(), &[("a.rs", 10)]);
+    let extracted =
+        read_local_repo_files(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
+    let report = report_from_walk_with(extracted, vec!["app/node_modules/**".to_string()]);
+    let marking = "excluded by agreement; nothing here is read by default";
+    let gaps = coverage_gaps(&report);
+    let row = gaps
+        .skipped_files
+        .iter()
+        .find(|r| r.path == "app/node_modules/**")
+        .expect("listed");
+    assert_eq!(row.reason, marking);
+    assert_eq!(
+        gaps.skipped_summary.as_deref(),
+        Some("1 pattern is excluded by agreement; nothing here is read by default.")
+    );
+    assert!(
+        !marking.contains('\u{2014}') && !marking.contains('\u{2013}'),
+        "no dashes"
+    );
+    assert!(!marking.contains(", and "), "no serial comma");
+    let sealed = report.seal();
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    let data = render_data_json(&json).expect("renders");
+    assert!(
+        data.contains(marking) && data.contains("app/node_modules/**"),
+        "{data}"
+    );
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
+    let all = crate::release_gate::xlsx_strings(&bytes)
+        .expect("a workbook")
+        .join("\n");
+    assert!(
+        all.contains(marking) && all.contains("app/node_modules/**"),
+        "{all}"
+    );
+    if which_typst().is_none() {
+        eprintln!("skipping the PDF half: typst not on PATH");
+        return;
+    }
+    let pdf = compile_pdf(&json).await.expect("the PDF compiles");
+    let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
+    assert!(text.contains("nothing here is read by default"), "{text}");
 }
 
 #[tokio::test]
@@ -527,7 +666,10 @@ async fn the_pdf_prints_the_size_and_the_file_limit() {
             ("big.json", MAX_FILE_BYTES + 2_000),
         ],
     );
-    let report = report_from_walk(read_local_repo_files_capped(dir.path(), 1).unwrap());
+    let report = report_from_walk(
+        read_local_repo_files_capped(dir.path(), 1, &crate::onboard::scope::RepoScope::none())
+            .unwrap(),
+    );
     let json = build_report_json(
         &crate::report_export::ReviewedReport::unreviewed(&report.seal(), &HashMap::new()),
         None,
@@ -535,7 +677,7 @@ async fn the_pdf_prints_the_size_and_the_file_limit() {
     );
     let pdf = compile_pdf(&json).await.expect("the PDF compiles");
     let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
-    assert!(text.contains("402 KB"), "{text}");
+    assert!(text.contains("1.1 MB"), "{text}");
     assert!(text.contains("reached the 1-file limit"), "{text}");
 }
 
@@ -600,4 +742,56 @@ fn coverage_is_silent_when_every_absorbed_site_was_checked() {
             ..Default::default()
         });
     assert!(coverage_gaps(&report).evidence_note.is_none());
+}
+
+/// A pattern that removed nothing is not a file: a project-wide wildcard pattern recorded by
+/// several repos is one pattern in Coverage and one row, and no file count includes it.
+#[test]
+fn a_never_read_pattern_is_counted_once_and_is_not_a_file() {
+    let mut list = SkippedFileList::default();
+    let sizes = HashMap::new();
+    for repo in ["owner/a", "owner/b", "owner/c"] {
+        list.record_repo(
+            repo,
+            RepoSkips {
+                oversize: Vec::new(),
+                beyond_cap: Vec::new(),
+                not_text: Vec::new(),
+                excluded_by_agreement: Vec::new(),
+                long_line: Vec::new(),
+                excluded_never_read: vec!["*/node_modules/**".to_string()],
+                sizes: &sizes,
+                file_cap: 20_000,
+            },
+        );
+    }
+    let totals = list.totals();
+    assert_eq!(
+        totals.excluded_never_read, 1,
+        "one pattern, not one per repo"
+    );
+    assert_eq!(totals.total(), 0, "a pattern is not a skipped file");
+    let (rows, _) = list.finish();
+    assert_eq!(rows.len(), 1);
+    let sentence = super::coverage_gaps::skipped_summary_sentence(&totals, &[]).unwrap();
+    assert_eq!(
+        sentence,
+        "1 pattern is excluded by agreement; nothing here is read by default."
+    );
+}
+
+/// A file excluded by agreement is never opened, so the secrets sentence names it as not searched.
+#[test]
+fn the_secrets_sentence_counts_files_excluded_by_agreement_as_not_searched() {
+    let totals = crate::scan_ledger::SkippedTotals {
+        excluded_by_agreement: 3,
+        not_text: 2,
+        secret_search_ran: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        super::coverage_gaps::skipped_summary_sentence(&totals, &[]).unwrap(),
+        "5 files were not read for the inspection: 2 not UTF-8 text, 3 excluded by agreement. \
+         5 files were not searched for secrets: 2 not UTF-8 text, 3 excluded by agreement."
+    );
 }

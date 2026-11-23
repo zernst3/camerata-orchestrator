@@ -91,6 +91,7 @@ const SPEC_STATES: &[&str] = &[
     "inspection-settings/save-error",
     "inspection-settings/registry-missing",
     "inspection-settings/non-anthropic-warning",
+    "inspection-settings/exclusions-listed",
     "inspection/start-agent",
     "inspection/start-engine",
     "inspection/estimate-unavailable",

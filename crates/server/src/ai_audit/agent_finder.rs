@@ -280,6 +280,13 @@ impl PieceLimits {
         (2 * files + 30).clamp(60, 400)
     }
 
+    /// [`Self::turns_for`] plus the Read calls the piece's files need beyond one each: a file
+    /// is read in pages (see [`room::read_pages`]), and the two turns given to each file cover
+    /// only its first page. `read_pages` is the sum of every file's pages.
+    pub fn turns_for_reading(files: usize, read_pages: usize) -> usize {
+        (2 * files + 30 + read_pages.saturating_sub(files)).clamp(60, 400)
+    }
+
     /// The longest one call may run on the clock: 60 seconds for each turn, at least 15 minutes
     /// and at most 4 hours. A call that passes it is stopped and the piece fails.
     pub fn wall_clock(&self) -> std::time::Duration {
@@ -289,8 +296,14 @@ impl PieceLimits {
     /// The limits for a piece of `files` files whose estimated cost is `estimate_usd`: the
     /// turn limit above, 32,000 tokens a turn and four times the estimate (at least $3).
     pub fn for_piece(files: usize, estimate_usd: f64) -> Self {
+        Self::for_piece_reading(files, files, estimate_usd)
+    }
+
+    /// [`Self::for_piece`] with the number of Read calls the piece's files need
+    /// ([`Self::turns_for_reading`]).
+    pub fn for_piece_reading(files: usize, read_pages: usize, estimate_usd: f64) -> Self {
         Self {
-            max_turns: Self::turns_for(files),
+            max_turns: Self::turns_for_reading(files, read_pages),
             max_turn_tokens: 32_000,
             ceiling_usd: (4.0 * estimate_usd).max(3.0),
         }

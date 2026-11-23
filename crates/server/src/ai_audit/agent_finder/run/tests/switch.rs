@@ -6,6 +6,7 @@ use super::*;
 
 fn agent_controls() -> RunControls {
     RunControls {
+        scope: Default::default(),
         finder: FinderChoice::Agent,
         ..RunControls::default()
     }
@@ -54,6 +55,7 @@ fn forcing_pieces_needs_an_internal_run() {
 #[test]
 fn forcing_pieces_without_the_agent_finder_is_refused() {
     let c = RunControls {
+        scope: Default::default(),
         finder_force_pieces: Some(4),
         ..RunControls::default()
     };
@@ -76,6 +78,7 @@ fn the_refusal_messages_use_no_dashes_or_serial_commas() {
         (agent_controls(), true, true),
         (
             RunControls {
+                scope: Default::default(),
                 finder_force_pieces: Some(2),
                 ..agent_controls()
             },

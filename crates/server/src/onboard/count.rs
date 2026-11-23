@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use super::files::read_local_repo_files;
 use super::propose::{count_source_lines, lang_for_ext, non_blank_lines};
+use super::scope::RepoScope;
 
 /// Counted files and lines for one language.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -40,11 +41,42 @@ pub struct RepoCount {
     pub excluded_noise_lines: usize,
     /// The file cap was hit: the counts cover only the first files read.
     pub truncated: bool,
+    /// Every file the inspection does NOT read, grouped by why, so a quote is set from the
+    /// billable total above and the reader sees what was left out. Reasons, in this order:
+    /// excluded by agreement (the project's exclusion list), over the read limit, beyond the
+    /// file limit, not UTF-8 text. A file over the read limit appears here only when the count
+    /// runs before the file is excluded; the inspection itself starts with a warning. Empty when every admitted file is read.
+    pub not_read: Vec<NotReadGroup>,
+    /// Patterns of Excluded by agreement that matched no file in this repo. `camerata count`
+    /// refuses to print figures while any is left, naming it.
+    pub unmatched_patterns: Vec<String>,
+    /// Patterns written for another repo of the project: not judged here (so a project-wide list
+    /// works repo by repo for a quote) and listed as "not for this repo".
+    pub not_for_this_repo: Vec<String>,
+    /// Patterns for this repo that match only files never read anyway: a warning, never a
+    /// refusal. Listed as "excluded by agreement; nothing here is read by default".
+    pub never_read_patterns: Vec<String>,
+}
+
+/// The files not read for one reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NotReadGroup {
+    /// The reason, as Coverage words it ([`crate::scan_ledger::SkipReason::label`]).
+    pub reason: String,
+    /// The files, in path order, with their size when it could be measured.
+    pub files: Vec<NotReadFile>,
+}
+
+/// One file not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NotReadFile {
+    pub path: String,
+    pub bytes: Option<u64>,
 }
 
 /// Count `root` through the inspection's own file filter. Blocking IO.
-pub fn count_repo(root: &Path) -> anyhow::Result<RepoCount> {
-    let extracted = read_local_repo_files(root)?;
+pub fn count_repo(root: &Path, scope: &RepoScope) -> anyhow::Result<RepoCount> {
+    let extracted = read_local_repo_files(root, scope)?;
     let (total_lines, lines_by_lang) = count_source_lines(&extracted.files);
 
     let mut files_by_lang: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -65,6 +97,7 @@ pub fn count_repo(root: &Path) -> anyhow::Result<RepoCount> {
     let lang_lines: usize = languages.iter().map(|l| l.lines).sum();
 
     let excluded_noise_lines = excluded_noise_lines(root, &extracted.excluded_noise_paths);
+    let not_read = not_read_groups(&extracted);
 
     Ok(RepoCount {
         languages,
@@ -75,7 +108,76 @@ pub fn count_repo(root: &Path) -> anyhow::Result<RepoCount> {
         excluded_noise_files: extracted.excluded_noise,
         excluded_noise_lines,
         truncated: extracted.truncated,
+        not_read,
+        unmatched_patterns: scope
+            .patterns()
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| {
+                !extracted.matched_patterns.contains(i)
+                    && scope.is_for_this_repo(p)
+                    && super::scope::never_read_folder(
+                        p,
+                        std::slice::from_ref(&scope.spec().to_string()),
+                    )
+                    .is_none()
+            })
+            .map(|(_, p)| p.clone())
+            .collect(),
+        never_read_patterns: scope
+            .patterns()
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| {
+                !extracted.matched_patterns.contains(i)
+                    && scope.is_for_this_repo(p)
+                    && super::scope::never_read_folder(
+                        p,
+                        std::slice::from_ref(&scope.spec().to_string()),
+                    )
+                    .is_some()
+            })
+            .map(|(_, p)| p.clone())
+            .collect(),
+        not_for_this_repo: scope
+            .patterns()
+            .iter()
+            .filter(|p| !scope.is_for_this_repo(p))
+            .cloned()
+            .collect(),
     })
+}
+
+/// The files the walk named but did not read, grouped by reason in the order Coverage uses.
+fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup> {
+    use crate::scan_ledger::SkipReason;
+    [
+        (
+            SkipReason::ExcludedByAgreement,
+            &extracted.excluded_by_agreement,
+        ),
+        (SkipReason::Oversize, &extracted.skipped_oversize),
+        (SkipReason::BeyondFileCap, &extracted.skipped_beyond_cap),
+        (SkipReason::NotText, &extracted.skipped_unreadable),
+        (SkipReason::LongLine, &extracted.skipped_long_line),
+    ]
+    .into_iter()
+    .filter(|(_, paths)| !paths.is_empty())
+    .map(|(reason, paths)| {
+        let mut files: Vec<NotReadFile> = paths
+            .iter()
+            .map(|path| NotReadFile {
+                path: path.clone(),
+                bytes: extracted.skipped_sizes.get(path).copied(),
+            })
+            .collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        NotReadGroup {
+            reason: reason.label(),
+            files,
+        }
+    })
+    .collect()
 }
 
 /// The non-blank lines in the files the noise filter dropped (`ExtractedRepo::
@@ -114,6 +216,36 @@ impl RepoCount {
         ));
         if self.truncated {
             out.push_str("note: file cap reached, counts are partial\n");
+        }
+        for p in &self.never_read_patterns {
+            out.push_str(&format!(
+                "warning: {p} matches only files never read; excluded by agreement; nothing here is read by default\n"
+            ));
+        }
+        for p in &self.not_for_this_repo {
+            out.push_str(&format!("not for this repo: {p}\n"));
+        }
+        for group in &self.not_read {
+            out.push_str(&format!(
+                "not read, {} ({} {}):\n",
+                group.reason,
+                group.files.len(),
+                if group.files.len() == 1 {
+                    "file"
+                } else {
+                    "files"
+                }
+            ));
+            for f in &group.files {
+                match f.bytes {
+                    Some(bytes) => out.push_str(&format!(
+                        "  {} ({})\n",
+                        f.path,
+                        crate::report_export::coverage_gaps::format_size(bytes)
+                    )),
+                    None => out.push_str(&format!("  {}\n", f.path)),
+                }
+            }
         }
         out
     }
@@ -161,10 +293,25 @@ mod tests {
         dir
     }
 
+    /// Fix D: an over-limit file is searched for secrets but is not read for the inspection, so
+    /// the quote count is the same with it as without it. The numbers are pinned.
+    #[test]
+    fn an_over_limit_file_does_not_change_the_quote_count() {
+        let dir = git_fixture();
+        write(dir.path(), "data/dump.js", &"var a = 1;\n".repeat(150_000));
+        git(dir.path(), &["add", "."]);
+        let c = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
+        assert_eq!((c.total_files, c.total_lines), (5, 10));
+        assert_eq!((c.other_files, c.other_lines), (2, 5));
+        assert_eq!((c.excluded_noise_files, c.excluded_noise_lines), (3, 6));
+        assert_eq!(c.not_read.len(), 1);
+        assert_eq!(c.not_read[0].files[0].path, "data/dump.js");
+    }
+
     #[test]
     fn counts_the_filtered_files_exactly_in_a_git_repo() {
         let dir = git_fixture();
-        let c = count_repo(dir.path()).unwrap();
+        let c = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
         assert_eq!(
             c.languages,
             vec![
@@ -190,7 +337,7 @@ mod tests {
     fn counts_a_folder_that_is_not_a_git_repo() {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path());
-        let c = count_repo(dir.path()).unwrap();
+        let c = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
         // Without git the .gitignore is not applied: the ignored files count like any other.
         let langs: Vec<_> = c
             .languages
@@ -205,8 +352,9 @@ mod tests {
     #[test]
     fn counts_the_same_file_set_the_inspection_reads() {
         let dir = git_fixture();
-        let extracted = read_local_repo_files(dir.path()).unwrap();
-        let c = count_repo(dir.path()).unwrap();
+        let extracted =
+            read_local_repo_files(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
+        let c = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
         assert_eq!(c.total_files, extracted.files.len());
         assert_eq!(c.excluded_noise_files, extracted.excluded_noise);
         assert_eq!(c.total_lines, count_source_lines(&extracted.files).0);
@@ -222,7 +370,7 @@ mod tests {
             "firestore.rules",
             "rules_version = '2';\nservice cloud.firestore {\n}\n\n// c\n",
         ); // other, 4
-        let c = count_repo(dir.path()).unwrap();
+        let c = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
         let dart = c.languages.iter().find(|l| l.language == "Dart").unwrap();
         assert_eq!((dart.files, dart.lines), (1, 3));
         // fixture(): config.yaml 3 + .gitignore 2 + secret.env 1 (not a git tree, so counted),
@@ -234,7 +382,10 @@ mod tests {
     #[test]
     fn json_has_the_documented_shape() {
         let dir = git_fixture();
-        let v = serde_json::to_value(count_repo(dir.path()).unwrap()).unwrap();
+        let v = serde_json::to_value(
+            count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(v["total_files"], 5);
         assert_eq!(v["total_lines"], 10);
         assert_eq!(v["excluded_noise_files"], 3);
@@ -248,9 +399,105 @@ mod tests {
     #[test]
     fn text_report_names_languages_totals_and_noise() {
         let dir = git_fixture();
-        let text = count_repo(dir.path()).unwrap().to_text();
+        let text = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none())
+            .unwrap()
+            .to_text();
         assert!(text.contains("Rust"));
         assert!(text.contains("TOTAL"));
         assert!(text.contains("excluded as noise: 3 files, 6 lines"));
+    }
+
+    // ── Item 31 step 7: what is not read, with the reason, from the run's own file list ──────
+
+    fn scope_of(patterns: &[&str]) -> RepoScope {
+        let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+        crate::onboard::scope::ScanScope::from_patterns(&patterns)
+            .unwrap()
+            .for_repo("acme/demo")
+    }
+
+    #[test]
+    fn the_count_lists_every_file_not_read_grouped_by_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/main.rs", "fn main() {}\n\nfn a() {}\n");
+        write(dir.path(), "seeds/rows.js", "var a;\nvar b;\n");
+        write(dir.path(), "seeds/more.js", "var c;\n");
+        write(
+            dir.path(),
+            "src/huge.rs",
+            &"x".repeat(super::super::files::MAX_FILE_BYTES + 1),
+        );
+        let c = count_repo(dir.path(), &scope_of(&["demo/seeds/**"])).unwrap();
+        assert_eq!(
+            (c.total_files, c.total_lines),
+            (1, 2),
+            "only what the run reads is billed"
+        );
+        let reasons: Vec<(&str, Vec<&str>)> = c
+            .not_read
+            .iter()
+            .map(|g| {
+                (
+                    g.reason.as_str(),
+                    g.files.iter().map(|f| f.path.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                (
+                    "excluded by agreement",
+                    vec!["seeds/more.js", "seeds/rows.js"]
+                ),
+                ("over the 1 MB file size limit", vec!["src/huge.rs"]),
+            ]
+        );
+        let text = c.to_text();
+        assert!(
+            text.contains("not read, excluded by agreement (2 files):"),
+            "{text}"
+        );
+        assert!(text.contains("  seeds/rows.js (14 B)"), "{text}");
+        assert!(
+            text.contains("not read, over the 1 MB file size limit (1 file):"),
+            "{text}"
+        );
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["not_read"][0]["reason"], "excluded by agreement");
+        assert_eq!(v["not_read"][0]["files"][0]["path"], "seeds/more.js");
+    }
+
+    #[test]
+    fn a_count_with_nothing_left_out_has_no_not_read_section() {
+        let dir = git_fixture();
+        let c = count_repo(dir.path(), &RepoScope::none()).unwrap();
+        assert!(c.not_read.is_empty());
+        assert!(!c.to_text().contains("not read"));
+    }
+
+    #[test]
+    fn the_count_total_is_the_inspections_total_with_an_exclusion() {
+        let dir = git_fixture();
+        write(
+            dir.path(),
+            "seeds/big.ts",
+            "export const rows = 1;\n\nexport const more = 2;\n",
+        );
+        let scope = scope_of(&["demo/seeds/**"]);
+        let extracted = read_local_repo_files(dir.path(), &scope).unwrap();
+        let c = count_repo(dir.path(), &scope).unwrap();
+        assert_eq!(c.total_files, extracted.files.len());
+        assert_eq!(c.total_lines, count_source_lines(&extracted.files).0);
+        assert!(extracted
+            .files
+            .iter()
+            .all(|(p, _)| !p.starts_with("seeds/")));
+        let without = count_repo(dir.path(), &RepoScope::none()).unwrap();
+        assert_eq!(
+            without.total_lines,
+            c.total_lines + 2,
+            "the excluded lines are not billed"
+        );
     }
 }

@@ -33,6 +33,7 @@ fn args(dir: &Path) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: FinderArgs::default(),
+        exclude: Vec::new(),
     }
 }
 

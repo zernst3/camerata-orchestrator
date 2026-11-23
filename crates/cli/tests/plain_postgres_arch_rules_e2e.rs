@@ -96,7 +96,12 @@ async fn plain_postgres_repo_selects_both_rules_via_the_real_curated_selection()
     let repo_spec = "e2e/plain-postgres-fixture".to_string();
     let sources = vec![(repo_spec.clone(), repo_dir.path().to_path_buf())];
 
-    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
+    let scan = camerata_server::onboard::scan_repos(
+        &sources,
+        Vec::new(),
+        &camerata_server::onboard::scope::ScanScope::none(),
+    )
+    .await;
     let selected = camerata::inspect_cmd::curated_rule_selection(&scan.proposed_rules);
     let selected_ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
 
@@ -163,6 +168,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false)

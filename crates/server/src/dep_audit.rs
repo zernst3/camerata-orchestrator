@@ -42,6 +42,8 @@
 //! contract, and the non-gate classification.
 
 use std::path::Path;
+
+use crate::onboard::scope::RepoScope;
 use std::time::Duration;
 
 use crate::onboard::{CoverageNote, Finding};
@@ -219,10 +221,11 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
 
         // Make the path relative to the repo root when possible.  osv-scanner
         // emits absolute paths; we store only the relative part in the finding.
-        let lockfile_rel = Path::new(lockfile_abs)
-            .strip_prefix(repo_root)
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| lockfile_abs.to_string());
+        // A repo root that is a symlink (or reached through one) is compared by its real path
+        // too; a path that still cannot be made relative stays absolute and is dropped when the
+        // project excludes files ([`drop_excluded`]).
+        let lockfile_rel = relative_to_root(Path::new(lockfile_abs), repo_root)
+            .unwrap_or_else(|| lockfile_abs.to_string());
         // Normalise to forward slashes (matters on Windows).
         let lockfile_rel = lockfile_rel.replace('\\', "/");
 
@@ -680,8 +683,12 @@ async fn run_dep_audit_with_tooling(
     repo: &str,
     repo_dir: &Path,
     tooling_dir: &Path,
+    scope: &RepoScope,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
-    let (findings, mut note) = run_dep_audit_core(repo, repo_dir, tooling_dir).await;
+    let (mut findings, mut note) = run_dep_audit_core(repo, repo_dir, tooling_dir, scope).await;
+    // osv-scanner discovers lockfiles itself (`-r`), so a lockfile the project's exclusion list
+    // names is dropped from its results here: the audit reports nothing about an excluded file.
+    drop_excluded(&mut findings, scope);
     // The note says which repo it is about, so a scan over several repos keeps one repo's
     // dependency audit failure apart from another's.
     if let Some(n) = note.as_mut() {
@@ -690,10 +697,35 @@ async fn run_dep_audit_with_tooling(
     (findings, note)
 }
 
+/// `path` relative to `root`, forward-slashed: directly, else through their real (canonical)
+/// paths. `None` when it is not under the root either way.
+fn relative_to_root(path: &Path, root: &Path) -> Option<String> {
+    let rel = |p: &Path, r: &Path| {
+        p.strip_prefix(r)
+            .ok()
+            .map(|x| x.to_string_lossy().replace('\\', "/"))
+    };
+    rel(path, root).or_else(|| {
+        let r = root.canonicalize().ok()?;
+        rel(path, &r).or_else(|| rel(&path.canonicalize().ok()?, &r))
+    })
+}
+
+/// Drop every finding about a lockfile the project's Excluded by agreement list names. A finding
+/// whose path is still absolute (it could not be made relative to the repo) cannot be matched
+/// against the list, so with a list set it is dropped too: fail closed.
+fn drop_excluded(findings: &mut Vec<Finding>, scope: &RepoScope) {
+    if scope.patterns().is_empty() {
+        return;
+    }
+    findings.retain(|f| !Path::new(&f.path).is_absolute() && !scope.excludes(&f.path));
+}
+
 async fn run_dep_audit_core(
     repo: &str,
     repo_dir: &Path,
     tooling_dir: &Path,
+    scope: &RepoScope,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
     // Fast-exit when the disable env var is set.  This is exclusively for test
     // isolation — see the `DISABLE_ENV_VAR` constant doc for the rationale.
@@ -805,7 +837,7 @@ async fn run_dep_audit_core(
             );
             // M12: no lockfile anywhere does not mean no dependencies. Name the manifests
             // that declare packages nobody checked.
-            match unaudited_manifest_sentence(repo_dir).await {
+            match unaudited_manifest_sentence(repo_dir, scope).await {
                 Some(gap) => format!("{base}. {gap}"),
                 None => base,
             }
@@ -841,7 +873,7 @@ async fn run_dep_audit_core(
             // lockfile covers, and files osv-scanner reported on stderr that it could not read.
             let stderr = String::from_utf8_lossy(&output.stderr);
             let message = manifests::success_gap_message(
-                unaudited_manifest_sentence(repo_dir).await,
+                unaudited_manifest_sentence(repo_dir, scope).await,
                 &stderr,
                 repo_dir,
             );
@@ -877,9 +909,10 @@ fn empty_output_message() -> String {
 
 /// The sentence naming the dependency manifests under `repo_dir` that no lockfile covers, or
 /// `None` when every manifest is covered (or the walk could not run).
-async fn unaudited_manifest_sentence(repo_dir: &Path) -> Option<String> {
+async fn unaudited_manifest_sentence(repo_dir: &Path, scope: &RepoScope) -> Option<String> {
     let dir = repo_dir.to_path_buf();
-    let found = tokio::task::spawn_blocking(move || manifests::unaudited_manifests(&dir))
+    let scope = scope.clone();
+    let found = tokio::task::spawn_blocking(move || manifests::unaudited_manifests(&dir, &scope))
         .await
         .ok()?;
     manifests::manifests_sentence(&found)
@@ -902,7 +935,11 @@ async fn unaudited_manifest_sentence(repo_dir: &Path) -> Option<String> {
 /// When the Camerata data dir cannot be resolved (unusual) or osv-scanner cannot
 /// be provisioned (network unavailable, unsupported platform, no Go toolchain),
 /// a `CoverageNote` is returned and the scan is NOT aborted.
-pub async fn run_dep_audit(repo: &str, repo_dir: &Path) -> (Vec<Finding>, Option<CoverageNote>) {
+pub async fn run_dep_audit(
+    repo: &str,
+    repo_dir: &Path,
+    scope: &RepoScope,
+) -> (Vec<Finding>, Option<CoverageNote>) {
     // Resolve the Camerata tooling dir where provisioned binaries live.
     let tooling_dir = match tool_provisioning::tooling_dir() {
         Some(d) => d,
@@ -920,7 +957,7 @@ pub async fn run_dep_audit(repo: &str, repo_dir: &Path) -> (Vec<Finding>, Option
             );
         }
     };
-    run_dep_audit_with_tooling(repo, repo_dir, &tooling_dir).await
+    run_dep_audit_with_tooling(repo, repo_dir, &tooling_dir, scope).await
 }
 
 // ─── tests (pure parser + severity mapping) ──────────────────────────────────
@@ -1322,7 +1359,8 @@ mod tests {
         // We just verify the type contract, not a specific outcome.
         let tmp = TempDir::new().unwrap();
         let repo_dir = std::path::Path::new("/nonexistent-camerata-dep-audit-repo-xyz");
-        let (findings, note) = run_dep_audit_with_tooling("acme/test", repo_dir, tmp.path()).await;
+        let (findings, note) =
+            run_dep_audit_with_tooling("acme/test", repo_dir, tmp.path(), &RepoScope::none()).await;
         // One of two valid outcomes:
         //   (a) provisioning failed → findings empty, note is Some
         //   (b) provisioning succeeded but repo_dir doesn't exist → note is Some, findings empty
@@ -1363,7 +1401,8 @@ mod tests {
         // "no panic and the result is well-typed."
         let tooling = std::path::Path::new("/nonexistent-camerata-tooling-dir-xyz");
         let repo_dir = std::path::Path::new("/nonexistent-camerata-repo-xyz");
-        let (findings, note) = run_dep_audit_with_tooling("acme/test", repo_dir, tooling).await;
+        let (findings, note) =
+            run_dep_audit_with_tooling("acme/test", repo_dir, tooling, &RepoScope::none()).await;
         // Regardless of outcome: no panic, and if there's a note it is well-formed.
         if let Some(ref n) = note {
             assert_eq!(n.tool, "osv-scanner");
@@ -1518,8 +1557,147 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set(DISABLE_ENV_VAR, "1");
         let tooling = std::path::Path::new("/nonexistent-tooling-for-disable-test");
         let repo_dir = std::path::Path::new("/nonexistent-repo-for-disable-test");
-        let (findings, note) = run_dep_audit_with_tooling("acme/api", repo_dir, tooling).await;
+        let (findings, note) =
+            run_dep_audit_with_tooling("acme/api", repo_dir, tooling, &RepoScope::none()).await;
         assert!(findings.is_empty(), "DISABLE → no findings");
         assert!(note.is_none(), "DISABLE → no coverage note (silent skip)");
+    }
+
+    /// Item 31: osv-scanner finds lockfiles itself, so a result about a lockfile the project's
+    /// exclusion list names is dropped, and only that one.
+    #[test]
+    fn a_vulnerability_in_an_excluded_lockfile_is_dropped_from_the_results() {
+        let finding = |path: &str| Finding {
+            repo: "acme/app".to_string(),
+            path: path.to_string(),
+            rule_id: DEP_AUDIT_RULE_ID.to_string(),
+            ..Finding::default()
+        };
+        let mut findings = vec![
+            finding("seeds/package-lock.json"),
+            finding("package-lock.json"),
+        ];
+        let scope =
+            crate::onboard::scope::ScanScope::from_patterns(&["app/seeds/**".to_string()]).unwrap();
+        drop_excluded(&mut findings, &scope.for_repo("acme/app"));
+        let kept: Vec<&str> = findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(kept, ["package-lock.json"]);
+        let mut all = vec![finding("seeds/package-lock.json")];
+        drop_excluded(&mut all, &RepoScope::none());
+        assert_eq!(all.len(), 1, "nothing is dropped without an exclusion");
+    }
+
+    // ── Round 1 item 4: the call site, with a fake osv-scanner in the tooling folder ────────
+
+    /// A fake `osv-scanner` that reports one vulnerable package in each of `lockfiles` (absolute
+    /// paths), installed where `ensure_osv_scanner` finds it.
+    fn fake_osv(tooling: &Path, lockfiles: &[String]) {
+        use std::os::unix::fs::PermissionsExt;
+        let results: Vec<String> = lockfiles
+            .iter()
+            .map(|path| {
+                format!(
+                    r#"{{"source":{{"path":"{path}","type":"lockfile"}},"packages":[{{"package":{{"name":"lodash","version":"4.17.0","ecosystem":"npm"}},"vulnerabilities":[{{"id":"GHSA-aaaa-bbbb-cccc","summary":"x","severity":[{{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}}]}}]}}]}}"#
+                )
+            })
+            .collect();
+        let json = format!(r#"{{"results":[{}]}}"#, results.join(","));
+        let dir = crate::tool_provisioning::osv_scanner_dir(tooling);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = crate::tool_provisioning::osv_scanner_bin(&dir);
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\n[ \"$1\" = \"--version\" ] && exit 0\ncat <<'EOF'\n{json}\nEOF\nexit 1\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn excluding(patterns: &[&str]) -> RepoScope {
+        let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+        crate::onboard::scope::ScanScope::from_patterns(&patterns)
+            .unwrap()
+            .for_repo("acme/app")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_audit_drops_what_osv_reports_in_an_excluded_lockfile() {
+        let _path = camerata_test_env::EnvGuard::set("PATH", "/usr/bin:/bin");
+        let tooling = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path().canonicalize().unwrap();
+        fake_osv(
+            tooling.path(),
+            &[
+                format!("{}/seeds/package-lock.json", root.display()),
+                format!("{}/package-lock.json", root.display()),
+            ],
+        );
+        let (all, _) =
+            run_dep_audit_with_tooling("acme/app", &root, tooling.path(), &RepoScope::none()).await;
+        assert_eq!(all.len(), 2, "the fake reports both: {all:?}");
+        let (kept, _) = run_dep_audit_with_tooling(
+            "acme/app",
+            &root,
+            tooling.path(),
+            &excluding(&["app/seeds/**"]),
+        )
+        .await;
+        let paths: Vec<&str> = kept.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["package-lock.json"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_symlinked_repo_root_does_not_let_an_excluded_lockfile_through() {
+        let _path = camerata_test_env::EnvGuard::set("PATH", "/usr/bin:/bin");
+        let tooling = tempfile::tempdir().unwrap();
+        let real = tempfile::tempdir().unwrap();
+        let real_root = real.path().canonicalize().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("clone");
+        std::os::unix::fs::symlink(&real_root, &link).unwrap();
+        // osv reports the real path; the run was given the symlink.
+        fake_osv(
+            tooling.path(),
+            &[
+                format!("{}/seeds/package-lock.json", real_root.display()),
+                format!("{}/package-lock.json", real_root.display()),
+            ],
+        );
+        let (kept, _) = run_dep_audit_with_tooling(
+            "acme/app",
+            &link,
+            tooling.path(),
+            &excluding(&["app/seeds/**"]),
+        )
+        .await;
+        let paths: Vec<&str> = kept.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["package-lock.json"],
+            "relative, and the excluded one is gone"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_path_that_cannot_be_made_relative_is_dropped_when_a_list_is_set() {
+        let _path = camerata_test_env::EnvGuard::set("PATH", "/usr/bin:/bin");
+        let tooling = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        fake_osv(
+            tooling.path(),
+            &["/elsewhere/seeds/package-lock.json".to_string()],
+        );
+        let (kept, _) = run_dep_audit_with_tooling(
+            "acme/app",
+            repo.path(),
+            tooling.path(),
+            &excluding(&["app/seeds/**"]),
+        )
+        .await;
+        assert!(kept.is_empty(), "fail closed: {kept:?}");
     }
 }

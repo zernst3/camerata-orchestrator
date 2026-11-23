@@ -120,6 +120,7 @@ impl LlmPort for Recorder {
 
 fn meter(efficiency: EfficiencyConfig) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         efficiency,
         ..RunControls::default()
     })
@@ -414,6 +415,7 @@ async fn findings_the_spend_limit_stopped_are_neither_sent_nor_given_up_on() {
         ..Recorder::default()
     };
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(0.5),
         ..RunControls::default()
     });

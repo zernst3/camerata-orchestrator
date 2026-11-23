@@ -453,8 +453,12 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
                 None => None,
             };
             let lines: usize = piece::lines_of(shared.files, &piece.files);
-            let limits =
-                super::PieceLimits::for_piece(piece.files.len(), piece::estimate_usd(lines));
+            let read_pages = piece::read_pages_of(shared.files, &piece.files);
+            let limits = super::PieceLimits::for_piece_reading(
+                piece.files.len(),
+                read_pages,
+                piece::estimate_usd(lines),
+            );
             let runs =
                 match piece::converse(shared, index, &piece, &room, &not_served, &list, &limits)
                     .await

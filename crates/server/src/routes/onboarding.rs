@@ -1092,7 +1092,11 @@ pub(crate) async fn project_suppressions(
     // moved a checkout past the inspected commit just by opening a screen (and cannot work on a
     // detached HEAD, where a re-fetch at the inspected commit leaves the tree). The Workspace
     // tab's "Clone / update all repos" is the deliberate way to refresh.
-    let entries = crate::onboard::suppression_registry(&sources).await;
+    let entries = crate::onboard::suppression_registry(
+        &sources,
+        &crate::onboard::scope::ScanScope::of_project_or_nothing(Some(&project)),
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "source_deleted": !deleted.is_empty(),

@@ -1829,6 +1829,7 @@ async fn the_spend_limit_counts_what_the_scan_already_spent_and_stops_stage_2() 
     let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
     let rules: Vec<(String, String)> = Vec::new();
     let controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(5.0),
         ..crate::cost_cap::RunControls::default()
     };
@@ -1966,6 +1967,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     });
     // The project (or the flags) chose the model, the rate and the floor.
     let controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         review: camerata_api_types::project::ReviewSettings {
             escalation_rate_per_kloc: 1.0,
             escalation_floor: 3,
@@ -2954,6 +2956,7 @@ async fn a_run_the_checkpoint_paused_sends_no_group_review_call() {
     let llm = Reviewer::new(|call| Ok(one_group(call, "Raw SQL.")));
     let rules: Vec<(String, String)> = Vec::new();
     let controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(100.0),
         ..crate::cost_cap::RunControls::default()
     };
@@ -2982,6 +2985,7 @@ async fn a_group_review_priced_over_the_approved_amount_is_not_started() {
     let mut report = spent_report(3);
     // Room for the spend plus half the stage's price: the stage would go over.
     let controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(5.0 + price / 2.0),
         ..crate::cost_cap::RunControls::default()
     };
@@ -3054,6 +3058,7 @@ async fn a_group_review_pause_reaches_the_job_state_the_ui_polls() {
         .expect("the test model is priced");
     let mut report = spent_report(3);
     let controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(5.0 + price / 2.0),
         ..crate::cost_cap::RunControls::default()
     };

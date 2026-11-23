@@ -189,6 +189,7 @@ impl ProjectStore {
                 client_engagement: true,
                 client_tooling_opt_in: false,
                 dev_run_spend_limit_cents: None,
+                scan_exclusions: Vec::new(),
                 // Stage 2 has a default of its own too; a new project seeds it (A15).
                 review: ReviewSettings::for_new_project(),
             };
@@ -308,6 +309,7 @@ impl ProjectStore {
                     client_engagement: true,
                     client_tooling_opt_in: false,
                     dev_run_spend_limit_cents: None,
+                    scan_exclusions: Vec::new(),
                     review: ReviewSettings::default(),
                 };
                 s.projects.push(project.clone());
@@ -475,6 +477,98 @@ impl ProjectStore {
             return Err("the dev run spend limit must be more than zero".to_string());
         }
         Ok(self.update(project_id, |p| p.dev_run_spend_limit_cents = limit_cents))
+    }
+
+    /// Replace the project's exclusion list (files excluded by agreement, one glob pattern each,
+    /// matched against `<repo name>/<path within the repo>`). Blank lines and repeats are
+    /// dropped. `Err` names the first pattern that is not a valid glob and nothing is saved;
+    /// `Ok(None)` when no project has that id.
+    pub fn set_scan_exclusions(
+        &self,
+        project_id: &str,
+        patterns: &[String],
+    ) -> Result<Option<Project>, String> {
+        let patterns = crate::onboard::scope::normalize_patterns(patterns);
+        crate::onboard::scope::validate_patterns(&patterns)?;
+        if let Some(p) = self.get(project_id) {
+            crate::onboard::scope::ScanScope::from_patterns(&patterns)?.check_names(&p.repos)?;
+        }
+        Ok(self.update(project_id, |p| p.scan_exclusions = patterns))
+    }
+
+    /// [`Self::set_scan_exclusions`] that writes only when the stored list is still `based_on`
+    /// (the list the caller loaded), the comparison and the write made together inside `update`
+    /// so nothing can slip in between. `Ok(Some(Err(current)))` = the list changed since; nothing
+    /// is written.
+    pub fn set_scan_exclusions_checked(
+        &self,
+        project_id: &str,
+        based_on: &[String],
+        patterns: &[String],
+    ) -> Result<Option<Result<Project, Vec<String>>>, String> {
+        let patterns = crate::onboard::scope::normalize_patterns(patterns);
+        crate::onboard::scope::validate_patterns(&patterns)?;
+        let loaded = crate::onboard::scope::normalize_patterns(based_on);
+        if let Some(p) = self.get(project_id) {
+            crate::onboard::scope::ScanScope::from_patterns(&patterns)?.check_names(&p.repos)?;
+        }
+        let mut conflict: Option<Vec<String>> = None;
+        let updated = self.update(project_id, |p| {
+            if p.scan_exclusions == loaded {
+                p.scan_exclusions = patterns;
+            } else {
+                conflict = Some(p.scan_exclusions.clone());
+            }
+        });
+        Ok(match (updated, conflict) {
+            (None, _) => None,
+            (Some(_), Some(current)) => Some(Err(current)),
+            (Some(p), None) => Some(Ok(p)),
+        })
+    }
+
+    /// Add one file, exactly, to the project's exclusion list: the pre-start check's "Exclude by
+    /// agreement" for a file over the read limit. A file already on the list is not added twice.
+    /// `Ok(None)` when no project has that id.
+    pub fn add_scan_exclusion(
+        &self,
+        project_id: &str,
+        repo: &str,
+        path: &str,
+    ) -> Result<Option<Project>, String> {
+        if path.trim().is_empty() {
+            return Err("name the file to exclude by agreement".to_string());
+        }
+        let Some(current) = self.get(project_id) else {
+            return Ok(None);
+        };
+        if !current.repos.iter().any(|r| r == repo) {
+            return Err(format!("{repo} is not a repo of this project"));
+        }
+        // Inside `update`, so two quick additions both land: the list is read and written under
+        // one lock, never read here and written back later.
+        let mut refused: Option<String> = None;
+        let updated = self.update(project_id, |p| {
+            let pattern = crate::onboard::scope::exact_pattern_in(&p.repos, repo, path);
+            let mut patterns = p.scan_exclusions.clone();
+            patterns.push(pattern);
+            let patterns = crate::onboard::scope::normalize_patterns(&patterns);
+            match crate::onboard::scope::validate_patterns(&patterns) {
+                Ok(()) => p.scan_exclusions = patterns,
+                Err(why) => refused = Some(why),
+            }
+        });
+        match refused {
+            Some(why) => Err(why),
+            None => Ok(updated),
+        }
+    }
+
+    /// Remove one pattern from the project's Excluded by agreement list, inside `update`.
+    pub fn remove_scan_exclusion(&self, project_id: &str, pattern: &str) -> Option<Project> {
+        self.update(project_id, |p| {
+            p.scan_exclusions.retain(|x| x != pattern.trim())
+        })
     }
 
     /// Write `chosen_option` onto `rule_id`'s selection for a single project by id — the
@@ -1367,6 +1461,7 @@ mod finder_setting_tests {
         let p = store.create("Defaults", vec![]).unwrap();
         assert_eq!(p.review.finder, ProjectFinder::Agent);
         let controls = crate::cost_cap::RunControls {
+            scope: Default::default(),
             review: p.review.clone(),
             finder: p.review.finder.into(),
             ..crate::cost_cap::RunControls::default()

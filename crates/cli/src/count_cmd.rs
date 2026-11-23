@@ -8,12 +8,19 @@
 use std::path::PathBuf;
 
 use camerata_server::onboard::count::count_repo;
+use camerata_server::onboard::scope::ScanScope;
 
 /// Arguments of `camerata count`.
 #[derive(Debug, Clone)]
 pub struct CountArgs {
     pub repo: PathBuf,
     pub json: bool,
+    /// Files agreed to be outside the inspection (`--exclude`): globs matched against
+    /// `<repo name>/<path within the repo>`, the repo name being the folder's name.
+    pub exclude: Vec<String>,
+    /// `--repo-name OWNER/REPO`: the name the repo goes by, as `camerata inspect --repo-name`
+    /// takes it. Without it the folder's own name, as inspect names a lone unnamed repo.
+    pub repo_name: Option<String>,
 }
 
 /// The report to print for `args.repo`. Errors when the path is not a directory.
@@ -21,7 +28,31 @@ pub fn run_count(args: &CountArgs) -> anyhow::Result<String> {
     if !args.repo.is_dir() {
         anyhow::bail!("{} is not a directory", args.repo.display());
     }
-    let count = count_repo(&args.repo)?;
+    let scope =
+        ScanScope::from_patterns(&args.exclude).map_err(|e| anyhow::anyhow!("--exclude: {e}"))?;
+    let name = crate::inspect_cmd::source_name(&args.repo, args.repo_name.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let count = count_repo(&args.repo, &scope.for_repo(&name))?;
+    // A pattern that matches no file is an exclusion that never happened: refuse, naming it.
+    if !count.unmatched_patterns.is_empty() {
+        anyhow::bail!(
+            "Excluded by agreement holds a pattern that matches no file: {}. Fix or remove it.",
+            count
+                .unmatched_patterns
+                .iter()
+                .zip(camerata_server::onboard::scope::unmatched_notes(
+                    &count.unmatched_patterns,
+                    std::slice::from_ref(&name)
+                ))
+                .map(|(p, note)| if note.is_empty() {
+                    format!("\"{p}\"")
+                } else {
+                    format!("\"{p}\" (matches no file: {note})")
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if args.json {
         Ok(serde_json::to_string_pretty(&count)?)
     } else {
@@ -48,6 +79,8 @@ mod tests {
         let out = run_count(&CountArgs {
             repo: dir.path().to_path_buf(),
             json: false,
+            exclude: Vec::new(),
+            repo_name: None,
         })
         .unwrap();
         assert!(out.contains("Rust"), "{out}");
@@ -61,6 +94,8 @@ mod tests {
         let out = run_count(&CountArgs {
             repo: dir.path().to_path_buf(),
             json: true,
+            exclude: Vec::new(),
+            repo_name: None,
         })
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -77,6 +112,8 @@ mod tests {
         let err = run_count(&CountArgs {
             repo: dir.path().join("a.rs"),
             json: false,
+            exclude: Vec::new(),
+            repo_name: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("not a directory"), "{err}");

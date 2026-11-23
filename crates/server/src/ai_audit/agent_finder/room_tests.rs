@@ -541,3 +541,18 @@ fn disk_path_compares_the_rooms_folder_without_regard_to_case() {
     assert_eq!(Room::disk_path("src/a.rs"), "code/src/a.rs");
     assert_eq!(Room::disk_path("_camerata_x/a"), "code/_camerata_x/a");
 }
+
+/// Round 1 item 11: a 10,000-character line is read in full by the room's Read (nothing is cut),
+/// and the command line transport, whose own Read cuts a line over 2,000 characters, is told
+/// about it (`long_lines`) so the file is sent again whole ("read in full or not at all").
+/// A single line over the room's 100,000 byte page limit is not covered: see the report.
+#[test]
+fn a_ten_thousand_character_line_is_read_in_full() {
+    let long = "z".repeat(10_000);
+    let files = vec![f("a.rs", &format!("short\n{long}\nend\n"))];
+    let r = Room::build(&piece(&["a.rs"]), &files, "").room;
+    let read = r.read("a.rs", 1, 10).expect("reads");
+    assert_eq!(read.lines_returned, 3);
+    assert!(read.text.contains(&long), "the whole line is in the answer");
+    assert_eq!(r.long_lines().get("a.rs"), Some(&vec![2]));
+}

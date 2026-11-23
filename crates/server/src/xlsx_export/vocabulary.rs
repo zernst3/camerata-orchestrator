@@ -1776,6 +1776,10 @@ mod tests {
         strings.extend([
             words.details_intro.clone(),
             words.skipped_files_more.clone(),
+            // The reasons Coverage gives for a file it did not read (item 31).
+            crate::scan_ledger::SkipReason::ExcludedByAgreement.label(),
+            crate::scan_ledger::SkipReason::Oversize.label(),
+            crate::scan_ledger::SkipReason::ExcludedNeverRead.label(),
             closes_rules(&["A".to_string(), "B".to_string()]),
             places_count(3),
             more_in_sheet(4, FIX_PLAN),

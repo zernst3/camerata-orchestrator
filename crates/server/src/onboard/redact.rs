@@ -104,6 +104,33 @@ pub(crate) fn snippet_from_line(line: &str, max: usize) -> String {
         .collect()
 }
 
+/// [`snippet_from_line`] that, when the redacted line is longer than `max`, shows a window of
+/// `max` characters around the first redacted value instead of the head of the line: on a
+/// minified 100 KB line the head says nothing about the secret. Still redacted first, still at
+/// most `max` characters, and the masked form is always whole inside the window. A line with no
+/// redacted value (a hit from a rule that is not secret-shaped) keeps the head of the line.
+pub(crate) fn snippet_around_secret(line: &str, max: usize) -> String {
+    let trimmed = line.trim();
+    let clean = strip_zero_width(trimmed);
+    if clean.chars().count() <= max {
+        return snippet_from_line(line, max);
+    }
+    let redacted = camerata_secrets::redact_for_client(&clean);
+    let Some(first) = redacted.redactions.first() else {
+        return snippet_from_line(line, max);
+    };
+    // Nothing before the first value changed, so its byte start is the same in the output.
+    let start_byte = first.span.start.min(redacted.text.len());
+    let at = redacted.text[..start_byte].chars().count();
+    let form = first.form.chars().count();
+    let lead = if form >= max {
+        0
+    } else {
+        ((max - form) / 2).min(at)
+    };
+    redacted.text.chars().skip(at - lead).take(max).collect()
+}
+
 /// Redact every model-written string of a deep-tier report: the lens prose and error, the SOC-2
 /// gap rows, the threat rows and the deep-security findings. Used on the way into a stored
 /// [`ScanReport`] and again by the deep-report export, which reads the report back from the job

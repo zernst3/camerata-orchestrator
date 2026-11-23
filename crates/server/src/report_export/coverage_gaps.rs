@@ -6,7 +6,7 @@
 //! - an AI scan pass that failed (a transport error, a refusal, or a reply that was still not
 //!   JSON after its bounded retries) reads "pass failed, N files not reviewed by the AI pass",
 //!   from the existing failed-pass record ([`crate::ai_audit::FailedPass::coverage_line`]);
-//! - an auditable file the walk did not read (over the 400 KB size limit, or past the
+//! - an auditable file the walk did not read (over the 1 MB size limit, or past the
 //!   20,000-file limit) is listed by repo and path, from the scan ledger's input facts
 //!   ([`crate::scan_ledger::ScanInputFacts::skipped_files`]).
 
@@ -79,7 +79,7 @@ pub struct CoverageGapsJson {
     /// Skipped files past that bound, counted but not named.
     pub skipped_beyond_cap_total: usize,
     /// One sentence counting every file the scan did not read, by reason, named or not ("12 files
-    /// were not scanned: 3 over the 400 KB file size limit, 9 beyond the 20,000-file limit.").
+    /// were not read for the inspection: 3 over the 1 MB file size limit, 9 beyond the 20,000-file limit.").
     /// `None` when every auditable file was read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped_summary: Option<String>,
@@ -151,15 +151,19 @@ pub fn skipped_beyond_cap_sentence(omitted: usize) -> Option<String> {
     })
 }
 
-/// A file size as Coverage prints it: bytes under a kilobyte, whole kilobytes (1,000 bytes) under
-/// a megabyte, then megabytes to one decimal. Decimal units, like the "400 KB" file limit.
+/// A file size as Coverage prints it, in the base the file size limit is written in (1 MB is
+/// 1,048,576 bytes): bytes under a kilobyte, whole kilobytes (1,024 bytes) under a megabyte, then
+/// megabytes to one decimal, rounded UP so a file over the limit never prints as 1.0 MB.
 pub fn format_size(bytes: u64) -> String {
-    if bytes < 1_000 {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes < KB {
         format!("{bytes} B")
-    } else if bytes < 1_000_000 {
-        format!("{} KB", (bytes + 500) / 1_000)
+    } else if bytes < MB {
+        format!("{} KB", (bytes + KB / 2) / KB)
     } else {
-        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+        let tenths = (bytes * 10).div_ceil(MB);
+        format!("{}.{} MB", tenths / 10, tenths % 10)
     }
 }
 
@@ -216,20 +220,24 @@ fn limit_of(hit: &FileCapHit) -> usize {
 fn beyond_limit_label(hits: &[FileCapHit], repo: &str) -> String {
     match hits.iter().find(|h| h.repo == repo) {
         Some(hit) => format!("beyond the {}-file limit", group_digits(limit_of(hit))),
-        None => SkipReason::BeyondFileCap.label().to_string(),
+        None => SkipReason::BeyondFileCap.label(),
     }
 }
 
 /// The one sentence counting every file the scan did not read, by reason. `None` when none.
-fn skipped_summary_sentence(totals: &SkippedTotals, hits: &[FileCapHit]) -> Option<String> {
+pub(super) fn skipped_summary_sentence(
+    totals: &SkippedTotals,
+    hits: &[FileCapHit],
+) -> Option<String> {
     let total = totals.total();
+    let patterns = never_read_sentence(totals.excluded_never_read);
     if total == 0 {
-        return None;
+        return patterns;
     }
     // The limit named is the one every hit applied; repos that applied different limits are
     // summed under a plain "beyond the file limit".
     let beyond = match hits.split_first() {
-        None => SkipReason::BeyondFileCap.label().to_string(),
+        None => SkipReason::BeyondFileCap.label(),
         Some((first, rest)) if rest.iter().all(|h| limit_of(h) == limit_of(first)) => {
             format!("beyond the {}-file limit", group_digits(limit_of(first)))
         }
@@ -239,34 +247,110 @@ fn skipped_summary_sentence(totals: &SkippedTotals, hits: &[FileCapHit]) -> Opti
         SkipReason::Oversize,
         SkipReason::BeyondFileCap,
         SkipReason::NotText,
+        SkipReason::ExcludedByAgreement,
+        SkipReason::LongLine,
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)
     .map(|r| {
         let label = if r == SkipReason::BeyondFileCap {
-            beyond.as_str()
+            beyond.clone()
         } else {
             r.label()
         };
         format!("{} {label}", totals.of(r))
     })
     .collect();
-    Some(format!(
-        "{total} {} not scanned: {}.",
+    let mut sentence = format!(
+        "{total} {} not read for the inspection: {}.",
         files_noun(total),
         parts.join(", ")
-    ))
+    );
+    if let Some(secrets) = secret_search_sentence(totals, &beyond) {
+        sentence.push(' ');
+        sentence.push_str(&secrets);
+    }
+    if let Some(patterns) = patterns {
+        sentence.push(' ');
+        sentence.push_str(&patterns);
+    }
+    Some(sentence)
+}
+
+/// The sentence for Excluded by agreement patterns that match only files never read: patterns,
+/// not skipped files. `None` when there are none.
+fn never_read_sentence(patterns: usize) -> Option<String> {
+    let marking = SkipReason::ExcludedNeverRead.label();
+    match patterns {
+        0 => None,
+        1 => Some(format!("1 pattern is {marking}.")),
+        n => Some(format!("{n} patterns are {marking}.")),
+    }
+}
+
+/// What the secret checks did with the files not read for the inspection. A file over the file
+/// size limit (up to the secret search ceiling) or with a long line is not read, billed or
+/// counted but its contents are still searched for secrets; a file over the ceiling, past the
+/// file limit or not text gets file-name checks only, and is said to be "not searched for
+/// secrets". `None` when the deterministic floor did not run, or nothing needs saying.
+fn secret_search_sentence(totals: &SkippedTotals, beyond: &str) -> Option<String> {
+    if !totals.secret_search_ran {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let ceiling = crate::onboard::files::secret_scan_label();
+    if totals.secret_over_ceiling > 0 {
+        parts.push(format!("{} over {ceiling}", totals.secret_over_ceiling));
+    }
+    if totals.beyond_file_cap > 0 {
+        parts.push(format!("{} {beyond}", totals.beyond_file_cap));
+    }
+    let not_text = totals.not_text + totals.secret_oversize_not_text;
+    if not_text > 0 {
+        parts.push(format!("{not_text} not UTF-8 text"));
+    }
+    // A file excluded by agreement is never opened, so it is not searched either.
+    if totals.excluded_by_agreement > 0 {
+        parts.push(format!(
+            "{} excluded by agreement",
+            totals.excluded_by_agreement
+        ));
+    }
+    let unsearched = totals.secret_over_ceiling
+        + totals.beyond_file_cap
+        + not_text
+        + totals.excluded_by_agreement;
+    let mut out: Vec<String> = Vec::new();
+    if totals.secret_searched > 0 {
+        out.push(format!(
+            "{} of these files {} still searched for secrets.",
+            totals.secret_searched,
+            if totals.secret_searched == 1 {
+                "was"
+            } else {
+                "were"
+            }
+        ));
+    }
+    if unsearched > 0 {
+        out.push(format!(
+            "{unsearched} {} not searched for secrets: {}.",
+            files_noun(unsearched),
+            parts.join(", ")
+        ));
+    }
+    (!out.is_empty()).then(|| out.join(" "))
 }
 
 /// One sentence per repo that reached the file limit, naming the limit that was applied and the
-/// number of files not scanned.
+/// number of files not read for the inspection.
 fn file_limit_sentences(hits: &[FileCapHit]) -> Vec<String> {
     hits.iter()
         .map(|h| {
             let limit = group_digits(limit_of(h));
             format!(
                 "{} reached the {limit}-file limit, so the scan read the first {limit} files in \
-                 path order. {} {} not scanned.",
+                 path order. {} {} not read for the inspection.",
                 h.repo,
                 h.not_scanned,
                 files_noun(h.not_scanned),
@@ -336,7 +420,7 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             reason: if s.reason == SkipReason::BeyondFileCap {
                 beyond_limit_label(&input.file_cap_hits, &s.repo)
             } else {
-                s.reason.label().to_string()
+                s.reason.label()
             },
             size_bytes: s.bytes,
             size: s.bytes.map(format_size).unwrap_or_default(),

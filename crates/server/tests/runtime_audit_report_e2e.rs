@@ -110,6 +110,7 @@ fn declared_repo() -> tempfile::TempDir {
 async fn audit(dir: &tempfile::TempDir, feeds: &Feeds) -> RuntimeAudit {
     audit_runtimes(
         &[("acme/app".to_string(), dir.path().to_path_buf())],
+        &camerata_server::onboard::scope::ScanScope::none(),
         feeds,
         None,
         now(),

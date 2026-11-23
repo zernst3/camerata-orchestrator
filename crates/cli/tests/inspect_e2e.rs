@@ -104,7 +104,11 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
     let export_path = export_dir.path().join("inspect.zip");
     // Counted BEFORE the run: the scan's Rust build pass leaves `target/` and `Cargo.lock` in
     // the repo afterwards, which a later count would include.
-    let count = camerata_server::onboard::count::count_repo(repo_dir.path()).expect("count");
+    let count = camerata_server::onboard::count::count_repo(
+        repo_dir.path(),
+        &camerata_server::onboard::scope::RepoScope::none(),
+    )
+    .expect("count");
 
     let args = InspectArgs {
         repo: repo_dir.path().to_path_buf(),
@@ -133,6 +137,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false)
@@ -244,6 +249,7 @@ fn floor_only_args(repo: &Path, export: &Path) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 
@@ -413,6 +419,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false).await;

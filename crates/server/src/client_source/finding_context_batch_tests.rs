@@ -149,9 +149,13 @@ async fn one_request_mixes_repos_and_every_status_in_the_shared_vocabulary() {
     commit_numbered(&fx, "src/rows.txt");
     let other = fx.add_repo("acme/other");
     let other_head = crate::client_source::git::head_sha(&other).await.unwrap();
-    // A binary file and a file over the 400 KB cap, both committed.
+    // A binary file and a file over the read limit, both committed.
     std::fs::write(fx.checkout.join("bin.dat"), [0xFFu8, 0xFE, 0x00, 0x01]).unwrap();
-    write_file(&fx.checkout, "big.txt", &"x".repeat(400_001));
+    write_file(
+        &fx.checkout,
+        "big.txt",
+        &"x".repeat(crate::onboard::files::MAX_FILE_BYTES + 1),
+    );
     let head = commit_all(&fx.checkout, "binary and big");
     let absent = "0".repeat(40);
 

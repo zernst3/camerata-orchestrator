@@ -128,6 +128,7 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 

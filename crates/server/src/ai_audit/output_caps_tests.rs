@@ -286,6 +286,7 @@ async fn the_truncation_retry_raises_the_cap_and_is_never_the_same_request_twice
 
 fn capped_meter(cap: f64) -> UsageMeter {
     UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(cap),
         ..crate::cost_cap::RunControls::default()
     })
@@ -597,6 +598,7 @@ async fn the_re_ask_goes_through_the_spend_limit() {
     let llm = Scripted::new(vec![(cut, true)]);
     // A limit the first call has already reached.
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(0.005),
         ..crate::cost_cap::RunControls::default()
     });

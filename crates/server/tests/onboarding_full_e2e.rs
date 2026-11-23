@@ -173,7 +173,12 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", corpus.path());
 
     let sources = vec![(repo_spec.clone(), repo_dir.path().to_path_buf())];
-    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
+    let scan = camerata_server::onboard::scan_repos(
+        &sources,
+        Vec::new(),
+        &camerata_server::onboard::scope::ScanScope::none(),
+    )
+    .await;
     assert!(
         !scan.gated,
         "a local-dir scan is not gated on a GitHub token"
@@ -292,7 +297,11 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
 
     // ── The suppression REGISTRY reads the repo from disk and TAGS each record with its repo.
     //    The repo has a real hardcoded-secret floor finding, so the registry is non-empty.
-    let registry = camerata_server::onboard::suppression_registry(&sources).await;
+    let registry = camerata_server::onboard::suppression_registry(
+        &sources,
+        &camerata_server::onboard::scope::ScanScope::none(),
+    )
+    .await;
     // Every record is tagged with the repo it came from (the orchestration layer's job).
     for rec in &registry {
         assert_eq!(

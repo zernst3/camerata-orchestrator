@@ -117,6 +117,7 @@ fn models() -> ModelsRecord {
         group_review: String::new(),
         finder: String::new(),
         finder_model: String::new(),
+        scan_exclusions: Vec::new(),
     }
 }
 
@@ -569,6 +570,17 @@ fn a_resume_is_refused_in_plain_words_when_anything_it_depends_on_differs() {
         ok(&record, &key(), &other_models, trees(repo.path())),
         Err(RunStoreError::Refused(m)) if m.contains("different models")
     ));
+    // Round 1 item 10: the Excluded by agreement list is part of the run's identity. Pieces
+    // checkpointed under another list may hold findings in files that are now excluded (or miss
+    // ones that are no longer), so a resume with a different list is refused.
+    let mut other_list = models();
+    other_list.scan_exclusions = vec!["app/seeds/**".to_string()];
+    let refused = ok(&record, &key(), &other_list, trees(repo.path()));
+    assert!(
+        matches!(&refused, Err(RunStoreError::Refused(m))
+            if m.contains("Excluded by agreement") && m.contains("start a new run")),
+        "{refused:?}"
+    );
     let mut other_rules = key();
     other_rules.directives_fingerprint = "fp2".to_string();
     assert!(matches!(
@@ -1246,6 +1258,7 @@ fn the_models_record_stores_the_resolved_ids_not_the_raw_picks() {
 
     // Picks are kept; a blank pick is no pick; an explicit fix model wins.
     let controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         fix_model: Some("claude-opus-5".to_string()),
         ..crate::cost_cap::RunControls::default()
     };
@@ -2226,6 +2239,7 @@ async fn the_model_the_backend_reported_is_stored_beside_the_requested_one() {
 
 fn controls_with_group_review(model: &str) -> crate::cost_cap::RunControls {
     crate::cost_cap::RunControls {
+        scope: Default::default(),
         review: camerata_api_types::project::ReviewSettings {
             group_review_model: model.to_string(),
             ..camerata_api_types::project::ReviewSettings::default()
@@ -2424,6 +2438,7 @@ fn controls_with_finder(
     finder: crate::ai_audit::agent_finder::FinderChoice,
 ) -> crate::cost_cap::RunControls {
     crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder,
         ..crate::cost_cap::RunControls::default()
     }

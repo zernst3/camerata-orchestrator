@@ -190,6 +190,7 @@ async fn runtime_rows() -> Vec<Finding> {
     let dir = three_file_repo();
     audit_runtimes(
         &[("acme/app".to_string(), dir.path().to_path_buf())],
+        &camerata_server::onboard::scope::ScanScope::none(),
         &Feeds,
         None,
         Utc.with_ymd_and_hms(2026, 10, 28, 12, 0, 0).unwrap(),

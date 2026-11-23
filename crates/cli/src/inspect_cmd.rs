@@ -153,6 +153,31 @@ pub struct InspectArgs {
     /// the scan passes (`engine`); a run saved before the flags existed loads with the default.
     #[serde(default)]
     pub finder: finder::FinderArgs,
+    /// `--exclude PATTERN` (repeatable): files the client and the operator agreed are not part of
+    /// the inspection, the headless form of a project's exclusion list. A glob matched against
+    /// `<repo name>/<path within the repo>`, for example `acme-field-data/seeds/**`. An
+    /// excluded file is not read, counted or billed, and Coverage lists it as excluded by
+    /// agreement. An invalid pattern is refused by name before anything is read.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// The name a repo goes by: `--repo-name` (validated), else the folder's own name. The ONE rule
+/// `camerata inspect` and `camerata count` share, so an exclusion pattern means the same files in
+/// both.
+pub fn source_name(dir: &std::path::Path, repo_name: Option<&str>) -> Result<String, String> {
+    match repo_name {
+        Some(name) => {
+            camerata_api_types::uow::validate_repo_name(name)
+                .map_err(|e| format!("--repo-name: {e}"))?;
+            Ok(name.to_string())
+        }
+        None => Ok(dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo")
+            .to_string()),
+    }
 }
 
 impl InspectArgs {
@@ -196,19 +221,7 @@ impl InspectArgs {
         }
         let mut sources: Vec<(String, PathBuf)> = Vec::with_capacity(dirs.len());
         for (i, dir) in dirs.iter().enumerate() {
-            let name = match self.repo_names.get(i) {
-                Some(name) => {
-                    camerata_api_types::uow::validate_repo_name(name)
-                        .map_err(|e| format!("--repo-name: {e}"))?;
-                    name.clone()
-                }
-                // A single unnamed repo: the folder's own name, as before.
-                None => dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("repo")
-                    .to_string(),
-            };
+            let name = source_name(dir, self.repo_names.get(i).map(String::as_str))?;
             if let Some((_, other)) = sources.iter().find(|(n, _)| *n == name) {
                 return Err(format!(
                     "--repo-name {name} is used for both {} and {}; each repo needs its own name",
@@ -280,6 +293,8 @@ impl InspectArgs {
             }
         };
         Ok(camerata_server::cost_cap::RunControls {
+            scope: camerata_server::onboard::scope::ScanScope::from_patterns(&self.exclude)
+                .map_err(|e| format!("--exclude: {e}"))?,
             stored_spend_usd: 0.0,
             review: camerata_api_types::project::ReviewSettings {
                 escalation_rate_per_kloc,
@@ -303,6 +318,13 @@ impl InspectArgs {
             finder_force_pieces: self.finder.force_pieces,
             checkpoint: camerata_server::cost_checkpoint::CheckpointSettings::default(),
         })
+    }
+}
+
+/// Print each start warning as `warning: <text>`, the line the operator sees on stderr.
+pub fn write_start_warnings(out: &mut impl std::io::Write, warnings: &[String]) {
+    for w in warnings {
+        let _ = writeln!(out, "warning: {w}");
     }
 }
 
@@ -986,6 +1008,23 @@ pub async fn run_inspect_pipeline_with(
     // role `spec` plays in `resolve_local_sources`. Several repos are ONE project: one scan,
     // one report, one cache and one ledger.
     let sources = args.resolve_sources()?;
+    // A pattern that starts with a repo name two repos share is refused, naming both: it must
+    // never silently exclude in both.
+    let names: Vec<String> = sources.iter().map(|(n, _)| n.clone()).collect();
+    controls.scope = controls
+        .scope
+        .clone()
+        .check_names(&names)
+        .map_err(|why| InspectError::Failed(format!("--exclude: {why}")))?;
+    // A file over the read limit that is not excluded by agreement, and a pattern that matches
+    // only files never read anyway, are warnings printed below, never refusals. A pattern that
+    // matches nothing still refuses the run.
+    let (refusal, warnings) =
+        camerata_server::onboard::scope::start_checks(&sources, &controls.scope).await;
+    if let Some(why) = refusal {
+        return Err(InspectError::Failed(why));
+    }
+    write_start_warnings(&mut std::io::stderr(), &warnings);
     let (manifest_path, ledger_file) = args.state_paths();
     // A multi-repo run's one cache and one ledger cover several folders; record which, so that
     // deleting any one of them can find and remove the files (see `project_files_covering`).
@@ -1002,7 +1041,7 @@ pub async fn run_inspect_pipeline_with(
     }
 
     // ── Phase 1: stack detection + rule proposal ────────────────────────────────────────
-    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
+    let scan = camerata_server::onboard::scan_repos(&sources, Vec::new(), &controls.scope).await;
     let selected = curated_rule_selection(&scan.proposed_rules);
 
     // ── Phase 2: load the corpus ONCE + derive the preview list ─────────────────────────
@@ -1200,9 +1239,13 @@ pub async fn run_inspect_pipeline_with(
         (seams.preflight_sink)(&text);
         preflight_text = Some(text);
     } else if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
-        let facts =
-            camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
-                .await;
+        let facts = camerata_server::preflight::gather_scan_facts(
+            &sources,
+            &selected,
+            corpus.as_ref(),
+            &controls.scope,
+        )
+        .await;
         // A repo that cannot be read is a repo the inspection would silently leave out. Refuse
         // before any model call, naming it, rather than price (and later run) a smaller job.
         if let Some(bad) = facts.iter().find(|f| f.read_error.is_some()) {
@@ -1462,6 +1505,7 @@ pub async fn run_inspect_pipeline_with(
         corpus.as_ref(),
         None,
         args.client_tooling(),
+        &controls.scope,
     )
     .await;
     // Pass-1 W1 seal fix: one ledger stage entry for this loop's net additions — mirrors
@@ -1470,11 +1514,13 @@ pub async fn run_inspect_pipeline_with(
     // Runtime and framework end of life and known runtime vulnerabilities, before the dependency
     // pass so that the KEV / EPSS enrichment below covers these rows too.
     let runtime_rows_in = report.findings.len();
-    camerata_server::runtime_audit::run_runtime_audit(&mut report, &sources).await;
+    camerata_server::runtime_audit::run_runtime_audit(&mut report, &sources, &controls.scope).await;
     let dep_audit_rows_in = report.findings.len();
     let mut osv_runs: Vec<camerata_server::vuln_intel::OsvRun> = Vec::new();
     for (spec, dir) in &sources {
-        let (dep_findings, dep_note) = camerata_server::dep_audit::run_dep_audit(spec, dir).await;
+        let (dep_findings, dep_note) =
+            camerata_server::dep_audit::run_dep_audit(spec, dir, &controls.scope.for_repo(spec))
+                .await;
         osv_runs.push(camerata_server::vuln_intel::OsvRun::from_note(
             spec,
             dep_note.as_ref(),
@@ -2418,6 +2464,7 @@ mod tests {
             run_client_tooling: false,
             consensus: false,
             finder: Default::default(),
+            exclude: Vec::new(),
         }
     }
 

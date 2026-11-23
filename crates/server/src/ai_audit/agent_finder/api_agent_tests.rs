@@ -202,6 +202,7 @@ fn metered(wire: &Arc<ScriptedWire>, meter: &Arc<UsageMeter>) -> (ApiPieceAgent,
 
 fn capped_meter(cap: f64) -> Arc<UsageMeter> {
     Arc::new(UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(cap),
         ..RunControls::default()
     }))

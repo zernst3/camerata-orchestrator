@@ -240,7 +240,11 @@ async fn finding_context_git_read_rejects_dotdot_and_absolute_paths() {
 async fn finding_context_git_read_applies_too_large_cap_and_redaction() {
     let fx = fixture();
     // A blob over the cap, and one that carries a secret-shaped value.
-    write_file(&fx.checkout, "src/huge.rs", &"x".repeat(400_001));
+    write_file(
+        &fx.checkout,
+        "src/huge.rs",
+        &"x".repeat(crate::onboard::files::MAX_FILE_BYTES + 1),
+    );
     let token = format!("ghp_{}", "Zq9Xk3Pm7Rt2Vw5Yb8Nc4Jd6Hf1Ga0Lo3Ue9");
     write_file(
         &fx.checkout,

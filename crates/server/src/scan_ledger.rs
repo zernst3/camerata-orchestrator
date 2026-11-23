@@ -1095,6 +1095,32 @@ pub struct SkippedTotals {
     pub beyond_file_cap: usize,
     #[serde(default)]
     pub not_text: usize,
+    /// Files the project's exclusion list names: not read, by agreement.
+    #[serde(default)]
+    pub excluded_by_agreement: usize,
+    /// Files with a line longer than the room's read page: not read.
+    #[serde(default)]
+    pub long_line: usize,
+    /// Patterns in Excluded by agreement that match only files never read anyway. Patterns, not
+    /// files: each is counted once per run, however many repos it was recorded for.
+    #[serde(default)]
+    pub excluded_never_read: usize,
+    /// True when the deterministic floor ran its secret checks over the contents of files that
+    /// were not read for the inspection (over the file size limit, or with a long line). The
+    /// three counts below mean nothing when this is false. Not part of [`Self::total`].
+    #[serde(default)]
+    pub secret_search_ran: bool,
+    /// Files not read for the inspection whose contents were still searched for secrets.
+    #[serde(default)]
+    pub secret_searched: usize,
+    /// Files over the secret search ceiling (`onboard::files::MAX_SECRET_SCAN_BYTES`): file-name
+    /// checks only. These are also counted in `oversize`.
+    #[serde(default)]
+    pub secret_over_ceiling: usize,
+    /// Files over the file size limit and under the ceiling that are not text this scan can
+    /// decode: file-name checks only. These are also counted in `oversize`.
+    #[serde(default)]
+    pub secret_oversize_not_text: usize,
 }
 
 impl SkippedTotals {
@@ -1104,12 +1130,20 @@ impl SkippedTotals {
             SkipReason::Oversize => self.oversize,
             SkipReason::BeyondFileCap => self.beyond_file_cap,
             SkipReason::NotText => self.not_text,
+            SkipReason::ExcludedByAgreement => self.excluded_by_agreement,
+            SkipReason::LongLine => self.long_line,
+            SkipReason::ExcludedNeverRead => self.excluded_never_read,
         }
     }
 
-    /// Files skipped for any reason.
+    /// Files skipped for any reason. Patterns that removed nothing (`excluded_never_read`) are
+    /// not files and are not in it.
     pub fn total(&self) -> usize {
-        self.oversize + self.beyond_file_cap + self.not_text
+        self.oversize
+            + self.beyond_file_cap
+            + self.not_text
+            + self.excluded_by_agreement
+            + self.long_line
     }
 
     fn add(&mut self, reason: SkipReason) {
@@ -1117,6 +1151,9 @@ impl SkippedTotals {
             SkipReason::Oversize => self.oversize += 1,
             SkipReason::BeyondFileCap => self.beyond_file_cap += 1,
             SkipReason::NotText => self.not_text += 1,
+            SkipReason::ExcludedByAgreement => self.excluded_by_agreement += 1,
+            SkipReason::LongLine => self.long_line += 1,
+            SkipReason::ExcludedNeverRead => self.excluded_never_read += 1,
         }
     }
 }
@@ -1257,6 +1294,8 @@ pub struct SkippedFileList {
     beyond_cap_total: usize,
     totals: SkippedTotals,
     file_cap_hits: Vec<FileCapHit>,
+    /// Never-read patterns already recorded, so a project-wide wildcard pattern is one row.
+    never_read_seen: std::collections::HashSet<String>,
 }
 
 /// What one repo's walk skipped, as the walk reports it (`onboard::files::ExtractedRepo`).
@@ -1267,6 +1306,13 @@ pub struct RepoSkips<'a> {
     pub beyond_cap: Vec<String>,
     /// Files that are not text this scan can decode.
     pub not_text: Vec<String>,
+    /// Files the project's exclusion list names (`onboard::scope`): not read, by agreement.
+    pub excluded_by_agreement: Vec<String>,
+    /// Files with a line longer than the room's read page.
+    pub long_line: Vec<String>,
+    /// Excluded by agreement patterns that match only files never read anyway: listed by the
+    /// pattern, so the client sees the exclusion removed nothing that would have been read.
+    pub excluded_never_read: Vec<String>,
     /// The size in bytes of each skipped file the walk could measure, by path.
     pub sizes: &'a std::collections::HashMap<String, u64>,
     /// The file limit the walk applied.
@@ -1306,8 +1352,16 @@ impl SkippedFileList {
             (skips.oversize, SkipReason::Oversize),
             (skips.beyond_cap, SkipReason::BeyondFileCap),
             (skips.not_text, SkipReason::NotText),
+            (skips.excluded_by_agreement, SkipReason::ExcludedByAgreement),
+            (skips.long_line, SkipReason::LongLine),
+            (skips.excluded_never_read, SkipReason::ExcludedNeverRead),
         ] {
             for path in paths {
+                if reason == SkipReason::ExcludedNeverRead
+                    && !self.never_read_seen.insert(path.clone())
+                {
+                    continue;
+                }
                 let bytes = skips.sizes.get(&path).copied();
                 self.push_sized(repo, path, reason, bytes);
             }
@@ -1324,6 +1378,16 @@ impl SkippedFileList {
     /// The count of every skipped file per reason. Read before [`Self::finish`].
     pub fn totals(&self) -> SkippedTotals {
         self.totals
+    }
+
+    /// Record what the secret checks did over the files not read for the inspection: `searched`
+    /// had their contents searched, `over_ceiling` and `not_text` (over-limit files) got file-name
+    /// checks only. Called once per repo when the deterministic floor ran.
+    pub fn record_secret_search(&mut self, searched: usize, over_ceiling: usize, not_text: usize) {
+        self.totals.secret_search_ran = true;
+        self.totals.secret_searched += searched;
+        self.totals.secret_over_ceiling += over_ceiling;
+        self.totals.secret_oversize_not_text += not_text;
     }
 
     /// The repos that reached the file limit. Read before [`Self::finish`].
@@ -1355,22 +1419,38 @@ pub struct SkippedFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
-    /// Larger than `onboard::files::MAX_FILE_BYTES` (400 KB).
+    /// Larger than `onboard::files::MAX_FILE_BYTES` (1 MB).
     Oversize,
     /// Past `onboard::files::HARD_CAP_FILES` (20,000 files) in its repo.
     BeyondFileCap,
     /// Not text this scan can decode: a binary key store, or a file in a legacy code page (H9).
     /// UTF-16 with a byte order mark is decoded and read, so it is not in this class.
     NotText,
+    /// Named by the project's exclusion list (`onboard::scope`): the client and the operator
+    /// agreed it is not part of the inspection, so it is not read, counted or billed.
+    ExcludedByAgreement,
+    /// A line longer than the room's read page: the file cannot be read in full.
+    LongLine,
+    /// An Excluded by agreement pattern that matches only files Camerata never reads anyway: the
+    /// exclusion removed nothing that would have been read or billed.
+    ExcludedNeverRead,
 }
 
 impl SkipReason {
     /// The client-facing reason, as the Coverage section states it.
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            SkipReason::Oversize => "over the 400 KB file size limit",
-            SkipReason::BeyondFileCap => "beyond the 20,000-file limit",
-            SkipReason::NotText => "not UTF-8 text",
+            SkipReason::Oversize => format!(
+                "over the {} file size limit",
+                crate::onboard::files::max_file_label()
+            ),
+            SkipReason::BeyondFileCap => "beyond the 20,000-file limit".to_string(),
+            SkipReason::NotText => "not UTF-8 text".to_string(),
+            SkipReason::ExcludedByAgreement => "excluded by agreement".to_string(),
+            SkipReason::LongLine => crate::onboard::files::long_line_label(),
+            SkipReason::ExcludedNeverRead => {
+                "excluded by agreement; nothing here is read by default".to_string()
+            }
         }
     }
 }
@@ -4415,5 +4495,69 @@ mod tests {
         let back: ScanLedger =
             serde_json::from_str(&serde_json::to_string(&ledger).unwrap()).unwrap();
         assert_eq!(back.group_review_counts(), ledger.group_review_counts());
+    }
+
+    // ── Item 31: "excluded by agreement" is a skip reason like the others ───────────────────
+
+    #[test]
+    fn a_file_excluded_by_agreement_is_recorded_named_counted_and_worded() {
+        let mut list = SkippedFileList::default();
+        let sizes: std::collections::HashMap<String, u64> =
+            [("seeds/data.js".to_string(), 6_100_000u64)].into();
+        list.record_repo(
+            "acme/app",
+            RepoSkips {
+                oversize: Vec::new(),
+                beyond_cap: Vec::new(),
+                not_text: Vec::new(),
+                excluded_by_agreement: vec!["seeds/data.js".to_string()],
+                long_line: Vec::new(),
+                excluded_never_read: Vec::new(),
+                sizes: &sizes,
+                file_cap: 20_000,
+            },
+        );
+        let totals = list.totals();
+        assert_eq!(totals.excluded_by_agreement, 1);
+        assert_eq!(totals.total(), 1);
+        assert_eq!(totals.of(SkipReason::ExcludedByAgreement), 1);
+        let (listed, more) = list.finish();
+        assert_eq!(more, 0);
+        assert_eq!(
+            listed,
+            [SkippedFile {
+                repo: "acme/app".to_string(),
+                path: "seeds/data.js".to_string(),
+                reason: SkipReason::ExcludedByAgreement,
+                bytes: Some(6_100_000),
+            }]
+        );
+        assert_eq!(
+            SkipReason::ExcludedByAgreement.label(),
+            "excluded by agreement"
+        );
+        assert_eq!(
+            serde_json::to_value(SkipReason::ExcludedByAgreement).unwrap(),
+            "excluded_by_agreement"
+        );
+    }
+
+    #[test]
+    fn an_older_ledger_without_the_new_total_still_loads() {
+        let old: SkippedTotals =
+            serde_json::from_str(r#"{"oversize":2,"beyond_file_cap":1,"not_text":0}"#).unwrap();
+        assert_eq!(old.excluded_by_agreement, 0);
+        assert_eq!(old.total(), 3);
+    }
+
+    #[test]
+    fn the_oversize_label_takes_its_number_from_the_read_limit() {
+        assert_eq!(
+            SkipReason::Oversize.label(),
+            format!(
+                "over the {} file size limit",
+                crate::onboard::files::max_file_label()
+            )
+        );
     }
 }

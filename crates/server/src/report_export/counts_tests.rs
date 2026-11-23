@@ -316,7 +316,7 @@ fn row(i: usize, bucket: &'static str, severity: &str, kind: CountKind) -> Count
     }
 }
 
-/// A view at the size of the Greenstand run: 5,264 places over 5,591 problem rows, where the
+/// A view at the size of a large real run: 5,264 places over 5,591 problem rows, where the
 /// number of DEFECT ROWS equals the number of PLACES by coincidence of the old counting (5,264
 /// rows of one kind), so a unit mix cannot hide.
 fn scale_view() -> CountingView {

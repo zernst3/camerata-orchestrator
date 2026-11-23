@@ -90,6 +90,21 @@ pub async fn finding_context(state: &AppState, params: FindingContextParams) -> 
         Ok(read) => read,
         Err(refusal) => return no_store(refusal.into_response()),
     };
+    // A file the project's exclusion list names is not shown: the inspection did not read it.
+    if matches!(
+        read,
+        SourceRead::Git { .. } | SourceRead::WorkingTree { .. }
+    ) && crate::onboard::scope::scope_for_read(state, params.project.as_deref())
+        .excludes(&params.repo, &params.path)
+    {
+        return no_store(
+            (
+                StatusCode::OK,
+                Json(FindingContextOutcome::ExcludedByAgreement.to_json()),
+            )
+                .into_response(),
+        );
+    }
     let expect = params.expect.as_deref();
     let (status, body) = match read {
         SourceRead::Deleted {

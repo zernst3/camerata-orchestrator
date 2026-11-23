@@ -144,6 +144,17 @@ pub(super) fn lines_of(files: &[(String, String)], paths: &[String]) -> usize {
         .sum()
 }
 
+/// The Read calls needed to read every file of `paths` whole, in the room's pages
+/// ([`super::room::read_pages`]).
+pub(super) fn read_pages_of(files: &[(String, String)], paths: &[String]) -> usize {
+    let wanted: HashSet<&str> = paths.iter().map(String::as_str).collect();
+    files
+        .iter()
+        .filter(|(p, _)| wanted.contains(p.as_str()))
+        .map(|(_, t)| super::super::room::read_pages(t))
+        .sum()
+}
+
 /// The estimate a piece's spend ceiling is four times (design section 7): about $1.00 for each
 /// 1,000 lines plus $0.80 for the piece.
 pub(super) fn estimate_usd(lines: usize) -> f64 {

@@ -816,6 +816,7 @@ fn bug_ai3_calibration_defaults_to_the_stage1_model_when_nothing_is_pinned() {
 #[tokio::test]
 async fn an_uncosted_call_under_a_limit_stops_admission_and_is_disclosed_as_unenforceable() {
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(10.0),
         ..crate::cost_cap::RunControls::default()
     });

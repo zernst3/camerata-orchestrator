@@ -248,6 +248,13 @@ pub async fn rescan_changes(
     let mut requested: Option<(String, String, Option<u64>)> = None;
     let mut repo_names = Vec::new();
 
+    // An unusable list refuses the delta with its reason: it must never run on zero files.
+    let scan_scope = crate::onboard::scope::ScanScope::of_project(Some(&project)).map_err(|why| {
+        Refusal::conflict(
+            "excluded_by_agreement_unusable",
+            format!("Cannot start: Excluded by agreement in the inspection settings cannot be used: {why}."),
+        )
+    })?;
     for covered in &entry.repos {
         let Some(inspected) = covered.sha.as_deref() else {
             continue;
@@ -283,15 +290,25 @@ pub async fn rescan_changes(
                 format!("Could not compare {name} with the inspected commit {inspected}."),
             ));
         };
+        // A file over the read limit is a warning in the notes, as on a first inspection.
+        notes.extend(
+            crate::onboard::scope::over_limit_warnings(
+                &[(name.clone(), dir.clone())],
+                &scan_scope,
+                true,
+            )
+            .await,
+        );
         let current = {
             let dir = dir.clone();
-            tokio::task::spawn_blocking(move || crate::onboard::read_local_repo_files(&dir))
-                .await
-                .map_err(|e| {
-                    Refusal::conflict("scan_in_progress", format!("read task failed: {e}"))
-                })?
-                .map_err(|e| not_present_because(&name, &e.to_string()))?
-                .files
+            let repo_scope = scan_scope.for_repo(&name);
+            tokio::task::spawn_blocking(move || {
+                crate::onboard::read_local_repo_files(&dir, &repo_scope)
+            })
+            .await
+            .map_err(|e| Refusal::conflict("scan_in_progress", format!("read task failed: {e}")))?
+            .map_err(|e| not_present_because(&name, &e.to_string()))?
+            .files
         };
         let delta = repo_delta(&name, &current, &changed, &entry);
         if !changed.is_empty() || head != inspected {

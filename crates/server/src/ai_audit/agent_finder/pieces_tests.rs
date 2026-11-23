@@ -281,3 +281,27 @@ fn forced_mode_gives_k_pieces_when_the_folder_cut_would_give_more() {
         }
     }
 }
+
+/// Item 31, step 4: a file at the read limit (1 MiB) is far over the piece target, and it is a
+/// piece of its own, with the small files around it in other pieces, never split or dropped.
+#[test]
+fn a_file_at_the_read_limit_is_a_piece_of_its_own() {
+    let mut files = vec![file("src/big.rs", crate::onboard::files::MAX_FILE_BYTES)];
+    files.extend((0..4).map(|i| file(&format!("src/small{i}.rs"), 2_000)));
+    let pieces = plan_pieces(&one_unit(&files), &files, super::pieces::TARGET_BYTES, None);
+    let big: Vec<_> = pieces
+        .iter()
+        .filter(|p| p.files.iter().any(|f| f == "src/big.rs"))
+        .collect();
+    assert_eq!(big.len(), 1, "the file is in exactly one piece");
+    assert_eq!(
+        big[0].files,
+        ["src/big.rs"],
+        "and that piece holds nothing else"
+    );
+    assert_eq!(
+        pieces.iter().map(|p| p.files.len()).sum::<usize>(),
+        files.len(),
+        "every file is planned"
+    );
+}

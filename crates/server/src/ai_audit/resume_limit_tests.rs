@@ -121,6 +121,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
             group_review: String::new(),
             finder: String::new(),
             finder_model: String::new(),
+            scan_exclusions: Vec::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: "claude-a".to_string(),
@@ -146,6 +147,7 @@ async fn seeded<F: std::future::Future>(fut: F) -> F::Output {
 
 fn capped(cap: Option<f64>, stored: f64) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         max_cost_usd: cap,
         stored_spend_usd: stored,
         ..RunControls::default()
@@ -458,6 +460,7 @@ fn a_replayed_reply_does_not_reset_the_outage_streak() {
 #[test]
 fn the_stage_that_continues_a_run_carries_the_replayed_share() {
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(25.0),
         stored_spend_usd: 20.0,
         ..RunControls::default()
