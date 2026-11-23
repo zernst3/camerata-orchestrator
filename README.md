@@ -118,6 +118,8 @@ A sample report costs nothing: `cargo test -p camerata-server --test generate_sa
 
 The Codebase Inspection and brownfield onboarding are built and run end to end on fixture repositories, and the gate is proven standalone against a real agent. **V1 accuracy testing has started, on fixture repositories with planted defects and decoys, graded blind against answer keys the engine never sees.** How precise and complete the AI pass is on large real-world codebases, and what each token-saving measure does to cost and to the problems found, have not been measured yet. The governed development console is wired end to end and unit-tested, but a live model doing multi-step work through the gate has not been run yet. The consumer app-builder, the architect surface for Jira, Azure DevOps and GitHub boards and the standing maintenance agent are earlier still. [`PLATFORM.md`](PLATFORM.md#status) separates what is proven from what is staged.
 
+Roadmap: [Camerata roadmap](https://github.com/users/zernst3/projects/1) shows what is in progress, in review and next.
+
 ## Where to read next
 
 | Read | For |
