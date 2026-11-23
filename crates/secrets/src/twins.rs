@@ -591,29 +591,48 @@ fn identifier_words(text: &str) -> Vec<String> {
     words
 }
 
-/// Whether `after_name` (the text after an identifier) assigns it: closing quotes or a bracket
-/// and spaces, then `:`, `=` or `=>`.
+/// Whether `after_name` (the text after an identifier) assigns it: closing quotes (escaped ones
+/// too), a bracket and spaces, then `:`, `=` or `=>`.
 fn is_assigned(after_name: &str) -> bool {
     after_name
-        .trim_start_matches(['"', '\'', ']', ' ', '\t'])
+        .trim_start_matches(['"', '\'', '\\', ']', ' ', '\t'])
         .starts_with([':', '='])
+}
+
+/// `before_value` without what the unquoted pattern puts in front of the name: indentation,
+/// `export ` and a list dash (`  - export API_KEY=` is `API_KEY=`).
+fn strip_line_prefix(before_value: &str) -> &str {
+    let mut rest = before_value.trim_start();
+    loop {
+        let next = rest
+            .strip_prefix("export ")
+            .or_else(|| rest.strip_prefix("- "))
+            .map(str::trim_start);
+        match next {
+            Some(next) => rest = next,
+            None => return rest,
+        }
+    }
+}
+
+/// The length of the identifier `text` opens with: letters, digits, `_`, `-` and `.`.
+fn identifier_len(text: &str) -> usize {
+    text.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .unwrap_or(text.len())
 }
 
 /// `before_value` with the identifier it starts in widened to the left: the quoted pattern's
 /// identifier class stops at `-` and `.`, so `"x-api-key": "..."` matches from `key`. The
-/// widening reads the line in front of the match over `[A-Za-z0-9_.-]`.
+/// widening reads the line in front of the match over `[A-Za-z0-9_.-]`, and only when the name is
+/// being assigned (`"x-api-key": "..."`, `headers["X-Api-Key"] =`, `'api-key' => '...'`).
 fn identifier_head(before_value: &str, context: &TwinContext<'_>) -> String {
     let head = context.line_prefix.strip_suffix(before_value).unwrap_or("");
     let kept = head
         .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
         .len();
     let lead = &head[kept..];
-    // Widen only when the name is being assigned (`"x-api-key": "..."`, `headers["X-Api-Key"] =`,
-    // `'api-key' => '...'`): a quoted string in a list (`["SEC-NO-TOKEN-1", "..."]`) is a value.
-    let end = before_value
-        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
-        .unwrap_or(before_value.len());
-    if is_assigned(&before_value[end..]) {
+    let stripped = strip_line_prefix(before_value);
+    if is_assigned(&stripped[identifier_len(stripped)..]) {
         format!("{lead}{before_value}")
     } else {
         before_value.to_string()
@@ -630,20 +649,33 @@ fn names_a_passphrase_holder(before_value: &str) -> bool {
     if names_a_secret(before_value) {
         return true;
     }
-    // The identifier is the name the text opens with, up to the first quote, space or operator.
-    let end = before_value
-        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
-        .unwrap_or(before_value.len());
-    let identifier = &before_value[..end];
-    // Only a name that is being assigned: `TOKEN-1` in a list of strings is a value.
-    if !is_assigned(&before_value[end..]) {
-        return false;
-    }
-    let mut words = identifier_words(identifier);
-    while words.len() > 1 && words.last().is_some_and(|w| is_suffix_word(w)) {
-        words.pop();
-    }
-    let Some((last, before)) = words.split_last() else {
+    let stripped = strip_line_prefix(before_value);
+    let end = identifier_len(stripped);
+    let assigned = is_assigned(&stripped[end..]);
+    let mut words = if assigned {
+        // A name being assigned: the whole identifier (kebab and dotted included), read without
+        // its environment or version suffix (`API_KEY_PROD`, `apiKeyV2`).
+        let mut words = identifier_words(&stripped[..end]);
+        while words.len() > 1 && words.last().is_some_and(|w| is_suffix_word(w)) {
+            words.pop();
+        }
+        words
+    } else {
+        // Not assigned (a fallback `|| "..."`, a call argument, an accessor): the words in front
+        // of the first `:` or `=`, as the last word. A string in a list (`"SEC-NO-TOKEN-1"`)
+        // ends in `1`, so it stays a value.
+        let head = stripped.split([':', '=', '{']).next().unwrap_or(stripped);
+        let mut words = identifier_words(head);
+        while words.len() > 1
+            && words
+                .last()
+                .is_some_and(|w| matches!(w.as_str(), "or" | "and"))
+        {
+            words.pop();
+        }
+        words
+    };
+    let Some(last) = words.pop() else {
         return false;
     };
     matches!(
@@ -651,7 +683,7 @@ fn names_a_passphrase_holder(before_value: &str) -> bool {
         "token" | "tokens" | "pass" | "auth" | "bearer"
     ) || KEY_COMPOUNDS.contains(&last.as_str())
         || (matches!(last.as_str(), "key" | "keys")
-            && before
+            && words
                 .last()
                 .is_some_and(|word| KEY_QUALIFIERS.contains(&word.as_str())))
 }
