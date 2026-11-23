@@ -23,7 +23,7 @@ fn blocked(package: ProductPackage) -> GateFailure {
 }
 
 /// A package built through the normal export path around a report with `findings`.
-fn exported(findings: Vec<Finding>) -> ProductPackage {
+pub(super) fn exported(findings: Vec<Finding>) -> ProductPackage {
     let mut report = scan_report();
     report.findings = findings;
     let sealed = report.seal();

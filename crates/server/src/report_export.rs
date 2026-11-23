@@ -227,7 +227,8 @@ pub fn triage_log_env_on(value: Option<&str>) -> bool {
 /// odd source encoding); this list is also what the PDF template's own `breakable()` helper
 /// must never introduce as a side effect of wrapping a long path (see that function's doc
 /// comment in `templates/audit_report.typ`).
-const ZERO_WIDTH_CODEPOINTS: [char; 5] = [
+const ZERO_WIDTH_CODEPOINTS: [char; 6] = [
+    '\u{00AD}', // soft hyphen: invisible unless a line breaks at it
     '\u{200B}', // zero width space
     '\u{200C}', // zero width non-joiner
     '\u{200D}', // zero width joiner

@@ -145,6 +145,28 @@ fn a_redacted_snippet_is_checked_against_the_redacted_file() {
 }
 
 #[test]
+fn a_snippet_mixing_a_redacted_real_secret_and_a_readable_docs_key_is_verified() {
+    // An older stored row: the model-side redaction masked the real key and left the vendor's
+    // documentation key readable, so the snippet matches the model-redacted window only.
+    let real = format!("sk_live_{}", "a1B2c3D4e5F6g7H8i9J0k1L2");
+    let docs = camerata_secrets::fixtures::stripe_docs_test_key();
+    let source = format!("const a = 1;\nconst keys = ['{real}', '{docs}'];\nconst b = 2;\n");
+    let files = vec![("src/pay.ts".to_string(), source)];
+    let snippet =
+        crate::onboard::redact::redact_visible(&format!("const keys = ['{real}', '{docs}'];"))
+            .into_owned();
+    assert!(
+        !snippet.contains(&real) && snippet.contains(&docs),
+        "{snippet}"
+    );
+    let mut f = row(2, &snippet);
+    f.path = "src/pay.ts".to_string();
+    let mut rows = vec![f];
+    verify_evidence(&mut rows, &files, None);
+    assert!(!marked(&rows[0]), "{:?}", rows[0].captures);
+}
+
+#[test]
 fn every_exempt_kind_is_left_alone_and_none_is_counted_as_checked() {
     let mut no_snippet = row(6, "");
     no_snippet.rule_id = "COVERAGE-1".to_string();

@@ -49,6 +49,17 @@ impl SecretMatch {
             Some(Twin::PlaceholderWord(_)) => {
                 !crate::twins::placeholder_holds_for_client(self.shape, &text[self.value.clone()])
             }
+            // A quoted env-variable-shaped value on a password-like name, or one with a run of
+            // digits, is a password that happens to be shouted: the floor lists it as a row, so
+            // the client package masks it.
+            // A placeholder word that holds (`CHANGE_ME_TO_A_REAL_KEY_1234`) keeps it readable.
+            Some(Twin::EnvNameLiteral) => {
+                self.counts_as_finding_in(text)
+                    && !crate::twins::has_placeholder_that_holds(
+                        self.shape,
+                        &text[self.value.clone()],
+                    )
+            }
             Some(twin) if twin.ships_unmasked() => false,
             Some(_) => crate::published::is_documentation_key(&crate::twins::sha256_hex(
                 &text[self.value.clone()],
@@ -107,11 +118,16 @@ fn push(
     // The text of the match before the value: for a context shape it holds the identifier.
     let before_value = &text[span.start..value.start];
     let context = twin_context(text, value.start);
+    // A token with a subject is a user's session, never a public key: only a subject-less JWT
+    // may be cleared by its role.
+    let public_role = jwt_role
+        .as_deref()
+        .filter(|_| !jwt_has_subject(&text[value.clone()]));
     let mut twin = classify(
         shape,
         &text[value.clone()],
         before_value,
-        jwt_role.as_deref(),
+        public_role,
         &context,
     );
     // The sealed-secret check reads the whole document, which the bounded context cannot hold.
@@ -177,6 +193,17 @@ fn jwt_role(token: &str) -> Option<String> {
     let bytes = decode_segment(payload)?;
     let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     claims.get("role")?.as_str().map(str::to_string)
+}
+
+/// Whether a JWT's payload has a `sub` claim (a user session token has one; a Supabase anon key
+/// never does).
+fn jwt_has_subject(token: &str) -> bool {
+    let Some(payload) = token.split('.').nth(1) else {
+        return false;
+    };
+    decode_segment(payload)
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|claims| claims.get("sub").is_some())
 }
 
 /// `sk-` keys. An `sk-ant-` run also matches the OpenAI pattern, but it is an Anthropic key
@@ -520,7 +547,12 @@ fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape], path:
 /// itself a GitHub token, or a quoted literal that is a Stripe key, is reported once, as the
 /// specific shape). Sorted by `(value.start, longest first, shape order)`; a candidate that starts
 /// before the previous kept candidate's end is dropped.
-fn resolve(mut candidates: Vec<SecretMatch>) -> Vec<SecretMatch> {
+///
+/// One exception: a longer match that may reach a client readable (a placeholder-word literal, a
+/// readable name) never hides a DIFFERENT, shorter match inside it that a client may not see (a
+/// published documentation key, a real key). The longer match is dropped and the inner one kept,
+/// so the inner value is still found and masked.
+pub(crate) fn resolve(mut candidates: Vec<SecretMatch>, text: &str) -> Vec<SecretMatch> {
     candidates.sort_by(|a, b| {
         a.value
             .start
@@ -529,11 +561,29 @@ fn resolve(mut candidates: Vec<SecretMatch>) -> Vec<SecretMatch> {
             .then(a.shape.rank().cmp(&b.shape.rank()))
     });
     let mut kept: Vec<SecretMatch> = Vec::with_capacity(candidates.len());
+    // The end of an outer match dropped in favour of an inner one: a later twin inside it is
+    // still covered by the outer's drop.
+    let mut dropped_outer_end = 0;
     for candidate in candidates {
-        let overlaps = kept
-            .last()
-            .is_some_and(|previous| candidate.value.start < previous.value.end);
-        if !overlaps {
+        let Some(previous) = kept.last() else {
+            kept.push(candidate);
+            continue;
+        };
+        if candidate.value.start >= previous.value.end {
+            if candidate.value.start < dropped_outer_end
+                && !candidate.is_client_visible_secret(text)
+            {
+                continue;
+            }
+            kept.push(candidate);
+            continue;
+        }
+        if candidate.value != previous.value
+            && !previous.is_client_visible_secret(text)
+            && candidate.is_client_visible_secret(text)
+        {
+            dropped_outer_end = dropped_outer_end.max(previous.value.end);
+            kept.pop();
             kept.push(candidate);
         }
     }
@@ -574,7 +624,7 @@ pub fn detect_shapes(text: &str, shapes: &[SecretShape]) -> Vec<SecretMatch> {
 fn detect_shapes_in(text: &str, shapes: &[SecretShape], path: Option<&str>) -> Vec<SecretMatch> {
     let mut candidates = Vec::new();
     collect(&mut candidates, text, shapes, path);
-    resolve(candidates)
+    resolve(candidates, text)
 }
 
 /// The matches a corpus rule governs: `detect_shapes` over `shapes_for_rule`, plus the

@@ -251,6 +251,9 @@ pub fn rules_needing_option_chosen<'a>(
 
 /// Quote a CSV field if it contains a comma, quote, or newline (RFC 4180).
 pub fn csv_field(s: &str) -> String {
+    // A cell a spreadsheet would run as a formula gets the leading apostrophe first.
+    let s = crate::csv_cell::neutralize(s);
+    let s = s.as_ref();
     if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
@@ -591,6 +594,15 @@ mod tests {
     // ── csv_field (RFC 4180 quoting) ──────────────────────────────────────────
     // Moved from scan.rs: csv_field is shared between rules_csv (moved) and findings_csv
     // (staying in scan.rs), so it lives here and is re-exported back to scan.rs.
+
+    #[test]
+    fn csv_field_neutralizes_a_cell_a_spreadsheet_would_run_as_a_formula() {
+        // The cockpit's camerata-findings.csv and proposed-rules CSV carry client snippets.
+        assert_eq!(csv_field("=cmd|' /C calc'!A0"), "'=cmd|' /C calc'!A0");
+        assert_eq!(csv_field("- run: npm ci"), "'- run: npm ci");
+        assert_eq!(csv_field("@SUM(1,2)"), "\"'@SUM(1,2)\"");
+        assert_eq!(csv_field("-5"), "-5");
+    }
 
     #[test]
     fn csv_field_passthrough_when_no_special_chars() {

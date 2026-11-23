@@ -224,12 +224,42 @@ pub fn compare_csv_to_json(dataset: &str, csv_bytes: &[u8], json_bytes: &[u8]) -
     }
     for (i, (record, row)) in records.iter().zip(&rows).enumerate() {
         for (c, header) in headers.iter().enumerate() {
-            if record.get(c).unwrap_or("") != cell_text(row, header) {
+            // The CSV is the JSON's cells with a formula leader neutralized (`csv_cell`).
+            if record.get(c).unwrap_or("") != crate::csv_cell::neutralize(&cell_text(row, header)) {
                 problems.push(problem(
                     &file,
                     &format!("row {}, column {header:?}", i + 1),
                     "the cell differs between the CSV and the JSON",
                 ));
+            }
+        }
+    }
+    problems
+}
+
+/// Every CSV member of the package: no cell opens with a character a spreadsheet runs as a
+/// formula (`=`, `+`, `-`, `@`, a tab or a carriage return) unless the writer put the apostrophe
+/// in front ([`crate::csv_cell`]). Header cells are read too. Names the file and the row (the
+/// header is row 0) and column, never the cell's text.
+pub fn csv_formula_problems(entries: &Entries) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (name, bytes) in entries.iter().filter(|(n, _)| n.ends_with(".csv")) {
+        let mut reader = csv::ReaderBuilder::new()
+            .flexible(true)
+            .has_headers(false)
+            .from_reader(bytes.as_slice());
+        for (i, record) in reader.records().enumerate() {
+            // An unreadable row is the parity check's to report.
+            let Ok(record) = record else { break };
+            for (c, cell) in record.iter().enumerate() {
+                if crate::csv_cell::starts_a_formula(cell) {
+                    problems.push(problem(
+                        name,
+                        &format!("row {i}, column {}", c + 1),
+                        "a cell opens with a character a spreadsheet runs as a formula, with no \
+                         apostrophe in front of it",
+                    ));
+                }
             }
         }
     }

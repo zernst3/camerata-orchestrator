@@ -229,7 +229,7 @@ pub fn triage_log_csv(rows: &[TriageLogRow]) -> anyhow::Result<Vec<u8>> {
     let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
     wtr.write_record(COLUMNS)?;
     for r in rows {
-        wtr.write_record([
+        wtr.write_record(crate::csv_cell::safe_record([
             r.rule_id.clone(),
             r.rule.clone(),
             r.proposed.to_string(),
@@ -238,7 +238,7 @@ pub fn triage_log_csv(rows: &[TriageLogRow]) -> anyhow::Result<Vec<u8>> {
             r.information_only.to_string(),
             r.thrown_out.to_string(),
             r.why.clone(),
-        ])?;
+        ]))?;
     }
     Ok(wtr.into_inner()?)
 }

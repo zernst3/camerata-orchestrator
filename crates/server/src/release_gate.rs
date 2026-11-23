@@ -49,11 +49,11 @@ pub use archive::{
 };
 pub use consistency::{
     client_readme_problems, compare_csv_to_json, count_reconciliation_problems, counts_problems,
-    dataset_parity_problems, dataset_set_problems, fix_archive_problems, fix_report_problems,
-    marking_problems, package_stem, parse_readme_provenance, patterns_clean_cell_problems,
-    patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems,
-    place_archive_problems, row_parity, verify_manifest, verify_readme_provenance,
-    ReadmeProvenance,
+    csv_formula_problems, dataset_parity_problems, dataset_set_problems, fix_archive_problems,
+    fix_report_problems, marking_problems, package_stem, parse_readme_provenance,
+    patterns_clean_cell_problems, patterns_section_problems, pdf_count_reconciliation_problems,
+    pdf_marking_problems, place_archive_problems, row_parity, verify_manifest,
+    verify_readme_provenance, ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
@@ -409,11 +409,7 @@ fn audit_zip_with(
             return report;
         }
     };
-    report.record(
-        CheckId::Secrets,
-        archive_secret_problems(&entries, pdf_text),
-    );
-    // The PDF's text, read once for the two checks that read it, when the caller has not.
+    // The PDF's text, read once for the checks that read it, when the caller has not.
     let pdf_pages: std::collections::BTreeMap<String, text_style::PdfText> = if pdf_text.is_some() {
         std::collections::BTreeMap::new()
     } else {
@@ -423,6 +419,10 @@ fn audit_zip_with(
             .map(|(name, bytes)| (name.clone(), text_style::pdf_text(bytes)))
             .collect()
     };
+    report.record(
+        CheckId::Secrets,
+        archive_secret_problems(&entries, pdf_text, &pdf_pages),
+    );
     // The operator's own review package (internal) carries engine notes, discarded rows and review
     // flags; it is not a client file, so the text-style check is a client-package check.
     report.record(
@@ -440,6 +440,7 @@ fn audit_zip_with(
     );
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
+    report.record(CheckId::DatasetParity, csv_formula_problems(&entries));
     report.record(CheckId::Counts, count_reconciliation_problems(&entries));
     // One fix per row, and one row per place: the same check, so the README's list is unchanged.
     let mut fix_and_place = fix_archive_problems(&entries);
@@ -530,6 +531,7 @@ fn incomplete_run_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>
 fn archive_secret_problems(
     entries: &std::collections::BTreeMap<String, Vec<u8>>,
     pdf_text: Option<&str>,
+    pdf_pages: &std::collections::BTreeMap<String, text_style::PdfText>,
 ) -> Vec<Problem> {
     let mut problems = Vec::new();
     for (name, bytes) in entries {
@@ -541,8 +543,23 @@ fn archive_secret_problems(
         } else if name.ends_with(".csv") {
             problems.extend(secrets::csv_problems(name, bytes));
         } else if name.ends_with(".pdf") {
-            if let Some(text) = pdf_text {
-                problems.extend(secrets::pdf_text_problems(name, text));
+            // The text a reader of the compiled PDF sees: the caller's own extraction, or this
+            // pass's reading of the member. `data.json` is checked too, but it is not the PDF.
+            match (pdf_text, pdf_pages.get(name)) {
+                (Some(text), _) => problems.extend(secrets::pdf_text_problems(name, text)),
+                (None, Some(text_style::PdfText::Pages(pages))) => {
+                    problems.extend(secrets::pdf_text_problems(name, &pages.join("\n")));
+                }
+                (None, Some(text_style::PdfText::Unreadable(why))) => problems.push(Problem::new(
+                    name.as_str(),
+                    "PDF text",
+                    format!(
+                        "the PDF's text could not be read, so it could not be checked for \
+                         secrets ({why})"
+                    ),
+                    None,
+                )),
+                (None, _) => {}
             }
         } else {
             problems.extend(secrets::text_problems(
@@ -858,6 +875,12 @@ mod patterns_tests;
 
 #[cfg(test)]
 mod text_style_tests;
+
+#[cfg(test)]
+mod evasion_tests;
+
+#[cfg(test)]
+mod csv_formula_tests;
 
 #[cfg(test)]
 mod readme_tests;

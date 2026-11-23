@@ -177,7 +177,7 @@ pub fn tickets_csv(
     let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
     writer.write_record(TICKET_HEADERS)?;
     for g in &groups {
-        writer.write_record(ticket_row(g))?;
+        writer.write_record(crate::csv_cell::safe_record(ticket_row(g)))?;
     }
     Ok(writer.into_inner()?)
 }
