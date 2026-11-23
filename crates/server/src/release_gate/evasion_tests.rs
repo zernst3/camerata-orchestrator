@@ -129,6 +129,36 @@ fn a_key_in_a_workbook_property_or_comment_is_refused() {
     assert!(secrets::xlsx_problems("report.xlsx", &package().xlsx).is_empty());
 }
 
+#[test]
+fn a_workbook_part_that_cannot_be_read_fails_the_secrets_check_closed() {
+    let mut entries = read_zip_entries(&package().xlsx).expect("a zip");
+    entries.insert(
+        "xl/comments1.xml".to_string(),
+        b"<comments><t>a plain comment</t></comments>".to_vec(),
+    );
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, bytes) in &entries {
+        writer.start_file(name.clone(), stored).expect("start");
+        writer.write_all(bytes).expect("write");
+    }
+    let mut zipped = writer.finish().expect("finish").into_inner();
+    // Corrupt the comment's stored bytes: the checksum no longer matches, so the part errors.
+    let at = zipped
+        .windows(7)
+        .position(|w| w == b"a plain")
+        .expect("the stored comment");
+    zipped[at] = b'X';
+    let problems = secrets::xlsx_problems("report.xlsx", &zipped);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.message.contains("could not be checked for secrets")),
+        "{problems:?}"
+    );
+}
+
 fn zip_of(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
@@ -163,4 +193,56 @@ fn a_key_only_in_the_pdfs_rendered_text_is_refused() {
     // A stand-in the check does not judge adds nothing.
     pages.insert("report.pdf".to_string(), text_style::PdfText::NotJudged);
     assert!(archive_secret_problems(&entries, None, &pages).is_empty());
+}
+
+/// The compiled PDF end to end: a key printed only in the PDF's rendered text (planted through
+/// the report data, the data.json check bypassed by auditing the zip alone) is read back out of
+/// the real PDF by `pdf_extract` whole, and the gate refuses it on the rendered-text check.
+///
+/// Run on demand (needs typst on the path):
+/// `cargo test -p camerata-server --lib a_compiled_pdf_with_a_key_in_its_text -- --ignored`
+#[tokio::test]
+#[ignore = "compiles a real PDF with typst; run on demand"]
+async fn a_compiled_pdf_with_a_key_in_its_text_is_refused_by_the_rendered_text_check() {
+    if !super::tests::typst_on_path() {
+        panic!("typst is not on the path; this test needs it");
+    }
+    let value = key();
+    let clean = package();
+    let mut data: serde_json::Value = serde_json::from_str(&clean.data_json).expect("data parses");
+    let line = data["confidentiality"]["line"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    data["confidentiality"]["line"] = serde_json::json!(format!("{line} {value}"));
+    let pdf = crate::report_export::compile_pdf_from_data(&data.to_string())
+        .await
+        .expect("compiles");
+    // The extractor hands the key back whole, with no inserted space.
+    let pages = match text_style::pdf_text(&pdf) {
+        text_style::PdfText::Pages(pages) => pages,
+        _ => panic!("the compiled PDF's text was not read"),
+    };
+    let joined: String = pages
+        .join("\n")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(joined.contains(&value), "the extractor split the key");
+    // Audit a zip whose only secret is in the PDF.
+    let released = release(package()).expect("a clean package releases");
+    let mut entries = read_zip_entries(&released.bytes).expect("zip");
+    let pdf_name = entries
+        .keys()
+        .find(|n| n.ends_with(".pdf"))
+        .cloned()
+        .expect("the package has a PDF");
+    entries.insert(pdf_name.clone(), pdf);
+    let report = audit_zip(&super::tests::rezip(&entries), None);
+    assert!(
+        report.problems().any(|(check, p)| check == CheckId::Secrets
+            && p.file == pdf_name
+            && p.location == "rendered text"),
+        "the gate did not refuse the key in the PDF text"
+    );
 }
