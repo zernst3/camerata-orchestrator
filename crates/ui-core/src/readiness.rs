@@ -196,7 +196,7 @@ pub struct OverLimitFile {
 /// (a warning, never a hold), and patterns of Excluded by agreement that match no file (a hold: a
 /// pattern that names nothing is fixed or removed, so an intended exclusion is never silently
 /// void). A second source for the same Start button as [`ScanBlock`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OverLimitBlock {
     /// The limit as a person reads it ("1 MB"), as the server states it.
     pub limit: String,
@@ -214,9 +214,20 @@ pub struct OverLimitBlock {
     /// The largest over-limit file the secret checks still search, as a person reads it ("20 MB"),
     /// as the server states it. Empty when the server did not say.
     pub secret_limit: String,
+    /// Files that declare themselves generated, over every repo, and the non-blank lines in them:
+    /// not read, not billed, searched for secrets only. A statement, never a hold.
+    pub generated_files: usize,
+    pub generated_lines: usize,
 }
 
 impl OverLimitBlock {
+    /// This block with the generated files and lines the server counted.
+    pub fn with_generated(mut self, files: usize, lines: usize) -> Self {
+        self.generated_files = files;
+        self.generated_lines = lines;
+        self
+    }
+
     /// This block with the secret search ceiling the server stated.
     pub fn with_secret_limit(mut self, limit: &str) -> Self {
         self.secret_limit = limit.trim().to_string();
@@ -248,7 +259,51 @@ pub fn over_limit_block(
             unchecked,
             warned,
             secret_limit: String::new(),
+            generated_files: 0,
+            generated_lines: 0,
         })
+}
+
+/// The sentence for the generated files of the block: how many and how many lines are not read or
+/// billed, in the one phrase every surface uses ([`GENERATED_FILES_LABEL`]). With the security
+/// floor off (AI review only) nothing searches them, and the sentence says so. Empty when there
+/// are none.
+pub fn generated_text(block: &OverLimitBlock, floor_on: bool) -> String {
+    let n = block.generated_files;
+    if n == 0 {
+        return String::new();
+    }
+    let what = format!(
+        "{n} {} ({} {}) will not be read for the inspection",
+        if n == 1 { "file" } else { "files" },
+        group_thousands(block.generated_lines),
+        if block.generated_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        },
+    );
+    if floor_on {
+        format!(
+            "{what}, {}.",
+            camerata_api_types::audit::GENERATED_FILES_LABEL
+        )
+    } else {
+        format!("{what} or billed, and are not searched for secrets in this run: the security floor is off.")
+    }
+}
+
+/// `n` with a comma between thousands (1,234).
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A size as the pre-start check prints it, in the base the limit is written in (1 MB is
@@ -745,5 +800,17 @@ mod tests {
             "{off}"
         );
         assert!(!off.contains("still searched"), "{off}");
+    }
+    #[test]
+    fn the_generated_sentence_counts_files_and_lines_in_the_one_coverage_phrase() {
+        let block = OverLimitBlock::default().with_generated(1, 1);
+        assert_eq!(
+            generated_text(&block, true),
+            "1 file (1 line) will not be read for the inspection, generated: scanned for secrets only, not billed."
+        );
+        let block = OverLimitBlock::default().with_generated(4, 1_234_567);
+        assert!(generated_text(&block, true).starts_with("4 files (1,234,567 lines)"));
+        assert!(generated_text(&block, false).contains("not searched for secrets in this run"));
+        assert!(generated_text(&OverLimitBlock::default(), true).is_empty());
     }
 }

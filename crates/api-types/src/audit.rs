@@ -495,6 +495,11 @@ pub struct RuleConvention {
     pub finder_rows: Vec<FinderRowRef>,
 }
 
+/// The reason a file that declares itself generated is not read for the inspection, as every
+/// surface states it (Coverage, `camerata count`, the pre-start check). One phrase in one place,
+/// so no surface words it differently.
+pub const GENERATED_FILES_LABEL: &str = "generated: scanned for secrets only, not billed";
+
 #[cfg(test)]
 mod tests {
     use super::*;

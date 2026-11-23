@@ -168,7 +168,7 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// `n` with a comma between each group of three digits ("20,000").
-fn group_digits(n: usize) -> String {
+pub(crate) fn group_digits(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
