@@ -542,18 +542,29 @@ pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
             None,
         )),
     }
-    if let Ok(strings) = xlsx_strings(bytes) {
-        let already: HashSet<(String, Option<String>)> = problems
-            .iter()
-            .map(|p| (p.message.clone(), p.evidence.clone()))
-            .collect();
-        for (i, text) in strings.iter().enumerate() {
-            for p in scan_text(file, &format!("shared string #{i}"), text, false) {
-                if !already.contains(&(p.message.clone(), p.evidence.clone())) {
-                    problems.push(p);
+    match xlsx_strings(bytes) {
+        Ok(strings) => {
+            let already: HashSet<(String, Option<String>)> = problems
+                .iter()
+                .map(|p| (p.message.clone(), p.evidence.clone()))
+                .collect();
+            for (i, text) in strings.iter().enumerate() {
+                for p in scan_text(file, &format!("shared string #{i}"), text, false) {
+                    if !already.contains(&(p.message.clone(), p.evidence.clone())) {
+                        problems.push(p);
+                    }
                 }
             }
         }
+        Err(e) => problems.push(Problem::new(
+            file,
+            "workbook",
+            format!(
+                "the workbook's shared strings could not be read, so they could not be checked \
+                 for secrets: {e}"
+            ),
+            None,
+        )),
     }
     problems
 }

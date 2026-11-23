@@ -159,6 +159,31 @@ fn a_workbook_part_that_cannot_be_read_fails_the_secrets_check_closed() {
     );
 }
 
+#[test]
+fn a_workbook_shared_strings_part_that_cannot_be_read_fails_the_secrets_check_closed() {
+    let entries = read_zip_entries(&package().xlsx).expect("a zip");
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, bytes) in &entries {
+        writer.start_file(name.clone(), stored).expect("start");
+        writer.write_all(bytes).expect("write");
+    }
+    let mut zipped = writer.finish().expect("finish").into_inner();
+    let at = zipped
+        .windows(4)
+        .position(|w| w == b"<sst")
+        .expect("the shared strings part");
+    zipped[at + 1] = b'S';
+    let problems = secrets::xlsx_problems("report.xlsx", &zipped);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.message.contains("shared strings could not be read")),
+        "{problems:?}"
+    );
+}
+
 fn zip_of(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
