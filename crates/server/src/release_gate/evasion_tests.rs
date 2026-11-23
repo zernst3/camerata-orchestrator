@@ -160,6 +160,22 @@ fn a_workbook_part_that_cannot_be_read_fails_the_secrets_check_closed() {
 }
 
 #[test]
+fn the_packages_own_workbook_always_has_a_shared_strings_part() {
+    // A workbook with no xl/sharedStrings.xml fails the secrets check closed, so the writer must
+    // always emit it: with rows, and with none.
+    for pkg in [
+        package(),
+        super::published_example_tests::exported(Vec::new()),
+    ] {
+        assert!(
+            archive::xlsx_strings(&pkg.xlsx).is_ok(),
+            "the workbook has no readable shared strings part"
+        );
+        assert!(secrets::xlsx_problems("report.xlsx", &pkg.xlsx).is_empty());
+    }
+}
+
+#[test]
 fn a_workbook_shared_strings_part_that_cannot_be_read_fails_the_secrets_check_closed() {
     let entries = read_zip_entries(&package().xlsx).expect("a zip");
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
