@@ -55,6 +55,7 @@ fn controls(
 ) -> RunControls {
     let seen = seen.clone();
     RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(limit),
         stored_spend_usd: stored,
         checkpoint: CheckpointSettings {

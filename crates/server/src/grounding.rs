@@ -127,11 +127,15 @@ pub fn render_rule_context(
 ///
 /// Returns `None` when the directory does not exist / is unreadable (an unresolved repo
 /// is reported by the caller as a NOTE, not silently dropped).
-pub fn render_repo_digest(repo: &str, dir: &Path) -> Option<String> {
+pub fn render_repo_digest(
+    repo: &str,
+    dir: &Path,
+    scope: &crate::onboard::scope::ScanScope,
+) -> Option<String> {
     if !dir.is_dir() {
         return None;
     }
-    let extracted = crate::onboard::read_local_repo_files(dir).ok()?;
+    let extracted = crate::onboard::read_local_repo_files(dir, &scope.for_repo(repo)).ok()?;
     let files = &extracted.files;
 
     let mut s = format!("--- repo: {repo} ---\n");
@@ -391,7 +395,8 @@ mod tests {
         // A secret file must NOT appear in the tree.
         std::fs::write(dir.join(".env"), "SECRET=abc123\n").unwrap();
 
-        let out = render_repo_digest("o/demo", &dir).expect("digest");
+        let out = render_repo_digest("o/demo", &dir, &crate::onboard::scope::ScanScope::none())
+            .expect("digest");
         assert!(out.contains("repo: o/demo"));
         assert!(out.contains("Rust"));
         assert!(out.contains("Cargo.toml"));
@@ -408,6 +413,8 @@ mod tests {
     #[test]
     fn digest_none_for_missing_dir() {
         let dir = std::env::temp_dir().join("cam-grounding-does-not-exist-xyz-123");
-        assert!(render_repo_digest("o/r", &dir).is_none());
+        assert!(
+            render_repo_digest("o/r", &dir, &crate::onboard::scope::ScanScope::none()).is_none()
+        );
     }
 }

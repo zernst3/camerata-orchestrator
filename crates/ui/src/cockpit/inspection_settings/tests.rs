@@ -275,6 +275,7 @@ fn no_state_has_a_dash_or_names_the_environment_outside_its_one_sentence() {
         "save-error",
         "registry-missing",
         "non-anthropic-warning",
+        "exclusions-listed",
     ] {
         let html = page(id);
         assert!(
@@ -1159,4 +1160,29 @@ fn a_blank_row_says_loading_only_while_the_registry_loads() {
     assert!(!loading.contains("No model list available"), "{loading}");
     assert!(missing.contains("No model list available"), "{missing}");
     assert!(!missing.contains("Loading models"), "{missing}");
+}
+
+/// Item 31: the exclusion list sits in the "Where it runs" area, with its label and help, and
+/// shows the project's patterns, one per line.
+#[test]
+fn the_exclusion_list_shows_its_label_its_help_and_the_projects_patterns() {
+    let html = page("exclusions-listed");
+    assert!(html.contains("Excluded by agreement"), "{html}");
+    assert!(
+        html.contains("excluded by agreement"),
+        "the help names the agreement: {html}"
+    );
+    assert!(html.contains("acme-field-data/seeds/**"), "{html}");
+    assert!(html.contains("acme-api/db/dump.sql"), "{html}");
+    let where_it_runs = html.find("Where it runs").expect("the heading");
+    let engagement = html.find("Engagement").expect("the next heading");
+    let list = html.find("Excluded by agreement").expect("the list");
+    assert!(
+        where_it_runs < list && list < engagement,
+        "the list is in the Where it runs area"
+    );
+    // A project with no list shows an empty box, not the patterns of another.
+    let plain = page("agent-opus");
+    assert!(plain.contains("Excluded by agreement"), "{plain}");
+    assert!(!plain.contains("acme-api/db/dump.sql"), "{plain}");
 }

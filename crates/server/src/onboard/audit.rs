@@ -275,6 +275,17 @@ fn private_key_kind(snippet: &str) -> &'static str {
 /// without being alarmed by fake credentials in unit-test fixtures. The finding
 /// is still surfaced — a real secret in a test file still merits a look.
 pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
+    audit_content_with(repo, path, content, AUDIT_RULES)
+}
+
+/// [`audit_content`] over `rules` only, in `rules` order. The long-line and over-limit files use
+/// the secret-shaped set, so no other rule runs over text that is not read.
+pub(crate) fn audit_content_with(
+    repo: &str,
+    path: &str,
+    content: &str,
+    rules: &[&str],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let in_test_path = is_test_or_fixture_path(path);
@@ -283,7 +294,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     // Whole-content matching (not line-by-line) so MULTI-LINE constructs are caught —
     // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
     // match is attributed to the line where it starts.
-    for rule_id in AUDIT_RULES {
+    for rule_id in rules {
         let content_lines = camerata_gateway::content_match_lines_in_file(rule_id, path, content);
         if content_lines.is_empty() {
             // Path-based rule: fire the arm with the real path and empty content to
@@ -348,7 +359,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
             // lands in it (and a cap can never cut a secret in half).
             let snippet: String = lines
                 .get(line_no.saturating_sub(1))
-                .map(|l| super::redact::snippet_from_line(l, 160))
+                .map(|l| super::redact::snippet_around_secret(l, 160))
                 .unwrap_or_default();
             // Per-finding classification: in_test_path covers whole test-path files;
             // is_in_test_scope covers inline #[cfg(test)] blocks in production-path files.
@@ -468,6 +479,33 @@ pub fn audit_unread_paths(
     let mut findings: Vec<Finding> = paths
         .iter()
         .flat_map(|path| audit_content(repo, path, ""))
+        .collect();
+    enrich_secret_context(&mut findings, files);
+    findings
+}
+
+/// The secret-shaped floor rules over ONE file's text, without the context step: what the floor
+/// runs over a file that is not read for the inspection. Pure, so it can run in a blocking task.
+pub(crate) fn secret_findings_in(repo: &str, path: &str, content: &str) -> Vec<Finding> {
+    audit_content_with(repo, path, content, SECRET_SHAPED_RULES)
+}
+
+/// The secret-shaped floor rules ([`SECRET_SHAPED_RULES`]) over files that are not read because a
+/// line is longer than the room's read page. The file stays out of the read, the billed count and
+/// the room, but a vendor token, private key or hardcoded secret inside it must still be found,
+/// so its content is scanned here. Rules that are not secret-shaped (raw SQL and the like) do not
+/// run: the file is not read. Findings go through the same construction-time redaction and
+/// `enrich_secret_context` as `audit_files`; the snippet is one redacted line capped at 160
+/// characters, so a minified line never travels whole. `files` is the audited set, used only
+/// for the `.gitignore` coverage context. Pure.
+pub fn audit_long_line_secrets(
+    repo: &str,
+    long_line_files: &[(String, String)],
+    files: &[(String, String)],
+) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = long_line_files
+        .iter()
+        .flat_map(|(path, content)| secret_findings_in(repo, path, content))
         .collect();
     enrich_secret_context(&mut findings, files);
     findings
@@ -1234,5 +1272,52 @@ mod hold_scope_tests {
         }
         let rows = audit_content("r", "config/service.yaml", &format!("token_id: {id}\n"));
         assert_eq!(secret_rows(&rows)[0].severity, "low");
+    }
+
+    /// Only the secret-shaped rules run over text that is not read for the inspection: a line that
+    /// breaks a non-secret floor rule gives no finding there, though the full floor reports it.
+    #[test]
+    fn the_secret_pass_runs_no_other_floor_rule() {
+        let content = "const agent = { rejectUnauthorized: false };\n";
+        let full = audit_content("o/r", "lib/a.js", content);
+        assert!(
+            full.iter().any(|f| f.rule_id == "SEC-NO-DISABLED-TLS-1"),
+            "precondition: the full floor reports it: {full:?}"
+        );
+        let secret_only =
+            audit_long_line_secrets("o/r", &[("lib/a.js".to_string(), content.to_string())], &[]);
+        assert!(secret_only.is_empty(), "{secret_only:?}");
+    }
+
+    /// The snippet of a hit on a long line is a window around the (masked) secret, not the first
+    /// 160 characters of the line: a key past character 5,000 is still shown, masked, and the
+    /// finding's line locates it.
+    #[test]
+    fn the_snippet_of_a_hit_on_a_long_line_shows_the_masked_key() {
+        let token = "ghp_0123456789012345678901234567890123456";
+        let line = format!(
+            "{}var t=\"{token}\";{}",
+            "x".repeat(5_000),
+            "y".repeat(5_000)
+        );
+        let content = format!("var first = 1;\n{line}\n");
+        let found = audit_content("o/r", "lib/wide.js", &content);
+        let hit = found
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+            .expect("a vendor token finding");
+        assert_eq!(hit.line, 2, "the line locates it");
+        let masked = super::super::redact::redact_visible_for_client(token).into_owned();
+        assert_ne!(masked, token);
+        assert!(hit.snippet.contains(&masked), "snippet: {}", hit.snippet);
+        assert!(!hit.snippet.contains(token));
+        assert!(hit.snippet.chars().count() <= 160);
+        // A short line is unchanged.
+        let short = audit_content("o/r", "a.js", &format!("var t=\"{token}\";\n"));
+        assert!(
+            short[0].snippet.starts_with("var t="),
+            "{}",
+            short[0].snippet
+        );
     }
 }

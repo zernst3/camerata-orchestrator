@@ -4134,6 +4134,9 @@ pub(super) fn resolve_selection_repos(repos: &[String], all_repos: &[String]) ->
     out
 }
 
+/// The html id of the Start button of the proposed rules table.
+pub(super) const RUN_INSPECTION_ID: &str = "run-inspection";
+
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
 ///
@@ -4158,6 +4161,19 @@ pub(super) fn ProposedRulesTable(
     /// way back).
     #[props(default)]
     scan_block: Option<camerata_ui_core::readiness::ScanBlock>,
+    /// Files over the read limit that the project's exclusion list does not name (a warning that
+    /// leaves Start on, each with an "Exclude by agreement" action), and patterns that hold Start.
+    #[props(default)]
+    over_limit: Option<camerata_ui_core::readiness::OverLimitBlock>,
+    /// Whether the run's security floor is on (it is off for "AI review only").
+    #[props(default = true)]
+    floor_on: bool,
+    /// Told `(repo, path)` when a listed file's "Exclude by agreement" is clicked.
+    #[props(default)]
+    on_exclude: Option<EventHandler<(String, String)>>,
+    /// Told the pattern when a listed pattern's "Remove pattern" is clicked.
+    #[props(default)]
+    on_remove: Option<EventHandler<String>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
@@ -4617,11 +4633,17 @@ pub(super) fn ProposedRulesTable(
         if let Some(block) = scan_block.clone() {
             crate::source_ui::ScanBlockNotice { block }
         }
+        if let Some(block) = over_limit.clone() {
+            crate::source_ui::OverLimitNotice { block, on_exclude, on_remove, floor_on }
+        }
         div { class: "findings-toolbar",
             button {
+                id: "{RUN_INSPECTION_ID}",
                 class: "btn-run",
                 "data-tour": camerata_ui_core::walkthrough::target::RUN_INSPECTION,
-                disabled: auditing || scan_block.is_some(),
+                disabled: auditing
+                    || scan_block.is_some()
+                    || over_limit.as_ref().is_some_and(|b| b.blocks()),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Build the audit request from EVERY repo's saved selection, so one scan

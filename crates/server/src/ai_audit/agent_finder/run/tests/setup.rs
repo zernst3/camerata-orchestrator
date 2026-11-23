@@ -238,6 +238,7 @@ fn creds_with_key(key: Option<&str>) -> crate::credentials::MemoryCredentialStor
 
 fn agent_controls() -> RunControls {
     RunControls {
+        scope: Default::default(),
         finder: crate::ai_audit::agent_finder::FinderChoice::Agent,
         ..RunControls::default()
     }

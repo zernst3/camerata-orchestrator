@@ -1051,6 +1051,112 @@ pub(crate) async fn set_dev_run_spend_limit_handler(
     }
 }
 
+/// Body for `POST /api/projects/:id/scan-exclusions`.
+#[derive(serde::Deserialize)]
+pub(crate) struct SetScanExclusionsReq {
+    /// One glob pattern per entry, matched against `<repo name>/<path within the repo>`.
+    pub(crate) patterns: Vec<String>,
+    /// The list the editor loaded. When given and different from the stored list (something
+    /// else changed it since), the save is refused so a stale editor cannot drop an agreed
+    /// exclusion.
+    #[serde(default)]
+    pub(crate) based_on: Option<Vec<String>>,
+}
+
+/// `POST /api/projects/:id/scan-exclusions` - replace the project's list of files excluded by
+/// agreement. An invalid pattern is refused by name and nothing is saved. Same
+/// `{ ok, project }` / `{ ok: false, message }` shape as `set_client_engagement_handler`.
+pub(crate) async fn set_scan_exclusions_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetScanExclusionsReq>,
+) -> Json<serde_json::Value> {
+    // `based_on` is required: a save that does not say which list it was made from could drop an
+    // agreed exclusion, so it is refused.
+    let Some(based_on) = &req.based_on else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "Send the list you loaded (based_on) with the save, so a stale save cannot drop an agreed exclusion.",
+        }));
+    };
+    // The comparison and the write happen together inside the store's update, so a save racing an
+    // add can never overwrite it.
+    match state
+        .projects
+        .set_scan_exclusions_checked(&id, based_on, &req.patterns)
+    {
+        Ok(Some(Err(current))) => Json(serde_json::json!({
+            "ok": false,
+            "message": "Excluded by agreement changed since you opened it. Reload the settings and try again.",
+            "current": current,
+        })),
+        Ok(Some(Ok(p))) => {
+            // A pattern that matches no file, or names a repo that was not read, is named at
+            // save: it would refuse every start.
+            let local = crate::resolve_local_sources(&state, &p.repos);
+            let scope = crate::onboard::scope::ScanScope::of_project_or_nothing(Some(&p));
+            let checks = crate::onboard::scope::unmatched_patterns(&local.sources, &scope).await;
+            let unchecked: Vec<String> = checks
+                .unchecked
+                .iter()
+                .map(|(pat, why)| format!("{pat} ({why})"))
+                .collect();
+            Json(serde_json::json!({
+                "ok": true, "project": p,
+                "unmatched": checks.unmatched, "unchecked": unchecked,
+                "warned": checks.warned.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>()
+            }))
+        }
+        Ok(None) => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/scan-exclusions/add`.
+#[derive(serde::Deserialize)]
+pub(crate) struct AddScanExclusionReq {
+    /// The repo (`owner/repo`) the file is in.
+    pub(crate) repo: String,
+    /// The file's path within the repo.
+    pub(crate) path: String,
+}
+
+/// `POST /api/projects/:id/scan-exclusions/add` - exclude one file by agreement, by its exact
+/// path (the pre-start check's action for a file over the read limit).
+pub(crate) async fn add_scan_exclusion_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddScanExclusionReq>,
+) -> Json<serde_json::Value> {
+    match state
+        .projects
+        .add_scan_exclusion(&id, req.repo.trim(), req.path.trim())
+    {
+        Ok(Some(p)) => Json(serde_json::json!({ "ok": true, "project": p })),
+        Ok(None) => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/scan-exclusions/remove`.
+#[derive(serde::Deserialize)]
+pub(crate) struct RemoveScanExclusionReq {
+    pub(crate) pattern: String,
+}
+
+/// `POST /api/projects/:id/scan-exclusions/remove` - remove one pattern from Excluded by
+/// agreement (the pre-start check's "Remove pattern" for a pattern that matches no file).
+pub(crate) async fn remove_scan_exclusion_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RemoveScanExclusionReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.remove_scan_exclusion(&id, &req.pattern) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
 /// Body for `POST /api/projects/:id/stall-thresholds`.
 #[derive(serde::Deserialize)]
 pub(crate) struct SetStallThresholdsReq {
@@ -1222,6 +1328,7 @@ pub(crate) async fn rescan_alternatives_handler(
     // The client-engagement lock, before any repository is read (the same check the main
     // audit runs, over the same step models this rescan uses below).
     let lock_controls = crate::cost_cap::RunControls {
+        scope: Default::default(),
         fix_model: fix_step_model(&state),
         clone_judge_model: Some(clone_judge_model_of(&project)),
         review: project.review.clone(),
@@ -1275,7 +1382,23 @@ pub(crate) async fn rescan_alternatives_handler(
     if let Some(why) = partial_run_refusal(&unresolved, project.repos.len(), req.allow_partial) {
         return Json(serde_json::json!({ "ok": false, "message": why }));
     }
+    // An unusable list (for example a repo sharing a name was added after `app/...` was saved)
+    // refuses the rescan with its reason: it must never run on zero files.
+    let rescan_scope = match crate::onboard::scope::ScanScope::of_project(Some(&project)) {
+        Ok(scope) => scope,
+        Err(why) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("Cannot start: Excluded by agreement in the inspection settings cannot be used: {why}."),
+            }));
+        }
+    };
+    // A file over the read limit is a warning, never a refusal: it is not read for the
+    // inspection and the secret checks still search it (see `scope::start_checks`). The warning
+    // goes into the run's notes, as on the scan route.
     run_notes.extend(source_notes);
+    run_notes
+        .extend(crate::onboard::scope::over_limit_warnings(&sources, &rescan_scope, true).await);
 
     let audit_model = Some(step_model_or(&state, crate::project::StepKind::Audit, None));
     let calibration_model = Some(step_model_or(
@@ -1329,20 +1452,22 @@ pub(crate) async fn rescan_alternatives_handler(
             continue;
         }
         let dir = dir.clone();
-        let files =
-            match tokio::task::spawn_blocking(move || crate::onboard::read_local_repo_files(&dir))
-                .await
-            {
-                Ok(Ok(extracted)) => extracted.files,
-                Ok(Err(e)) => {
-                    run_notes.push(format!("{spec}: {e}"));
-                    continue;
-                }
-                Err(e) => {
-                    run_notes.push(format!("{spec}: rescan task failed ({e})"));
-                    continue;
-                }
-            };
+        let repo_scope = rescan_scope.for_repo(spec);
+        let files = match tokio::task::spawn_blocking(move || {
+            crate::onboard::read_local_repo_files(&dir, &repo_scope)
+        })
+        .await
+        {
+            Ok(Ok(extracted)) => extracted.files,
+            Ok(Err(e)) => {
+                run_notes.push(format!("{spec}: {e}"));
+                continue;
+            }
+            Err(e) => {
+                run_notes.push(format!("{spec}: rescan task failed ({e})"));
+                continue;
+            }
+        };
         let alt_slice: Vec<crate::ai_audit::RuleAlternatives> = applicable_ids
             .iter()
             .filter_map(|rid| alternatives_by_rule.get(rid).cloned())

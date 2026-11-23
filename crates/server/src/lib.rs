@@ -816,17 +816,24 @@ impl AppState {
             }
         }
 
+        // The project's exclusion list also bounds what grounding reads; a list that cannot be
+        // used grounds nothing from the checkout rather than reading excluded files.
+        let digest_scope = crate::onboard::scope::ScanScope::of_project(Some(&project));
         let repo_digests = if resolved.is_empty() {
             Vec::new()
-        } else {
+        } else if let Ok(digest_scope) = digest_scope {
             tokio::task::spawn_blocking(move || {
                 resolved
                     .iter()
-                    .filter_map(|(repo, dir)| crate::grounding::render_repo_digest(repo, dir))
+                    .filter_map(|(repo, dir)| {
+                        crate::grounding::render_repo_digest(repo, dir, &digest_scope)
+                    })
                     .collect::<Vec<String>>()
             })
             .await
             .unwrap_or_default()
+        } else {
+            Vec::new()
         };
 
         // ── Soft context (#112): the product brief + the enabled operating principles. The brief
@@ -1506,6 +1513,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/projects/:id/dev-run-spend-limit",
             post(set_dev_run_spend_limit_handler),
+        )
+        .route(
+            "/api/projects/:id/scan-exclusions",
+            post(set_scan_exclusions_handler),
+        )
+        .route(
+            "/api/projects/:id/scan-exclusions/add",
+            post(add_scan_exclusion_handler),
+        )
+        .route(
+            "/api/projects/:id/scan-exclusions/remove",
+            post(remove_scan_exclusion_handler),
         )
         // Stall-detection thresholds: per-project idle timeout config.
         .route(
@@ -2344,6 +2363,7 @@ async fn onboard_audit(
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
     let run_controls = req.run_controls_for(&state);
+    let scan_scope = run_controls.scope.clone();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -2404,6 +2424,19 @@ async fn onboard_audit(
         // report would show as a successful scan that found nothing.
         return Json(client_lock_blocked_report(&repos, why));
     }
+    // A file over the read limit that the project does not exclude by agreement is a warning,
+    // never a refusal: it is not read for the inspection and, with the security floor on, the
+    // secret checks still search it. A pattern that matches nothing still refuses the start.
+    let (refusal, start_warnings) = crate::onboard::scope::start_check(
+        state.projects.active().as_ref(),
+        &sources,
+        effective_scan_modes(req.run_ai_review, req.run_deterministic).1,
+    )
+    .await;
+    if let Some(why) = refusal {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
+    notes.extend(start_warnings);
     let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
         .into_iter()
@@ -2611,6 +2644,7 @@ async fn onboard_audit(
                 corpus.as_ref(),
                 None,
                 project_client_tooling(active_project.as_ref()),
+                &scan_scope,
             )
             .await;
         }
@@ -2629,12 +2663,13 @@ async fn onboard_audit(
             // the enrichment range below, so a known-exploited runtime vulnerability is labelled
             // and floored exactly like a dependency one.
             let runtime_rows_in = report.findings.len();
-            crate::runtime_audit::run_runtime_audit(&mut report, &sources).await;
+            crate::runtime_audit::run_runtime_audit(&mut report, &sources, &scan_scope).await;
             let dep_audit_rows_in = report.findings.len();
             let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
-                let run = crate::dep_audit::run_dep_audit(spec, dir);
+                let repo_scope = scan_scope.for_repo(spec);
+                let run = crate::dep_audit::run_dep_audit(spec, dir, &repo_scope);
                 let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
                     Ok(result) => result,
                     Err(_elapsed) => (
@@ -2795,6 +2830,7 @@ pub(crate) async fn start_audit_job(
         .and_then(|id| state.projects.get(id))
         .or_else(|| state.projects.active());
     let mut run_controls = req.run_controls_for_project(active_project.as_ref());
+    let scan_scope = run_controls.scope.clone();
     // What the run was asked, saved with the run so it can be resumed with the same request.
     let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
     let resume_run = options.resume_run.clone();
@@ -2880,6 +2916,22 @@ pub(crate) async fn start_audit_job(
         state.jobs.fail(&job_id, why);
         return job_id;
     }
+    // A file over the read limit that the project does not exclude by agreement is a warning,
+    // never a refusal: it is not read for the inspection and, with the security floor on, the
+    // secret checks still search it. A pattern that matches nothing still refuses the start.
+    let (refusal, start_warnings) = crate::onboard::scope::start_check(
+        active_project.as_ref(),
+        &sources,
+        effective_scan_modes(req.run_ai_review, req.run_deterministic).1,
+    )
+    .await;
+    if let Some(why) = refusal {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
+    // A pattern that matches only files never read is a warning the run goes ahead with.
+    notes.extend(start_warnings);
     notes.extend(options.extra_notes);
     let delta = options.delta;
     let client_tooling = project_client_tooling(active_project.as_ref());
@@ -2982,8 +3034,9 @@ pub(crate) async fn start_audit_job(
                     // will not run on a repo is not left waiting in the denominator.
                     for (spec, dir) in &sources {
                         let dir_clone = dir.clone();
+                        let repo_scope = scan_scope.for_repo(spec);
                         let languages = tokio::task::spawn_blocking(move || {
-                            crate::onboard::files::read_local_repo_files(&dir_clone)
+                            crate::onboard::files::read_local_repo_files(&dir_clone, &repo_scope)
                                 .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
                                 .unwrap_or_default()
                         })
@@ -3013,10 +3066,11 @@ pub(crate) async fn start_audit_job(
                     // but adds to the same job). Using the union is conservative: a tool
                     // present in ANY repo stays in the denominator.
                     let mut union_languages = std::collections::HashSet::<String>::new();
-                    for (_, dir) in &sources {
+                    for (spec, dir) in &sources {
                         let dir_clone = dir.clone();
+                        let repo_scope = scan_scope.for_repo(spec);
                         if let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
-                            crate::onboard::files::read_local_repo_files(&dir_clone)
+                            crate::onboard::files::read_local_repo_files(&dir_clone, &repo_scope)
                         })
                         .await
                         {
@@ -3321,6 +3375,7 @@ pub(crate) async fn start_audit_job(
                     corpus.as_ref(),
                     Some((&body_jobs, &body_jid)),
                     client_tooling,
+                    &scan_scope,
                 )
                 .await;
             }
@@ -3341,12 +3396,13 @@ pub(crate) async fn start_audit_job(
                 // path — one ledger stage entry for the whole loop's net additions.
                 // Runtime end of life and runtime vulnerabilities (see `onboard_audit`).
                 let runtime_rows_in = report.findings.len();
-                crate::runtime_audit::run_runtime_audit(&mut report, &sources).await;
+                crate::runtime_audit::run_runtime_audit(&mut report, &sources, &scan_scope).await;
                 let dep_audit_rows_in = report.findings.len();
                 let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
-                    let run = crate::dep_audit::run_dep_audit(spec, dir);
+                    let repo_scope = scan_scope.for_repo(spec);
+                    let run = crate::dep_audit::run_dep_audit(spec, dir, &repo_scope);
                     let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
                         Ok(result) => result,
                         Err(_elapsed) => (

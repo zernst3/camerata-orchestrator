@@ -134,6 +134,7 @@ async fn surfaces(terse_output: bool, p: &Planted) -> (Vec<(String, String)>, Ve
     let mut efficiency = EfficiencyConfig::default();
     efficiency.set("terse_output", terse_output).unwrap();
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,

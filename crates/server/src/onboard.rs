@@ -30,6 +30,7 @@ pub mod patterns_matrix;
 pub mod propose;
 pub(crate) mod redact;
 pub mod report;
+pub mod scope;
 pub mod self_ref;
 pub mod source_file;
 pub mod symbol_refs;
@@ -1879,14 +1880,16 @@ fn note_unanswered_checker_rule(
 // ── Orchestration functions ───────────────────────────────────────────────────────
 pub async fn suppression_registry(
     sources: &[(String, std::path::PathBuf)],
+    scope: &scope::ScanScope,
 ) -> Vec<crate::suppression::SuppressionRecord> {
     use crate::suppression::{parse_inline_waivers, registry, Baseline, FindingRef};
     let mut out = Vec::new();
     for (spec, dir) in sources {
         let spec = spec.as_str();
         let dir = dir.clone();
+        let repo_scope = scope.for_repo(spec);
         let Ok(Ok(extracted)) =
-            tokio::task::spawn_blocking(move || read_local_repo_files(&dir)).await
+            tokio::task::spawn_blocking(move || read_local_repo_files(&dir, &repo_scope)).await
         else {
             continue;
         };
@@ -1921,6 +1924,7 @@ pub async fn suppression_registry(
 pub async fn scan_repos(
     sources: &[(String, std::path::PathBuf)],
     extra_notes: Vec<String>,
+    scope: &scope::ScanScope,
 ) -> ScanReport {
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
@@ -1938,7 +1942,8 @@ pub async fn scan_repos(
             continue;
         }
         let dir = dir.clone();
-        match tokio::task::spawn_blocking(move || read_local_repo_files(&dir)).await {
+        let repo_scope = scope.for_repo(spec);
+        match tokio::task::spawn_blocking(move || read_local_repo_files(&dir, &repo_scope)).await {
             Ok(Ok(extracted)) => {
                 let ExtractedRepo {
                     files,
@@ -2369,6 +2374,9 @@ pub async fn audit_repos_with_llm_controlled(
     // by path, for the Coverage section.
     // Bounded: the first paths per reason are named, the rest counted (`SkippedFileList`).
     let mut skipped_files_total = crate::scan_ledger::SkippedFileList::default();
+    // Per repo whose floor ran: (files searched for secrets only, over the secret search ceiling,
+    // over the size limit but not text). Recorded into the ledger beside the skipped files.
+    let mut secret_search_totals: Vec<(usize, usize, usize)> = Vec::new();
     let mut code_chars_total = 0usize;
     let mut code_lines_total = 0usize;
     let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
@@ -2537,10 +2545,12 @@ pub async fn audit_repos_with_llm_controlled(
         // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
         // comes from the loop binding and is the PathBuf we're iterating.
         let dir = dir.clone();
+        // The project's exclusion list, bound to this repo: the walk never reads a file on it.
+        let repo_scope = controls.scope.for_repo(spec);
         // The excluded-noise line count (22c) is read in the same blocking task, through the
         // function `camerata count` uses (`count::excluded_noise_lines`).
         match tokio::task::spawn_blocking(move || {
-            read_local_repo_files(&dir).map(|extracted| {
+            read_local_repo_files(&dir, &repo_scope).map(|extracted| {
                 let noise_lines =
                     count::excluded_noise_lines(&dir, &extracted.excluded_noise_paths);
                 (extracted, noise_lines)
@@ -2556,19 +2566,70 @@ pub async fn audit_repos_with_llm_controlled(
                     truncated,
                     reference_truncated,
                     skipped_oversize,
+                    secret_searchable,
                     skipped_beyond_cap,
                     skipped_unreadable,
+                    skipped_long_line,
+                    long_line_contents,
                     skipped_sizes,
+                    matched_patterns,
                     file_cap,
                     excluded_noise,
                     excluded_noise_paths: _,
+                    excluded_by_agreement,
                 },
                 noise_lines,
             )) => {
                 // H9: the path-only floor rules still run over every file the walk named but
                 // could not read: a 2 MB `.pem` or a binary `.p12` is a secret file by its name.
+                // A long-line file is not here: `long_line_contents` carries its text, and the
+                // secret-shaped rules (path included) run over it below, so it is scanned once.
+                //
+                // A file over the file size limit and not over the secret search ceiling is
+                // opened here, one at a time, for the secret-shaped rules only: never read for
+                // the inspection, sent to a model, billed or counted, and never kept. One that
+                // is searched is not in `unread_paths` (the secret pass includes the path rules,
+                // so it would be reported twice); one that is not text stays name-only.
+                let mut secret_searched_oversize: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let mut oversize_secret_findings: Vec<Finding> = Vec::new();
+                let mut oversize_not_text = 0usize;
+                let mut oversize_grown = 0usize;
+                if run_deterministic {
+                    for rel in &secret_searchable {
+                        let (root, path) = (repo_root_for_history.clone(), rel.clone());
+                        let repo_name = spec.to_string();
+                        let read =
+                            tokio::task::spawn_blocking(
+                                move || match files::read_for_secret_search(&root, &path) {
+                                    files::SecretRead::Text(text) => {
+                                        Ok(audit::secret_findings_in(&repo_name, &path, &text))
+                                    }
+                                    other => Err(other),
+                                },
+                            )
+                            .await
+                            .unwrap_or(Err(files::SecretRead::NotText));
+                        match read {
+                            Ok(mut found) => {
+                                audit::enrich_secret_context(&mut found, &files);
+                                oversize_secret_findings.extend(found);
+                                secret_searched_oversize.insert(rel.clone());
+                            }
+                            // Grew past the ceiling after the walk: name-only, like the rest.
+                            Err(files::SecretRead::OverCeiling) => oversize_grown += 1,
+                            Err(_) => oversize_not_text += 1,
+                        }
+                    }
+                    secret_search_totals.push((
+                        secret_searched_oversize.len() + skipped_long_line.len(),
+                        skipped_oversize.len() - secret_searchable.len() + oversize_grown,
+                        oversize_not_text,
+                    ));
+                }
                 let unread_paths: Vec<String> = skipped_oversize
                     .iter()
+                    .filter(|p| !secret_searched_oversize.contains(*p))
                     .chain(&skipped_beyond_cap)
                     .chain(&skipped_unreadable)
                     .cloned()
@@ -2577,12 +2638,32 @@ pub async fn audit_repos_with_llm_controlled(
                 files_excluded_total += excluded_noise;
                 excluded_noise_lines_total += noise_lines;
                 any_repo_read = true;
+                // A pattern for this repo that matched nothing because its folder is never read
+                // is listed by the pattern, marked as having removed nothing read or billed.
+                let never_read_patterns: Vec<String> = controls
+                    .scope
+                    .patterns()
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, p)| {
+                        !matched_patterns.contains(i)
+                            && (scope::names_any_repo(p)
+                                || scope::target_repo(p, std::slice::from_ref(&spec.to_string()))
+                                    .is_some())
+                            && scope::never_read_folder(p, std::slice::from_ref(&spec.to_string()))
+                                .is_some()
+                    })
+                    .map(|(_, p)| p.clone())
+                    .collect();
                 skipped_files_total.record_repo(
                     spec,
                     crate::scan_ledger::RepoSkips {
+                        excluded_never_read: never_read_patterns,
                         oversize: skipped_oversize,
                         beyond_cap: skipped_beyond_cap,
                         not_text: skipped_unreadable,
+                        excluded_by_agreement,
+                        long_line: skipped_long_line,
                         sizes: &skipped_sizes,
                         file_cap,
                     },
@@ -2695,6 +2776,12 @@ pub async fn audit_repos_with_llm_controlled(
                     }
                     let mut floor = audit_files(spec, &files);
                     floor.extend(audit::audit_unread_paths(spec, &unread_paths, &files));
+                    floor.extend(audit::audit_long_line_secrets(
+                        spec,
+                        &long_line_contents,
+                        &files,
+                    ));
+                    floor.extend(oversize_secret_findings);
                     // P4: the ONE context fact that needs real git plumbing (whether a
                     // committed secret also appears in an EARLIER commit) rather than just
                     // the already-fetched file set `audit_files` works from — see
@@ -3927,6 +4014,9 @@ pub async fn audit_repos_with_llm_controlled(
     // Computed once and shared with provenance below, so the gate and the export can never
     // disagree about whether a model ran.
     let ai_ran_for_ledger = report.actual_usage.as_ref().is_some_and(|u| u.calls > 0);
+    for (searched, over_ceiling, not_text) in &secret_search_totals {
+        skipped_files_total.record_secret_search(*searched, *over_ceiling, *not_text);
+    }
     let skipped_totals = skipped_files_total.totals();
     let file_cap_hits = skipped_files_total.file_cap_hits();
     let (skipped_files, skipped_beyond_cap_total) = skipped_files_total.finish();
@@ -4200,6 +4290,7 @@ mod tests {
     async fn the_incomplete_note_names_the_real_cause_of_the_stop() {
         fn capped() -> crate::ai_audit::UsageMeter {
             crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls {
+                scope: Default::default(),
                 max_cost_usd: Some(20.0),
                 ..crate::cost_cap::RunControls::default()
             })
@@ -4436,7 +4527,10 @@ mod tests {
 
         let got = capture_audited_ref("acme/app", &repo).await;
         let _ = commits_touching_path(&repo, "a.txt").await;
-        let _ = crate::onboard::files::read_local_repo_files(&repo);
+        let _ = crate::onboard::files::read_local_repo_files(
+            &repo,
+            &crate::onboard::scope::RepoScope::none(),
+        );
         assert!(got.sha.is_some());
         assert!(
             !marker.exists(),
@@ -4853,7 +4947,8 @@ mod tests {
         fs::write(base.join("README.md"), "# readme").unwrap(); // not a code ext -> skipped
         fs::write(base.join("node_modules/x/index.js"), "noise").unwrap(); // noise dir -> skipped
 
-        let extracted = read_local_repo_files(&base).unwrap();
+        let extracted =
+            read_local_repo_files(&base, &crate::onboard::scope::RepoScope::none()).unwrap();
         let files = extracted.files;
         let _ = fs::remove_dir_all(&base);
 
@@ -6346,6 +6441,246 @@ mod tests {
         .unwrap();
         let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
         (dir, sources)
+    }
+
+    /// Fix A (round 3): a file with a line longer than the room's read page is not read, billed
+    /// or counted, but the secrets floor still scans its content. One synthetic minified file
+    /// holds a vendor-token-shaped string, and a one-line `.pem` proves the path-only rule is
+    /// not reported twice (once from the unread paths, once from the long-line pass).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_long_line_file_still_gets_the_secrets_floor_once_with_bounded_evidence() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        std::fs::create_dir_all(dir.path().join("certs")).unwrap();
+        std::fs::write(dir.path().join("lib/ok.rs"), "fn ok() {}\n").unwrap();
+        let token = "ghp_0123456789012345678901234567890123456";
+        let wide = format!(
+            "var a=1;{}var t=\"{token}\";{}\n",
+            "x".repeat(60_000),
+            "y".repeat(60_000)
+        );
+        assert!(wide.len() > crate::ai_audit::agent_finder::room::MAX_READ_LINE_BYTES);
+        std::fs::write(dir.path().join("lib/wide.js"), &wide).unwrap();
+        std::fs::write(
+            dir.path().join("certs/server.pem"),
+            format!("{}\n", "A".repeat(100_500)),
+        )
+        .unwrap();
+        let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
+        let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        // Not read, not counted.
+        assert_eq!(
+            report.files_scanned, 1,
+            "only lib/ok.rs is read and counted"
+        );
+        let hits: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "lib/wide.js" && f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+            .collect();
+        assert_eq!(hits.len(), 1, "one vendor-token finding: {hits:?}");
+        let hit = hits[0];
+        assert!(hit.snippet.chars().count() <= 160, "snippet is capped");
+        assert!(!hit.snippet.contains(token), "snippet is redacted");
+        assert!(hit.captures.contains_key("secret-kind"), "enriched");
+        assert!(hit.effort.is_some());
+        assert_eq!(hit.repo, "me/api");
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains(token), "no raw token anywhere in the report");
+        assert!(
+            !json.contains(&"x".repeat(2_000)),
+            "the long line never travels whole into the report"
+        );
+        // Only secret-shaped rules run over a long-line file.
+        assert!(report
+            .findings
+            .iter()
+            .filter(|f| f.path == "lib/wide.js")
+            .all(|f| audit::SECRET_SHAPED_RULES.contains(&f.rule_id.as_str())));
+        // The path-only rule is reported exactly once for the one-line `.pem`.
+        let pem = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "certs/server.pem" && f.rule_id == "SEC-NO-SECRET-FILE-1")
+            .count();
+        assert_eq!(pem, 1, "the path-only rule must not be reported twice");
+        // Still listed as a long-line file under Coverage data.
+        let ledger = serde_json::to_value(&report.ledger).unwrap();
+        let skipped = ledger["input"]["skipped_files"].to_string();
+        assert!(
+            skipped.contains("lib/wide.js") && skipped.contains("long_line"),
+            "still listed as long-line: {skipped}"
+        );
+    }
+
+    /// Fix D (V1 item 38): the secret checks search the contents of files over the 1 MB file size
+    /// limit up to the 20 MB ceiling. A 2 MB text file with a planted fake token gives one masked
+    /// finding with its path and line; a 21 MB file and a 2 MB binary key store get file-name
+    /// checks only, and Coverage says so. None of them is read for the inspection or counted.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn secret_checks_search_over_limit_files_up_to_the_ceiling() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::create_dir_all(dir.path().join("keys")).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn ok() {}\n").unwrap();
+        // A text key file over the limit: searched, and its name rule is reported once.
+        std::fs::write(dir.path().join("keys/server.pem"), "AAAA\n".repeat(250_000)).unwrap();
+        let token = "ghp_0123456789012345678901234567890123456";
+        let mut big = "var row = 1;\n".repeat(4_999);
+        big.push_str(&format!("var t = \"{token}\";\n"));
+        big.push_str(&"var row = 1;\n".repeat(150_000));
+        assert!(big.len() > files::MAX_FILE_BYTES && big.len() < files::MAX_SECRET_SCAN_BYTES);
+        std::fs::write(dir.path().join("data/dump.js"), &big).unwrap();
+        let mut huge = format!("var t = \"{token}\";\n").into_bytes();
+        huge.resize(files::MAX_SECRET_SCAN_BYTES + 1_024, b'x');
+        std::fs::write(dir.path().join("data/huge.js"), huge).unwrap();
+        std::fs::write(
+            dir.path().join("keys/store.p12"),
+            vec![0xFFu8; files::MAX_FILE_BYTES + 4_096],
+        )
+        .unwrap();
+        let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
+        let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        assert_eq!(report.files_scanned, 1, "only lib.rs is read and counted");
+        let hits: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "data/dump.js" && f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "one masked finding in the 2 MB file: {hits:?}"
+        );
+        assert_eq!(hits[0].line, 5_000, "with its line");
+        assert!(!hits[0].snippet.contains(token), "snippet is redacted");
+        assert!(hits[0].snippet.chars().count() <= 160, "snippet is bounded");
+        assert!(
+            !serde_json::to_string(&report).unwrap().contains(token),
+            "no raw token anywhere in the report"
+        );
+        assert!(
+            !report.findings.iter().any(|f| f.path == "data/huge.js"),
+            "a file over 20 MB is name-only: no content finding"
+        );
+        let p12 = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "keys/store.p12" && f.rule_id == "SEC-NO-SECRET-FILE-1")
+            .count();
+        assert_eq!(
+            p12, 1,
+            "a binary over-limit file is flagged once by its name"
+        );
+        let pem = report
+            .findings
+            .iter()
+            .filter(|f| f.path == "keys/server.pem" && f.rule_id == "SEC-NO-SECRET-FILE-1")
+            .count();
+        assert_eq!(pem, 1, "a searched file is not flagged twice by its name");
+        let summary = crate::report_export::coverage_gaps::coverage_gaps(&report)
+            .skipped_summary
+            .expect("skipped files are summarised");
+        assert_eq!(
+            summary,
+            "4 files were not read for the inspection: 4 over the 1 MB file size limit. \
+             2 of these files were still searched for secrets. \
+             2 files were not searched for secrets: 1 over 20 MB, 1 not UTF-8 text."
+        );
+    }
+
+    /// An agreed exclusion wins over the secret search too: an excluded over-limit file is never
+    /// opened, so it is not even a candidate for the secret checks.
+    #[test]
+    fn an_agreed_exclusion_keeps_an_over_limit_file_out_of_the_secret_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::write(
+            dir.path().join("data/dump.js"),
+            "var a = 1;\n".repeat(150_000),
+        )
+        .unwrap();
+        let open = read_local_repo_files(dir.path(), &scope::RepoScope::none()).unwrap();
+        assert_eq!(open.secret_searchable, ["data/dump.js"]);
+        let scope = scope::ScanScope::from_patterns(&["api/data/dump.js".to_string()])
+            .unwrap()
+            .for_repo("me/api");
+        let extracted = read_local_repo_files(dir.path(), &scope).unwrap();
+        assert!(extracted.secret_searchable.is_empty());
+        assert!(extracted.skipped_oversize.is_empty());
+        assert_eq!(extracted.excluded_by_agreement, ["data/dump.js"]);
+    }
+
+    /// An agreed exclusion wins over every class: a long-line file excluded by agreement is
+    /// never read, so no secrets pass runs over it.
+    #[test]
+    fn an_agreed_exclusion_keeps_a_long_line_file_out_of_the_secrets_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        let wide = format!(
+            "{}ghp_0123456789012345678901234567890123456{}\n",
+            "x".repeat(60_000),
+            "y".repeat(60_000)
+        );
+        std::fs::write(dir.path().join("lib/wide.js"), wide).unwrap();
+        let scope = scope::ScanScope::from_patterns(&["api/lib/wide.js".to_string()])
+            .unwrap()
+            .for_repo("me/api");
+        let extracted = read_local_repo_files(dir.path(), &scope).unwrap();
+        assert!(extracted.long_line_contents.is_empty());
+        assert!(extracted.skipped_long_line.is_empty());
+        assert_eq!(extracted.excluded_by_agreement, ["lib/wide.js"]);
+        assert!(
+            audit::audit_long_line_secrets("me/api", &extracted.long_line_contents, &[]).is_empty()
+        );
     }
 
     /// The removed "must choose an alternative before arming" gate (2026-09-22 design,
@@ -7931,7 +8266,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
             !paths.iter().any(|p| p.contains("secrets.env")),
@@ -7961,7 +8297,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         // The .env is NOT in .gitignore → must be scanned.
         assert!(
@@ -8086,7 +8423,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
             paths.contains(&".env.production"),
@@ -8119,7 +8457,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
             !paths.iter().any(|p| p.contains("local-only.env")),
@@ -8168,7 +8507,8 @@ mod tests {
         )
         .expect("write .env.staging");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let findings = audit_files("test/repo", &extracted.files);
 
         for path in [
@@ -8235,7 +8575,8 @@ mod tests {
         std::fs::create_dir_all(&nm).expect("mkdir node_modules");
         std::fs::write(nm.join("index.js"), "module.exports = {};\n").expect("write noise");
 
-        let extracted = read_local_repo_files(root).expect("scan ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("scan ok");
         let admitted_paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
 
         // File-count sanity: the benign config files WERE admitted (so an empty-findings
@@ -8307,7 +8648,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 
-        let extracted = read_local_repo_files(root).expect("non-git fallback ok");
+        let extracted = read_local_repo_files(root, &crate::onboard::scope::RepoScope::none())
+            .expect("non-git fallback ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         assert!(
             !paths.iter().any(|p| p.contains("node_modules")),

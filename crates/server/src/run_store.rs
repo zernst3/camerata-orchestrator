@@ -252,6 +252,12 @@ pub struct ModelsRecord {
     /// Not part of [`Self::matches_for_resume`]: [`Self::hold_finder_model`] keeps it.
     #[serde(default)]
     pub finder_model: String,
+    /// The project's Excluded by agreement list (normalized) the run started with. Part of the
+    /// run's resume identity: checkpointed pieces may hold findings in files a different list
+    /// excludes (or lack ones it admits), so a resume with another list is refused. Empty for a
+    /// run saved before it was recorded, which read every admitted file.
+    #[serde(default)]
+    pub scan_exclusions: Vec<String>,
 }
 
 /// The agent finder's default model when a run saved without a recorded finder model started.
@@ -295,6 +301,7 @@ impl ModelsRecord {
             } else {
                 String::new()
             },
+            scan_exclusions: controls.scope.patterns().to_vec(),
         }
     }
 
@@ -1575,6 +1582,13 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
                 saved.name, record.run_id
             ));
         }
+    }
+    if record.models.scan_exclusions != check.models.scan_exclusions {
+        return refuse(format!(
+            "Excluded by agreement is not the list run {} was made with, and its stored replies \
+             cover the files that list left out; start a new run",
+            record.run_id
+        ));
     }
     if !record.models.matches_for_resume(check.models) {
         return refuse(format!(

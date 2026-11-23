@@ -17,7 +17,12 @@ fn render_repo_digest_is_redacted() {
     .expect("write readme");
     std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").expect("write source");
 
-    let digest = render_repo_digest("acme/demo", dir.path()).expect("a digest");
+    let digest = render_repo_digest(
+        "acme/demo",
+        dir.path(),
+        &crate::onboard::scope::ScanScope::none(),
+    )
+    .expect("a digest");
     assert!(digest.contains("Demo"), "the digest still carries the doc");
     assert!(
         !digest.contains(&p.value),

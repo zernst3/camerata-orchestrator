@@ -277,6 +277,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<crate::run_store::RunStore> {
             group_review: String::new(),
             finder: String::new(),
             finder_model: String::new(),
+            scan_exclusions: Vec::new(),
         },
         ai_scan_key: crate::scan_cache::AiScanKey {
             audit_model: MODEL.to_string(),

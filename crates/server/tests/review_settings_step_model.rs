@@ -73,6 +73,7 @@ async fn a_blank_group_review_model_clears_the_setting_and_the_run_resolves_the_
         "the other review settings are untouched"
     );
     let controls = camerata_server::cost_cap::RunControls {
+        scope: Default::default(),
         review: after.review.clone(),
         ..camerata_server::cost_cap::RunControls::default()
     };

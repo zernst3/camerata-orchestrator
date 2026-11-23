@@ -210,6 +210,11 @@ mod order_preset_followup_tests;
 #[cfg(test)]
 mod resume_button_tests;
 
+/// The pre-start check: a file over the read limit is a warning and leaves Start on; a pattern
+/// that matches nothing holds Start until it is fixed or removed.
+#[cfg(test)]
+mod over_limit_start_tests;
+
 /// The Inspection screen tells the truth (work order C): per finder, the "This run" block, the
 /// estimate, the Inspect button and the help behind "?".
 #[cfg(test)]

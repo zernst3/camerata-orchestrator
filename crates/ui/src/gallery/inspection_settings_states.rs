@@ -156,6 +156,15 @@ pub(crate) fn page_props(id: &str) -> Option<PageProps> {
             }),
             ..base
         },
+        "inspection-settings/exclusions-listed" => PageProps {
+            project: {
+                let mut value = serde_json::to_value(recipe()).expect("a project serializes");
+                value["scan_exclusions"] =
+                    serde_json::json!(["acme-field-data/seeds/**", "acme-api/db/dump.sql"]);
+                serde_json::from_value(value).expect("a project with an exclusion list")
+            },
+            ..base
+        },
         "inspection-settings/registry-missing" => PageProps {
             models: None,
             ..base
@@ -191,4 +200,5 @@ states! {
     save_error => "inspection-settings/save-error",
     registry_missing => "inspection-settings/registry-missing",
     non_anthropic_warning => "inspection-settings/non-anthropic-warning",
+    exclusions_listed => "inspection-settings/exclusions-listed",
 }

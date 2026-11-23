@@ -32,6 +32,7 @@ fn todays_model_list_is_unchanged_with_the_engine_finder() {
 #[test]
 fn the_agent_finder_lists_the_finder_model_and_leaves_out_scan_and_calibration() {
     let controls = RunControls {
+        scope: Default::default(),
         finder: FinderChoice::Agent,
         ..RunControls::default()
     };
@@ -64,12 +65,14 @@ fn the_agent_finder_lists_the_finder_model_and_leaves_out_scan_and_calibration()
 #[test]
 fn an_explicit_finder_model_is_used_and_a_blank_one_falls_back_to_the_default() {
     let named = RunControls {
+        scope: Default::default(),
         finder: FinderChoice::Agent,
         finder_model: Some("  claude-other-model ".to_string()),
         ..RunControls::default()
     };
     assert_eq!(named.finder_model_for(), "claude-other-model");
     let blank = RunControls {
+        scope: Default::default(),
         finder_model: Some("   ".to_string()),
         ..RunControls::default()
     };
@@ -79,6 +82,7 @@ fn an_explicit_finder_model_is_used_and_a_blank_one_falls_back_to_the_default() 
 #[test]
 fn the_spend_limits_price_check_sees_the_finder_model() {
     let controls = RunControls {
+        scope: Default::default(),
         finder: FinderChoice::Agent,
         finder_model: Some("claude-not-in-the-registry".to_string()),
         max_cost_usd: Some(10.0),
@@ -92,6 +96,7 @@ fn the_spend_limits_price_check_sees_the_finder_model() {
     assert!(refusal.contains("the finder"), "{refusal}");
 
     let priced = RunControls {
+        scope: Default::default(),
         finder: FinderChoice::Agent,
         max_cost_usd: Some(10.0),
         ..RunControls::default()

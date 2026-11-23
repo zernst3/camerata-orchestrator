@@ -216,6 +216,7 @@ async fn the_failure_reason_states_the_attempt_count() {
 
 fn capped_meter(cap: f64) -> UsageMeter {
     UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(cap),
         ..crate::cost_cap::RunControls::default()
     })

@@ -413,6 +413,198 @@ pub(in crate::cockpit) struct RepoSizeView {
     /// function the command line prints from). `None` for a repo that could not be read.
     #[serde(default)]
     pub agent_finder: Option<AgentFinderSizeView>,
+    /// Files over the read limit that the project's exclusion list does not name: the pre-start
+    /// check lists them as a warning and leaves Start on.
+    #[serde(default)]
+    pub over_limit: Vec<OverLimitSizeView>,
+    /// The read limit as a person reads it ("1 MB"), as the engine states it.
+    #[serde(default)]
+    pub read_limit: String,
+    /// The largest over-limit file the secret checks still search ("20 MB"), as the engine states it.
+    #[serde(default)]
+    pub secret_search_limit: String,
+    /// Patterns of Excluded by agreement that match no file in any repo (project-wide).
+    #[serde(default)]
+    pub unmatched_patterns: Vec<String>,
+    /// One entry per unmatched pattern: why it never can, or empty.
+    #[serde(default)]
+    pub unmatched_reasons: Vec<String>,
+    /// Patterns naming a repo that was not read, with the reason in `unchecked_reasons`.
+    #[serde(default)]
+    pub unchecked_patterns: Vec<String>,
+    #[serde(default)]
+    pub unchecked_reasons: Vec<String>,
+    /// Patterns matching only files never read: a warning, with the reason in `warned_reasons`.
+    #[serde(default)]
+    pub warned_patterns: Vec<String>,
+    #[serde(default)]
+    pub warned_reasons: Vec<String>,
+}
+
+/// One file over the read limit, as the preflight route sends it.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(in crate::cockpit) struct OverLimitSizeView {
+    pub path: String,
+    #[serde(default)]
+    pub bytes: u64,
+    /// The path as a pattern writes it, as the server states it.
+    #[serde(default)]
+    pub display: String,
+    /// Why it cannot be read when that is not the size limit, as the server states it.
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// The pre-start block for a project's repo sizes: every file over the read limit (a warning), the
+/// patterns that match nothing or cannot be checked (holds) and the never-read patterns (a
+/// warning). `None` when there is nothing to show (or the sizes are not known yet).
+pub(in crate::cockpit) fn over_limit_block_of(
+    sizes: &Option<Vec<RepoSizeView>>,
+) -> Option<camerata_ui_core::readiness::OverLimitBlock> {
+    let sizes = sizes.as_ref()?;
+    let limit = sizes
+        .iter()
+        .map(|s| s.read_limit.as_str())
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
+    let files: Vec<camerata_ui_core::readiness::OverLimitFile> = sizes
+        .iter()
+        .flat_map(|s| {
+            s.over_limit
+                .iter()
+                .map(|f| camerata_ui_core::readiness::OverLimitFile {
+                    repo: s.repo.clone(),
+                    path: f.path.clone(),
+                    display: f.display.clone(),
+                    reason: f.reason.clone(),
+                    bytes: f.bytes,
+                })
+        })
+        .collect();
+    let unmatched = sizes
+        .iter()
+        .find(|s| !s.unmatched_patterns.is_empty())
+        .map(|s| s.unmatched_patterns.clone())
+        .unwrap_or_default();
+    let notes = sizes
+        .iter()
+        .find(|s| !s.unmatched_patterns.is_empty())
+        .map(|s| s.unmatched_reasons.clone())
+        .unwrap_or_default();
+    let unchecked: Vec<String> = sizes
+        .iter()
+        .find(|s| !s.unchecked_patterns.is_empty())
+        .map(|s| {
+            s.unchecked_patterns
+                .iter()
+                .zip(
+                    s.unchecked_reasons
+                        .iter()
+                        .chain(std::iter::repeat(&String::new())),
+                )
+                .map(|(p, r)| {
+                    if r.is_empty() {
+                        p.clone()
+                    } else {
+                        format!("{p} ({r})")
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let warned: Vec<(String, String)> = sizes
+        .iter()
+        .find(|s| !s.warned_patterns.is_empty())
+        .map(|s| {
+            s.warned_patterns
+                .iter()
+                .cloned()
+                .zip(
+                    s.warned_reasons
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::repeat(String::new())),
+                )
+                .collect()
+        })
+        .unwrap_or_default();
+    let secret_limit = sizes
+        .iter()
+        .map(|s| s.secret_search_limit.as_str())
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
+    camerata_ui_core::readiness::over_limit_block(limit, files, unmatched, notes, unchecked, warned)
+        .map(|block| block.with_secret_limit(secret_limit))
+}
+
+/// Remove one pattern from Excluded by agreement (`POST /api/projects/:id/scan-exclusions/remove`).
+pub(in crate::cockpit) async fn remove_exclusion_pattern(
+    project_id: &str,
+    pattern: &str,
+) -> Result<Vec<String>, String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/scan-exclusions/remove",
+            crate::bff_base(),
+            project_id
+        ))
+        .json(&serde_json::json!({ "pattern": pattern }))
+        .send()
+        .await
+        .map_err(|_| "The server could not be reached.".to_string())?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| "The server's answer could not be read.".to_string())?;
+    if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(body
+            .get("project")
+            .and_then(|p| p.get("scan_exclusions"))
+            .and_then(|l| serde_json::from_value::<Vec<String>>(l.clone()).ok())
+            .unwrap_or_default())
+    } else {
+        Err(body
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("The pattern could not be removed.")
+            .to_string())
+    }
+}
+
+/// Exclude one file by agreement: add its exact path to the project's exclusion list
+/// (`POST /api/projects/:id/scan-exclusions/add`). The server's reason on a refusal, else `Ok`.
+pub(in crate::cockpit) async fn exclude_file_by_agreement(
+    project_id: &str,
+    repo: &str,
+    path: &str,
+) -> Result<Vec<String>, String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/scan-exclusions/add",
+            crate::bff_base(),
+            project_id
+        ))
+        .json(&serde_json::json!({ "repo": repo, "path": path }))
+        .send()
+        .await
+        .map_err(|_| "The server could not be reached.".to_string())?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| "The server's answer could not be read.".to_string())?;
+    if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(body
+            .get("project")
+            .and_then(|p| p.get("scan_exclusions"))
+            .and_then(|l| serde_json::from_value::<Vec<String>>(l.clone()).ok())
+            .unwrap_or_default())
+    } else {
+        Err(body
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("The file could not be excluded.")
+            .to_string())
+    }
 }
 
 /// The agent finder's pre-flight figures for one repo, as the preflight route sends them.

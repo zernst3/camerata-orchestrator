@@ -224,11 +224,19 @@ async fn checker_rule_ids_for_repo_is_config_aware_per_repo_for_both_checkers() 
     let ExtractedRepo {
         files: configured_files,
         ..
-    } = read_local_repo_files(configured_dir.path()).expect("read configured fixture");
+    } = read_local_repo_files(
+        configured_dir.path(),
+        &camerata_server::onboard::scope::RepoScope::none(),
+    )
+    .expect("read configured fixture");
     let ExtractedRepo {
         files: unconfigured_files,
         ..
-    } = read_local_repo_files(unconfigured_dir.path()).expect("read unconfigured fixture");
+    } = read_local_repo_files(
+        unconfigured_dir.path(),
+        &camerata_server::onboard::scope::RepoScope::none(),
+    )
+    .expect("read unconfigured fixture");
 
     let configured_view = RepoView {
         spec: "e2e/configured",

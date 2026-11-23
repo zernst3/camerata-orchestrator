@@ -365,6 +365,37 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    are **not violations**; they tell the operator where coverage has a gap, so the operator knows what the scan did
    and didn't check.
 
+   **Excluded by agreement patterns and the pre-start notice.** A project's Excluded by agreement
+   list names files a run never reads and never bills; each one is listed under Coverage as
+   "excluded by agreement". Before a run starts, the desktop and `camerata inspect` check the list
+   against the files of each repo. A pattern that matches no file anywhere stops the start until
+   you remove it or fix it ("Excluded by agreement holds a pattern that matches no file"). A
+   pattern that matches only files in a folder Camerata never reads anyway (`node_modules`,
+   vendored code, build output) does not stop the start: it is a warning, because the pattern is
+   harmless. The desktop says "A start is not held; you can remove it" and still offers
+   **Remove pattern**, and `camerata inspect` prints `warning: Excluded by agreement holds
+   "<pattern>" (matches no file: <folder> is never read, so this pattern is not needed); the start
+   goes ahead` to stderr. `camerata count` prints "warning: <pattern> matches only files never
+   read; excluded by agreement; nothing here is read by default". The package still lists the
+   pattern in its Coverage section, the PDF and the workbook, marked "excluded by agreement;
+   nothing here is read by default". A file over the 1 MB file size limit, or with a line longer
+   than 97 KB, never stops a start. Before the start the desktop lists it, with its size, as a
+   warning ("1 file will not be read for the inspection (over the 1 MB file size limit)") and
+   leaves Start on; `camerata inspect` prints the same warning to stderr. The file is not read for
+   the inspection, sent to a model, billed or counted. The secret checks still search its
+   contents by pattern, never by the model, so a token or key inside it is found and reported with
+   its path and line, masked like any other. With "AI review only" the security floor is off, so
+   the warning says the file is not searched for secrets in this run. Add the file to Excluded by agreement if you want it
+   left alone completely; it is then never opened. Searching holds for a file up to 20 MB. Coverage
+   counts these files in one sentence ("4 files were
+   not read for the inspection: ...") and then says how many of them were still searched for
+   secrets ("2 of these files were still searched for secrets."). Only the file name is checked
+   for a file over 20 MB, a file beyond the 20,000-file limit and a file that is not UTF-8 text,
+   and Coverage says so: "2 files were not searched for secrets: 1 over 20 MB, 1 not UTF-8
+   text". A file excluded by agreement is never opened, so it is named there too ("3 excluded by
+   agreement"). A pattern that removed nothing is not a file: Coverage counts it in its own
+   sentence ("1 pattern is excluded by agreement; nothing here is read by default.").
+
    **Scan tools auto-install on first use.** Camerata auto-provisions Semgrep and ESLint into its
    own cache directory (`~/Library/Application Support/camerata/tooling/` on macOS;
    `~/.local/share/camerata/tooling/` on Linux) the first time a scan needs them. The bundled
@@ -512,7 +543,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      the repo's source was deleted from this machine it shows `Source deleted on <date>, re-fetch to
      view` and no code. A file too large to view (over 4 MB) offers **Show the enclosing block**
      instead, which opens the full-detail modal. A missing or binary file gives its reason. Files
-     between 400 KB and 4 MB are loaded 800 lines at a time and the next page loads as the operator scrolls.
+     between 1 MB and 4 MB are loaded 800 lines at a time and the next page loads as the operator scrolls.
    - **Deciding without leaving the code.** `C`, `T`, `I` and `F` do exactly what they do in the pane:
      `C` and `T` apply at once with the five-second Undo (shown at the bottom of the viewer), and `I`
      and `F` ask for a reason first (Enter commits, Esc cancels and a blank reason is refused). After
@@ -560,12 +591,13 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      case), the current match is stronger and the field shows `3 of 12`. Enter steps to the next
      match and Shift+Enter to the previous one; stepping past either end wraps and the count says
      `(wrapped)`. `Esc` closes the field and leaves the highlights until the operator's next move (a
-     navigation key, go-to-line or opening a reference). In a file longer than 400 KB only the
+     navigation key, go-to-line or opening a reference). In a file longer than 1 MB only the
      loaded 800 lines are searched, and the count says which lines.
    - **References.** `S` opens a prompt pre-filled with the symbol the rule captured, else the
      longest identifier on the finding's line. Enter lists every whole-word use of it at the
      inspected commit, at most 200 (the heading says when there are more), skipping vendored and
-     generated paths (and any folder in `CAMERATA_SCAN_EXCLUDE_DIRS`, as in the scan), with every
+     generated paths (and any folder in `CAMERATA_SCAN_EXCLUDE_DIRS`, and any file the project's
+     Excluded by agreement names, as in the scan), with every
      line redacted; a line of key material is shown as `[redacted]` but keeps its `path:line`.
      `Up` `Down` choose (the list scrolls to keep the choice on screen), `Enter` opens the hit and
      `Esc` goes back to the code. If the search could not run, or took too long or the server was

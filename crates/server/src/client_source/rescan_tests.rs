@@ -692,3 +692,131 @@ fn an_ai_finding_under_a_floor_rule_id_survives_the_delta() {
     let carried: Vec<&str> = delta.carried.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(carried, ["model.rs"], "{carried:?}");
 }
+
+/// Item 9, round 3 ruling: the delta rescan no longer refuses a file over the limit that Excluded
+/// by agreement does not name; it is a warning at the start, and the rescan goes ahead.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn rescan_changes_does_not_refuse_a_file_over_the_limit() {
+    let rig = rig();
+    first_inspection(&rig).await;
+    write_file(
+        &rig.fx.checkout,
+        "seeds/big.js",
+        &"x".repeat(crate::onboard::files::MAX_FILE_BYTES + 1),
+    );
+    write_file(
+        &rig.fx.checkout,
+        "src/changed.ts",
+        &changed_ts(CHANGED_MARKER_NEW),
+    );
+    commit_all(&rig.fx.checkout, "edit and add a big file");
+    let outcome = rescan_changes(&rig.fx.state, &rig.fx.project_id, REPO).await;
+    let text = format!("{outcome:?}");
+    assert!(outcome.is_ok(), "{text}");
+    // The file warning is in the notes, as on the scan route.
+    let Ok(RescanOutcome::Started { notes, .. }) = outcome else {
+        panic!("expected a started rescan: {text}");
+    };
+    let notes = notes.join("\n");
+    assert!(
+        notes.contains("app/seeds/big.js") && notes.contains("will not be read for the inspection"),
+        "{notes}"
+    );
+}
+
+// ── Item 4 (gap closed): the preview linters' results honor Excluded by agreement ───────────
+
+/// A stub `ruff` (first on PATH) that reports one problem in `seeds/q.py` and one in `src/a.py`.
+fn install_stub_ruff(rig: &Rig) {
+    use std::os::unix::fs::PermissionsExt;
+    let json = r#"[{"code":"S608","message":"Possible SQL injection","filename":"seeds/q.py","location":{"row":1,"column":1}},{"code":"S608","message":"Possible SQL injection","filename":"src/a.py","location":{"row":1,"column":1}}]"#;
+    let bin = rig.tools.path().join("ruff");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\ncat <<'EOF'\n{json}\nEOF\nexit 1\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_file(&rig.fx.checkout, "src/a.py", "q = 1\n");
+    write_file(&rig.fx.checkout, "seeds/q.py", "q = 1\n");
+    commit_all(&rig.fx.checkout, "python files");
+    rig.fx
+        .state
+        .projects
+        .update(&rig.fx.project_id, |p| {
+            p.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "PYTHON-PARAMETERIZED-SQL-1".to_string(),
+                chosen_option: None,
+                repos: Vec::new(),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+}
+
+fn preview_paths(findings: &[crate::onboard::Finding]) -> Vec<String> {
+    let mut paths: Vec<String> = findings
+        .iter()
+        .filter(|f| f.preview_tool.as_deref() == Some("ruff"))
+        .map(|f| f.path.clone())
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_job_path_drops_a_linter_result_in_an_excluded_file() {
+    let rig = rig();
+    install_stub_ruff(&rig);
+    let entry = first_inspection(&rig).await;
+    assert_eq!(
+        preview_paths(&entry.report.findings),
+        ["seeds/q.py", "src/a.py"],
+        "control: the stub linter reports both when nothing is excluded"
+    );
+    rig.fx
+        .state
+        .projects
+        .set_scan_exclusions(&rig.fx.project_id, &["app/seeds/**".to_string()])
+        .unwrap();
+    let entry = first_inspection(&rig).await;
+    assert_eq!(preview_paths(&entry.report.findings), ["src/a.py"]);
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_synchronous_path_drops_a_linter_result_in_an_excluded_file() {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let rig = rig();
+    install_stub_ruff(&rig);
+    rig.fx
+        .state
+        .projects
+        .set_scan_exclusions(&rig.fx.project_id, &["app/seeds/**".to_string()])
+        .unwrap();
+    let req = serde_json::to_value(scan_request(&rig.fx).await).unwrap();
+    let resp = crate::router(rig.fx.state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/onboard/audit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(req.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let report: crate::onboard::ScanReport = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        preview_paths(&report.findings),
+        ["src/a.py"],
+        "{:?}",
+        report.message
+    );
+}

@@ -509,6 +509,10 @@ pub(crate) async fn source_of(
     let Ok(read) = source_for_read(state, Some(project), repo, None).await else {
         return Vec::new();
     };
+    // A file the project's exclusion list names is not read, not even to check a finding.
+    if crate::onboard::scope::scope_for_read(state, Some(project)).excludes(repo, path) {
+        return Vec::new();
+    }
     let cap = 8 * 1024 * 1024;
     let bytes = match &read {
         SourceRead::Git { dir, sha, .. } => read_bytes(Origin::Git { dir, sha }, path, cap).await,

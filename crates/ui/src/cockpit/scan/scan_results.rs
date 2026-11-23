@@ -257,23 +257,20 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| repo_selection);
     // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
     // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
-    // Per-repo sizes for the estimate: several repos always, and one repo too under the Agent
-    // finder (its figures come with the sizes). Reads the live finder, so a change of finder
-    // fetches again.
-    let repo_sizes = {
+    // Per-repo sizes: the estimate's input (several repos always, and one repo too under the
+    // Agent finder, whose figures come with the sizes) and, for every project, the pre-start
+    // check of files over the read limit. The pre-start check restarts the fetch after a file is
+    // excluded by agreement.
+    let mut repo_sizes = {
         let repos = report.repos.clone();
         use_resource(move || {
             let repos = repos.clone();
-            let agent = finder_now() == camerata_api_types::project::ProjectFinder::Agent;
-            async move {
-                if repos.len() > 1 || agent {
-                    fetch_repo_sizes(&repos).await
-                } else {
-                    None
-                }
-            }
+            async move { fetch_repo_sizes(&repos).await }
         })
     };
+    // The pre-start block: every file over the read limit that the project's exclusion list does
+    // not name. A warning: Start stays on.
+    let over_limit = over_limit_block_of(&repo_sizes.read().clone().flatten());
     let viewed_repo = use_signal(|| report.repos.first().cloned().unwrap_or_default());
     use_context_provider(|| viewed_repo);
     let mut viewed_repo = viewed_repo;
@@ -1396,6 +1393,46 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                         findings: findings.clone(),
                         auditing: auditing(),
                         scan_block: scan_blocked.clone(),
+                        over_limit: over_limit.clone(),
+                        floor_on: checks().flags().1,
+                        on_exclude: {
+                            let exclude_pid = project_id.clone();
+                            EventHandler::new(move |(repo, path): (String, String)| {
+                                let pid = exclude_pid.clone();
+                                spawn(async move {
+                                    match exclude_file_by_agreement(&pid, &repo, &path).await {
+                                        Ok(list) => {
+                                            crate::cockpit::scan_exclusions::publish_exclusions(&pid, list);
+                                            repo_sizes.restart();
+                                        }
+                                        Err(why) => crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Error,
+                                            &why,
+                                        ),
+                                    }
+                                });
+                            })
+                        },
+                        on_remove: {
+                            let remove_pid = project_id.clone();
+                            EventHandler::new(move |pattern: String| {
+                                let pid = remove_pid.clone();
+                                spawn(async move {
+                                    match remove_exclusion_pattern(&pid, &pattern).await {
+                                        Ok(list) => {
+                                            crate::cockpit::scan_exclusions::publish_exclusions(&pid, list);
+                                            repo_sizes.restart();
+                                        }
+                                        Err(why) => crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Error,
+                                            &why,
+                                        ),
+                                    }
+                                });
+                            })
+                        },
                         on_audit: move |rules: Vec<SelectedAuditRule>| {
                             let repos = repos_audit.clone();
                             let mode = audit_mode();

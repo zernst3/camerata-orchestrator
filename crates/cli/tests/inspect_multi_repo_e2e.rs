@@ -100,6 +100,7 @@ fn args(a: &Path, b: &Path, export: &Path) -> InspectArgs {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     }
 }
 

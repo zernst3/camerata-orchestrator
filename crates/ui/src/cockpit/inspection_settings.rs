@@ -139,6 +139,8 @@ pub(crate) enum InspectionEvent {
     BackendSaved(ProjectBackend),
     /// The embedded Client engagement control saved: engagement and the client tooling opt-in.
     EngagementSaved(bool, bool),
+    /// The exclusion list saved: the list the server stored.
+    ExclusionsSaved(Vec<String>),
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -316,6 +318,12 @@ pub(crate) fn InspectionSettingsView(props: InspectionSettingsViewProps) -> Elem
                     on_event.call(InspectionEvent::EngagementSaved(engagement, opt_in));
                 },
             }
+            super::scan_exclusions::ScanExclusionsEditor {
+                project_id: project.id.clone(),
+                initial: project.scan_exclusions.clone(),
+                disabled: run_locked,
+                on_saved: move |list| on_event.call(InspectionEvent::ExclusionsSaved(list)),
+            }
             if let Some(line) = conflict {
                 p { class: "review-settings-bad inspection-settings-conflict", role: "alert", "{line}" }
             }
@@ -355,6 +363,7 @@ pub(crate) fn with_event(mut project: ProjectView, event: &InspectionEvent) -> P
             project.client_engagement = *engagement;
             project.client_tooling_opt_in = *opt_in;
         }
+        InspectionEvent::ExclusionsSaved(list) => project.scan_exclusions = list.clone(),
         InspectionEvent::Pick(..) | InspectionEvent::ShowUnused => {}
     }
     project
@@ -404,7 +413,9 @@ pub(crate) fn InspectionSettingsHost(
     let write_id = project_id.clone();
     let handler = EventHandler::new(move |event: InspectionEvent| match event {
         InspectionEvent::ShowUnused => show_unused.set(true),
-        InspectionEvent::BackendSaved(_) | InspectionEvent::EngagementSaved(..) => {
+        InspectionEvent::BackendSaved(_)
+        | InspectionEvent::EngagementSaved(..)
+        | InspectionEvent::ExclusionsSaved(_) => {
             if let Some(current) = project() {
                 let next = with_event(current, &event);
                 project.set(Some(next.clone()));

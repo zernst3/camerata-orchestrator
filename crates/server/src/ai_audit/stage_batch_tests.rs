@@ -1696,6 +1696,7 @@ async fn save_unsettled_batch(cp: &StageCheckpoint, all: &[&str], gone_id: &str)
 
 fn cap_meter() -> UsageMeter {
     UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -2042,6 +2043,7 @@ async fn a_window_of_large_requests_is_refused_at_admission_though_the_old_const
     stage.padding = 300_000;
     let api = Api::new();
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -2096,6 +2098,7 @@ async fn a_window_of_small_requests_under_the_limit_is_still_admitted() {
     let mut stage = Scripted::numbered(10);
     let api = Api::new();
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,
@@ -2132,6 +2135,7 @@ fn priced_reply(cost: f64) -> LlmResponse {
 /// A meter under a $20 limit that has already spent $7.02, $3.68 of it in ONE big finder call.
 fn meter_after_a_big_finder_call() -> UsageMeter {
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(20.0),
         ..crate::cost_cap::RunControls::default()
     });
@@ -2172,6 +2176,7 @@ async fn a_fix_stage_after_a_big_finder_call_is_not_stopped_by_a_limit_it_did_no
 async fn a_limit_that_really_is_reached_still_refuses_the_stage_and_says_so() {
     let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(5.0),
         ..crate::cost_cap::RunControls::default()
     });
@@ -2204,6 +2209,7 @@ async fn a_limit_that_really_is_reached_still_refuses_the_stage_and_says_so() {
 async fn a_checkpoint_stop_is_not_reported_as_the_spend_limit_being_reached() {
     let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(20.0),
         ..crate::cost_cap::RunControls::default()
     });
@@ -2243,6 +2249,7 @@ async fn a_checkpoint_stop_is_not_reported_as_the_spend_limit_being_reached() {
 async fn an_unknown_cost_is_not_reported_as_the_spend_limit_being_reached() {
     let rt = Realtime::new(|id, _| (Duration::from_secs(1), Ok(reply_for(&prompt_for(id)))));
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(20.0),
         ..crate::cost_cap::RunControls::default()
     });
@@ -2305,6 +2312,7 @@ async fn a_request_reserve_is_released_when_its_permit_drops_and_the_limit_still
     // $19.99 spent of $20 and one request in flight: the next is refused, then admitted again
     // once the first finishes and the spend is still under the limit.
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(20.0),
         ..crate::cost_cap::RunControls::default()
     });
@@ -2329,6 +2337,7 @@ async fn a_request_reserve_is_released_when_its_permit_drops_and_the_limit_still
 async fn the_overshoot_stays_bounded_by_the_requests_own_ceilings() {
     let cap = 10.0;
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(cap),
         ..crate::cost_cap::RunControls::default()
     });
@@ -2358,6 +2367,7 @@ async fn a_stage_whose_calls_cost_more_than_their_ceiling_reserves_what_they_rea
     // largest real cost its stage has had, or the overshoot is no longer bounded.
     let cap = 10.0;
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(cap),
         ..crate::cost_cap::RunControls::default()
     });
@@ -2388,6 +2398,7 @@ async fn a_stage_whose_calls_cost_more_than_their_ceiling_reserves_what_they_rea
 #[tokio::test]
 async fn a_refused_admission_carries_the_cause_it_was_refused_for() {
     let meter = UsageMeter::with_controls(crate::cost_cap::RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(5.0),
         ..crate::cost_cap::RunControls::default()
     });

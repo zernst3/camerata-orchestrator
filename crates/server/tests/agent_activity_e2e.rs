@@ -68,6 +68,7 @@ async fn the_agent_finder_shows_its_piece_row_when_a_scan_is_given_a_transcript_
     let store = TranscriptStore::new();
     let agent = std::sync::Arc::new(ScriptedAgent::new(Vec::new()));
     let controls = RunControls {
+        scope: Default::default(),
         finder: FinderChoice::Agent,
         ..RunControls::default()
     };

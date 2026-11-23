@@ -57,6 +57,7 @@ impl LlmPort for Counting {
 /// a resume whose stored replies cost more than the limit allows.
 fn past_the_limit() -> UsageMeter {
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(LIMIT),
         ..RunControls::default()
     };
@@ -387,6 +388,7 @@ async fn the_same_stages_do_send_when_the_limit_is_not_reached() {
     for stage in Stage::ALL.into_iter().filter(|s| *s != Stage::Finder) {
         let llm = Counting::new();
         let meter = UsageMeter::with_controls(RunControls {
+            scope: Default::default(),
             max_cost_usd: Some(LIMIT),
             ..RunControls::default()
         });
@@ -418,6 +420,7 @@ async fn a_judge_stopped_by_the_limit_is_recorded_not_run() {
 
 fn resumed_meter(limit: f64, stored: f64) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(limit),
         stored_spend_usd: stored,
         ..RunControls::default()
@@ -476,6 +479,7 @@ async fn stored_spend_and_new_spend_add_up_against_the_limit() {
 #[test]
 fn the_stage_that_continues_a_run_keeps_the_stored_spend() {
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(LIMIT),
         stored_spend_usd: 4.0,
         ..RunControls::default()
@@ -499,6 +503,7 @@ fn the_cap_record_reads_the_whole_run_even_when_the_last_stage_refused_nothing()
     // refused nothing and sent nothing, but the run's spend ($43.51) is past the limit ($25):
     // the record the final report prints must say so and not the scan's $19.61.
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(25.0),
         ..RunControls::default()
     };

@@ -127,6 +127,10 @@ pub struct RunControls {
     /// The cost checkpoint's settings: the pre-flight figures it projects from, the run folder
     /// it records into and the sink that prints it. The approved amount is `max_cost_usd`.
     pub checkpoint: crate::cost_checkpoint::CheckpointSettings,
+    /// The project's exclusion list: files excluded by agreement are not read by this run, so
+    /// they are not billed either ([`crate::onboard::scope`]). The caller builds it from the
+    /// open project; the default excludes nothing.
+    pub scope: crate::onboard::scope::ScanScope,
 }
 
 impl RunControls {
@@ -641,6 +645,7 @@ mod tests {
 
     fn controls_with_cap(cap: Option<f64>) -> RunControls {
         RunControls {
+            scope: Default::default(),
             max_cost_usd: cap,
             ..RunControls::default()
         }
@@ -780,6 +785,7 @@ mod tests {
         assert_eq!(blank.clone_judge_model_for(), "claude-haiku-5-5");
         // A flag wins over the project, for every role.
         let mut flagged = RunControls {
+            scope: Default::default(),
             finder_model: Some("flag-finder".to_string()),
             clone_judge_model: Some("flag-judge".to_string()),
             review: ReviewSettings {
@@ -802,6 +808,7 @@ mod tests {
             &[camerata_checks::clone_rules::RULE_SINGLE_SOURCE],
             &{
                 let mut c = RunControls {
+                    scope: Default::default(),
                     finder: crate::ai_audit::agent_finder::FinderChoice::Agent,
                     ..RunControls::default()
                 };
@@ -840,12 +847,14 @@ mod tests {
         };
         assert_eq!(judge_of(&RunControls::default()), "claude-haiku-5-5");
         let picked = RunControls {
+            scope: Default::default(),
             clone_judge_model: Some("claude-haiku-4-5-20251001".to_string()),
             ..RunControls::default()
         };
         assert_eq!(judge_of(&picked), "claude-haiku-4-5-20251001");
         assert!(crate::llm::is_priced("claude-haiku-4-5-20251001"));
         let blank = RunControls {
+            scope: Default::default(),
             clone_judge_model: Some("  ".to_string()),
             ..RunControls::default()
         };
@@ -868,6 +877,7 @@ mod tests {
             crate::ai_audit::FIX_STAGE_HAIKU_MODEL
         );
         let explicit = RunControls {
+            scope: Default::default(),
             fix_model: Some("claude-opus-5".to_string()),
             ..RunControls::default()
         };

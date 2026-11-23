@@ -181,6 +181,7 @@ async fn export_text(regeneration_down: bool) -> (String, Vec<camerata_server::o
     };
     // The default switches: `terse_output` is on.
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,

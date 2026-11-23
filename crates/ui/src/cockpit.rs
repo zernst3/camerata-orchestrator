@@ -139,6 +139,10 @@ pub(crate) struct ProjectView {
     /// The operator's opt-in to run the client's own tooling for this engagement. Absent → off.
     #[serde(default)]
     client_tooling_opt_in: bool,
+    /// Files excluded by agreement: glob patterns written as `repo-name/path`, one each. The
+    /// engine neither reads nor bills a file the list names. Absent from an older payload.
+    #[serde(default)]
+    scan_exclusions: Vec<String>,
     /// The review tree's settings: the escalation rate and floor, the reasons that may exceed
     /// the budget, and the group reviewer's model. Absent from an older server -> the design
     /// values.
@@ -3515,6 +3519,7 @@ pub(crate) mod review_shell;
 pub mod rules;
 mod saved_inspections;
 pub mod scan;
+pub(crate) mod scan_exclusions;
 pub(crate) mod site_detail;
 mod stack;
 pub mod table;

@@ -530,7 +530,7 @@ pub fn scroll_top_for_line(line: usize, line_h: u32, viewport_px: f64, total_lin
 /// Lines of a window left unrendered at its edges before the viewer asks for a new window.
 pub const PAGE_MARGIN_LINES: usize = 50;
 
-/// For a file delivered as a window (400 KB to 4 MB): the line to centre a new window on when
+/// For a file delivered as a window (1 MB to 4 MB): the line to centre a new window on when
 /// the viewport has come within [`PAGE_MARGIN_LINES`] of a window edge that is not the file's
 /// edge. `None` for a whole file or when the viewport is well inside the window.
 pub fn page_request(

@@ -93,6 +93,7 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
         run_client_tooling: false,
         consensus: false,
         finder: Default::default(),
+        exclude: Vec::new(),
     };
 
     let err = run_inspect_with_key_presence(args, false)

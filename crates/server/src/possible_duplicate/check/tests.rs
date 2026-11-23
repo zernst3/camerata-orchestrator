@@ -399,6 +399,7 @@ async fn a_limit_reached_by_the_first_call_stops_the_check_and_not_the_run() {
     let mut r = report();
     let (failed, reasons) = (r.failed_passes.len(), r.incomplete_reasons());
     let controls = RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(0.005),
         ..RunControls::default()
     };

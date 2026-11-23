@@ -134,6 +134,7 @@ async fn scan(
 
 fn controls(cap: Option<f64>, efficiency: EfficiencyConfig) -> RunControls {
     RunControls {
+        scope: Default::default(),
         finder: Default::default(),
         finder_model: None,
         finder_force_pieces: None,

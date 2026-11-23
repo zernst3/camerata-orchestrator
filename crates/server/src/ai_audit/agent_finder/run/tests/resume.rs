@@ -289,6 +289,7 @@ async fn a_single_file_the_model_refused_is_disclosed_and_not_tried_a_third_time
 #[tokio::test]
 async fn a_piece_the_spend_limit_refuses_is_recorded_not_run_with_its_files() {
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(0.5),
         ..RunControls::default()
     });
@@ -366,6 +367,7 @@ async fn a_piece_that_cannot_start_is_a_failed_part_and_costs_nothing() {
 #[tokio::test]
 async fn a_piece_the_spend_limit_refuses_has_a_coverage_record_listing_its_files_as_not_reviewed() {
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(0.5),
         ..RunControls::default()
     });

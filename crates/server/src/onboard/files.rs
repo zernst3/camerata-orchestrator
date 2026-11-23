@@ -5,13 +5,81 @@
 //! `is_admissible_text` for the admission policy and why broadening it doesn't create noise
 //! elsewhere.
 
+use super::scope::RepoScope;
+
 /// Safety net for pathological monorepos so one scan can't exhaust memory. This
 /// is NOT a per-scan window that rotates: a single tarball download covers the
 /// WHOLE repo, and only a repo with more than this many auditable files is
 /// truncated (and the report says so). Normal repos are fully scanned.
 pub(crate) const HARD_CAP_FILES: usize = 20_000;
-/// Skip files larger than this (likely generated/vendored/binary).
-pub(crate) const MAX_FILE_BYTES: usize = 400_000;
+/// The reason a file with a line longer than the room's read page is not read ("has a line longer
+/// than 100 KB"), from the room's own page limit so the two never differ.
+pub fn long_line_label() -> String {
+    // In the base sizes are printed in (1 KB = 1,024 bytes), rounded down, so a file shown with
+    // this reason really has a line longer than the number printed.
+    format!(
+        "has a line longer than {} KB",
+        crate::ai_audit::agent_finder::room::MAX_READ_LINE_BYTES / 1024
+    )
+}
+
+/// Files larger than this are not read for the inspection. An admitted text file over it (and not
+/// excluded by agreement) is a pre-start warning, never a refusal, and is listed under Coverage;
+/// the secret checks still search it up to [`MAX_SECRET_SCAN_BYTES`].
+pub(crate) const MAX_FILE_BYTES: usize = 1024 * 1024;
+
+/// The largest file whose contents the secret checks search when it is over [`MAX_FILE_BYTES`]
+/// (20 MB). Such a file is still not read for the inspection, billed or counted; only the
+/// secret-shaped floor rules look inside it. Over this, only its file name is checked.
+pub(crate) const MAX_SECRET_SCAN_BYTES: usize = 20 * 1024 * 1024;
+
+/// The secret search ceiling as a client reads it ("20 MB"), taken from [`MAX_SECRET_SCAN_BYTES`].
+pub fn secret_scan_label() -> String {
+    format!("{} MB", MAX_SECRET_SCAN_BYTES / (1024 * 1024))
+}
+
+/// What reading one file for the secret checks gave.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SecretRead {
+    /// The file's text.
+    Text(String),
+    /// More than [`MAX_SECRET_SCAN_BYTES`] bytes: the file grew after the walk measured it. Only
+    /// its name is checked, like any file over the ceiling.
+    OverCeiling,
+    /// Unreadable, or not text this scan can decode (UTF-8, or UTF-16 with a byte order mark).
+    NotText,
+}
+
+/// Read `rel` under `root` for the secret checks only. At most [`MAX_SECRET_SCAN_BYTES`] + 1 bytes
+/// are read, so a file that grew after the walk cannot be pulled whole into memory. The caller
+/// holds one file at a time.
+pub fn read_for_secret_search(root: &std::path::Path, rel: &str) -> SecretRead {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(root.join(rel)) else {
+        return SecretRead::NotText;
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_SECRET_SCAN_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return SecretRead::NotText;
+    }
+    if bytes.len() > MAX_SECRET_SCAN_BYTES {
+        return SecretRead::OverCeiling;
+    }
+    match decode_text(&bytes) {
+        Some(text) => SecretRead::Text(text),
+        None => SecretRead::NotText,
+    }
+}
+
+/// The read limit as a client reads it ("1 MB"), taken from [`MAX_FILE_BYTES`] so a message,
+/// a label and a test never state a number the engine does not apply.
+pub fn max_file_label() -> String {
+    format!("{} MB", MAX_FILE_BYTES / (1024 * 1024))
+}
 
 /// Extensions worth auditing (source + config text). Keeps the scan off images,
 /// lockfiles, and binaries.
@@ -468,6 +536,12 @@ fn noise_path(path: &str, extra_dirs: &[String], allow_generated: bool) -> bool 
     })
 }
 
+/// Whether a folder name is one the walk never reads (build output, dependencies, caches, or a
+/// folder named by `CAMERATA_SCAN_EXCLUDE_DIRS`).
+pub(crate) fn is_noise_dir_name(name: &str) -> bool {
+    NOISE_DIRS.contains(&name) || extra_exclude_dirs().iter().any(|d| d == name)
+}
+
 /// Parse the `CAMERATA_SCAN_EXCLUDE_DIRS` env (comma-separated) into extra dir names.
 pub(crate) fn extra_exclude_dirs() -> Vec<String> {
     std::env::var("CAMERATA_SCAN_EXCLUDE_DIRS")
@@ -498,6 +572,9 @@ pub struct ExtractedRepo {
     /// Admissible files NOT read because they exceed [`MAX_FILE_BYTES`], by path. Listed under
     /// Coverage in the report and `json/inspection.json`, so a skipped file is named, never silent.
     pub skipped_oversize: Vec<String>,
+    /// The files in `skipped_oversize` that are not over [`MAX_SECRET_SCAN_BYTES`]: the floor
+    /// opens each one, one at a time, for the secret checks only. Paths only, never contents.
+    pub secret_searchable: Vec<String>,
     /// Admissible files NOT read because the walk had already admitted [`HARD_CAP_FILES`], by
     /// path. Non-empty exactly when `truncated` is true. Listed under Coverage like
     /// `skipped_oversize`.
@@ -507,6 +584,14 @@ pub struct ExtractedRepo {
     /// path-only floor rules still run over each, so a `.p12` is flagged by its name though it
     /// could not be read.
     pub skipped_unreadable: Vec<String>,
+    /// Admissible files NOT read because a line is longer than the room's read page
+    /// ([`long_line_label`]): the room could not show such a file in full. Treated like
+    /// `skipped_oversize`: a pre-start warning, never a refusal.
+    pub skipped_long_line: Vec<String>,
+    /// The decoded text of each file in `skipped_long_line`, by path. Held for the deterministic
+    /// floor's secret-shaped rules only (`audit::audit_long_line_secrets`): the file is not read,
+    /// billed or counted, but a token or key inside it must still be found. Never persisted.
+    pub long_line_contents: Vec<(String, String)>,
     /// The size in bytes of each file named in the three `skipped_*` lists, by path, so Coverage
     /// states how big the file was. Every skipped file the walk could measure is here.
     pub skipped_sizes: std::collections::HashMap<String, u64>,
@@ -516,9 +601,55 @@ pub struct ExtractedRepo {
     /// The paths behind `excluded_noise` (always the same length), so `camerata count` can size
     /// what the filter dropped without a second walk.
     pub excluded_noise_paths: Vec<String>,
+    /// Files the project's exclusion list names ([`super::scope`]) that the run would otherwise
+    /// have read: not read, not counted, listed by path under Coverage as "excluded by
+    /// agreement". Their sizes are in `skipped_sizes`.
+    pub excluded_by_agreement: Vec<String>,
+    /// The indexes (into the project's list) of every pattern that matched at least one walked
+    /// file, of any kind. A pattern in no repo's list of these matches nothing.
+    pub matched_patterns: Vec<usize>,
+}
+
+/// A file the run cannot read because it is over [`MAX_FILE_BYTES`] and the project's exclusion
+/// list does not name it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OverLimitFile {
+    pub path: String,
+    pub bytes: u64,
+    /// Why it cannot be read: empty for the 1 MB file size limit, else [`long_line_label`].
+    #[serde(default)]
+    pub reason: String,
+    /// The path as an Excluded by agreement pattern writes it (`repo/path`, or `owner/repo/path`
+    /// when another repo in the project has the same name). Filled by the preflight route.
+    #[serde(default)]
+    pub display: String,
 }
 
 impl ExtractedRepo {
+    /// The admitted files over the read limit, with their sizes, in path order. A run with any
+    /// still starts, with a warning (the operator may exclude each by agreement); `camerata count`
+    /// and the desktop's pre-start check list them.
+    pub fn over_limit_files(&self) -> Vec<OverLimitFile> {
+        let mut out: Vec<OverLimitFile> = self
+            .skipped_oversize
+            .iter()
+            .map(|path| OverLimitFile {
+                path: path.clone(),
+                bytes: self.skipped_sizes.get(path).copied().unwrap_or(0),
+                display: String::new(),
+                reason: String::new(),
+            })
+            .collect();
+        out.extend(self.skipped_long_line.iter().map(|path| OverLimitFile {
+            path: path.clone(),
+            bytes: self.skipped_sizes.get(path).copied().unwrap_or(0),
+            display: String::new(),
+            reason: long_line_label(),
+        }));
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
+    }
+
     /// Put every list in path order. The directory walks list entries in whatever order the
     /// filesystem returns them (sorted on APFS, hash order on ext4), and everything downstream
     /// of this struct (the audit digest the model sees, finding order, which files survive a
@@ -528,6 +659,7 @@ impl ExtractedRepo {
         self.files.sort_by(|a, b| a.0.cmp(&b.0));
         self.reference_files.sort_by(|a, b| a.0.cmp(&b.0));
         self.excluded_noise_paths.sort();
+        self.excluded_by_agreement.sort();
         self
     }
 
@@ -571,8 +703,11 @@ impl ExtractedRepo {
 ///
 /// Paths are relative to the repo root, forward-slashed. Synchronous (blocking IO) —
 /// call via `tokio::task::spawn_blocking`.
-pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<ExtractedRepo> {
-    read_local_repo_files_capped(root, HARD_CAP_FILES)
+pub fn read_local_repo_files(
+    root: &std::path::Path,
+    scope: &RepoScope,
+) -> anyhow::Result<ExtractedRepo> {
+    read_local_repo_files_capped(root, HARD_CAP_FILES, scope)
 }
 
 /// [`read_local_repo_files`] with the file limit as a parameter: [`HARD_CAP_FILES`] in
@@ -580,6 +715,7 @@ pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<Extracted
 pub(crate) fn read_local_repo_files_capped(
     root: &std::path::Path,
     cap: usize,
+    scope: &RepoScope,
 ) -> anyhow::Result<ExtractedRepo> {
     // A folder that is gone, or a path that is not a folder, is a repo that could not be read.
     // Walking it would return no files and no error, which reads as an empty repo with nothing
@@ -591,9 +727,9 @@ pub(crate) fn read_local_repo_files_capped(
     }
     let extra_dirs = extra_exclude_dirs();
     if root.join(".git").exists() {
-        read_local_repo_files_gitignore(root, &extra_dirs, cap)
+        read_local_repo_files_gitignore(root, &extra_dirs, cap, scope)
     } else {
-        read_local_repo_files_noise_denylist(root, &extra_dirs, cap)
+        read_local_repo_files_noise_denylist(root, &extra_dirs, cap, scope)
     }
 }
 
@@ -604,8 +740,12 @@ struct AdmittedSink {
     cap: usize,
     files: Vec<(String, String)>,
     oversize: Vec<String>,
+    secret_searchable: Vec<String>,
     beyond_cap: Vec<String>,
     unreadable: Vec<String>,
+    long_line: Vec<String>,
+    /// The decoded text of each `long_line` file, kept for the secrets floor only.
+    long_line_contents: Vec<(String, String)>,
     /// Sizes of the files in `oversize`, `beyond_cap` and `unreadable`, by path.
     sizes: std::collections::HashMap<String, u64>,
 }
@@ -616,8 +756,11 @@ impl AdmittedSink {
             cap,
             files: Vec::new(),
             oversize: Vec::new(),
+            secret_searchable: Vec::new(),
             beyond_cap: Vec::new(),
             unreadable: Vec::new(),
+            long_line: Vec::new(),
+            long_line_contents: Vec::new(),
             sizes: std::collections::HashMap::new(),
         }
     }
@@ -631,6 +774,9 @@ impl AdmittedSink {
         };
         if len as usize > MAX_FILE_BYTES {
             self.sizes.insert(rel.clone(), len);
+            if len as usize <= MAX_SECRET_SCAN_BYTES {
+                self.secret_searchable.push(rel.clone());
+            }
             self.oversize.push(rel);
             return false;
         }
@@ -647,12 +793,111 @@ impl AdmittedSink {
             self.unreadable.push(rel);
             return false;
         };
+        // A line the room's Read page cannot carry means the file cannot be read in full: it is
+        // named, not read for the inspection, and warned about like a file over the size limit.
+        let longest = content.lines().map(str::len).max().unwrap_or(0);
+        if longest > crate::ai_audit::agent_finder::room::MAX_READ_LINE_BYTES {
+            self.sizes.insert(rel.clone(), len);
+            self.long_line.push(rel.clone());
+            self.long_line_contents.push((rel, content));
+            return false;
+        }
         self.files.push((rel, content));
         true
     }
 
     fn truncated(&self) -> bool {
         !self.beyond_cap.is_empty()
+    }
+}
+
+/// Everything a walk collects, and the ONE place a walked file is classified. The three walk
+/// bodies (gitignore walk, `git ls-files` union, non-git DFS) each call [`WalkSink::classify`]
+/// for every file they reach, so a rule about which files are read lives here and nowhere else.
+struct WalkSink {
+    extra_dirs: Vec<String>,
+    scope: RepoScope,
+    excluded_by_agreement: Vec<String>,
+    matched_patterns: std::collections::BTreeSet<usize>,
+    admitted: AdmittedSink,
+    excluded_noise_paths: Vec<String>,
+    reference: ReferenceSink,
+}
+
+impl WalkSink {
+    fn new(extra_dirs: &[String], cap: usize, scope: &RepoScope) -> Self {
+        Self {
+            extra_dirs: extra_dirs.to_vec(),
+            scope: scope.clone(),
+            excluded_by_agreement: Vec::new(),
+            matched_patterns: std::collections::BTreeSet::new(),
+            admitted: AdmittedSink::new(cap),
+            excluded_noise_paths: Vec::new(),
+            reference: ReferenceSink::new(HARD_CAP_REFERENCE_FILES),
+        }
+    }
+
+    /// Classify `rel` (at `full`): counted as excluded noise, offered as reference text, or
+    /// admitted for reading. `len` is asked for only when the file is admissible; `None` (a
+    /// size that cannot be read, or an entry that is gone) skips it.
+    fn classify(&mut self, rel: String, full: &std::path::Path, len: impl FnOnce() -> Option<u64>) {
+        // Belt-and-suspenders: noise denylist on top of gitignore (catches projects whose
+        // build artefacts are not yet gitignored, or repos where target/ was committed).
+        let noise = is_noise_path(&rel, &self.extra_dirs);
+        let admissible = is_admissible_text(&rel);
+        // The project's exclusion list decides first and for every reader: a file named there is
+        // neither read nor offered as reference text, and one the run would otherwise have read
+        // is named, with its size, so the report lists it as excluded by agreement.
+        let hits = self.scope.matching(&rel);
+        self.matched_patterns.extend(hits.iter().copied());
+        if !hits.is_empty() {
+            // An agreed exclusion wins over every other class: never read, never counted in any
+            // figure (noise included), named only as excluded by agreement.
+            if admissible {
+                if let Some(len) = len() {
+                    self.admitted.sizes.insert(rel.clone(), len);
+                }
+                self.excluded_by_agreement.push(rel);
+            }
+            return;
+        }
+        if noise && admissible {
+            self.excluded_noise_paths.push(rel.clone());
+        }
+        if !noise && !admissible {
+            self.reference.offer(&rel, full);
+        } else if noise && admissible && is_generated_only_noise(&rel, &self.extra_dirs) {
+            self.reference.accept(&rel, full);
+        }
+        if noise || !admissible {
+            return;
+        }
+        // Past the cap the walk continues, naming each further admissible file instead of
+        // reading it, so the report can list what the cap left out.
+        self.admitted.admit(rel, full, len());
+    }
+
+    fn finish(self) -> ExtractedRepo {
+        let truncated = self.admitted.truncated();
+        ExtractedRepo {
+            files: self.admitted.files,
+            reference_files: self.reference.files,
+            truncated,
+            reference_truncated: self.reference.truncated,
+            skipped_oversize: self.admitted.oversize,
+            secret_searchable: self.admitted.secret_searchable,
+            skipped_beyond_cap: self.admitted.beyond_cap,
+            skipped_unreadable: self.admitted.unreadable,
+            skipped_long_line: self.admitted.long_line,
+            long_line_contents: self.admitted.long_line_contents,
+            skipped_sizes: self.admitted.sizes,
+            file_cap: self.admitted.cap,
+            excluded_noise: self.excluded_noise_paths.len(),
+            excluded_noise_paths: self.excluded_noise_paths,
+            excluded_by_agreement: self.excluded_by_agreement,
+            matched_patterns: self.matched_patterns.into_iter().collect(),
+        }
+        .sorted()
     }
 }
 
@@ -690,11 +935,10 @@ fn read_local_repo_files_gitignore(
     root: &std::path::Path,
     extra_dirs: &[String],
     cap: usize,
+    scope: &RepoScope,
 ) -> anyhow::Result<ExtractedRepo> {
-    let mut admitted = AdmittedSink::new(cap);
+    let mut sink = WalkSink::new(extra_dirs, cap, scope);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut excluded_noise_paths: Vec<String> = Vec::new();
-    let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
 
     // hidden(false): we want to scan dotfiles like .env and .camerata/ — the `ignore`
     // crate would otherwise skip them by default.
@@ -733,25 +977,7 @@ fn read_local_repo_files_gitignore(
         // revisits files the walk skipped (gitignored); it must not classify a walked noise or
         // reference file a second time.
         seen.insert(rel.clone());
-        // Belt-and-suspenders: noise denylist on top of gitignore (catches projects whose
-        // build artefacts are not yet gitignored, or repos where target/ was committed).
-        let noise = is_noise_path(&rel, extra_dirs);
-        let admissible = is_admissible_text(&rel);
-        if noise && admissible {
-            excluded_noise_paths.push(rel.clone());
-        }
-        if !noise && !admissible {
-            reference.offer(&rel, p);
-        } else if noise && admissible && is_generated_only_noise(&rel, extra_dirs) {
-            reference.accept(&rel, p);
-        }
-        if noise || !admissible {
-            continue;
-        }
-        // Past the cap the walk continues, naming each further admissible file instead of
-        // reading it, so the report can list what the cap left out.
-        let len = entry.metadata().ok().map(|m| m.len());
-        admitted.admit(rel, p, len);
+        sink.classify(rel, p, || entry.metadata().ok().map(|m| m.len()));
     }
 
     // Union in git-TRACKED files the ignore-aware walk above skipped because they match a
@@ -768,47 +994,21 @@ fn read_local_repo_files_gitignore(
                 if seen.contains(&rel) {
                     continue;
                 }
-                let noise = is_noise_path(&rel, extra_dirs);
-                let admissible = is_admissible_text(&rel);
-                if noise && admissible {
-                    excluded_noise_paths.push(rel.clone());
-                }
                 let full = root.join(&rel);
-                if !noise && !admissible {
-                    reference.offer(&rel, &full);
-                } else if noise && admissible && is_generated_only_noise(&rel, extra_dirs) {
-                    reference.accept(&rel, &full);
-                }
-                if noise || !admissible {
-                    continue;
-                }
-                let Ok(meta) = std::fs::metadata(&full) else {
-                    continue; // tracked in the index but not present on disk (rare edge case)
+                // Tracked in the index but not present on disk (rare edge case) has no size.
+                let len = || {
+                    std::fs::metadata(&full)
+                        .ok()
+                        .filter(std::fs::Metadata::is_file)
+                        .map(|m| m.len())
                 };
-                if !meta.is_file() {
-                    continue;
-                }
                 seen.insert(rel.clone());
-                admitted.admit(rel, &full, Some(meta.len()));
+                sink.classify(rel, &full, len);
             }
         }
     }
 
-    let truncated = admitted.truncated();
-    Ok(ExtractedRepo {
-        files: admitted.files,
-        reference_files: reference.files,
-        truncated,
-        reference_truncated: reference.truncated,
-        skipped_oversize: admitted.oversize,
-        skipped_beyond_cap: admitted.beyond_cap,
-        skipped_unreadable: admitted.unreadable,
-        skipped_sizes: admitted.sizes,
-        file_cap: admitted.cap,
-        excluded_noise: excluded_noise_paths.len(),
-        excluded_noise_paths,
-    }
-    .sorted())
+    Ok(sink.finish())
 }
 
 /// The full set of git-TRACKED file paths under `root` (relative, forward-slashed), via
@@ -842,10 +1042,9 @@ fn read_local_repo_files_noise_denylist(
     root: &std::path::Path,
     extra_dirs: &[String],
     cap: usize,
+    scope: &RepoScope,
 ) -> anyhow::Result<ExtractedRepo> {
-    let mut admitted = AdmittedSink::new(cap);
-    let mut excluded_noise_paths: Vec<String> = Vec::new();
-    let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
+    let mut sink = WalkSink::new(extra_dirs, cap, scope);
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -877,38 +1076,10 @@ fn read_local_repo_files_noise_denylist(
             if !ft.is_file() {
                 continue; // skip symlinks / fifos / etc.
             }
-            let noise = is_noise_path(&rel, extra_dirs);
-            let admissible = is_admissible_text(&rel);
-            if noise && admissible {
-                excluded_noise_paths.push(rel.clone());
-            }
-            if !noise && !admissible {
-                reference.offer(&rel, &p);
-            } else if noise && admissible && is_generated_only_noise(&rel, extra_dirs) {
-                reference.accept(&rel, &p);
-            }
-            if noise || !admissible {
-                continue;
-            }
-            let len = entry.metadata().ok().map(|m| m.len());
-            admitted.admit(rel, &p, len);
+            sink.classify(rel, &p, || entry.metadata().ok().map(|m| m.len()));
         }
     }
-    let truncated = admitted.truncated();
-    Ok(ExtractedRepo {
-        files: admitted.files,
-        reference_files: reference.files,
-        truncated,
-        reference_truncated: reference.truncated,
-        skipped_oversize: admitted.oversize,
-        skipped_beyond_cap: admitted.beyond_cap,
-        skipped_unreadable: admitted.unreadable,
-        skipped_sizes: admitted.sizes,
-        file_cap: admitted.cap,
-        excluded_noise: excluded_noise_paths.len(),
-        excluded_noise_paths,
-    }
-    .sorted())
+    Ok(sink.finish())
 }
 
 #[cfg(test)]
@@ -925,7 +1096,7 @@ mod tests {
     }
 
     fn scan(root: &std::path::Path) -> ExtractedRepo {
-        read_local_repo_files(root).unwrap()
+        read_local_repo_files(root, &crate::onboard::scope::RepoScope::none()).unwrap()
     }
 
     fn paths(extracted: &ExtractedRepo) -> Vec<String> {
@@ -1695,8 +1866,13 @@ mod tests {
     fn files_beyond_the_file_cap_are_listed_by_path_in_a_non_git_tree() {
         let dir = tempfile::tempdir().unwrap();
         cap_fixture(dir.path());
-        let extracted =
-            read_local_repo_files_noise_denylist(dir.path(), &[], 3).expect("walk succeeds");
+        let extracted = read_local_repo_files_noise_denylist(
+            dir.path(),
+            &[],
+            3,
+            &crate::onboard::scope::RepoScope::none(),
+        )
+        .expect("walk succeeds");
         assert!(extracted.truncated);
         assert_eq!(extracted.files.len(), 3);
         assert_eq!(extracted.skipped_beyond_cap.len(), 2);
@@ -1720,7 +1896,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         cap_fixture(dir.path());
-        let extracted = read_local_repo_files_gitignore(dir.path(), &[], 3).expect("walk succeeds");
+        let extracted = read_local_repo_files_gitignore(
+            dir.path(),
+            &[],
+            3,
+            &crate::onboard::scope::RepoScope::none(),
+        )
+        .expect("walk succeeds");
         assert!(extracted.truncated);
         assert_eq!(extracted.files.len(), 3);
         let mut all: Vec<String> = extracted.files.iter().map(|(p, _)| p.clone()).collect();
@@ -1886,5 +2068,253 @@ mod tests {
                 "the key material must not be quoted: {shown}"
             );
         }
+    }
+
+    /// The secret search reads at most the ceiling plus one byte: a file that grew after the walk
+    /// is over the ceiling, never read whole.
+    #[test]
+    fn the_secret_search_read_is_capped_at_the_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "small.js", "var a = 1;\n");
+        assert_eq!(
+            read_for_secret_search(dir.path(), "small.js"),
+            SecretRead::Text("var a = 1;\n".to_string())
+        );
+        let at = dir.path().join("at.js");
+        std::fs::write(&at, vec![b'x'; MAX_SECRET_SCAN_BYTES]).unwrap();
+        assert!(matches!(
+            read_for_secret_search(dir.path(), "at.js"),
+            SecretRead::Text(_)
+        ));
+        let grown = dir.path().join("grown.js");
+        let f = std::fs::File::create(&grown).unwrap();
+        f.set_len(MAX_SECRET_SCAN_BYTES as u64 + 1).unwrap();
+        assert_eq!(
+            read_for_secret_search(dir.path(), "grown.js"),
+            SecretRead::OverCeiling
+        );
+        std::fs::write(dir.path().join("bin.p12"), [0xFFu8; 64]).unwrap();
+        assert_eq!(
+            read_for_secret_search(dir.path(), "bin.p12"),
+            SecretRead::NotText
+        );
+        assert_eq!(
+            read_for_secret_search(dir.path(), "gone.js"),
+            SecretRead::NotText
+        );
+    }
+
+    // ── Item 31: the exclusion list (excluded by agreement) and the 1 MiB read limit ────────
+
+    fn scan_excluding(root: &std::path::Path, patterns: &[&str]) -> ExtractedRepo {
+        let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+        let scope = crate::onboard::scope::ScanScope::from_patterns(&patterns)
+            .unwrap()
+            .for_repo("acme/app");
+        read_local_repo_files(root, &scope).unwrap()
+    }
+
+    fn exclusion_fixture(root: &std::path::Path) {
+        write(root, "src/a.rs", "fn a() {}\n");
+        write(
+            root,
+            "seeds/data.js",
+            "const rows = [1, 2, 3];\n\nexport default rows;\n",
+        );
+        write(root, "seeds/notes.md", "# seed notes, reference text\n");
+        write(root, "seeds/package-lock.json", "{}\n");
+    }
+
+    fn excluded_expectations(extracted: &ExtractedRepo) {
+        let read: Vec<String> = paths(extracted)
+            .into_iter()
+            .filter(|p| p != ".gitignore")
+            .collect();
+        assert_eq!(read, ["src/a.rs"]);
+        // The noise file in the folder is named too: an agreed exclusion wins over noise.
+        assert_eq!(
+            extracted.excluded_by_agreement,
+            ["seeds/data.js", "seeds/package-lock.json"]
+        );
+        assert_eq!(
+            extracted.skipped_sizes.get("seeds/data.js").copied(),
+            Some(46),
+            "the size of an excluded file is recorded for Coverage"
+        );
+        assert!(
+            extracted
+                .reference_files
+                .iter()
+                .all(|(p, _)| !p.starts_with("seeds/")),
+            "an excluded folder gives no reference text: {:?}",
+            extracted.reference_files
+        );
+        assert!(
+            extracted
+                .excluded_noise_paths
+                .iter()
+                .all(|p| p != "seeds/data.js"),
+            "an excluded file is not also counted as noise"
+        );
+    }
+
+    #[test]
+    fn an_excluded_file_is_not_read_and_is_named_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        exclusion_fixture(dir.path());
+        excluded_expectations(&scan_excluding(dir.path(), &["app/seeds/**"]));
+    }
+
+    #[test]
+    fn an_excluded_file_is_not_read_and_is_named_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        exclusion_fixture(dir.path());
+        excluded_expectations(&scan_excluding(dir.path(), &["app/seeds/**"]));
+    }
+
+    #[test]
+    fn an_excluded_file_is_not_read_when_it_is_tracked_but_gitignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            matches!(
+                std::process::Command::new("git").args(args).current_dir(root).status(),
+                Ok(s) if s.success()
+            )
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git on PATH: the union path is not exercisable here
+        }
+        exclusion_fixture(root);
+        assert!(git(&[
+            "add",
+            "-f",
+            "src/a.rs",
+            "seeds/data.js",
+            "seeds/notes.md",
+            "seeds/package-lock.json"
+        ]));
+        write(root, ".gitignore", "seeds/\n");
+        excluded_expectations(&scan_excluding(root, &["app/seeds/**"]));
+    }
+
+    #[test]
+    fn without_an_exclusion_the_same_files_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        exclusion_fixture(dir.path());
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["seeds/data.js", "src/a.rs"]);
+        assert!(extracted.excluded_by_agreement.is_empty());
+        assert_eq!(extracted.excluded_noise_paths, ["seeds/package-lock.json"]);
+        assert!(extracted
+            .reference_files
+            .iter()
+            .any(|(p, _)| p == "seeds/notes.md"));
+    }
+
+    /// RULING (coordinator, round 1 item 5): an agreed exclusion wins over every other class.
+    /// A noise file the list names is never read, never counted in any figure (not as noise
+    /// either), and named only as excluded by agreement.
+    #[test]
+    fn an_exclusion_by_agreement_wins_over_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        exclusion_fixture(dir.path());
+        let extracted = scan_excluding(dir.path(), &["app/seeds/package-lock.json"]);
+        assert_eq!(extracted.excluded_by_agreement, ["seeds/package-lock.json"]);
+        assert!(
+            extracted.excluded_noise_paths.is_empty(),
+            "{:?}",
+            extracted.excluded_noise_paths
+        );
+        assert_eq!(extracted.excluded_noise, 0);
+    }
+
+    #[test]
+    fn an_over_limit_file_that_is_excluded_by_agreement_blocks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.rs", "fn a() {}\n");
+        write(dir.path(), "seeds/big.js", &"x".repeat(MAX_FILE_BYTES + 1));
+        let plain = scan(dir.path());
+        assert_eq!(plain.skipped_oversize, ["seeds/big.js"]);
+        assert_eq!(
+            plain.over_limit_files(),
+            [OverLimitFile {
+                path: "seeds/big.js".to_string(),
+                bytes: MAX_FILE_BYTES as u64 + 1,
+                display: String::new(),
+                reason: String::new(),
+            }]
+        );
+        let agreed = scan_excluding(dir.path(), &["app/seeds/big.js"]);
+        assert!(agreed.skipped_oversize.is_empty());
+        assert!(agreed.over_limit_files().is_empty());
+        assert_eq!(agreed.excluded_by_agreement, ["seeds/big.js"]);
+    }
+
+    /// Item 31 step 4: the read limit is 1 MiB, the number every label takes from the constant.
+    #[test]
+    fn the_read_limit_is_one_mebibyte_and_a_file_at_the_limit_is_read() {
+        assert_eq!(MAX_FILE_BYTES, 1024 * 1024);
+        assert_eq!(max_file_label(), "1 MB");
+        let dir = tempfile::tempdir().unwrap();
+        // Short lines: a single 1 MiB line would also have a line longer than the read page.
+        write(
+            dir.path(),
+            "src/at_limit.rs",
+            &"x\n".repeat(MAX_FILE_BYTES / 2),
+        );
+        write(dir.path(), "src/over.rs", &"x".repeat(MAX_FILE_BYTES + 1));
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["src/at_limit.rs"]);
+        assert_eq!(extracted.skipped_oversize, ["src/over.rs"]);
+    }
+
+    /// Item 31 step 1: the walks classify through one function, so a rule added there reaches all
+    /// three. A second `is_admissible_text(&rel)` call in a walk body would be a copy of it.
+    #[test]
+    fn the_three_walks_classify_through_one_function() {
+        let source = include_str!("files.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            production.matches("is_admissible_text(&rel)").count(),
+            1,
+            "only WalkSink::classify decides whether a walked file is admissible"
+        );
+        assert_eq!(
+            production.matches("sink.classify(").count(),
+            3,
+            "the gitignore walk, the git ls-files union and the plain walk each classify through it"
+        );
+    }
+
+    /// Gap 5 (coordinator ruling): an admitted file with a line longer than the room's read page
+    /// cannot be read in full, so it is treated like an over-limit file: not read for the
+    /// inspection, listed with the reason, and warned about at the start (never a refusal).
+    #[test]
+    fn a_file_with_a_line_longer_than_the_read_page_is_not_read_and_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.rs", "fn a() {}\n");
+        write(
+            dir.path(),
+            "data/ok.js",
+            &format!("{}\n", "x".repeat(90_000)),
+        );
+        write(
+            dir.path(),
+            "data/wide.js",
+            &format!("var a;\n{}\n", "y".repeat(100_001)),
+        );
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["data/ok.js", "src/a.rs"]);
+        assert_eq!(extracted.skipped_long_line, ["data/wide.js"]);
+        let listed = extracted.over_limit_files();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "data/wide.js");
+        assert_eq!(listed[0].reason, long_line_label());
+        assert_eq!(long_line_label(), "has a line longer than 97 KB");
+        // Excluded by agreement, it no longer blocks.
+        let agreed = scan_excluding(dir.path(), &["app/data/wide.js"]);
+        assert!(agreed.over_limit_files().is_empty());
     }
 }

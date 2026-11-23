@@ -176,7 +176,23 @@ pub(crate) async fn onboard_scan(
         // report would show as a successful scan that found nothing.
         return Json(client_lock_blocked_report(&repos, why));
     }
-    let mut report = crate::onboard::scan_repos(&sources, notes).await;
+    // An unusable list refuses the scan with its reason: it must never run on zero files.
+    let scope = match crate::onboard::scope::ScanScope::of_project(state.projects.active().as_ref())
+    {
+        Ok(scope) => scope,
+        Err(why) => {
+            return Json(client_lock_blocked_report(
+                &repos,
+                format!("Cannot start: Excluded by agreement in the inspection settings cannot be used: {why}."),
+            ));
+        }
+    };
+    // A file over the 1 MB file size limit that Excluded by agreement does not name is not read
+    // for the inspection; it is a warning in the report notes, never a refusal.
+    let (_, file_warnings) = crate::onboard::scope::start_checks(&sources, &scope).await;
+    let mut notes = notes;
+    notes.extend(file_warnings);
+    let mut report = crate::onboard::scan_repos(&sources, notes, &scope).await;
     for (spec, why) in &unresolved {
         report.note_repo_not_inspected(spec, why, &[], None);
     }

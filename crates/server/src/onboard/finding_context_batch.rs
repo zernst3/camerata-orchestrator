@@ -226,10 +226,22 @@ pub async fn finding_context_batch(state: &AppState, params: BatchParams) -> Res
 
     let items = &params.items;
     let sources = &sources;
+    let scope = super::scope::scope_for_read(state, params.project.as_deref());
+    let scope = &scope;
     let answered: Vec<Vec<(usize, serde_json::Value)>> = stream::iter(order)
         .map(|file| {
             let indexes = by_file.get(&file).cloned().unwrap_or_default();
             async move {
+                // A file the project's exclusion list names is not read, whatever the source.
+                if scope.excludes(&file.repo, &file.path) {
+                    return indexes
+                        .into_iter()
+                        .map(|i| {
+                            let outcome = FindingContextOutcome::ExcludedByAgreement;
+                            (i, answer(&items[i], i, &outcome, None))
+                        })
+                        .collect();
+                }
                 match sources.get(&(file.repo.clone(), file.sha.clone())) {
                     Some(source) => answer_file(source, &file.path, &indexes, items).await,
                     // Unreachable: every tuple's source was resolved above. Closed all the same.

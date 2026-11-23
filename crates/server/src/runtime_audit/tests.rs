@@ -140,6 +140,7 @@ async fn run(
 ) -> RuntimeAudit {
     audit_runtimes(
         &[("acme/app".to_string(), dir.path().to_path_buf())],
+        &crate::onboard::scope::ScanScope::none(),
         fetcher,
         cache,
         now(),
@@ -434,7 +435,7 @@ fn rust_is_not_a_product_this_pass_reads() {
         ("Dockerfile", "FROM rust:1.75-slim\n"),
         (".tool-versions", "rust 1.75.0\n"),
     ]);
-    let found = detect::detect_declarations(dir.path());
+    let found = detect::detect_declarations(dir.path(), &crate::onboard::scope::RepoScope::none());
     assert!(found.declarations.is_empty(), "{:?}", found.declarations);
 }
 
@@ -553,7 +554,7 @@ fn lockfiles_give_framework_versions_with_their_lines() {
 
 /// The framework declarations a folder yields, as `(product, path, excluded)`.
 fn frameworks(dir: &tempfile::TempDir) -> Vec<(Product, String, bool)> {
-    detect::detect_declarations(dir.path())
+    detect::detect_declarations(dir.path(), &crate::onboard::scope::RepoScope::none())
         .declarations
         .into_iter()
         .filter(|d| {
@@ -774,7 +775,7 @@ fn the_walk_reads_nested_files_skips_vendored_and_fixture_folders_and_is_stable(
         ("e2e/Dockerfile", "FROM node:4\n"),
         ("testdata/.nvmrc", "4\n"),
     ]);
-    let first = detect::detect_declarations(dir.path());
+    let first = detect::detect_declarations(dir.path(), &crate::onboard::scope::RepoScope::none());
     let places: Vec<(&str, usize)> = first
         .declarations
         .iter()
@@ -783,7 +784,8 @@ fn the_walk_reads_nested_files_skips_vendored_and_fixture_folders_and_is_stable(
     assert_eq!(places, vec![("Dockerfile", 1), ("services/api/.nvmrc", 1)]);
     assert!(!first.truncated);
     assert_eq!(
-        detect::detect_declarations(dir.path()).declarations,
+        detect::detect_declarations(dir.path(), &crate::onboard::scope::RepoScope::none())
+            .declarations,
         first.declarations
     );
 }
@@ -1207,6 +1209,7 @@ async fn with_several_repos_a_not_checked_declaration_names_its_repo() {
     ];
     let audit = audit_runtimes(
         &sources,
+        &crate::onboard::scope::ScanScope::none(),
         &Fixture::online(),
         None,
         now(),
@@ -1305,6 +1308,7 @@ async fn a_cached_end_of_life_copy_stands_in_when_the_live_fetch_fails_and_says_
     // Three days later the feed is down: the cache is used, dated, and the stamp says so.
     let later = audit_runtimes(
         &[("acme/app".to_string(), dir.path().to_path_buf())],
+        &crate::onboard::scope::ScanScope::none(),
         &Fixture::offline(),
         Some(cache.path()),
         now() + chrono::Duration::days(3),
@@ -1328,6 +1332,7 @@ async fn a_cached_end_of_life_copy_stands_in_when_the_live_fetch_fails_and_says_
     // Eight days later the cache is too old to use.
     let stale = audit_runtimes(
         &[("acme/app".to_string(), dir.path().to_path_buf())],
+        &crate::onboard::scope::ScanScope::none(),
         &Fixture::offline(),
         Some(cache.path()),
         now() + chrono::Duration::days(8),
@@ -1694,6 +1699,7 @@ async fn a_cached_nvd_answer_stands_in_for_a_failed_lookup() {
     assert_eq!(vuln_findings(&warm).len(), 1);
     let later = audit_runtimes(
         &[("acme/app".to_string(), dir.path().to_path_buf())],
+        &crate::onboard::scope::ScanScope::none(),
         &Fixture::offline(),
         Some(cache.path()),
         now() + chrono::Duration::days(2),
@@ -1907,6 +1913,7 @@ async fn the_disabled_switch_reads_nothing_and_fetches_nothing() {
     run_runtime_audit(
         &mut report,
         &[("acme/app".to_string(), dir.path().to_path_buf())],
+        &crate::onboard::scope::ScanScope::none(),
     )
     .await;
     assert!(report.findings.is_empty());
@@ -2164,7 +2171,7 @@ fn spring_boot_does_not_count_from_a_test_configuration_a_comment_or_a_string() 
 /// The reason each JavaScript framework declaration read from a folder was left out, or `None`
 /// if it counts.
 fn framework_reasons(dir: &tempfile::TempDir) -> Vec<(Product, Option<String>)> {
-    detect::detect_declarations(dir.path())
+    detect::detect_declarations(dir.path(), &crate::onboard::scope::RepoScope::none())
         .declarations
         .into_iter()
         .filter(|d| matches!(d.product, Product::Next | Product::React | Product::Express))
@@ -2412,5 +2419,56 @@ async fn a_repository_with_nothing_declared_keeps_the_nothing_found_reason() {
     assert_eq!(
         reason,
         "no runtime or framework version was found in the repository"
+    );
+}
+
+/// Item 31: the runtime audit's own walk never reads a file the project's exclusion list names.
+#[test]
+fn an_excluded_dockerfile_declares_nothing() {
+    let dir = repo(&[
+        ("Dockerfile", "FROM node:18\n"),
+        ("seeds/Dockerfile", "FROM node:16\n"),
+    ]);
+    let all = detect::detect_declarations(dir.path(), &crate::onboard::scope::RepoScope::none());
+    assert_eq!(all.declarations.len(), 2, "{:?}", all.declarations);
+    let scope = crate::onboard::scope::ScanScope::from_patterns(&["app/seeds/**".to_string()])
+        .unwrap()
+        .for_repo("acme/app");
+    let found = detect::detect_declarations(dir.path(), &scope);
+    assert_eq!(found.declarations.len(), 1, "{:?}", found.declarations);
+    assert!(found
+        .declarations
+        .iter()
+        .all(|d| !d.path.starts_with("seeds/")));
+}
+
+/// Round 1 item 6: a sibling manifest read while judging a lockfile's declaration is not read
+/// when the project excludes it. Here `package.json` (which lists react directly) is excluded, so
+/// the declaration read from the admitted lockfile no longer reads as a direct dependency.
+#[test]
+fn an_excluded_package_json_beside_an_admitted_lockfile_is_not_read() {
+    let dir = repo(&[
+        ("package.json", r#"{"dependencies":{"react":"^16.0.0"}}"#),
+        (
+            "package-lock.json",
+            r#"{"lockfileVersion":3,"packages":{"node_modules/react":{"version":"16.14.0"}}}"#,
+        ),
+    ]);
+    let none = detect::detect_declarations(dir.path(), &crate::onboard::scope::RepoScope::none());
+    let direct = |d: &detect::Detected| {
+        d.declarations
+            .iter()
+            .filter(|x| x.path == "package-lock.json")
+            .all(|x| !matches!(x.version, detect::Version::Excluded(_)))
+    };
+    assert!(direct(&none), "{:?}", none.declarations);
+    let scope = crate::onboard::scope::ScanScope::from_patterns(&["app/package.json".to_string()])
+        .unwrap()
+        .for_repo("acme/app");
+    let found = detect::detect_declarations(dir.path(), &scope);
+    assert!(
+        !direct(&found),
+        "the excluded manifest was read: {:?}",
+        found.declarations
     );
 }

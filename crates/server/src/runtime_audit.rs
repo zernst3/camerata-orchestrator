@@ -526,8 +526,10 @@ struct Found {
 ///
 /// `eol_budget` bounds the end-of-life fetches (they run together); [`NVD_BUDGET`] bounds the NVD
 /// lookups (they run one after another, `policy.spacing` apart).
+#[allow(clippy::too_many_arguments)] // one pass's inputs: the repos, their exclusion list, the feeds and their budgets
 pub async fn audit_runtimes(
     sources: &[(String, PathBuf)],
+    scope: &crate::onboard::scope::ScanScope,
     fetcher: &dyn FeedFetcher,
     cache_dir: Option<&Path>,
     now: DateTime<Utc>,
@@ -541,7 +543,7 @@ pub async fn audit_runtimes(
     let mut found: Vec<Found> = Vec::new();
     let mut walk_stopped: Vec<String> = Vec::new();
     for (repo, dir) in sources {
-        let detected = detect::detect_declarations(dir);
+        let detected = detect::detect_declarations(dir, &scope.for_repo(repo));
         if detected.truncated {
             walk_stopped.push(repo.clone());
         }
@@ -860,7 +862,11 @@ pub async fn audit_runtimes(
 /// Call it BEFORE `enrich_dependency_findings`, over the same row range: that call adds KEV and
 /// EPSS to the vulnerability findings this adds, and the corpus severity bounds run after both.
 /// With `CAMERATA_DISABLE_DEP_AUDIT` set (test isolation) nothing is read or fetched.
-pub async fn run_runtime_audit(report: &mut ScanReport, sources: &[(String, PathBuf)]) {
+pub async fn run_runtime_audit(
+    report: &mut ScanReport,
+    sources: &[(String, PathBuf)],
+    scope: &crate::onboard::scope::ScanScope,
+) {
     let rows_in = report.findings.len();
     let disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
         .map(|v| !v.is_empty())
@@ -883,6 +889,7 @@ pub async fn run_runtime_audit(report: &mut ScanReport, sources: &[(String, Path
             Ok(fetcher) => {
                 audit_runtimes(
                     sources,
+                    scope,
                     &fetcher,
                     cache_dir.as_deref(),
                     Utc::now(),
@@ -896,6 +903,7 @@ pub async fn run_runtime_audit(report: &mut ScanReport, sources: &[(String, Path
                 tracing::warn!("could not build the runtime feed HTTP client: {e}");
                 audit_runtimes(
                     sources,
+                    scope,
                     &Unreachable,
                     cache_dir.as_deref(),
                     Utc::now(),

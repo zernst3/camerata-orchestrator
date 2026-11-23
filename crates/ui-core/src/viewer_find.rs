@@ -69,7 +69,7 @@ pub struct SearchResult {
     pub matches: Vec<(usize, usize)>,
     /// Chars in the needle: the length of every highlight.
     pub needle_chars: usize,
-    /// Set when only part of the file is loaded (a file over 400 KB is shown in windows):
+    /// Set when only part of the file is loaded (a file over 1 MB is shown in windows):
     /// the search covers those lines and the status says so.
     pub scope_note: Option<String>,
     /// The match list stopped at [`MAX_MATCHES`].

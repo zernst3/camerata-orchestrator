@@ -776,6 +776,20 @@ pub(crate) fn dedup_preview_against_floor(
     dedup_scan_previews(existing, previews)
 }
 
+/// The preview findings in files the project admits: a linter runs over the whole checkout, so
+/// the result of one in a file the exclusion list names is dropped here, before it can reach the
+/// report.
+pub(crate) fn admitted_previews(
+    previews: Vec<crate::onboard::Finding>,
+    spec: &str,
+    scope: &crate::onboard::scope::ScanScope,
+) -> Vec<crate::onboard::Finding> {
+    previews
+        .into_iter()
+        .filter(|f| scope.admits(spec, &f.path))
+        .collect()
+}
+
 /// Run the scan-time deterministic preview pass over each local repo source and append
 /// its preview findings to the report. A no-op when there are no preview-runnable rules
 /// (or the corpus is unavailable). Preview findings are ADVISORY-but-deterministic — they
@@ -806,6 +820,8 @@ pub async fn merge_scan_preview(
     // Whether a preview tool that executes the repository's code (`cargo clippy`) may run: the
     // engagement's client-tooling decision (see `crate::client_lock`).
     tooling: crate::client_lock::ClientTooling,
+    // The project's exclusion list: a preview finding in a file it names is dropped.
+    scope: &crate::onboard::scope::ScanScope,
 ) {
     // Every tool NAME this call actually attempted to invoke, across every repo in `sources`
     // (regardless of whether each attempt then succeeded or failed) — fed to
@@ -843,8 +859,9 @@ pub async fn merge_scan_preview(
                 // Derive the language set present in this repo so stack-gating can omit
                 // tools whose language is absent (e.g. no eslint on a Rust-only repo).
                 let dir_clone = dir.clone();
+                let repo_scope = scope.for_repo(spec);
                 let (present_languages, repo_files) = tokio::task::spawn_blocking(move || {
-                    crate::onboard::files::read_local_repo_files(&dir_clone)
+                    crate::onboard::files::read_local_repo_files(&dir_clone, &repo_scope)
                         .map(|ex| (crate::scan_tools::languages_from_files(&ex.files), ex.files))
                         .unwrap_or_default()
                 })
@@ -861,6 +878,9 @@ pub async fn merge_scan_preview(
                     sources.len() > 1,
                 )
                 .await;
+                // The linters run over the whole checkout, so a result in a file the exclusion
+                // list names is dropped here, before it can reach the report.
+                let previews = admitted_previews(previews, spec, scope);
                 tools_attempted
                     .entry(spec.clone())
                     .or_default()
@@ -1591,6 +1611,7 @@ impl AuditReq {
         clone_judge_model: Option<String>,
     ) -> crate::cost_cap::RunControls {
         crate::cost_cap::RunControls {
+            scope: Default::default(),
             clone_judge_model,
             max_cost_usd: self.max_cost_usd.map(|cap| {
                 crate::cost_cap::RunControls::validate_cap(cap).unwrap_or(f64::MIN_POSITIVE)
@@ -1634,6 +1655,10 @@ impl AuditReq {
         controls.review = review.clone();
         controls.finder = review.finder.into();
         controls.fill_models_from_project(&review);
+        // The project's exclusion list travels with the run: every file read of this run's
+        // checkout goes through it (a list that cannot be used excludes everything, and the
+        // start paths refuse first with the reason: `scope::start_refusal`).
+        controls.scope = crate::onboard::scope::ScanScope::of_project_or_nothing(project);
         controls
     }
 }
@@ -1664,4 +1689,33 @@ pub(crate) struct DeltaRetest {
     pub base_inspection_id: String,
     pub from_sha: String,
     pub to_sha: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Item 31: a linter runs over the whole checkout, so a preview finding in a file the
+    /// project's exclusion list names is dropped, and the others stay.
+    #[test]
+    fn a_preview_finding_in_an_excluded_file_is_dropped() {
+        let finding = |path: &str| crate::onboard::Finding {
+            repo: "acme/app".to_string(),
+            path: path.to_string(),
+            rule_id: "RUST-CLIPPY-1".to_string(),
+            ..Default::default()
+        };
+        let previews = vec![finding("seeds/data.rs"), finding("src/lib.rs")];
+        let scope =
+            crate::onboard::scope::ScanScope::from_patterns(&["app/seeds/**".to_string()]).unwrap();
+        let kept = admitted_previews(previews.clone(), "acme/app", &scope);
+        let paths: Vec<&str> = kept.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["src/lib.rs"]);
+        let all = admitted_previews(
+            previews,
+            "acme/app",
+            &crate::onboard::scope::ScanScope::none(),
+        );
+        assert_eq!(all.len(), 2, "nothing is dropped without an exclusion");
+    }
 }

@@ -81,6 +81,7 @@ async fn failures() -> Vec<crate::ai_audit::FailedPass> {
     );
     // Not run: the spend limit.
     let meter = UsageMeter::with_controls(RunControls {
+        scope: Default::default(),
         max_cost_usd: Some(0.5),
         ..RunControls::default()
     });

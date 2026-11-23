@@ -274,6 +274,7 @@ fn args(repo: &Path, export: &Path, client_engagement: bool) -> InspectArgs {
             finder: FinderChoice::Agent,
             ..FinderArgs::default()
         },
+        exclude: Vec::new(),
     }
 }
 
