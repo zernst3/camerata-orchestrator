@@ -714,6 +714,7 @@ async fn submit_poll_fetch(
     ttl: CacheTtl,
 ) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
     let n_items = items.len();
+    let round_started = crate::stage_telemetry::now_unix_ms();
     let submitted = ctx.api.submit(items).await;
     note_batch_call(ctx.meter, &submitted);
     let batch_id = submitted.map_err(|error| SubBatchFailure {
@@ -734,7 +735,7 @@ async fn submit_poll_fetch(
         done_before: 0,
         total: Some(n_items),
     };
-    poll_and_fetch(
+    poll_and_fetch_since(
         ctx,
         &batch_id,
         ttl,
@@ -742,6 +743,7 @@ async fn submit_poll_fetch(
         Some(progress),
         ctx.fatal_errors,
         false,
+        round_started,
     )
     .await
 }
@@ -754,6 +756,63 @@ async fn submit_poll_fetch(
 /// With `cancellable` the job's cancel flag is looked at once per poll interval (and before each
 /// attempt); a cancel ends the wait at once with a [`JobCancelled`] error carrying the batch id.
 pub(crate) async fn poll_and_fetch(
+    ctx: &RoundContext<'_>,
+    batch_id: &str,
+    ttl: CacheTtl,
+    interval: std::time::Duration,
+    progress: Option<PollProgress>,
+    fatal_errors: bool,
+    cancellable: bool,
+) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
+    poll_and_fetch_since(
+        ctx,
+        batch_id,
+        ttl,
+        interval,
+        progress,
+        fatal_errors,
+        cancellable,
+        crate::stage_telemetry::now_unix_ms(),
+    )
+    .await
+}
+
+/// [`poll_and_fetch`] for a round that began at `started_unix_ms` (the submission, for a fresh
+/// batch): when the wait ends, however it ends, the stage's run figures learn the round's span.
+/// A resume that only polls starts the round at the poll, so it records this session's wait only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn poll_and_fetch_since(
+    ctx: &RoundContext<'_>,
+    batch_id: &str,
+    ttl: CacheTtl,
+    interval: std::time::Duration,
+    progress: Option<PollProgress>,
+    fatal_errors: bool,
+    cancellable: bool,
+    started_unix_ms: u64,
+) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
+    let stage = progress.map(|p| p.stage);
+    let result = poll_and_fetch_inner(
+        ctx,
+        batch_id,
+        ttl,
+        interval,
+        progress,
+        fatal_errors,
+        cancellable,
+    )
+    .await;
+    if let (Some(meter), Some(stage)) = (ctx.meter, stage) {
+        meter.record_batch_round(
+            stage,
+            started_unix_ms,
+            crate::stage_telemetry::now_unix_ms(),
+        );
+    }
+    result
+}
+
+async fn poll_and_fetch_inner(
     ctx: &RoundContext<'_>,
     batch_id: &str,
     ttl: CacheTtl,

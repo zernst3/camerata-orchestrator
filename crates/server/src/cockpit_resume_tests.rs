@@ -1265,6 +1265,7 @@ async fn a_cockpit_resume_is_refused_when_the_kept_group_review_model_is_not_all
         .unwrap();
     std::fs::remove_file(&rig.group_review_down).unwrap();
     let calls_before = stage_calls(&rig.log).len();
+    let segments_before = crate::run_store::read_record(&rig.run_id).unwrap().segments;
 
     let resume = run_resume_start(
         State(rig.state.clone()),
@@ -1291,6 +1292,11 @@ async fn a_cockpit_resume_is_refused_when_the_kept_group_review_model_is_not_all
         stage_calls(&rig.log).len(),
         calls_before,
         "no model call was made"
+    );
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().segments,
+        segments_before,
+        "a refused resume leaves no segment of its own"
     );
 }
 

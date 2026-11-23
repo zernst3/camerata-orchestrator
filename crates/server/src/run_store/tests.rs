@@ -1676,6 +1676,8 @@ fn store_unusable(store: &RunStore, req: &LlmRequest, text: &str, truncated: boo
                 truncated,
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
+                ended_unix_ms: None,
             }),
             error: None,
             class: None,
@@ -2566,9 +2568,10 @@ fn a_finished_session_leaves_one_segment_and_a_resume_appends_a_second() {
     let repo = git_repo();
     let store = new_run(&repo);
     let id = store.run_id();
-    assert!(
-        read_record(&id).unwrap().segments.is_empty(),
-        "no segment while the session is open"
+    assert_eq!(
+        read_record(&id).unwrap().segments.len(),
+        1,
+        "the session's segment is on disk from the start"
     );
     store.finish(&FinishOutcome::default());
     let first = read_record(&id).unwrap().segments;
@@ -2578,9 +2581,14 @@ fn a_finished_session_leaves_one_segment_and_a_resume_appends_a_second() {
 
     // The process ends; a resume opens the run again and finishes it.
     let resumed = reopen(store);
+    let opened = read_record(&id).unwrap().segments;
     assert_eq!(
-        read_record(&id).unwrap().segments,
-        first,
+        opened.len(),
+        2,
+        "the resume's own segment is on disk at once"
+    );
+    assert_eq!(
+        opened[0], first[0],
         "opening a resume changes no earlier segment"
     );
     resumed.finish(&FinishOutcome::default());
@@ -2632,4 +2640,92 @@ fn a_run_saved_before_segments_existed_still_loads() {
     assert!(value.as_object_mut().unwrap().remove("segments").is_some());
     std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(read_record(&id).unwrap().segments.is_empty());
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_killed_session_leaves_a_segment_with_the_end_of_its_last_save() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    let dir = store.dir().to_path_buf();
+    let at_create = read_record(&id).unwrap().segments[0].elapsed_ms;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    store.persist().unwrap();
+    // What a kill leaves behind is run.json as the last save wrote it: no destructor runs.
+    let left_by_the_kill = std::fs::read(dir.join("run.json")).unwrap();
+    let killed = read_record(&id).unwrap().segments;
+    assert_eq!(killed.len(), 1, "{killed:?}");
+    assert!(
+        killed[0].elapsed_ms >= at_create + 30,
+        "the save moved the end: {at_create} then {killed:?}"
+    );
+    assert_eq!(
+        killed[0].finished_unix_ms,
+        killed[0].started_unix_ms + killed[0].elapsed_ms,
+        "the end is the last save's"
+    );
+
+    // In one process the only way to release the lock is to drop the holder (which would close
+    // the segment), so put the killed process's file and its dead lock back, then resume.
+    let dead = {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    };
+    drop(store);
+    std::fs::write(dir.join("run.json"), left_by_the_kill).unwrap();
+    let stale = serde_json::json!({"pid": dead, "started_at": now(), "heartbeat_at": now()});
+    std::fs::write(dir.join("lock.json"), stale.to_string()).unwrap();
+    let resumed = RunStore::open(&id).unwrap();
+    let two = read_record(&id).unwrap().segments;
+    assert_eq!(two.len(), 2, "{two:?}");
+    assert_eq!(
+        two[0], killed[0],
+        "the killed session's segment is kept as saved"
+    );
+    drop(resumed);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_session_that_did_no_work_can_take_its_segment_back_and_earlier_ones_stay() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    store.finish(&FinishOutcome::default());
+    let first = read_record(&id).unwrap().segments;
+    let refused = reopen(store);
+    assert_eq!(read_record(&id).unwrap().segments.len(), 2);
+    refused.discard_segment();
+    drop(refused);
+    assert_eq!(read_record(&id).unwrap().segments, first);
+}
+
+#[test]
+fn the_saved_journal_keeps_a_calls_timing_and_an_older_line_still_loads() {
+    let mut timed = response("answer", 0.1);
+    timed.elapsed_ms = Some(1_234);
+    let stored = journal::StoredResponse::of(&timed);
+    assert_eq!(stored.elapsed_ms, Some(1_234));
+    assert!(stored.ended_unix_ms.is_some_and(|t| t > 0));
+    let back: journal::StoredResponse =
+        serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+    assert_eq!(back.elapsed_ms, Some(1_234), "the timing survives the save");
+    // A replay adds nothing to the live telemetry of the resuming session.
+    assert_eq!(back.replayed().elapsed_ms, None);
+
+    // A journal line written before the fields existed.
+    let mut value = serde_json::to_value(&stored).unwrap();
+    let object = value.as_object_mut().unwrap();
+    assert!(object.remove("elapsed_ms").is_some());
+    assert!(object.remove("ended_unix_ms").is_some());
+    let old: journal::StoredResponse = serde_json::from_value(value).expect("an old line loads");
+    assert_eq!((old.elapsed_ms, old.ended_unix_ms), (None, None));
 }

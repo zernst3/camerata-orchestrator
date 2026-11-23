@@ -110,10 +110,18 @@ pub struct StoredResponse {
     /// `LlmResponse::cli_cost_usd`).
     #[serde(default)]
     pub cli_cost_usd: Option<f64>,
+    /// How long the call took in the session that made it (`LlmResponse::elapsed_ms`). Kept so a
+    /// resume's saved journal still holds the earlier sessions' timings; a replay returns none of
+    /// it, so live telemetry counts only what the session itself sends. Operator-only.
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
+    /// Unix milliseconds at which the call ended, in the session that made it.
+    #[serde(default)]
+    pub ended_unix_ms: Option<u64>,
 }
 
 impl StoredResponse {
-    fn of(r: &LlmResponse) -> Self {
+    pub(crate) fn of(r: &LlmResponse) -> Self {
         Self {
             text: r.text.clone(),
             model: r.model.clone(),
@@ -127,13 +135,15 @@ impl StoredResponse {
             truncated: r.truncated,
             reported_model: r.reported_model.clone(),
             cli_cost_usd: r.cli_cost_usd,
+            elapsed_ms: r.elapsed_ms,
+            ended_unix_ms: Some(crate::stage_telemetry::now_unix_ms()),
         }
     }
 
     /// The reply as a replay returns it: the same text, and no cost, because this attempt did not
     /// pay for it. The usage meter therefore counts only what this attempt sends; a spend limit
     /// adds the stored cost separately (`RunControls::stored_spend_usd`).
-    fn replayed(&self) -> LlmResponse {
+    pub(crate) fn replayed(&self) -> LlmResponse {
         LlmResponse {
             reported_model: self.reported_model.clone(),
             // Replayed at no cost, so there is no CLI figure to compare either.

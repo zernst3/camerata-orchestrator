@@ -406,3 +406,22 @@ fn stamp_elapsed_times_a_reply_and_leaves_a_failure_alone() {
     assert!(ok.elapsed_ms.unwrap() >= 250);
     assert!(stamp_elapsed(Err(anyhow::anyhow!("down")), started).is_err());
 }
+
+/// A failed call waited too: the typed failure carries how long, for the stage's run figures.
+#[tokio::test]
+async fn a_failed_call_carries_the_time_it_waited() {
+    let bad = ResponseTemplate::new(400).set_body_json(
+        json!({"type":"error","error":{"type":"invalid_request_error","message":"bad"}}),
+    );
+    let server = server_with(vec![bad]).await;
+    let waits = Arc::new(Waits::default());
+    let (llm, _) = llm_at(&server, &waits);
+    let err = llm
+        .complete_streaming(request(4_096), &mut |_| {})
+        .await
+        .expect_err("400 is terminal");
+    assert!(
+        crate::failure::elapsed_ms_of(&err).is_some(),
+        "the failure is timed: {err}"
+    );
+}

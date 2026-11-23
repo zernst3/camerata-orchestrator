@@ -139,6 +139,18 @@ pub struct StageUsage {
     /// Unix milliseconds at which the stage's latest timed call ended.
     #[serde(default)]
     pub last_call_unix_ms: Option<u64>,
+    /// Milliseconds this session spent waiting on Message Batches rounds of the stage (from the
+    /// round's submission, or from the poll a resume started, to the results being read). Kept
+    /// apart from `busy_ms`: a batch row has no per-call time, and the wait is the provider's
+    /// queue, not a call in flight. The rounds also move `first_call_unix_ms` and
+    /// `last_call_unix_ms`. Operator-only; never exported.
+    #[serde(default)]
+    pub batch_wait_ms: u64,
+    /// Milliseconds spent in calls that failed with no billed reply (a timeout, an HTTP error),
+    /// kept apart from `busy_ms`, which belongs to calls counted in `calls`. A timed-out call
+    /// that is counted at its cost ceiling (`record_unanswered`) is in `busy_ms` instead.
+    #[serde(default)]
+    pub failed_busy_ms: u64,
 }
 
 /// Wall-clock now, in Unix milliseconds. The one clock the run figures read.
@@ -214,8 +226,10 @@ impl StageUsage {
         for (model, calls) in &other.models {
             *self.models.entry(model.clone()).or_default() += calls;
         }
-        self.busy_ms += other.busy_ms;
-        self.wasted_busy_ms += other.wasted_busy_ms;
+        self.busy_ms = self.busy_ms.saturating_add(other.busy_ms);
+        self.wasted_busy_ms = self.wasted_busy_ms.saturating_add(other.wasted_busy_ms);
+        self.batch_wait_ms = self.batch_wait_ms.saturating_add(other.batch_wait_ms);
+        self.failed_busy_ms = self.failed_busy_ms.saturating_add(other.failed_busy_ms);
         self.first_call_unix_ms = match (self.first_call_unix_ms, other.first_call_unix_ms) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -582,6 +596,34 @@ impl StageMeter {
     /// [`Self::record`] with the call's end time given (Unix ms), so a test can state it.
     pub fn record_at(&self, stage: Stage, r: &LlmResponse, ended_unix_ms: u64) {
         self.with_stage(stage, |u| u.fold(r, ended_unix_ms));
+    }
+
+    /// A call of `stage` failed after `elapsed_ms` with no reply to bill: adds the wait to
+    /// `failed_busy_ms`.
+    pub fn record_failed_time(&self, stage: Stage, elapsed_ms: u64) {
+        self.with_stage(stage, |u| {
+            u.failed_busy_ms = u.failed_busy_ms.saturating_add(elapsed_ms);
+        });
+    }
+
+    /// One Message Batches round of `stage`, from `started_unix_ms` to `ended_unix_ms` (its
+    /// results read): widens the stage's first and last stamps to cover the round and adds the
+    /// wait to `batch_wait_ms`. Batch rows carry no per-call time, so this is the stage's timing
+    /// in batch mode.
+    pub fn record_batch_round(&self, stage: Stage, started_unix_ms: u64, ended_unix_ms: u64) {
+        self.with_stage(stage, |u| {
+            u.batch_wait_ms = u
+                .batch_wait_ms
+                .saturating_add(ended_unix_ms.saturating_sub(started_unix_ms));
+            u.first_call_unix_ms = Some(
+                u.first_call_unix_ms
+                    .map_or(started_unix_ms, |t| t.min(started_unix_ms)),
+            );
+            u.last_call_unix_ms = Some(
+                u.last_call_unix_ms
+                    .map_or(ended_unix_ms, |t| t.max(ended_unix_ms)),
+            );
+        });
     }
 
     /// Mark a completion that [`Self::record`] already counted as one whose output was thrown

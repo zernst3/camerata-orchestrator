@@ -446,3 +446,17 @@ fn telemetry_with_run_figures_round_trips_and_an_older_record_still_loads() {
     assert_eq!((usage.busy_ms, usage.first_call_unix_ms), (0, None));
     assert_eq!(usage.calls, 1);
 }
+
+#[test]
+fn batch_rounds_widen_the_stage_span_and_add_their_wait_apart_from_busy_time() {
+    let meter = StageMeter::default();
+    // Two rounds of the same stage (a batch and its resubmission); the rows carry no timing.
+    meter.record_batch_round(Stage::ScanPass, 1_000, 4_000);
+    meter.record_batch_round(Stage::ScanPass, 4_500, 5_000);
+    meter.record(Stage::ScanPass, &resp(10, 1, 0, 0, Some(0.1)));
+    let scan = &meter.snapshot(0).stages[0].usage;
+    assert_eq!(scan.batch_wait_ms, 3_500);
+    assert_eq!(scan.busy_ms, 0, "a wait is not call time");
+    assert_eq!(scan.first_call_unix_ms, Some(1_000));
+    assert!(scan.last_call_unix_ms >= Some(5_000));
+}

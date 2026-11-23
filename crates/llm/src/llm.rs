@@ -3579,8 +3579,15 @@ fn stamp_elapsed(
     mut result: anyhow::Result<LlmResponse>,
     started: std::time::Instant,
 ) -> anyhow::Result<LlmResponse> {
-    if let Ok(resp) = &mut result {
-        resp.elapsed_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+    let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match &mut result {
+        Ok(resp) => resp.elapsed_ms = Some(elapsed),
+        // A failed call still waited: a typed transport failure carries how long.
+        Err(e) => {
+            if let Some(failure) = e.downcast_mut::<crate::failure::LlmCallFailure>() {
+                failure.elapsed_ms = Some(elapsed);
+            }
+        }
     }
     result
 }

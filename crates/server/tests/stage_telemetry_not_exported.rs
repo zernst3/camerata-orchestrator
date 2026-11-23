@@ -107,6 +107,14 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
             truncated: false,
         },
     );
+    // The run's own timing, as `run.json` saves it: its keys and values must not reach the export.
+    let segment = camerata_server::run_store::RunSegment {
+        started_unix_ms: 1_700_000_123_456,
+        finished_unix_ms: 1_700_000_130_000,
+        elapsed_ms: 6_544,
+    };
+    let segment_json = serde_json::to_string(&segment).unwrap();
+    assert!(segment_json.contains("started_unix_ms"), "{segment_json}");
     let mut with = ScanLedger::new();
     with.record_stage_telemetry(meter.snapshot(400));
     with.record_ai_key(camerata_server::scan_cache::AiScanKey::new(
@@ -143,6 +151,9 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
         "phases",
         "telemetry-only-model-id",
         "4321",
+        "1700000123456",
+        "1700000130000",
+        "6544",
     ] {
         assert!(
             !report_with.contains(term) && !findings_with.contains(term),

@@ -268,6 +268,9 @@ pub struct LlmCallFailure {
     /// The final HTTP status and body, when the failure was an HTTP answer. Lets a caller that
     /// formats its own message keep doing so.
     pub http: Option<(u16, String)>,
+    /// Milliseconds the failed call took (set where the backend call returns), so a failed
+    /// call's wait still counts toward the stage's run figures. `None` when not timed.
+    pub elapsed_ms: Option<u64>,
 }
 
 impl LlmCallFailure {
@@ -278,6 +281,7 @@ impl LlmCallFailure {
             attempts: Vec::new(),
             retryable: false,
             http: None,
+            elapsed_ms: None,
         }
     }
 }
@@ -499,6 +503,11 @@ pub fn classify_error(e: &anyhow::Error) -> FailureClass {
             }
         }
     }
+}
+
+/// How long the failed call inside `e` took, when it is a typed transport failure that was timed.
+pub fn elapsed_ms_of(e: &anyhow::Error) -> Option<u64> {
+    call_failure_of(e).and_then(|f| f.elapsed_ms)
 }
 
 /// The attempt trail inside `e`, empty when the error is not a typed transport failure.
