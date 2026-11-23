@@ -607,6 +607,7 @@ pub(super) fn response_of(
         truncated: false,
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
     }
 }
 

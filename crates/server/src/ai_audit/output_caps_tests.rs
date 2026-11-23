@@ -120,6 +120,7 @@ impl LlmPort for ThinksUntilTheCap {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "claude-haiku-5-5".to_string(),
             backend: "api".to_string(),
@@ -303,6 +304,7 @@ fn paid_reply(model: &str, cost: f64) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: model.to_string(),
         backend: "api".to_string(),
@@ -467,6 +469,7 @@ impl LlmPort for Scripted {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "claude-sonnet-5-5".to_string(),
             backend: "api".to_string(),

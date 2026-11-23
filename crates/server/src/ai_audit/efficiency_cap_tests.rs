@@ -55,6 +55,7 @@ impl LlmPort for StubLlm {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: "{}".to_string(),
             model: "stub".to_string(),
             backend: "api".to_string(),
@@ -366,6 +367,7 @@ fn a_stage_that_would_start_past_the_cap_is_blocked_and_recorded_once() {
         &LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -411,6 +413,7 @@ fn spend(meter: &UsageMeter, dollars: f64) {
         &LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: "m".into(),
             backend: "api".into(),
@@ -875,6 +878,7 @@ fn response(
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: model.to_string(),
         backend: "api".to_string(),

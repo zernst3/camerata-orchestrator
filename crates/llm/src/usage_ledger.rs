@@ -268,6 +268,7 @@ mod tests {
         LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: model.to_string(),
             backend: "cli".to_string(),
@@ -286,6 +287,7 @@ mod tests {
         LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: String::new(),
             model: model.to_string(),
             backend: "api".to_string(),

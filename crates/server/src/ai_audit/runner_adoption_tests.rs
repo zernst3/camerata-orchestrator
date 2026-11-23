@@ -27,6 +27,7 @@ fn reply_of(text: &str) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "stub".to_string(),

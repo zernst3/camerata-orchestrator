@@ -12,6 +12,7 @@ fn response(text: &str, cost: f64) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: text.to_string(),
         model: "stub".to_string(),
         backend: "api".to_string(),
@@ -785,6 +786,7 @@ fn make_run(root: &std::path::Path, id: &str, project: &str, commit: &str, statu
         plan: Vec::new(),
         incomplete_reasons: Vec::new(),
         notes: Vec::new(),
+        segments: Vec::new(),
     };
     std::fs::write(dir.join("run.json"), serde_json::to_vec(&record).unwrap()).unwrap();
 }
@@ -2555,4 +2557,79 @@ fn the_finder_model_hold_keeps_the_recorded_model_and_says_so() {
         record("claude-fable-5-2").hold_finder_model(&mut e),
         Ok(None)
     );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_finished_session_leaves_one_segment_and_a_resume_appends_a_second() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    assert!(
+        read_record(&id).unwrap().segments.is_empty(),
+        "no segment while the session is open"
+    );
+    store.finish(&FinishOutcome::default());
+    let first = read_record(&id).unwrap().segments;
+    assert_eq!(first.len(), 1, "finish closes the session's segment");
+    assert!(first[0].finished_unix_ms >= first[0].started_unix_ms);
+    assert!(first[0].started_unix_ms > 0);
+
+    // The process ends; a resume opens the run again and finishes it.
+    let resumed = reopen(store);
+    assert_eq!(
+        read_record(&id).unwrap().segments,
+        first,
+        "opening a resume changes no earlier segment"
+    );
+    resumed.finish(&FinishOutcome::default());
+    let both = read_record(&id).unwrap().segments;
+    assert_eq!(both.len(), 2, "the resume appended its own segment");
+    assert_eq!(both[0], first[0], "the first segment is never overwritten");
+    assert!(both[1].started_unix_ms >= first[0].finished_unix_ms);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_session_that_never_reaches_finish_still_records_its_segment_end() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    // A failed or cancelled job drops the store without `finish`.
+    drop(store);
+    let segments = read_record(&id).unwrap().segments;
+    assert_eq!(segments.len(), 1, "the drop closed the open segment");
+    assert!(segments[0].finished_unix_ms >= segments[0].started_unix_ms);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_segment_is_closed_once_whichever_comes_first() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    store.end_segment();
+    store.end_segment();
+    store.finish(&FinishOutcome::default());
+    drop(store);
+    assert_eq!(read_record(&id).unwrap().segments.len(), 1);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_run_saved_before_segments_existed_still_loads() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    store.finish(&FinishOutcome::default());
+    let path = runs_dir().join(&id).join("run.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(value.as_object_mut().unwrap().remove("segments").is_some());
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(read_record(&id).unwrap().segments.is_empty());
 }

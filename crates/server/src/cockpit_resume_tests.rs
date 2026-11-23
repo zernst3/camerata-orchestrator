@@ -299,6 +299,10 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
         Some(project.id.as_str()),
         "a scan started from the cockpit records the project it was started in"
     );
+    // The app's scan job records the wall-clock segment of its session (run figures).
+    let first_segments = record.segments.clone();
+    assert_eq!(first_segments.len(), 1, "{first_segments:?}");
+    assert!(first_segments[0].finished_unix_ms >= first_segments[0].started_unix_ms);
     let audit_calls_before = stage_calls(&log).iter().filter(|s| *s == "audit").count();
     assert!(audit_calls_before > 0);
 
@@ -384,6 +388,11 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     );
     let record = crate::run_store::read_record(&run_id).unwrap();
     assert_eq!(record.status, crate::run_store::RunStatus::Complete);
+    assert_eq!(record.segments.len(), 2, "the resume appended a segment");
+    assert_eq!(
+        record.segments[0], first_segments[0],
+        "the first segment is kept as it was"
+    );
 
     // ── A complete run: the plan says so and the resume endpoint starts nothing ───────────
     let plan = body_json(

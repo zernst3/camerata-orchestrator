@@ -120,6 +120,32 @@ pub struct StageUsage {
     /// written before this existed.
     #[serde(default)]
     pub models: BTreeMap<String, u64>,
+    /// Sum of the calls' `elapsed_ms`: the time the stage's calls were in flight, added up. With
+    /// calls running in parallel this exceeds the stage's wall-clock span (see
+    /// `first_call_unix_ms` / `last_call_unix_ms`). A call with no timing (a record replayed from
+    /// a checkpoint, the CLI finder's per-turn records) adds nothing. Includes the attempts later
+    /// marked wasted, exactly as `calls` and the token fields do; `wasted_busy_ms` is the subset.
+    /// Operator-only; never exported.
+    #[serde(default)]
+    pub busy_ms: u64,
+    /// The part of `busy_ms` spent on attempts whose output was thrown away. A SUBSET of
+    /// `busy_ms`, never added to totals twice.
+    #[serde(default)]
+    pub wasted_busy_ms: u64,
+    /// Unix milliseconds at which the stage's earliest timed call started (a call's start is its
+    /// end stamp minus its `elapsed_ms`). `None` until a timed call is recorded.
+    #[serde(default)]
+    pub first_call_unix_ms: Option<u64>,
+    /// Unix milliseconds at which the stage's latest timed call ended.
+    #[serde(default)]
+    pub last_call_unix_ms: Option<u64>,
+}
+
+/// Wall-clock now, in Unix milliseconds. The one clock the run figures read.
+pub fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The key a call is counted under in [`StageUsage::models`]: the served model id when the
@@ -140,7 +166,7 @@ impl StageUsage {
         self.cost_reported_calls == self.calls
     }
 
-    fn fold(&mut self, r: &LlmResponse) {
+    fn fold(&mut self, r: &LlmResponse, ended_unix_ms: u64) {
         self.calls += 1;
         self.input_tokens += r.input_tokens.unwrap_or(0);
         self.output_tokens += r.output_tokens.unwrap_or(0);
@@ -151,6 +177,16 @@ impl StageUsage {
             self.cost_reported_calls += 1;
         }
         *self.models.entry(model_key(r)).or_default() += 1;
+        if let Some(ms) = r.elapsed_ms {
+            self.busy_ms = self.busy_ms.saturating_add(ms);
+            let started = ended_unix_ms.saturating_sub(ms);
+            self.first_call_unix_ms =
+                Some(self.first_call_unix_ms.map_or(started, |t| t.min(started)));
+            self.last_call_unix_ms = Some(
+                self.last_call_unix_ms
+                    .map_or(ended_unix_ms, |t| t.max(ended_unix_ms)),
+            );
+        }
     }
 
     fn fold_wasted(&mut self, r: &LlmResponse, share: f64) {
@@ -160,6 +196,7 @@ impl StageUsage {
         self.wasted_input_tokens += prorate(r.input_tokens);
         self.wasted_output_tokens += prorate(r.output_tokens);
         self.wasted_cost_usd += r.cost_usd.unwrap_or(0.0) * share;
+        self.wasted_busy_ms += prorate(r.elapsed_ms);
     }
 
     fn add(&mut self, other: &StageUsage) {
@@ -177,6 +214,16 @@ impl StageUsage {
         for (model, calls) in &other.models {
             *self.models.entry(model.clone()).or_default() += calls;
         }
+        self.busy_ms += other.busy_ms;
+        self.wasted_busy_ms += other.wasted_busy_ms;
+        self.first_call_unix_ms = match (self.first_call_unix_ms, other.first_call_unix_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.last_call_unix_ms = match (self.last_call_unix_ms, other.last_call_unix_ms) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
     }
 
     /// `model xN, other xM`, in model-id order. Empty when no call recorded a model.
@@ -529,7 +576,12 @@ pub struct StageMeter {
 impl StageMeter {
     /// Fold one completion into `stage`.
     pub fn record(&self, stage: Stage, r: &LlmResponse) {
-        self.with_stage(stage, |u| u.fold(r));
+        self.record_at(stage, r, now_unix_ms());
+    }
+
+    /// [`Self::record`] with the call's end time given (Unix ms), so a test can state it.
+    pub fn record_at(&self, stage: Stage, r: &LlmResponse, ended_unix_ms: u64) {
+        self.with_stage(stage, |u| u.fold(r, ended_unix_ms));
     }
 
     /// Mark a completion that [`Self::record`] already counted as one whose output was thrown

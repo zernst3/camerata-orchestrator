@@ -56,6 +56,7 @@ impl LlmPort for Counting {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: r#"{"findings":[],"real":"yes","reason":"ok"}"#.to_string(),
             model: req.model.clone(),
             backend: "api".to_string(),
@@ -397,6 +398,7 @@ fn reply(cost: f64) -> LlmResponse {
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: "m".into(),
         backend: "api".into(),
@@ -534,6 +536,7 @@ mod batches {
                         truncated: false,
                         reported_model: None,
                         cli_cost_usd: None,
+                        elapsed_ms: None,
                     }),
                     error: None,
                     billed: None,

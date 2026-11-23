@@ -60,6 +60,7 @@ impl LlmPort for SilentModel {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: EMPTY_FINDINGS_JSON.to_string(),
             model: "stub".to_string(),
             backend: "stub".to_string(),

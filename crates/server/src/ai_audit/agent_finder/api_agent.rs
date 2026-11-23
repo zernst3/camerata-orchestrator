@@ -390,6 +390,7 @@ impl ApiPieceAgent {
             &LlmResponse {
                 reported_model: None,
                 cli_cost_usd: None,
+                elapsed_ms: None,
                 text: String::new(),
                 model: self.model.clone(),
                 backend: "anthropic/api/agentic".to_string(),

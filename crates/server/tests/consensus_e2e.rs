@@ -56,6 +56,7 @@ impl LlmPort for Varying {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: req.model.clone(),
             backend: "stub".to_string(),

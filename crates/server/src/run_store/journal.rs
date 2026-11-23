@@ -138,6 +138,7 @@ impl StoredResponse {
             reported_model: self.reported_model.clone(),
             // Replayed at no cost, so there is no CLI figure to compare either.
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: self.text.clone(),
             model: self.model.clone(),
             backend: self.backend.clone(),

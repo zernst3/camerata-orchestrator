@@ -68,6 +68,7 @@ impl LlmPort for ConfirmsEverything {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: serde_json::json!({ "verdicts": items }).to_string(),
             model: req.model.clone(),
             backend: "stub".to_string(),

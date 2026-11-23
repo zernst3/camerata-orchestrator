@@ -77,6 +77,7 @@ fn response(v: &Value, input: u64, output: u64, cache_read: u64) -> LlmResponse 
         truncated: false,
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
     }
 }
 

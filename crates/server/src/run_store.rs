@@ -497,6 +497,40 @@ pub struct RunRecord {
     /// attempts; each note appears once.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Wall-clock segments: one per session that worked on the run (the first scan, then each
+    /// resume), in order. A resume appends; an earlier segment is never changed. Operator-only
+    /// figures, never exported. Empty for a run saved before this existed.
+    #[serde(default)]
+    pub segments: Vec<RunSegment>,
+}
+
+/// One session's wall-clock time on a run: from the moment the process opened the run to the
+/// moment it finished, failed, was cancelled or dropped it. Operator-only; never exported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSegment {
+    /// Unix milliseconds when the session opened the run.
+    pub started_unix_ms: u64,
+    /// Unix milliseconds when the session ended.
+    pub finished_unix_ms: u64,
+    /// Milliseconds on a monotonic clock between the two, so a system clock change during the
+    /// session does not distort it. It can be shorter than the wall-clock gap when the machine
+    /// slept, because the monotonic clock does not count sleep.
+    pub elapsed_ms: u64,
+}
+
+/// When this process opened the run: the start of the segment [`RunStore::end_segment`] closes.
+struct Session {
+    started_unix_ms: u64,
+    started: std::time::Instant,
+}
+
+impl Session {
+    fn begin() -> Self {
+        Self {
+            started_unix_ms: crate::stage_telemetry::now_unix_ms(),
+            started: std::time::Instant::now(),
+        }
+    }
 }
 
 /// What a process working on a run looks like from outside.
@@ -865,6 +899,8 @@ pub struct RunStore {
     state: Mutex<StoreState>,
     /// Held for the life of the store.
     _lock: RunLock,
+    /// The open segment of this process's work on the run; taken when the segment is closed.
+    session: Mutex<Option<Session>>,
 }
 
 pub(crate) struct StoreState {
@@ -992,6 +1028,7 @@ impl RunStore {
             plan: plan_for(&new.repos, new.include_alternatives),
             incomplete_reasons: Vec::new(),
             notes: Vec::new(),
+            segments: Vec::new(),
         };
         let lock = RunLock::acquire(&dir)?;
         let store = Arc::new(Self {
@@ -1005,6 +1042,7 @@ impl RunStore {
                 submitted: Default::default(),
             }),
             _lock: lock,
+            session: Mutex::new(Some(Session::begin())),
         });
         store.persist()?;
         Ok(store)
@@ -1031,6 +1069,7 @@ impl RunStore {
                 submitted: Default::default(),
             }),
             _lock: lock,
+            session: Mutex::new(Some(Session::begin())),
         });
         store.persist()?;
         Ok(store)
@@ -1133,6 +1172,41 @@ impl RunStore {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Close this process's wall-clock segment of the run, once: appends it to the record and
+    /// writes `run.json`. Called by [`Self::finish`] and, for a session that never reaches it (the
+    /// job failed or was cancelled, the command line returned an error), when the store is
+    /// dropped, so every session leaves a segment. A later call does nothing.
+    pub fn end_segment(&self) {
+        let Some(session) = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
+            return;
+        };
+        self.close_segment_at(
+            session.started_unix_ms,
+            crate::stage_telemetry::now_unix_ms(),
+            u64::try_from(session.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+    }
+
+    /// Append the segment to the record and write it. Takes the three figures so a test states them.
+    pub(crate) fn close_segment_at(
+        &self,
+        started_unix_ms: u64,
+        finished_unix_ms: u64,
+        elapsed_ms: u64,
+    ) {
+        self.lock_state().record.segments.push(RunSegment {
+            started_unix_ms,
+            finished_unix_ms,
+            elapsed_ms,
+        });
+        let _ = self.persist();
+    }
+
     /// Write `run.json`.
     pub fn persist(&self) -> Result<(), RunStoreError> {
         let mut state = self.lock_state();
@@ -1196,6 +1270,7 @@ impl RunStore {
     /// The end of an attempt: sets aside replies a later step rejected, decides which parts are
     /// done, and marks the run complete or incomplete.
     pub fn finish(&self, outcome: &FinishOutcome) {
+        self.end_segment();
         journal::quarantine_rejected(self, &outcome.failures);
         journal::count_calls(self);
         {
@@ -1264,6 +1339,14 @@ impl RunStore {
                 .clone_from(&outcome.incomplete_reasons);
         }
         self.record_tree_end();
+    }
+}
+
+impl Drop for RunStore {
+    /// A session that ended without [`RunStore::finish`] (a failed or cancelled job, an error
+    /// return) still records the end of its segment.
+    fn drop(&mut self) {
+        self.end_segment();
     }
 }
 

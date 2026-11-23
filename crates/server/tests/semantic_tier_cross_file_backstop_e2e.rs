@@ -107,6 +107,7 @@ impl LlmPort for StubModel {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: answer(&req, CANNED_FINDING_JSON.to_string()),
             model: "stub".to_string(),
             backend: "stub".to_string(),

@@ -10,6 +10,7 @@ fn resp(
     LlmResponse {
         reported_model: None,
         cli_cost_usd: None,
+        elapsed_ms: None,
         text: String::new(),
         model: "m".to_string(),
         backend: "api".to_string(),
@@ -349,4 +350,99 @@ fn cli_calls_are_counted_as_the_requested_model() {
         "{}",
         t.render_table()
     );
+}
+
+fn timed(model: &str, elapsed_ms: u64) -> LlmResponse {
+    LlmResponse {
+        model: model.to_string(),
+        elapsed_ms: Some(elapsed_ms),
+        ..resp(100, 10, 0, 0, Some(0.1))
+    }
+}
+
+#[test]
+fn a_stage_sums_busy_time_and_spans_its_calls_even_when_they_overlap() {
+    let meter = StageMeter::default();
+    // Two calls in flight at once: A ran 9_000..10_000 (1_000 ms), B ran 9_500..10_200 (700 ms).
+    meter.record_at(Stage::ScanPass, &timed("model-a", 1_000), 10_000);
+    meter.record_at(Stage::ScanPass, &timed("model-b", 700), 10_200);
+    meter.record_at(Stage::Calibration, &timed("model-a", 50), 20_000);
+
+    let t = meter.snapshot(1_000);
+    let scan = &t.stages[0].usage;
+    assert_eq!(scan.busy_ms, 1_700, "the call times add up");
+    assert_eq!(
+        scan.first_call_unix_ms,
+        Some(9_000),
+        "the earliest call's start"
+    );
+    assert_eq!(
+        scan.last_call_unix_ms,
+        Some(10_200),
+        "the latest call's end"
+    );
+    assert_eq!(
+        scan.models,
+        BTreeMap::from([("model-a".to_string(), 1), ("model-b".to_string(), 1)])
+    );
+    let total = t.total();
+    assert_eq!(total.busy_ms, 1_750);
+    assert_eq!(total.first_call_unix_ms, Some(9_000));
+    assert_eq!(total.last_call_unix_ms, Some(20_000));
+}
+
+#[test]
+fn a_wasted_attempt_counts_toward_busy_time_once() {
+    let meter = StageMeter::default();
+    let discarded = timed("model-a", 400);
+    meter.record_at(Stage::FixGeneration, &discarded, 5_000);
+    meter.record_at(Stage::FixGeneration, &timed("model-a", 600), 6_000);
+    meter.record_wasted(Stage::FixGeneration, &discarded);
+
+    let fix = &meter.snapshot(0).stages[0].usage;
+    assert_eq!(
+        fix.busy_ms, 1_000,
+        "the discarded attempt is inside busy time, once"
+    );
+    assert_eq!(fix.wasted_busy_ms, 400, "and named as wasted");
+    assert_eq!(fix.calls, 2);
+}
+
+#[test]
+fn a_call_with_no_timing_adds_no_time_and_no_stamps() {
+    let meter = StageMeter::default();
+    meter.record_at(Stage::ScanPass, &resp(1, 1, 0, 0, None), 7_000);
+    let scan = &meter.snapshot(0).stages[0].usage;
+    assert_eq!(scan.calls, 1);
+    assert_eq!(scan.busy_ms, 0);
+    assert_eq!(scan.first_call_unix_ms, None);
+    assert_eq!(scan.last_call_unix_ms, None);
+}
+
+#[test]
+fn telemetry_with_run_figures_round_trips_and_an_older_record_still_loads() {
+    let meter = StageMeter::default();
+    meter.record_at(Stage::ScanPass, &timed("model-a", 1_000), 10_000);
+    let t = meter.snapshot(500);
+    let json = serde_json::to_string(&t).unwrap();
+    let back: StageTelemetry = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, t, "a report with the new fields loads back equal");
+
+    // A record written before the figures existed: strip them.
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    for stage in value["stages"].as_array_mut().unwrap() {
+        let usage = stage["usage"].as_object_mut().unwrap();
+        for key in [
+            "busy_ms",
+            "wasted_busy_ms",
+            "first_call_unix_ms",
+            "last_call_unix_ms",
+        ] {
+            assert!(usage.remove(key).is_some(), "{key} was serialized");
+        }
+    }
+    let old: StageTelemetry = serde_json::from_value(value).expect("an older record loads");
+    let usage = &old.stages[0].usage;
+    assert_eq!((usage.busy_ms, usage.first_call_unix_ms), (0, None));
+    assert_eq!(usage.calls, 1);
 }

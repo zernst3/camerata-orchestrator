@@ -94,8 +94,9 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
         &camerata_server::llm::LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: Some(4_321),
             text: String::new(),
-            model: "m".to_string(),
+            model: "telemetry-only-model-id".to_string(),
             backend: "api".to_string(),
             cost_usd: Some(1.25),
             input_tokens: Some(9_000),
@@ -132,6 +133,16 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
         "wasted",
         "cost_per_1k",
         "1.25",
+        // The run figures: timing, and the model ids the telemetry names.
+        "elapsed_ms",
+        "busy_ms",
+        "first_call_unix_ms",
+        "last_call_unix_ms",
+        "started_unix_ms",
+        "finished_unix_ms",
+        "phases",
+        "telemetry-only-model-id",
+        "4321",
     ] {
         assert!(
             !report_with.contains(term) && !findings_with.contains(term),

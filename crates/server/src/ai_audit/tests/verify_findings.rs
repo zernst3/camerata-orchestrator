@@ -160,6 +160,7 @@ impl LlmPort for SeamRecordingCompleter {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text: self.text.clone(),
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -184,6 +185,7 @@ impl LlmPort for SeamRecordingCompleter {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
@@ -434,6 +436,7 @@ impl LlmPort for SalvagingFixCompleter {
         Ok(LlmResponse {
             reported_model: None,
             cli_cost_usd: None,
+            elapsed_ms: None,
             text,
             model: "stub".to_string(),
             backend: "stub".to_string(),
