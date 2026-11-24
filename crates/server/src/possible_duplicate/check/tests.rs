@@ -560,6 +560,12 @@ async fn the_check_shows_a_duplicate_check_row_in_agent_activity() {
 struct FakeBatch {
     realtime: Script,
     submitted: Mutex<Vec<Vec<(String, String)>>>,
+    /// Batch ids never end (a process killed while it waits).
+    hang: bool,
+    polls: AtomicUsize,
+    /// Batches an earlier process submitted: id to its `(custom id, reply)` items.
+    known: Mutex<std::collections::BTreeMap<String, Vec<(String, String)>>>,
+    fetched: Mutex<Vec<String>>,
 }
 
 impl FakeBatch {
@@ -567,6 +573,16 @@ impl FakeBatch {
         Self {
             realtime: Script::new(c_same_d_different),
             submitted: Mutex::new(Vec::new()),
+            hang: false,
+            polls: AtomicUsize::new(0),
+            known: Mutex::new(std::collections::BTreeMap::new()),
+            fetched: Mutex::new(Vec::new()),
+        }
+    }
+    fn hanging() -> Self {
+        Self {
+            hang: true,
+            ..Self::new()
         }
     }
     fn items_sent(&self) -> usize {
@@ -604,6 +620,16 @@ impl crate::ai_audit::BatchApi for FakeBatch {
         Ok(id)
     }
     async fn poll(&self, _batch_id: &str) -> anyhow::Result<crate::llm::BatchStatus> {
+        if self.hang {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            return Ok(crate::llm::BatchStatus {
+                processing_status: "in_progress".to_string(),
+                request_counts: crate::llm::BatchRequestCounts {
+                    processing: 1,
+                    ..crate::llm::BatchRequestCounts::default()
+                },
+            });
+        }
         Ok(crate::llm::BatchStatus {
             processing_status: "ended".to_string(),
             request_counts: crate::llm::BatchRequestCounts::default(),
@@ -614,8 +640,14 @@ impl crate::ai_audit::BatchApi for FakeBatch {
         batch_id: &str,
         _ttl: crate::llm::CacheTtl,
     ) -> anyhow::Result<Vec<crate::llm::BatchResultRow>> {
-        let n: usize = batch_id.trim_start_matches("msgbatch_").parse().unwrap();
-        let members = self.submitted.lock().unwrap()[n].clone();
+        self.fetched.lock().unwrap().push(batch_id.to_string());
+        let members = match self.known.lock().unwrap().get(batch_id) {
+            Some(known) => known.clone(),
+            None => {
+                let n: usize = batch_id.trim_start_matches("msgbatch_").parse().unwrap();
+                self.submitted.lock().unwrap()[n].clone()
+            }
+        };
         Ok(members
             .into_iter()
             .map(|(custom_id, reply)| crate::llm::BatchResultRow {
@@ -670,4 +702,73 @@ async fn the_duplicate_check_runs_as_a_batch_in_a_batch_run_and_in_real_time_oth
     .await;
     assert_eq!(api.items_sent(), 0);
     assert_eq!(api.realtime.calls(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_duplicate_check_batch_submitted_before_a_stop_is_fetched_by_a_real_time_resume() {
+    use crate::ai_audit::{BatchApi, BatchSeam};
+    let dir = tempfile::tempdir().unwrap();
+
+    // First process: a batch run submits the batch, which never ends; the process is killed.
+    let first = std::sync::Arc::new(FakeBatch::hanging());
+    let first_seam = BatchSeam::new(first.clone() as std::sync::Arc<dyn BatchApi>);
+    {
+        let mut r = report();
+        let controls = RunControls::default();
+        let run_future = crate::checkpoint::with_run_checkpoints(
+            Some(dir.path().to_path_buf()),
+            check_possible_duplicates(&mut r, &first_seam, &controls, false, true, None, None),
+        );
+        let killed = async {
+            while first.polls.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        };
+        tokio::select! {
+            _ = run_future => panic!("the first process was meant to be killed while a batch waited"),
+            () = killed => {}
+        }
+    }
+    let sent = first.submitted.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one batch was submitted");
+
+    // Second process: the same run, asked for in real time. The batch the first one left running
+    // is fetched, and no pair is asked again.
+    let second = std::sync::Arc::new(FakeBatch::new());
+    second
+        .known
+        .lock()
+        .unwrap()
+        .insert("msgbatch_0".to_string(), sent[0].clone());
+    second.submitted.lock().unwrap().push(Vec::new());
+    let second_seam = BatchSeam::new(second.clone() as std::sync::Arc<dyn BatchApi>);
+    let mut r = report();
+    crate::checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        check_possible_duplicates(
+            &mut r,
+            &second_seam,
+            &RunControls::default(),
+            false,
+            false,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(second.items_sent(), 0, "nothing was submitted again");
+    assert_eq!(
+        second.realtime.calls(),
+        0,
+        "and nothing went out in real time"
+    );
+    assert!(
+        second
+            .fetched
+            .lock()
+            .unwrap()
+            .contains(&"msgbatch_0".to_string()),
+        "the submitted batch was fetched"
+    );
+    assert!(hinted(&r, "src/c.rs"), "its answers were applied");
 }

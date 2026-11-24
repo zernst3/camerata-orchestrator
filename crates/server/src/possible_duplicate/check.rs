@@ -532,12 +532,11 @@ async fn send_calls(
     }
 
     let repo = report.repos.join(", ");
-    // A Message Batch in a batch run on the API backend; real time otherwise.
-    let batch_api = if batch && !cli_backend {
-        crate::ai_audit::stage_batch::mode_and_api(llm, true, 1).1
-    } else {
-        None
-    };
+    // The batch API is taken whenever the seam carries one, so a batch an earlier attempt
+    // submitted is fetched on a resume in any mode and never paid for twice. A Message Batch is
+    // what new calls use only in a batch run on the API backend; real time otherwise.
+    let (chosen, batch_api) =
+        crate::ai_audit::stage_batch::mode_and_api(llm, batch && !cli_backend, 1);
     let checkpoint = crate::checkpoint::stage_checkpoint(CHECKPOINT_NAME);
     let ctx = StageCtx {
         repo: &repo,
@@ -554,7 +553,7 @@ async fn send_calls(
             name: "Duplicate check",
         }),
     };
-    let mode = if batch_api.is_some() {
+    let mode = if matches!(chosen, StageMode::Batch) {
         StageMode::Batch
     } else {
         StageMode::parallel_default(cli_backend)

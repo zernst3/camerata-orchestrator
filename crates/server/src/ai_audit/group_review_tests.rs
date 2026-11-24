@@ -2983,7 +2983,7 @@ async fn a_run_the_checkpoint_paused_sends_no_group_review_call() {
 #[tokio::test]
 async fn a_group_review_priced_over_the_approved_amount_is_not_started() {
     let rules: Vec<(String, String)> = Vec::new();
-    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false)
+    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false, false)
         .expect("the test model is priced");
     assert!(price > 0.0);
     let mut report = spent_report(3);
@@ -3058,7 +3058,7 @@ fn a_malformed_correction_after_a_valid_object_is_refused() {
 #[tokio::test]
 async fn a_group_review_pause_reaches_the_job_state_the_ui_polls() {
     let rules: Vec<(String, String)> = Vec::new();
-    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false)
+    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false, false)
         .expect("the test model is priced");
     let mut report = spent_report(3);
     let controls = crate::cost_cap::RunControls {

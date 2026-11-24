@@ -880,6 +880,12 @@ struct RuleWork {
     hints: Vec<Hint>,
     /// The member indexes each call is asked about; set when the requests are planned.
     chunks: Vec<Vec<usize>>,
+    /// The id of each call, in the order of `chunks`; set when the requests are planned. It
+    /// carries a digest of the call's content, so a stored reply is never applied to a group
+    /// whose rows changed since it was asked.
+    chunk_ids: Vec<String>,
+    /// The id of the rule-level summary call: the node and a digest of the ids of its parts.
+    summary_id: String,
 }
 
 fn build_works(report: &ScanReport) -> Vec<RuleWork> {
@@ -959,6 +965,8 @@ fn build_works(report: &ScanReport) -> Vec<RuleWork> {
             members,
             hints,
             chunks: Vec::new(),
+            chunk_ids: Vec::new(),
+            summary_id: String::new(),
         });
     }
     works
@@ -1130,6 +1138,13 @@ fn chunk_request(
     )
 }
 
+/// A short digest of `parts`, for the ids of the calls.
+fn content_digest<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let key = crate::checkpoint::batch_key("g", parts.into_iter());
+    key.split_once(':')
+        .map_or(key.clone(), |(_, d)| d.to_string())
+}
+
 /// Plan the chunks of every rule group and build their requests. A chunk whose request does not
 /// fit the model's window is split in halves until it does (A7); one that does not fit even with
 /// a single member is left whole, so the runner records it as a failed part instead of sending it.
@@ -1158,11 +1173,27 @@ fn plan_chunks(
             }
         }
         let n = final_chunks.len();
+        let mut ids = Vec::new();
         for (ci, chunk) in final_chunks.iter().enumerate() {
             let part = (n > 1).then_some((ci + 1, n));
             let req = chunk_request(ctx, work, findings, chunk, part);
-            out.push((format!("{}#{ci}", work.node_id), wi, chunk.clone(), req));
+            // The id names the content: the prompt without the run's delimiter token, which
+            // differs from one attempt to the next whenever any row of the report does.
+            let stable = req.prompt.replace(ctx.nonce.as_str(), "");
+            let id = format!(
+                "{}#{ci}@{}",
+                work.node_id,
+                content_digest([stable.as_str()])
+            );
+            ids.push(id.clone());
+            out.push((id, wi, chunk.clone(), req));
         }
+        work.summary_id = format!(
+            "{}@{}",
+            work.node_id,
+            content_digest(ids.iter().map(String::as_str))
+        );
+        work.chunk_ids = ids;
         work.chunks = final_chunks;
     }
     out
@@ -2057,7 +2088,7 @@ pub async fn review_groups(
             .enumerate()
             .map(|(ci, idxs)| ChunkReply {
                 idxs,
-                reply: items.replies.get(&format!("{}#{ci}", work.node_id)),
+                reply: work.chunk_ids.get(ci).and_then(|id| items.replies.get(id)),
             })
             .collect();
         let chunk_summaries: Vec<String> = chunk_replies
@@ -2084,7 +2115,7 @@ pub async fn review_groups(
         outcome
             .prompt_bytes
             .push((work.node_id.clone(), req.prompt.len()));
-        summaries.requests.insert(work.node_id.clone(), req);
+        summaries.requests.insert(work.summary_id.clone(), req);
     }
     let summary_ran = if summaries.requests.is_empty() {
         None
@@ -2112,10 +2143,10 @@ pub async fn review_groups(
             .enumerate()
             .map(|(ci, idxs)| ChunkReply {
                 idxs,
-                reply: items.replies.get(&format!("{}#{ci}", work.node_id)),
+                reply: work.chunk_ids.get(ci).and_then(|id| items.replies.get(id)),
             })
             .collect();
-        let rule_summary = summaries.summaries.get(&work.node_id).cloned();
+        let rule_summary = summaries.summaries.get(&work.summary_id).cloned();
         let applied = apply_rule(
             work,
             &chunk_replies,
@@ -2135,7 +2166,7 @@ pub async fn review_groups(
     if let Some(ran) = &summary_ran {
         for f in &ran.failed {
             prev_failed.push((
-                works.iter().position(|w| w.node_id == f.id).unwrap_or(0),
+                works.iter().position(|w| w.summary_id == f.id).unwrap_or(0),
                 f.reason.clone(),
             ));
         }
@@ -2322,12 +2353,14 @@ pub(super) fn fold_spend_into_report(report: &mut ScanReport, meter: &UsageMeter
 }
 
 /// What the group review is estimated to cost for `sites` rows and `rules` rules on `model`, in
-/// dollars, by the pre-flight's own estimate. `None` when the model has no list price.
+/// dollars, by the pre-flight's own estimate; at the batch price when the stage will run as a
+/// Message Batch. `None` when the model has no list price.
 pub(crate) fn group_review_estimate_usd(
     model: &str,
     sites: usize,
     rules: usize,
     cli_backend: bool,
+    batched: bool,
 ) -> Option<f64> {
     use camerata_api_types::project::ProjectBackend;
     let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
@@ -2338,7 +2371,12 @@ pub(crate) fn group_review_estimate_usd(
     };
     let e = camerata_ui_core::scan::group_review_estimate(sites as f64, rules, backend);
     let out = e.output_tokens * camerata_ui_core::scan::output_scale(model);
-    Some((e.input_tokens * price.price_in + out * price.price_out) / 1_000_000.0)
+    let usd = (e.input_tokens * price.price_in + out * price.price_out) / 1_000_000.0;
+    Some(if batched {
+        usd * crate::llm::BATCH_MULT
+    } else {
+        usd
+    })
 }
 
 /// [`review_groups`] on a meter that continues the scan's own: the whole run's spend counts toward
@@ -2372,11 +2410,16 @@ pub async fn review_groups_metered(
     }
     let repo = report.repos.join(", ");
     // The stage is priced from the rows it will read; over the approved amount, it does not start.
+    let batched = matches!(
+        stage_batch::mode_and_api(llm, cfg.batch && !cfg.cli_backend, 1).0,
+        stage_batch::StageMode::Batch
+    );
     let stage_usd = group_review_estimate_usd(
         cfg.model,
         report.findings.len(),
         cfg.rules.len(),
         cfg.cli_backend,
+        batched,
     );
     let paused = if meter.checkpoint_stopped() {
         meter.record_stage_not_run(&repo, STAGE_GROUP_REVIEW, false);

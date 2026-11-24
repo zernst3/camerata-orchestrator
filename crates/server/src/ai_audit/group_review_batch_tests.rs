@@ -669,3 +669,107 @@ async fn a_part_not_sent_after_a_bad_key_stop_keeps_its_plain_sentence() {
     assert!(!text.contains("credit balance"), "{text}");
     assert!(text.contains("could not be reached"), "{text}");
 }
+
+// ── 7. A real-time resume of a submitted batch; a changed group; the estimate ──────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_submitted_before_a_stop_is_fetched_by_a_real_time_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = Arc::new(FakeBatch::new().hanging());
+    let first_llm = seam(&first);
+    {
+        let mut report = report_of(&[(SQL, 3), (SECRETS, 2)]);
+        let run_future = checkpoint::with_run_checkpoints(
+            Some(dir.path().to_path_buf()),
+            run(&mut report, &first_llm, true, None),
+        );
+        let killed = async {
+            while first.polls_on_hung.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        };
+        tokio::select! {
+            _ = run_future => panic!("the first process was meant to be killed while a batch waited"),
+            () = killed => {}
+        }
+    }
+    let in_flight = first.batches.lock().unwrap()[0].clone();
+
+    // The resume asks for real time (`--realtime`): the batch is still fetched, never paid twice.
+    let second = Arc::new(FakeBatch::new());
+    second
+        .known
+        .lock()
+        .unwrap()
+        .insert("msgbatch_0".to_string(), in_flight);
+    second.batches.lock().unwrap().push(Vec::new());
+    let second_llm = seam(&second);
+    let mut report = report_of(&[(SQL, 3), (SECRETS, 2)]);
+    let outcome = checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        run(&mut report, &second_llm, false, None),
+    )
+    .await;
+    assert_eq!(outcome.rules_reviewed, 2, "{outcome:?}");
+    assert!(second
+        .fetched
+        .lock()
+        .unwrap()
+        .contains(&"msgbatch_0".to_string()));
+    assert_eq!(second.items_sent(), 0, "nothing was submitted again");
+    assert_eq!(
+        second.realtime.asked().len(),
+        0,
+        "nothing went out in real time"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_group_that_gained_a_row_since_the_stop_is_asked_again_and_the_others_are_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = Arc::new(FakeBatch::new());
+    let first_llm = seam(&first);
+    let mut report = report_of(&[(SQL, 3), (SECRETS, 2)]);
+    let outcome = checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        run(&mut report, &first_llm, true, None),
+    )
+    .await;
+    assert_eq!(outcome.rules_reviewed, 2);
+    assert_eq!(first.items_sent(), 2);
+
+    // The resume reads a report where the SQL group has one more row.
+    let second = Arc::new(FakeBatch::new());
+    let second_llm = seam(&second);
+    let mut report = report_of(&[(SQL, 4), (SECRETS, 2)]);
+    let outcome = checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        run(&mut report, &second_llm, true, None),
+    )
+    .await;
+    assert_eq!(outcome.rules_reviewed, 2, "{outcome:?}");
+    assert_eq!(
+        second.items_sent(),
+        1,
+        "only the group that changed was asked again"
+    );
+    let item = second.items.lock().unwrap()[0].clone();
+    assert!(
+        item_prompt(&item).contains("SEC-NO-RAW-SQL-CONCAT-1"),
+        "and it is the group that gained the row"
+    );
+    // Its stored reply was not applied to the shifted members: every row is in a sub-group.
+    for f in &report.findings {
+        assert!(f.group_path.len() >= 3, "{:?}", f.group_path);
+    }
+}
+
+#[test]
+fn the_estimate_is_the_batch_price_when_the_stage_runs_batched() {
+    let full = group_review_estimate_usd(MODEL, 100, 5, false, false).expect("priced");
+    let batched = group_review_estimate_usd(MODEL, 100, 5, false, true).expect("priced");
+    assert!(
+        (batched - full * crate::llm::BATCH_MULT).abs() < 1e-9,
+        "{batched} vs {full}"
+    );
+}
