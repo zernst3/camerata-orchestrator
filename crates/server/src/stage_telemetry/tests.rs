@@ -460,3 +460,101 @@ fn batch_rounds_widen_the_stage_span_and_add_their_wait_apart_from_busy_time() {
     assert_eq!(scan.first_call_unix_ms, Some(1_000));
     assert!(scan.last_call_unix_ms >= Some(5_000));
 }
+
+// #243: cache hit share per stage. `input_tokens` already includes cache read and write, so the
+// share is `cache_read_input_tokens / input_tokens`, never read over (input + read).
+#[test]
+fn the_cache_hit_share_is_cache_reads_over_billed_input() {
+    let meter = StageMeter::default();
+    meter.record(Stage::ScanPass, &resp(9000, 700, 4000, 2000, Some(2.0)));
+    meter.record(Stage::ScanPass, &resp(1000, 100, 1000, 0, Some(0.1)));
+    meter.record(Stage::FixGeneration, &resp(2000, 50, 0, 1500, Some(0.2)));
+    let t = meter.snapshot(1_000);
+
+    let scan = t.cache_hit_share(Stage::ScanPass).expect("scan had input");
+    assert!((scan - 0.5).abs() < 1e-9, "5000 of 10000 read, got {scan}");
+    let fix = t
+        .cache_hit_share(Stage::FixGeneration)
+        .expect("fix had input");
+    assert!(fix.abs() < 1e-9, "a cache write is not a hit, got {fix}");
+    let total = t.total().cache_hit_share().expect("the run had input");
+    assert!((total - 5000.0 / 12000.0).abs() < 1e-9, "got {total}");
+    assert_eq!(
+        t.cache_hit_share(Stage::Calibration),
+        None,
+        "a stage that made no call has no share"
+    );
+}
+
+#[test]
+fn a_stage_with_no_input_has_no_cache_hit_share_and_the_table_says_n_a() {
+    assert_eq!(StageUsage::default().cache_hit_share(), None);
+    // Inconsistent data (reads reported, no input total) is not shown as a share above 100%.
+    let odd = StageUsage {
+        calls: 1,
+        cache_read_input_tokens: 10,
+        ..StageUsage::default()
+    };
+    assert_eq!(odd.cache_hit_share(), None);
+
+    let meter = StageMeter::default();
+    meter.record(Stage::ScanPass, &resp(0, 10, 0, 0, Some(0.0)));
+    let t = meter.snapshot(100);
+    assert_eq!(t.cache_hit_share(Stage::ScanPass), None);
+    let table = t.render_table();
+    let scan_row = table
+        .lines()
+        .find(|l| l.trim_start().starts_with("scan"))
+        .unwrap_or_else(|| panic!("no scan row in:\n{table}"));
+    assert!(scan_row.trim_end().ends_with("n/a"), "{scan_row}");
+}
+
+#[test]
+fn a_snapshot_saved_before_the_cache_hit_share_existed_still_loads() {
+    // The shape a run saved before #243: no share anywhere, and none of the later defaults.
+    let json = r#"{
+        "counted_lines": 400,
+        "stages": [{
+            "stage": "scan_pass",
+            "usage": {
+                "calls": 2,
+                "input_tokens": 8000,
+                "output_tokens": 300,
+                "cache_read_input_tokens": 2000,
+                "cache_creation_input_tokens": 1000,
+                "cost_usd": 0.5
+            }
+        }]
+    }"#;
+    let old: StageTelemetry = serde_json::from_str(json).expect("an older snapshot loads");
+    let share = old.cache_hit_share(Stage::ScanPass).expect("it had input");
+    assert!((share - 0.25).abs() < 1e-9, "got {share}");
+    assert!(
+        old.render_table().contains("25.0%"),
+        "{}",
+        old.render_table()
+    );
+}
+
+#[test]
+fn the_table_shows_the_cache_hit_share_column() {
+    let meter = StageMeter::default();
+    meter.record(Stage::ScanPass, &resp(9000, 700, 4000, 2000, Some(2.0)));
+    let table = meter.snapshot(8_000).render_table();
+    let header = table
+        .lines()
+        .find(|l| l.contains("calls") && l.contains("cache-rd"))
+        .unwrap_or_else(|| panic!("no header in:\n{table}"));
+    assert!(header.contains("cache-hit"), "{header}");
+    // 4000 of 9000 billed input tokens were cache reads.
+    let scan_row = table
+        .lines()
+        .find(|l| l.trim_start().starts_with("scan"))
+        .unwrap_or_else(|| panic!("no scan row in:\n{table}"));
+    assert!(scan_row.trim_end().ends_with("44.4%"), "{scan_row}");
+    let total_row = table
+        .lines()
+        .find(|l| l.trim_start().starts_with("total"))
+        .unwrap_or_else(|| panic!("no total row in:\n{table}"));
+    assert!(total_row.trim_end().ends_with("44.4%"), "{total_row}");
+}

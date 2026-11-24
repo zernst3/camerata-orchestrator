@@ -115,8 +115,13 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
     };
     let segment_json = serde_json::to_string(&segment).unwrap();
     assert!(segment_json.contains("started_unix_ms"), "{segment_json}");
+    // #243: the cache hit share (4,000 of 9,000 billed input tokens) is operator-only too.
+    let snapshot = meter.snapshot(400);
+    let share = snapshot.cache_hit_share(Stage::ScanPass).unwrap();
+    assert!((share - 4_000.0 / 9_000.0).abs() < 1e-9, "{share}");
+    assert!(snapshot.render_table().contains("44.4%"));
     let mut with = ScanLedger::new();
-    with.record_stage_telemetry(meter.snapshot(400));
+    with.record_stage_telemetry(snapshot);
     with.record_ai_key(camerata_server::scan_cache::AiScanKey::new(
         "claude-sonnet-5",
         None,
@@ -154,6 +159,11 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
         "1700000123456",
         "1700000130000",
         "6544",
+        // The cache hit share: its name, the table label, and the figure itself.
+        "cache_hit_share",
+        "cache-hit",
+        "44.4%",
+        "0.4444",
     ] {
         assert!(
             !report_with.contains(term) && !findings_with.contains(term),

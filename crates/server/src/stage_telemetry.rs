@@ -172,6 +172,21 @@ fn model_key(r: &LlmResponse) -> String {
 }
 
 impl StageUsage {
+    /// The share of billed input tokens that were cache reads: `cache_read_input_tokens /
+    /// input_tokens`. `input_tokens` already INCLUDES cache read and write (see the struct doc),
+    /// so the denominator is `input_tokens` alone, never `input_tokens + cache_read`. A cache
+    /// write is not a hit. `None` when the stage billed no input (no division by zero), and
+    /// `None` when reads exceed the input total (a call that reported cache reads but no input
+    /// count): a share above 100% would be a wrong figure, not a measurement. Computed from the
+    /// saved token fields, so it is never stored and every saved run yields it. Operator-only;
+    /// never exported.
+    pub fn cache_hit_share(&self) -> Option<f64> {
+        if self.input_tokens == 0 || self.cache_read_input_tokens > self.input_tokens {
+            return None;
+        }
+        Some(self.cache_read_input_tokens as f64 / self.input_tokens as f64)
+    }
+
     /// True when every call in this stage reported a cost, so `cost_usd` is not an
     /// understatement. An empty stage is trivially complete.
     pub fn cost_complete(&self) -> bool {
@@ -866,6 +881,15 @@ pub struct StageTelemetry {
 }
 
 impl StageTelemetry {
+    /// The cache hit share of one stage ([`StageUsage::cache_hit_share`]). `None` when the stage
+    /// made no call this run or billed no input.
+    pub fn cache_hit_share(&self, stage: Stage) -> Option<f64> {
+        self.stages
+            .iter()
+            .find(|s| s.stage == stage)
+            .and_then(|s| s.usage.cache_hit_share())
+    }
+
     /// All stages summed.
     pub fn total(&self) -> StageUsage {
         let mut t = StageUsage::default();
@@ -916,7 +940,7 @@ impl StageTelemetry {
         }
         writeln!(
             out,
-            "  {:<13} {:>5} {:>10} {:>9} {:>10} {:>10} {:>9} {:>11} {:>19}",
+            "  {:<13} {:>5} {:>10} {:>9} {:>10} {:>10} {:>9} {:>11} {:>19} {:>9}",
             "stage",
             "calls",
             "input",
@@ -925,16 +949,20 @@ impl StageTelemetry {
             "cache-wr",
             "cost",
             "$/1K lines",
-            "wasted (in/out)"
+            "wasted (in/out)",
+            "cache-hit"
         )
         .ok();
         let row = |out: &mut String, name: &str, u: &StageUsage, lines: usize| {
             let partial = if u.cost_complete() { "" } else { " PARTIAL" };
             let per_1k =
                 per_1k(u.cost_usd, lines).map_or_else(|| "n/a".to_string(), |v| format!("{v:.4}"));
+            let hit = u
+                .cache_hit_share()
+                .map_or_else(|| "n/a".to_string(), |v| format!("{:.1}%", v * 100.0));
             writeln!(
                 out,
-                "  {:<13} {:>5} {:>10} {:>9} {:>10} {:>10} {:>9} {:>11} {:>19}{partial}",
+                "  {:<13} {:>5} {:>10} {:>9} {:>10} {:>10} {:>9} {:>11} {:>19} {:>9}{partial}",
                 name,
                 u.calls,
                 u.input_tokens,
@@ -944,6 +972,7 @@ impl StageTelemetry {
                 format!("${:.4}", u.cost_usd),
                 per_1k,
                 format!("{}/{}", u.wasted_input_tokens, u.wasted_output_tokens),
+                hit,
             )
             .ok();
         };
