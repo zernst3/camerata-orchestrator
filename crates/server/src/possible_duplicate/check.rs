@@ -342,6 +342,7 @@ pub async fn check_possible_duplicates(
     llm: &dyn LlmPort,
     controls: &crate::cost_cap::RunControls,
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) {
@@ -377,6 +378,7 @@ pub async fn check_possible_duplicates(
         &model,
         &candidates,
         cli_backend,
+        batch,
         job,
         feedback,
     )
@@ -448,6 +450,7 @@ pub(crate) async fn run_check(
     model: &str,
     candidates: &[CandidatePair],
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> (Vec<PairCheck>, Option<String>) {
@@ -469,6 +472,7 @@ pub(crate) async fn run_check(
         model,
         candidates,
         cli_backend,
+        batch,
         job,
         feedback,
     )
@@ -484,6 +488,7 @@ async fn send_calls(
     model: &str,
     candidates: &[CandidatePair],
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> (Vec<PairCheck>, Option<String>) {
@@ -527,12 +532,17 @@ async fn send_calls(
     }
 
     let repo = report.repos.join(", ");
+    // The batch API is taken whenever the seam carries one, so a batch an earlier attempt
+    // submitted is fetched on a resume in any mode and never paid for twice. A Message Batch is
+    // what new calls use only in a batch run on the API backend; real time otherwise.
+    let (chosen, batch_api) =
+        crate::ai_audit::stage_batch::mode_and_api(llm, batch && !cli_backend, 1);
     let checkpoint = crate::checkpoint::stage_checkpoint(CHECKPOINT_NAME);
     let ctx = StageCtx {
         repo: &repo,
         model,
         realtime: llm,
-        batch: None,
+        batch: batch_api,
         meter: Some(meter),
         job,
         checkpoint: checkpoint.as_ref(),
@@ -543,7 +553,11 @@ async fn send_calls(
             name: "Duplicate check",
         }),
     };
-    let mode = StageMode::parallel_default(cli_backend);
+    let mode = if matches!(chosen, StageMode::Batch) {
+        StageMode::Batch
+    } else {
+        StageMode::parallel_default(cli_backend)
+    };
     let ran = run_stage(Stage::DuplicateCheck, &mut items, mode, &ctx).await;
     if !ran.failed.is_empty() || ran.cancelled.is_some() {
         let first = ran

@@ -116,3 +116,39 @@ async fn a_self_metering_agents_failure_advances_the_outage_streak_once() {
     let _ = go(&agent).await;
     assert_eq!(agent.meter.health().streak(), 1);
 }
+
+#[test]
+fn a_piece_stopped_mid_conversation_by_the_run_stop_keeps_its_outage_class() {
+    use super::super::piece::stop_class;
+    use camerata_llm::failure::FailureClass;
+    let meter = UsageMeter::default();
+    meter.health().note_failure(
+        camerata_llm::failure::FailureClass::AuthOrBilling,
+        "Your credit balance is too low to access the Anthropic API.",
+    );
+    let text = super::super::super::api_agent::run_stopped_text(&meter);
+    assert_eq!(
+        stop_class(&AgentStop::Failed(text.clone())),
+        FailureClass::OutageStop,
+        "the stop text must keep its class: {text}"
+    );
+    assert!(
+        text.contains("refused the request for billing (credit balance)"),
+        "{text}"
+    );
+    assert!(!text.contains("could not be reached"), "{text}");
+
+    // An unreachable provider keeps the plain sentence, and the same class.
+    let meter = UsageMeter::default();
+    let text = super::super::super::api_agent::run_stopped_text(&meter);
+    assert_eq!(
+        stop_class(&AgentStop::Failed(text.clone())),
+        FailureClass::OutageStop,
+        "{text}"
+    );
+    // A stop that is not the run's own keeps the class its text gives.
+    assert_eq!(
+        stop_class(&AgentStop::Failed("connection reset by peer".into())),
+        FailureClass::Transport
+    );
+}

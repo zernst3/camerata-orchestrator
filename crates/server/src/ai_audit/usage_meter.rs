@@ -172,6 +172,12 @@ impl UsageMeter {
         &self.health
     }
 
+    /// The clause that says why the run stopped, for a part that was not sent
+    /// ([`crate::run_health::OutageTrigger::phrase`]).
+    pub fn stop_phrase(&self) -> &'static str {
+        self.health.stop_phrase()
+    }
+
     /// True once the outage stop has tripped: no new part is sent.
     pub fn outage_stopped(&self) -> bool {
         self.health.is_stopped()

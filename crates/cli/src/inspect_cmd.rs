@@ -1590,6 +1590,7 @@ pub async fn run_inspect_pipeline_with(
                     &controls,
                     &rules,
                     llm_backend == camerata_server::llm::Backend::Cli,
+                    batch,
                     None,
                     None,
                     corpus.as_ref(),
@@ -1602,6 +1603,7 @@ pub async fn run_inspect_pipeline_with(
                     model_seam,
                     &controls,
                     llm_backend == camerata_server::llm::Backend::Cli,
+                    batch,
                     None,
                     None,
                 )

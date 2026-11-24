@@ -298,6 +298,7 @@ fn cfg<'a>(rules: &'a [(String, String)]) -> GroupReviewConfig<'a> {
         rank: RankSettings::default(),
         max_in_flight: 4,
         cli_backend: false,
+        batch: false,
         job: None,
         feedback: None,
     }
@@ -1984,6 +1985,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
         &controls,
         &rules,
         false,
+        false,
         None,
         None,
         None,
@@ -2007,11 +2009,11 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     let mut empty = ScanReport::gated(&[]);
     empty.gated = false;
     let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
-    assert!(
-        review_scan_report(&mut empty, &llm, &controls, &rules, false, None, None, None)
-            .await
-            .is_none()
-    );
+    assert!(review_scan_report(
+        &mut empty, &llm, &controls, &rules, false, false, None, None, None
+    )
+    .await
+    .is_none());
     assert!(llm.calls().is_empty());
 }
 
@@ -2872,6 +2874,7 @@ async fn tool_rows_the_reviewer_split_into_three_sub_groups_end_as_one_cause_wit
         &controls,
         &rules,
         false,
+        false,
         None,
         None,
         None,
@@ -2980,7 +2983,7 @@ async fn a_run_the_checkpoint_paused_sends_no_group_review_call() {
 #[tokio::test]
 async fn a_group_review_priced_over_the_approved_amount_is_not_started() {
     let rules: Vec<(String, String)> = Vec::new();
-    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false)
+    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false, false)
         .expect("the test model is priced");
     assert!(price > 0.0);
     let mut report = spent_report(3);
@@ -3055,7 +3058,7 @@ fn a_malformed_correction_after_a_valid_object_is_refused() {
 #[tokio::test]
 async fn a_group_review_pause_reaches_the_job_state_the_ui_polls() {
     let rules: Vec<(String, String)> = Vec::new();
-    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false)
+    let price = group_review_estimate_usd("claude-fable-5-1", 3, 0, false, false)
         .expect("the test model is priced");
     let mut report = spent_report(3);
     let controls = crate::cost_cap::RunControls {
@@ -3381,6 +3384,7 @@ async fn review_scan_report_shows_its_group_review_rows_in_agent_activity() {
         &crate::cost_cap::RunControls::default(),
         &rules,
         false,
+        false,
         None,
         Some((&store, "scan-key")),
         None,
@@ -3404,6 +3408,7 @@ async fn review_scan_report_shows_its_group_review_rows_in_agent_activity() {
         &failing,
         &crate::cost_cap::RunControls::default(),
         &rules,
+        false,
         false,
         None,
         Some((&store, "scan-key")),

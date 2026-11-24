@@ -102,6 +102,26 @@ pub struct OutageTrigger {
     pub at: String,
 }
 
+/// What the provider could not be reached for, as a clause after "the run stopped because".
+pub const STOP_PHRASE_UNREACHABLE: &str = "the model provider could not be reached";
+/// The same clause for a stop caused by an exhausted account.
+pub const STOP_PHRASE_BILLING: &str =
+    "the model provider refused the request for billing (credit balance)";
+
+impl OutageTrigger {
+    /// The clause that says why the run stopped: a credit stop reads as billing, any other stop
+    /// as the provider not being reached.
+    pub fn phrase(&self) -> &'static str {
+        if self.class == FailureClass::AuthOrBilling
+            && camerata_llm::failure::is_exhausted_account_text(&self.detail)
+        {
+            STOP_PHRASE_BILLING
+        } else {
+            STOP_PHRASE_UNREACHABLE
+        }
+    }
+}
+
 /// The run-wide health counter. See the module docs for the rules.
 pub struct RunHealth {
     streak: Mutex<Streak>,
@@ -216,6 +236,13 @@ impl RunHealth {
         self.stopped.store(true, Ordering::SeqCst);
     }
 
+    /// The clause that says why the run stopped ([`OutageTrigger::phrase`]); the plain
+    /// "could not be reached" clause while the run has not stopped.
+    pub fn stop_phrase(&self) -> &'static str {
+        self.trigger()
+            .map_or(STOP_PHRASE_UNREACHABLE, |t| t.phrase())
+    }
+
     /// True once the run has stopped. New work is refused from here on.
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
@@ -254,7 +281,7 @@ impl OutageRecord {
         crate::cost_cap::not_run_failed_passes(
             &self.not_run_passes,
             &self.not_run_stages,
-            "the run stopped because the model provider could not be reached",
+            &format!("the run stopped because {}", self.trigger.phrase()),
         )
     }
 
