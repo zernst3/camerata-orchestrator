@@ -11,6 +11,9 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # dry run changes nothing
 "$S" t1 --dry-run | grep -q "Nothing changed" || fail "dry run text"
+"$S" t1 --dry-run | grep -qxF 'export CAMERATA_STATE_DIR="$HOME/camerata-scan-state/t1"' || fail "dry run missing the state dir export line"
+"$S" t1 --dry-run | grep -q "Run every scan command (count, inspect, resume, diagnose) from $base/camerata-scan-t1 with that variable set" || fail "dry run missing run-from line"
+"$S" t1 --dry-run | grep -q "Keep this folder until the package is delivered" || fail "dry run missing keep-folder line"
 [ -z "$(git tag)" ] || fail "dry run created a tag"
 [ ! -e "$base/camerata-scan-t1" ] || fail "dry run created a folder"
 

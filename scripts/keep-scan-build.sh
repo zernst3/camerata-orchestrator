@@ -14,6 +14,10 @@
 #   3. adds a worktree at <parent of main checkout>/camerata-scan-<name> on that tag
 #      (outside .claude/worktrees, so remove-merged-worktree.sh never sweeps it);
 #   4. builds server, app and CLI there, in the worktree's own target folder.
+#
+# Next steps it prints (the dry run prints them too): export CAMERATA_STATE_DIR (a per-inspection
+# state folder under $HOME/camerata-scan-state/<name>) and run every scan command from the
+# worktree with it set, so this inspection's run data stays apart from dev work.
 # A worktree, not a copied binary, because the rule library is read from the checkout folder at
 # run time: the worktree freezes the rules together with the binary.
 # It never pushes a tag or a branch, never deletes or overwrites anything, and refuses if the
@@ -59,7 +63,14 @@ commit="$(git -C "$top" rev-parse HEAD)"
 echo "Commit: $commit"
 echo "Tag (local only, never pushed): $tag"
 echo "Worktree: $dest"
+next_steps() {
+    echo "Next steps:"
+    echo "export CAMERATA_STATE_DIR=\"\$HOME/camerata-scan-state/$name\""
+    echo "  Run every scan command (count, inspect, resume, diagnose) from $dest with that variable set."
+    echo "  Keep this folder until the package is delivered."
+}
 if [ "$dry" = 1 ]; then
+    next_steps
     echo "Dry run: would tag, add the worktree$([ "$build" = 1 ] && echo ", build server, app and CLI"). Nothing changed."
     exit 0
 fi
@@ -87,4 +98,5 @@ echo "Kept build: $build_id (the id a refusal names when another build is opened
 echo "Start the inspection from this folder: $dest"
 echo "To find it again later: git worktree list | grep $build_id"
 echo "Do not pull, edit or rebuild there until the inspection is complete."
+next_steps
 echo "The tag $tag is local. Push it yourself only if you decide to; this script never does."
