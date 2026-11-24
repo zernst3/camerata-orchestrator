@@ -251,14 +251,15 @@ pub(super) fn skipped_summary_sentence(
         SkipReason::LongLine,
         SkipReason::Generated,
         SkipReason::GeneratedUnsearched,
+        SkipReason::NotInspectedType,
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)
     .map(|r| {
-        let label = if r == SkipReason::BeyondFileCap {
-            beyond.clone()
-        } else {
-            in_a_list(&r.label())
+        let label = match r {
+            SkipReason::BeyondFileCap => beyond.clone(),
+            SkipReason::NotInspectedType => crate::onboard::files::not_inspected_in_a_list(),
+            _ => in_a_list(&r.label()),
         };
         format!("{} {label}", totals.of(r))
     })
@@ -335,11 +336,20 @@ fn secret_search_sentence(totals: &SkippedTotals, beyond: &str) -> Option<String
             totals.excluded_by_agreement
         ));
     }
+    // A file of a type not inspected yet is never opened, so it is not searched either.
+    if totals.not_inspected_type > 0 {
+        parts.push(format!(
+            "{} {}",
+            totals.not_inspected_type,
+            crate::onboard::files::not_inspected_in_a_list()
+        ));
+    }
     let unsearched = totals.secret_over_ceiling
         + totals.secret_over_budget
         + totals.beyond_file_cap
         + not_text
-        + totals.excluded_by_agreement;
+        + totals.excluded_by_agreement
+        + totals.not_inspected_type;
     let mut out: Vec<String> = Vec::new();
     if totals.secret_searched > 0 {
         out.push(format!(

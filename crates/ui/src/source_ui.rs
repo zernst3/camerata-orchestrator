@@ -1022,6 +1022,10 @@ pub fn OverLimitNotice(
     let unmatched_text = camerata_ui_core::readiness::unmatched_text(&block);
     let generated_text = camerata_ui_core::readiness::generated_text(&block, floor_on);
     let generated_paths = camerata_ui_core::readiness::generated_paths_text(&block);
+    let not_inspected_text =
+        camerata_ui_core::readiness::not_inspected_note(block.not_inspected_paths.len());
+    let not_inspected_paths =
+        camerata_ui_core::readiness::not_inspected_paths_line(&block.not_inspected_paths);
     rsx! {
         div { class: "scan-block-hint over-limit-notice", role: "alert",
             if !generated_text.is_empty() {
@@ -1029,6 +1033,12 @@ pub fn OverLimitNotice(
             }
             if !generated_paths.is_empty() {
                 p { class: "generated-files-paths", "{generated_paths}" }
+            }
+            if !not_inspected_text.is_empty() {
+                p { class: "not-inspected-files-note", "{not_inspected_text}" }
+            }
+            if !not_inspected_paths.is_empty() {
+                p { class: "not-inspected-files-paths", "{not_inspected_paths}" }
             }
             if !text.is_empty() {
                 p { "{text}" }

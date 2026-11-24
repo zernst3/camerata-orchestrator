@@ -387,6 +387,9 @@ struct WalkChecks {
     generated: Vec<String>,
     /// The non-blank lines in the files of `generated`.
     generated_lines: usize,
+    /// Hand-written files of a type the inspection does not read yet, as `repo/path` in pattern
+    /// form: not read, billed or searched for secrets.
+    not_inspected: Vec<String>,
     unmatched: Vec<String>,
     warned: Vec<(String, String)>,
     unchecked: Vec<(String, String)>,
@@ -403,6 +406,7 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
     let mut budget_used: u64 = 0;
     let mut generated: Vec<String> = Vec::new();
     let mut generated_lines = 0usize;
+    let mut not_inspected: Vec<String> = Vec::new();
     let mut read_ok: Vec<String> = Vec::new();
     let mut matched = vec![false; scope.patterns().len()];
     for (spec, dir) in sources {
@@ -430,6 +434,12 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
                 .map(|path| pattern_form(&repos, spec, path)),
         );
         generated_lines += lines;
+        not_inspected.extend(
+            extracted
+                .not_inspected
+                .iter()
+                .map(|path| pattern_form(&repos, spec, path)),
+        );
         for f in extracted.over_limit_files() {
             let why = if f.reason.is_empty() {
                 String::new()
@@ -463,6 +473,7 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
         over_budget,
         generated,
         generated_lines,
+        not_inspected,
         unmatched: checks.unmatched,
         warned: checks.warned,
         unchecked: checks.unchecked,
@@ -548,6 +559,15 @@ fn file_warnings(w: &WalkChecks, floor_on: bool) -> Vec<String> {
             } else {
                 "They are not searched for secrets in this run: the security floor is off."
             }
+        ));
+    }
+    // Hand-written files of a type not inspected yet: never opened, so neither read, billed nor
+    // searched, in the words the app's pre-start check uses, paths capped as it caps them.
+    if !w.not_inspected.is_empty() {
+        out.push(format!(
+            "{} {}",
+            camerata_ui_core::readiness::not_inspected_note(w.not_inspected.len()),
+            camerata_ui_core::readiness::not_inspected_paths_line(&w.not_inspected)
         ));
     }
     let mut part = |list: &[String], qualifier: &str, tail_one: &str, tail_each: &str| {

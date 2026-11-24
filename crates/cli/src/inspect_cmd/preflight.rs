@@ -495,6 +495,7 @@ mod tests {
             generated_files: 0,
             generated_lines: 0,
             generated_paths: Vec::new(),
+            not_inspected_paths: Vec::new(),
             matched_patterns: Vec::new(),
         }
     }
@@ -869,6 +870,7 @@ mod tests {
             generated_files: 0,
             generated_lines: 0,
             generated_paths: Vec::new(),
+            not_inspected_paths: Vec::new(),
             matched_patterns: Vec::new(),
         }
     }

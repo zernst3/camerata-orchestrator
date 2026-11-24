@@ -508,6 +508,13 @@ pub const GENERATED_FILES_LABEL: &str = "generated: searched for secrets only, n
 pub const GENERATED_UNSEARCHED_LABEL: &str =
     "generated: not read, not billed, not searched for secrets";
 
+/// The reason a hand-written file of a type the inspection does not read yet is not read (GitHub
+/// #338, "list now, inspect later"), as every surface states it: Coverage, `camerata count` and
+/// the pre-start check. The types are listed in `camerata-server`'s `onboard::files`.
+pub const NOT_INSPECTED_TYPE_LABEL: &str = "this file type is not inspected yet";
+/// [`NOT_INSPECTED_TYPE_LABEL`] after a count in a list ("2 of a file type not inspected yet").
+pub const NOT_INSPECTED_TYPE_IN_A_LIST: &str = "of a file type not inspected yet";
+
 #[cfg(test)]
 mod tests {
     use super::*;

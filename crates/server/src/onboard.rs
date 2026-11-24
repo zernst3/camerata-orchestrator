@@ -2591,6 +2591,7 @@ pub async fn audit_repos_with_llm_controlled(
                     excluded_noise_paths: _,
                     excluded_by_agreement,
                     generated,
+                    not_inspected,
                 },
                 noise_lines,
             )) => {
@@ -2704,6 +2705,7 @@ pub async fn audit_repos_with_llm_controlled(
                     spec,
                     crate::scan_ledger::RepoSkips {
                         generated_unsearched,
+                        not_inspected_type: not_inspected,
                         excluded_never_read: never_read_patterns,
                         oversize: skipped_oversize,
                         beyond_cap: skipped_beyond_cap,

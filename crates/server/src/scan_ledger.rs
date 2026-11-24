@@ -1109,6 +1109,10 @@ pub struct SkippedTotals {
     /// secret search ceiling or is not text): not read, billed or counted either.
     #[serde(default)]
     pub generated_unsearched: usize,
+    /// Hand-written files of a type the inspection does not read yet
+    /// (`onboard::files::NOT_INSPECTED_TYPES`): not read, billed or searched for secrets.
+    #[serde(default)]
+    pub not_inspected_type: usize,
     /// Patterns in Excluded by agreement that match only files never read anyway. Patterns, not
     /// files: each is counted once per run, however many repos it was recorded for.
     #[serde(default)]
@@ -1147,6 +1151,7 @@ impl SkippedTotals {
             SkipReason::LongLine => self.long_line,
             SkipReason::Generated => self.generated,
             SkipReason::GeneratedUnsearched => self.generated_unsearched,
+            SkipReason::NotInspectedType => self.not_inspected_type,
             SkipReason::ExcludedNeverRead => self.excluded_never_read,
         }
     }
@@ -1161,6 +1166,7 @@ impl SkippedTotals {
             + self.long_line
             + self.generated
             + self.generated_unsearched
+            + self.not_inspected_type
     }
 
     fn add(&mut self, reason: SkipReason) {
@@ -1172,6 +1178,7 @@ impl SkippedTotals {
             SkipReason::LongLine => self.long_line += 1,
             SkipReason::Generated => self.generated += 1,
             SkipReason::GeneratedUnsearched => self.generated_unsearched += 1,
+            SkipReason::NotInspectedType => self.not_inspected_type += 1,
             SkipReason::ExcludedNeverRead => self.excluded_never_read += 1,
         }
     }
@@ -1335,6 +1342,9 @@ pub struct RepoSkips<'a> {
     /// Files that declare themselves generated and were NOT searched for secrets (floor off, over
     /// the secret search ceiling, or not text).
     pub generated_unsearched: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet
+    /// (`onboard::files::NOT_INSPECTED_TYPES`).
+    pub not_inspected_type: Vec<String>,
     /// Excluded by agreement patterns that match only files never read anyway: listed by the
     /// pattern, so the client sees the exclusion removed nothing that would have been read.
     pub excluded_never_read: Vec<String>,
@@ -1381,6 +1391,7 @@ impl SkippedFileList {
             (skips.long_line, SkipReason::LongLine),
             (skips.generated, SkipReason::Generated),
             (skips.generated_unsearched, SkipReason::GeneratedUnsearched),
+            (skips.not_inspected_type, SkipReason::NotInspectedType),
             (skips.excluded_never_read, SkipReason::ExcludedNeverRead),
         ] {
             for path in paths {
@@ -1471,6 +1482,10 @@ pub enum SkipReason {
     /// A generated file the secret checks did not search: the deterministic floor was off, the
     /// file is over the secret search ceiling, or it is not text.
     GeneratedUnsearched,
+    /// A hand-written file of a type the inspection does not read yet
+    /// (`onboard::files::NOT_INSPECTED_TYPES`, GitHub #338): never opened, so not read, billed or
+    /// searched for secrets. Listed so Coverage is never silent about a hand-written file.
+    NotInspectedType,
     /// An Excluded by agreement pattern that matches only files Camerata never reads anyway: the
     /// exclusion removed nothing that would have been read or billed.
     ExcludedNeverRead,
@@ -1490,6 +1505,7 @@ impl SkipReason {
             SkipReason::LongLine => crate::onboard::files::long_line_label(),
             SkipReason::Generated => crate::onboard::files::generated_label(),
             SkipReason::GeneratedUnsearched => crate::onboard::files::generated_unsearched_label(),
+            SkipReason::NotInspectedType => crate::onboard::files::not_inspected_label(),
             SkipReason::ExcludedNeverRead => {
                 "excluded by agreement; nothing here is read by default".to_string()
             }
@@ -4556,6 +4572,7 @@ mod tests {
                 long_line: Vec::new(),
                 generated: Vec::new(),
                 generated_unsearched: Vec::new(),
+                not_inspected_type: Vec::new(),
                 excluded_never_read: Vec::new(),
                 sizes: &sizes,
                 file_cap: 20_000,
