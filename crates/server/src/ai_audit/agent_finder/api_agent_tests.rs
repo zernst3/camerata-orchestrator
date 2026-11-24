@@ -1694,17 +1694,28 @@ async fn the_finders_own_client_reads_a_reply_that_comes_after_the_old_limit() {
 }
 
 #[test]
-fn the_finders_request_goes_through_the_finders_own_client() {
+fn only_the_finder_uses_the_thirty_minute_client_and_the_agent_driver_keeps_its_own() {
     let source = include_str!("../../api_agent_driver.rs");
-    let body = source
-        .split("pub(crate) async fn post_anthropic_body(")
-        .nth(1)
-        .expect("the finder's post function")
-        .split("\n}\n")
-        .next()
-        .expect("its body");
-    assert!(body.contains("finder_http_client()"), "{body}");
-    assert!(!body.contains("agent_http_client()"), "{body}");
+    let body_of = |start: &str| -> String {
+        source
+            .split(start)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{start} exists"))
+            .split("\n}\n")
+            .next()
+            .expect("its body")
+            .to_string()
+    };
+    let finder = body_of("pub(crate) async fn post_anthropic_body(");
+    assert!(finder.contains("finder_http_client()"), "{finder}");
+    assert!(!finder.contains("agent_http_client()"), "{finder}");
+    let driver = body_of("async fn call_anthropic_with_tools(");
+    assert!(driver.contains("agent_http_client()"), "{driver}");
+    assert!(!driver.contains("finder_http_client()"), "{driver}");
+    assert!(
+        !driver.contains("post_anthropic_body("),
+        "the agent driver must not go through the finder's post function: {driver}"
+    );
 }
 
 #[tokio::test]
