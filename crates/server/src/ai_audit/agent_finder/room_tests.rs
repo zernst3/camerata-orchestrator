@@ -630,3 +630,93 @@ fn the_room_serves_exactly_the_billed_set_including_the_admitted_text_types() {
     let counted = crate::onboard::count::count_repo(dir.path(), &scope).unwrap();
     assert_eq!(counted.total_files, billed.len());
 }
+
+// ─── the Edit rule of the room ───────────────────────────────────────────────────────────────
+
+fn written(text: &str) -> Room {
+    let r = room();
+    r.write("_camerata/out/p.json", text).expect("write");
+    r
+}
+
+#[test]
+fn an_edit_replaces_the_one_match_and_needs_exactly_one() {
+    let r = written("alpha beta gamma");
+    r.edit("_camerata/out/p.json", "beta", "BETA").expect("edit");
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "alpha BETA gamma");
+    r.edit("./_camerata/out/p.json", "gamma", "")
+        .expect("a leading ./ names the same file, and new may be empty");
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "alpha BETA ");
+
+    let r = written("one two one");
+    assert!(matches!(
+        r.edit("_camerata/out/p.json", "one", "1"),
+        Err(RoomError::Invalid(m)) if m.contains("2 places")
+    ));
+    assert!(matches!(
+        r.edit("_camerata/out/p.json", "three", "3"),
+        Err(RoomError::Invalid(m)) if m.contains("was not found")
+    ));
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "one two one");
+}
+
+#[test]
+fn overlapping_matches_count_as_more_than_one() {
+    let r = written("aaa");
+    assert!(matches!(
+        r.edit("_camerata/out/p.json", "aa", "b"),
+        Err(RoomError::Invalid(m)) if m.contains("2 places")
+    ));
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "aaa");
+    // The same through a multi-byte character.
+    let r = written("ééé");
+    assert!(r.edit("_camerata/out/p.json", "éé", "x").is_err());
+    r.edit("_camerata/out/p.json", "é", "x").expect_err("three matches");
+    let r = written("aé");
+    r.edit("_camerata/out/p.json", "é", "e").expect("one match");
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "ae");
+}
+
+#[test]
+fn an_edit_outside_the_out_folder_or_of_an_unwritten_file_is_refused() {
+    let r = written("text");
+    for path in [
+        "src/main.rs",
+        "_camerata/checklist.md",
+        "_camerata/context/tree.txt",
+        "/tmp/p.json",
+        "../p.json",
+        "_camerata/out/",
+        "_camerata/out/../../p.json",
+    ] {
+        assert!(
+            matches!(r.edit(path, "e", "x"), Err(RoomError::OutsideOut(_))),
+            "{path}"
+        );
+    }
+    assert!(matches!(
+        r.edit("_camerata/out/other.json", "e", "x"),
+        Err(RoomError::NotFound(_))
+    ));
+    assert!(matches!(
+        r.edit("_camerata/out/p.json", "", "x"),
+        Err(RoomError::Invalid(_))
+    ));
+    assert!(matches!(
+        r.edit("_camerata/out/p.json", "text", "text"),
+        Err(RoomError::Invalid(_))
+    ));
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "text");
+    assert!(r.read("src/main.rs", 1, 3).expect("read").text.contains("mod util"));
+}
+
+#[test]
+fn an_edit_cannot_grow_a_file_past_the_write_limit() {
+    let r = written("x");
+    let big = "y".repeat(super::room::MAX_WRITE_BYTES);
+    assert!(matches!(
+        r.edit("_camerata/out/p.json", "x", &big),
+        Err(RoomError::Invalid(m)) if m.contains("at most")
+    ));
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "x");
+}

@@ -346,7 +346,7 @@ async fn a_three_turn_run_returns_the_trace_the_outputs_and_the_stop() {
 }
 
 #[tokio::test]
-async fn the_request_has_the_five_tools_the_limit_and_no_forced_choice_or_sampling() {
+async fn the_request_has_the_six_tools_the_limit_and_no_forced_choice_or_sampling() {
     let wire = ScriptedWire::new(vec![text_reply("done")]);
     let mut lim = limits();
     lim.max_turn_tokens = 12_345;
@@ -354,8 +354,8 @@ async fn the_request_has_the_five_tools_the_limit_and_no_forced_choice_or_sampli
     let body = &wire.bodies()[0];
     assert_eq!(
         tool_names(body),
-        vec!["Read", "Glob", "Grep", "LS", "Write"],
-        "the tool list is exactly these five"
+        vec!["Read", "Glob", "Grep", "LS", "Write", "Edit"],
+        "the tool list is exactly these six"
     );
     assert_eq!(body["tool_choice"], json!({"type": "auto"}));
     assert_eq!(body["max_tokens"], 12_345);
@@ -391,8 +391,8 @@ async fn a_call_to_any_other_tool_is_refused_and_changes_nothing() {
         call("g4", "Bash", json!({"command": "echo hi"})),
         call(
             "g5",
-            "Edit",
-            json!({"file_path": "src/a.rs", "old_string": "a", "new_string": "b"}),
+            "MultiEdit",
+            json!({"file_path": "src/a.rs", "edits": []}),
         ),
         call("g6", "WebFetch", json!({"url": "https://example.invalid"})),
     ];
@@ -408,7 +408,7 @@ async fn a_call_to_any_other_tool_is_refused_and_changes_nothing() {
     assert_eq!(results.len(), 6, "every call is answered");
     for (id, text) in results {
         assert!(
-            text.starts_with("Refused") && text.contains("Read, Glob, Grep, LS and Write"),
+            text.starts_with("Refused") && text.contains("Read, Glob, Grep, LS, Write and Edit"),
             "{id} got {text:?}"
         );
     }
@@ -461,6 +461,111 @@ async fn a_write_outside_the_out_folder_is_refused() {
         room.read("src/a.rs", 1, 10).expect("read").lines_returned,
         3
     );
+}
+
+// ─── 2b. the Edit tool ───────────────────────────────────────────────────────────────────────
+
+const PROBLEMS: &str = "{\"problems\": [{\"n\": 1, \"places\": []}]}";
+
+#[tokio::test]
+async fn an_edit_amends_a_file_the_model_wrote_and_is_recorded_as_a_write() {
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![call(
+            "w",
+            "Write",
+            json!({"file_path": "_camerata/out/problems-1.json", "content": PROBLEMS}),
+        )]),
+        tools_reply(vec![call(
+            "e",
+            "Edit",
+            json!({
+                "file_path": "_camerata/out/problems-1.json",
+                "old_string": "\"places\": []",
+                "new_string": "\"places\": [{\"path\": \"src/a.rs\", \"line\": 2}]",
+            }),
+        )]),
+        text_reply("done"),
+    ]);
+    let room = room();
+    let run = run_ok(&agent(&wire), &room, &limits()).await;
+
+    assert_eq!(
+        run.outputs["_camerata/out/problems-1.json"],
+        "{\"problems\": [{\"n\": 1, \"places\": [{\"path\": \"src/a.rs\", \"line\": 2}]}]}",
+        "the run's output holds the amended file"
+    );
+    assert_eq!(
+        run.trace,
+        vec![
+            ToolEvent::Write {
+                path: "_camerata/out/problems-1.json".into()
+            },
+            ToolEvent::Write {
+                path: "_camerata/out/problems-1.json".into()
+            },
+        ],
+        "an Edit is recorded as the Write it is"
+    );
+    let results = tool_results(&wire.bodies()[2], 4);
+    assert_eq!(results[0].1, "edited _camerata/out/problems-1.json");
+    assert!(!results[0].1.contains("does not exist"), "{results:?}");
+}
+
+#[tokio::test]
+async fn an_edit_that_cannot_be_applied_is_refused_and_changes_nothing() {
+    let edit = |id: &str, path: &str, old: &str, new: &str| {
+        call(
+            id,
+            "Edit",
+            json!({"file_path": path, "old_string": old, "new_string": new}),
+        )
+    };
+    let out = "_camerata/out/leads.json";
+    let blocks = vec![
+        call(
+            "w",
+            "Write",
+            json!({"file_path": out, "content": "x x y"}),
+        ),
+        // A path outside the output folder, a room file, the checklist, the folder itself.
+        edit("e0", "src/a.rs", "fn a()", "fn z()"),
+        edit("e1", "_camerata/checklist.md", "checklist", "gone"),
+        edit("e2", "../out.json", "x", "z"),
+        edit("e3", "/tmp/out.json", "x", "z"),
+        edit("e4", "_camerata/out/", "x", "z"),
+        edit("e5", "_camerata/out/../../x.json", "x", "z"),
+        // A file the model never wrote.
+        edit("e6", "_camerata/out/never.json", "x", "z"),
+        // Zero matches, two matches, an empty old_string, an edit that changes nothing.
+        edit("e7", out, "absent", "z"),
+        edit("e8", out, "x", "z"),
+        edit("e9", out, "", "z"),
+        edit("e10", out, "y", "y"),
+        // A call with a missing argument.
+        call("e11", "Edit", json!({"file_path": out, "old_string": "y"})),
+    ];
+    let wire = ScriptedWire::new(vec![tools_reply(blocks), text_reply("done")]);
+    let room = room();
+    let before = room.read("src/a.rs", 1, 100).expect("read").text;
+    let run = run_ok(&agent(&wire), &room, &limits()).await;
+
+    assert_eq!(
+        run.trace,
+        vec![ToolEvent::Write { path: out.into() }],
+        "only the first Write is a trace entry: a refused Edit records nothing"
+    );
+    assert_eq!(run.outputs[out], "x x y", "no refused edit changed the file");
+    assert_eq!(room.read("src/a.rs", 1, 100).expect("read").text, before);
+    let results = tool_results(&wire.bodies()[1], 2);
+    assert_eq!(results.len(), 13);
+    for (id, text) in &results[1..] {
+        assert!(
+            text.starts_with("Refused") || text.starts_with("Edit needs"),
+            "{id} got {text:?}"
+        );
+    }
+    assert!(results[8].1.contains("was not found"), "{:?}", results[8]);
+    assert!(results[9].1.contains("2 places"), "{:?}", results[9]);
 }
 
 #[tokio::test]

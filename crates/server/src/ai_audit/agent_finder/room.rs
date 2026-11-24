@@ -1,6 +1,7 @@
 //! The review room: the small in-memory file tree one agent works in (design section 1). It is
-//! built from already redacted files and serves five tools (Read, Glob, Grep, LS, Write). A path
-//! that is not in the room does not exist; a write is accepted only under `_camerata/out/`.
+//! built from already redacted files and serves six tools (Read, Glob, Grep, LS, Write, Edit). A
+//! path that is not in the room does not exist; a write or an edit is accepted only under
+//! `_camerata/out/`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -562,6 +563,59 @@ impl Room {
             )));
         }
         out.insert(normal, text.to_string());
+        Ok(())
+    }
+
+    /// Change an output file in place: replace `old` with `new` in the text of `path`. Accepted
+    /// only under [`OUT_DIR`], only for a file already written, and only when `old` is not empty
+    /// and occurs exactly once (occurrences may overlap, so `aa` in `aaa` is two). The check and
+    /// the change happen under one lock, so a refused edit leaves the file as it was.
+    pub fn edit(&self, path: &str, old: &str, new: &str) -> Result<(), RoomError> {
+        let normal = normalize(path).ok_or_else(|| RoomError::OutsideOut(path.to_string()))?;
+        if !normal.starts_with(OUT_DIR) || normal.len() == OUT_DIR.len() {
+            return Err(RoomError::OutsideOut(path.to_string()));
+        }
+        if old.is_empty() {
+            return Err(RoomError::Invalid(
+                "old_string must not be empty".to_string(),
+            ));
+        }
+        if old == new {
+            return Err(RoomError::Invalid(
+                "old_string and new_string are the same".to_string(),
+            ));
+        }
+        let mut out = self.out_lock();
+        let Some(text) = out.get(&normal) else {
+            return Err(RoomError::NotFound(path.to_string()));
+        };
+        let first = text.find(old).ok_or_else(|| {
+            RoomError::Invalid(format!("old_string was not found in {path}; nothing changed"))
+        })?;
+        // Count every position, overlapping ones too: step one character past each hit.
+        let mut matches = 1usize;
+        let mut from = first + text[first..].chars().next().map_or(1, char::len_utf8);
+        while let Some(at) = text[from..].find(old) {
+            matches += 1;
+            let hit = from + at;
+            from = hit + text[hit..].chars().next().map_or(1, char::len_utf8);
+        }
+        if matches > 1 {
+            return Err(RoomError::Invalid(format!(
+                "old_string matches {matches} places in {path}; give more of the surrounding \
+                 text so it matches exactly once. Nothing changed."
+            )));
+        }
+        let mut changed = String::with_capacity(text.len() - old.len() + new.len());
+        changed.push_str(&text[..first]);
+        changed.push_str(new);
+        changed.push_str(&text[first + old.len()..]);
+        if changed.len() > MAX_WRITE_BYTES {
+            return Err(RoomError::Invalid(format!(
+                "a file may hold at most {MAX_WRITE_BYTES} bytes"
+            )));
+        }
+        out.insert(normal, changed);
         Ok(())
     }
 
