@@ -266,6 +266,11 @@ fn refused_key(key: &str) -> String {
     format!("{key}#refused")
 }
 
+/// The marker of a piece that ended on a stop that repeats (see `piece::splits_on_resume`).
+fn split_key(key: &str) -> String {
+    format!("{key}#split")
+}
+
 /// Expand a planned piece against the stored lines of an earlier attempt: a finished piece is
 /// replayed, a refused piece is run in two halves (by path order), and anything else runs.
 /// The stored line of each refused piece that was split into halves goes to `split_parents`: its
@@ -302,6 +307,27 @@ fn expand(
             out.push(Work::RefusedFinal(piece, line.clone()));
         }
         return;
+    }
+    if let Some(line) = lines.get(&split_key(&piece.key)) {
+        if piece.files.len() >= 2 {
+            split_parents.push(line.clone());
+            let mid = piece.files.len() / 2;
+            for (suffix, files) in [("a", &piece.files[..mid]), ("b", &piece.files[mid..])] {
+                expand(
+                    Piece {
+                        key: format!("{}/{suffix}", piece.key),
+                        unit: piece.unit.clone(),
+                        files: files.to_vec(),
+                    },
+                    lines,
+                    out,
+                    split_parents,
+                );
+            }
+            return;
+        }
+        // One file cannot be halved: it runs again whole and, if it ends the same way, stays a
+        // named failed part.
     }
     out.push(Work::Fresh(piece));
 }
@@ -499,6 +525,17 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
                     for usage in &report.usage {
                         m.record_wasted(Stage::Finder, &piece::response_of(shared.options, usage));
                     }
+                }
+                if report.split_on_resume {
+                    store(
+                        shared,
+                        &checkpoint_line(
+                            shared.options,
+                            split_key(&piece.key),
+                            &report.usage,
+                            String::from("split"),
+                        ),
+                    );
                 }
                 if report.refused {
                     store(

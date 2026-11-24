@@ -176,6 +176,22 @@ pub(super) fn run_stopped_text(meter: &UsageMeter) -> String {
     )
 }
 
+/// How the text of a piece stopped at its own spend ceiling begins. Only this stop (not the run's
+/// spend limit) says the piece itself is too big, so a resume halves it.
+pub(super) const PIECE_CEILING_PREFIX: &str = "the piece's spend ceiling of ";
+
+/// How the text of a piece whose reply was cut off at the output limit twice begins.
+pub(super) const CUT_OFF_TWICE_PREFIX: &str = "the reply was cut off at the output limit of ";
+
+/// How the text of a piece stopped before a request that would pass the model's context window
+/// begins; a resume halves the piece.
+pub(super) const CONTEXT_FULL_PREFIX: &str =
+    "the next request would pass the model's context window";
+
+/// The share of the context window a request may fill, in percent; the rest is the safety margin
+/// for the estimate.
+const CONTEXT_FILL_PERCENT: usize = 90;
+
 /// How the text of a piece stopped by the run's own stop begins; the class of the stop is read
 /// from it ([`super::run`]).
 pub(super) const RUN_STOPPED_PREFIX: &str = "the run stopped because ";
@@ -605,7 +621,7 @@ impl ApiPieceAgent {
             }
             if spent >= limits.ceiling_usd {
                 break AgentStop::SpendLimit(format!(
-                    "the piece's spend ceiling of ${:.2} was reached after {} turns (${spent:.2} spent)",
+                    "{PIECE_CEILING_PREFIX}${:.2} was reached after {} turns (${spent:.2} spent)",
                     limits.ceiling_usd,
                     usage.len()
                 ));
@@ -689,7 +705,7 @@ impl ApiPieceAgent {
             if message["stop_reason"].as_str() == Some("max_tokens") {
                 if continued {
                     break AgentStop::Failed(format!(
-                        "the reply was cut off at the output limit of {} tokens twice",
+                        "{CUT_OFF_TWICE_PREFIX}{} tokens twice",
                         limits.max_turn_tokens
                     ));
                 }
