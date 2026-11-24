@@ -569,6 +569,52 @@ async fn an_edit_that_cannot_be_applied_is_refused_and_changes_nothing() {
 }
 
 #[tokio::test]
+async fn an_edit_that_would_break_json_is_refused_and_the_stored_run_replays_to_the_same_outputs() {
+    let edit = |id: &str, old: &str, new: &str| {
+        call(
+            id,
+            "Edit",
+            json!({"file_path": "_camerata/out/problems-1.json", "old_string": old, "new_string": new}),
+        )
+    };
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![
+            call(
+                "w",
+                "Write",
+                json!({"file_path": "_camerata/out/problems-1.json", "content": PROBLEMS}),
+            ),
+            // Breaks the JSON: refused, the file stays as written.
+            edit("bad", "\"places\": []", "\"places\": ["),
+            // Valid: kept.
+            edit("good", "\"n\": 1", "\"n\": 7"),
+        ]),
+        text_reply("done"),
+    ]);
+    let run = run_ok(&agent(&wire), &room(), &limits()).await;
+    let results = tool_results(&wire.bodies()[1], 2);
+    assert!(results[1].1.starts_with("Refused") && results[1].1.contains("would break the JSON"));
+    assert_eq!(results[2].1, "edited _camerata/out/problems-1.json");
+    let amended = "{\"problems\": [{\"n\": 7, \"places\": []}]}";
+    assert_eq!(run.outputs["_camerata/out/problems-1.json"], amended);
+
+    // What a resume replays is the stored run: the outputs are the final text, whatever tools
+    // made them, and the trace shows the Edit as a Write.
+    let stored = serde_json::to_string(&run).expect("serialize");
+    let replayed: AgentRun = serde_json::from_str(&stored).expect("deserialize");
+    assert_eq!(replayed, run);
+    assert_eq!(replayed.outputs["_camerata/out/problems-1.json"], amended);
+    assert_eq!(
+        replayed
+            .trace
+            .iter()
+            .filter(|e| matches!(e, ToolEvent::Write { .. }))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn a_read_outside_the_room_says_no_such_file() {
     let manifest = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
     assert!(

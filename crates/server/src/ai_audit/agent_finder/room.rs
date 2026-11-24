@@ -707,6 +707,16 @@ impl Room {
                 "a file may hold at most {MAX_WRITE_BYTES} bytes"
             )));
         }
+        // A JSON output that stops parsing is a broken file for the reader: refuse the edit and
+        // keep the file, so the model's one repair turn is not spent on a second breakage.
+        if normal.to_ascii_lowercase().ends_with(".json")
+            && serde_json::from_str::<serde_json::Value>(&changed).is_err()
+        {
+            return Err(RoomError::Invalid(format!(
+                "this edit would break the JSON in {path}, so nothing changed. Change the text so \
+                 the whole file stays valid JSON, or write the whole file again with Write."
+            )));
+        }
         out.insert(normal, changed);
         Ok(())
     }

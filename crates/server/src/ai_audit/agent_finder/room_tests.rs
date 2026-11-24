@@ -650,46 +650,46 @@ fn the_room_serves_exactly_the_billed_set_including_the_admitted_text_types() {
 
 fn written(text: &str) -> Room {
     let r = room();
-    r.write("_camerata/out/p.json", text).expect("write");
+    r.write("_camerata/out/p.txt", text).expect("write");
     r
 }
 
 #[test]
 fn an_edit_replaces_the_one_match_and_needs_exactly_one() {
     let r = written("alpha beta gamma");
-    r.edit("_camerata/out/p.json", "beta", "BETA").expect("edit");
-    assert_eq!(r.outputs()["_camerata/out/p.json"], "alpha BETA gamma");
-    r.edit("./_camerata/out/p.json", "gamma", "")
+    r.edit("_camerata/out/p.txt", "beta", "BETA").expect("edit");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "alpha BETA gamma");
+    r.edit("./_camerata/out/p.txt", "gamma", "")
         .expect("a leading ./ names the same file, and new may be empty");
-    assert_eq!(r.outputs()["_camerata/out/p.json"], "alpha BETA ");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "alpha BETA ");
 
     let r = written("one two one");
     assert!(matches!(
-        r.edit("_camerata/out/p.json", "one", "1"),
+        r.edit("_camerata/out/p.txt", "one", "1"),
         Err(RoomError::Invalid(m)) if m.contains("2 places")
     ));
     assert!(matches!(
-        r.edit("_camerata/out/p.json", "three", "3"),
+        r.edit("_camerata/out/p.txt", "three", "3"),
         Err(RoomError::Invalid(m)) if m.contains("was not found")
     ));
-    assert_eq!(r.outputs()["_camerata/out/p.json"], "one two one");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "one two one");
 }
 
 #[test]
 fn overlapping_matches_count_as_more_than_one() {
     let r = written("aaa");
     assert!(matches!(
-        r.edit("_camerata/out/p.json", "aa", "b"),
+        r.edit("_camerata/out/p.txt", "aa", "b"),
         Err(RoomError::Invalid(m)) if m.contains("2 places")
     ));
-    assert_eq!(r.outputs()["_camerata/out/p.json"], "aaa");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "aaa");
     // The same through a multi-byte character.
     let r = written("ééé");
-    assert!(r.edit("_camerata/out/p.json", "éé", "x").is_err());
-    r.edit("_camerata/out/p.json", "é", "x").expect_err("three matches");
+    assert!(r.edit("_camerata/out/p.txt", "éé", "x").is_err());
+    r.edit("_camerata/out/p.txt", "é", "x").expect_err("three matches");
     let r = written("aé");
-    r.edit("_camerata/out/p.json", "é", "e").expect("one match");
-    assert_eq!(r.outputs()["_camerata/out/p.json"], "ae");
+    r.edit("_camerata/out/p.txt", "é", "e").expect("one match");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "ae");
 }
 
 #[test]
@@ -699,10 +699,10 @@ fn an_edit_outside_the_out_folder_or_of_an_unwritten_file_is_refused() {
         "src/main.rs",
         "_camerata/checklist.md",
         "_camerata/context/tree.txt",
-        "/tmp/p.json",
-        "../p.json",
+        "/tmp/p.txt",
+        "../p.txt",
         "_camerata/out/",
-        "_camerata/out/../../p.json",
+        "_camerata/out/../../p.txt",
     ] {
         assert!(
             matches!(r.edit(path, "e", "x"), Err(RoomError::OutsideOut(_))),
@@ -710,18 +710,18 @@ fn an_edit_outside_the_out_folder_or_of_an_unwritten_file_is_refused() {
         );
     }
     assert!(matches!(
-        r.edit("_camerata/out/other.json", "e", "x"),
+        r.edit("_camerata/out/other.txt", "e", "x"),
         Err(RoomError::NotFound(_))
     ));
     assert!(matches!(
-        r.edit("_camerata/out/p.json", "", "x"),
+        r.edit("_camerata/out/p.txt", "", "x"),
         Err(RoomError::Invalid(_))
     ));
     assert!(matches!(
-        r.edit("_camerata/out/p.json", "text", "text"),
+        r.edit("_camerata/out/p.txt", "text", "text"),
         Err(RoomError::Invalid(_))
     ));
-    assert_eq!(r.outputs()["_camerata/out/p.json"], "text");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "text");
     assert!(r.read("src/main.rs", 1, 3).expect("read").text.contains("mod util"));
 }
 
@@ -730,10 +730,36 @@ fn an_edit_cannot_grow_a_file_past_the_write_limit() {
     let r = written("x");
     let big = "y".repeat(super::room::MAX_WRITE_BYTES);
     assert!(matches!(
-        r.edit("_camerata/out/p.json", "x", &big),
+        r.edit("_camerata/out/p.txt", "x", &big),
         Err(RoomError::Invalid(m)) if m.contains("at most")
     ));
-    assert_eq!(r.outputs()["_camerata/out/p.json"], "x");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "x");
+}
+
+#[test]
+fn an_edit_that_would_break_a_json_file_is_refused_and_a_valid_one_is_kept() {
+    let r = room();
+    r.write("_camerata/out/p.json", "{\"a\": [1, 2]}").expect("write");
+    for (old, new) in [("[1, 2]", "[1, 2"), ("\"a\"", "a"), (":", "")] {
+        assert!(
+            matches!(
+                r.edit("_camerata/out/p.json", old, new),
+                Err(RoomError::Invalid(m)) if m.contains("would break the JSON")
+            ),
+            "{old:?} to {new:?}"
+        );
+        assert_eq!(r.outputs()["_camerata/out/p.json"], "{\"a\": [1, 2]}");
+    }
+    r.edit("_camerata/out/p.json", "[1, 2]", "[1, 2, 3]")
+        .expect("a valid result is kept");
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "{\"a\": [1, 2, 3]}");
+    // An edit that repairs a file that was already broken is allowed.
+    r.write("_camerata/out/q.JSON", "{\"a\": 1,}").expect("write");
+    assert!(r.edit("_camerata/out/q.JSON", "x", "y").is_err());
+    r.edit("_camerata/out/q.JSON", ",}", "}").expect("repair");
+    // A file that is not JSON is not checked.
+    r.write("_camerata/out/n.txt", "not json").expect("write");
+    r.edit("_camerata/out/n.txt", "not", "still not").expect("plain text");
 }
 
 // ─── the plain read of the checklist ─────────────────────────────────────────────────────────
