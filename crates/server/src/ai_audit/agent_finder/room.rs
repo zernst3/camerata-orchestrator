@@ -465,6 +465,44 @@ impl Room {
         })
     }
 
+    /// Read the room's own checklist as it is: no line numbers, and no byte limit. `count` lines
+    /// from `first_line` (1-based), at most [`MAX_READ_LINES`]; the text is cut from the stored
+    /// text at line ends, so a read of every line is byte for byte the stored text. Any other path
+    /// is refused: client text is only ever served numbered and framed ([`Room::read`]).
+    pub fn read_plain(
+        &self,
+        path: &str,
+        first_line: usize,
+        count: usize,
+    ) -> Result<ReadOutput, RoomError> {
+        if !is_checklist_path(path) {
+            return Err(RoomError::Invalid(format!(
+                "only the checklist is served as plain text: {path}"
+            )));
+        }
+        let text = self
+            .text_of(path)
+            .ok_or_else(|| RoomError::NotFound(path.to_string()))?;
+        let first_line = first_line.max(1);
+        let take = count.min(MAX_READ_LINES);
+        let mut out = String::new();
+        let mut returned = 0usize;
+        let mut total_lines = 0usize;
+        for (i, line) in text.split_inclusive('\n').enumerate() {
+            total_lines += 1;
+            if i + 1 >= first_line && returned < take {
+                out.push_str(line);
+                returned += 1;
+            }
+        }
+        Ok(ReadOutput {
+            text: out,
+            first_line,
+            lines_returned: returned,
+            total_lines,
+        })
+    }
+
     fn glob_options() -> glob::MatchOptions {
         glob::MatchOptions {
             case_sensitive: true,

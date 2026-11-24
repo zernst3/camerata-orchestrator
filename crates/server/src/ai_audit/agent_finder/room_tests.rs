@@ -720,3 +720,67 @@ fn an_edit_cannot_grow_a_file_past_the_write_limit() {
     ));
     assert_eq!(r.outputs()["_camerata/out/p.json"], "x");
 }
+
+// ─── the plain read of the checklist ─────────────────────────────────────────────────────────
+
+fn room_with_checklist(text: &str) -> Room {
+    Room::build(&piece(&["src/main.rs"]), &repo(), text).room
+}
+
+#[test]
+fn the_checklist_is_served_plain_byte_for_byte_whatever_its_line_ends() {
+    for text in [
+        "# Checklist\n\nline one\nline two\n",
+        "no final line end",
+        "crlf line\r\nsecond\r\n\r\nlast\r\n",
+        "tab\there\n  indented\n\n\n",
+        "",
+    ] {
+        let r = room_with_checklist(text);
+        let out = r
+            .read_plain("_camerata/checklist.md", 1, 100_000)
+            .expect("plain read");
+        assert_eq!(out.text, text, "{text:?}");
+        assert_eq!(out.lines_returned, text.lines().count());
+        assert_eq!(out.total_lines, text.lines().count());
+    }
+}
+
+#[test]
+fn the_plain_read_has_no_byte_limit_and_still_pages_by_lines() {
+    let big: String = (1..=1_500).map(|i| format!("{i} {}\n", "x".repeat(150))).collect();
+    assert!(big.len() > super::room::MAX_READ_BYTES);
+    let r = room_with_checklist(&big);
+    let whole = r
+        .read_plain("./_camerata/checklist.md", 1, MAX_READ_LINES)
+        .expect("whole");
+    assert_eq!(whole.text, big, "past the byte limit of the numbered read");
+    assert_eq!(whole.lines_returned, 1_500);
+    // The numbered read of the same text does stop at the byte limit.
+    let numbered = r.read("_camerata/checklist.md", 1, MAX_READ_LINES).expect("numbered");
+    assert!(numbered.lines_returned < 1_500);
+
+    let page = r.read_plain("_camerata/checklist.md", 3, 2).expect("page");
+    let expected: String = big.split_inclusive('\n').skip(2).take(2).collect();
+    assert_eq!((page.text, page.first_line, page.lines_returned), (expected, 3, 2));
+    let past = r.read_plain("_camerata/checklist.md", 2_000, 5).expect("past end");
+    assert_eq!((past.text.as_str(), past.lines_returned, past.total_lines), ("", 0, 1_500));
+}
+
+#[test]
+fn the_plain_read_serves_no_file_but_the_checklist() {
+    let r = room();
+    for path in [
+        "src/main.rs",
+        "_camerata/context/tree.txt",
+        "_camerata/context/neighbours.md",
+        "_Camerata/Checklist.md",
+        "_camerata/out/x.json",
+    ] {
+        assert!(r.read_plain(path, 1, 10).is_err(), "{path}");
+    }
+    assert!(matches!(
+        r.read_plain("../_camerata/checklist.md", 1, 10),
+        Err(RoomError::Invalid(_))
+    ));
+}

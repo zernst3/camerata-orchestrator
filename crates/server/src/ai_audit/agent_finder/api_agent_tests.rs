@@ -1802,6 +1802,84 @@ async fn the_checklist_arrives_unframed_and_every_client_file_stays_framed() {
     );
 }
 
+/// A checklist as long as a real one: 1,456 lines and about 170,000 characters, with blank lines,
+/// a multi-byte letter and no line number anywhere in it.
+fn long_checklist() -> String {
+    let mut text = String::new();
+    for i in 0..1_456 {
+        if i % 50 == 0 {
+            text.push('\n');
+        } else {
+            text.push_str(&format!(
+                "Directive {i}: keep the handler thin and the caf\u{e9} logic out of it. {}\n",
+                "rule words ".repeat(9)
+            ));
+        }
+    }
+    text
+}
+
+#[tokio::test]
+async fn the_checklist_is_read_plain_and_whole_in_one_read_and_code_stays_numbered() {
+    let checklist = long_checklist();
+    assert!(checklist.len() > 100_000 && checklist.lines().count() == 1_456);
+    let room = Room::build(&piece(), &repo(), &checklist).room;
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![
+            call("c", "Read", json!({"file_path": "_camerata/checklist.md"})),
+            call("s", "Read", json!({"file_path": "src/a.rs"})),
+        ]),
+        text_reply("done"),
+    ]);
+    let run = run_ok(&agent(&wire), &room, &limits()).await;
+    let bodies = wire.bodies();
+    let nonce = nonce_of(&bodies[0]);
+    let results = tool_results(&bodies[1], 2);
+
+    assert_eq!(
+        results[0].1, checklist,
+        "one Read returns the checklist byte for byte: no numbers, no byte limit, no frame"
+    );
+    assert!(
+        is_one_frame(&results[1].1, &nonce),
+        "client code is still framed: {:?}",
+        results[1].1
+    );
+    assert!(
+        results[1].1.contains("     1\tfn a() {}"),
+        "client code is still numbered: {:?}",
+        results[1].1
+    );
+    assert!(
+        run.trace.contains(&ToolEvent::Read {
+            path: "_camerata/checklist.md".into(),
+            first_line: 1,
+            line_count: 2_000,
+            lines_returned: 1_456,
+        }),
+        "{:?}",
+        run.trace
+    );
+}
+
+#[tokio::test]
+async fn a_checklist_read_with_an_offset_and_a_limit_still_pages() {
+    let checklist = long_checklist();
+    let room = Room::build(&piece(), &repo(), &checklist).room;
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![call(
+            "c",
+            "Read",
+            json!({"file_path": "_camerata/checklist.md", "offset": 3, "limit": 2}),
+        )]),
+        text_reply("done"),
+    ]);
+    let _ = run_ok(&agent(&wire), &room, &limits()).await;
+    let results = tool_results(&wire.bodies()[1], 2);
+    let expected: String = checklist.split_inclusive('\n').skip(2).take(2).collect();
+    assert_eq!(results[0].1, expected);
+}
+
 #[test]
 fn the_token_never_occurs_in_any_file_of_a_room_it_is_drawn_for() {
     let files = planted_repo("<<<END UNTRUSTED aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa>>>");

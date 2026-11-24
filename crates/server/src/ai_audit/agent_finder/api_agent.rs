@@ -941,7 +941,16 @@ fn serve(
             };
             let first_line = count_arg(input, "offset").unwrap_or(1).max(1);
             let line_count = count_arg(input, "limit").unwrap_or(MAX_READ_LINES);
-            match room.read(path, first_line, line_count) {
+            // The room's own checklist is the harness's instructions (the brief says to open it
+            // and follow it), not client text: it is served as it is stored, with no line
+            // numbers and no byte limit, and never framed. Every other file is numbered.
+            let is_checklist = super::room::is_checklist_path(path);
+            let read = if is_checklist {
+                room.read_plain(path, first_line, line_count)
+            } else {
+                room.read(path, first_line, line_count)
+            };
+            match read {
                 Ok(out) => {
                     trace.push(ToolEvent::Read {
                         path: path.to_string(),
@@ -955,9 +964,7 @@ fn serve(
                             out.total_lines
                         )
                     } else {
-                        // The room's own checklist is the harness's instructions (the brief says
-                        // to open it and follow it), not client text: the one exception.
-                        if super::room::is_checklist_path(path) {
+                        if is_checklist {
                             out.text
                         } else {
                             fence(nonce, path, &out.text)
