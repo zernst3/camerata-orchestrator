@@ -253,6 +253,7 @@ pub(super) fn skipped_summary_sentence(
         SkipReason::GeneratedUnsearched,
         SkipReason::NotInspectedType,
         SkipReason::NotInspectedVersionsOnly,
+        SkipReason::Symlink,
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)
@@ -270,6 +271,12 @@ pub(super) fn skipped_summary_sentence(
                 "{} (not billed)",
                 crate::onboard::files::not_inspected_versions_in_a_list()
             ),
+            // Said as the other reasons are, in the middle of a list: "29 symbolic links (not read
+            // through)".
+            SkipReason::Symlink if totals.of(r) == 1 => {
+                "symbolic link (not read through)".to_string()
+            }
+            SkipReason::Symlink => "symbolic links (not read through)".to_string(),
             _ => in_a_list(&r.label()),
         };
         format!("{} {label}", totals.of(r))

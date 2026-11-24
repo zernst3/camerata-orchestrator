@@ -97,9 +97,10 @@ fn each_checkpoint_reaches_the_job_state_the_ui_polls() {
         .expect("recorded on the job");
     assert!((cp.approved_usd - 10.0).abs() < 1e-9);
     assert!((cp.spent_usd - 2.0).abs() < 1e-9);
-    // Three pieces left at the $2.00 average: 2 + 6 = 8.
+    // Three pieces left. One finished piece weighs 4 percent against the $1.00 estimate:
+    // 0.04 x 2.00 + 0.96 x 1.00 = $1.04 each, so 2 + 3 x 1.04 = 5.12.
     assert!(
-        (cp.projected_usd - 8.0).abs() < 1e-9,
+        (cp.projected_usd - 5.12).abs() < 1e-9,
         "{}",
         cp.projected_usd
     );

@@ -1074,6 +1074,10 @@ impl SiblingReader<'_> {
         {
             return None;
         }
+        // Never through a link: the sibling may point outside the repository.
+        if !crate::onboard::files::is_regular_file_inside(self.root, &path) {
+            return None;
+        }
         std::fs::read_to_string(path).ok()
     }
 

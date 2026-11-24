@@ -1117,6 +1117,9 @@ pub struct SkippedTotals {
     /// versions ([`SkipReason::NotInspectedVersionsOnly`]): not billed or searched for secrets.
     #[serde(default)]
     pub not_inspected_versions_only: usize,
+    /// Symbolic links: never followed, so what one points to is not read through it.
+    #[serde(default)]
+    pub symlink: usize,
     /// Patterns in Excluded by agreement that match only files never read anyway. Patterns, not
     /// files: each is counted once per run, however many repos it was recorded for.
     #[serde(default)]
@@ -1158,6 +1161,7 @@ impl SkippedTotals {
             SkipReason::NotInspectedType => self.not_inspected_type,
             SkipReason::NotInspectedVersionsOnly => self.not_inspected_versions_only,
             SkipReason::ExcludedNeverRead => self.excluded_never_read,
+            SkipReason::Symlink => self.symlink,
         }
     }
 
@@ -1173,6 +1177,7 @@ impl SkippedTotals {
             + self.generated_unsearched
             + self.not_inspected_type
             + self.not_inspected_versions_only
+            + self.symlink
     }
 
     fn add(&mut self, reason: SkipReason) {
@@ -1187,6 +1192,7 @@ impl SkippedTotals {
             SkipReason::NotInspectedType => self.not_inspected_type += 1,
             SkipReason::NotInspectedVersionsOnly => self.not_inspected_versions_only += 1,
             SkipReason::ExcludedNeverRead => self.excluded_never_read += 1,
+            SkipReason::Symlink => self.symlink += 1,
         }
     }
 }
@@ -1355,6 +1361,8 @@ pub struct RepoSkips<'a> {
     /// Excluded by agreement patterns that match only files never read anyway: listed by the
     /// pattern, so the client sees the exclusion removed nothing that would have been read.
     pub excluded_never_read: Vec<String>,
+    /// Symbolic links (`onboard::files::symlink_label`): never followed, so never read through.
+    pub symlink: Vec<String>,
     /// The size in bytes of each skipped file the walk could measure, by path.
     pub sizes: &'a std::collections::HashMap<String, u64>,
     /// The file limit the walk applied.
@@ -1405,6 +1413,7 @@ impl SkippedFileList {
             (not_inspected_plain, SkipReason::NotInspectedType),
             (not_inspected_versions, SkipReason::NotInspectedVersionsOnly),
             (skips.excluded_never_read, SkipReason::ExcludedNeverRead),
+            (skips.symlink, SkipReason::Symlink),
         ] {
             for path in paths {
                 if reason == SkipReason::ExcludedNeverRead
@@ -1505,6 +1514,9 @@ pub enum SkipReason {
     /// An Excluded by agreement pattern that matches only files Camerata never reads anyway: the
     /// exclusion removed nothing that would have been read or billed.
     ExcludedNeverRead,
+    /// A symbolic link: never followed, so the file or folder it points to (inside the repository,
+    /// outside it, or nothing) is not read, billed or counted through it.
+    Symlink,
 }
 
 impl SkipReason {
@@ -1528,6 +1540,7 @@ impl SkipReason {
             SkipReason::ExcludedNeverRead => {
                 "excluded by agreement; nothing here is read by default".to_string()
             }
+            SkipReason::Symlink => crate::onboard::files::symlink_label(),
         }
     }
 }
@@ -4593,6 +4606,7 @@ mod tests {
                 generated_unsearched: Vec::new(),
                 not_inspected_type: Vec::new(),
                 excluded_never_read: Vec::new(),
+                symlink: Vec::new(),
                 sizes: &sizes,
                 file_cap: 20_000,
             },

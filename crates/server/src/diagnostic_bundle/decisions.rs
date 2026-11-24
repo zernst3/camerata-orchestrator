@@ -54,6 +54,7 @@ pub mod enums {
         "generated_unsearched",
         "not_inspected_type",
         "not_inspected_versions_only",
+        "symlink",
     ];
     pub const STAGE: &[&str] = &[
         "scan_pass",

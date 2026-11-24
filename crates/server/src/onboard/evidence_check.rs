@@ -238,6 +238,10 @@ impl<'a> Sources<'a> {
             return None;
         }
         let full = root.join(rel);
+        // Never through a link: the file may be outside the repository folder.
+        if !crate::onboard::files::is_regular_file_inside(root, &full) {
+            return None;
+        }
         let meta = std::fs::metadata(&full).ok()?;
         if !meta.is_file() || meta.len() > MAX_EVIDENCE_FILE_BYTES {
             return None;

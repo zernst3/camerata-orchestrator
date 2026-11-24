@@ -237,6 +237,7 @@ fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup>
         (SkipReason::Generated, &extracted.generated),
         (SkipReason::NotInspectedType, &plain),
         (SkipReason::NotInspectedVersionsOnly, &versions),
+        (SkipReason::Symlink, &extracted.symlinks),
     ]
     .into_iter()
     .filter(|(_, paths)| !paths.is_empty())
@@ -579,6 +580,25 @@ mod tests {
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["not_read"][0]["reason"], "excluded by agreement");
         assert_eq!(v["not_read"][0]["files"][0]["path"], "seeds/more.js");
+    }
+
+    /// A symbolic link is listed with its own reason, never read, and is not in the billed total.
+    #[cfg(unix)]
+    #[test]
+    fn the_count_lists_symbolic_links_and_does_not_bill_their_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/main.rs", "fn main() {}\n\nfn a() {}\n");
+        std::os::unix::fs::symlink("main.rs", dir.path().join("src/alias.rs")).unwrap();
+        let c = count_repo(dir.path(), &crate::onboard::scope::RepoScope::none()).unwrap();
+        assert_eq!((c.total_files, c.total_lines), (1, 2));
+        assert_eq!(c.not_read.len(), 1, "{:?}", c.not_read);
+        assert_eq!(
+            c.not_read[0].reason,
+            "a symbolic link; what it points to is not read through it"
+        );
+        assert_eq!(c.not_read[0].files[0].path, "src/alias.rs");
+        let text = c.to_text();
+        assert!(text.contains("src/alias.rs"), "{text}");
     }
 
     /// V1 item 32: generated files are listed (count, lines and each path) and are not in the

@@ -2592,6 +2592,7 @@ pub async fn audit_repos_with_llm_controlled(
                     excluded_by_agreement,
                     generated,
                     not_inspected,
+                    symlinks,
                     unclassified_types: _,
                 },
                 noise_lines,
@@ -2714,6 +2715,7 @@ pub async fn audit_repos_with_llm_controlled(
                         excluded_by_agreement,
                         long_line: skipped_long_line,
                         generated,
+                        symlink: symlinks,
                         sizes: &skipped_sizes,
                         file_cap,
                     },
@@ -8388,6 +8390,212 @@ mod tests {
             paths.iter().any(|p| p.contains("main.rs")),
             "src/main.rs must appear in scan: {paths:?}"
         );
+    }
+
+    /// Run `git add -f` for `paths` (a gitignored link is staged on purpose).
+    fn git_add_force(dir: &std::path::Path, paths: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["add", "-f"])
+            .args(paths)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git add failed");
+        assert!(status.success(), "git add -f must succeed for {paths:?}");
+    }
+
+    /// A tracked symbolic link is never read through: not to a file in the repository, not to a
+    /// folder, not to a file outside the repository, not to nothing. Each is listed as a symbolic
+    /// link, and the line total counts only the real files.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_symlink_is_listed_and_never_read_or_counted() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.rs"), "fn leaked_outside() {}\n").unwrap();
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        git_init(&root);
+        std::fs::write(root.join(".gitignore"), "ignored-link.rs\n").unwrap();
+        std::fs::write(root.join("src/real.rs"), "fn real() {}\n").unwrap();
+        std::fs::write(root.join("lib/a.rs"), "fn lib_a() {}\n").unwrap();
+        symlink("real.rs", root.join("src/inside-link.rs")).unwrap();
+        symlink(outside.join("secret.rs"), root.join("src/outside-link.rs")).unwrap();
+        symlink("../lib", root.join("src/folder-link")).unwrap();
+        symlink(
+            base.path().join("acme-nothing.rs"),
+            root.join("src/dangling.rs"),
+        )
+        .unwrap();
+        symlink(outside.join("secret.rs"), root.join("ignored-link.rs")).unwrap();
+        git_add(
+            &root,
+            &[
+                ".gitignore",
+                "src/real.rs",
+                "lib/a.rs",
+                "src/inside-link.rs",
+                "src/outside-link.rs",
+                "src/folder-link",
+                "src/dangling.rs",
+            ],
+        );
+        git_add_force(&root, &["ignored-link.rs"]);
+
+        let extracted =
+            read_local_repo_files(&root, &crate::onboard::scope::RepoScope::none()).expect("scan");
+        let mut paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            [".gitignore", "lib/a.rs", "src/real.rs"],
+            "only real files are read"
+        );
+        assert!(
+            extracted
+                .files
+                .iter()
+                .all(|(_, c)| !c.contains("leaked_outside")),
+            "a file outside the repository must not be read through a link"
+        );
+        assert_eq!(
+            extracted.symlinks,
+            [
+                "ignored-link.rs",
+                "src/dangling.rs",
+                "src/folder-link",
+                "src/inside-link.rs",
+                "src/outside-link.rs"
+            ],
+            "every link is listed, none dropped"
+        );
+        let real: Vec<(String, String)> = extracted
+            .files
+            .iter()
+            .filter(|(p, _)| p.ends_with(".rs"))
+            .cloned()
+            .collect();
+        let (lines, _) = propose::count_source_lines(&real);
+        assert_eq!(lines, 2, "a link's target is never counted");
+        // It reaches Coverage under its own reason, with the client-facing label.
+        let mut list = crate::scan_ledger::SkippedFileList::default();
+        list.push(
+            "acme/repo",
+            "src/inside-link.rs".to_string(),
+            crate::scan_ledger::SkipReason::Symlink,
+        );
+        assert_eq!(list.totals().symlink, 1);
+        assert_eq!(
+            crate::scan_ledger::SkipReason::Symlink.label(),
+            "a symbolic link; what it points to is not read through it"
+        );
+    }
+
+    /// A tracked file whose folder is now a link (a dirty tree) is read through neither a link to
+    /// a folder outside the repository nor one inside it: each is listed as a symbolic link.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_file_under_a_folder_swapped_for_a_link_is_not_read_through_it() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("a.rs"), "fn leaked_outside() {}\n").unwrap();
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("dirout")).unwrap();
+        std::fs::create_dir_all(root.join("dirin")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        git_init(&root);
+        std::fs::write(root.join("dirout/a.rs"), "fn first() {}\n").unwrap();
+        std::fs::write(root.join("dirin/b.rs"), "fn second() {}\n").unwrap();
+        std::fs::write(root.join("lib/b.rs"), "fn lib_b() {}\n").unwrap();
+        git_add(&root, &["dirout/a.rs", "dirin/b.rs", "lib/b.rs"]);
+        // The tree is now dirty: both tracked folders became links.
+        std::fs::remove_dir_all(root.join("dirout")).unwrap();
+        std::fs::remove_dir_all(root.join("dirin")).unwrap();
+        symlink(&outside, root.join("dirout")).unwrap();
+        symlink(root.join("lib"), root.join("dirin")).unwrap();
+
+        let extracted =
+            read_local_repo_files(&root, &crate::onboard::scope::RepoScope::none()).expect("scan");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["lib/b.rs"],
+            "only the real file is read, under its own name"
+        );
+        assert!(extracted
+            .files
+            .iter()
+            .all(|(_, c)| !c.contains("leaked_outside")));
+        for listed in ["dirout/a.rs", "dirin/b.rs"] {
+            assert!(
+                extracted.symlinks.iter().any(|p| p == listed),
+                "{listed} must be listed: {:?}",
+                extracted.symlinks
+            );
+        }
+    }
+
+    /// The one check every reader of a repository file uses: a regular file whose real path is
+    /// the repository's path for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_inside_is_told_from_a_link_or_a_file_under_a_linked_folder() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let root = base.path().join("acme-repo");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("src/real.rs"), "x\n").unwrap();
+        std::fs::write(outside.join("o.rs"), "x\n").unwrap();
+        symlink(root.join("src/real.rs"), root.join("src/link.rs")).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+        use files::is_regular_file_inside as inside;
+        assert!(inside(&root, &root.join("src/real.rs")));
+        assert!(!inside(&root, &root.join("src/link.rs")));
+        assert!(!inside(&root, &root.join("linked/o.rs")));
+        assert!(!inside(&root, &root.join("src/missing.rs")));
+        assert!(!inside(&root, &outside.join("o.rs")));
+        assert!(matches!(
+            files::read_for_secret_search(&root, "src/link.rs"),
+            files::SecretRead::NotText
+        ));
+    }
+
+    /// A path spelled differently from the disk only in case, or in the Unicode form of a name,
+    /// is the same file on a filesystem that folds them (macOS): it is read, not called a link.
+    /// The checks are skipped where the filesystem does not fold the spelling.
+    #[test]
+    fn a_spelling_that_differs_from_disk_is_a_file_not_a_link() {
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("Src")).unwrap();
+        std::fs::write(root.join("Src/Real.rs"), "x\n").unwrap();
+        let composed = "caf\u{e9}.rs";
+        let decomposed = "cafe\u{301}.rs";
+        std::fs::write(root.join(composed), "x\n").unwrap();
+        let mut checked = 0;
+        if root.join("src/real.rs").exists() {
+            checked += 1;
+            assert!(
+                files::is_regular_file_inside(&root, &root.join("src/real.rs")),
+                "a case-only difference is the same file"
+            );
+        }
+        if root.join(decomposed).exists() {
+            checked += 1;
+            assert!(
+                files::is_regular_file_inside(&root, &root.join(decomposed)),
+                "a decomposed name is the same file"
+            );
+        }
+        eprintln!("spelling checks run: {checked}");
     }
 
     #[test]

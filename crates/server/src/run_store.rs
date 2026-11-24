@@ -873,6 +873,9 @@ pub struct TreeState {
     pub clean: bool,
     /// A digest of the status and the diff against HEAD.
     pub digest: String,
+    /// The paths git reports as changed or new, in path order. Named in the refusal of a resume,
+    /// an operator-only message; never stored, never put in a package.
+    pub changed: Vec<String>,
 }
 
 /// Read the commit and the tree state of `dir` with git. A folder that is not a git checkout has
@@ -893,6 +896,7 @@ pub fn tree_state(dir: &Path) -> TreeState {
     let status = git(&["status", "--porcelain", "-z", "--untracked-files=all"]);
     let diff = git(&["diff", "HEAD", "--no-ext-diff"]);
     let clean = status.as_ref().is_some_and(Vec::is_empty);
+    let changed = status.as_deref().map(changed_paths).unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(status.unwrap_or_default());
     hasher.update([0u8]);
@@ -901,8 +905,44 @@ pub fn tree_state(dir: &Path) -> TreeState {
         commit,
         clean,
         digest: hex(&hasher.finalize()),
+        changed,
     }
 }
+
+/// The paths in the output of `git status --porcelain -z`, in path order. A rename or copy entry
+/// is followed by its old path, which is not a changed file of its own.
+fn changed_paths(status: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(status);
+    let mut tokens = text.split('\0').filter(|t| !t.is_empty());
+    let mut paths = Vec::new();
+    while let Some(entry) = tokens.next() {
+        let Some(path) = entry.get(3..) else { continue };
+        paths.push(path.to_string());
+        if matches!(entry.as_bytes().first(), Some(b'R' | b'C')) {
+            tokens.next();
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// At most [`CHANGED_PATHS_NAMED`] of `paths`, then how many more.
+fn named_changes(paths: &[String]) -> String {
+    let shown = paths
+        .iter()
+        .take(CHANGED_PATHS_NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match paths.len().saturating_sub(CHANGED_PATHS_NAMED) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
+/// How many changed paths a resume refusal names.
+const CHANGED_PATHS_NAMED: usize = 20;
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -1702,9 +1742,14 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
         let unchanged = now.digest == saved.tree_at_start
             || saved.tree_at_end.as_deref() == Some(now.digest.as_str());
         if !unchanged {
+            let which = if now.changed.is_empty() {
+                String::new()
+            } else {
+                format!(" (changed paths now: {})", named_changes(&now.changed))
+            };
             return refuse(format!(
                 "repository {} has changes that were not there when run {} was made (an edited \
-                 or new file); put the tree back as it was, or start a new run",
+                 or new file){which}; put the tree back as it was, or start a new run",
                 saved.name, record.run_id
             ));
         }
