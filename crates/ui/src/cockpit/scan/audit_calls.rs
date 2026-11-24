@@ -426,6 +426,12 @@ pub(in crate::cockpit) struct RepoSizeView {
     /// The generated files' paths, as the server names them.
     #[serde(default)]
     pub generated_paths: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet, as the server names them:
+    /// not read, billed or searched for secrets. The pre-start check lists them.
+    #[serde(default)]
+    pub not_inspected_paths: Vec<String>,
+    #[serde(default)]
+    pub not_inspected_versions_only_paths: Vec<String>,
     /// The read limit as a person reads it ("1 MB"), as the engine states it.
     #[serde(default)]
     pub read_limit: String,
@@ -548,16 +554,30 @@ pub(in crate::cockpit) fn over_limit_block_of(
         .iter()
         .flat_map(|s| s.generated_paths.iter().cloned())
         .collect();
+    let not_inspected_paths: Vec<String> = sizes
+        .iter()
+        .flat_map(|s| s.not_inspected_paths.iter().cloned())
+        .collect();
+    let versions_only_paths: Vec<String> = sizes
+        .iter()
+        .flat_map(|s| s.not_inspected_versions_only_paths.iter().cloned())
+        .collect();
     camerata_ui_core::readiness::over_limit_block(limit, files, unmatched, notes, unchecked, warned)
-        // Generated files alone still make a block: it is a statement for the quote, not a hold.
+        // Generated files, or files of a type not inspected yet, alone still make a block: it is
+        // a statement for the quote, not a hold.
         .or_else(|| {
-            (generated_files > 0).then(camerata_ui_core::readiness::OverLimitBlock::default)
+            (generated_files > 0
+                || !not_inspected_paths.is_empty()
+                || !versions_only_paths.is_empty())
+            .then(camerata_ui_core::readiness::OverLimitBlock::default)
         })
         .map(|block| {
             block
                 .with_secret_limit(secret_limit)
                 .with_generated(generated_files, generated_lines)
                 .with_generated_paths(generated_paths)
+                .with_not_inspected_paths(not_inspected_paths)
+                .with_not_inspected_versions_only_paths(versions_only_paths)
         })
 }
 

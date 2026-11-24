@@ -393,7 +393,14 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    for a file over 20 MB, a file beyond the 20,000-file limit and a file that is not UTF-8 text,
    and Coverage says so: "2 files were not searched for secrets: 1 over 20 MB, 1 past the 200 MB
    search budget for one run". A file excluded by agreement is never opened, so it is named there too ("3 excluded by
-   agreement"). A pattern that removed nothing is not a file: Coverage counts it in its own
+   agreement"). A hand-written file of a type the inspection does not read yet (Razor views,
+   project and solution files, schemas, some scripts and templates) is never silent either: it is not read, billed or
+   searched for secrets, and `camerata count`, the start warning and Coverage list it as "this file type is not
+   inspected yet" ("not billed" in Coverage). `camerata count` tallies them by type ("300 .cshtml, 12 .csproj")
+   beside the first 10 paths. A project file or `Gemfile` is still opened for its declared runtime and package
+   versions, so it is listed as "this file type is not inspected yet; only its declared runtime and package versions
+   are checked", never plainly not read. The report's method text says the same in one sentence. `camerata count
+   --json` also carries `unclassified_types`, for the operator only: files of types nothing reads or lists. A pattern that removed nothing is not a file: Coverage counts it in its own
    sentence ("1 pattern is excluded by agreement; nothing here is read by default.").
 
    **Scan tools auto-install on first use.** Camerata auto-provisions Semgrep and ESLint into its

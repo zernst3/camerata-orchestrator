@@ -520,6 +520,43 @@ async fn generated_files_are_counted_with_their_lines_before_the_start_and_start
     );
 }
 
+/// GitHub #338, "list now, inspect later": hand-written files of a type the inspection does not
+/// read yet are listed in the pre-start check with the reason, as the command line lists them,
+/// and Start stays on. The paths come from the preflight wire exactly as the server sends them.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(process_env)]
+async fn files_of_a_type_not_inspected_yet_are_listed_before_the_start_and_start_stays_on() {
+    let server = MockServer::start().await;
+    stub_screen(&server).await;
+    let mut body = sizes(serde_json::json!([]));
+    body[0]["not_inspected_paths"] =
+        serde_json::json!(["app/Views/Home/Index.cshtml", "app/schema.graphql"]);
+    Mock::given(method("POST"))
+        .and(path("/api/onboard/preflight"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+    let mut vdom = VirtualDom::new(results);
+    let mut seen = Seen::default();
+    seen.take(&vdom.rebuild_to_vec());
+    pump(&mut vdom, &mut seen, 1_200).await;
+    let html = dioxus_ssr::render(&vdom);
+    assert!(
+        html.contains("2 files will not be read for the inspection, billed or searched for secrets: this file type is not inspected yet."),
+        "{html}"
+    );
+    assert!(
+        html.contains("Not inspected yet: app/Views/Home/Index.cshtml; app/schema.graphql."),
+        "{html}"
+    );
+    assert!(
+        !start_button_tag(&html).contains("disabled"),
+        "{}",
+        start_button_tag(&html)
+    );
+}
+
 /// Zach's ruling: a pattern in a never-read folder is a warning with a Remove pattern action,
 /// and Start stays on.
 #[tokio::test(flavor = "current_thread")]

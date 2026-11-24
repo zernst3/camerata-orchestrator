@@ -76,8 +76,9 @@ pub struct RepoCount {
     /// Every file the inspection does NOT read, grouped by why, so a quote is set from the
     /// billable total above and the reader sees what was left out. Reasons, in this order:
     /// excluded by agreement (the project's exclusion list), over the read limit, beyond the
-    /// file limit, not UTF-8 text. A file over the read limit appears here only when the count
-    /// runs before the file is excluded; the inspection itself starts with a warning. Empty when every admitted file is read.
+    /// file limit, not UTF-8 text, a long line, generated, a file type not inspected yet. Files
+    /// of a type not inspected yet are never in the billed total. A file over the read limit
+    /// appears here only when the count runs before the file is excluded; the inspection itself starts with a warning. Empty when every admitted file is read.
     pub not_read: Vec<NotReadGroup>,
     /// Patterns of Excluded by agreement that matched no file in this repo. `camerata count`
     /// refuses to print figures while any is left, naming it.
@@ -88,6 +89,18 @@ pub struct RepoCount {
     /// Patterns for this repo that match only files never read anyway: a warning, never a
     /// refusal. Listed as "excluded by agreement; nothing here is read by default".
     pub never_read_patterns: Vec<String>,
+    /// Operator only: the files that are neither read, listed as not read, noise nor excluded,
+    /// counted by type (".png", "Gemfile"), most files first. A type nothing claims shows here on
+    /// the first count of a repo instead of staying silent. Never part of client text.
+    pub unclassified_types: Vec<UnclassifiedType>,
+}
+
+/// One type of file nothing claims, with how many files of it the walk met.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnclassifiedType {
+    /// The extension with a dot (".xyz"), or the whole name of a file with none.
+    pub extension: String,
+    pub files: usize,
 }
 
 /// The files not read for one reason.
@@ -161,6 +174,14 @@ pub fn count_repo(root: &Path, scope: &RepoScope) -> anyhow::Result<RepoCount> {
         generated_lines: non_blank_lines_in_files(root, &extracted.generated),
         truncated: extracted.truncated,
         not_read,
+        unclassified_types: extracted
+            .unclassified_types
+            .iter()
+            .map(|(extension, files)| UnclassifiedType {
+                extension: extension.clone(),
+                files: *files,
+            })
+            .collect(),
         unmatched_patterns: scope
             .patterns()
             .iter()
@@ -203,6 +224,7 @@ pub fn count_repo(root: &Path, scope: &RepoScope) -> anyhow::Result<RepoCount> {
 /// The files the walk named but did not read, grouped by reason in the order Coverage uses.
 fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup> {
     use crate::scan_ledger::SkipReason;
+    let (plain, versions) = super::files::split_not_inspected(&extracted.not_inspected);
     [
         (
             SkipReason::ExcludedByAgreement,
@@ -213,6 +235,8 @@ fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup>
         (SkipReason::NotText, &extracted.skipped_unreadable),
         (SkipReason::LongLine, &extracted.skipped_long_line),
         (SkipReason::Generated, &extracted.generated),
+        (SkipReason::NotInspectedType, &plain),
+        (SkipReason::NotInspectedVersionsOnly, &versions),
     ]
     .into_iter()
     .filter(|(_, paths)| !paths.is_empty())
@@ -293,16 +317,37 @@ impl RepoCount {
         for p in &self.not_for_this_repo {
             out.push_str(&format!("not for this repo: {p}\n"));
         }
+        let not_inspected = [
+            crate::onboard::files::not_inspected_label(),
+            crate::onboard::files::not_inspected_versions_label(),
+        ];
         for group in &self.not_read {
+            let noun = if group.files.len() == 1 {
+                "file"
+            } else {
+                "files"
+            };
+            // A file type not inspected yet is one line: how many of each type, then its paths
+            // capped as the pre-start check caps them. Never each file's size.
+            if not_inspected.contains(&group.reason) {
+                let paths: Vec<String> = group.files.iter().map(|f| f.path.clone()).collect();
+                let by_type = super::files::type_tally(&paths)
+                    .iter()
+                    .map(|(ty, n)| format!("{n} {ty}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "not read, {} ({} {noun}, by type: {by_type}): {}\n",
+                    group.reason,
+                    group.files.len(),
+                    camerata_ui_core::readiness::capped_paths(&paths)
+                ));
+                continue;
+            }
             out.push_str(&format!(
-                "not read, {} ({} {}):\n",
+                "not read, {} ({} {noun}):\n",
                 group.reason,
                 group.files.len(),
-                if group.files.len() == 1 {
-                    "file"
-                } else {
-                    "files"
-                }
             ));
             for f in &group.files {
                 match f.bytes {

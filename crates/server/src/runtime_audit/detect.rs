@@ -1457,7 +1457,7 @@ fn python_project_lists_django(rd: SiblingReader, dir: &Path) -> bool {
 type Reader = fn(&str, &str) -> Vec<Declaration>;
 
 /// The reader for a file name, or `None` when the file declares nothing this module reads.
-fn reader_for(name: &str) -> Option<Reader> {
+pub(super) fn reader_for(name: &str) -> Option<Reader> {
     let lower = name.to_ascii_lowercase();
     if lower == "dockerfile" || lower.starts_with("dockerfile.") || lower.ends_with(".dockerfile") {
         return Some(read_dockerfile);

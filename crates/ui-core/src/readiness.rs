@@ -220,12 +220,31 @@ pub struct OverLimitBlock {
     pub generated_lines: usize,
     /// The generated files' paths (repo-qualified when several repos are read), for the list.
     pub generated_paths: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet (repo-qualified when several
+    /// repos are read): not read, billed or searched for secrets. A statement, never a hold.
+    pub not_inspected_paths: Vec<String>,
+    /// Files of a type not inspected yet that the engine still opens for their declared runtime
+    /// and package versions: not billed or searched for secrets. Never called plainly not read.
+    pub not_inspected_versions_only_paths: Vec<String>,
 }
 
 /// How many generated paths the pre-start check names before it says how many more there are.
 pub const GENERATED_PATHS_SHOWN: usize = 10;
 
 impl OverLimitBlock {
+    /// This block with the files of a type not inspected yet the server named.
+    pub fn with_not_inspected_paths(mut self, paths: Vec<String>) -> Self {
+        self.not_inspected_paths = paths;
+        self
+    }
+
+    /// This block with the files of a type not inspected yet that are opened for declared
+    /// versions, as the server named them.
+    pub fn with_not_inspected_versions_only_paths(mut self, paths: Vec<String>) -> Self {
+        self.not_inspected_versions_only_paths = paths;
+        self
+    }
+
     /// This block with the generated files' paths the server named.
     pub fn with_generated_paths(mut self, paths: Vec<String>) -> Self {
         self.generated_paths = paths;
@@ -273,6 +292,8 @@ pub fn over_limit_block(
             generated_files: 0,
             generated_lines: 0,
             generated_paths: Vec::new(),
+            not_inspected_paths: Vec::new(),
+            not_inspected_versions_only_paths: Vec::new(),
         })
 }
 
@@ -303,6 +324,55 @@ pub fn generated_text(block: &OverLimitBlock, floor_on: bool) -> String {
     } else {
         format!("{what} or billed, and are not searched for secrets in this run: the security floor is off.")
     }
+}
+
+/// `paths` joined with "; ", up to [`GENERATED_PATHS_SHOWN`] and then how many more ("a; b; and
+/// 3 more"). The one cap every pre-start and count path list uses. Empty when there are none.
+pub fn capped_paths(paths: &[String]) -> String {
+    let shown = paths
+        .iter()
+        .take(GENERATED_PATHS_SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    match paths.len().saturating_sub(GENERATED_PATHS_SHOWN) {
+        0 => shown,
+        more => format!("{shown}; and {more} more"),
+    }
+}
+
+/// The sentence for `n` hand-written files of a type the inspection does not read yet, as the
+/// command line's warning and the app's pre-start check state it. Empty when there are none.
+pub fn not_inspected_note(n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!(
+        "{n} {} will not be read for the inspection, billed or searched for secrets: {}.",
+        if n == 1 { "file" } else { "files" },
+        camerata_api_types::audit::NOT_INSPECTED_TYPE_LABEL
+    )
+}
+
+/// The sentence for `n` files of a type not inspected yet that the engine still opens for their
+/// declared runtime and package versions. Empty when there are none.
+pub fn not_inspected_versions_note(n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!(
+        "{n} {} not billed or searched for secrets: {}.",
+        if n == 1 { "file is" } else { "files are" },
+        camerata_api_types::audit::NOT_INSPECTED_VERSIONS_LABEL
+    )
+}
+
+/// The files of a type not inspected yet by path, capped by [`capped_paths`]. Empty when none.
+pub fn not_inspected_paths_line(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    format!("Not inspected yet: {}.", capped_paths(paths))
 }
 
 /// The generated files by path, as `camerata count` and the command line's warning name them, up
@@ -825,6 +895,40 @@ mod tests {
         assert!(text.contains("g/f9.cs"), "{text}");
         assert!(!text.contains("g/f10.cs"), "{text}");
         assert!(text.ends_with("; and 3 more."), "{text}");
+    }
+
+    #[test]
+    fn files_opened_for_versions_are_never_called_not_read() {
+        assert!(not_inspected_versions_note(0).is_empty());
+        let note = not_inspected_versions_note(2);
+        assert_eq!(
+            note,
+            "2 files are not billed or searched for secrets: this file type is not inspected yet; \
+             only its declared runtime and package versions are checked."
+        );
+        assert!(!note.contains("not read"), "{note}");
+    }
+
+    /// GitHub #338: files of a type not inspected yet are stated with the reason and listed with
+    /// the same cap as the generated files.
+    #[test]
+    fn files_of_a_type_not_inspected_yet_are_stated_and_capped() {
+        assert!(not_inspected_note(0).is_empty());
+        assert!(not_inspected_paths_line(&[]).is_empty());
+        assert_eq!(
+            not_inspected_note(1),
+            "1 file will not be read for the inspection, billed or searched for secrets: this \
+             file type is not inspected yet."
+        );
+        let many: Vec<String> = (0..12).map(|i| format!("app/v{i}.cshtml")).collect();
+        let line = not_inspected_paths_line(&many);
+        assert!(
+            line.starts_with("Not inspected yet: app/v0.cshtml; "),
+            "{line}"
+        );
+        assert!(line.contains("app/v9.cshtml"), "{line}");
+        assert!(!line.contains("app/v10.cshtml"), "{line}");
+        assert!(line.ends_with("; and 2 more."), "{line}");
     }
 
     /// With the security floor off the warning must not say the file is searched; and the ceiling
