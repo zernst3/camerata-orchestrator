@@ -46,6 +46,16 @@ SC="$T/camerata-scan-t1"
 mkdir -p "$SC/target/release" "$SC/target/debug/incremental"
 echo bin > "$SC/target/release/camerata-server"; echo inc > "$SC/target/debug/incremental/x"
 echo "Signature: 8a477f597d28d172789f06886806bc55" > "$SC/target/CACHEDIR.TAG"
+# a merged, clean worktree whose folder is named camerata-scan-*: must be skipped by the worktree loop
+mkbranch "scw" "$WT/camerata-scan-w"
+# a folder that only CONTAINS the name is not a kept build: matching is on a path component
+mkdir -p "$T/my-camerata-scan-x/target"; echo "Signature: 8a477f597d28d172789f06886806bc55" > "$T/my-camerata-scan-x/target/CACHEDIR.TAG"
+# kept builds reached through a relative root and through a symlink with a trailing slash
+for n in t2 t3; do
+    mkdir -p "$T/camerata-scan-$n/target/release"; echo bin > "$T/camerata-scan-$n/target/release/camerata-server"
+    echo "Signature: 8a477f597d28d172789f06886806bc55" > "$T/camerata-scan-$n/target/CACHEDIR.TAG"
+done
+ln -s "$T/camerata-scan-t3" "$T/lnk"
 # stand-ins for running builds. A symlink named cargo gives sleep that process name.
 ln -s /bin/sleep "$T/bin/cargo"
 printf '#!/bin/bash\nsleep 120\n' > "$T/bin/rustc"; chmod +x "$T/bin/rustc"
@@ -132,5 +142,20 @@ done
 [ -f "$SC/target/release/camerata-server" ] && r=present || r=gone;      ok "real kept scan build release survives" present "$r"
 [ -f "$SC/target/debug/incremental/x" ] && r=present || r=gone;          ok "real kept scan build incremental survives" present "$r"
 runguard --dry-run | grep -qF "keep camerata-scan-" && r=logged || r=silent; ok "kept scan build is logged" logged "$r"
+ok "worktree loop skips a camerata-scan-* worktree" present "$([ -d "$WT/camerata-scan-w" ] && echo present || echo gone)"
+runguard --dry-run | grep -qF "would remove merged worktree $WT/camerata-scan-w" && r=listed || r=skipped; ok "dry run never lists a scan worktree" skipped "$r"
+[ -d "$T/my-camerata-scan-x/target" ] && r=present || r=gone; ok "my-camerata-scan-x is NOT protected (component match only)" gone "$r"
+# resolved roots: relative '.' from inside the kept folder, and a symlink with a trailing slash
+(cd "$T/camerata-scan-t2" && CARGO_GUARD_REPOS_ROOT=. CARGO_GUARD_ORCH_REPO="$ORCH" CARGO_GUARD_MERGE_TARGETS=main CARGO_GUARD_ACTIVE_MINUTES=0 CARGO_GUARD_STAMP="$T/stamp" CARGO_GUARD_VOLUME="$T" CARGO_GUARD_TIER1_GIB=100000 CARGO_GUARD_TIER2_GIB=100000 CARGO_GUARD_TIER3_GIB=100000 exec bash "$GUARD" 2>&1) | sed 's/^/  rel: /'
+[ -f "$T/camerata-scan-t2/target/release/camerata-server" ] && r=present || r=gone; ok "REPOS_ROOT=. inside the kept folder survives" present "$r"
+CARGO_GUARD_REPOS_ROOT="$T/lnk/" CARGO_GUARD_ORCH_REPO="$ORCH" CARGO_GUARD_MERGE_TARGETS=main CARGO_GUARD_ACTIVE_MINUTES=0 CARGO_GUARD_STAMP="$T/stamp" CARGO_GUARD_VOLUME="$T" CARGO_GUARD_TIER1_GIB=100000 CARGO_GUARD_TIER2_GIB=100000 CARGO_GUARD_TIER3_GIB=100000 bash "$GUARD" 2>&1 | sed 's/^/  lnk: /'
+[ -f "$T/camerata-scan-t3/target/release/camerata-server" ] && r=present || r=gone; ok "REPOS_ROOT=symlink/ to the kept folder survives" present "$r"
+# remove_path backstop: pull the two functions out of the guard and call remove_path directly
+mkdir -p "$T/camerata-scan-t4/target/release"; echo bin > "$T/camerata-scan-t4/target/release/b"
+mkdir -p "$T/plain/target/release"; echo bin > "$T/plain/target/release/b"
+bo="$(DRY_RUN=0; log() { echo "$*"; }; eval "$(awk '/^is_scan_path\(\)/,/^}/; /^remove_path\(\)/,/^}/' "$GUARD")"; remove_path "$T/camerata-scan-t4/target/release"; remove_path "$T/plain/target/release")"
+[ -f "$T/camerata-scan-t4/target/release/b" ] && r=present || r=gone; ok "remove_path refuses a scan path" present "$r"
+[ -f "$T/plain/target/release/b" ] && r=present || r=gone; ok "remove_path still removes an ordinary target path" gone "$r"
+echo "$bo" | grep -q "REFUSED.*kept scan build" && r=logged || r=silent; ok "remove_path logs the refusal" logged "$r"
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILED"
 exit "$fail"

@@ -51,6 +51,10 @@ else
     ORCH_REPO="${CARGO_GUARD_ORCH_REPO:-$MAIN_CHECKOUT}"
     REPOS_ROOT="$(dirname "$ORCH_REPO")"
 fi
+# Physical absolute paths, so the camerata-scan-* component test sees the real folder names even
+# when the root is given as ".", a relative path, or a symlink (with or without a trailing slash).
+REPOS_ROOT="$(cd -P "$REPOS_ROOT" 2>/dev/null && pwd)" || { echo "cargo-disk-guard: cannot resolve REPOS_ROOT" >&2; exit 1; }
+ORCH_REPO="$(cd -P "$ORCH_REPO" 2>/dev/null && pwd)" || { echo "cargo-disk-guard: cannot resolve ORCH_REPO" >&2; exit 1; }
 MERGE_TARGETS="${CARGO_GUARD_MERGE_TARGETS:-feat/audit-report-export main}"
 ACTIVE_MINUTES="${CARGO_GUARD_ACTIVE_MINUTES:-60}"
 TIER1_GIB="${CARGO_GUARD_TIER1_GIB:-150}"
