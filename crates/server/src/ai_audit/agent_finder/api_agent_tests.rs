@@ -618,6 +618,37 @@ async fn the_turn_limit_stops_the_run_and_keeps_the_trace() {
 }
 
 #[tokio::test]
+async fn a_piece_stops_between_turns_when_the_runs_spend_limit_is_reached() {
+    // Each turn costs $1.20 on Fable 5.2 and the run's limit is $1.00. The piece's own ceiling
+    // is far away, so only the run's limit can stop it: after the first turn no request goes out.
+    let turn = |i: usize| {
+        reply_with(
+            vec![call(&format!("g{i}"), "Glob", json!({"pattern": "*.rs"}))],
+            "tool_use",
+            100_000,
+            10_000,
+            0,
+        )
+    };
+    let wire = ScriptedWire::new((0..5).map(turn).collect());
+    let meter = capped_meter(1.0);
+    let (agent, _) = metered(&wire, &meter);
+    let mut lim = limits();
+    lim.ceiling_usd = 100.0;
+    let run = run_ok(&agent, &room(), &lim).await;
+    assert!(
+        matches!(&run.stop, AgentStop::SpendLimit(why) if why.contains("run's spend limit")),
+        "got {:?}",
+        run.stop
+    );
+    assert_eq!(
+        wire.calls(),
+        1,
+        "no second request once the run's limit is reached"
+    );
+}
+
+#[tokio::test]
 async fn the_spend_ceiling_of_the_piece_stops_the_run_and_keeps_the_trace() {
     // Each turn: 100,000 input and 10,000 output tokens, $1.20 on Fable 5.2.
     let turn = |i: usize| {

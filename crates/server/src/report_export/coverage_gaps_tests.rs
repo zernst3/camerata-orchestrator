@@ -429,7 +429,7 @@ fn a_generated_file_is_named_in_coverage_as_scanned_for_secrets_only_and_not_bil
         },
     );
     // The floor searched the one generated file, as the scan records it.
-    list.record_secret_search(1, 0, 0);
+    list.record_secret_search(1, 0, 0, 0);
     let totals = list.totals();
     let (skipped_files, skipped_beyond_cap_total) = list.finish();
     report.ledger.record_input(ScanInputFacts {
@@ -923,5 +923,28 @@ fn the_secrets_sentence_counts_files_excluded_by_agreement_as_not_searched() {
         super::coverage_gaps::skipped_summary_sentence(&totals, &[]).unwrap(),
         "5 files were not read for the inspection: 2 not UTF-8 text, 3 excluded by agreement. \
          5 files were not searched for secrets: 2 not UTF-8 text, 3 excluded by agreement."
+    );
+}
+
+/// Over-limit files the run's secret search budget left unsearched are said to be "not searched
+/// for secrets", with the budget named, in the same sentence as every other unsearched file.
+#[test]
+fn the_secrets_sentence_names_files_the_search_budget_left_unsearched() {
+    let mut list = crate::scan_ledger::SkippedFileList::default();
+    list.record_secret_search(10, 0, 0, 2);
+    let totals = crate::scan_ledger::SkippedTotals {
+        oversize: 12,
+        ..list.totals()
+    };
+    let sentence = super::coverage_gaps::skipped_summary_sentence(&totals, &[]).unwrap();
+    assert!(
+        sentence.contains(
+            "2 files were not searched for secrets: 2 past the 200 MB search budget for one run."
+        ),
+        "{sentence}"
+    );
+    assert!(
+        sentence.contains("10 of these files were still searched"),
+        "{sentence}"
     );
 }

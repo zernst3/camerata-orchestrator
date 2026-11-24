@@ -379,6 +379,9 @@ struct WalkChecks {
     named: Vec<String>,
     /// Files over the secret search ceiling: checked by name only.
     name_only: Vec<String>,
+    /// Files under the ceiling that the run's total secret search budget leaves unsearched:
+    /// checked by name only.
+    over_budget: Vec<String>,
     /// Files that declare themselves generated, as `repo/path` in pattern form: not read, not
     /// billed, searched for secrets only.
     generated: Vec<String>,
@@ -395,6 +398,9 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
     let repos: Vec<String> = sources.iter().map(|(s, _)| s.clone()).collect();
     let mut named: Vec<String> = Vec::new();
     let mut name_only: Vec<String> = Vec::new();
+    let mut over_budget: Vec<String> = Vec::new();
+    // Bytes of over-limit files the run's secret search would open so far, in the run's order.
+    let mut budget_used: u64 = 0;
     let mut generated: Vec<String> = Vec::new();
     let mut generated_lines = 0usize;
     let mut read_ok: Vec<String> = Vec::new();
@@ -437,7 +443,15 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
             );
             if f.bytes > super::files::MAX_SECRET_SCAN_BYTES as u64 {
                 name_only.push(line);
+            } else if f.reason.is_empty()
+                && budget_used.saturating_add(f.bytes) > super::files::MAX_SECRET_SEARCH_TOTAL_BYTES
+            {
+                // The scan searches these in path order against the same run-wide budget.
+                over_budget.push(line);
             } else {
+                if f.reason.is_empty() {
+                    budget_used += f.bytes;
+                }
                 named.push(line);
             }
         }
@@ -446,6 +460,7 @@ async fn walk_checks(sources: &[(String, std::path::PathBuf)], scope: &ScanScope
     WalkChecks {
         named,
         name_only,
+        over_budget,
         generated,
         generated_lines,
         unmatched: checks.unmatched,
@@ -565,6 +580,23 @@ fn file_warnings(w: &WalkChecks, floor_on: bool) -> Vec<String> {
         },
     );
     part(
+        &w.over_budget,
+        &format!(
+            " past the {} secret search budget for one run",
+            super::files::secret_search_budget_label()
+        ),
+        if floor_on {
+            "It is not searched for secrets in this run: it does not fit in what is left of the budget, so it is checked by name only"
+        } else {
+            off
+        },
+        if floor_on {
+            "Each is not searched for secrets in this run: none fits in what is left of the budget, so each is checked by name only"
+        } else {
+            off_each
+        },
+    );
+    part(
         &w.name_only,
         &format!(" over {}", super::files::secret_scan_label()),
         if floor_on {
@@ -583,6 +615,9 @@ fn file_warnings(w: &WalkChecks, floor_on: bool) -> Vec<String> {
 
 fn refusal_text(w: WalkChecks, with_unmatched: bool, repos: &[String]) -> Option<String> {
     let WalkChecks {
+        named: _,
+        name_only: _,
+        over_budget: _,
         unmatched,
         unchecked,
         ..
@@ -902,6 +937,42 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("checked by name only"), "{text}");
+    }
+
+    /// Past the run's total secret search budget a file is not searched, and the warning says so
+    /// in its own words. Ten files of exactly the ceiling size use the whole 200 MB; the next one,
+    /// last in path order, is over.
+    #[tokio::test]
+    async fn a_file_past_the_secret_search_budget_warns_that_it_is_not_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            let f = std::fs::File::create(dir.path().join(format!("a{i}.sql"))).unwrap();
+            f.set_len(super::super::files::MAX_SECRET_SCAN_BYTES as u64)
+                .unwrap();
+        }
+        let sources = vec![("acme/app".to_string(), dir.path().to_path_buf())];
+        let (_, at_the_edge) = start_checks(&sources, &ScanScope::none()).await;
+        let text = at_the_edge.join("\n");
+        assert!(!text.contains("search budget"), "the edge fits: {text}");
+        assert!(text.contains("10 files will not be read"), "{text}");
+        let f = std::fs::File::create(dir.path().join("z.sql")).unwrap();
+        f.set_len(super::super::files::MAX_FILE_BYTES as u64 + 1)
+            .unwrap();
+        let (refusal, warnings) = start_checks(&sources, &ScanScope::none()).await;
+        assert_eq!(refusal, None);
+        let text = warnings.join("\n");
+        assert!(
+            text.contains(
+                "1 file past the 200 MB secret search budget for one run will not be read \
+                 for the inspection: app/z.sql"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("not searched for secrets in this run"),
+            "{text}"
+        );
+        assert!(text.contains("10 files will not be read"), "{text}");
     }
 
     // ── Round 1 fixes ───────────────────────────────────────────────────────────────────

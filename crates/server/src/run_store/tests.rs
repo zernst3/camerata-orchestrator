@@ -2140,6 +2140,64 @@ async fn the_estimate_and_the_store_name_the_whole_stored_spend() {
     .await;
 }
 
+/// Answers every call with a model refusal that carries what it was billed ($0.60 on Opus 5.5).
+struct BilledRefuser;
+
+#[async_trait::async_trait]
+impl LlmPort for BilledRefuser {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        Err(crate::llm::refusal_error_billed(
+            &serde_json::json!({
+                "model": "claude-opus-5-5",
+                "content": [],
+                "stop_reason": "refusal",
+                "usage": { "input_tokens": 100_000, "output_tokens": 10_000 }
+            }),
+            "claude-opus-5-5",
+            "api",
+            crate::llm::PriceBasis {
+                batch: false,
+                cache_ttl: crate::llm::CacheTtl::FiveMinutes,
+            },
+        )
+        .expect("a refusal stop_reason is an error"))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_billed_refusal_is_in_the_stored_spend_a_resume_starts_from() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        {
+            let j = JournalLlm::new(&BilledRefuser, store.clone());
+            assert!(j.complete(ask("calibrate this")).await.is_err());
+            assert!(j.complete(ask("judge this")).await.is_err());
+        }
+        let id = store.run_id();
+        drop(store);
+        let reopened = RunStore::open(&id).unwrap();
+        assert!(
+            (reopened.stored_usd() - 1.20).abs() < 1e-6,
+            "two refusals billed $0.60 each, so the resumed meter starts at $1.20: {}",
+            reopened.stored_usd()
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn a_call_of_a_finished_part_is_not_counted_as_to_send_again() {

@@ -410,6 +410,11 @@ async fn judge_rule(
         let response = match llm.complete_streaming(request, &mut on_delta).await {
             Ok(response) => response,
             Err(e) => {
+                // A refused call carries what it was billed: the spend limit must see it, as it
+                // does for every other stage (and the outage stop watches every failed call).
+                if let Some(m) = meter {
+                    m.record_failed(Stage::CloneJudge, &e);
+                }
                 first_failure.get_or_insert_with(|| format!("{e:#}"));
                 append(feedback, session, &format!("batch failed: {e:#}"));
                 continue;

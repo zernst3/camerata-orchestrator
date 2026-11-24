@@ -386,13 +386,13 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    contents by pattern, never by the model, so a token or key inside it is found and reported with
    its path and line, masked like any other. With "AI review only" the security floor is off, so
    the warning says the file is not searched for secrets in this run. Add the file to Excluded by agreement if you want it
-   left alone completely; it is then never opened. Searching holds for a file up to 20 MB. Coverage
+   left alone completely; it is then never opened. Searching holds for a file up to 20 MB, and for 200 MB of such files in all in one run (the secret search budget): files are searched in path order, and a file that does not fit in what is left of the budget is checked by name only, with its own warning before the start. Coverage
    counts these files in one sentence ("4 files were
    not read for the inspection: ...") and then says how many of them were still searched for
    secrets ("2 of these files were still searched for secrets."). Only the file name is checked
    for a file over 20 MB, a file beyond the 20,000-file limit and a file that is not UTF-8 text,
-   and Coverage says so: "2 files were not searched for secrets: 1 over 20 MB, 1 not UTF-8
-   text". A file excluded by agreement is never opened, so it is named there too ("3 excluded by
+   and Coverage says so: "2 files were not searched for secrets: 1 over 20 MB, 1 past the 200 MB
+   search budget for one run". A file excluded by agreement is never opened, so it is named there too ("3 excluded by
    agreement"). A pattern that removed nothing is not a file: Coverage counts it in its own
    sentence ("1 pattern is excluded by agreement; nothing here is read by default.").
 

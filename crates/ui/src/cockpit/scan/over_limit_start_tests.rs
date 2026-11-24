@@ -169,7 +169,7 @@ async fn a_planted_file_over_the_limit_warns_and_can_still_be_excluded_by_agreem
     // The file is listed with its repo, path and size, in the words the check uses, and Start is off.
     let html = dioxus_ssr::render(&vdom);
     assert!(
-        html.contains("1 file will not be read for the inspection (over the 1 MB file size limit). It is still searched for secrets by pattern checks, never by the model; one over 20 MB or not text is checked by name only. A start is not held."),
+        html.contains("1 file will not be read for the inspection (over the 1 MB file size limit). It is still searched for secrets by pattern checks, never by the model; one over 20 MB or not text is checked by name only, and so is one that does not fit in what is left of the run&#39;s secret search budget. A start is not held."),
         "{html}"
     );
     assert!(html.contains("api/seeds/data.js (1.2 MB)"), "{html}");

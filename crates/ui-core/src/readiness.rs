@@ -390,7 +390,7 @@ pub fn over_limit_text(block: &OverLimitBlock, floor_on: bool) -> String {
             format!("over {}", block.secret_limit)
         };
         format!(
-            "{it} still searched for secrets by pattern checks, never by the model; one {ceiling} or not text is checked by name only."
+            "{it} still searched for secrets by pattern checks, never by the model; one {ceiling} or not text is checked by name only, and so is one that does not fit in what is left of the run's secret search budget."
         )
     } else {
         format!(
@@ -686,7 +686,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             over_limit_text(&block, true),
-            "2 files will not be read for the inspection (over the 1 MB file size limit). Each one is still searched for secrets by pattern checks, never by the model; one that is too large or not text is checked by name only. A start is not held."
+            "2 files will not be read for the inspection (over the 1 MB file size limit). Each one is still searched for secrets by pattern checks, never by the model; one that is too large or not text is checked by name only, and so is one that does not fit in what is left of the run's secret search budget. A start is not held."
         );
         assert_eq!(
             over_limit_file_line(&files[0]),
@@ -759,7 +759,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             over_limit_text(&block, true),
-            "1 file will not be read for the inspection (over the 1 MB file size limit or has a line longer than 97 KB). It is still searched for secrets by pattern checks, never by the model; one that is too large or not text is checked by name only. A start is not held."
+            "1 file will not be read for the inspection (over the 1 MB file size limit or has a line longer than 97 KB). It is still searched for secrets by pattern checks, never by the model; one that is too large or not text is checked by name only, and so is one that does not fit in what is left of the run's secret search budget. A start is not held."
         );
     }
 

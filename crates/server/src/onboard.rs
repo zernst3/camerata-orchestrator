@@ -2386,7 +2386,10 @@ pub async fn audit_repos_with_llm_controlled(
     let mut skipped_files_total = crate::scan_ledger::SkippedFileList::default();
     // Per repo whose floor ran: (files searched for secrets only, over the secret search ceiling,
     // over the size limit but not text). Recorded into the ledger beside the skipped files.
-    let mut secret_search_totals: Vec<(usize, usize, usize)> = Vec::new();
+    // The fourth figure is the files the run's secret search budget left unsearched.
+    let mut secret_search_totals: Vec<(usize, usize, usize, usize)> = Vec::new();
+    // Bytes of over-limit files the secret search has opened so far in this run, all repos.
+    let mut secret_search_bytes_used: u64 = 0;
     let mut code_chars_total = 0usize;
     let mut code_lines_total = 0usize;
     let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
@@ -2609,8 +2612,26 @@ pub async fn audit_repos_with_llm_controlled(
                 if run_deterministic {
                     // A file that declares itself generated is searched the same way: its
                     // contents are never read for the inspection, but a key baked into it is
-                    // a normal finding.
-                    for rel in secret_searchable.iter().chain(&generated) {
+                    // a normal finding. Both kinds spend the run's one byte budget, in path
+                    // order; what does not fit is checked by name only.
+                    let candidates: Vec<String> = secret_searchable
+                        .iter()
+                        .chain(&generated)
+                        .cloned()
+                        .collect();
+                    let (to_search, over_budget) = files::plan_secret_search(
+                        &candidates,
+                        &skipped_sizes,
+                        &mut secret_search_bytes_used,
+                        files::MAX_SECRET_SEARCH_TOTAL_BYTES,
+                    );
+                    // The ledger's over-budget count is over-limit files; a generated file left
+                    // unsearched is counted by its own line (`split_generated_by_search`).
+                    let oversize_over_budget = over_budget
+                        .iter()
+                        .filter(|p| secret_searchable.contains(p))
+                        .count();
+                    for rel in &to_search {
                         let (root, path) = (repo_root_for_history.clone(), rel.clone());
                         let repo_name = spec.to_string();
                         let read =
@@ -2639,6 +2660,7 @@ pub async fn audit_repos_with_llm_controlled(
                         secret_searched_oversize.len() + skipped_long_line.len(),
                         skipped_oversize.len() - secret_searchable.len() + oversize_grown,
                         oversize_not_text,
+                        oversize_over_budget,
                     ));
                 }
                 let unread_paths: Vec<String> = skipped_oversize
@@ -4040,8 +4062,8 @@ pub async fn audit_repos_with_llm_controlled(
     // Computed once and shared with provenance below, so the gate and the export can never
     // disagree about whether a model ran.
     let ai_ran_for_ledger = report.actual_usage.as_ref().is_some_and(|u| u.calls > 0);
-    for (searched, over_ceiling, not_text) in &secret_search_totals {
-        skipped_files_total.record_secret_search(*searched, *over_ceiling, *not_text);
+    for (searched, over_ceiling, not_text, over_budget) in &secret_search_totals {
+        skipped_files_total.record_secret_search(*searched, *over_ceiling, *not_text, *over_budget);
     }
     let skipped_totals = skipped_files_total.totals();
     let file_cap_hits = skipped_files_total.file_cap_hits();
@@ -6662,6 +6684,65 @@ mod tests {
              2 of these files were still searched for secrets. \
              2 files were not searched for secrets: 1 over 20 MB, 1 not UTF-8 text."
         );
+    }
+
+    /// The secret search has a total byte budget per run. Eleven 19 MB files (sparse, so the test
+    /// writes almost nothing) are 209 MB: ten are searched in path order (190 MB) and the last is
+    /// not, so a token planted in it is NOT found, and the ledger counts it as not searched.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_secret_search_stops_at_the_run_budget_and_says_which_files_it_left() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn ok() {}\n").unwrap();
+        let token = "ghp_0123456789012345678901234567890123456";
+        for i in 0..=10 {
+            let path = dir.path().join(format!("d{i:02}.js"));
+            std::fs::write(&path, format!("var t = \"{token}\";\n")).unwrap();
+            let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.set_len(19 * 1024 * 1024).unwrap();
+        }
+        let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
+        let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false,
+            true,
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        let token_rule = |path: &str| {
+            report
+                .findings
+                .iter()
+                .any(|f| f.path == path && f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+        };
+        assert!(
+            token_rule("d09.js"),
+            "the tenth file in path order is searched"
+        );
+        assert!(
+            !token_rule("d10.js"),
+            "the eleventh is past the budget: not searched"
+        );
+        let ledger = serde_json::to_string(&report.ledger).unwrap();
+        assert!(ledger.contains("\"secret_over_budget\":1"), "{ledger}");
+        assert!(ledger.contains("\"secret_searched\":10"), "{ledger}");
     }
 
     /// An agreed exclusion wins over the secret search too: an excluded over-limit file is never
