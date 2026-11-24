@@ -105,15 +105,22 @@ pub struct OutageTrigger {
 
 /// What the provider could not be reached for, as a clause after "the run stopped because".
 pub const STOP_PHRASE_UNREACHABLE: &str = "the model provider could not be reached";
+/// The same clause for a stop caused by a rate limit or an overload that did not clear.
+pub const STOP_PHRASE_RATE_LIMIT: &str =
+    "the model provider kept answering that it was over its rate limit or busy for 30 minutes";
 /// The same clause for a stop caused by an exhausted account.
 pub const STOP_PHRASE_BILLING: &str =
     "the model provider refused the request for billing (credit balance)";
 
 impl OutageTrigger {
-    /// The clause that says why the run stopped: a credit stop reads as billing, any other stop
-    /// as the provider not being reached.
+    /// The clause that says why the run stopped: a credit stop reads as billing, a rate limit
+    /// that did not clear as such, any other stop as the provider not being reached. Operator
+    /// only: it ends up in the failed-part reasons of the operator ledger, and a client export is
+    /// refused while any exist.
     pub fn phrase(&self) -> &'static str {
-        if self.class == FailureClass::AuthOrBilling
+        if self.class == FailureClass::RateLimited {
+            STOP_PHRASE_RATE_LIMIT
+        } else if self.class == FailureClass::AuthOrBilling
             && camerata_llm::failure::is_exhausted_account_text(&self.detail)
         {
             STOP_PHRASE_BILLING
@@ -330,6 +337,29 @@ mod tests {
             }
             h.note_failure(FailureClass::Transport, "x");
         }
+    }
+
+    #[test]
+    fn a_rate_limit_that_did_not_clear_stops_the_run_and_says_so() {
+        let (h, _) = health();
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_UNREACHABLE, "not stopped yet");
+        h.note_wait_exhausted("HTTP 429: slow down");
+        assert!(h.is_stopped());
+        let trigger = h.trigger().expect("trigger");
+        assert_eq!(trigger.class, FailureClass::RateLimited);
+        assert!(trigger.detail.contains("slow down"));
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_RATE_LIMIT);
+        assert_eq!(
+            STOP_PHRASE_RATE_LIMIT,
+            "the model provider kept answering that it was over its rate limit or busy for 30 minutes"
+        );
+        // A real outage and a credit stop keep their own clauses.
+        let (h, now) = health();
+        transport_failures(&h, &now, 3, 90);
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_UNREACHABLE);
+        let (h, _) = health();
+        h.note_failure(FailureClass::AuthOrBilling, "credit balance is too low");
+        assert_eq!(h.stop_phrase(), STOP_PHRASE_BILLING);
     }
 
     #[test]
