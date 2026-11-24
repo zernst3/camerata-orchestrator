@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "run_id": "20261124T101500Z-acme0001",
+  "created_at": "2026-11-24T10:15:00Z",
+  "updated_at": "2026-11-24T10:45:07Z",
+  "status": "incomplete",
+  "origin": "cli",
+  "project_id": "project-acme-web",
+  "attempt": 2,
+  "engine_version": "0.0.0+prompt12",
+  "project_key": "acme-web-1a2b3c4d",
+  "repos": [
+    {
+      "name": "acme-web",
+      "dir": "/Users/zach/clients/acme/acme-web",
+      "commit": "4f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c",
+      "clean": true,
+      "tree_at_start": "tree-start-digest-acme",
+      "tree_at_end": "tree-end-digest-acme"
+    },
+    {
+      "name": "acme-api",
+      "dir": "/Users/zach/clients/acme/acme-api",
+      "commit": null,
+      "clean": false,
+      "tree_at_start": "tree-start-digest-api",
+      "tree_at_end": null
+    }
+  ],
+  "models": {
+    "audit": "model-audit-1",
+    "calibration": "model-calibration-1",
+    "fix": "model-fix-1",
+    "backend": "api",
+    "mode": "batch",
+    "resolved": true,
+    "group_review": "model-review-1",
+    "finder": "agent",
+    "finder_model": "model-finder-1",
+    "scan_exclusions": ["vendor/**", "acmelegacy"]
+  },
+  "rules_fingerprint": "f00dfeed0123",
+  "ai_scan_key": {
+    "audit_model": "model-audit-1",
+    "calibration_model": "",
+    "prompt_schema_version": 12,
+    "directives_fingerprint": "beefcafe4567",
+    "terse_output": true,
+    "applies_to_routing": true
+  },
+  "nonce_seed": "00ff00ff00ff00ff00ff00ff00ff00ff",
+  "args": {
+    "repo": "/Users/zach/clients/acme/acme-web",
+    "extra_repos": ["/Users/zach/clients/acme/acme-api"],
+    "budget_usd": 40.0,
+    "verbose": false,
+    "model": null,
+    "efficiency": {"warm_schedule": true, "label": "acmeweb"}
+  },
+  "pin": {
+    "build": {
+      "version": "0.0.0",
+      "commit": "4f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c",
+      "dirty": false,
+      "prompt_schema": 12,
+      "clone_prompt_schema": 3
+    },
+    "corpus_version": "9a8b7c6d5e4f",
+    "clone_judge_model": "model-judge-1"
+  },
+  "segments": [
+    {"started_unix_ms": 1795601700000, "finished_unix_ms": 1795603500000, "elapsed_ms": 1800000},
+    {"started_unix_ms": 1795604000000, "finished_unix_ms": 1795604400000, "elapsed_ms": 400000}
+  ],
+  "estimate_usd": 12.5,
+  "plan": [
+    {
+      "id": "acme-web:scan",
+      "repo": "acme-web",
+      "kind": "scan",
+      "status": "failed",
+      "calls_done": 10,
+      "calls_not_done": 2,
+      "updated_at": "2026-11-24T10:40:00Z",
+      "note": "2 calls failed: HTTP 529 overloaded"
+    },
+    {
+      "id": "merge",
+      "repo": "",
+      "kind": "merge",
+      "status": "pending",
+      "calls_done": 0,
+      "calls_not_done": 0,
+      "updated_at": "",
+      "note": null
+    }
+  ],
+  "incomplete_reasons": ["the scan of acme-web did not finish: 2 calls failed"],
+  "notes": ["a model call was made with no prompt seed in scope"]
+}

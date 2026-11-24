@@ -421,10 +421,60 @@ enum Command {
         threshold_pct: f64,
     },
 
+    /// The diagnostic bundle: when a client run fails, write a sanitized JSON of engine facts
+    /// (counts, enums, rule ids, hashed paths, word-skeleton messages) that a developer can fix
+    /// the bug from without seeing client code. Writes local files only; sends nothing.
+    Diagnose {
+        #[command(subcommand)]
+        action: DiagnoseAction,
+    },
+
     /// Corpus staleness watermark (see docs/design/2026-10-20_corpus-staleness-check.md).
     Corpus {
         #[command(subcommand)]
         action: CorpusAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DiagnoseAction {
+    /// Write a diagnostic bundle for a run and print its preview. Reads three operator files
+    /// only: the run's `run.json`, the integrity ledger and the failure report. Every field is
+    /// re-typed (no text is copied), every path is hashed with a salt that is never written,
+    /// and a leak check refuses the write (exit 3) if anything client-shaped got through.
+    ///
+    /// LIMIT: the ledger and the failure report are files only `camerata inspect` writes, side
+    /// by side in the state directory, and they are found from the run's repo folders. A
+    /// cockpit run keeps both inside its saved inspection instead, so for a cockpit run the
+    /// bundle holds the run record alone unless `--ledger` and `--failures` name the files.
+    Bundle {
+        /// The run: its id (as `camerata inspect` printed it), or `latest` for the newest saved
+        /// run of any state, started anywhere.
+        #[arg(long, value_name = "ID|latest")]
+        run: String,
+        /// The integrity ledger (`<key>.ledger.json`). Default: the one `camerata inspect`
+        /// keeps for the run's repo folders.
+        #[arg(long, value_name = "PATH")]
+        ledger: Option<PathBuf>,
+        /// The failure report. Default: `<key>.failures.json` next to the ledger.
+        #[arg(long, value_name = "PATH")]
+        failures: Option<PathBuf>,
+        /// Where to write the bundle and its preview. Default: `<data dir>/camerata/diagnostics`
+        /// (created private to you).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Show real repo-relative paths instead of tokens. Secrets and code are still
+        /// stripped; send such a bundle only where the client's file names may go.
+        #[arg(long)]
+        named_paths: bool,
+        /// Do not measure the files of the failed parts (line endings, sizes, encoding).
+        #[arg(long)]
+        no_shapes: bool,
+    },
+    /// Print the preview of a written bundle again, from its JSON.
+    Preview {
+        /// The bundle (`camerata-diagnostic-<id>.json`).
+        bundle: PathBuf,
     },
 }
 
@@ -720,6 +770,48 @@ async fn main() -> anyhow::Result<()> {
             current,
             threshold_pct,
         }),
+        Command::Diagnose { action } => match action {
+            DiagnoseAction::Bundle {
+                run,
+                ledger,
+                failures,
+                out,
+                named_paths,
+                no_shapes,
+            } => {
+                let args = camerata::diagnose_cmd::BundleArgs {
+                    run,
+                    ledger,
+                    failures,
+                    out,
+                    named_paths,
+                    no_shapes,
+                };
+                match camerata::diagnose_cmd::run_bundle(&args).await {
+                    Ok(outcome) => {
+                        print!("{}", outcome.render_preview());
+                        eprint!("\n{}", outcome.render_local());
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("camerata diagnose bundle: {e}");
+                        std::process::exit(e.exit_code());
+                    }
+                }
+            }
+            DiagnoseAction::Preview { bundle } => {
+                match camerata::diagnose_cmd::run_preview(&bundle) {
+                    Ok(text) => {
+                        print!("{text}");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("camerata diagnose preview: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
         Command::Corpus { action } => match action {
             CorpusAction::Check => camerata::corpus_cmd::run_corpus_check().await,
             CorpusAction::Confirm { domain, date } => {

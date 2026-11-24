@@ -13,6 +13,7 @@ pub mod cost_regression_cmd;
 /// `camerata count <repo>`: the inspection's own file filter as a size count (no model).
 pub mod count_cmd;
 pub mod deploy_demo;
+pub mod diagnose_cmd;
 pub mod eval_cmd;
 pub mod fleet_support;
 pub mod gate_probe;
