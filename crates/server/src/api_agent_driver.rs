@@ -3781,7 +3781,8 @@ fn agent_http_client() -> &'static reqwest::Client {
 
 /// The most one finder call may take in all, from the request to the last byte of the reply. A
 /// turn with long thinking and a large file can take close to ten minutes without streaming.
-pub(crate) const FINDER_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+pub(crate) const FINDER_TOTAL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
 /// How long the finder waits to connect (the same as the agent driver's client).
 pub(crate) const FINDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How often the finder's connections send a keep-alive probe, so a long silent wait for the

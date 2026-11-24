@@ -522,11 +522,7 @@ async fn an_edit_that_cannot_be_applied_is_refused_and_changes_nothing() {
     };
     let out = "_camerata/out/leads.json";
     let blocks = vec![
-        call(
-            "w",
-            "Write",
-            json!({"file_path": out, "content": "x x y"}),
-        ),
+        call("w", "Write", json!({"file_path": out, "content": "x x y"})),
         // A path outside the output folder, a room file, the checklist, the folder itself.
         edit("e0", "src/a.rs", "fn a()", "fn z()"),
         edit("e1", "_camerata/checklist.md", "checklist", "gone"),
@@ -554,7 +550,10 @@ async fn an_edit_that_cannot_be_applied_is_refused_and_changes_nothing() {
         vec![ToolEvent::Write { path: out.into() }],
         "only the first Write is a trace entry: a refused Edit records nothing"
     );
-    assert_eq!(run.outputs[out], "x x y", "no refused edit changed the file");
+    assert_eq!(
+        run.outputs[out], "x x y",
+        "no refused edit changed the file"
+    );
     assert_eq!(room.read("src/a.rs", 1, 100).expect("read").text, before);
     let results = tool_results(&wire.bodies()[1], 2);
     assert_eq!(results.len(), 13);
@@ -989,7 +988,11 @@ async fn ten_refusals_then_a_good_reply(status: u16, error_type: &str) {
     let (agent, pauses) = metered(&wire, &meter);
     let run = run_ok(&agent, &room(), &limits()).await;
 
-    assert_eq!(run.stop, AgentStop::Finished, "{status}: the piece finishes");
+    assert_eq!(
+        run.stop,
+        AgentStop::Finished,
+        "{status}: the piece finishes"
+    );
     assert_eq!(wire.calls(), 11);
     let waits = waits_of(&pauses);
     assert_eq!(waits.len(), 10);
@@ -1043,7 +1046,11 @@ async fn a_stop_raised_during_a_wait_ends_it_with_no_further_request() {
         .with_meter(Arc::clone(&meter));
     let run = run_ok(&agent, &room(), &limits()).await;
 
-    assert_eq!(wire.calls(), 1, "the request is not sent again after the stop");
+    assert_eq!(
+        wire.calls(),
+        1,
+        "the request is not sent again after the stop"
+    );
     assert!(
         matches!(&run.stop, AgentStop::Failed(why) if why.starts_with("the run stopped because")),
         "a stop ends the wait as a stop between turns does, got {:?}",
@@ -1072,7 +1079,11 @@ async fn waiting_out_a_rate_limit_stops_at_the_deadline_and_fails_as_before() {
     assert_eq!(wire.calls(), 7);
     assert_eq!(waits_of(&pauses), vec![Duration::from_secs(300); 6]);
     assert!(run.usage.is_empty());
-    assert_eq!(meter.health().streak(), 0, "a rate limit is a pause, not an outage");
+    assert_eq!(
+        meter.health().streak(),
+        0,
+        "a rate limit is a pause, not an outage"
+    );
 }
 
 #[tokio::test]

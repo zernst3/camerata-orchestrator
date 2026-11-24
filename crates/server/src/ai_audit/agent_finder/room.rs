@@ -682,7 +682,9 @@ impl Room {
             return Err(RoomError::NotFound(path.to_string()));
         };
         let first = text.find(old).ok_or_else(|| {
-            RoomError::Invalid(format!("old_string was not found in {path}; nothing changed"))
+            RoomError::Invalid(format!(
+                "old_string was not found in {path}; nothing changed"
+            ))
         })?;
         // Count every position, overlapping ones too: step one character past each hit.
         let mut matches = 1usize;

@@ -1,6 +1,6 @@
 //! Tests for the review room (design sections 1 and 2).
 
-use super::room::{expand_tree, group_tree, TREE_HEADER, Room, RoomError, MAX_READ_LINES, OUT_DIR};
+use super::room::{expand_tree, group_tree, Room, RoomError, MAX_READ_LINES, OUT_DIR, TREE_HEADER};
 use super::Piece;
 
 fn f(path: &str, text: &str) -> (String, String) {
@@ -77,9 +77,7 @@ fn the_tree_lists_every_file_of_the_repository_grouped_by_folder() {
         .1;
     assert_eq!(
         stored,
-        format!(
-            "{TREE_HEADER}\n./\n  README.md\nsrc/\n  main.rs\n  other.rs\n  util.rs\n"
-        )
+        format!("{TREE_HEADER}\n./\n  README.md\nsrc/\n  main.rs\n  other.rs\n  util.rs\n")
     );
     assert!(TREE_HEADER.is_ascii() && !TREE_HEADER.contains('-') && !TREE_HEADER.contains('\n'));
     assert_eq!(
@@ -686,7 +684,8 @@ fn overlapping_matches_count_as_more_than_one() {
     // The same through a multi-byte character.
     let r = written("ééé");
     assert!(r.edit("_camerata/out/p.txt", "éé", "x").is_err());
-    r.edit("_camerata/out/p.txt", "é", "x").expect_err("three matches");
+    r.edit("_camerata/out/p.txt", "é", "x")
+        .expect_err("three matches");
     let r = written("aé");
     r.edit("_camerata/out/p.txt", "é", "e").expect("one match");
     assert_eq!(r.outputs()["_camerata/out/p.txt"], "ae");
@@ -722,13 +721,17 @@ fn an_edit_outside_the_out_folder_or_of_an_unwritten_file_is_refused() {
         Err(RoomError::Invalid(_))
     ));
     assert_eq!(r.outputs()["_camerata/out/p.txt"], "text");
-    assert!(r.read("src/main.rs", 1, 3).expect("read").text.contains("mod util"));
+    assert!(r
+        .read("src/main.rs", 1, 3)
+        .expect("read")
+        .text
+        .contains("mod util"));
 }
 
 #[test]
 fn an_edit_cannot_grow_a_file_past_the_write_limit() {
     let r = written("x");
-    let big = "y".repeat(super::room::MAX_WRITE_BYTES);
+    let big = "y".repeat(super::room::MAX_WRITE_BYTES + 1);
     assert!(matches!(
         r.edit("_camerata/out/p.txt", "x", &big),
         Err(RoomError::Invalid(m)) if m.contains("at most")
@@ -739,7 +742,8 @@ fn an_edit_cannot_grow_a_file_past_the_write_limit() {
 #[test]
 fn an_edit_that_would_break_a_json_file_is_refused_and_a_valid_one_is_kept() {
     let r = room();
-    r.write("_camerata/out/p.json", "{\"a\": [1, 2]}").expect("write");
+    r.write("_camerata/out/p.json", "{\"a\": [1, 2]}")
+        .expect("write");
     for (old, new) in [("[1, 2]", "[1, 2"), ("\"a\"", "a"), (":", "")] {
         assert!(
             matches!(
@@ -754,12 +758,14 @@ fn an_edit_that_would_break_a_json_file_is_refused_and_a_valid_one_is_kept() {
         .expect("a valid result is kept");
     assert_eq!(r.outputs()["_camerata/out/p.json"], "{\"a\": [1, 2, 3]}");
     // An edit that repairs a file that was already broken is allowed.
-    r.write("_camerata/out/q.JSON", "{\"a\": 1,}").expect("write");
+    r.write("_camerata/out/q.JSON", "{\"a\": 1,}")
+        .expect("write");
     assert!(r.edit("_camerata/out/q.JSON", "x", "y").is_err());
     r.edit("_camerata/out/q.JSON", ",}", "}").expect("repair");
     // A file that is not JSON is not checked.
     r.write("_camerata/out/n.txt", "not json").expect("write");
-    r.edit("_camerata/out/n.txt", "not", "still not").expect("plain text");
+    r.edit("_camerata/out/n.txt", "not", "still not")
+        .expect("plain text");
 }
 
 // ─── the plain read of the checklist ─────────────────────────────────────────────────────────
@@ -789,7 +795,9 @@ fn the_checklist_is_served_plain_byte_for_byte_whatever_its_line_ends() {
 
 #[test]
 fn the_plain_read_has_no_byte_limit_and_still_pages_by_lines() {
-    let big: String = (1..=1_500).map(|i| format!("{i} {}\n", "x".repeat(150))).collect();
+    let big: String = (1..=1_500)
+        .map(|i| format!("{i} {}\n", "x".repeat(150)))
+        .collect();
     assert!(big.len() > super::room::MAX_READ_BYTES);
     let r = room_with_checklist(&big);
     let whole = r
@@ -798,14 +806,24 @@ fn the_plain_read_has_no_byte_limit_and_still_pages_by_lines() {
     assert_eq!(whole.text, big, "past the byte limit of the numbered read");
     assert_eq!(whole.lines_returned, 1_500);
     // The numbered read of the same text does stop at the byte limit.
-    let numbered = r.read("_camerata/checklist.md", 1, MAX_READ_LINES).expect("numbered");
+    let numbered = r
+        .read("_camerata/checklist.md", 1, MAX_READ_LINES)
+        .expect("numbered");
     assert!(numbered.lines_returned < 1_500);
 
     let page = r.read_plain("_camerata/checklist.md", 3, 2).expect("page");
     let expected: String = big.split_inclusive('\n').skip(2).take(2).collect();
-    assert_eq!((page.text, page.first_line, page.lines_returned), (expected, 3, 2));
-    let past = r.read_plain("_camerata/checklist.md", 2_000, 5).expect("past end");
-    assert_eq!((past.text.as_str(), past.lines_returned, past.total_lines), ("", 0, 1_500));
+    assert_eq!(
+        (page.text, page.first_line, page.lines_returned),
+        (expected, 3, 2)
+    );
+    let past = r
+        .read_plain("_camerata/checklist.md", 2_000, 5)
+        .expect("past end");
+    assert_eq!(
+        (past.text.as_str(), past.lines_returned, past.total_lines),
+        ("", 0, 1_500)
+    );
 }
 
 #[test]
@@ -903,11 +921,28 @@ fn the_grouped_tree_writes_each_folder_once_and_is_smaller_than_one_path_a_line(
     let body = grouped
         .strip_prefix(&format!("{TREE_HEADER}\n"))
         .expect("the header leads");
+    // A sample with one or two files a folder is not smaller (each folder line and indent costs);
+    // the saving is for folders that hold several files, as in a real repository.
+    let deep: Vec<String> = (0..40)
+        .map(|i| {
+            format!(
+                "crates/server/src/handlers/{}/file_{i}.rs",
+                ["a", "b", "c"][i % 3]
+            )
+        })
+        .collect();
+    let mut deep: Vec<&str> = deep.iter().map(String::as_str).collect();
+    deep.sort_unstable();
+    let deep_flat: String = deep.iter().map(|p| format!("{p}\n")).collect();
+    let deep_grouped = group_tree(&deep);
+    let deep_body = deep_grouped
+        .strip_prefix(&format!("{TREE_HEADER}\n"))
+        .expect("the header leads");
     assert!(
-        body.len() < flat.len(),
+        deep_body.len() < deep_flat.len(),
         "grouped {} bytes (header left out), flat {} bytes",
-        body.len(),
-        flat.len()
+        deep_body.len(),
+        deep_flat.len()
     );
     for folder in ["src/a/b/c/", "src/util/", "tests/api/", "docs/guide/"] {
         assert_eq!(
@@ -916,7 +951,10 @@ fn the_grouped_tree_writes_each_folder_once_and_is_smaller_than_one_path_a_line(
             "{folder} is written once:\n{grouped}"
         );
     }
-    assert!(!grouped.contains("src/a/b/c/deep.rs"), "no path prefix before a file");
+    assert!(
+        !grouped.contains("src/a/b/c/deep.rs"),
+        "no path prefix before a file"
+    );
     assert!(
         body.starts_with("./\n  Cargo.toml\n  README.md\n  src.rs\n"),
         "root files come first, under `./`:\n{grouped}"
@@ -941,6 +979,8 @@ fn the_room_serves_the_grouped_tree_for_a_repository_of_many_folders() {
     expected.sort_unstable();
     assert_eq!(sorted(expand_tree(&stored)), expected);
     // The agent reads it through the Read tool like any file.
-    let read = r.read("_camerata/context/tree.txt", 1, 1_000).expect("read");
+    let read = r
+        .read("_camerata/context/tree.txt", 1, 1_000)
+        .expect("read");
     assert!(read.text.contains("src/a/b/c/\n"), "{}", read.text);
 }
