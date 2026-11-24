@@ -625,7 +625,8 @@ fn the_tree_changed_refusal_names_the_changed_paths_up_to_twenty() {
     let one = refuse_now();
     assert!(
         matches!(&one, Err(RunStoreError::Refused(m))
-            if m.contains("acme-stray.txt") && !m.contains("more")),
+            if m.contains("changed paths now") && m.contains("acme-stray.txt")
+                && !m.contains("more")),
         "{one:?}"
     );
     // An edit and twenty-five strays: twenty named, then "and 6 more".

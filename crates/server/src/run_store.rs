@@ -1745,7 +1745,7 @@ pub fn check_resume(check: &ResumeCheck<'_>) -> Result<(), RunStoreError> {
             let which = if now.changed.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", named_changes(&now.changed))
+                format!(" (changed paths now: {})", named_changes(&now.changed))
             };
             return refuse(format!(
                 "repository {} has changes that were not there when run {} was made (an edited \

@@ -239,6 +239,24 @@ mod tests {
         assert!(over_limit(projected_total(&five_dear), 15.0));
     }
 
+    /// The ramp between one piece and five: the measured average (3 a piece) against the estimate
+    /// (1 a piece) weighs (finished / 5) squared, so 16 percent at two pieces and 64 at four.
+    #[test]
+    fn the_measured_average_gains_weight_between_one_and_five_pieces() {
+        let at = |finished: usize| ProjectionInput {
+            spent_usd: 0.0,
+            pieces_left: 10,
+            finished_pieces: finished,
+            finished_cost_usd: 3.0 * finished as f64,
+            preflight_per_piece_usd: 1.0,
+            ..base()
+        };
+        // 10 x (0.16 x 3 + 0.84 x 1) = 13.2, and 10 x (0.64 x 3 + 0.36 x 1) = 22.8.
+        assert!((projected_total(&at(2)) - 13.2).abs() < 1e-9);
+        assert!((projected_total(&at(4)) - 22.8).abs() < 1e-9);
+        assert!((projected_total(&at(5)) - 30.0).abs() < 1e-9);
+    }
+
     #[test]
     fn the_pre_flight_figure_prices_the_pieces_left_while_none_has_finished() {
         let i = ProjectionInput {
