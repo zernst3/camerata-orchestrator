@@ -8568,6 +8568,36 @@ mod tests {
         ));
     }
 
+    /// A path spelled differently from the disk only in case, or in the Unicode form of a name,
+    /// is the same file on a filesystem that folds them (macOS): it is read, not called a link.
+    /// The checks are skipped where the filesystem does not fold the spelling.
+    #[test]
+    fn a_spelling_that_differs_from_disk_is_a_file_not_a_link() {
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("Src")).unwrap();
+        std::fs::write(root.join("Src/Real.rs"), "x\n").unwrap();
+        let composed = "caf\u{e9}.rs";
+        let decomposed = "cafe\u{301}.rs";
+        std::fs::write(root.join(composed), "x\n").unwrap();
+        let mut checked = 0;
+        if root.join("src/real.rs").exists() {
+            checked += 1;
+            assert!(
+                files::is_regular_file_inside(&root, &root.join("src/real.rs")),
+                "a case-only difference is the same file"
+            );
+        }
+        if root.join(decomposed).exists() {
+            checked += 1;
+            assert!(
+                files::is_regular_file_inside(&root, &root.join(decomposed)),
+                "a decomposed name is the same file"
+            );
+        }
+        eprintln!("spelling checks run: {checked}");
+    }
+
     #[test]
     fn gitignore_walk_scans_tracked_env() {
         // A .env file that is NOT in .gitignore (committed/tracked) must still be scanned.

@@ -160,24 +160,27 @@ pub enum SecretRead {
     NotText,
 }
 
-/// Whether `full` is a regular file whose real path is `root` joined with its own relative path:
-/// not a symbolic link, and not under a folder that is one (a link inside the repository or out
-/// of it). Every reader that opens a repository file by path asks this first. A missing file, or a
-/// path not under `root`, is not one.
+/// Whether `full` is a regular file reached with no symbolic link on the way: each component of
+/// its path under `root`, the file included, is looked at with `symlink_metadata` (which does not
+/// follow a link), and none may be a link. `root` is taken as given, so a repository that sits
+/// under a linked folder is fine. No real path is compared, so a spelling that differs from the
+/// disk only in case or in Unicode form (macOS) is still the same file. A missing file, or a path
+/// not under `root`, is not one. Every reader that opens a repository file by path asks this first.
 pub(crate) fn is_regular_file_inside(root: &std::path::Path, full: &std::path::Path) -> bool {
     let Ok(rel) = full.strip_prefix(root) else {
         return false;
     };
-    let Ok(meta) = std::fs::symlink_metadata(full) else {
-        return false;
-    };
-    if !meta.file_type().is_file() {
-        return false;
+    let mut at = root.to_path_buf();
+    let mut last = None;
+    for part in rel.components() {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => return false,
+            Ok(meta) => last = Some(meta),
+            Err(_) => return false,
+        }
     }
-    match (std::fs::canonicalize(full), std::fs::canonicalize(root)) {
-        (Ok(real), Ok(real_root)) => real == real_root.join(rel),
-        _ => false,
-    }
+    last.is_some_and(|meta| meta.file_type().is_file())
 }
 
 /// Read `rel` under `root` for the secret checks only. At most [`MAX_SECRET_SCAN_BYTES`] + 1 bytes
