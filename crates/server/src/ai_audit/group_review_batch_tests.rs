@@ -306,11 +306,15 @@ async fn group_review_in_batch_mode_submits_through_the_batch_runner() {
     assert_eq!(outcome.rules_reviewed, 2, "{outcome:?}");
     assert_eq!(outcome.rules_failed, 0);
     assert!(api.batch_count() >= 1, "the calls went out as a batch");
-    assert_eq!(api.items_sent(), 2, "one item per rule group");
+    assert_eq!(
+        api.items_sent(),
+        1,
+        "one item per rule group, less the first, which warmed the cached prefix in real time"
+    );
     assert_eq!(
         api.realtime.asked().len(),
-        0,
-        "and nothing was sent in real time"
+        1,
+        "and that one warm call is all that was sent in real time"
     );
 }
 
@@ -376,8 +380,8 @@ async fn the_stage_entry_batches_on_the_api_backend_when_the_run_is_a_batch_run(
     )
     .await
     .expect("it ran");
-    assert_eq!(api.items_sent(), 2);
-    assert_eq!(api.realtime.asked().len(), 0);
+    assert_eq!(api.items_sent(), 1, "the other group went as the warm call");
+    assert_eq!(api.realtime.asked().len(), 1);
 }
 
 // ── 2. The shared prefix is one cached block ───────────────────────────────────────────────
@@ -423,8 +427,11 @@ async fn the_batch_item_carries_the_cached_prefix_as_its_own_block() {
     let llm = seam(&api);
     run(&mut report, &llm, true, None).await;
     let items = api.items.lock().unwrap().clone();
-    assert_eq!(items.len(), 2);
-    let mut firsts = Vec::new();
+    assert_eq!(items.len(), 1, "the other group was the warm call");
+    // The warm call's cached prefix is the one the batch item carries.
+    let warm = api.realtime.asked();
+    assert_eq!(warm.len(), 1);
+    let mut firsts = vec![warm[0].prompt[..warm[0].cache_breakpoints[0]].to_string()];
     for item in &items {
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let blocks = content.as_array().expect("cached content is blocks");
@@ -464,7 +471,7 @@ async fn a_resumed_run_with_a_submitted_group_review_batch_fetches_it_and_resubm
     }
     assert_eq!(first.batch_count(), 1, "the batch was submitted once");
     let in_flight = first.batches.lock().unwrap()[0].clone();
-    assert_eq!(in_flight.len(), 2);
+    assert_eq!(in_flight.len(), 1, "the other group went as the warm call");
 
     // Second process: a fresh API that knows the batch the first one left running, and the same
     // checkpoint.
@@ -536,11 +543,12 @@ async fn the_meter_charges_batched_group_review_at_the_batch_and_cache_prices() 
     let realtime = usage_cost_usd(MODEL, &usage, PriceBasis::realtime()).expect("priced");
     assert!(batch < realtime, "the batch price is the discounted one");
 
+    // One item at the batch price, and the warm call at the real-time stub's own price.
     let snap = meter.snapshot();
     assert_eq!(snap.calls, 2);
     assert!(
-        (snap.cost_usd - 2.0 * batch).abs() < 1e-6,
-        "two items at the batch price {batch}: {}",
+        (snap.cost_usd - (batch + 0.01)).abs() < 1e-6,
+        "one item at the batch price {batch} plus the 0.01 warm call: {}",
         snap.cost_usd
     );
     assert_eq!(snap.cache_read_input_tokens, 2 * CACHE_READ_TOKENS);
@@ -591,8 +599,11 @@ async fn a_credit_error_on_a_batch_row_stops_the_run_and_is_not_resent() {
     );
     let trigger = meter.health().trigger().expect("a trigger");
     assert_eq!(trigger.class, FailureClass::AuthOrBilling);
-    assert_eq!(outcome.rules_reviewed, 0);
-    assert_eq!(outcome.rules_failed, 2);
+    assert_eq!(
+        outcome.rules_reviewed, 1,
+        "the warm call's reply was absorbed"
+    );
+    assert_eq!(outcome.rules_failed, 1);
     let classes: Vec<FailureClass> = report.failed_passes.iter().map(|f| f.class).collect();
     assert!(
         classes.contains(&FailureClass::AuthOrBilling),
@@ -736,7 +747,11 @@ async fn a_group_that_gained_a_row_since_the_stop_is_asked_again_and_the_others_
     )
     .await;
     assert_eq!(outcome.rules_reviewed, 2);
-    assert_eq!(first.items_sent(), 2);
+    assert_eq!(
+        first.items_sent(),
+        1,
+        "the other group went as the warm call"
+    );
 
     // The resume reads a report where the SQL group has one more row.
     let second = Arc::new(FakeBatch::new());

@@ -295,6 +295,17 @@ async fn calibrate(
     .await
 }
 
+/// A meter with the batch warm call (#240) switched off, for tests that count what goes out as a
+/// batch or in real time item by item; the warm call has its own tests in `stage_batch_tests`.
+fn unwarmed_meter() -> UsageMeter {
+    let mut efficiency = crate::efficiency::EfficiencyConfig::default();
+    efficiency.set("batch_warm", false).unwrap();
+    UsageMeter::with_controls(crate::cost_cap::RunControls {
+        efficiency,
+        ..crate::cost_cap::RunControls::default()
+    })
+}
+
 fn seam(api: &Arc<FakeBatch>) -> BatchSeam {
     BatchSeam::new(api.clone() as Arc<dyn BatchApi>)
 }
@@ -313,7 +324,8 @@ async fn stage1_runs_as_a_batch_when_the_backend_has_batches_and_in_real_time_ot
     let files = files();
     let api = Arc::new(FakeBatch::new());
     let llm = seam(&api);
-    let (out, failed) = calibrate(&llm, sites(5), &files, None, true).await;
+    let meter = unwarmed_meter();
+    let (out, failed) = calibrate(&llm, sites(5), &files, Some(&meter), true).await;
     assert!(failed.is_empty(), "{failed:?}");
     assert_eq!(api.batch_count(), 1, "the five sites went as one batch");
     assert_eq!(
@@ -344,7 +356,8 @@ async fn the_batch_path_keeps_the_cache_breakpoint_after_the_shared_prompt() {
     let files = files();
     let api = Arc::new(FakeBatch::new());
     let llm = seam(&api);
-    let (_, failed) = calibrate(&llm, sites(3), &files, None, true).await;
+    let meter = unwarmed_meter();
+    let (_, failed) = calibrate(&llm, sites(3), &files, Some(&meter), true).await;
     assert!(failed.is_empty(), "{failed:?}");
     assert_eq!(api.batch_count(), 1, "stage 1 went out as a batch");
 
@@ -380,7 +393,8 @@ async fn stage1_items_are_built_in_ranges_of_the_batch_size() {
     let api = Arc::new(FakeBatch::new());
     let llm = seam(&api);
     BUILT_RANGES.with(|r| r.borrow_mut().clear());
-    let (out, failed) = calibrate(&llm, sites(n), &files, None, true).await;
+    let meter = unwarmed_meter();
+    let (out, failed) = calibrate(&llm, sites(n), &files, Some(&meter), true).await;
     assert!(failed.is_empty(), "{failed:?}");
     assert_eq!(verified(&out), n);
     assert_eq!(api.submitted_sites().len(), n, "every site was submitted");
@@ -474,6 +488,118 @@ async fn a_resumed_30k_site_calibration_resubmits_nothing_already_absorbed() {
     // future is dropped) while it polls.
     let first = Arc::new(FakeBatch::new().hanging_from(2));
     let first_llm = seam(&first);
+    let meter = unwarmed_meter();
+    {
+        let run = checkpoint::with_run_checkpoints(
+            Some(dir.path().to_path_buf()),
+            calibrate(&first_llm, sites(SITES), &files, Some(&meter), true),
+        );
+        let killed = async {
+            while first.polls_on_hung.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        };
+        tokio::select! {
+            _ = run => panic!("the first process was meant to be killed while a batch waited"),
+            () = killed => {}
+        }
+    }
+    let done_by_first = first
+        .batches
+        .lock()
+        .unwrap()
+        .iter()
+        .take(2)
+        .map(Vec::len)
+        .sum::<usize>();
+    assert!(
+        done_by_first > 0,
+        "the first two batches ended before the kill"
+    );
+    let in_flight: Vec<(String, usize)> = first.batches.lock().unwrap()[2].clone();
+
+    // Second process: a fresh API that knows the batch the first one left running (the provider
+    // still has it), and the same checkpoint.
+    let second = Arc::new(FakeBatch::new());
+    second
+        .known
+        .lock()
+        .unwrap()
+        .insert("msgbatch_2".to_string(), in_flight.clone());
+    // The provider's ids continue where the first process stopped.
+    for _ in 0..3 {
+        second.batches.lock().unwrap().push(Vec::new());
+    }
+    let second_llm = seam(&second);
+    let meter = unwarmed_meter();
+    let (out, failed) = checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        calibrate(&second_llm, sites(SITES), &files, Some(&meter), true),
+    )
+    .await;
+    assert!(failed.is_empty(), "{:?}", failed.first());
+    assert_eq!(verified(&out), SITES, "every site ends with its verdict");
+
+    // Nothing absorbed in the first process was sent again, and the batch left running was
+    // fetched, not submitted again.
+    let first_sent: BTreeSet<usize> = first.submitted_sites().into_iter().collect();
+    let second_sent: Vec<usize> = second.submitted_sites();
+    let overlap: Vec<&usize> = second_sent
+        .iter()
+        .filter(|s| first_sent.contains(s))
+        .collect();
+    assert!(
+        overlap.is_empty(),
+        "{} site(s) were submitted by both processes",
+        overlap.len()
+    );
+    assert!(
+        second
+            .fetched
+            .lock()
+            .unwrap()
+            .contains(&"msgbatch_2".to_string()),
+        "the running batch was fetched by id"
+    );
+    let all_sent: BTreeSet<usize> = first_sent
+        .iter()
+        .chain(second_sent.iter())
+        .copied()
+        .collect();
+    assert_eq!(
+        all_sent.len(),
+        SITES,
+        "every site was submitted exactly once between them"
+    );
+    assert_eq!(first_sent.len() + second_sent.len(), SITES);
+
+    // The usage of the whole stage is reported by the second process: absorbed sites included.
+    let usage = meter.snapshot();
+    assert_eq!(usage.input_tokens, SITES as u64 * INPUT_TOKENS);
+    assert_eq!(usage.output_tokens, SITES as u64 * OUTPUT_TOKENS);
+    println!(
+        "30k resume: wall time {:.1?}, {} batches by the first process, {} by the second",
+        started.elapsed(),
+        first.batch_count(),
+        second.batch_count() - 3
+    );
+}
+
+/// The same run with the batch warm call (#240) on: the first item goes in real time and is
+/// absorbed and checkpointed before the batches go out, so a resume must not send it again either.
+/// 30,000 synthetic sites through stage 1 as batches, killed while the third batch waits, then
+/// resumed from its checkpoint. Wall time and peak memory are printed for the report.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_30k_site_calibration_with_a_warm_call_resubmits_nothing_already_absorbed() {
+    const SITES: usize = 30_000;
+    let started = std::time::Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let files = files();
+
+    // First process: the third batch is submitted and never ends; the process is killed (the
+    // future is dropped) while it polls.
+    let first = Arc::new(FakeBatch::new().hanging_from(2));
+    let first_llm = seam(&first);
     let meter = UsageMeter::default();
     {
         let run = checkpoint::with_run_checkpoints(
@@ -528,12 +654,23 @@ async fn a_resumed_30k_site_calibration_resubmits_nothing_already_absorbed() {
 
     // Nothing absorbed in the first process was sent again, and the batch left running was
     // fetched, not submitted again.
-    let first_sent: BTreeSet<usize> = first.submitted_sites().into_iter().collect();
+    // The first process's sites: the batches it submitted and the one warm call it made.
+    let warmed: Vec<usize> = first.realtime.asked();
+    assert_eq!(warmed.len(), 1, "one warm call, and no more");
+    let first_sent: BTreeSet<usize> = first
+        .submitted_sites()
+        .into_iter()
+        .chain(warmed.iter().copied())
+        .collect();
     let second_sent: Vec<usize> = second.submitted_sites();
     let overlap: Vec<&usize> = second_sent
         .iter()
         .filter(|s| first_sent.contains(s))
         .collect();
+    assert!(
+        second.realtime.asked().is_empty(),
+        "the resume sent nothing in real time: the warm item was replayed, not sent again"
+    );
     assert!(
         overlap.is_empty(),
         "{} site(s) were submitted by both processes",

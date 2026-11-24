@@ -1191,6 +1191,11 @@ mod batch {
         let mut a = args(&[repo], &["acme/one"], export);
         a.realtime = false;
         a.batch = true;
+        // This test counts the requests each attempt submits as batch items. The warm call
+        // (#240) moves a stage's first request to real time, and the interrupted attempt and the
+        // resume run their stages apart, so it would move a different request in each. The
+        // warm call has its own tests in `stage_batch_tests`.
+        a.efficiency.push("batch_warm=off".to_string());
         a
     }
 
