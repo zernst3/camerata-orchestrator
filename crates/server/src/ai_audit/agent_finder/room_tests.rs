@@ -1,6 +1,6 @@
 //! Tests for the review room (design sections 1 and 2).
 
-use super::room::{Room, RoomError, MAX_READ_LINES, OUT_DIR};
+use super::room::{expand_tree, group_tree, Room, RoomError, MAX_READ_LINES, OUT_DIR, TREE_HEADER};
 use super::Piece;
 
 fn f(path: &str, text: &str) -> (String, String) {
@@ -67,14 +67,37 @@ fn the_room_holds_the_piece_the_context_files_and_the_four_harness_files() {
 }
 
 #[test]
-fn the_tree_lists_every_file_of_the_repository() {
+fn the_tree_lists_every_file_of_the_repository_grouped_by_folder() {
     let r = room();
-    let tree = r
-        .read("_camerata/context/tree.txt", 1, 100)
-        .expect("tree reads");
-    for p in ["src/main.rs", "src/util.rs", "src/other.rs", "README.md"] {
-        assert!(tree.text.contains(p), "{p} not in the tree: {}", tree.text);
-    }
+    let stored = r
+        .file_pairs()
+        .into_iter()
+        .find(|(p, _)| p == "_camerata/context/tree.txt")
+        .expect("the room stores a tree")
+        .1;
+    assert_eq!(
+        stored,
+        format!("{TREE_HEADER}\n./\n  README.md\nsrc/\n  main.rs\n  other.rs\n  util.rs\n")
+    );
+    assert!(
+        TREE_HEADER.contains("src/ then  a.rs is src/a.rs.") && !TREE_HEADER.contains("   a.rs"),
+        "the example shows the real two space indent: {TREE_HEADER}"
+    );
+    assert!(
+        TREE_HEADER.contains(
+            "A search of this file shows only the file name; its folder is the nearest line above that ends with /."
+        ),
+        "{TREE_HEADER}"
+    );
+    assert!(TREE_HEADER.is_ascii() && !TREE_HEADER.contains('-') && !TREE_HEADER.contains('\n'));
+    assert_eq!(
+        expand_tree(&stored),
+        ["README.md", "src/main.rs", "src/other.rs", "src/util.rs"]
+    );
+    assert!(
+        !stored.contains("src/main.rs"),
+        "a folder's path is written once, not before each file"
+    );
 }
 
 #[test]
@@ -629,4 +652,410 @@ fn the_room_serves_exactly_the_billed_set_including_the_admitted_text_types() {
     // The count bills the same files.
     let counted = crate::onboard::count::count_repo(dir.path(), &scope).unwrap();
     assert_eq!(counted.total_files, billed.len());
+}
+
+// ─── the Edit rule of the room ───────────────────────────────────────────────────────────────
+
+fn written(text: &str) -> Room {
+    let r = room();
+    r.write("_camerata/out/p.txt", text).expect("write");
+    r
+}
+
+#[test]
+fn an_edit_replaces_the_one_match_and_needs_exactly_one() {
+    let r = written("alpha beta gamma");
+    r.edit("_camerata/out/p.txt", "beta", "BETA").expect("edit");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "alpha BETA gamma");
+    r.edit("./_camerata/out/p.txt", "gamma", "")
+        .expect("a leading ./ names the same file, and new may be empty");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "alpha BETA ");
+
+    let r = written("one two one");
+    assert!(matches!(
+        r.edit("_camerata/out/p.txt", "one", "1"),
+        Err(RoomError::Invalid(m)) if m.contains("2 places")
+    ));
+    assert!(matches!(
+        r.edit("_camerata/out/p.txt", "three", "3"),
+        Err(RoomError::Invalid(m)) if m.contains("was not found")
+    ));
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "one two one");
+}
+
+#[test]
+fn overlapping_matches_count_as_more_than_one() {
+    let r = written("aaa");
+    assert!(matches!(
+        r.edit("_camerata/out/p.txt", "aa", "b"),
+        Err(RoomError::Invalid(m)) if m.contains("2 places")
+    ));
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "aaa");
+    // The same through a multi-byte character.
+    let r = written("ééé");
+    assert!(r.edit("_camerata/out/p.txt", "éé", "x").is_err());
+    r.edit("_camerata/out/p.txt", "é", "x")
+        .expect_err("three matches");
+    let r = written("aé");
+    r.edit("_camerata/out/p.txt", "é", "e").expect("one match");
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "ae");
+}
+
+#[test]
+fn an_edit_outside_the_out_folder_or_of_an_unwritten_file_is_refused() {
+    let r = written("text");
+    for path in [
+        "src/main.rs",
+        "_camerata/checklist.md",
+        "_camerata/context/tree.txt",
+        "/tmp/p.txt",
+        "../p.txt",
+        "_camerata/out/",
+        "_camerata/out/../../p.txt",
+    ] {
+        assert!(
+            matches!(r.edit(path, "e", "x"), Err(RoomError::OutsideOut(_))),
+            "{path}"
+        );
+    }
+    assert!(matches!(
+        r.edit("_camerata/out/other.txt", "e", "x"),
+        Err(RoomError::NotFound(_))
+    ));
+    assert!(matches!(
+        r.edit("_camerata/out/p.txt", "", "x"),
+        Err(RoomError::Invalid(_))
+    ));
+    assert!(matches!(
+        r.edit("_camerata/out/p.txt", "text", "text"),
+        Err(RoomError::Invalid(_))
+    ));
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "text");
+    assert!(r
+        .read("src/main.rs", 1, 3)
+        .expect("read")
+        .text
+        .contains("mod util"));
+}
+
+#[test]
+fn an_edit_cannot_grow_a_file_past_the_write_limit() {
+    let r = written("x");
+    let big = "y".repeat(super::room::MAX_WRITE_BYTES + 1);
+    assert!(matches!(
+        r.edit("_camerata/out/p.txt", "x", &big),
+        Err(RoomError::Invalid(m)) if m.contains("at most")
+    ));
+    assert_eq!(r.outputs()["_camerata/out/p.txt"], "x");
+}
+
+#[test]
+fn an_edit_that_would_break_a_json_file_is_refused_and_a_valid_one_is_kept() {
+    let r = room();
+    r.write("_camerata/out/p.json", "{\"a\": [1, 2]}")
+        .expect("write");
+    for (old, new) in [("[1, 2]", "[1, 2"), ("\"a\"", "a"), (":", "")] {
+        assert!(
+            matches!(
+                r.edit("_camerata/out/p.json", old, new),
+                Err(RoomError::Invalid(m)) if m.contains("would break the JSON")
+            ),
+            "{old:?} to {new:?}"
+        );
+        assert_eq!(r.outputs()["_camerata/out/p.json"], "{\"a\": [1, 2]}");
+    }
+    r.edit("_camerata/out/p.json", "[1, 2]", "[1, 2, 3]")
+        .expect("a valid result is kept");
+    assert_eq!(r.outputs()["_camerata/out/p.json"], "{\"a\": [1, 2, 3]}");
+    // An edit that repairs a file that was already broken is allowed.
+    r.write("_camerata/out/q.JSON", "{\"a\": 1,}")
+        .expect("write");
+    assert!(r.edit("_camerata/out/q.JSON", "x", "y").is_err());
+    r.edit("_camerata/out/q.JSON", ",}", "}").expect("repair");
+    // A file that is not JSON is not checked.
+    r.write("_camerata/out/n.txt", "not json").expect("write");
+    r.edit("_camerata/out/n.txt", "not", "still not")
+        .expect("plain text");
+}
+
+// ─── the plain read of the checklist ─────────────────────────────────────────────────────────
+
+fn room_with_checklist(text: &str) -> Room {
+    Room::build(&piece(&["src/main.rs"]), &repo(), text).room
+}
+
+#[test]
+fn the_checklist_is_served_plain_byte_for_byte_whatever_its_line_ends() {
+    for text in [
+        "# Checklist\n\nline one\nline two\n",
+        "no final line end",
+        "crlf line\r\nsecond\r\n\r\nlast\r\n",
+        "tab\there\n  indented\n\n\n",
+        "",
+    ] {
+        let r = room_with_checklist(text);
+        let out = r
+            .read_plain("_camerata/checklist.md", 1, 100_000)
+            .expect("plain read");
+        assert_eq!(out.text, text, "{text:?}");
+        assert_eq!(out.lines_returned, text.lines().count());
+        assert_eq!(out.total_lines, text.lines().count());
+    }
+}
+
+#[test]
+fn the_plain_read_has_no_byte_limit_and_still_pages_by_lines() {
+    let big: String = (1..=1_500)
+        .map(|i| format!("{i} {}\n", "x".repeat(150)))
+        .collect();
+    assert!(big.len() > super::room::MAX_READ_BYTES);
+    let r = room_with_checklist(&big);
+    let whole = r
+        .read_plain("./_camerata/checklist.md", 1, MAX_READ_LINES)
+        .expect("whole");
+    assert_eq!(whole.text, big, "past the byte limit of the numbered read");
+    assert_eq!(whole.lines_returned, 1_500);
+    // The numbered read of the same text does stop at the byte limit.
+    let numbered = r
+        .read("_camerata/checklist.md", 1, MAX_READ_LINES)
+        .expect("numbered");
+    assert!(numbered.lines_returned < 1_500);
+
+    let page = r.read_plain("_camerata/checklist.md", 3, 2).expect("page");
+    let expected: String = big.split_inclusive('\n').skip(2).take(2).collect();
+    assert_eq!(
+        (page.text, page.first_line, page.lines_returned),
+        (expected, 3, 2)
+    );
+    let past = r
+        .read_plain("_camerata/checklist.md", 2_000, 5)
+        .expect("past end");
+    assert_eq!(
+        (past.text.as_str(), past.lines_returned, past.total_lines),
+        ("", 0, 1_500)
+    );
+}
+
+#[test]
+fn the_plain_read_serves_no_file_but_the_checklist() {
+    let r = room();
+    for path in [
+        "src/main.rs",
+        "_camerata/context/tree.txt",
+        "_camerata/context/neighbours.md",
+        "_Camerata/Checklist.md",
+        "_camerata/out/x.json",
+    ] {
+        assert!(r.read_plain(path, 1, 10).is_err(), "{path}");
+    }
+    assert!(matches!(
+        r.read_plain("../_camerata/checklist.md", 1, 10),
+        Err(RoomError::Invalid(_))
+    ));
+}
+
+// ─── the grouped tree ────────────────────────────────────────────────────────────────────────
+
+/// Paths with deep folders, a file and a folder sharing a name, folders that sort between each
+/// other oddly, root files, a leading space and a multi-byte letter.
+fn tree_sample() -> Vec<&'static str> {
+    vec![
+        "Cargo.toml",
+        "README.md",
+        "src.rs",
+        "src/a/b/c/deep.rs",
+        "src/a/b/c/deeper.rs",
+        "src/a/b/mod.rs",
+        "src/a/mod.rs",
+        "src/lib.rs",
+        "src/util.rs",
+        "src/util/mod.rs",
+        "src/util/strings.rs",
+        "src-x/y.rs",
+        "src.d/z.rs",
+        "docs/guide/caf\u{e9}.md",
+        "docs/ spaced name.md",
+        " odd folder/ odd file.txt",
+        "tests/api/one.rs",
+        "tests/api/two.rs",
+    ]
+}
+
+fn sorted(mut paths: Vec<String>) -> Vec<String> {
+    paths.sort_unstable();
+    paths
+}
+
+#[test]
+fn the_grouped_tree_expands_back_to_the_same_paths() {
+    let mut paths = tree_sample();
+    paths.sort_unstable();
+    let grouped = group_tree(&paths);
+    let back = expand_tree(&grouped);
+    assert_eq!(
+        sorted(back.clone()),
+        paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+        "no path is lost, added or changed:\n{grouped}"
+    );
+    assert_eq!(back.len(), paths.len(), "no path is listed twice");
+}
+
+#[test]
+fn the_grouped_tree_round_trips_every_shape_of_input() {
+    for paths in [
+        vec![],
+        vec!["only.rs"],
+        vec!["a/b.rs"],
+        vec!["a.rs", "b.rs", "c.rs"],
+        vec!["a/b/c/d/e/f.rs"],
+        vec!["x/a.rs", "x/b/c.rs", "x/d.rs"],
+        vec!["dir/file with spaces.txt", "dir/.hidden", "dir/ends.dot."],
+    ] {
+        let mut paths = paths;
+        paths.sort_unstable();
+        let back = expand_tree(&group_tree(&paths));
+        assert_eq!(
+            sorted(back),
+            paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            "{paths:?}"
+        );
+    }
+}
+
+#[test]
+fn the_grouped_tree_writes_each_folder_once_and_is_smaller_than_one_path_a_line() {
+    let mut paths = tree_sample();
+    paths.sort_unstable();
+    let grouped = group_tree(&paths);
+    let body = grouped
+        .strip_prefix(&format!("{TREE_HEADER}\n"))
+        .expect("the header leads");
+    // A sample with one or two files a folder is not smaller (each folder line and indent costs);
+    // the saving is for folders that hold several files, as in a real repository.
+    let deep: Vec<String> = (0..40)
+        .map(|i| {
+            format!(
+                "crates/server/src/handlers/{}/file_{i}.rs",
+                ["a", "b", "c"][i % 3]
+            )
+        })
+        .collect();
+    let mut deep: Vec<&str> = deep.iter().map(String::as_str).collect();
+    deep.sort_unstable();
+    let deep_flat: String = deep.iter().map(|p| format!("{p}\n")).collect();
+    let deep_grouped = group_tree(&deep);
+    let deep_body = deep_grouped
+        .strip_prefix(&format!("{TREE_HEADER}\n"))
+        .expect("the header leads");
+    assert!(
+        deep_body.len() < deep_flat.len(),
+        "grouped {} bytes (header left out), flat {} bytes",
+        deep_body.len(),
+        deep_flat.len()
+    );
+    for folder in ["src/a/b/c/", "src/util/", "tests/api/", "docs/guide/"] {
+        assert_eq!(
+            grouped.lines().filter(|l| *l == folder).count(),
+            1,
+            "{folder} is written once:\n{grouped}"
+        );
+    }
+    assert!(
+        !grouped.contains("src/a/b/c/deep.rs"),
+        "no path prefix before a file"
+    );
+    assert!(
+        body.starts_with("./\n  Cargo.toml\n  README.md\n  src.rs\n"),
+        "root files come first, under `./`:\n{grouped}"
+    );
+}
+
+#[test]
+fn the_room_serves_the_grouped_tree_for_a_repository_of_many_folders() {
+    let files: Vec<(String, String)> = tree_sample()
+        .iter()
+        .map(|p| f(p, "// x\n"))
+        .chain([f("src/main.rs", "fn main() {}\n")])
+        .collect();
+    let r = Room::build(&piece(&["src/main.rs"]), &files, "# checklist\n").room;
+    let stored = r
+        .file_pairs()
+        .into_iter()
+        .find(|(p, _)| p == "_camerata/context/tree.txt")
+        .expect("tree")
+        .1;
+    let mut expected: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
+    expected.sort_unstable();
+    assert_eq!(sorted(expand_tree(&stored)), expected);
+    // The agent reads it through the Read tool like any file.
+    let read = r
+        .read("_camerata/context/tree.txt", 1, 1_000)
+        .expect("read");
+    assert!(read.text.contains("src/a/b/c/\n"), "{}", read.text);
+}
+
+#[test]
+fn a_search_of_the_tree_returns_bare_names_and_the_header_says_where_the_folder_is() {
+    let r = room();
+    let hits = r
+        .grep("main", Some("_camerata/context/tree.txt"))
+        .expect("grep");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].text, "  main.rs", "no folder in the hit");
+    let tree = r
+        .file_pairs()
+        .into_iter()
+        .find(|(p, _)| p == "_camerata/context/tree.txt")
+        .expect("tree")
+        .1;
+    let lines: Vec<&str> = tree.lines().collect();
+    let at = hits[0].line - 1;
+    let folder = lines[..at]
+        .iter()
+        .rev()
+        .find(|l| l.ends_with('/'))
+        .expect("a folder line above");
+    assert_eq!(
+        *folder, "src/",
+        "the nearest line above that ends with / is the folder"
+    );
+}
+
+#[test]
+fn a_checklist_over_the_line_cap_ends_with_a_notice_that_gives_the_next_offset() {
+    let lines = MAX_READ_LINES + 500;
+    let text: String = (1..=lines).map(|i| format!("rule line {i}\n")).collect();
+    let r = room_with_checklist(&text);
+    let first = r
+        .read_plain("_camerata/checklist.md", 1, MAX_READ_LINES)
+        .expect("first page");
+    let cut: String = text.split_inclusive('\n').take(MAX_READ_LINES).collect();
+    assert_eq!(
+        first.text,
+        format!("{cut}500 more lines; read again with offset 2001 to see them.\n")
+    );
+    assert_eq!(
+        first.lines_returned, MAX_READ_LINES,
+        "the notice is not a line read"
+    );
+    // The offset it names reads the rest, with no notice, and the two pages are the whole text.
+    let rest = r
+        .read_plain("_camerata/checklist.md", 2_001, MAX_READ_LINES)
+        .expect("rest");
+    assert_eq!(format!("{cut}{}", rest.text), text);
+    assert_eq!(rest.lines_returned, 500);
+    // A checklist that fits, and a page the model's own limit ends, carry no notice.
+    let exact: String = (1..=MAX_READ_LINES).map(|i| format!("l{i}\n")).collect();
+    let r = room_with_checklist(&exact);
+    assert_eq!(
+        r.read_plain("_camerata/checklist.md", 1, MAX_READ_LINES)
+            .expect("exact")
+            .text,
+        exact
+    );
+    let r = room_with_checklist(&text);
+    let short = r
+        .read_plain("_camerata/checklist.md", 1, 10)
+        .expect("short");
+    assert!(!short.text.contains("more lines"), "{}", short.text);
 }

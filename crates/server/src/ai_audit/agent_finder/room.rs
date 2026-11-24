@@ -1,6 +1,7 @@
 //! The review room: the small in-memory file tree one agent works in (design section 1). It is
-//! built from already redacted files and serves five tools (Read, Glob, Grep, LS, Write). A path
-//! that is not in the room does not exist; a write is accepted only under `_camerata/out/`.
+//! built from already redacted files and serves six tools (Read, Glob, Grep, LS, Write, Edit). A
+//! path that is not in the room does not exist; a write or an edit is accepted only under
+//! `_camerata/out/`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -117,7 +118,7 @@ pub(super) fn is_checklist_path(path: &str) -> bool {
     normalize(path).as_deref() == Some(CHECKLIST_PATH)
 }
 
-/// The tree file: every path of the repository, one a line.
+/// The tree file: every file of the repository, grouped by folder (see [`group_tree`]).
 const TREE_PATH: &str = "_camerata/context/tree.txt";
 const NEIGHBOURS_PATH: &str = "_camerata/context/neighbours.md";
 const CONTEXT_LIST_PATH: &str = "_camerata/context/context-files.txt";
@@ -140,6 +141,60 @@ fn normalize(path: &str) -> Option<String> {
         }
     }
     Some(parts.join("/"))
+}
+
+/// The first line of the tree file: it tells the reader how to read the rest.
+pub(super) const TREE_HEADER: &str = "Folders end with /. The files of a folder are listed under it, indented. Join them to get a path, for example src/ then  a.rs is src/a.rs. A search of this file shows only the file name; its folder is the nearest line above that ends with /.";
+
+/// The tree file's text: the [`TREE_HEADER`] line, then for each folder that holds a file, one
+/// line with the folder's path from the root and a closing `/` (the root is `./`), then the names
+/// of its files, one a line, each indented by two spaces. A folder's path is written once, not before every file. A line ending
+/// in `/` is a folder (a file name never holds a `/`), and every other line is a file of the
+/// folder above it, so every path can be rebuilt ([`expand_tree`]). Folders come in path order,
+/// the root first, so `src/` is followed by `src/a/` and then `src-x/`.
+pub(super) fn group_tree(paths: &[&str]) -> String {
+    let mut folders: BTreeMap<Vec<&str>, Vec<&str>> = BTreeMap::new();
+    for path in paths {
+        let mut parts: Vec<&str> = path.split('/').collect();
+        let name = parts.pop().unwrap_or("");
+        folders.entry(parts).or_default().push(name);
+    }
+    let mut out = format!("{TREE_HEADER}\n");
+    for (folder, names) in &folders {
+        if folder.is_empty() {
+            out.push_str("./\n");
+        } else {
+            out.push_str(&folder.join("/"));
+            out.push_str("/\n");
+        }
+        for name in names {
+            out.push_str("  ");
+            out.push_str(name);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The paths a grouped tree text names, in the order it lists them: the inverse of
+/// [`group_tree`], which skips the header line (tests only).
+#[cfg(test)]
+pub(super) fn expand_tree(text: &str) -> Vec<String> {
+    let mut folder = String::new();
+    let mut paths = Vec::new();
+    for line in text.lines().skip(1) {
+        if let Some(path) = line.strip_suffix('/') {
+            folder = if path == "." {
+                String::new()
+            } else {
+                format!("{path}/")
+            };
+        } else {
+            let name = line.strip_prefix("  ").unwrap_or(line);
+            paths.push(format!("{folder}{name}"));
+        }
+    }
+    paths
 }
 
 /// How many leading folders `a` and `b` share.
@@ -265,7 +320,7 @@ impl Room {
 
         let mut tree_paths: Vec<&str> = repo.iter().map(|(p, _)| p.as_str()).collect();
         tree_paths.sort_unstable();
-        let tree: String = tree_paths.iter().map(|p| format!("{p}\n")).collect();
+        let tree = group_tree(&tree_paths);
 
         let context_list = if context_idx.is_empty() {
             "none\n".to_string()
@@ -464,6 +519,55 @@ impl Room {
         })
     }
 
+    /// Read the room's own checklist as it is: no line numbers, and no byte limit. `count` lines
+    /// from `first_line` (1-based), at most [`MAX_READ_LINES`]; the text is cut from the stored
+    /// text at line ends, so a read of every line is byte for byte the stored text. Any other path
+    /// is refused: client text is only ever served numbered and framed ([`Room::read`]). A page cut
+    /// at the line cap ends with one notice line naming the offset to read next.
+    pub fn read_plain(
+        &self,
+        path: &str,
+        first_line: usize,
+        count: usize,
+    ) -> Result<ReadOutput, RoomError> {
+        if !is_checklist_path(path) {
+            return Err(RoomError::Invalid(format!(
+                "only the checklist is served as plain text: {path}"
+            )));
+        }
+        let text = self
+            .text_of(path)
+            .ok_or_else(|| RoomError::NotFound(path.to_string()))?;
+        let first_line = first_line.max(1);
+        let take = count.min(MAX_READ_LINES);
+        let mut out = String::new();
+        let mut returned = 0usize;
+        let mut total_lines = 0usize;
+        for (i, line) in text.split_inclusive('\n').enumerate() {
+            total_lines += 1;
+            if i + 1 >= first_line && returned < take {
+                out.push_str(line);
+                returned += 1;
+            }
+        }
+        // A page that stopped at the line cap with lines left says so, and where to go on. The
+        // notice is not a line of the checklist: `lines_returned` does not count it. A text that
+        // fits, or a page the caller's own limit ended, has none, so it stays byte for byte.
+        let remaining = total_lines.saturating_sub(first_line - 1 + returned);
+        if returned == MAX_READ_LINES && remaining > 0 {
+            out.push_str(&format!(
+                "{remaining} more lines; read again with offset {} to see them.\n",
+                first_line + returned
+            ));
+        }
+        Ok(ReadOutput {
+            text: out,
+            first_line,
+            lines_returned: returned,
+            total_lines,
+        })
+    }
+
     fn glob_options() -> glob::MatchOptions {
         glob::MatchOptions {
             case_sensitive: true,
@@ -562,6 +666,71 @@ impl Room {
             )));
         }
         out.insert(normal, text.to_string());
+        Ok(())
+    }
+
+    /// Change an output file in place: replace `old` with `new` in the text of `path`. Accepted
+    /// only under [`OUT_DIR`], only for a file already written, and only when `old` is not empty
+    /// and occurs exactly once (occurrences may overlap, so `aa` in `aaa` is two). The check and
+    /// the change happen under one lock, so a refused edit leaves the file as it was.
+    pub fn edit(&self, path: &str, old: &str, new: &str) -> Result<(), RoomError> {
+        let normal = normalize(path).ok_or_else(|| RoomError::OutsideOut(path.to_string()))?;
+        if !normal.starts_with(OUT_DIR) || normal.len() == OUT_DIR.len() {
+            return Err(RoomError::OutsideOut(path.to_string()));
+        }
+        if old.is_empty() {
+            return Err(RoomError::Invalid(
+                "old_string must not be empty".to_string(),
+            ));
+        }
+        if old == new {
+            return Err(RoomError::Invalid(
+                "old_string and new_string are the same".to_string(),
+            ));
+        }
+        let mut out = self.out_lock();
+        let Some(text) = out.get(&normal) else {
+            return Err(RoomError::NotFound(path.to_string()));
+        };
+        let first = text.find(old).ok_or_else(|| {
+            RoomError::Invalid(format!(
+                "old_string was not found in {path}; nothing changed"
+            ))
+        })?;
+        // Count every position, overlapping ones too: step one character past each hit.
+        let mut matches = 1usize;
+        let mut from = first + text[first..].chars().next().map_or(1, char::len_utf8);
+        while let Some(at) = text[from..].find(old) {
+            matches += 1;
+            let hit = from + at;
+            from = hit + text[hit..].chars().next().map_or(1, char::len_utf8);
+        }
+        if matches > 1 {
+            return Err(RoomError::Invalid(format!(
+                "old_string matches {matches} places in {path}; give more of the surrounding \
+                 text so it matches exactly once. Nothing changed."
+            )));
+        }
+        let mut changed = String::with_capacity(text.len() - old.len() + new.len());
+        changed.push_str(&text[..first]);
+        changed.push_str(new);
+        changed.push_str(&text[first + old.len()..]);
+        if changed.len() > MAX_WRITE_BYTES {
+            return Err(RoomError::Invalid(format!(
+                "a file may hold at most {MAX_WRITE_BYTES} bytes"
+            )));
+        }
+        // A JSON output that stops parsing is a broken file for the reader: refuse the edit and
+        // keep the file, so the model's one repair turn is not spent on a second breakage.
+        if normal.to_ascii_lowercase().ends_with(".json")
+            && serde_json::from_str::<serde_json::Value>(&changed).is_err()
+        {
+            return Err(RoomError::Invalid(format!(
+                "this edit would break the JSON in {path}, so nothing changed. Change the text so \
+                 the whole file stays valid JSON, or write the whole file again with Write."
+            )));
+        }
+        out.insert(normal, changed);
         Ok(())
     }
 

@@ -1663,9 +1663,17 @@ async fn call_anthropic_with_tools(
     tool_schemas: &[Value],
 ) -> anyhow::Result<LlmResponse> {
     let (body, use_caching) = build_anthropic_request_body(model, system, messages, tool_schemas);
-    post_anthropic_body(api_key, &body, use_caching)
-        .await
-        .map_err(AnthropicPostError::into_anyhow)
+    // The agent driver keeps its own client and its 600 s bound; only the finder has the 30
+    // minute one ([`post_anthropic_body`]).
+    post_anthropic_body_to(
+        agent_http_client(),
+        ANTHROPIC_MESSAGES_URL,
+        api_key,
+        &body,
+        use_caching,
+    )
+    .await
+    .map_err(AnthropicPostError::into_anyhow)
 }
 
 /// Why one POST of a Messages body did not give a usable reply. The finder loop needs the parts
@@ -1707,6 +1715,9 @@ fn status_text(status: u16) -> String {
     reqwest::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string())
 }
 
+/// The Messages endpoint.
+const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+
 /// POST an already built Messages `body` and read the reply: the second half of
 /// [`call_anthropic_with_tools`], reachable on its own so a caller that builds the body itself
 /// (the finder loop) sees the typed failure.
@@ -1716,8 +1727,8 @@ pub(crate) async fn post_anthropic_body(
     use_caching: bool,
 ) -> Result<LlmResponse, AnthropicPostError> {
     post_anthropic_body_to(
-        agent_http_client(),
-        "https://api.anthropic.com/v1/messages",
+        finder_http_client(),
+        ANTHROPIC_MESSAGES_URL,
         api_key,
         body,
         use_caching,
@@ -3777,6 +3788,36 @@ fn agent_http_client() -> &'static reqwest::Client {
             .build()
             .expect("failed to build the agent HTTP client")
     })
+}
+
+/// The most one finder call may take in all, from the request to the last byte of the reply. A
+/// turn with long thinking and a large file can take close to ten minutes without streaming.
+pub(crate) const FINDER_TOTAL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+/// How long the finder waits to connect (the same as the agent driver's client).
+pub(crate) const FINDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often the finder's connections send a keep-alive probe, so a long silent wait for the
+/// reply is not dropped by a middlebox.
+const FINDER_TCP_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A client for the finder's calls with the given limits (a test passes short ones) and TCP
+/// keep-alive.
+pub(crate) fn build_finder_http_client(
+    total: std::time::Duration,
+    connect: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(total)
+        .connect_timeout(connect)
+        .tcp_keepalive(FINDER_TCP_KEEPALIVE)
+        .build()
+        .expect("failed to build the finder HTTP client")
+}
+
+/// The finder's own HTTP client ([`FINDER_TOTAL_TIMEOUT`], [`FINDER_CONNECT_TIMEOUT`]).
+fn finder_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| build_finder_http_client(FINDER_TOTAL_TIMEOUT, FINDER_CONNECT_TIMEOUT))
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────

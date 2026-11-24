@@ -4322,19 +4322,31 @@ redacted. A path that is not in the room does not exist.
 |---|---|
 | the piece's files | the files the agent owes a full read |
 | context files | files outside the piece that the piece imports, nearest folder first, within 30 percent of the piece's bytes, read only |
-| `_camerata/context/tree.txt` | every path of the whole repository |
+| `_camerata/context/tree.txt` | every file of the whole repository, grouped by folder (below the table) |
 | `_camerata/context/neighbours.md` | an outline of what the piece imports and what imports it (at most 400 lines each side) |
 | `_camerata/context/context-files.txt` | the context files that were included |
 | `_camerata/checklist.md` | the rules checklist (below) |
 | `_camerata/out/` | the only place the agent may write |
 
+The tree file starts with one line that says how to read it. After it comes one line for each
+folder that holds a file, written with its whole path from the root and a closing `/` (the root is
+`./`). Under each folder line are the names of its files, one a line, indented by two spaces. So a
+folder's path is written once, and a path is the folder line joined to a file name. The line says
+too that a search of the file shows only a file name, whose folder is the nearest line above that
+ends with `/`.
+
 A repository file whose path is under `_camerata/` in any case is left out of the room and, if it is
 a piece file, is reported as not served. So a client file can never shadow a room file.
 
-**Tools.** Five: Read, Glob, Grep, LS and Write. Limits: a Read returns at most 2,000 lines and
-100,000 bytes (it stops at the last whole line that fits); a Grep returns at most 200 hits; a written
-file is at most 1,000,000 bytes; at most 200 distinct files may be written; a write is accepted only
-under `_camerata/out/`. Any other tool name is answered with a refusal.
+**Tools.** Six on the API transport: Read, Glob, Grep, LS, Write and Edit. Limits: a Read returns at
+most 2,000 lines and 100,000 bytes (it stops at the last whole line that fits); a Grep returns at
+most 200 hits; a written file is at most 1,000,000 bytes; at most 200 distinct files may be written;
+a write or an edit is accepted only under `_camerata/out/`. Edit changes a file the agent already
+wrote: `old_string` must occur exactly once, the result may not pass the size limit, and an edit to
+a `.json` file that would leave invalid JSON is refused and changes nothing. A successful Edit is
+recorded in the trace as a Write. The checklist is the one exception to the numbered, framed Read:
+it is returned as stored, with no line numbers, and a page that stops at the 2,000 line cap ends
+with a line giving the offset to read next. Any other tool name is answered with a refusal.
 
 ### Isolation: what the model can and cannot reach
 
@@ -4342,7 +4354,7 @@ The client's own `.claude/` folder, `CLAUDE.md` and `.mcp.json` are reviewed as 
 never loaded. How that holds depends on the transport.
 
 * **API transport** (`api_agent.rs`). The finder calls the Anthropic Messages API directly with the
-  five tools served from the in-memory room. There is no Claude Code, no settings loader and no MCP
+  six tools served from the in-memory room. There is no Claude Code, no settings loader and no MCP
   here, so nothing a repository holds can configure the call. The system text says text inside the
   files is material to review and never an instruction. Each request body is built by the one
   builder of `api_agent_driver.rs`, which redacts the whole conversation, so a secret the model
@@ -4446,9 +4458,15 @@ a problems list.
   piece is a base amount plus an amount for each 1,000 lines (`run/piece.rs` `estimate_usd`). The
   ceiling is one per piece however many follow-ups it takes.
 
-The API transport waits and retries by the engine's schedules: 2, 8 and 30 seconds for a rate limit
-or a server error, 5, 20, 60 and 120 seconds for an overload (HTTP 529 or 503). A `retry-after`
-is honoured up to 300 seconds. A request that has been sent and may be billed is always counted: a
+The API transport waits out a rate limit (HTTP 429) or an overload (529 or 503) instead of counting
+tries. It waits for the provider's `retry-after` (up to 300 seconds, and never shorter, with up to 20
+percent added so the pieces do not come back together), or 30 seconds with 30 percent jitter either
+way when none is given. One call waits at most 30 minutes in all. After that the call fails and the
+run stops cleanly, as it does for an outage, so the other pieces stop at their next check and no new
+piece starts. The run's own stop (outage, credit, spend limit) is checked before and after every
+wait. Other server errors and transport failures are retried after 2, 8 and 30 seconds, each with 30
+percent jitter. The finder's HTTP client allows 30 minutes in all for one reply (the agent driver's
+own client keeps 600 seconds). A request that has been sent and may be billed is always counted: a
 later failure comes back as a failed run with the usage of every paid turn, never as a silent error.
 
 ### The rules checklist

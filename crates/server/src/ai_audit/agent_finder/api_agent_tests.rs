@@ -346,7 +346,7 @@ async fn a_three_turn_run_returns_the_trace_the_outputs_and_the_stop() {
 }
 
 #[tokio::test]
-async fn the_request_has_the_five_tools_the_limit_and_no_forced_choice_or_sampling() {
+async fn the_request_has_the_six_tools_the_limit_and_no_forced_choice_or_sampling() {
     let wire = ScriptedWire::new(vec![text_reply("done")]);
     let mut lim = limits();
     lim.max_turn_tokens = 12_345;
@@ -354,8 +354,8 @@ async fn the_request_has_the_five_tools_the_limit_and_no_forced_choice_or_sampli
     let body = &wire.bodies()[0];
     assert_eq!(
         tool_names(body),
-        vec!["Read", "Glob", "Grep", "LS", "Write"],
-        "the tool list is exactly these five"
+        vec!["Read", "Glob", "Grep", "LS", "Write", "Edit"],
+        "the tool list is exactly these six"
     );
     assert_eq!(body["tool_choice"], json!({"type": "auto"}));
     assert_eq!(body["max_tokens"], 12_345);
@@ -391,8 +391,8 @@ async fn a_call_to_any_other_tool_is_refused_and_changes_nothing() {
         call("g4", "Bash", json!({"command": "echo hi"})),
         call(
             "g5",
-            "Edit",
-            json!({"file_path": "src/a.rs", "old_string": "a", "new_string": "b"}),
+            "MultiEdit",
+            json!({"file_path": "src/a.rs", "edits": []}),
         ),
         call("g6", "WebFetch", json!({"url": "https://example.invalid"})),
     ];
@@ -408,7 +408,7 @@ async fn a_call_to_any_other_tool_is_refused_and_changes_nothing() {
     assert_eq!(results.len(), 6, "every call is answered");
     for (id, text) in results {
         assert!(
-            text.starts_with("Refused") && text.contains("Read, Glob, Grep, LS and Write"),
+            text.starts_with("Refused") && text.contains("Read, Glob, Grep, LS, Write and Edit"),
             "{id} got {text:?}"
         );
     }
@@ -460,6 +460,156 @@ async fn a_write_outside_the_out_folder_is_refused() {
     assert_eq!(
         room.read("src/a.rs", 1, 10).expect("read").lines_returned,
         3
+    );
+}
+
+// ─── 2b. the Edit tool ───────────────────────────────────────────────────────────────────────
+
+const PROBLEMS: &str = "{\"problems\": [{\"n\": 1, \"places\": []}]}";
+
+#[tokio::test]
+async fn an_edit_amends_a_file_the_model_wrote_and_is_recorded_as_a_write() {
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![call(
+            "w",
+            "Write",
+            json!({"file_path": "_camerata/out/problems-1.json", "content": PROBLEMS}),
+        )]),
+        tools_reply(vec![call(
+            "e",
+            "Edit",
+            json!({
+                "file_path": "_camerata/out/problems-1.json",
+                "old_string": "\"places\": []",
+                "new_string": "\"places\": [{\"path\": \"src/a.rs\", \"line\": 2}]",
+            }),
+        )]),
+        text_reply("done"),
+    ]);
+    let room = room();
+    let run = run_ok(&agent(&wire), &room, &limits()).await;
+
+    assert_eq!(
+        run.outputs["_camerata/out/problems-1.json"],
+        "{\"problems\": [{\"n\": 1, \"places\": [{\"path\": \"src/a.rs\", \"line\": 2}]}]}",
+        "the run's output holds the amended file"
+    );
+    assert_eq!(
+        run.trace,
+        vec![
+            ToolEvent::Write {
+                path: "_camerata/out/problems-1.json".into()
+            },
+            ToolEvent::Write {
+                path: "_camerata/out/problems-1.json".into()
+            },
+        ],
+        "an Edit is recorded as the Write it is"
+    );
+    let results = tool_results(&wire.bodies()[2], 4);
+    assert_eq!(results[0].1, "edited _camerata/out/problems-1.json");
+    assert!(!results[0].1.contains("does not exist"), "{results:?}");
+}
+
+#[tokio::test]
+async fn an_edit_that_cannot_be_applied_is_refused_and_changes_nothing() {
+    let edit = |id: &str, path: &str, old: &str, new: &str| {
+        call(
+            id,
+            "Edit",
+            json!({"file_path": path, "old_string": old, "new_string": new}),
+        )
+    };
+    let out = "_camerata/out/leads.json";
+    let blocks = vec![
+        call("w", "Write", json!({"file_path": out, "content": "x x y"})),
+        // A path outside the output folder, a room file, the checklist, the folder itself.
+        edit("e0", "src/a.rs", "fn a()", "fn z()"),
+        edit("e1", "_camerata/checklist.md", "checklist", "gone"),
+        edit("e2", "../out.json", "x", "z"),
+        edit("e3", "/tmp/out.json", "x", "z"),
+        edit("e4", "_camerata/out/", "x", "z"),
+        edit("e5", "_camerata/out/../../x.json", "x", "z"),
+        // A file the model never wrote.
+        edit("e6", "_camerata/out/never.json", "x", "z"),
+        // Zero matches, two matches, an empty old_string, an edit that changes nothing.
+        edit("e7", out, "absent", "z"),
+        edit("e8", out, "x", "z"),
+        edit("e9", out, "", "z"),
+        edit("e10", out, "y", "y"),
+        // A call with a missing argument.
+        call("e11", "Edit", json!({"file_path": out, "old_string": "y"})),
+    ];
+    let wire = ScriptedWire::new(vec![tools_reply(blocks), text_reply("done")]);
+    let room = room();
+    let before = room.read("src/a.rs", 1, 100).expect("read").text;
+    let run = run_ok(&agent(&wire), &room, &limits()).await;
+
+    assert_eq!(
+        run.trace,
+        vec![ToolEvent::Write { path: out.into() }],
+        "only the first Write is a trace entry: a refused Edit records nothing"
+    );
+    assert_eq!(
+        run.outputs[out], "x x y",
+        "no refused edit changed the file"
+    );
+    assert_eq!(room.read("src/a.rs", 1, 100).expect("read").text, before);
+    let results = tool_results(&wire.bodies()[1], 2);
+    assert_eq!(results.len(), 13);
+    for (id, text) in &results[1..] {
+        assert!(
+            text.starts_with("Refused") || text.starts_with("Edit needs"),
+            "{id} got {text:?}"
+        );
+    }
+    assert!(results[8].1.contains("was not found"), "{:?}", results[8]);
+    assert!(results[9].1.contains("2 places"), "{:?}", results[9]);
+}
+
+#[tokio::test]
+async fn an_edit_that_would_break_json_is_refused_and_the_stored_run_replays_to_the_same_outputs() {
+    let edit = |id: &str, old: &str, new: &str| {
+        call(
+            id,
+            "Edit",
+            json!({"file_path": "_camerata/out/problems-1.json", "old_string": old, "new_string": new}),
+        )
+    };
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![
+            call(
+                "w",
+                "Write",
+                json!({"file_path": "_camerata/out/problems-1.json", "content": PROBLEMS}),
+            ),
+            // Breaks the JSON: refused, the file stays as written.
+            edit("bad", "\"places\": []", "\"places\": ["),
+            // Valid: kept.
+            edit("good", "\"n\": 1", "\"n\": 7"),
+        ]),
+        text_reply("done"),
+    ]);
+    let run = run_ok(&agent(&wire), &room(), &limits()).await;
+    let results = tool_results(&wire.bodies()[1], 2);
+    assert!(results[1].1.starts_with("Refused") && results[1].1.contains("would break the JSON"));
+    assert_eq!(results[2].1, "edited _camerata/out/problems-1.json");
+    let amended = "{\"problems\": [{\"n\": 7, \"places\": []}]}";
+    assert_eq!(run.outputs["_camerata/out/problems-1.json"], amended);
+
+    // What a resume replays is the stored run: the outputs are the final text, whatever tools
+    // made them, and the trace shows the Edit as a Write.
+    let stored = serde_json::to_string(&run).expect("serialize");
+    let replayed: AgentRun = serde_json::from_str(&stored).expect("deserialize");
+    assert_eq!(replayed, run);
+    assert_eq!(replayed.outputs["_camerata/out/problems-1.json"], amended);
+    assert_eq!(
+        replayed
+            .trace
+            .iter()
+            .filter(|e| matches!(e, ToolEvent::Write { .. }))
+            .count(),
+        2
     );
 }
 
@@ -787,8 +937,18 @@ async fn a_spend_limit_with_an_unpriced_model_is_refused_before_the_first_call()
 
 // ─── 6. retry, refusal, outage ───────────────────────────────────────────────────────────────
 
+/// The waits the transport asked for during one call.
+fn waits_of(pauses: &Pauses) -> Vec<Duration> {
+    pauses.lock().expect("lock").clone()
+}
+
+fn within_jitter(d: Duration, secs: u64) -> bool {
+    let (lo, hi) = (secs * 700, secs * 1_300);
+    (lo..=hi).contains(&(d.as_millis() as u64))
+}
+
 #[tokio::test]
-async fn a_rate_limit_is_retried_on_the_engines_schedule_and_the_retry_after_wins() {
+async fn a_rate_limit_waits_thirty_seconds_with_jitter_and_the_retry_after_wins() {
     let wire = ScriptedWire::new(vec![
         http(429, "rate_limit_error", "slow down", None),
         http(429, "rate_limit_error", "slow down", Some(7)),
@@ -799,9 +959,17 @@ async fn a_rate_limit_is_retried_on_the_engines_schedule_and_the_retry_after_win
     let run = run_ok(&agent, &room(), &limits()).await;
     assert_eq!(run.stop, AgentStop::Finished);
     assert_eq!(wire.calls(), 3);
-    assert_eq!(
-        *pauses.lock().expect("lock"),
-        vec![Duration::from_secs(2), Duration::from_secs(7)]
+    let waits = waits_of(&pauses);
+    assert_eq!(waits.len(), 2);
+    assert!(
+        within_jitter(waits[0], 30),
+        "no retry-after: 30 s, plus or minus 30 percent, got {:?}",
+        waits[0]
+    );
+    assert!(
+        (7_000..=8_400).contains(&(waits[1].as_millis() as u64)),
+        "the retry-after wins, never shortened, spread up by at most 20 percent: {:?}",
+        waits[1]
     );
     // The same body went each time.
     let bodies = wire.bodies();
@@ -814,27 +982,280 @@ async fn a_rate_limit_is_retried_on_the_engines_schedule_and_the_retry_after_win
     );
 }
 
-#[tokio::test]
-async fn an_overload_waits_longer_and_gives_up_after_its_schedule() {
-    let script = (0..5)
-        .map(|_| http(529, "overloaded_error", "busy", None))
+async fn ten_refusals_then_a_good_reply(status: u16, error_type: &str) {
+    let mut script: Vec<Reply> = (0..10)
+        .map(|_| http(status, error_type, "busy", None))
         .collect();
+    script.push(text_reply("done"));
     let wire = ScriptedWire::new(script);
     let meter = Arc::new(UsageMeter::default());
     let (agent, pauses) = metered(&wire, &meter);
-    let result = agent.run(&room(), "Review.", &limits()).await;
-    // Nothing came back, so nothing was billed, but a request was sent: still Ok with Failed.
-    let run = result.expect("a request was sent, so the run returns Ok");
+    let run = run_ok(&agent, &room(), &limits()).await;
+
+    assert_eq!(
+        run.stop,
+        AgentStop::Finished,
+        "{status}: the piece finishes"
+    );
+    assert_eq!(wire.calls(), 11);
+    let waits = waits_of(&pauses);
+    assert_eq!(waits.len(), 10);
+    assert!(
+        waits.iter().all(|w| within_jitter(*w, 30)),
+        "{status}: {waits:?}"
+    );
+    assert!(
+        waits.iter().any(|w| *w != waits[0]),
+        "{status}: ten waits with jitter are not all the same: {waits:?}"
+    );
+    assert_eq!(run.usage.len(), 1, "waiting bills nothing");
+    let (baseline, _) = spend_after(vec![text_reply("done")]).await;
+    assert!(
+        (meter.snapshot().cost_usd - baseline).abs() < 1e-9,
+        "nothing was spent or booked while waiting"
+    );
+    assert_eq!(meter.health().streak(), 0, "{status}: not a failure");
+}
+
+#[tokio::test]
+async fn ten_rate_limits_in_a_row_are_waited_out_and_the_piece_finishes() {
+    ten_refusals_then_a_good_reply(429, "rate_limit_error").await;
+}
+
+#[tokio::test]
+async fn ten_overloads_in_a_row_are_waited_out_and_the_piece_finishes() {
+    ten_refusals_then_a_good_reply(529, "overloaded_error").await;
+}
+
+#[tokio::test]
+async fn a_stop_raised_during_a_wait_ends_it_with_no_further_request() {
+    let wire = ScriptedWire::new(vec![
+        http(429, "rate_limit_error", "slow down", None),
+        text_reply("never sent"),
+    ]);
+    let meter = Arc::new(UsageMeter::default());
+    let raised = Arc::clone(&meter);
+    let pause: PauseFn = Arc::new(move |_| {
+        // A credit stop arrives while the call waits.
+        raised.health().note_failure(
+            camerata_llm::failure::FailureClass::AuthOrBilling,
+            "credit balance",
+        );
+        Box::pin(async {})
+    });
+    let dyn_wire: Arc<dyn FinderWire> = wire.clone();
+    let agent = ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
+        .with_wire(dyn_wire)
+        .with_pause(pause)
+        .with_meter(Arc::clone(&meter));
+    let run = run_ok(&agent, &room(), &limits()).await;
+
+    assert_eq!(
+        wire.calls(),
+        1,
+        "the request is not sent again after the stop"
+    );
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if why.starts_with("the run stopped because")),
+        "a stop ends the wait as a stop between turns does, got {:?}",
+        run.stop
+    );
+    assert!(run.usage.is_empty());
+}
+
+#[tokio::test]
+async fn waiting_out_a_rate_limit_stops_at_the_deadline_and_fails_as_before() {
+    // retry-after of 300 s (the most honoured), spread up by at most 20 percent: five waits
+    // always fit in the 30 minutes and a seventh request is never needed.
+    let wire = ScriptedWire::new(
+        (0..8)
+            .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
+            .collect(),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if why.contains("slow")),
+        "got {:?}",
+        run.stop
+    );
+    let waits = waits_of(&pauses);
+    assert!((5..=6).contains(&waits.len()), "{waits:?}");
+    assert!(
+        waits.iter().all(|w| (300..=360).contains(&w.as_secs())),
+        "{waits:?}"
+    );
+    assert!(waits.iter().sum::<Duration>() <= Duration::from_secs(30 * 60));
+    assert_eq!(wire.calls(), waits.len() + 1);
+    assert!(run.usage.is_empty());
+    assert_eq!(
+        meter.health().streak(),
+        0,
+        "a rate limit is not a transport streak"
+    );
+}
+
+#[tokio::test]
+async fn a_retry_after_is_never_shortened_and_the_waits_are_spread_upward() {
+    let mut script: Vec<Reply> = (0..10)
+        .map(|_| http(429, "rate_limit_error", "slow", Some(100)))
+        .collect();
+    script.push(text_reply("done"));
+    let wire = ScriptedWire::new(script);
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(run.stop, AgentStop::Finished);
+    let waits = waits_of(&pauses);
+    assert_eq!(waits.len(), 10);
+    assert!(
+        waits
+            .iter()
+            .all(|w| (100_000..=120_000).contains(&(w.as_millis() as u64))),
+        "never under what the provider asked, at most 20 percent over: {waits:?}"
+    );
+    assert!(waits.iter().any(|w| *w != waits[0]), "{waits:?}");
+}
+
+#[tokio::test]
+async fn a_rate_limit_that_never_clears_stops_the_run_so_no_next_piece_starts() {
+    // Every answer is a 429 with the longest retry-after: the call waits out its deadline.
+    let wire = ScriptedWire::new(
+        (0..8)
+            .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
+            .collect(),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    assert!(!meter.outage_stopped());
+    let run = run_ok(&agent, &room(), &limits()).await;
+
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+    assert!(
+        meter.outage_stopped(),
+        "the deadline stops the run, as an outage does"
+    );
+    let trigger = meter.health().trigger().expect("a trigger is recorded");
+    assert_eq!(
+        trigger.class,
+        camerata_llm::failure::FailureClass::RateLimited
+    );
+    assert!(trigger.detail.contains("slow"), "{}", trigger.detail);
+
+    // The next piece does not start: no request goes out for it.
+    let sent = wire.calls();
+    let waits = waits_of(&pauses).len();
+    let next = agent
+        .run(&room(), "Review the next piece.", &limits())
+        .await;
+    assert!(next.is_err(), "a stopped run starts no piece");
+    assert_eq!(wire.calls(), sent);
+    assert_eq!(waits_of(&pauses).len(), waits, "and waits for nothing");
+
+    // Nothing was booked twice or at all: no turn was answered.
+    assert!(run.usage.is_empty());
+    assert!(meter.snapshot().cost_usd.abs() < 1e-12);
+}
+
+/// A pause that lets the other tasks of the test run (a real wait would), then returns.
+fn yielding_pause() -> PauseFn {
+    Arc::new(|_| Box::pin(tokio::task::yield_now()))
+}
+
+#[tokio::test]
+async fn one_piece_refused_forever_fails_alone_while_another_pieces_calls_succeed() {
+    let refused = ScriptedWire::new(
+        (0..8)
+            .map(|_| http(429, "rate_limit_error", "too big for the limit", Some(300)))
+            .collect(),
+    );
+    let served = ScriptedWire::new(vec![text_reply("done")]);
+    let meter = Arc::new(UsageMeter::default());
+    let make = |wire: &Arc<ScriptedWire>| {
+        let dyn_wire: Arc<dyn FinderWire> = wire.clone();
+        ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
+            .with_wire(dyn_wire)
+            .with_pause(yielding_pause())
+            .with_meter(Arc::clone(&meter))
+    };
+    let (starved, other) = (make(&refused), make(&served));
+    let (room_a, room_b, lim) = (room(), room(), limits());
+    let (a, b) = tokio::join!(
+        starved.run(&room_a, "Review the big piece.", &lim),
+        other.run(&room_b, "Review the small piece.", &lim),
+    );
+    let (a, b) = (a.expect("sent"), b.expect("sent"));
+
+    assert_eq!(b.stop, AgentStop::Finished, "the other piece is served");
+    assert!(
+        matches!(&a.stop, AgentStop::Failed(why) if why.contains("too big")),
+        "the starved piece fails alone: {:?}",
+        a.stop
+    );
+    assert!(
+        !meter.outage_stopped(),
+        "a run whose other calls succeed does not stop"
+    );
+    assert!(meter.health().trigger().is_none());
+    // The next piece still starts.
+    let next = ScriptedWire::new(vec![text_reply("done")]);
+    let again = make(&next)
+        .run(&room(), "Review the next piece.", &limits())
+        .await;
+    assert_eq!(again.expect("starts").stop, AgentStop::Finished);
+}
+
+#[tokio::test]
+async fn a_success_that_arrives_during_the_wait_prevents_the_stop() {
+    let wire = ScriptedWire::new(
+        (0..8)
+            .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
+            .collect(),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let seen = Arc::clone(&meter);
+    let waits = Arc::new(Mutex::new(0usize));
+    let pause: PauseFn = Arc::new(move |_| {
+        let mut n = waits.lock().expect("lock");
+        *n += 1;
+        if *n == 3 {
+            // A call of some other piece succeeds in the middle of this wait.
+            seen.health().note_success();
+        }
+        Box::pin(async {})
+    });
+    let dyn_wire: Arc<dyn FinderWire> = wire.clone();
+    let agent = ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
+        .with_wire(dyn_wire)
+        .with_pause(pause)
+        .with_meter(Arc::clone(&meter));
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+    assert!(!meter.outage_stopped(), "a success since the call began");
+}
+
+#[tokio::test]
+async fn an_overload_is_waited_out_under_the_same_deadline_then_fails() {
+    let wire = ScriptedWire::new(
+        (0..200)
+            .map(|_| http(529, "overloaded_error", "busy", None))
+            .collect(),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
     assert!(
         matches!(&run.stop, AgentStop::Failed(why) if why.contains("busy")),
         "got {:?}",
         run.stop
     );
-    assert_eq!(wire.calls(), 5);
-    assert_eq!(
-        *pauses.lock().expect("lock"),
-        [5, 20, 60, 120].map(Duration::from_secs).to_vec()
-    );
+    let waits = waits_of(&pauses);
+    let total: Duration = waits.iter().sum();
+    assert!(total <= Duration::from_secs(30 * 60), "{total:?}");
+    // 30 s waits, 21 to 39 s each: between 46 and 86 of them fill 30 minutes.
+    assert!((46..=86).contains(&waits.len()), "{} waits", waits.len());
+    assert_eq!(wire.calls(), waits.len() + 1);
     assert!(run.usage.is_empty());
 }
 
@@ -909,10 +1330,10 @@ async fn failures_and_successes_feed_the_run_health_record() {
     assert_eq!(run.stop, AgentStop::Finished);
     assert_eq!(meter.health().streak(), 0, "a reply clears the streak");
 
-    // A rate limit that outlasts its retries is a pause, not an outage.
+    // A rate limit that outlasts the deadline is a pause, not an outage.
     let wire = ScriptedWire::new(
-        (0..4)
-            .map(|_| http(429, "rate_limit_error", "slow", None))
+        (0..7)
+            .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
             .collect(),
     );
     let (agent, _) = metered(&wire, &meter);
@@ -1332,6 +1753,120 @@ impl FinderWire for LocalHttpWire {
     }
 }
 
+/// A local listener that reads each request whole and answers a valid reply after `delay`.
+async fn slow_provider(delay: Duration) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!(
+        "http://{}/v1/messages",
+        listener.local_addr().expect("addr")
+    );
+    let task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut seen = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // The head, then as many body bytes as its content-length says.
+                loop {
+                    let Ok(n) = socket.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    seen.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&seen).to_string();
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let wanted = text[..head_end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if seen.len() >= head_end + 4 + wanted {
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                let body = json!({
+                    "id": "msg_slow", "type": "message", "role": "assistant", "model": MODEL,
+                    "content": [{"type": "text", "text": "slow but whole"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1}
+                })
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    (url, task)
+}
+
+#[tokio::test]
+async fn the_finders_own_client_reads_a_reply_that_comes_after_the_old_limit() {
+    use crate::api_agent_driver::{
+        build_finder_http_client, post_anthropic_body_to, FINDER_CONNECT_TIMEOUT,
+        FINDER_TOTAL_TIMEOUT,
+    };
+    // The real limits: 30 minutes in all, longer than the 600 seconds the driver's client has.
+    assert_eq!(FINDER_TOTAL_TIMEOUT, Duration::from_secs(30 * 60));
+    assert_eq!(FINDER_CONNECT_TIMEOUT, Duration::from_secs(10));
+
+    // Test scale: the "old limit" is 400 ms and the provider answers after 1.2 s.
+    let (url, task) = slow_provider(Duration::from_millis(1_200)).await;
+    let body = json!({"model": MODEL});
+    let old = reqwest::Client::builder()
+        .timeout(Duration::from_millis(400))
+        .build()
+        .expect("client");
+    let refused = post_anthropic_body_to(&old, &url, "sk-test-not-a-real-key", &body, false).await;
+    assert!(
+        matches!(&refused, Err(AnthropicPostError::Network(e)) if e.to_ascii_lowercase().contains("timed out")),
+        "the reply is later than the old limit, so the old client gives up: {refused:?}"
+    );
+
+    let client = build_finder_http_client(Duration::from_secs(20), Duration::from_secs(2));
+    let reply = post_anthropic_body_to(&client, &url, "sk-test-not-a-real-key", &body, false)
+        .await
+        .expect("the finder's client waits for the reply");
+    task.abort();
+    assert!(reply.text.contains("slow but whole"), "{}", reply.text);
+}
+
+#[test]
+fn only_the_finder_uses_the_thirty_minute_client_and_the_agent_driver_keeps_its_own() {
+    let source = include_str!("../../api_agent_driver.rs");
+    let body_of = |start: &str| -> String {
+        source
+            .split(start)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{start} exists"))
+            .split("\n}\n")
+            .next()
+            .expect("its body")
+            .to_string()
+    };
+    let finder = body_of("pub(crate) async fn post_anthropic_body(");
+    assert!(finder.contains("finder_http_client()"), "{finder}");
+    assert!(!finder.contains("agent_http_client()"), "{finder}");
+    let driver = body_of("async fn call_anthropic_with_tools(");
+    assert!(driver.contains("agent_http_client()"), "{driver}");
+    assert!(!driver.contains("finder_http_client()"), "{driver}");
+    assert!(
+        !driver.contains("post_anthropic_body("),
+        "the agent driver must not go through the finder's post function: {driver}"
+    );
+}
+
 #[tokio::test]
 async fn a_provider_that_never_answers_ends_the_piece_failed_with_the_usage_kept() {
     // A local listener that accepts connections and never writes a byte.
@@ -1695,6 +2230,84 @@ async fn the_checklist_arrives_unframed_and_every_client_file_stays_framed() {
         "a client file cannot occupy the reserved path: {:?}",
         results[3].1
     );
+}
+
+/// A checklist as long as a real one: 1,456 lines and about 170,000 characters, with blank lines,
+/// a multi-byte letter and no line number anywhere in it.
+fn long_checklist() -> String {
+    let mut text = String::new();
+    for i in 0..1_456 {
+        if i % 50 == 0 {
+            text.push('\n');
+        } else {
+            text.push_str(&format!(
+                "Directive {i}: keep the handler thin and the caf\u{e9} logic out of it. {}\n",
+                "rule words ".repeat(9)
+            ));
+        }
+    }
+    text
+}
+
+#[tokio::test]
+async fn the_checklist_is_read_plain_and_whole_in_one_read_and_code_stays_numbered() {
+    let checklist = long_checklist();
+    assert!(checklist.len() > 100_000 && checklist.lines().count() == 1_456);
+    let room = Room::build(&piece(), &repo(), &checklist).room;
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![
+            call("c", "Read", json!({"file_path": "_camerata/checklist.md"})),
+            call("s", "Read", json!({"file_path": "src/a.rs"})),
+        ]),
+        text_reply("done"),
+    ]);
+    let run = run_ok(&agent(&wire), &room, &limits()).await;
+    let bodies = wire.bodies();
+    let nonce = nonce_of(&bodies[0]);
+    let results = tool_results(&bodies[1], 2);
+
+    assert_eq!(
+        results[0].1, checklist,
+        "one Read returns the checklist byte for byte: no numbers, no byte limit, no frame"
+    );
+    assert!(
+        is_one_frame(&results[1].1, &nonce),
+        "client code is still framed: {:?}",
+        results[1].1
+    );
+    assert!(
+        results[1].1.contains("     1\tfn a() {}"),
+        "client code is still numbered: {:?}",
+        results[1].1
+    );
+    assert!(
+        run.trace.contains(&ToolEvent::Read {
+            path: "_camerata/checklist.md".into(),
+            first_line: 1,
+            line_count: 2_000,
+            lines_returned: 1_456,
+        }),
+        "{:?}",
+        run.trace
+    );
+}
+
+#[tokio::test]
+async fn a_checklist_read_with_an_offset_and_a_limit_still_pages() {
+    let checklist = long_checklist();
+    let room = Room::build(&piece(), &repo(), &checklist).room;
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![call(
+            "c",
+            "Read",
+            json!({"file_path": "_camerata/checklist.md", "offset": 3, "limit": 2}),
+        )]),
+        text_reply("done"),
+    ]);
+    let _ = run_ok(&agent(&wire), &room, &limits()).await;
+    let results = tool_results(&wire.bodies()[1], 2);
+    let expected: String = checklist.split_inclusive('\n').skip(2).take(2).collect();
+    assert_eq!(results[0].1, expected);
 }
 
 #[test]
