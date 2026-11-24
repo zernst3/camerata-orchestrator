@@ -579,8 +579,9 @@ pub(super) fn response_of(
     options: &FinderOptions,
     usage: &super::super::TurnUsage,
 ) -> crate::llm::LlmResponse {
-    let input =
-        usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+    // `TurnUsage::input_tokens` already holds the cache reads and writes (every transport
+    // stores it so, as `LlmResponse` does); adding them again counted the cache twice.
+    let input = usage.input_tokens;
     let cost = usage.cost_usd.or_else(|| {
         crate::llm::usage_cost_usd(
             &options.model,

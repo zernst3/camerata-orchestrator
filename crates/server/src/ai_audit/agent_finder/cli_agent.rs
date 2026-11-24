@@ -721,13 +721,16 @@ pub(crate) fn parse_session_in(
                         .or_else(|| record["message"]["id"].as_str())
                         .unwrap_or("")
                         .to_string();
+                    let cache_read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                    let cache_creation = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
                     let turn = TurnUsage {
-                        input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
+                        // Input with its cache part, like the result record above.
+                        input_tokens: u["input_tokens"].as_u64().unwrap_or(0)
+                            + cache_read
+                            + cache_creation,
                         output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-                        cache_read_input_tokens: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
-                        cache_creation_input_tokens: u["cache_creation_input_tokens"]
-                            .as_u64()
-                            .unwrap_or(0),
+                        cache_read_input_tokens: cache_read,
+                        cache_creation_input_tokens: cache_creation,
                         cost_usd: None,
                     };
                     match usage_by_request

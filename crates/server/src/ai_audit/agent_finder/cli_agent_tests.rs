@@ -1171,6 +1171,21 @@ fn a_session_file_request_id_is_read_in_its_own_spelling() {
     assert_eq!(parsed.usage[0].output_tokens, 9);
 }
 
+/// A turn read from the session file holds its input with the cache read and written folded in,
+/// like the turn read from the result record, so the stage row counts the cache once.
+#[test]
+fn a_session_file_turn_counts_its_input_with_the_cache_folded_in() {
+    let rec = json!({"type": "assistant", "requestId": "req_1", "message": {"role": "assistant",
+        "usage": {"input_tokens": 100, "output_tokens": 7, "cache_read_input_tokens": 800,
+                  "cache_creation_input_tokens": 100}, "content": []}})
+    .to_string();
+    let parsed = parse_session(&rec, &[PathBuf::from("/room")], &BTreeMap::new());
+    assert_eq!(parsed.usage.len(), 1, "{:?}", parsed.usage);
+    assert_eq!(parsed.usage[0].input_tokens, 1_000);
+    assert_eq!(parsed.usage[0].cache_read_input_tokens, 800);
+    assert_eq!(parsed.usage[0].cache_creation_input_tokens, 100);
+}
+
 #[tokio::test]
 async fn a_successful_call_to_a_tool_outside_the_set_fails_the_piece() {
     for name in ["Bash", "WebFetch", "Task", "SomeFutureTool", "NotebookEdit"] {

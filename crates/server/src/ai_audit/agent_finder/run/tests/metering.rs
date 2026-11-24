@@ -152,3 +152,53 @@ fn a_piece_stopped_mid_conversation_by_the_run_stop_keeps_its_outage_class() {
         FailureClass::Transport
     );
 }
+
+/// A stored finder record counts its input side with the cache reads and writes folded in (every
+/// transport stores it so). The stage row shows that figure once, not the figure plus the cache
+/// again. The record is a made-up sample: 100 plain, 800 read and 100 written is 1,000 in all.
+#[test]
+fn a_stored_finder_record_reads_back_as_one_row_without_counting_its_cache_twice() {
+    let line = crate::checkpoint::AbsorbedLine {
+        key: "src/a.rs".to_string(),
+        model: "acme-model-1".to_string(),
+        backend: "cli".to_string(),
+        cost_usd: Some(0.25),
+        input_tokens: Some(1_000),
+        output_tokens: Some(50),
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        text: String::new(),
+        members: Vec::new(),
+        batch_id: None,
+    };
+    let usage = super::super::line_usage(&line);
+    let meter = UsageMeter::default();
+    meter.record_stage(
+        crate::stage_telemetry::Stage::Finder,
+        &super::super::piece::response_of(&options(), &usage),
+    );
+    let telemetry = meter.stage_telemetry(0);
+    let row = telemetry
+        .stages
+        .iter()
+        .find(|s| s.stage == crate::stage_telemetry::Stage::Finder)
+        .expect("a finder row");
+    assert_eq!(row.usage.input_tokens, 1_000);
+    assert_eq!(row.usage.cache_read_input_tokens, 800);
+    assert_eq!(row.usage.cache_creation_input_tokens, 100);
+    assert!((row.usage.cost_usd - 0.25).abs() < 1e-9);
+}
+
+/// The meter's input figure for a turn is the turn's own input, which already holds its cache.
+#[test]
+fn a_turns_meter_input_is_its_own_input_figure() {
+    let usage = super::super::super::TurnUsage {
+        input_tokens: 1_000,
+        output_tokens: 0,
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        cost_usd: None,
+    };
+    let resp = super::super::piece::response_of(&options(), &usage);
+    assert_eq!(resp.input_tokens, Some(1_000));
+}
