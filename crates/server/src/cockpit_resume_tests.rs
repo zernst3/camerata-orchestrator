@@ -1824,7 +1824,7 @@ async fn a_plain_request_scan_shows_its_group_review_row_in_agent_activity() {
 /// returns the refusal in plain words, and "Run what remains" starts no job and makes no model
 /// call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial(process_env, engine_build)]
+#[serial_test::serial(process_env)]
 async fn a_cockpit_inspection_started_on_another_build_cannot_be_continued() {
     if !camerata_test_env::python3_on_path_for("a_cockpit_inspection_started_on_another_build") {
         return;
@@ -1860,7 +1860,7 @@ async fn a_cockpit_inspection_started_on_another_build_cannot_be_continued() {
 /// A saved inspection with no pin (started before builds were recorded) and one whose rule
 /// library changed are both refused at the start of the resume, with no model call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial(process_env, engine_build)]
+#[serial_test::serial(process_env)]
 async fn a_cockpit_resume_with_no_pin_or_another_rule_library_is_refused() {
     if !camerata_test_env::python3_on_path_for("a_cockpit_resume_with_no_pin_or_another_rule") {
         return;
@@ -1903,7 +1903,7 @@ async fn a_cockpit_resume_with_no_pin_or_another_rule_library_is_refused() {
 /// uncommitted changes and records it; the same build is refused for a client inspection, before
 /// any model call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial(process_env, engine_build)]
+#[serial_test::serial(process_env)]
 async fn a_client_inspection_does_not_start_on_a_dirty_build_but_an_internal_one_does() {
     if !camerata_test_env::python3_on_path_for("a_client_inspection_does_not_start_on_a_dirty") {
         return;
@@ -1955,7 +1955,7 @@ async fn a_client_inspection_does_not_start_on_a_dirty_build_but_an_internal_one
 /// A cockpit resume keeps the clone judge model the inspection started on, even when the project
 /// now names another (the app always passes its project's pick), and says so on the run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial(process_env, engine_build)]
+#[serial_test::serial(process_env)]
 async fn a_cockpit_resume_keeps_the_clone_judge_the_inspection_started_on() {
     if !camerata_test_env::python3_on_path_for("a_cockpit_resume_keeps_the_clone_judge") {
         return;
@@ -1991,7 +1991,7 @@ async fn a_cockpit_resume_keeps_the_clone_judge_the_inspection_started_on() {
 
 /// The synchronous scan route refuses a client inspection on a dirty build, like the job route.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial(process_env, engine_build)]
+#[serial_test::serial(process_env)]
 async fn the_synchronous_scan_route_refuses_a_client_inspection_on_a_dirty_build() {
     use crate::run_store::engine_pin::{test_build, BuildId};
     struct RestoreBuild;

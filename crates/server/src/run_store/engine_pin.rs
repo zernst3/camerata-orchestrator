@@ -69,7 +69,7 @@ pub mod test_build {
     pub fn get() -> Option<BuildId> {
         OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
-    /// Replace the build for the tests that hold `serial(engine_build)`; `None` restores it.
+    /// Replace the build for the tests that hold `serial(process_env)` (the one shared key); `None` restores it.
     pub fn set(build: Option<BuildId>) {
         *OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = build;
     }
