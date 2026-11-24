@@ -280,6 +280,7 @@ fn expand(
     lines: &HashMap<String, AbsorbedLine>,
     out: &mut Vec<Work>,
     split_parents: &mut Vec<AbsorbedLine>,
+    halves: &mut HashSet<String>,
 ) {
     if let Some(line) = lines.get(&piece.key) {
         if let Ok(stored) = serde_json::from_str::<StoredPiece>(&line.text) {
@@ -292,6 +293,7 @@ fn expand(
             split_parents.push(line.clone());
             let mid = piece.files.len() / 2;
             for (suffix, files) in [("a", &piece.files[..mid]), ("b", &piece.files[mid..])] {
+                halves.insert(format!("{}/{suffix}", piece.key));
                 expand(
                     Piece {
                         key: format!("{}/{suffix}", piece.key),
@@ -301,6 +303,7 @@ fn expand(
                     lines,
                     out,
                     split_parents,
+                    halves,
                 );
             }
         } else {
@@ -313,6 +316,7 @@ fn expand(
             split_parents.push(line.clone());
             let mid = piece.files.len() / 2;
             for (suffix, files) in [("a", &piece.files[..mid]), ("b", &piece.files[mid..])] {
+                halves.insert(format!("{}/{suffix}", piece.key));
                 expand(
                     Piece {
                         key: format!("{}/{suffix}", piece.key),
@@ -322,6 +326,7 @@ fn expand(
                     lines,
                     out,
                     split_parents,
+                    halves,
                 );
             }
             return;
@@ -509,6 +514,9 @@ async fn run_work(shared: &Shared<'_>, index: usize, work: Work) -> PieceReport 
             if report.failures.is_empty() {
                 if let Some(m) = shared.meter {
                     let cost: f64 = report.usage.iter().filter_map(|u| u.cost_usd).sum();
+                    if shared.halves.contains(&piece.key) {
+                        m.half_finished();
+                    }
                     m.piece_finished(Some(cost), report.problems.len());
                 }
                 if let Ok(text) = serde_json::to_string(&StoredPiece {
@@ -747,8 +755,15 @@ pub async fn find_repo(
             .unwrap_or_default();
     let mut works: Vec<Work> = Vec::new();
     let mut split_parents: Vec<AbsorbedLine> = Vec::new();
+    let mut halves: HashSet<String> = HashSet::new();
     for p in planned {
-        expand(p, &stored_lines, &mut works, &mut split_parents);
+        expand(
+            p,
+            &stored_lines,
+            &mut works,
+            &mut split_parents,
+            &mut halves,
+        );
     }
     if let Some(m) = meter {
         for line in &split_parents {
@@ -764,6 +779,13 @@ pub async fn find_repo(
             .filter(|w| !matches!(w, Work::Fresh(_)))
             .count();
         m.begin_pieces(works.len(), held);
+        // The halves still to run (a stored half is held, not left).
+        m.begin_halves(
+            works
+                .iter()
+                .filter(|w| matches!(w, Work::Fresh(p) if halves.contains(&p.key)))
+                .count(),
+        );
     }
     let shared = Shared {
         agent,
@@ -774,6 +796,7 @@ pub async fn find_repo(
         options,
         meter,
         n_pieces: works.len(),
+        halves,
         activity: FINDER_ACTIVITY.try_with(Clone::clone).ok(),
     };
 
@@ -786,6 +809,9 @@ pub async fn find_repo(
         .collect()
         .await;
     reports.sort_by_key(|r| r.index);
+    if let Some(m) = meter {
+        m.end_halves();
+    }
 
     let mut failed: Vec<FailedPass> = Vec::new();
     let mut extras = FinderExtras::default();

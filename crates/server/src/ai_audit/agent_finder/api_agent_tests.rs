@@ -1830,7 +1830,7 @@ async fn the_finders_own_client_reads_a_reply_that_comes_after_the_old_limit() {
         .expect("client");
     let refused = post_anthropic_body_to(&old, &url, "sk-test-not-a-real-key", &body, false).await;
     assert!(
-        matches!(&refused, Err(AnthropicPostError::Network(e)) if e.to_ascii_lowercase().contains("timed out")),
+        matches!(&refused, Err(AnthropicPostError::ReplyTimeout(e)) if e.to_ascii_lowercase().contains("timed out")),
         "the reply is later than the old limit, so the old client gives up: {refused:?}"
     );
 
@@ -2770,4 +2770,125 @@ async fn a_conversation_inside_the_window_is_sent_as_before() {
     let run = run_ok(&agent(&wire), &room(), &limits()).await;
     assert_eq!(run.stop, AgentStop::Finished);
     assert_eq!(wire.calls(), 2);
+}
+
+// ─── the stops a resume answers by halving carry their own prefix ────────────────────────────
+
+async fn one_http_failure(reply: Reply) -> (AgentStop, usize) {
+    let wire = ScriptedWire::new(vec![reply]);
+    let run = run_ok_after_one_turn(&wire).await;
+    (run.stop, wire.calls())
+}
+
+/// A first paid turn, then the failing reply.
+async fn run_ok_after_one_turn(wire: &Arc<ScriptedWire>) -> AgentRun {
+    run_ok(&agent(wire), &room(), &limits()).await
+}
+
+#[tokio::test]
+async fn every_oversize_refusal_of_the_provider_ends_the_piece_with_the_too_large_prefix() {
+    for (status, kind, text) in [
+        (
+            400,
+            "invalid_request_error",
+            "prompt is too long: 250000 tokens > 200000 maximum",
+        ),
+        (
+            400,
+            "invalid_request_error",
+            "input length and `max_tokens` exceed context limit: 190000 + 32000 > 200000, \
+             decrease input length or `max_tokens` and try again",
+        ),
+        (
+            413,
+            "request_too_large",
+            "Request exceeds the maximum allowed number of bytes.",
+        ),
+    ] {
+        let (stop, calls) = one_http_failure(http(status, kind, text, None)).await;
+        assert!(
+            matches!(&stop, AgentStop::Failed(why) if why.starts_with(super::REQUEST_TOO_LARGE_PREFIX)),
+            "{status} {text}: got {stop:?}"
+        );
+        assert_eq!(calls, 1, "the same body is not sent again");
+    }
+}
+
+#[tokio::test]
+async fn another_400_does_not_carry_the_too_large_prefix() {
+    let (stop, _) = one_http_failure(http(
+        400,
+        "invalid_request_error",
+        "The block is bound to a different conversation",
+        None,
+    ))
+    .await;
+    assert!(
+        matches!(&stop, AgentStop::Failed(why) if !why.starts_with(super::REQUEST_TOO_LARGE_PREFIX)),
+        "got {stop:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_time_out_on_every_attempt_ends_with_the_reply_timeout_prefix_and_a_connect_one_does_not(
+) {
+    let reply_timeouts = (0..4)
+        .map(|_| {
+            Err(AnthropicPostError::ReplyTimeout(
+                "operation timed out".into(),
+            ))
+        })
+        .collect();
+    let wire = ScriptedWire::new(reply_timeouts);
+    let run = run_ok(&agent(&wire), &room(), &limits()).await;
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if why.starts_with(super::REPLY_TIMEOUT_PREFIX)),
+        "got {:?}",
+        run.stop
+    );
+    assert_eq!(wire.calls(), 4, "tried, then 3 retries");
+
+    let connect_timeouts = (0..4)
+        .map(|_| {
+            Err(AnthropicPostError::Network(
+                "connect: operation timed out".into(),
+            ))
+        })
+        .collect();
+    let wire = ScriptedWire::new(connect_timeouts);
+    let run = run_ok(&agent(&wire), &room(), &limits()).await;
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if !why.starts_with(super::REPLY_TIMEOUT_PREFIX)
+            && why.contains("timed out")),
+        "got {:?}",
+        run.stop
+    );
+}
+
+#[tokio::test]
+async fn the_output_reserve_counts_against_the_window() {
+    // Five reads of about 100,000 bytes: about 167,000 estimated tokens, under 90 percent of the
+    // 200,000 window (180,000) but over it once the turn's 32,000 output tokens are added.
+    let big: String = (0..2_000)
+        .map(|i| format!("{i:04} {}\n", "x".repeat(43)))
+        .collect();
+    let mut files = repo();
+    files[0].1 = big;
+    let reads: Vec<Value> = (0..5)
+        .map(|i| call(&format!("r{i}"), "Read", json!({"file_path": "src/a.rs"})))
+        .collect();
+    let wire = ScriptedWire::new(vec![tools_reply(reads)]);
+    let wire_dyn: Arc<dyn FinderWire> = wire.clone();
+    let (pause, _) = pause_recorder();
+    let agent = ApiPieceAgent::new(SMALL_WINDOW_MODEL, "sk-test-not-a-real-key")
+        .with_wire(wire_dyn)
+        .with_pause(pause)
+        .with_meter(Arc::new(UsageMeter::default()));
+    let run = run_ok(&agent, &room_of(&files), &limits()).await;
+    assert_eq!(wire.calls(), 1);
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if why.starts_with(super::CONTEXT_FULL_PREFIX)),
+        "got {:?}",
+        run.stop
+    );
 }

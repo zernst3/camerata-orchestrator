@@ -34,6 +34,23 @@ impl UsageMeter {
         st.pieces_done += already_done.min(total);
     }
 
+    /// `halves` of the pieces just announced are halves of a piece cut in two on a resume. They
+    /// are one planned piece's work between them, so the projection counts two as one left.
+    pub fn begin_halves(&self, halves: usize) {
+        self.checkpoint_state().halves_left += halves;
+    }
+
+    /// A half finished (call before [`Self::piece_finished`]).
+    pub fn half_finished(&self) {
+        let mut st = self.checkpoint_state();
+        st.halves_left = st.halves_left.saturating_sub(1);
+    }
+
+    /// The repository's pieces are over: no half is waiting any more.
+    pub fn end_halves(&self) {
+        self.checkpoint_state().halves_left = 0;
+    }
+
     /// One piece finished clean. `cost_usd` is what it cost this attempt (`None` when it was not
     /// paid for here); `problems` is how many problems it found. With a limit set this records
     /// and prints the checkpoint line.
@@ -80,7 +97,9 @@ impl UsageMeter {
         let pieces_left = if later_spent.is_some() {
             planned.saturating_sub(st.pieces_total)
         } else {
-            planned.saturating_sub(st.pieces_done)
+            let left = planned.saturating_sub(st.pieces_done);
+            let halves = st.halves_left.min(left);
+            left - halves + halves.div_ceil(2)
         };
         let projected = projected_total(&ProjectionInput {
             spent_usd: spent,

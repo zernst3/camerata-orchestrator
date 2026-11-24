@@ -35,6 +35,8 @@ pub(super) struct Shared<'a> {
     pub meter: Option<&'a UsageMeter>,
     /// How many pieces (and halves of refused pieces) the repository is reviewed in.
     pub n_pieces: usize,
+    /// The keys of the pieces that are halves of a piece cut in two on a resume.
+    pub halves: HashSet<String>,
     /// Where each model call shows in Agent activity; `None` shows nothing.
     pub activity: Option<super::FinderActivity>,
 }
@@ -688,18 +690,20 @@ pub(super) fn stop_class(stop: &AgentStop) -> FailureClass {
 /// spend-limit or outage stop) never splits: those run whole again.
 pub(super) fn splits_on_resume(stop: &AgentStop) -> bool {
     use super::super::api_agent::{
-        CONTEXT_FULL_PREFIX, CUT_OFF_TWICE_PREFIX, PIECE_CEILING_PREFIX,
+        CONTEXT_FULL_PREFIX, CUT_OFF_TWICE_PREFIX, PIECE_CEILING_PREFIX, REPLY_TIMEOUT_PREFIX,
+        REQUEST_TOO_LARGE_PREFIX,
     };
     match stop {
         AgentStop::TurnLimit(_) => true,
         AgentStop::SpendLimit(why) => why.starts_with(PIECE_CEILING_PREFIX),
-        AgentStop::Failed(why) => {
-            let lower = why.to_ascii_lowercase();
-            why.starts_with(CUT_OFF_TWICE_PREFIX)
-                || why.starts_with(CONTEXT_FULL_PREFIX)
-                || lower.contains("prompt is too long")
-                || lower.contains("timed out")
-        }
+        AgentStop::Failed(why) => [
+            CUT_OFF_TWICE_PREFIX,
+            CONTEXT_FULL_PREFIX,
+            REQUEST_TOO_LARGE_PREFIX,
+            REPLY_TIMEOUT_PREFIX,
+        ]
+        .iter()
+        .any(|p| why.starts_with(p)),
         AgentStop::Finished | AgentStop::Refused(_) => false,
     }
 }

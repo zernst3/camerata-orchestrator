@@ -162,6 +162,9 @@ pub use camerata_api_types::cost_checkpoint::CostCheckpoint;
 pub(crate) struct CheckpointState {
     pub pieces_total: usize,
     pub pieces_done: usize,
+    /// Pieces of this attempt that are halves of a piece an earlier attempt could not finish and
+    /// that are not done yet. Two halves are one planned piece's work, so they count as one left.
+    pub halves_left: usize,
     pub fresh_done: usize,
     pub fresh_cost_usd: f64,
     pub problems_found: usize,

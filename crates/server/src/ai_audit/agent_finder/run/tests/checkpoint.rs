@@ -4,6 +4,10 @@
 
 use std::sync::Mutex;
 
+use super::super::super::api_agent::{
+    CONTEXT_FULL_PREFIX, CUT_OFF_TWICE_PREFIX, PIECE_CEILING_PREFIX, REPLY_TIMEOUT_PREFIX,
+    REQUEST_TOO_LARGE_PREFIX,
+};
 use super::super::FinderExtras;
 use super::*;
 use crate::ai_audit::{FailedPass, UsageMeter};
@@ -426,9 +430,9 @@ async fn a_piece_that_hit_its_turn_limit_runs_as_two_halves_on_the_resume_and_no
 #[tokio::test]
 async fn a_piece_that_reached_its_own_spend_ceiling_is_halved_but_the_runs_limit_is_not_a_reason() {
     let (seen, failed, extras, _) = resume_after(
-        AgentStop::SpendLimit(
-            "the piece's spend ceiling of $4.00 was reached after 9 turns".into(),
-        ),
+        AgentStop::SpendLimit(format!(
+            "{PIECE_CEILING_PREFIX}$4.00 was reached after 9 turns"
+        )),
         true,
     )
     .await;
@@ -440,7 +444,7 @@ async fn a_piece_that_reached_its_own_spend_ceiling_is_halved_but_the_runs_limit
 #[tokio::test]
 async fn a_reply_cut_off_at_the_output_limit_twice_is_halved_on_the_resume() {
     let (seen, failed, extras, _) = resume_after(
-        AgentStop::Failed("the reply was cut off at the output limit of 32000 tokens twice".into()),
+        AgentStop::Failed(format!("{CUT_OFF_TWICE_PREFIX}32000 tokens twice")),
         true,
     )
     .await;
@@ -452,9 +456,9 @@ async fn a_reply_cut_off_at_the_output_limit_twice_is_halved_on_the_resume() {
 #[tokio::test]
 async fn a_prompt_too_long_400_is_halved_on_the_resume() {
     let (seen, failed, extras, _) = resume_after(
-        AgentStop::Failed(
-            "Anthropic API HTTP 400: prompt is too long: 250000 tokens > 200000 maximum".into(),
-        ),
+        AgentStop::Failed(format!(
+            "{REQUEST_TOO_LARGE_PREFIX}Anthropic API HTTP 400: prompt is too long"
+        )),
         true,
     )
     .await;
@@ -466,9 +470,9 @@ async fn a_prompt_too_long_400_is_halved_on_the_resume() {
 #[tokio::test]
 async fn repeated_time_outs_are_halved_on_the_resume() {
     let (seen, failed, extras, _) = resume_after(
-        AgentStop::Failed(
-            "Anthropic API request failed: error sending request: operation timed out".into(),
-        ),
+        AgentStop::Failed(format!(
+            "{REPLY_TIMEOUT_PREFIX}Anthropic API request failed: operation timed out"
+        )),
         true,
     )
     .await;
@@ -481,6 +485,8 @@ async fn repeated_time_outs_are_halved_on_the_resume() {
 async fn a_transient_stop_reruns_the_piece_whole_and_never_splits_it() {
     let transient = [
         AgentStop::Failed("Anthropic API HTTP 429: rate limit exceeded".into()),
+        AgentStop::Failed("Anthropic API request failed: connect: operation timed out".into()),
+        AgentStop::Failed("Anthropic API HTTP 400: some other bad request".into()),
         AgentStop::Failed("Anthropic API HTTP 529: overloaded".into()),
         AgentStop::Failed("Anthropic API request failed: connection reset by peer".into()),
         AgentStop::Failed(
@@ -556,10 +562,64 @@ async fn a_one_file_piece_that_hit_its_turn_limit_cannot_be_halved_and_stays_a_n
 async fn a_piece_stopped_before_a_request_past_the_context_window_is_halved_on_the_resume() {
     let why = format!(
         "{} (about 190000 tokens against a window of 200000): no further request was sent",
-        super::super::super::api_agent::CONTEXT_FULL_PREFIX
+        CONTEXT_FULL_PREFIX
     );
     let (seen, failed, extras, _) = resume_after(AgentStop::Failed(why), true).await;
     assert!(failed.is_empty(), "{failed:?}");
     assert!(seen.contains(&"src/c.rs".to_string()), "{seen:?}");
     assert_halves_cover_the_parent(&extras);
+}
+
+/// Two files, then a third: the first attempt (no limit) finishes part one and stops part two;
+/// the resume runs under a spend limit just above its estimate.
+#[tokio::test]
+async fn a_piece_that_splits_on_the_resume_does_not_pause_the_run_by_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let stopped = ScriptedAgent::new(vec![])
+        .with_stop(AgentStop::TurnLimit("60 turns".into()))
+        .with_usage(usage(0.2));
+    let first = ByPiece::new(vec![
+        ("src/a.rs", part("src/a.rs", 6, 1.0)),
+        ("src/b.rs", stopped),
+        ("joints", quick_joints()),
+    ]);
+    let meter = UsageMeter::default();
+    let (_, _, _, failed, _, _) = run_three(&first, dir.path(), &meter).await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+
+    // The resume: 1.2 is stored (part one 1.0, the stopped parent 0.2). The run planned 2 pieces
+    // at 1.0 each. Part two's halves cost 0.4 each, so the whole run ends at 2.0, under 2.5.
+    let seen: Lines = Lines::default();
+    let mut c = controls(2.5, 1.2, None, &seen);
+    c.checkpoint.plan.as_mut().unwrap().pieces = 2;
+    let meter2 = UsageMeter::with_controls(c.clone());
+    let second = ByPiece::new(vec![
+        ("src/a.rs", part("src/a.rs", 6, 1.0)),
+        ("src/b.rs", part("src/b.rs", 4, 0.4)),
+        ("src/c.rs", part("src/c.rs", 3, 0.4)),
+        ("joints", quick_joints()),
+    ]);
+    let (_, _, _, failed2, _, _) = in_run(
+        dir.path(),
+        find_repo(
+            &second,
+            REPO,
+            &three_files(),
+            &rules(),
+            &corpus(),
+            &c,
+            &two_pieces(),
+            Some(&meter2),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        meter2.checkpoint_stop().is_none(),
+        "the split alone paused the run: {:?}",
+        meter2.checkpoint_stop()
+    );
+    assert!(failed2.is_empty(), "{failed2:?}");
+    let ran = second.seen.lock().unwrap().clone();
+    assert!(ran.contains(&"src/c.rs".to_string()), "{ran:?}");
 }
