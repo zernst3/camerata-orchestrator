@@ -1716,7 +1716,7 @@ pub(crate) async fn post_anthropic_body(
     use_caching: bool,
 ) -> Result<LlmResponse, AnthropicPostError> {
     post_anthropic_body_to(
-        agent_http_client(),
+        finder_http_client(),
         "https://api.anthropic.com/v1/messages",
         api_key,
         body,
@@ -3777,6 +3777,35 @@ fn agent_http_client() -> &'static reqwest::Client {
             .build()
             .expect("failed to build the agent HTTP client")
     })
+}
+
+/// The most one finder call may take in all, from the request to the last byte of the reply. A
+/// turn with long thinking and a large file can take close to ten minutes without streaming.
+pub(crate) const FINDER_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// How long the finder waits to connect (the same as the agent driver's client).
+pub(crate) const FINDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often the finder's connections send a keep-alive probe, so a long silent wait for the
+/// reply is not dropped by a middlebox.
+const FINDER_TCP_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A client for the finder's calls with the given limits (a test passes short ones) and TCP
+/// keep-alive.
+pub(crate) fn build_finder_http_client(
+    total: std::time::Duration,
+    connect: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(total)
+        .connect_timeout(connect)
+        .tcp_keepalive(FINDER_TCP_KEEPALIVE)
+        .build()
+        .expect("failed to build the finder HTTP client")
+}
+
+/// The finder's own HTTP client ([`FINDER_TOTAL_TIMEOUT`], [`FINDER_CONNECT_TIMEOUT`]).
+fn finder_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| build_finder_http_client(FINDER_TOTAL_TIMEOUT, FINDER_CONNECT_TIMEOUT))
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────

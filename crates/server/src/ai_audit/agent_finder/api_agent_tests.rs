@@ -1593,6 +1593,95 @@ impl FinderWire for LocalHttpWire {
     }
 }
 
+/// A local listener that reads each request whole and answers a valid reply after `delay`.
+async fn slow_provider(delay: Duration) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!(
+        "http://{}/v1/messages",
+        listener.local_addr().expect("addr")
+    );
+    let task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut seen = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // The head, then as many body bytes as its content-length says.
+                loop {
+                    let Ok(n) = socket.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    seen.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&seen).to_string();
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let wanted = text[..head_end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if seen.len() >= head_end + 4 + wanted {
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                let body = json!({
+                    "id": "msg_slow", "type": "message", "role": "assistant", "model": MODEL,
+                    "content": [{"type": "text", "text": "slow but whole"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1}
+                })
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    (url, task)
+}
+
+#[tokio::test]
+async fn the_finders_own_client_reads_a_reply_that_comes_after_the_old_limit() {
+    use crate::api_agent_driver::{
+        build_finder_http_client, post_anthropic_body_to, FINDER_CONNECT_TIMEOUT,
+        FINDER_TOTAL_TIMEOUT,
+    };
+    // The real limits: 30 minutes in all, longer than the 600 seconds the driver's client has.
+    assert_eq!(FINDER_TOTAL_TIMEOUT, Duration::from_secs(30 * 60));
+    assert_eq!(FINDER_CONNECT_TIMEOUT, Duration::from_secs(10));
+
+    // Test scale: the "old limit" is 400 ms and the provider answers after 1.2 s.
+    let (url, task) = slow_provider(Duration::from_millis(1_200)).await;
+    let body = json!({"model": MODEL});
+    let old = reqwest::Client::builder()
+        .timeout(Duration::from_millis(400))
+        .build()
+        .expect("client");
+    let refused = post_anthropic_body_to(&old, &url, "sk-test-not-a-real-key", &body, false).await;
+    assert!(
+        matches!(&refused, Err(AnthropicPostError::Network(e)) if e.to_ascii_lowercase().contains("timed out")),
+        "the reply is later than the old limit, so the old client gives up: {refused:?}"
+    );
+
+    let client = build_finder_http_client(Duration::from_secs(20), Duration::from_secs(2));
+    let reply = post_anthropic_body_to(&client, &url, "sk-test-not-a-real-key", &body, false)
+        .await
+        .expect("the finder's client waits for the reply");
+    task.abort();
+    assert!(reply.text.contains("slow but whole"), "{}", reply.text);
+}
+
 #[tokio::test]
 async fn a_provider_that_never_answers_ends_the_piece_failed_with_the_usage_kept() {
     // A local listener that accepts connections and never writes a byte.
