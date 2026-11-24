@@ -1662,21 +1662,59 @@ async fn a_resume_after_the_prompt_schema_changed_is_refused() {
     );
 }
 
+/// A resume that names another clone judge than the run started on stays on the saved one, and
+/// the pre-flight says so.
 #[tokio::test]
 #[serial_test::serial(process_env)]
-async fn a_resume_naming_another_clone_judge_than_the_run_started_on_is_refused() {
-    let Some(why) = refused_resume_after("a_resume_naming_another_clone_judge", |v| {
+async fn a_resume_naming_another_clone_judge_than_the_run_started_on_keeps_the_saved_one() {
+    if !typst_available("a_resume_naming_another_clone_judge") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("resumed.zip");
+    let down = Outage {
+        group_review: true,
+        ..Outage::default()
+    };
+    let (llm, run_id) = interrupted_run(repo.path(), &export, down).await;
+    patch_saved_run(&run_id, |v| {
         v["pin"]["clone_judge_model"] = serde_json::json!("claude-haiku-5-5");
         v["args"]["clone_judge_model"] = serde_json::json!("claude-sonnet-5-5");
-    })
-    .await
-    else {
-        return;
-    };
+    });
+    let (result, text) = resume_with_preflight(&llm, &run_id, export.clone()).await;
+    result.expect("the resume goes on, on the saved clone judge");
     assert!(
-        why.contains("claude-haiku-5-5") && why.contains("claude-sonnet-5-5"),
-        "{why}"
+        text.contains("The clone check stays on claude-haiku-5-5"),
+        "{text}"
     );
+}
+
+/// The start check, directly: dirty and commit-less builds are refused for a client inspection,
+/// an internal one is not, a clean build is not.
+#[test]
+fn the_client_start_check_refuses_a_dirty_or_commitless_build_and_never_an_internal_run() {
+    use camerata::inspect_cmd::refuse_unfit_build_for_client as check;
+    use camerata_server::run_store::engine_pin::BuildId;
+    let build = |commit: Option<&str>, dirty: bool| BuildId {
+        version: "0".to_string(),
+        commit: commit.map(str::to_string),
+        dirty,
+        prompt_schema: 1,
+        clone_prompt_schema: 1,
+    };
+    let sha = "a".repeat(40);
+    assert!(check(true, &build(Some(&sha), false)).is_ok());
+    let dirty = check(true, &build(Some(&sha), true))
+        .unwrap_err()
+        .to_string();
+    assert!(dirty.contains("changes that are not committed"), "{dirty}");
+    let none = check(true, &build(None, false)).unwrap_err().to_string();
+    assert!(none.contains("does not know which build it is"), "{none}");
+    assert!(check(false, &build(Some(&sha), true)).is_ok());
+    assert!(check(false, &build(None, false)).is_ok());
 }
 
 /// A client inspection started through the production entry is refused at once on a build that

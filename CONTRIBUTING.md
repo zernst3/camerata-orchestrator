@@ -77,3 +77,10 @@ inspection, commit everything, pass the full gate, then run `scripts/keep-scan-b
 builds server, app and CLI there. Start the inspection from that folder and do not pull, edit or
 rebuild in it until the inspection is complete. The script never pushes a tag or a branch and
 never deletes anything; the tag stays as the record after the folder is removed by hand.
+
+Client inspections start only from that kept folder: the build records whether it has uncommitted
+changes, a client inspection will not start on a dirty build, and the build flag is refreshed
+whenever a source file under `crates/` changes. The app uses one fixed port, so only one build's
+app can be open at a time, and the running inspection owns it: do not open another build's app
+until the inspection is complete. If the script fails after creating the tag, it says so and
+leaves the tag alone; remove it yourself when you are sure.

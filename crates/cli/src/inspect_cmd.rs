@@ -1146,10 +1146,7 @@ pub async fn run_inspect_pipeline_with(
             .map_err(InspectError::Failed)?;
         group_review_notice = Some(notice);
         // The clone check stays on the model the run started with.
-        if let Some(line) = store
-            .hold_clone_judge_model(&mut controls)
-            .map_err(InspectError::Failed)?
-        {
+        if let Some(line) = store.hold_clone_judge_model(&mut controls) {
             group_review_notice = group_review_notice.map(|n| format!("{n}\n{line}"));
         }
         // An agent finder run finishes its remaining pieces on the finder model it started with.
@@ -2219,6 +2216,20 @@ pub fn api_key_present(store: &dyn camerata_server::credentials::CredentialStore
     camerata_server::credentials::anthropic_api_key(store).is_some()
 }
 
+/// A client inspection is not started on a build with uncommitted changes or no commit, so the
+/// build that starts it can be named exactly. `client_engagement` is false for `--internal`, which
+/// is never refused. Checked at the production starts only (after the key check); a resume goes
+/// through [`resume_inspect`], and the scripted test entries are not refused.
+pub fn refuse_unfit_build_for_client(
+    client_engagement: bool,
+    build: &camerata_server::run_store::engine_pin::BuildId,
+) -> Result<(), InspectError> {
+    match camerata_server::run_store::engine_pin::client_start_refusal(client_engagement, build) {
+        Some(why) => Err(InspectError::Failed(why)),
+        None => Ok(()),
+    }
+}
+
 /// Production entry point: resolves the Anthropic key from the REAL Keychain (the one the app's
 /// Settings writes), with `ANTHROPIC_API_KEY` as the fallback, then runs
 /// [`run_inspect_with_store`].
@@ -2238,16 +2249,10 @@ pub async fn run_inspect_with_store(
 ) -> Result<InspectOutcome, InspectError> {
     let has_api_key = api_key_present(store);
     require_api_key_for_client_inspection(args.backend, has_api_key)?;
-    // A client inspection is not started on a build with uncommitted changes or no commit, so the
-    // build that starts it can be named exactly. Checked at the production start only (after the
-    // key check); a resume goes through `resume_inspect`, and the scripted test entries are not
-    // refused.
-    if let Some(why) = camerata_server::run_store::engine_pin::client_start_refusal(
+    refuse_unfit_build_for_client(
         args.client_engagement,
         &camerata_server::run_store::engine_pin::BuildId::current(),
-    ) {
-        return Err(InspectError::Failed(why));
-    }
+    )?;
     run_inspect_pipeline(args, has_api_key, store).await
 }
 

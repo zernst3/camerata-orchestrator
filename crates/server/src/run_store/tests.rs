@@ -2931,17 +2931,37 @@ fn a_changed_rule_library_or_prompt_schema_refuses_a_resume() {
 
 #[test]
 #[serial_test::serial(process_env)]
-fn the_same_commit_with_the_dirty_flag_resumes_and_says_so() {
-    let (_s, _g, repo, record) = pinned_record();
+fn a_clean_inspection_is_not_continued_on_a_dirty_build_of_the_same_commit() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let dirty = build_with(Some(&"a".repeat(40)), true);
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &dirty, None) else {
+        panic!("a clean run on a dirty build must refuse");
+    };
+    assert!(m.contains("started on a clean build"), "{m}");
+    assert!(m.contains(&"a".repeat(12)), "{m}");
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_dirty_inspection_resumes_on_a_dirty_build_of_the_same_commit_and_says_so() {
+    let (_s, _g, repo, mut record) = pinned_record();
+    record.pin.as_mut().unwrap().build.dirty = true;
     let dirty = build_with(Some(&"a".repeat(40)), true);
     assert_eq!(resume_on(&record, &dirty, None), Ok(()));
     let note = engine_pin::dirty_note(record.pin.as_ref(), &dirty).expect("a note");
     assert!(note.contains("uncommitted changes"), "{note}");
-    assert_eq!(
-        engine_pin::dirty_note(record.pin.as_ref(), &engine_pin::BuildId::current()),
-        None
-    );
+    // A clean saved build gets no note (it is refused on a dirty one instead).
+    let mut clean = record.clone();
+    clean.pin.as_mut().unwrap().build.dirty = false;
+    assert_eq!(engine_pin::dirty_note(clean.pin.as_ref(), &dirty), None);
     // Through the one implementation of resume: the note lands on the run.
+    let mut saved = read_record(&record.run_id).unwrap();
+    saved.pin.as_mut().unwrap().build.dirty = true;
+    std::fs::write(
+        runs_dir().join(&record.run_id).join("run.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
     let pin = engine_pin::EnginePin {
         build: dirty,
         ..record.pin.clone().unwrap()
@@ -2953,6 +2973,20 @@ fn the_same_commit_with_the_dirty_flag_resumes_and_says_so() {
         .notes
         .iter()
         .any(|n| n.contains("uncommitted changes")));
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_saved_run_with_no_commit_says_to_start_again_not_to_open_an_unknown_build() {
+    let (_s, _g, _repo, mut record) = pinned_record();
+    record.pin.as_mut().unwrap().build.commit = None;
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &engine_pin::BuildId::current(), None)
+    else {
+        panic!("a saved run with no commit must refuse");
+    };
+    assert!(m.contains("did not record its commit"), "{m}");
+    assert!(m.contains("Start it again"), "{m}");
+    assert!(!m.contains("(unknown)"), "{m}");
 }
 
 #[test]
@@ -2985,26 +3019,30 @@ fn open_for_resume_refuses_another_build_before_opening_the_run() {
 }
 
 #[test]
-fn a_changed_clone_judge_pick_is_held_to_the_saved_one() {
+fn a_changed_clone_judge_pick_is_put_back_to_the_saved_one_with_a_note() {
     let pin = engine_pin::EnginePin {
         build: engine_pin::BuildId::clean_test_build(),
         corpus_version: String::new(),
         clone_judge_model: "judge-a".to_string(),
     };
     let mut none = crate::cost_cap::RunControls::default();
-    assert!(pin.hold_clone_judge_model(&mut none).unwrap().is_some());
+    assert!(pin.hold_clone_judge_model(&mut none).is_some());
     assert_eq!(none.clone_judge_model.as_deref(), Some("judge-a"));
     let mut same = crate::cost_cap::RunControls {
         clone_judge_model: Some("judge-a".to_string()),
         ..Default::default()
     };
-    assert_eq!(pin.hold_clone_judge_model(&mut same), Ok(None));
+    assert_eq!(pin.hold_clone_judge_model(&mut same), None);
     let mut other = crate::cost_cap::RunControls {
         clone_judge_model: Some("judge-b".to_string()),
         ..Default::default()
     };
-    let err = pin.hold_clone_judge_model(&mut other).unwrap_err();
-    assert!(err.contains("judge-a") && err.contains("judge-b"), "{err}");
+    let note = pin.hold_clone_judge_model(&mut other).expect("a note");
+    assert!(
+        note.contains("judge-a") && note.contains("judge-b"),
+        "{note}"
+    );
+    assert_eq!(other.clone_judge_model.as_deref(), Some("judge-a"));
 }
 
 #[test]

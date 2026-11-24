@@ -1168,11 +1168,10 @@ impl RunStore {
     pub fn hold_clone_judge_model(
         &self,
         controls: &mut crate::cost_cap::RunControls,
-    ) -> Result<Option<String>, String> {
-        match self.record().pin {
-            Some(pin) => pin.hold_clone_judge_model(controls),
-            None => Ok(None),
-        }
+    ) -> Option<String> {
+        self.record()
+            .pin
+            .and_then(|pin| pin.hold_clone_judge_model(controls))
     }
 
     /// [`ModelsRecord::hold_finder`] for this run.

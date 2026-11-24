@@ -6,8 +6,10 @@
 //! A release pipeline can set `CAMERATA_GIT_COMMIT` itself; that value wins over `git`.
 //!
 //! Also records `CAMERATA_GIT_DIRTY` (`1` when the tree had uncommitted changes, `0` when clean),
-//! read through `option_env!` and reported on `/api/health` next to the commit. It is a snapshot
-//! taken when this script last ran, shown for information and never compared.
+//! read through `option_env!`, reported on `/api/health` next to the commit and saved with every run
+//! (a client inspection refuses to start on a dirty build, and a clean inspection is not continued
+//! on a dirty one). The script reruns when anything under `crates/` changes (sources and the rule
+//! library), so an edit made after a clean build flips the flag at the next build.
 //!
 //! The app (`crates/ui`) includes this file by path as its own build script, so both binaries
 //! name their build the same way (the app refuses to run against a server from another build).
@@ -17,6 +19,9 @@ use std::process::Command;
 
 pub fn main() {
     println!("cargo:rerun-if-env-changed=CAMERATA_GIT_COMMIT");
+    // The crates folder holds every source file and the rule library (`crates/rules/principles`);
+    // relative to this package's folder, which is `crates/<name>` for the server and the app.
+    println!("cargo:rerun-if-changed=..");
     if let Ok(commit) = std::env::var("CAMERATA_GIT_COMMIT") {
         if is_commit(&commit) {
             println!("cargo:rustc-env=CAMERATA_GIT_COMMIT={commit}");

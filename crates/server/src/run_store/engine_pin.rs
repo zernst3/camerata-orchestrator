@@ -105,36 +105,36 @@ impl EnginePin {
         }
     }
 
-    /// A resume names its clone judge model only when the pick is its own; the run keeps the model
-    /// it started on. An explicit pick that differs is refused. Returns a note when the saved
-    /// model is put back.
+    /// A resume keeps the clone judge model the inspection started on, whatever the project or the
+    /// command line names now (the stored clone verdicts came from it, and a mid-inspection
+    /// settings change must not strand the run). Returns a note when the pick had to be put back.
     pub fn hold_clone_judge_model(
         &self,
         controls: &mut crate::cost_cap::RunControls,
-    ) -> Result<Option<String>, String> {
+    ) -> Option<String> {
         let saved = self.clone_judge_model.trim();
         if saved.is_empty() {
-            return Ok(None);
+            return None;
         }
-        let explicit = controls
+        let asked = controls
             .clone_judge_model
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty());
-        match explicit {
-            Some(pick) if pick != saved => Err(format!(
-                "this inspection's clone check runs on {saved}, and this resume asks for {pick}. \
-                 The stored clone verdicts came from {saved}, so resume it with the same model, or \
-                 start the inspection again"
-            )),
-            Some(_) => Ok(None),
-            None => {
-                controls.clone_judge_model = Some(saved.to_string());
-                Ok(Some(format!(
-                    "The clone check stays on {saved}, the model this inspection started with."
-                )))
-            }
+        if asked == Some(saved) {
+            return None;
         }
+        let was = asked.map(str::to_string);
+        controls.clone_judge_model = Some(saved.to_string());
+        Some(match was {
+            Some(pick) => format!(
+                "The clone check stays on {saved}, the model this inspection started with \
+                 (not {pick})."
+            ),
+            None => {
+                format!("The clone check stays on {saved}, the model this inspection started with.")
+            }
+        })
     }
 }
 
@@ -161,6 +161,13 @@ pub fn check_pin(
             saved_short.as_deref().unwrap_or("(unknown)")
         ));
     };
+    if saved.build.commit.is_none() {
+        return Err(
+            "This inspection was started on a build that did not record its commit, so it \
+             cannot be continued. Start it again."
+                .to_string(),
+        );
+    }
     if saved.build.commit.as_ref() != Some(now_commit) {
         return Err(format!(
             "This inspection was started on build {} and cannot be continued on this build ({}). \
@@ -169,6 +176,14 @@ pub fn check_pin(
             saved_short.as_deref().unwrap_or("(unknown)"),
             short(now_commit),
             saved_short.as_deref().unwrap_or("(unknown)"),
+        ));
+    }
+    if !saved.build.dirty && now.dirty {
+        return Err(format!(
+            "This inspection was started on a clean build and this copy has changes that are \
+             not committed, so it cannot be continued here. Open build {} to run what remains, \
+             or start the inspection again.",
+            saved_short.as_deref().unwrap_or("(unknown)")
         ));
     }
     if saved.build.prompt_schema != now.prompt_schema
@@ -193,10 +208,11 @@ pub fn check_pin(
     Ok(())
 }
 
-/// The note for a resume on the same commit when either side carries uncommitted changes.
+/// The note for a resume on the same commit when the saved build carried uncommitted changes (a
+/// clean saved build is never continued on a dirty one, see [`check_pin`]).
 pub fn dirty_note(saved: Option<&EnginePin>, now: &BuildId) -> Option<String> {
     let saved = saved?;
-    (saved.build.commit == now.commit && (saved.build.dirty || now.dirty))
+    (saved.build.commit == now.commit && saved.build.dirty && now.dirty)
         .then(|| "Continued on a build with uncommitted changes.".to_string())
 }
 

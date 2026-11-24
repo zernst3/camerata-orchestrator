@@ -2413,6 +2413,16 @@ async fn onboard_audit(
     ) {
         return Json(client_lock_blocked_report(&repos, why));
     }
+    // A client inspection starts only on a build that can be named exactly (a commit, no
+    // uncommitted changes); the lock above has already refused a scan with no project.
+    if let Some(why) = state.projects.active().and_then(|p| {
+        crate::run_store::engine_pin::client_start_refusal(
+            p.client_engagement,
+            &crate::run_store::engine_pin::BuildId::current(),
+        )
+    }) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // Local-first: the audit reads the repos' local working trees, not GitHub.
     let LocalSources {
         sources,
@@ -3178,17 +3188,10 @@ pub(crate) async fn start_audit_job(
                         if let Some(notice) = store.hold_finder(&mut run_controls) {
                             store.add_note(&notice);
                         }
-                        // The clone judge stays on the model the run started with.
-                        match store.hold_clone_judge_model(&mut run_controls) {
-                            Ok(Some(notice)) => {
-                                store.add_note(&notice);
-                            }
-                            Ok(None) => {}
-                            Err(why) => {
-                                store.discard_segment();
-                                body_jobs.fail(&body_jid, why);
-                                return;
-                            }
+                        // The clone judge stays on the model the run started with, whatever the
+                        // project's setting is now.
+                        if let Some(notice) = store.hold_clone_judge_model(&mut run_controls) {
+                            store.add_note(&notice);
                         }
                         // The group reviewer stays on the model the run started with.
                         // A project setting that is only the built-in default is no pick of

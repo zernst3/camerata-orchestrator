@@ -266,6 +266,14 @@ pub async fn run_repeatability(args: RepeatabilityArgs) -> Result<RepeatabilityO
     let has_api_key = crate::inspect_cmd::api_key_present(&store);
     crate::inspect_cmd::require_api_key_for_client_inspection(args.backend, has_api_key)
         .map_err(|e| e.to_string())?;
+    // The same start rule as `camerata inspect`, at the production entry only (the scripted test
+    // entry below is not refused): a client run needs a build with a commit and no
+    // uncommitted changes.
+    crate::inspect_cmd::refuse_unfit_build_for_client(
+        args.client_engagement,
+        &camerata_server::run_store::engine_pin::BuildId::current(),
+    )
+    .map_err(|e| e.to_string())?;
     run_repeatability_with(
         args,
         has_api_key,

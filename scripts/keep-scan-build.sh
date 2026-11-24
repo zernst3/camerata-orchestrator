@@ -62,11 +62,27 @@ if [ "$dry" = 1 ]; then
     exit 0
 fi
 
+build_id="${commit:0:12}"
+tag_left_behind() {
+    echo "The tag $tag was created and is left in place; this script never deletes it." >&2
+    echo "To try again under the same name, remove the tag yourself (git tag -d $tag) and any" >&2
+    echo "half-made folder $dest, or pick another name." >&2
+}
 git -C "$top" tag "$tag" "$commit"
-git -C "$top" worktree add -q --detach "$dest" "$tag"
-if [ "$build" = 1 ]; then
-    (cd "$dest" && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}" cargo build --release --locked -p camerata-server -p camerata-ui -p camerata)
+if ! git -C "$top" worktree add -q --detach "$dest" "$tag"; then
+    echo "Could not add the worktree at $dest." >&2
+    tag_left_behind
+    exit 1
 fi
+if [ "$build" = 1 ]; then
+    if ! (cd "$dest" && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}" cargo build --release --locked -p camerata-server -p camerata-ui -p camerata); then
+        echo "The build failed in $dest." >&2
+        tag_left_behind
+        exit 1
+    fi
+fi
+echo "Kept build: $build_id (the id a refusal names when another build is opened)."
 echo "Start the inspection from this folder: $dest"
+echo "To find it again later: git worktree list | grep $build_id"
 echo "Do not pull, edit or rebuild there until the inspection is complete."
 echo "The tag $tag is local. Push it yourself only if you decide to; this script never does."
