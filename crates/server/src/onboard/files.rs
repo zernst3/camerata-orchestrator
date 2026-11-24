@@ -87,10 +87,11 @@ pub fn generated_unsearched_label() -> String {
     camerata_api_types::audit::GENERATED_UNSEARCHED_LABEL.to_string()
 }
 
-/// The reason a symbolic link is not read, as Coverage states it. The file or folder it points to
-/// is not read through it; if that target is inside the repository it is read under its own name.
+/// The reason a symbolic link is not read, as Coverage states it. What it points to (a file, a
+/// folder, or nothing) is not read through it; a target inside the repository is read under its
+/// own name.
 pub fn symlink_label() -> String {
-    "a symbolic link; the file it points to is not read through it".to_string()
+    "a symbolic link; what it points to is not read through it".to_string()
 }
 
 /// Files larger than this are not read for the inspection. An admitted text file over it (and not
@@ -159,12 +160,37 @@ pub enum SecretRead {
     NotText,
 }
 
+/// Whether `full` is a regular file whose real path is `root` joined with its own relative path:
+/// not a symbolic link, and not under a folder that is one (a link inside the repository or out
+/// of it). Every reader that opens a repository file by path asks this first. A missing file, or a
+/// path not under `root`, is not one.
+pub(crate) fn is_regular_file_inside(root: &std::path::Path, full: &std::path::Path) -> bool {
+    let Ok(rel) = full.strip_prefix(root) else {
+        return false;
+    };
+    let Ok(meta) = std::fs::symlink_metadata(full) else {
+        return false;
+    };
+    if !meta.file_type().is_file() {
+        return false;
+    }
+    match (std::fs::canonicalize(full), std::fs::canonicalize(root)) {
+        (Ok(real), Ok(real_root)) => real == real_root.join(rel),
+        _ => false,
+    }
+}
+
 /// Read `rel` under `root` for the secret checks only. At most [`MAX_SECRET_SCAN_BYTES`] + 1 bytes
 /// are read, so a file that grew after the walk cannot be pulled whole into memory. The caller
 /// holds one file at a time.
 pub fn read_for_secret_search(root: &std::path::Path, rel: &str) -> SecretRead {
     use std::io::Read;
-    let Ok(file) = std::fs::File::open(root.join(rel)) else {
+    let full = root.join(rel);
+    // Never through a link: it may point outside the repository.
+    if !is_regular_file_inside(root, &full) {
+        return SecretRead::NotText;
+    }
+    let Ok(file) = std::fs::File::open(&full) else {
         return SecretRead::NotText;
     };
     let mut bytes = Vec::new();
@@ -1448,7 +1474,13 @@ fn read_local_repo_files_gitignore(
                 // be a folder, a file outside the repository, or nothing. `symlink_metadata` does
                 // not follow it.
                 let meta = std::fs::symlink_metadata(&full).ok();
-                if meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
+                // A link itself, or a file whose folder is now a link (a dirty tree): neither is
+                // read, because the real path leaves the repository or lands on another file.
+                let linked = meta.as_ref().is_some_and(|m| {
+                    m.file_type().is_symlink()
+                        || (m.file_type().is_file() && !is_regular_file_inside(root, &full))
+                });
+                if linked {
                     seen.insert(rel.clone());
                     sink.symlink(rel);
                     continue;

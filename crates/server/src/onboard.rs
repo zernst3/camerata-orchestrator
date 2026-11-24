@@ -8491,8 +8491,81 @@ mod tests {
         assert_eq!(list.totals().symlink, 1);
         assert_eq!(
             crate::scan_ledger::SkipReason::Symlink.label(),
-            "a symbolic link; the file it points to is not read through it"
+            "a symbolic link; what it points to is not read through it"
         );
+    }
+
+    /// A tracked file whose folder is now a link (a dirty tree) is read through neither a link to
+    /// a folder outside the repository nor one inside it: each is listed as a symbolic link.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_file_under_a_folder_swapped_for_a_link_is_not_read_through_it() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("a.rs"), "fn leaked_outside() {}\n").unwrap();
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("dirout")).unwrap();
+        std::fs::create_dir_all(root.join("dirin")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        git_init(&root);
+        std::fs::write(root.join("dirout/a.rs"), "fn first() {}\n").unwrap();
+        std::fs::write(root.join("dirin/b.rs"), "fn second() {}\n").unwrap();
+        std::fs::write(root.join("lib/b.rs"), "fn lib_b() {}\n").unwrap();
+        git_add(&root, &["dirout/a.rs", "dirin/b.rs", "lib/b.rs"]);
+        // The tree is now dirty: both tracked folders became links.
+        std::fs::remove_dir_all(root.join("dirout")).unwrap();
+        std::fs::remove_dir_all(root.join("dirin")).unwrap();
+        symlink(&outside, root.join("dirout")).unwrap();
+        symlink(root.join("lib"), root.join("dirin")).unwrap();
+
+        let extracted =
+            read_local_repo_files(&root, &crate::onboard::scope::RepoScope::none()).expect("scan");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["lib/b.rs"],
+            "only the real file is read, under its own name"
+        );
+        assert!(extracted
+            .files
+            .iter()
+            .all(|(_, c)| !c.contains("leaked_outside")));
+        for listed in ["dirout/a.rs", "dirin/b.rs"] {
+            assert!(
+                extracted.symlinks.iter().any(|p| p == listed),
+                "{listed} must be listed: {:?}",
+                extracted.symlinks
+            );
+        }
+    }
+
+    /// The one check every reader of a repository file uses: a regular file whose real path is
+    /// the repository's path for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_inside_is_told_from_a_link_or_a_file_under_a_linked_folder() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let root = base.path().join("acme-repo");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("src/real.rs"), "x\n").unwrap();
+        std::fs::write(outside.join("o.rs"), "x\n").unwrap();
+        symlink(root.join("src/real.rs"), root.join("src/link.rs")).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+        use files::is_regular_file_inside as inside;
+        assert!(inside(&root, &root.join("src/real.rs")));
+        assert!(!inside(&root, &root.join("src/link.rs")));
+        assert!(!inside(&root, &root.join("linked/o.rs")));
+        assert!(!inside(&root, &root.join("src/missing.rs")));
+        assert!(!inside(&root, &outside.join("o.rs")));
+        assert!(matches!(
+            files::read_for_secret_search(&root, "src/link.rs"),
+            files::SecretRead::NotText
+        ));
     }
 
     #[test]

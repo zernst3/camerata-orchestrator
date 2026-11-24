@@ -361,7 +361,7 @@ fn report_from_walk_with(
             generated_unsearched: Vec::new(),
             not_inspected_type: Vec::new(),
             excluded_never_read: never_read,
-            symlink: Vec::new(),
+            symlink: extracted.symlinks,
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
         },
@@ -427,7 +427,7 @@ fn a_generated_file_is_named_in_coverage_as_scanned_for_secrets_only_and_not_bil
             generated_unsearched: Vec::new(),
             not_inspected_type: Vec::new(),
             excluded_never_read: Vec::new(),
-            symlink: Vec::new(),
+            symlink: extracted.symlinks,
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
         },
@@ -681,6 +681,76 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
         "{all}"
     );
     assert!(all.contains("reached the 2-file limit"), "{all}");
+}
+
+/// Symbolic links are counted in the total, so the sentence names them: its parts add up to the
+/// number it opens with, and a run with links alone reads correctly in every output.
+#[cfg(unix)]
+#[test]
+fn symbolic_links_are_named_in_the_summary_sentence_in_every_output() {
+    // The parts add up to the total, in a mixed case.
+    let mut list = SkippedFileList::default();
+    for n in 0..29 {
+        list.push("acme/app", format!("l/link-{n}.ts"), SkipReason::Symlink);
+    }
+    list.push("acme/app", "a/big.json".to_string(), SkipReason::Oversize);
+    let totals = list.totals();
+    assert_eq!(totals.total(), 30);
+    let sentence = super::coverage_gaps::skipped_summary_sentence(&totals, &[]).unwrap();
+    assert_eq!(
+        sentence,
+        "30 files were not read for the inspection: 1 over the 1 MB file size limit, 29 symbolic \
+         links (not read through)."
+    );
+    // One link alone is singular.
+    let mut one = SkippedFileList::default();
+    one.push("acme/app", "l/link.ts".to_string(), SkipReason::Symlink);
+    assert_eq!(
+        super::coverage_gaps::skipped_summary_sentence(&one.totals(), &[]).unwrap(),
+        "1 file was not read for the inspection: 1 symbolic link (not read through)."
+    );
+
+    // A tree holding links alone beside real files reaches the PDF data, the JSON and the
+    // workbook with the sentence whole.
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(dir.path(), &[("a.rs", 10), ("b.rs", 10)]);
+    for n in 0..3 {
+        std::os::unix::fs::symlink("a.rs", dir.path().join(format!("link-{n}.rs"))).unwrap();
+    }
+    let extracted = crate::onboard::files::read_local_repo_files(
+        dir.path(),
+        &crate::onboard::scope::RepoScope::none(),
+    )
+    .unwrap();
+    assert_eq!(extracted.symlinks.len(), 3);
+    let report = report_from_walk(extracted);
+    let sealed = report.seal();
+    let json = build_report_json(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    );
+    let sentence = "3 files were not read for the inspection: 3 symbolic links (not read through).";
+    let data = render_data_json(&json).expect("renders");
+    assert!(data.contains(sentence), "{data}");
+    let export = crate::xlsx_export::build_findings_export(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &json,
+        &HashMap::new(),
+    );
+    let value = serde_json::to_value(&export).unwrap();
+    assert_eq!(value["coverage"]["skipped_summary"], sentence);
+    let bytes = crate::xlsx_export::build_workbook(
+        &crate::report_export::ReviewedReport::unreviewed(&sealed, &HashMap::new()),
+        None,
+        &empty_opts(),
+    )
+    .unwrap();
+    let all = crate::release_gate::xlsx_strings(&bytes)
+        .expect("a workbook")
+        .join("\n");
+    assert!(all.contains(sentence), "{all}");
 }
 
 /// Round 1 item 13: "excluded by agreement" reaches the PDF's data, the workbook's Coverage

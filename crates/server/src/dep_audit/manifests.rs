@@ -242,6 +242,10 @@ pub fn unaudited_manifests(repo_dir: &Path, scope: &RepoScope) -> Vec<String> {
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
+            // A link is never followed or read, whatever it is named or points to.
+            if kind.is_symlink() {
+                continue;
+            }
             if kind.is_dir() {
                 if !SKIP_DIRS.contains(&name.as_str()) {
                     stack.push(path);
@@ -441,6 +445,24 @@ mod tests {
         );
         write(dir.path(), "package-lock.json", "{}");
         assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
+    }
+
+    /// A link named like a manifest is never read: its target is not opened through it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_named_like_a_manifest_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "real/package.json", DEPS);
+        std::fs::create_dir_all(dir.path().join("linked")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("real/package.json"),
+            dir.path().join("linked/package.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            unaudited_manifests(dir.path(), &RepoScope::none()),
+            ["real/package.json"]
+        );
     }
 
     #[test]

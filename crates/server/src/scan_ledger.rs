@@ -1117,7 +1117,7 @@ pub struct SkippedTotals {
     /// versions ([`SkipReason::NotInspectedVersionsOnly`]): not billed or searched for secrets.
     #[serde(default)]
     pub not_inspected_versions_only: usize,
-    /// Symbolic links: never followed, so the file or folder one points to is not read through it.
+    /// Symbolic links: never followed, so what one points to is not read through it.
     #[serde(default)]
     pub symlink: usize,
     /// Patterns in Excluded by agreement that match only files never read anyway. Patterns, not
