@@ -121,7 +121,16 @@ fn c_same_d_different(prompt: &str) -> String {
 }
 
 async fn run(report: &mut ScanReport, llm: &Script) {
-    check_possible_duplicates(report, llm, &RunControls::default(), false, false, None, None).await;
+    check_possible_duplicates(
+        report,
+        llm,
+        &RunControls::default(),
+        false,
+        false,
+        None,
+        None,
+    )
+    .await;
 }
 
 fn hinted(report: &ScanReport, path: &str) -> bool {
@@ -271,7 +280,15 @@ async fn a_resume_replays_the_stored_answers_with_no_new_call() {
     let llm = Script::new(c_same_d_different);
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, false, None, None),
+        check_possible_duplicates(
+            &mut first,
+            &llm,
+            &RunControls::default(),
+            false,
+            false,
+            None,
+            None,
+        ),
     )
     .await;
     assert_eq!(llm.calls(), 2);
@@ -288,7 +305,8 @@ async fn a_resume_replays_the_stored_answers_with_no_new_call() {
             &mut resumed,
             &again,
             &RunControls::default(),
-            false, false,
+            false,
+            false,
             None,
             None,
         ),
@@ -433,7 +451,16 @@ async fn a_cost_checkpoint_stop_stops_the_check_and_not_the_run() {
     });
     let reasons_with_record = r.incomplete_reasons();
     let llm = Script::new(c_same_d_different);
-    check_possible_duplicates(&mut r, &llm, &RunControls::default(), false, false, None, None).await;
+    check_possible_duplicates(
+        &mut r,
+        &llm,
+        &RunControls::default(),
+        false,
+        false,
+        None,
+        None,
+    )
+    .await;
     assert_eq!(llm.calls(), 0, "a paused run sends nothing");
     let _ = reasons;
     assert_limit_stop_leaves_the_run_whole(&r, failed, &reasons_with_record);
@@ -449,7 +476,15 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
     let llm = Script::new(c_same_d_different);
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, false, None, None),
+        check_possible_duplicates(
+            &mut first,
+            &llm,
+            &RunControls::default(),
+            false,
+            false,
+            None,
+            None,
+        ),
     )
     .await;
     assert_eq!(llm.calls(), 2);
@@ -465,7 +500,15 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
     let none = Script::new(|_| panic!("the same model must not be asked again"));
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut same, &none, &RunControls::default(), false, false, None, None),
+        check_possible_duplicates(
+            &mut same,
+            &none,
+            &RunControls::default(),
+            false,
+            false,
+            None,
+            None,
+        ),
     )
     .await;
     assert_eq!(none.calls(), 0);
@@ -498,7 +541,8 @@ async fn the_check_shows_a_duplicate_check_row_in_agent_activity() {
         &mut r,
         &llm,
         &RunControls::default(),
-        false, false,
+        false,
+        false,
         None,
         Some((&store, "scan-key")),
     )
@@ -587,12 +631,22 @@ impl crate::ai_audit::BatchApi for FakeBatch {
 #[tokio::test(start_paused = true)]
 async fn the_duplicate_check_runs_as_a_batch_in_a_batch_run_and_in_real_time_otherwise() {
     let api = std::sync::Arc::new(FakeBatch::new());
-    let seam = crate::ai_audit::BatchSeam::new(api.clone() as std::sync::Arc<dyn crate::ai_audit::BatchApi>);
+    let seam = crate::ai_audit::BatchSeam::new(
+        api.clone() as std::sync::Arc<dyn crate::ai_audit::BatchApi>
+    );
 
     // A batch run on the API backend: the two calls (one per file) are one batch.
     let mut r = report();
-    check_possible_duplicates(&mut r, &seam, &RunControls::default(), false, true, None, None)
-        .await;
+    check_possible_duplicates(
+        &mut r,
+        &seam,
+        &RunControls::default(),
+        false,
+        true,
+        None,
+        None,
+    )
+    .await;
     assert_eq!(api.items_sent(), 2, "one item per file");
     assert_eq!(api.realtime.calls(), 0, "and nothing in real time");
     assert!(hinted(&r, "src/c.rs"), "the batch answers were applied");
@@ -600,10 +654,20 @@ async fn the_duplicate_check_runs_as_a_batch_in_a_batch_run_and_in_real_time_oth
 
     // Not a batch run: real time, as before.
     let api = std::sync::Arc::new(FakeBatch::new());
-    let seam = crate::ai_audit::BatchSeam::new(api.clone() as std::sync::Arc<dyn crate::ai_audit::BatchApi>);
+    let seam = crate::ai_audit::BatchSeam::new(
+        api.clone() as std::sync::Arc<dyn crate::ai_audit::BatchApi>
+    );
     let mut r = report();
-    check_possible_duplicates(&mut r, &seam, &RunControls::default(), false, false, None, None)
-        .await;
+    check_possible_duplicates(
+        &mut r,
+        &seam,
+        &RunControls::default(),
+        false,
+        false,
+        None,
+        None,
+    )
+    .await;
     assert_eq!(api.items_sent(), 0);
     assert_eq!(api.realtime.calls(), 2);
 }

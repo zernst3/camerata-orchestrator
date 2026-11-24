@@ -115,9 +115,16 @@ fn instance_token() -> String {
 }
 
 /// What a piece's conversation ends with when the run stopped between its turns.
-pub(super) fn run_stopped_text(_meter: &UsageMeter) -> String {
-    "the run stopped after repeated provider failures; no further request was sent".to_string()
+pub(super) fn run_stopped_text(meter: &UsageMeter) -> String {
+    format!(
+        "{RUN_STOPPED_PREFIX}{}; no further request was sent",
+        meter.stop_phrase()
+    )
 }
+
+/// How the text of a piece stopped by the run's own stop begins; the class of the stop is read
+/// from it ([`super::run`]).
+pub(super) const RUN_STOPPED_PREFIX: &str = "the run stopped because ";
 
 /// The API transport.
 pub struct ApiPieceAgent {

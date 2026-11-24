@@ -2009,11 +2009,11 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     let mut empty = ScanReport::gated(&[]);
     empty.gated = false;
     let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
-    assert!(
-        review_scan_report(&mut empty, &llm, &controls, &rules, false, false, None, None, None)
-            .await
-            .is_none()
-    );
+    assert!(review_scan_report(
+        &mut empty, &llm, &controls, &rules, false, false, None, None, None
+    )
+    .await
+    .is_none());
     assert!(llm.calls().is_empty());
 }
 

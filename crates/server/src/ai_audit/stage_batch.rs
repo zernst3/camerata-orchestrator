@@ -1083,32 +1083,36 @@ fn resend_or_fail<Id: Clone + Ord>(
 }
 
 /// Why a part was not sent: the outage stop or the spend limit.
-fn refusal_class(ctx: &StageCtx<'_>) -> (FailureClass, &'static str) {
-    refusal_class_for(ctx.meter.map(UsageMeter::refusal_cause))
+fn refusal_class(ctx: &StageCtx<'_>) -> (FailureClass, String) {
+    refusal_class_for(ctx.meter.map(UsageMeter::refusal_cause), ctx.meter)
 }
 
 /// [`refusal_class`] for a cause already known: the one the refused admission itself carried, read
 /// at the moment of refusal and not afterwards, when the state may have moved on.
 fn refusal_class_for(
     cause: Option<super::usage_meter::RefusalCause>,
-) -> (FailureClass, &'static str) {
+    meter: Option<&UsageMeter>,
+) -> (FailureClass, String) {
     use super::usage_meter::RefusalCause;
     match cause {
         Some(RefusalCause::Outage) => (
             FailureClass::OutageStop,
-            "the run stopped because the model provider could not be reached before this item was sent",
+            format!(
+                "the run stopped because {} before this item was sent",
+                meter.map_or(crate::run_health::STOP_PHRASE_UNREACHABLE, |m| m.stop_phrase())
+            ),
         ),
         Some(RefusalCause::CostUnknown) => (
             FailureClass::SpendLimit,
-            "a call's cost was unknown, so the limit set for this run could not be enforced and this item was not sent",
+            "a call's cost was unknown, so the limit set for this run could not be enforced and this item was not sent".to_string(),
         ),
         Some(RefusalCause::CheckpointStop) => (
             FailureClass::SpendLimit,
-            "the run was paused at a cost checkpoint, so this item was not sent",
+            "the run was paused at a cost checkpoint, so this item was not sent".to_string(),
         ),
         _ => (
             FailureClass::SpendLimit,
-            "the spend limit stopped the run before this item was sent",
+            "the spend limit stopped the run before this item was sent".to_string(),
         ),
     }
 }
@@ -1286,7 +1290,7 @@ async fn run_parallel<S>(
             }
             if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
                 let (class, why) = refusal_class(ctx);
-                book.fail(&work.id, class, why, None);
+                book.fail(&work.id, class, &why, None);
                 if let Some(m) = ctx.meter {
                     m.record_stage_not_run(ctx.repo, admission_name(stage), true);
                 }
@@ -1374,8 +1378,8 @@ async fn run_parallel<S>(
 
         match called {
             Called::Refused(cause) => {
-                let (class, why) = refusal_class_for(Some(cause));
-                book.fail(&work.id, class, why, None);
+                let (class, why) = refusal_class_for(Some(cause), ctx.meter);
+                book.fail(&work.id, class, &why, None);
                 report_progress(ctx, stage, book);
             }
             Called::Done(Ok(resp)) => {
@@ -1524,6 +1528,17 @@ fn settle_rows<S: StageItems>(
                 }
                 if refused {
                     book.fail(&work.id, FailureClass::Content, &error, None);
+                    report_progress(ctx, stage, book);
+                } else if camerata_llm::failure::classify_text(&error).0
+                    == FailureClass::AuthOrBilling
+                {
+                    // The account or the credential was refused: waiting or sending again fixes
+                    // neither. The run stops now (run health), not a round later, and the item
+                    // is failed with its real class, never resent and never labeled transport.
+                    if let Some(m) = ctx.meter {
+                        m.health().note_failure(FailureClass::AuthOrBilling, &error);
+                    }
+                    book.fail(&work.id, FailureClass::AuthOrBilling, &error, None);
                     report_progress(ctx, stage, book);
                 } else if let Some(again) = resend_or_fail(
                     ctx,
@@ -2216,7 +2231,7 @@ where
         if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
             let (class, why) = refusal_class(ctx);
             for w in sub {
-                book.fail(&w.id, class, why, None);
+                book.fail(&w.id, class, &why, None);
             }
             if let Some(m) = ctx.meter {
                 m.record_stage_not_run(ctx.repo, admission_name(stage), true);

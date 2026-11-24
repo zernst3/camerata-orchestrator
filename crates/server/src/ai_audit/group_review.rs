@@ -38,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use camerata_api_types::review::{DisagreementField, EscalationReason, OutlierReason};
 
 use super::stage_batch::{
-    run_stage, ItemReject, StageCtx, StageFeedback, StageItems, StageMode, StageSettings,
+    self, run_stage, ItemReject, StageCtx, StageFeedback, StageItems, StageSettings,
 };
 use super::*;
 use crate::llm::{LlmPort, LlmRequest, LlmResponse};
@@ -1022,6 +1022,13 @@ pub(super) fn member_line(f: &Finding, idx: usize, with_repo: bool) -> String {
     camerata_secrets::redact_str(&line).into_owned()
 }
 
+/// The lines every call of a run opens with: the repository and its shape. The same bytes lead
+/// every chunk request and every rule summary request of the run, so the cached prefix
+/// (the system prompt, then this) is read from the cache by every call after the first.
+fn shared_prefix(ctx: &PromptContext<'_>) -> String {
+    format!("Repository: {}\n{}\n", ctx.repo, ctx.repo_shape)
+}
+
 /// The user prompt for one chunk of a rule group.
 fn chunk_prompt(
     ctx: &PromptContext<'_>,
@@ -1036,7 +1043,7 @@ fn chunk_prompt(
         .collect::<BTreeSet<_>>()
         .len()
         > 1;
-    let mut p = format!("Repository: {}\n{}\n", ctx.repo, ctx.repo_shape);
+    let mut p = shared_prefix(ctx);
     p.push_str(&format!("Rule group: {}\n", work.label));
     p.push_str(&format!("Rule group node: {}\n", work.node_id));
     if let Some((i, n)) = part {
@@ -1109,6 +1116,7 @@ fn chunk_request(
 ) -> LlmRequest {
     with_stage_effort(
         LlmRequest::new(chunk_prompt(ctx, work, findings, chunk, part))
+            .with_cache_breakpoints([shared_prefix(ctx).len()])
             .with_system(ctx.system.clone())
             .with_max_tokens(staged_max_tokens(
                 chunk.len(),
@@ -1833,7 +1841,7 @@ fn summary_prompt(
     chunk_summaries: &[String],
     chunks: &[ChunkReply<'_>],
 ) -> String {
-    let mut p = format!("Repository: {}\n{}\n", ctx.repo, ctx.repo_shape);
+    let mut p = shared_prefix(ctx);
     p.push_str(&format!("Rule group: {}\n", work.label));
     p.push_str(&format!("Rule group node: {}\n", work.node_id));
     p.push_str(&format!(
@@ -1978,11 +1986,15 @@ pub async fn review_groups(
     // the ones it skips (design 6.2). The rule-level summary calls have a checkpoint of their own.
     let chunk_checkpoint = crate::checkpoint::stage_checkpoint("group-review");
     let summary_checkpoint = crate::checkpoint::stage_checkpoint("group-review-summary");
+    // A Message Batch when the run is a batch run on the API backend and the seam carries a
+    // batch API; real time otherwise (the CLI backend has no batches).
+    let (mode, batch_api) =
+        stage_batch::mode_and_api(llm, cfg.batch && !cfg.cli_backend, cfg.max_in_flight);
     let stage_ctx = StageCtx {
         repo: &repo_label,
         model: cfg.model,
         realtime: llm,
-        batch: None,
+        batch: batch_api,
         meter,
         job: cfg.job,
         checkpoint: chunk_checkpoint.as_ref(),
@@ -1992,9 +2004,6 @@ pub async fn review_groups(
             key,
             name: "Group review",
         }),
-    };
-    let mode = StageMode::Parallel {
-        max_in_flight: cfg.max_in_flight.max(1),
     };
     let ran = run_stage(Stage::GroupReview, &mut items, mode, &stage_ctx).await;
     // A lone sub-group that left `members` out holds every index of its part.
@@ -2060,6 +2069,7 @@ pub async fn review_groups(
         }
         let req = with_stage_effort(
             LlmRequest::new(summary_prompt(&ctx, work, &chunk_summaries, &chunk_replies))
+                .with_cache_breakpoints([shared_prefix(&ctx).len()])
                 .with_system(ctx.rule_system.clone())
                 .with_max_tokens(staged_max_tokens(
                     1,

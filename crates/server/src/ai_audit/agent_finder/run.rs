@@ -805,7 +805,10 @@ pub async fn find_repo(
                             repo: repo.to_string(),
                             pass: "agent finder, joints between parts".to_string(),
                             reason: if outage {
-                                "NOT RUN: the run stopped because the model provider could not be reached before the joints between the parts were reviewed. This inspection is incomplete.".to_string()
+                                format!(
+                                    "NOT RUN: the run stopped because {} before the joints between the parts were reviewed. This inspection is incomplete.",
+                                    meter.map_or(crate::run_health::STOP_PHRASE_UNREACHABLE, |m| m.stop_phrase())
+                                )
                             } else {
                                 format!("NOT RUN: {cause} before the joints between the parts were reviewed. This inspection is incomplete.")
                             },

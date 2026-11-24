@@ -532,12 +532,18 @@ async fn send_calls(
     }
 
     let repo = report.repos.join(", ");
+    // A Message Batch in a batch run on the API backend; real time otherwise.
+    let batch_api = if batch && !cli_backend {
+        crate::ai_audit::stage_batch::mode_and_api(llm, true, 1).1
+    } else {
+        None
+    };
     let checkpoint = crate::checkpoint::stage_checkpoint(CHECKPOINT_NAME);
     let ctx = StageCtx {
         repo: &repo,
         model,
         realtime: llm,
-        batch: None,
+        batch: batch_api,
         meter: Some(meter),
         job,
         checkpoint: checkpoint.as_ref(),
@@ -548,7 +554,11 @@ async fn send_calls(
             name: "Duplicate check",
         }),
     };
-    let mode = StageMode::parallel_default(cli_backend);
+    let mode = if batch_api.is_some() {
+        StageMode::Batch
+    } else {
+        StageMode::parallel_default(cli_backend)
+    };
     let ran = run_stage(Stage::DuplicateCheck, &mut items, mode, &ctx).await;
     if !ran.failed.is_empty() || ran.cancelled.is_some() {
         let first = ran

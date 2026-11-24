@@ -322,7 +322,11 @@ async fn group_review_stays_real_time_when_the_run_is_not_a_batch_run() {
     let outcome = run(&mut report, &llm, false, None).await;
     assert_eq!(outcome.rules_reviewed, 2, "{outcome:?}");
     assert_eq!(api.batch_count(), 0, "no batch was submitted");
-    assert_eq!(api.realtime.asked().len(), 2, "both calls went in real time");
+    assert_eq!(
+        api.realtime.asked().len(),
+        2,
+        "both calls went in real time"
+    );
 }
 
 #[tokio::test(start_paused = true)]
