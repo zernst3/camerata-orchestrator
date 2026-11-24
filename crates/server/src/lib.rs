@@ -2413,6 +2413,16 @@ async fn onboard_audit(
     ) {
         return Json(client_lock_blocked_report(&repos, why));
     }
+    // A client inspection starts only on a build that can be named exactly (a commit, no
+    // uncommitted changes); the lock above has already refused a scan with no project.
+    if let Some(why) = state.projects.active().and_then(|p| {
+        crate::run_store::engine_pin::client_start_refusal(
+            p.client_engagement,
+            &crate::run_store::engine_pin::BuildId::current(),
+        )
+    }) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // Local-first: the audit reads the repos' local working trees, not GitHub.
     let LocalSources {
         sources,
@@ -3146,8 +3156,28 @@ pub(crate) async fn start_audit_job(
                 }
             }
             let mut prior = prior;
+            // The build and the rule library this run starts on (or must still be on to resume),
+            // read from the running binary and the rules it loaded.
+            let engine_pin = rs::engine_pin::EnginePin::for_run(corpus.as_ref(), &run_controls);
+            if resume_run.is_none() {
+                let client_engagement = engagement_project
+                    .as_ref()
+                    .is_none_or(|p| p.client_engagement);
+                if let Some(why) =
+                    rs::engine_pin::client_start_refusal(client_engagement, &engine_pin.build)
+                {
+                    body_jobs.fail(&body_jid, why);
+                    return;
+                }
+            }
             let run_store = match &resume_run {
-                Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {
+                Some(id) => match rs::open_for_resume(
+                    id,
+                    &sources,
+                    &ai_scan_key,
+                    &models_record,
+                    &engine_pin,
+                ) {
                     Ok((store, _estimate)) => {
                         // The baseline the run started from, not one an attempt since replaced.
                         prior = store.load_prior_manifest();
@@ -3156,6 +3186,11 @@ pub(crate) async fn start_audit_job(
                         // The run keeps the finder it started with, whatever the project's
                         // setting is now (a mid-run switch would mix two finders' work).
                         if let Some(notice) = store.hold_finder(&mut run_controls) {
+                            store.add_note(&notice);
+                        }
+                        // The clone judge stays on the model the run started with, whatever the
+                        // project's setting is now.
+                        if let Some(notice) = store.hold_clone_judge_model(&mut run_controls) {
                             store.add_note(&notice);
                         }
                         // The group reviewer stays on the model the run started with.
@@ -3244,6 +3279,7 @@ pub(crate) async fn start_audit_job(
                     include_alternatives: corpus.is_some(),
                     origin: rs::RunOrigin::Cockpit,
                     project_id: project_id.clone(),
+                    pin: engine_pin,
                 }) {
                     Ok(store) => {
                         if let Some(p) = &prior {

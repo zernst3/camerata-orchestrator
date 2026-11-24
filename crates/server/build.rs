@@ -6,8 +6,13 @@
 //! A release pipeline can set `CAMERATA_GIT_COMMIT` itself; that value wins over `git`.
 //!
 //! Also records `CAMERATA_GIT_DIRTY` (`1` when the tree had uncommitted changes, `0` when clean),
-//! read through `option_env!` and reported on `/api/health` next to the commit. It is a snapshot
-//! taken when this script last ran, shown for information and never compared.
+//! read through `option_env!`, reported on `/api/health` next to the commit and saved with every run
+//! (a client inspection refuses to start on a dirty build, and a clean inspection is not continued
+//! on a dirty one). The script reruns when a source file of this package or of a workspace crate it
+//! depends on changes (the rule library lives inside `crates/rules`), so an edit made after a
+//! clean build flips the flag at the next build, while an edit in a crate this package does not
+//! use leaves it alone (a rerun recompiles the package). The lists below are checked against
+//! `cargo metadata` by `crates/server/tests/build_watch_list.rs`.
 //!
 //! The app (`crates/ui`) includes this file by path as its own build script, so both binaries
 //! name their build the same way (the app refuses to run against a server from another build).
@@ -17,6 +22,7 @@ use std::process::Command;
 
 pub fn main() {
     println!("cargo:rerun-if-env-changed=CAMERATA_GIT_COMMIT");
+    watch_sources();
     if let Ok(commit) = std::env::var("CAMERATA_GIT_COMMIT") {
         if is_commit(&commit) {
             println!("cargo:rustc-env=CAMERATA_GIT_COMMIT={commit}");
@@ -32,6 +38,56 @@ pub fn main() {
         println!("cargo:rustc-env=CAMERATA_GIT_DIRTY={dirty}");
     }
     watch_head();
+}
+
+/// The workspace crates (folder names under `crates/`) the server's normal dependency graph
+/// contains, itself included.
+pub const SERVER_CRATES: &[&str] = &[
+    "agent",
+    "api-types",
+    "app-core",
+    "checks",
+    "core",
+    "fleet",
+    "gateway",
+    "intake",
+    "liveness",
+    "llm",
+    "orchestrator",
+    "persistence",
+    "rules",
+    "scaffold",
+    "secrets",
+    "server",
+    "ui-core",
+    "worktracker",
+];
+
+/// The same for the desktop app (it does not depend on the server crate).
+pub const UI_CRATES: &[&str] = &["api-types", "ui", "ui-core", "worktracker"];
+
+/// The crate folders whose sources can change what package `pkg` is built from; `None` for a
+/// package this build script does not know, which then watches all of `crates/`.
+pub fn watched_crates(pkg: &str) -> Option<&'static [&'static str]> {
+    match pkg {
+        "camerata-server" => Some(SERVER_CRATES),
+        "camerata-ui" => Some(UI_CRATES),
+        _ => None,
+    }
+}
+
+/// Rerun when a source of this build's own crates changes, so the dirty flag follows edits made
+/// after a clean build. Paths are relative to the package folder (`crates/<name>`).
+fn watch_sources() {
+    let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+    match watched_crates(&pkg) {
+        Some(crates) => {
+            for c in crates {
+                println!("cargo:rerun-if-changed=../{c}");
+            }
+        }
+        None => println!("cargo:rerun-if-changed=.."),
+    }
 }
 
 /// A full 40-character lowercase hex SHA-1 (or 64 for SHA-256 repositories). Anything else is

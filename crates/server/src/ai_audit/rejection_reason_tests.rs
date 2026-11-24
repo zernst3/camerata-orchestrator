@@ -37,6 +37,7 @@ fn state_dir() -> (tempfile::TempDir, camerata_test_env::EnvGuard) {
 
 fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
     RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-1".to_string(),
         repos: vec![("o/r".to_string(), repo_dir.to_path_buf())],
         models: ModelsRecord {

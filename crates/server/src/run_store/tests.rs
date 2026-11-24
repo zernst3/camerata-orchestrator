@@ -135,6 +135,7 @@ fn key() -> AiScanKey {
 
 fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
     RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-1".to_string(),
         repos: vec![("acme/api".to_string(), repo.path().to_path_buf())],
         models: models(),
@@ -534,6 +535,8 @@ fn a_resume_is_refused_in_plain_words_when_anything_it_depends_on_differs() {
             ai_scan_key: key,
             models,
             trees: t,
+            build: &engine_pin::BuildId::current(),
+            corpus_version: None,
         })
     };
     assert_eq!(ok(&record, &key(), &models(), trees(repo.path())), Ok(()));
@@ -594,12 +597,6 @@ fn a_resume_is_refused_in_plain_words_when_anything_it_depends_on_differs() {
         ok(&record, &other_prompt, &models(), trees(repo.path())),
         Err(RunStoreError::Refused(m)) if m.contains("scan asks the model")
     ));
-    let mut other_engine = record.clone();
-    other_engine.engine_version = "9.9.9+prompt1".to_string();
-    assert!(matches!(
-        ok(&other_engine, &key(), &models(), trees(repo.path())),
-        Err(RunStoreError::Refused(m)) if m.contains("another version")
-    ));
 }
 
 #[test]
@@ -628,6 +625,8 @@ fn the_tree_a_run_left_behind_is_accepted_and_a_complete_run_is_a_no_op() {
             ai_scan_key: &key(),
             models: &models(),
             trees: vec![("acme/api".to_string(), tree_state(repo.path()))],
+            build: &engine_pin::BuildId::current(),
+            corpus_version: None,
         })
     };
     assert_eq!(
@@ -768,6 +767,7 @@ fn make_run(root: &std::path::Path, id: &str, project: &str, commit: &str, statu
         project_id: None,
         attempt: 1,
         engine_version: engine_version(),
+        pin: None,
         project_key: project.to_string(),
         repos: vec![RepoRecord {
             name: "a/b".to_string(),
@@ -1121,6 +1121,7 @@ fn the_preview_says_what_remains_and_why_a_resume_cannot_start() {
 /// A cockpit run made for the listing tests: `origin` Cockpit, the repo `repo` as "acme/api".
 fn cockpit_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
     RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-1".to_string(),
         repos: vec![("acme/api".to_string(), repo.path().to_path_buf())],
         models: models(),
@@ -1222,6 +1223,7 @@ fn the_listing_holds_only_the_runs_the_caller_says_belong_to_the_project() {
     let other = git_repo();
     drop(cockpit_run(&repo));
     let stranger = RunStore::create(NewRun {
+        pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
         project_key: "proj-2".to_string(),
         repos: vec![("acme/other".to_string(), other.path().to_path_buf())],
         models: models(),
@@ -1314,6 +1316,8 @@ fn a_changed_default_is_noticed_on_resume() {
             ai_scan_key: &key(),
             models: now,
             trees: trees(),
+            build: &engine_pin::BuildId::current(),
+            corpus_version: None,
         })
     };
     assert_eq!(check(&models()), Ok(()));
@@ -2786,4 +2790,278 @@ fn the_saved_journal_keeps_a_calls_timing_and_an_older_line_still_loads() {
     assert!(object.remove("ended_unix_ms").is_some());
     let old: journal::StoredResponse = serde_json::from_value(value).expect("an old line loads");
     assert_eq!((old.elapsed_ms, old.ended_unix_ms), (None, None));
+}
+
+// ── The engine pin (V1 item 39) ──────────────────────────────────────────────────────────────
+
+fn build_with(commit: Option<&str>, dirty: bool) -> engine_pin::BuildId {
+    engine_pin::BuildId {
+        commit: commit.map(str::to_string),
+        dirty,
+        ..engine_pin::BuildId::clean_test_build()
+    }
+}
+
+/// A saved run on the test build, and the result of resuming it on `now` with `corpus` loaded.
+fn resume_on(
+    record: &RunRecord,
+    now: &engine_pin::BuildId,
+    corpus: Option<&str>,
+) -> Result<(), RunStoreError> {
+    check_resume(&ResumeCheck {
+        record,
+        ai_scan_key: &record.ai_scan_key,
+        models: &record.models,
+        trees: record
+            .repos
+            .iter()
+            .map(|r| (r.name.clone(), tree_state(std::path::Path::new(&r.dir))))
+            .collect(),
+        build: now,
+        corpus_version: corpus,
+    })
+}
+
+fn pinned_record() -> (
+    tempfile::TempDir,
+    camerata_test_env::EnvGuard,
+    tempfile::TempDir,
+    RunRecord,
+) {
+    let (s, g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    drop(store);
+    (s, g, repo, read_record(&id).unwrap())
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn the_run_saves_the_build_it_started_on() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let pin = record.pin.expect("a new run records its pin");
+    assert_eq!(pin.build, engine_pin::BuildId::current());
+    assert!(pin.build.commit.is_some());
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_resume_on_the_same_build_still_resumes() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let pin = record.pin.clone().unwrap();
+    assert_eq!(
+        resume_on(&record, &pin.build, Some(&pin.corpus_version)),
+        Ok(())
+    );
+    assert_eq!(resume_on(&record, &pin.build, None), Ok(()));
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_resume_on_another_commit_is_refused_naming_both_builds() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let other = build_with(Some(&"b".repeat(40)), false);
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &other, None) else {
+        panic!("a different commit must refuse");
+    };
+    assert!(m.contains("must finish it"), "{m}");
+    assert!(
+        m.contains(&"a".repeat(12)) && m.contains(&"b".repeat(12)),
+        "{m}"
+    );
+    assert!(
+        !m.contains(&"a".repeat(13)),
+        "twelve characters, not the whole hash: {m}"
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_run_saved_without_a_pin_cannot_be_resumed() {
+    let (_s, _g, _repo, mut record) = pinned_record();
+    record.pin = None;
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &engine_pin::BuildId::current(), None)
+    else {
+        panic!("no pin must refuse");
+    };
+    assert!(
+        m.contains("before Camerata recorded which build ran it"),
+        "{m}"
+    );
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_build_with_no_commit_cannot_continue_a_saved_inspection() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &build_with(None, false), None) else {
+        panic!("no commit must refuse");
+    };
+    assert!(m.contains("does not know which build it is"), "{m}");
+    assert!(m.contains(&"a".repeat(12)), "{m}");
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_changed_rule_library_or_prompt_schema_refuses_a_resume() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let now = engine_pin::BuildId::current();
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &now, Some("sha256:other")) else {
+        panic!("a different corpus must refuse");
+    };
+    assert!(m.contains("rule library changed"), "{m}");
+
+    let mut newer = now.clone();
+    newer.prompt_schema += 1;
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &newer, None) else {
+        panic!("a different prompt schema must refuse");
+    };
+    assert!(
+        m.contains("questions Camerata asks the model changed"),
+        "{m}"
+    );
+    let mut newer = now;
+    newer.clone_prompt_schema += 1;
+    assert!(matches!(
+        resume_on(&record, &newer, None),
+        Err(RunStoreError::Refused(m)) if m.contains("questions Camerata asks")
+    ));
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_clean_inspection_is_not_continued_on_a_dirty_build_of_the_same_commit() {
+    let (_s, _g, _repo, record) = pinned_record();
+    let dirty = build_with(Some(&"a".repeat(40)), true);
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &dirty, None) else {
+        panic!("a clean run on a dirty build must refuse");
+    };
+    assert!(m.contains("started on a clean build"), "{m}");
+    assert!(m.contains(&"a".repeat(12)), "{m}");
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_dirty_inspection_resumes_on_a_dirty_build_of_the_same_commit_and_says_so() {
+    let (_s, _g, repo, mut record) = pinned_record();
+    record.pin.as_mut().unwrap().build.dirty = true;
+    let dirty = build_with(Some(&"a".repeat(40)), true);
+    assert_eq!(resume_on(&record, &dirty, None), Ok(()));
+    let note = engine_pin::dirty_note(record.pin.as_ref(), &dirty).expect("a note");
+    assert!(note.contains("uncommitted changes"), "{note}");
+    // A clean saved build gets no note (it is refused on a dirty one instead).
+    let mut clean = record.clone();
+    clean.pin.as_mut().unwrap().build.dirty = false;
+    assert_eq!(engine_pin::dirty_note(clean.pin.as_ref(), &dirty), None);
+    // Through the one implementation of resume: the note lands on the run.
+    let mut saved = read_record(&record.run_id).unwrap();
+    saved.pin.as_mut().unwrap().build.dirty = true;
+    std::fs::write(
+        runs_dir().join(&record.run_id).join("run.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    let pin = engine_pin::EnginePin {
+        build: dirty,
+        ..record.pin.clone().unwrap()
+    };
+    let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+    let (store, _) = open_for_resume(&record.run_id, &sources, &key(), &models(), &pin).unwrap();
+    assert!(store
+        .record()
+        .notes
+        .iter()
+        .any(|n| n.contains("uncommitted changes")));
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn a_saved_run_with_no_commit_says_to_start_again_not_to_open_an_unknown_build() {
+    let (_s, _g, _repo, mut record) = pinned_record();
+    record.pin.as_mut().unwrap().build.commit = None;
+    let Err(RunStoreError::Refused(m)) = resume_on(&record, &engine_pin::BuildId::current(), None)
+    else {
+        panic!("a saved run with no commit must refuse");
+    };
+    assert!(m.contains("did not record its commit"), "{m}");
+    assert!(m.contains("Start it again"), "{m}");
+    assert!(!m.contains("(unknown)"), "{m}");
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn open_for_resume_refuses_another_build_before_opening_the_run() {
+    let (_s, _g, repo, record) = pinned_record();
+    let pin = engine_pin::EnginePin {
+        build: build_with(Some(&"c".repeat(40)), false),
+        ..record.pin.clone().unwrap()
+    };
+    let sources = vec![("acme/api".to_string(), repo.path().to_path_buf())];
+    let result = open_for_resume(&record.run_id, &sources, &key(), &models(), &pin);
+    assert!(
+        matches!(&result, Err(RunStoreError::Refused(m)) if m.contains("must finish it")),
+        "{:?}",
+        result.err()
+    );
+    // The preview runs the build checks too, on the running build.
+    let mut stored = read_record(&record.run_id).unwrap();
+    stored.pin.as_mut().unwrap().build.commit = Some("d".repeat(40));
+    std::fs::write(
+        runs_dir().join(&record.run_id).join("run.json"),
+        serde_json::to_vec(&stored).unwrap(),
+    )
+    .unwrap();
+    let preview = preview_resume(&record.run_id).unwrap();
+    assert!(preview
+        .refusal
+        .is_some_and(|m| m.contains("must finish it")));
+}
+
+#[test]
+fn a_changed_clone_judge_pick_is_put_back_to_the_saved_one_with_a_note() {
+    let pin = engine_pin::EnginePin {
+        build: engine_pin::BuildId::clean_test_build(),
+        corpus_version: String::new(),
+        clone_judge_model: "judge-a".to_string(),
+    };
+    let mut none = crate::cost_cap::RunControls::default();
+    assert!(pin.hold_clone_judge_model(&mut none).is_some());
+    assert_eq!(none.clone_judge_model.as_deref(), Some("judge-a"));
+    let mut same = crate::cost_cap::RunControls {
+        clone_judge_model: Some("judge-a".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(pin.hold_clone_judge_model(&mut same), None);
+    let mut other = crate::cost_cap::RunControls {
+        clone_judge_model: Some("judge-b".to_string()),
+        ..Default::default()
+    };
+    let note = pin.hold_clone_judge_model(&mut other).expect("a note");
+    assert!(
+        note.contains("judge-a") && note.contains("judge-b"),
+        "{note}"
+    );
+    assert_eq!(other.clone_judge_model.as_deref(), Some("judge-a"));
+}
+
+#[test]
+fn a_client_inspection_does_not_start_on_a_dirty_or_commitless_build() {
+    let clean = build_with(Some(&"a".repeat(40)), false);
+    assert_eq!(engine_pin::client_start_refusal(true, &clean), None);
+    let dirty = engine_pin::client_start_refusal(true, &build_with(Some(&"a".repeat(40)), true))
+        .expect("dirty refuses");
+    assert!(dirty.contains("changes that are not committed"), "{dirty}");
+    let none = engine_pin::client_start_refusal(true, &build_with(None, false))
+        .expect("no commit refuses");
+    assert!(none.contains("does not know which build it is"), "{none}");
+    // Internal runs still start on any build.
+    assert_eq!(
+        engine_pin::client_start_refusal(false, &build_with(Some(&"a".repeat(40)), true)),
+        None
+    );
+    assert_eq!(
+        engine_pin::client_start_refusal(false, &build_with(None, false)),
+        None
+    );
 }
