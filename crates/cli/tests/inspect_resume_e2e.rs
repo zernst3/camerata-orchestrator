@@ -1083,6 +1083,8 @@ mod batch {
     pub struct FakeBatchApi {
         pub model: Scripted,
         pub submits: AtomicUsize,
+        /// Requests across every batch submitted.
+        pub submitted_items: AtomicUsize,
         pub fetches: AtomicUsize,
         pub poll_down: AtomicBool,
         items: Mutex<HashMap<String, Vec<BatchItem>>>,
@@ -1093,6 +1095,7 @@ mod batch {
             Self {
                 model: Scripted::new(Outage::default()),
                 submits: AtomicUsize::new(0),
+                submitted_items: AtomicUsize::new(0),
                 fetches: AtomicUsize::new(0),
                 poll_down: AtomicBool::new(false),
                 items: Mutex::new(HashMap::new()),
@@ -1132,6 +1135,7 @@ mod batch {
         async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
             let n = self.0.submits.fetch_add(1, Ordering::SeqCst);
             let id = format!("msgbatch_{n}");
+            self.0.submitted_items.fetch_add(items.len(), Ordering::SeqCst);
             self.0.items.lock().unwrap().insert(id.clone(), items);
             Ok(id)
         }
@@ -1268,13 +1272,15 @@ mod batch {
             "{:?}",
             outcome.incomplete_reasons
         );
-        // The first batch was not submitted a second time: across both attempts the batches
-        // submitted are exactly those an uninterrupted run submits (its second round follows the
-        // first round's results, so the interrupted attempt never got to it).
+        // Nothing submitted before the interruption was submitted a second time: across both
+        // attempts the requests sent are exactly those an uninterrupted run sends. They are
+        // counted as requests, not batches: the group review reads the report as it stands, so
+        // the interrupted attempt sent its one rule group in a batch of its own and the resume
+        // sent the other, where the uninterrupted run sent both in one.
         assert_eq!(
-            api.submits.load(Ordering::SeqCst),
-            healthy.submits.load(Ordering::SeqCst),
-            "the batch submitted before the interruption was not submitted again"
+            api.submitted_items.load(Ordering::SeqCst),
+            healthy.submitted_items.load(Ordering::SeqCst),
+            "the requests submitted before the interruption were not submitted again"
         );
         assert!(
             api.fetches.load(Ordering::SeqCst) >= 1,
