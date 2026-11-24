@@ -298,6 +298,7 @@ fn cfg<'a>(rules: &'a [(String, String)]) -> GroupReviewConfig<'a> {
         rank: RankSettings::default(),
         max_in_flight: 4,
         cli_backend: false,
+        batch: false,
         job: None,
         feedback: None,
     }
@@ -1984,6 +1985,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
         &controls,
         &rules,
         false,
+        false,
         None,
         None,
         None,
@@ -2008,7 +2010,7 @@ async fn a_scan_report_is_reviewed_with_the_runs_model_and_escalation_settings()
     empty.gated = false;
     let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
     assert!(
-        review_scan_report(&mut empty, &llm, &controls, &rules, false, None, None, None)
+        review_scan_report(&mut empty, &llm, &controls, &rules, false, false, None, None, None)
             .await
             .is_none()
     );
@@ -2872,6 +2874,7 @@ async fn tool_rows_the_reviewer_split_into_three_sub_groups_end_as_one_cause_wit
         &controls,
         &rules,
         false,
+        false,
         None,
         None,
         None,
@@ -3381,6 +3384,7 @@ async fn review_scan_report_shows_its_group_review_rows_in_agent_activity() {
         &crate::cost_cap::RunControls::default(),
         &rules,
         false,
+        false,
         None,
         Some((&store, "scan-key")),
         None,
@@ -3404,6 +3408,7 @@ async fn review_scan_report_shows_its_group_review_rows_in_agent_activity() {
         &failing,
         &crate::cost_cap::RunControls::default(),
         &rules,
+        false,
         false,
         None,
         Some((&store, "scan-key")),

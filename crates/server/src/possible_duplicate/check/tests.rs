@@ -121,7 +121,7 @@ fn c_same_d_different(prompt: &str) -> String {
 }
 
 async fn run(report: &mut ScanReport, llm: &Script) {
-    check_possible_duplicates(report, llm, &RunControls::default(), false, None, None).await;
+    check_possible_duplicates(report, llm, &RunControls::default(), false, false, None, None).await;
 }
 
 fn hinted(report: &ScanReport, path: &str) -> bool {
@@ -271,7 +271,7 @@ async fn a_resume_replays_the_stored_answers_with_no_new_call() {
     let llm = Script::new(c_same_d_different);
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, None, None),
+        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, false, None, None),
     )
     .await;
     assert_eq!(llm.calls(), 2);
@@ -288,7 +288,7 @@ async fn a_resume_replays_the_stored_answers_with_no_new_call() {
             &mut resumed,
             &again,
             &RunControls::default(),
-            false,
+            false, false,
             None,
             None,
         ),
@@ -308,7 +308,7 @@ async fn the_check_runs_on_the_set_model_and_is_metered_under_its_own_stage() {
     let llm = Script::new(c_same_d_different);
     let mut controls = RunControls::default();
     controls.review.dup_check_model = "claude-opus-5-5".to_string();
-    check_possible_duplicates(&mut r, &llm, &controls, false, None, None).await;
+    check_possible_duplicates(&mut r, &llm, &controls, false, false, None, None).await;
     assert!(llm
         .seen
         .lock()
@@ -406,7 +406,7 @@ async fn a_limit_reached_by_the_first_call_stops_the_check_and_not_the_run() {
     };
     // One call at a time, so the first call's spend is on the meter before the second is admitted.
     let llm = Script::new(c_same_d_different);
-    check_possible_duplicates(&mut r, &llm, &controls, true, None, None).await;
+    check_possible_duplicates(&mut r, &llm, &controls, true, false, None, None).await;
     assert_limit_stop_leaves_the_run_whole(&r, failed, &reasons);
 }
 
@@ -433,7 +433,7 @@ async fn a_cost_checkpoint_stop_stops_the_check_and_not_the_run() {
     });
     let reasons_with_record = r.incomplete_reasons();
     let llm = Script::new(c_same_d_different);
-    check_possible_duplicates(&mut r, &llm, &RunControls::default(), false, None, None).await;
+    check_possible_duplicates(&mut r, &llm, &RunControls::default(), false, false, None, None).await;
     assert_eq!(llm.calls(), 0, "a paused run sends nothing");
     let _ = reasons;
     assert_limit_stop_leaves_the_run_whole(&r, failed, &reasons_with_record);
@@ -449,7 +449,7 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
     let llm = Script::new(c_same_d_different);
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, None, None),
+        check_possible_duplicates(&mut first, &llm, &RunControls::default(), false, false, None, None),
     )
     .await;
     assert_eq!(llm.calls(), 2);
@@ -465,7 +465,7 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
     let none = Script::new(|_| panic!("the same model must not be asked again"));
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints.clone()),
-        check_possible_duplicates(&mut same, &none, &RunControls::default(), false, None, None),
+        check_possible_duplicates(&mut same, &none, &RunControls::default(), false, false, None, None),
     )
     .await;
     assert_eq!(none.calls(), 0);
@@ -477,7 +477,7 @@ async fn a_resume_on_a_different_model_asks_again_and_stores_the_new_model() {
     let again = Script::new(c_same_d_different);
     crate::checkpoint::with_run_checkpoints(
         Some(checkpoints),
-        check_possible_duplicates(&mut changed, &again, &controls, false, None, None),
+        check_possible_duplicates(&mut changed, &again, &controls, false, false, None, None),
     )
     .await;
     assert_eq!(again.calls(), 2, "a model change asks again");
@@ -498,7 +498,7 @@ async fn the_check_shows_a_duplicate_check_row_in_agent_activity() {
         &mut r,
         &llm,
         &RunControls::default(),
-        false,
+        false, false,
         None,
         Some((&store, "scan-key")),
     )
@@ -508,4 +508,102 @@ async fn the_check_shows_a_duplicate_check_row_in_agent_activity() {
     assert!(rows[0].role.starts_with("Duplicate check ("), "{rows:#?}");
     assert_eq!(rows[0].status, "done");
     assert!(rows[0].output.contains("answered"), "{}", rows[0].output);
+}
+
+// ── On the Message Batches path ────────────────────────────────────────────────────────────
+
+/// A fake Message Batches API that answers every item with the scripted file-by-file verdicts.
+struct FakeBatch {
+    realtime: Script,
+    submitted: Mutex<Vec<Vec<(String, String)>>>,
+}
+
+impl FakeBatch {
+    fn new() -> Self {
+        Self {
+            realtime: Script::new(c_same_d_different),
+            submitted: Mutex::new(Vec::new()),
+        }
+    }
+    fn items_sent(&self) -> usize {
+        self.submitted.lock().unwrap().iter().map(Vec::len).sum()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ai_audit::BatchApi for FakeBatch {
+    fn has_api_key(&self) -> bool {
+        true
+    }
+    fn realtime(&self) -> &dyn LlmPort {
+        &self.realtime
+    }
+    async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+        None
+    }
+    async fn submit(&self, items: Vec<crate::llm::BatchItem>) -> anyhow::Result<String> {
+        let mut batches = self.submitted.lock().unwrap();
+        let id = format!("msgbatch_{}", batches.len());
+        batches.push(
+            items
+                .iter()
+                .map(|i| {
+                    let content = serde_json::to_value(&i.params.messages[0].content).unwrap();
+                    let prompt = content
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| content.to_string());
+                    (i.custom_id.clone(), c_same_d_different(&prompt))
+                })
+                .collect(),
+        );
+        Ok(id)
+    }
+    async fn poll(&self, _batch_id: &str) -> anyhow::Result<crate::llm::BatchStatus> {
+        Ok(crate::llm::BatchStatus {
+            processing_status: "ended".to_string(),
+            request_counts: crate::llm::BatchRequestCounts::default(),
+        })
+    }
+    async fn fetch(
+        &self,
+        batch_id: &str,
+        _ttl: crate::llm::CacheTtl,
+    ) -> anyhow::Result<Vec<crate::llm::BatchResultRow>> {
+        let n: usize = batch_id.trim_start_matches("msgbatch_").parse().unwrap();
+        let members = self.submitted.lock().unwrap()[n].clone();
+        Ok(members
+            .into_iter()
+            .map(|(custom_id, reply)| crate::llm::BatchResultRow {
+                custom_id,
+                response: Some(response(&reply, "stub-model")),
+                error: None,
+                billed: None,
+            })
+            .collect())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_duplicate_check_runs_as_a_batch_in_a_batch_run_and_in_real_time_otherwise() {
+    let api = std::sync::Arc::new(FakeBatch::new());
+    let seam = crate::ai_audit::BatchSeam::new(api.clone() as std::sync::Arc<dyn crate::ai_audit::BatchApi>);
+
+    // A batch run on the API backend: the two calls (one per file) are one batch.
+    let mut r = report();
+    check_possible_duplicates(&mut r, &seam, &RunControls::default(), false, true, None, None)
+        .await;
+    assert_eq!(api.items_sent(), 2, "one item per file");
+    assert_eq!(api.realtime.calls(), 0, "and nothing in real time");
+    assert!(hinted(&r, "src/c.rs"), "the batch answers were applied");
+    assert!(!hinted(&r, "src/d.rs"));
+
+    // Not a batch run: real time, as before.
+    let api = std::sync::Arc::new(FakeBatch::new());
+    let seam = crate::ai_audit::BatchSeam::new(api.clone() as std::sync::Arc<dyn crate::ai_audit::BatchApi>);
+    let mut r = report();
+    check_possible_duplicates(&mut r, &seam, &RunControls::default(), false, false, None, None)
+        .await;
+    assert_eq!(api.items_sent(), 0);
+    assert_eq!(api.realtime.calls(), 2);
 }

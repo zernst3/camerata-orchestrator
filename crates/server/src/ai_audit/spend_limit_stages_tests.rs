@@ -268,6 +268,7 @@ async fn run_stage_once(stage: Stage, llm: &dyn LlmPort, meter: &UsageMeter) {
                 rank: crate::review_tree::RankSettings::default(),
                 max_in_flight: 4,
                 cli_backend: false,
+                batch: false,
                 job: None,
                 feedback: None,
             };
@@ -328,6 +329,7 @@ async fn run_stage_once(stage: Stage, llm: &dyn LlmPort, meter: &UsageMeter) {
                 meter,
                 "claude-sonnet-5-5",
                 &candidates,
+                false,
                 false,
                 None,
                 None,

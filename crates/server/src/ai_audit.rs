@@ -317,6 +317,8 @@ pub mod group_review;
 #[cfg(test)]
 mod group_review_tests;
 #[cfg(test)]
+mod group_review_batch_tests;
+#[cfg(test)]
 mod loop_batch;
 #[cfg(test)]
 mod runner_adoption_tests;

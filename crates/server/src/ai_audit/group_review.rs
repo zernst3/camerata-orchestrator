@@ -1796,6 +1796,10 @@ pub struct GroupReviewConfig<'a> {
     /// The model runs through the Claude Code CLI (no tools, but it can drift into agent mode):
     /// the prompts say outright that no tools exist.
     pub cli_backend: bool,
+    /// The run is a Message Batch run (the scan mode resolved to Batch): the stage's calls go
+    /// out as provider batches when the model seam carries a batch API, at the batch price. Off
+    /// for the CLI backend and for a run that must answer now (no job to record a batch id on).
+    pub batch: bool,
     /// The job the stage reports to: its activity is touched and its progress set as calls end.
     pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
     /// Where the stage shows in Agent activity: the transcript store and the key the panel reads.
@@ -2426,6 +2430,7 @@ pub async fn review_scan_report(
     controls: &crate::cost_cap::RunControls,
     rules: &[(String, String)],
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -2457,6 +2462,7 @@ pub async fn review_scan_report(
             stage_batch::DEFAULT_MAX_IN_FLIGHT
         },
         cli_backend,
+        batch: batch && !cli_backend,
         job,
         feedback,
     };

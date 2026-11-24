@@ -342,6 +342,7 @@ pub async fn check_possible_duplicates(
     llm: &dyn LlmPort,
     controls: &crate::cost_cap::RunControls,
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) {
@@ -377,6 +378,7 @@ pub async fn check_possible_duplicates(
         &model,
         &candidates,
         cli_backend,
+        batch,
         job,
         feedback,
     )
@@ -448,6 +450,7 @@ pub(crate) async fn run_check(
     model: &str,
     candidates: &[CandidatePair],
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> (Vec<PairCheck>, Option<String>) {
@@ -469,6 +472,7 @@ pub(crate) async fn run_check(
         model,
         candidates,
         cli_backend,
+        batch,
         job,
         feedback,
     )
@@ -484,6 +488,7 @@ async fn send_calls(
     model: &str,
     candidates: &[CandidatePair],
     cli_backend: bool,
+    batch: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> (Vec<PairCheck>, Option<String>) {

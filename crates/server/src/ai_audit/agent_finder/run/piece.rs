@@ -660,7 +660,7 @@ fn rules_covering(shared: &Shared<'_>, checklist: &Checklist, files: &[String]) 
         .collect()
 }
 
-fn stop_class(stop: &AgentStop) -> FailureClass {
+pub(super) fn stop_class(stop: &AgentStop) -> FailureClass {
     match stop {
         AgentStop::Finished | AgentStop::TurnLimit(_) | AgentStop::Refused(_) => {
             FailureClass::Content
