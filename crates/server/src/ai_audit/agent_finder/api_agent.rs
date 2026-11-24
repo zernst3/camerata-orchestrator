@@ -86,6 +86,17 @@ struct Kept {
     /// The run's frame token. The system text names it from the first request on, so a
     /// follow-up must keep it.
     nonce: FrameNonce,
+    /// The last turn the provider answered, so a follow-up's first turn can be compared with it.
+    last_turn: Option<TurnUsage>,
+}
+
+/// What a drive starts from: the files already shown, what the piece has spent, its frame token
+/// and the last turn the provider answered before it (none for a piece's first step).
+struct DriveStart<'a> {
+    shown: Vec<String>,
+    spent_before: f64,
+    nonce: &'a FrameNonce,
+    last_turn: Option<TurnUsage>,
 }
 
 /// The conversations a transport keeps so a follow-up can continue one. An entry lives until the
@@ -113,6 +124,18 @@ fn instance_token() -> String {
     }
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// What a piece's conversation ends with when the run stopped between its turns.
+pub(super) fn run_stopped_text(meter: &UsageMeter) -> String {
+    format!(
+        "{RUN_STOPPED_PREFIX}{}; no further request was sent",
+        meter.stop_phrase()
+    )
+}
+
+/// How the text of a piece stopped by the run's own stop begins; the class of the stop is read
+/// from it ([`super::run`]).
+pub(super) const RUN_STOPPED_PREFIX: &str = "the run stopped because ";
 
 /// The API transport.
 pub struct ApiPieceAgent {
@@ -214,7 +237,13 @@ impl ApiPieceAgent {
         Ok(())
     }
 
-    fn keep(&self, messages: Vec<Value>, spent_usd: f64, nonce: FrameNonce) -> ConversationHandle {
+    fn keep(
+        &self,
+        messages: Vec<Value>,
+        spent_usd: f64,
+        nonce: FrameNonce,
+        last_turn: Option<TurnUsage>,
+    ) -> ConversationHandle {
         let mut store = self
             .store
             .lock()
@@ -227,6 +256,7 @@ impl ApiPieceAgent {
                 messages,
                 spent_usd,
                 nonce,
+                last_turn,
             },
         );
         ConversationHandle::new(format!("api:{}:{n}", self.token))
@@ -439,10 +469,14 @@ impl ApiPieceAgent {
         room: &Room,
         mut messages: Vec<Value>,
         limits: &PieceLimits,
-        shown: Vec<String>,
-        spent_before: f64,
-        nonce: &FrameNonce,
+        start: DriveStart<'_>,
     ) -> AgentRun {
+        let DriveStart {
+            shown,
+            spent_before,
+            nonce,
+            mut last_turn,
+        } = start;
         let tools = tool_schemas();
         let system = with_untrusted_clause(SYSTEM_TEXT.to_string(), nonce);
         let outputs_before = room.outputs();
@@ -456,11 +490,8 @@ impl ApiPieceAgent {
         let mut continued = false;
 
         let stop = loop {
-            if self.meter.as_ref().is_some_and(|m| m.outage_stopped()) {
-                break AgentStop::Failed(
-                    "the run stopped after repeated provider failures; no further request was sent"
-                        .to_string(),
-                );
+            if let Some(m) = self.meter.as_ref().filter(|m| m.outage_stopped()) {
+                break AgentStop::Failed(run_stopped_text(m));
             }
             if usage.len() >= limits.max_turns {
                 break AgentStop::TurnLimit(format!(
@@ -523,6 +554,16 @@ impl ApiPieceAgent {
             };
             trace.append(&mut pending);
             let turn = self.account(&reply);
+            // A turn that did not read back what the turn before it wrote pays the write price
+            // for the context again; count it (no change to what is sent). The first turn of a
+            // piece has no turn before it; a follow-up's first turn is compared with the last
+            // turn of the step before it.
+            if let (Some(previous), Some(meter)) = (&last_turn, &self.meter) {
+                if turn.is_cache_miss_after(previous) {
+                    meter.record_cache_miss_turn(Stage::Finder);
+                }
+            }
+            last_turn = Some(turn.clone());
             let cost_known = turn.cost_usd.is_some();
             spent += turn.cost_usd.unwrap_or(0.0);
             usage.push(turn);
@@ -596,7 +637,7 @@ impl ApiPieceAgent {
             usage,
             stop,
             shown_in_full,
-            conversation: self.keep(messages, spent, nonce.clone()),
+            conversation: self.keep(messages, spent, nonce.clone(), last_turn),
         }
     }
 }
@@ -613,7 +654,17 @@ impl PieceAgent for ApiPieceAgent {
         let messages = vec![json!({"role": "user", "content": brief})];
         let nonce = nonce_for_room(room);
         Ok(self
-            .drive(room, messages, limits, Vec::new(), 0.0, &nonce)
+            .drive(
+                room,
+                messages,
+                limits,
+                DriveStart {
+                    shown: Vec::new(),
+                    spent_before: 0.0,
+                    nonce: &nonce,
+                    last_turn: None,
+                },
+            )
             .await)
     }
 
@@ -632,7 +683,17 @@ impl PieceAgent for ApiPieceAgent {
         let (text, shown) = turn.render_framed(room, &kept.nonce);
         messages.push(json!({"role": "user", "content": text}));
         let run = self
-            .drive(room, messages, limits, shown, kept.spent_usd, &kept.nonce)
+            .drive(
+                room,
+                messages,
+                limits,
+                DriveStart {
+                    shown,
+                    spent_before: kept.spent_usd,
+                    nonce: &kept.nonce,
+                    last_turn: kept.last_turn,
+                },
+            )
             .await;
         // The step's own handle continues the piece from here.
         self.forget(&prior.conversation);
@@ -702,22 +763,61 @@ fn non_empty_content(content: &Value) -> Value {
     }
 }
 
-/// Put the cache breakpoint on the last block of the last message of the body, so each turn
-/// reads the conversation so far from the cache. Only the body carries it, never the stored
-/// conversation.
-fn cache_the_conversation(body: &mut Value) {
-    let Some(last) = body["messages"].as_array_mut().and_then(|m| m.last_mut()) else {
-        return;
-    };
+/// The most `cache_control` breakpoints one request may carry (a provider limit).
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// How many `cache_control` markers a request body carries, anywhere in it.
+fn count_cache_breakpoints(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| usize::from(k == "cache_control") + count_cache_breakpoints(v))
+            .sum(),
+        Value::Array(items) => items.iter().map(count_cache_breakpoints).sum(),
+        _ => 0,
+    }
+}
+
+/// Put a breakpoint on the last block of `message`, turning a plain text content into one block
+/// to hold it. A block that already carries one is left as it is.
+fn mark_message_end(message: &mut Value) {
     let breakpoint = json!({"type": "ephemeral"});
-    if let Some(text) = last["content"].as_str().map(str::to_string) {
-        last["content"] = json!([{"type": "text", "text": text, "cache_control": breakpoint}]);
-    } else if let Some(block) = last["content"]
+    if let Some(text) = message["content"].as_str().map(str::to_string) {
+        message["content"] = json!([{"type": "text", "text": text, "cache_control": breakpoint}]);
+    } else if let Some(block) = message["content"]
         .as_array_mut()
         .and_then(|blocks| blocks.last_mut())
         .filter(|b| b.is_object())
     {
-        block["cache_control"] = breakpoint;
+        if block.get("cache_control").is_none() {
+            block["cache_control"] = breakpoint;
+        }
+    }
+}
+
+/// Put the cache breakpoints on the conversation of the body, so each turn reads the conversation
+/// so far from the cache. Two move with the conversation: one on the last block of the last
+/// message, and one on the end of the previous request's last message (the user message two
+/// places before the last: each turn adds the reply and the next user message). The provider
+/// looks back only about 20 blocks from a breakpoint for an earlier entry, and a turn of many
+/// parallel tool results adds more than that, so without the second one the next turn misses the
+/// cache and writes the whole context again. The system block carries its own, and the request
+/// never carries more than [`MAX_CACHE_BREAKPOINTS`]. Only the body carries them, never the
+/// stored conversation, and no other byte of the body changes.
+fn cache_the_conversation(body: &mut Value) {
+    let Some(messages) = body["messages"].as_array_mut() else {
+        return;
+    };
+    let count = messages.len();
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    mark_message_end(last);
+    if count >= 3 && messages[count - 3]["role"] == "user" {
+        // The last one is on, so count what the body carries with the previous one added.
+        if count_cache_breakpoints(body) < MAX_CACHE_BREAKPOINTS {
+            mark_message_end(&mut body["messages"][count - 3]);
+        }
     }
 }
 

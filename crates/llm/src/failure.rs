@@ -359,6 +359,12 @@ fn mentions_exhausted_account(lower: &str) -> bool {
     .any(|p| lower.contains(p))
 }
 
+/// True when `text` says the account is out of credit, quota or usage (a billing stop), as
+/// opposed to a bad credential.
+pub fn is_exhausted_account_text(text: &str) -> bool {
+    mentions_exhausted_account(&text.to_ascii_lowercase())
+}
+
 /// True when `text` says the credential is missing or wrong.
 fn mentions_bad_credential(lower: &str) -> bool {
     [

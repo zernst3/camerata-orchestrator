@@ -2755,6 +2755,8 @@ async fn onboard_audit(
                 &review_controls,
                 &rules,
                 review_backend == crate::llm::Backend::Cli,
+                // The synchronous endpoint has no job to record a batch id on: real time.
+                false,
                 None,
                 Some((&state.transcripts, SCAN_AUDIT_KEY)),
                 corpus.as_ref(),
@@ -2766,6 +2768,7 @@ async fn onboard_audit(
                 &llm,
                 &review_controls,
                 review_backend == crate::llm::Backend::Cli,
+                false,
                 None,
                 Some((&state.transcripts, SCAN_AUDIT_KEY)),
             )
@@ -3537,6 +3540,7 @@ pub(crate) async fn start_audit_job(
                             &review_controls,
                             &rules,
                             llm_backend == crate::llm::Backend::Cli,
+                            mode == crate::ai_audit::ScanMode::Batch,
                             Some((&body_jobs, &body_jid)),
                             Some((&transcripts, SCAN_AUDIT_KEY)),
                             corpus.as_ref(),
@@ -3549,6 +3553,7 @@ pub(crate) async fn start_audit_job(
                             model_seam,
                             &review_controls,
                             llm_backend == crate::llm::Backend::Cli,
+                            mode == crate::ai_audit::ScanMode::Batch,
                             Some((&body_jobs, &body_jid)),
                             Some((&transcripts, SCAN_AUDIT_KEY)),
                         )

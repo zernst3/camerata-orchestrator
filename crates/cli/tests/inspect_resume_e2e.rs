@@ -1083,6 +1083,10 @@ mod batch {
     pub struct FakeBatchApi {
         pub model: Scripted,
         pub submits: AtomicUsize,
+        /// Requests across every batch submitted.
+        pub submitted_items: AtomicUsize,
+        /// Each submitted request as its custom id and a hash of its content.
+        pub submitted_ids: Mutex<Vec<String>>,
         pub fetches: AtomicUsize,
         pub poll_down: AtomicBool,
         items: Mutex<HashMap<String, Vec<BatchItem>>>,
@@ -1093,6 +1097,8 @@ mod batch {
             Self {
                 model: Scripted::new(Outage::default()),
                 submits: AtomicUsize::new(0),
+                submitted_items: AtomicUsize::new(0),
+                submitted_ids: Mutex::new(Vec::new()),
                 fetches: AtomicUsize::new(0),
                 poll_down: AtomicBool::new(false),
                 items: Mutex::new(HashMap::new()),
@@ -1132,6 +1138,19 @@ mod batch {
         async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
             let n = self.0.submits.fetch_add(1, Ordering::SeqCst);
             let id = format!("msgbatch_{n}");
+            self.0
+                .submitted_items
+                .fetch_add(items.len(), Ordering::SeqCst);
+            {
+                use std::hash::{Hash, Hasher};
+                let mut ids = self.0.submitted_ids.lock().unwrap();
+                for item in &items {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    request_of(item).prompt.hash(&mut h);
+                    item.params.system.hash(&mut h);
+                    ids.push(format!("{}#{:x}", item.custom_id, h.finish()));
+                }
+            }
             self.0.items.lock().unwrap().insert(id.clone(), items);
             Ok(id)
         }
@@ -1268,13 +1287,22 @@ mod batch {
             "{:?}",
             outcome.incomplete_reasons
         );
-        // The first batch was not submitted a second time: across both attempts the batches
-        // submitted are exactly those an uninterrupted run submits (its second round follows the
-        // first round's results, so the interrupted attempt never got to it).
+        // Nothing submitted before the interruption was submitted a second time: across both
+        // attempts the requests sent are exactly those an uninterrupted run sends. They are
+        // counted as requests, not batches: the group review reads the report as it stands, so
+        // the interrupted attempt sent its one rule group in a batch of its own and the resume
+        // sent the other, where the uninterrupted run sent both in one.
         assert_eq!(
-            api.submits.load(Ordering::SeqCst),
-            healthy.submits.load(Ordering::SeqCst),
-            "the batch submitted before the interruption was not submitted again"
+            api.submitted_items.load(Ordering::SeqCst),
+            healthy.submitted_items.load(Ordering::SeqCst),
+            "the requests submitted before the interruption were not submitted again"
+        );
+        let ids = api.submitted_ids.lock().unwrap().clone();
+        let distinct: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            ids.len(),
+            "no request (custom id and content) was submitted twice across the attempts: {ids:?}"
         );
         assert!(
             api.fetches.load(Ordering::SeqCst) >= 1,

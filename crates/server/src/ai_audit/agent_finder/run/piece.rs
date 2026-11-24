@@ -660,12 +660,17 @@ fn rules_covering(shared: &Shared<'_>, checklist: &Checklist, files: &[String]) 
         .collect()
 }
 
-fn stop_class(stop: &AgentStop) -> FailureClass {
+pub(super) fn stop_class(stop: &AgentStop) -> FailureClass {
     match stop {
         AgentStop::Finished | AgentStop::TurnLimit(_) | AgentStop::Refused(_) => {
             FailureClass::Content
         }
         AgentStop::SpendLimit(_) => FailureClass::SpendLimit,
+        // The run's own stop, met between two turns of a conversation, keeps its class: it is
+        // not a content failure of the piece.
+        AgentStop::Failed(why) if why.starts_with(super::super::api_agent::RUN_STOPPED_PREFIX) => {
+            FailureClass::OutageStop
+        }
         AgentStop::Failed(why) => crate::ai_audit::classify_pass_error(&anyhow::anyhow!("{why}")),
     }
 }
@@ -1070,7 +1075,10 @@ pub(super) fn not_run_report(
         .meter
         .map_or(crate::cost_cap::CAUSE_LIMIT_REACHED, |m| m.stop_cause());
     let reason = if outage {
-        "NOT RUN: the run stopped because the model provider could not be reached before this part was reviewed. This inspection is incomplete.".to_string()
+        format!(
+            "NOT RUN: the run stopped because {} before this part was reviewed. This inspection is incomplete.",
+            shared.meter.map_or(crate::run_health::STOP_PHRASE_UNREACHABLE, |m| m.stop_phrase())
+        )
     } else {
         format!("NOT RUN: {cause} before this part was reviewed. This inspection is incomplete.")
     };

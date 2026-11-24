@@ -151,6 +151,12 @@ pub struct StageUsage {
     /// that is counted at its cost ceiling (`record_unanswered`) is in `busy_ms` instead.
     #[serde(default)]
     pub failed_busy_ms: u64,
+    /// Finder turns (after a piece's first) that did not read back the prefix the turn before
+    /// them wrote to the prompt cache. Each one pays the cache write price for the context again.
+    /// Counted for the finder stage only; zero for every other stage. Operator-only; never
+    /// exported.
+    #[serde(default)]
+    pub cache_miss_turns: u64,
 }
 
 /// Wall-clock now, in Unix milliseconds. The one clock the run figures read.
@@ -172,6 +178,21 @@ fn model_key(r: &LlmResponse) -> String {
 }
 
 impl StageUsage {
+    /// The share of billed input tokens that were cache reads: `cache_read_input_tokens /
+    /// input_tokens`. `input_tokens` already INCLUDES cache read and write (see the struct doc),
+    /// so the denominator is `input_tokens` alone, never `input_tokens + cache_read`. A cache
+    /// write is not a hit. `None` when the stage billed no input (no division by zero), and
+    /// `None` when reads exceed the input total (a call that reported cache reads but no input
+    /// count): a share above 100% would be a wrong figure, not a measurement. Computed from the
+    /// saved token fields, so it is never stored and every saved run yields it. Operator-only;
+    /// never exported.
+    pub fn cache_hit_share(&self) -> Option<f64> {
+        if self.input_tokens == 0 || self.cache_read_input_tokens > self.input_tokens {
+            return None;
+        }
+        Some(self.cache_read_input_tokens as f64 / self.input_tokens as f64)
+    }
+
     /// True when every call in this stage reported a cost, so `cost_usd` is not an
     /// understatement. An empty stage is trivially complete.
     pub fn cost_complete(&self) -> bool {
@@ -230,6 +251,7 @@ impl StageUsage {
         self.wasted_busy_ms = self.wasted_busy_ms.saturating_add(other.wasted_busy_ms);
         self.batch_wait_ms = self.batch_wait_ms.saturating_add(other.batch_wait_ms);
         self.failed_busy_ms = self.failed_busy_ms.saturating_add(other.failed_busy_ms);
+        self.cache_miss_turns = self.cache_miss_turns.saturating_add(other.cache_miss_turns);
         self.first_call_unix_ms = match (self.first_call_unix_ms, other.first_call_unix_ms) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -606,6 +628,14 @@ impl StageMeter {
         });
     }
 
+    /// A turn after the first of a finder piece missed the prompt cache: adds one to the stage's
+    /// `cache_miss_turns`.
+    pub fn record_cache_miss_turn(&self, stage: Stage) {
+        self.with_stage(stage, |u| {
+            u.cache_miss_turns = u.cache_miss_turns.saturating_add(1)
+        });
+    }
+
     /// One Message Batches round of `stage`, from `started_unix_ms` to `ended_unix_ms` (its
     /// results read): widens the stage's first and last stamps to cover the round and adds the
     /// wait to `batch_wait_ms`. Batch rows carry no per-call time, so this is the stage's timing
@@ -866,6 +896,15 @@ pub struct StageTelemetry {
 }
 
 impl StageTelemetry {
+    /// The cache hit share of one stage ([`StageUsage::cache_hit_share`]). `None` when the stage
+    /// made no call this run or billed no input.
+    pub fn cache_hit_share(&self, stage: Stage) -> Option<f64> {
+        self.stages
+            .iter()
+            .find(|s| s.stage == stage)
+            .and_then(|s| s.usage.cache_hit_share())
+    }
+
     /// All stages summed.
     pub fn total(&self) -> StageUsage {
         let mut t = StageUsage::default();
@@ -916,7 +955,7 @@ impl StageTelemetry {
         }
         writeln!(
             out,
-            "  {:<13} {:>5} {:>10} {:>9} {:>10} {:>10} {:>9} {:>11} {:>19}",
+            "  {:<13} {:>5} {:>10} {:>9} {:>10} {:>10} {:>9} {:>11} {:>19} {:>9}",
             "stage",
             "calls",
             "input",
@@ -925,16 +964,20 @@ impl StageTelemetry {
             "cache-wr",
             "cost",
             "$/1K lines",
-            "wasted (in/out)"
+            "wasted (in/out)",
+            "cache-hit"
         )
         .ok();
         let row = |out: &mut String, name: &str, u: &StageUsage, lines: usize| {
             let partial = if u.cost_complete() { "" } else { " PARTIAL" };
             let per_1k =
                 per_1k(u.cost_usd, lines).map_or_else(|| "n/a".to_string(), |v| format!("{v:.4}"));
+            let hit = u
+                .cache_hit_share()
+                .map_or_else(|| "n/a".to_string(), |v| format!("{:.1}%", v * 100.0));
             writeln!(
                 out,
-                "  {:<13} {:>5} {:>10} {:>9} {:>10} {:>10} {:>9} {:>11} {:>19}{partial}",
+                "  {:<13} {:>5} {:>10} {:>9} {:>10} {:>10} {:>9} {:>11} {:>19} {:>9}{partial}",
                 name,
                 u.calls,
                 u.input_tokens,
@@ -944,6 +987,7 @@ impl StageTelemetry {
                 format!("${:.4}", u.cost_usd),
                 per_1k,
                 format!("{}/{}", u.wasted_input_tokens, u.wasted_output_tokens),
+                hit,
             )
             .ok();
         };
@@ -955,6 +999,16 @@ impl StageTelemetry {
             let models = s.usage.render_models();
             if !models.is_empty() {
                 writeln!(out, "  {} model: {models}", s.stage.label()).ok();
+            }
+            if s.stage == Stage::Finder || s.usage.cache_miss_turns > 0 {
+                writeln!(
+                    out,
+                    "  {} cache-miss turns: {} (turns after a piece's first that did not read \
+                     the conversation from the cache)",
+                    s.stage.label(),
+                    s.usage.cache_miss_turns
+                )
+                .ok();
             }
         }
         if let Some(rejections) = &self.detail_rejections {
