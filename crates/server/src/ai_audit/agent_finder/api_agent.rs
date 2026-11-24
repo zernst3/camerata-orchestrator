@@ -90,6 +90,15 @@ struct Kept {
     last_turn: Option<TurnUsage>,
 }
 
+/// What a drive starts from: the files already shown, what the piece has spent, its frame token
+/// and the last turn the provider answered before it (none for a piece's first step).
+struct DriveStart<'a> {
+    shown: Vec<String>,
+    spent_before: f64,
+    nonce: &'a FrameNonce,
+    last_turn: Option<TurnUsage>,
+}
+
 /// The conversations a transport keeps so a follow-up can continue one. An entry lives until the
 /// piece releases it ([`PieceAgent::release`]) or a follow-up supersedes it with its own: there is
 /// no count cap, because the only entries are those of pieces still running, and dropping a live
@@ -448,11 +457,14 @@ impl ApiPieceAgent {
         room: &Room,
         mut messages: Vec<Value>,
         limits: &PieceLimits,
-        shown: Vec<String>,
-        spent_before: f64,
-        nonce: &FrameNonce,
-        mut last_turn: Option<TurnUsage>,
+        start: DriveStart<'_>,
     ) -> AgentRun {
+        let DriveStart {
+            shown,
+            spent_before,
+            nonce,
+            mut last_turn,
+        } = start;
         let tools = tool_schemas();
         let system = with_untrusted_clause(SYSTEM_TEXT.to_string(), nonce);
         let outputs_before = room.outputs();
@@ -633,7 +645,17 @@ impl PieceAgent for ApiPieceAgent {
         let messages = vec![json!({"role": "user", "content": brief})];
         let nonce = nonce_for_room(room);
         Ok(self
-            .drive(room, messages, limits, Vec::new(), 0.0, &nonce, None)
+            .drive(
+                room,
+                messages,
+                limits,
+                DriveStart {
+                    shown: Vec::new(),
+                    spent_before: 0.0,
+                    nonce: &nonce,
+                    last_turn: None,
+                },
+            )
             .await)
     }
 
@@ -656,10 +678,12 @@ impl PieceAgent for ApiPieceAgent {
                 room,
                 messages,
                 limits,
-                shown,
-                kept.spent_usd,
-                &kept.nonce,
-                kept.last_turn,
+                DriveStart {
+                    shown,
+                    spent_before: kept.spent_usd,
+                    nonce: &kept.nonce,
+                    last_turn: kept.last_turn,
+                },
             )
             .await;
         // The step's own handle continues the piece from here.
