@@ -522,7 +522,8 @@ impl Room {
     /// Read the room's own checklist as it is: no line numbers, and no byte limit. `count` lines
     /// from `first_line` (1-based), at most [`MAX_READ_LINES`]; the text is cut from the stored
     /// text at line ends, so a read of every line is byte for byte the stored text. Any other path
-    /// is refused: client text is only ever served numbered and framed ([`Room::read`]).
+    /// is refused: client text is only ever served numbered and framed ([`Room::read`]). A page cut
+    /// at the line cap ends with one notice line naming the offset to read next.
     pub fn read_plain(
         &self,
         path: &str,
@@ -548,6 +549,16 @@ impl Room {
                 out.push_str(line);
                 returned += 1;
             }
+        }
+        // A page that stopped at the line cap with lines left says so, and where to go on. The
+        // notice is not a line of the checklist: `lines_returned` does not count it. A text that
+        // fits, or a page the caller's own limit ended, has none, so it stays byte for byte.
+        let remaining = total_lines.saturating_sub(first_line - 1 + returned);
+        if returned == MAX_READ_LINES && remaining > 0 {
+            out.push_str(&format!(
+                "{remaining} more lines; read again with offset {} to see them.\n",
+                first_line + returned
+            ));
         }
         Ok(ReadOutput {
             text: out,

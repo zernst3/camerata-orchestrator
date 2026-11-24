@@ -1015,3 +1015,37 @@ fn a_search_of_the_tree_returns_bare_names_and_the_header_says_where_the_folder_
         .expect("a folder line above");
     assert_eq!(*folder, "src/", "the nearest line above that ends with / is the folder");
 }
+
+#[test]
+fn a_checklist_over_the_line_cap_ends_with_a_notice_that_gives_the_next_offset() {
+    let lines = MAX_READ_LINES + 500;
+    let text: String = (1..=lines).map(|i| format!("rule line {i}\n")).collect();
+    let r = room_with_checklist(&text);
+    let first = r
+        .read_plain("_camerata/checklist.md", 1, MAX_READ_LINES)
+        .expect("first page");
+    let cut: String = text.split_inclusive('\n').take(MAX_READ_LINES).collect();
+    assert_eq!(
+        first.text,
+        format!("{cut}500 more lines; read again with offset 2001 to see them.\n")
+    );
+    assert_eq!(first.lines_returned, MAX_READ_LINES, "the notice is not a line read");
+    // The offset it names reads the rest, with no notice, and the two pages are the whole text.
+    let rest = r
+        .read_plain("_camerata/checklist.md", 2_001, MAX_READ_LINES)
+        .expect("rest");
+    assert_eq!(format!("{cut}{}", rest.text), text);
+    assert_eq!(rest.lines_returned, 500);
+    // A checklist that fits, and a page the model's own limit ends, carry no notice.
+    let exact: String = (1..=MAX_READ_LINES).map(|i| format!("l{i}\n")).collect();
+    let r = room_with_checklist(&exact);
+    assert_eq!(
+        r.read_plain("_camerata/checklist.md", 1, MAX_READ_LINES)
+            .expect("exact")
+            .text,
+        exact
+    );
+    let r = room_with_checklist(&text);
+    let short = r.read_plain("_camerata/checklist.md", 1, 10).expect("short");
+    assert!(!short.text.contains("more lines"), "{}", short.text);
+}
