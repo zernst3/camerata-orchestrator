@@ -146,3 +146,78 @@ async fn a_finding_keeps_its_fix_id_across_rounds() {
         .iter()
         .all(|id| rounds[0].contains(id)));
 }
+
+/// A made-up rule with a generic remediation on its default option.
+fn rule_with_remediation(rule_id: &str, remediation: &str) -> camerata_rules::Rule {
+    let mut rule = camerata_rules::bare_rule(rule_id, "universal");
+    rule.options = vec![camerata_rules::RuleOption {
+        id: "default".to_string(),
+        label: "Default".to_string(),
+        directive: "Test directive.".to_string(),
+        why: "Test rationale.".to_string(),
+        remediation: Some(remediation.to_string()),
+        finding_headline: None,
+        finding_detail: None,
+        escalation: None,
+        effort: None,
+        violates: false,
+    }];
+    rule.default_option = Some("default".to_string());
+    rule
+}
+
+/// Three findings of one rule share one printed remediation, under a rule heading, and each
+/// finding block names the rule and refers to it. A lone finding of another rule keeps its own.
+#[test]
+fn findings_of_one_rule_share_one_printed_remediation() {
+    const GENERIC: &str = "Move the check into the shared guard.";
+    const LONE: &str = "Rename the handler.";
+    let mut corpus = camerata_rules::RuleSet::default();
+    corpus.push(rule_with_remediation("ARCH-A-1", GENERIC));
+    corpus.push(rule_with_remediation("ARCH-B-1", LONE));
+    let mut findings = Vec::new();
+    for (i, rule) in ["ARCH-A-1", "ARCH-A-1", "ARCH-A-1", "ARCH-B-1"]
+        .iter()
+        .enumerate()
+    {
+        let mut f = finding("src/work.ts", i + 1, "`runWork` takes `raw`", "runWork");
+        f.rule_id = rule.to_string();
+        findings.push(f);
+    }
+    let refs: Vec<&Finding> = findings.iter().collect();
+    let ids: Vec<String> = (0..4).map(|i| format!("f{i}")).collect();
+    let block = build_fix_specific_block(
+        &refs,
+        &ids,
+        &files(),
+        Some(&corpus),
+        &std::collections::HashMap::new(),
+        &nonce_for_fix(),
+    );
+    assert_eq!(block.matches(GENERIC).count(), 1, "{block}");
+    assert!(
+        block.starts_with("Rule ARCH-A-1: generic remediation"),
+        "{block}"
+    );
+    assert_eq!(
+        block
+            .matches("This rule's generic remediation is given above under rule ARCH-A-1.")
+            .count(),
+        3,
+        "{block}"
+    );
+    assert_eq!(block.matches("[f0] rule ARCH-A-1").count(), 1, "{block}");
+    // The lone finding's rule is printed in the old place and the old form.
+    assert_eq!(block.matches(LONE).count(), 1, "{block}");
+    assert!(
+        block.contains(&format!(
+            "This rule's generic remediation (inspiration only — your fix must be SPECIFIC to \
+             this finding, not a restatement of this): {LONE}\n"
+        )),
+        "{block}"
+    );
+}
+
+fn nonce_for_fix() -> crate::prompt_frame::FrameNonce {
+    crate::prompt_frame::FrameNonce::generate_avoiding(&[])
+}
