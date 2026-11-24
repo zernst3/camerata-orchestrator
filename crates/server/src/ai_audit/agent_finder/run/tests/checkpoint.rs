@@ -60,7 +60,10 @@ fn controls(
         stored_spend_usd: stored,
         checkpoint: CheckpointSettings {
             plan: Some(CheckpointPlan {
-                per_piece_usd: 1.0,
+                // No estimate for a piece: the measured average prices the pieces left alone,
+                // which is what these tests exercise. The blend of a small sample with the
+                // estimate is pinned in `cost_checkpoint`.
+                per_piece_usd: 0.0,
                 later_stages_usd: 0.0,
                 assumed_problems: None,
                 ..CheckpointPlan::default()

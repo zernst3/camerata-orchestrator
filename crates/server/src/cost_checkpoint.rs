@@ -131,14 +131,28 @@ pub struct ProjectionInput {
     pub pieces_planned: usize,
 }
 
+/// Finished pieces from which the measured average prices the pieces left on its own.
+pub const SETTLED_AFTER_PIECES: usize = 5;
+
 /// Projected total = spent so far + (pieces left x the average cost of the pieces finished in
-/// this run, or the pre-flight per-piece figure while none has finished) + the pre-flight figure
+/// this run, blended with the pre-flight per-piece figure until [`SETTLED_AFTER_PIECES`] have
+/// finished, and the pre-flight figure alone while none has) + the pre-flight figure
 /// for the stages after the finder (scaled by problems found against the problems the estimate
 /// assumed, when it assumed any).
 #[must_use]
 pub fn projected_total(i: &ProjectionInput) -> f64 {
     let per_piece = if i.finished_pieces > 0 {
-        i.finished_cost_usd / i.finished_pieces as f64
+        let measured = i.finished_cost_usd / i.finished_pieces as f64;
+        if i.preflight_per_piece_usd > 0.0 {
+            // A small sample is a poor guide: the measured average takes over from the pre-flight
+            // figure gradually (its weight is the square of the share of the settling count
+            // finished), and alone from SETTLED_AFTER_PIECES finished pieces.
+            let share = (i.finished_pieces as f64 / SETTLED_AFTER_PIECES as f64).min(1.0);
+            let weight = share * share;
+            weight * measured + (1.0 - weight) * i.preflight_per_piece_usd
+        } else {
+            measured
+        }
     } else {
         i.preflight_per_piece_usd
     };
@@ -181,8 +195,8 @@ mod tests {
         ProjectionInput {
             spent_usd: 10.0,
             pieces_left: 4,
-            finished_pieces: 2,
-            finished_cost_usd: 6.0,
+            finished_pieces: SETTLED_AFTER_PIECES,
+            finished_cost_usd: 15.0,
             preflight_per_piece_usd: 1.0,
             joints_usd: 0.0,
             later_stages_usd: 0.0,
@@ -196,8 +210,33 @@ mod tests {
 
     #[test]
     fn the_average_of_the_finished_pieces_prices_the_pieces_left() {
-        // 10 spent + 4 left x (6 / 2) = 22.
+        // 10 spent + 4 left x (15 / 5) = 22.
         assert!((projected_total(&base()) - 22.0).abs() < 1e-9);
+    }
+
+    /// Ten pieces estimated at 1 each, a limit of 1.5 times that total. The first piece to finish
+    /// cost three times the estimate: a sample of one must not pause the run.
+    #[test]
+    fn one_dear_piece_among_ten_does_not_pause_a_run_with_headroom() {
+        let one_dear = ProjectionInput {
+            spent_usd: 3.0,
+            pieces_left: 9,
+            finished_pieces: 1,
+            finished_cost_usd: 3.0,
+            preflight_per_piece_usd: 1.0,
+            ..base()
+        };
+        assert!(!over_limit(projected_total(&one_dear), 15.0));
+        // The same pieces, all five finished dear: the measurement now decides alone.
+        let five_dear = ProjectionInput {
+            spent_usd: 15.0,
+            pieces_left: 5,
+            finished_pieces: 5,
+            finished_cost_usd: 15.0,
+            ..one_dear
+        };
+        assert!((projected_total(&five_dear) - 30.0).abs() < 1e-9);
+        assert!(over_limit(projected_total(&five_dear), 15.0));
     }
 
     #[test]
