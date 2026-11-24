@@ -87,6 +87,12 @@ pub fn generated_unsearched_label() -> String {
     camerata_api_types::audit::GENERATED_UNSEARCHED_LABEL.to_string()
 }
 
+/// The reason a symbolic link is not read, as Coverage states it. The file or folder it points to
+/// is not read through it; if that target is inside the repository it is read under its own name.
+pub fn symlink_label() -> String {
+    "a symbolic link; the file it points to is not read through it".to_string()
+}
+
 /// Files larger than this are not read for the inspection. An admitted text file over it (and not
 /// excluded by agreement) is a pre-start warning, never a refusal, and is listed under Coverage;
 /// the secret checks still search it up to [`MAX_SECRET_SCAN_BYTES`].
@@ -900,6 +906,10 @@ pub struct ExtractedRepo {
     /// [`not_inspected_label`]. Never a noise path or a file excluded by agreement: those win.
     /// Their sizes are in `skipped_sizes`.
     pub not_inspected: Vec<String>,
+    /// Symbolic links the walk met (a tracked one included), by path: never followed, so neither
+    /// the file nor the folder a link points to is read, sized or counted through it. Listed under
+    /// Coverage with [`symlink_label`], never dropped silently.
+    pub symlinks: Vec<String>,
     /// Files neither admitted, listed, noise nor excluded, counted by type ([`type_key`]), most
     /// files first: the operator-only tally in `camerata count --json` that makes a new silent
     /// type visible on the first count. Never shown to a client.
@@ -961,6 +971,7 @@ impl ExtractedRepo {
         self.excluded_by_agreement.sort();
         self.generated.sort();
         self.not_inspected.sort();
+        self.symlinks.sort();
         self
     }
 
@@ -1125,6 +1136,7 @@ struct WalkSink {
     reference: ReferenceSink,
     generated: Vec<String>,
     not_inspected: Vec<String>,
+    symlinks: Vec<String>,
     unclassified: std::collections::BTreeMap<String, usize>,
 }
 
@@ -1140,7 +1152,17 @@ impl WalkSink {
             reference: ReferenceSink::new(HARD_CAP_REFERENCE_FILES),
             generated: Vec::new(),
             not_inspected: Vec::new(),
+            symlinks: Vec::new(),
             unclassified: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Name a symbolic link as not read. It is never opened, sized or followed, so what it points
+    /// to (a file in the repository, a folder, a file outside it, or nothing) is not read through
+    /// it. Noise paths are left out, as for any file.
+    fn symlink(&mut self, rel: String) {
+        if !is_noise_path(&rel, &self.extra_dirs) {
+            self.symlinks.push(rel);
         }
     }
 
@@ -1223,6 +1245,7 @@ impl WalkSink {
             long_line_contents: self.admitted.long_line_contents,
             generated: self.generated,
             not_inspected: self.not_inspected,
+            symlinks: self.symlinks,
             unclassified_types: {
                 let mut tally: Vec<(String, usize)> = self.unclassified.into_iter().collect();
                 tally.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -1377,6 +1400,18 @@ fn read_local_repo_files_gitignore(
             Some(ft) => ft,
             None => continue,
         };
+        if ft.is_symlink() {
+            // Named as not read, never followed. Marked seen so the ls-files union below does
+            // not meet it a second time.
+            if let Ok(rel) = p.strip_prefix(root) {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if !rel.is_empty() {
+                    seen.insert(rel.clone());
+                    sink.symlink(rel);
+                }
+            }
+            continue;
+        }
         if !ft.is_file() {
             continue;
         }
@@ -1409,12 +1444,20 @@ fn read_local_repo_files_gitignore(
                     continue;
                 }
                 let full = root.join(&rel);
+                // A tracked symbolic link is named as not read and never followed: its target may
+                // be a folder, a file outside the repository, or nothing. `symlink_metadata` does
+                // not follow it.
+                let meta = std::fs::symlink_metadata(&full).ok();
+                if meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
+                    seen.insert(rel.clone());
+                    sink.symlink(rel);
+                    continue;
+                }
                 // Tracked in the index but not present on disk (rare edge case) has no size.
                 let len = || {
-                    std::fs::metadata(&full)
-                        .ok()
-                        .filter(std::fs::Metadata::is_file)
-                        .map(|m| m.len())
+                    meta.as_ref()
+                        .filter(|m| m.file_type().is_file())
+                        .map(std::fs::Metadata::len)
                 };
                 seen.insert(rel.clone());
                 sink.classify(rel, &full, len);
@@ -1487,8 +1530,12 @@ fn read_local_repo_files_noise_denylist(
                 }
                 continue;
             }
+            if ft.is_symlink() {
+                sink.symlink(rel);
+                continue;
+            }
             if !ft.is_file() {
-                continue; // skip symlinks / fifos / etc.
+                continue; // skip fifos / etc.
             }
             sink.classify(rel, &p, || entry.metadata().ok().map(|m| m.len()));
         }

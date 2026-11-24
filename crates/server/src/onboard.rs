@@ -2592,6 +2592,7 @@ pub async fn audit_repos_with_llm_controlled(
                     excluded_by_agreement,
                     generated,
                     not_inspected,
+                    symlinks,
                     unclassified_types: _,
                 },
                 noise_lines,
@@ -2714,6 +2715,7 @@ pub async fn audit_repos_with_llm_controlled(
                         excluded_by_agreement,
                         long_line: skipped_long_line,
                         generated,
+                        symlink: symlinks,
                         sizes: &skipped_sizes,
                         file_cap,
                     },
@@ -8387,6 +8389,109 @@ mod tests {
         assert!(
             paths.iter().any(|p| p.contains("main.rs")),
             "src/main.rs must appear in scan: {paths:?}"
+        );
+    }
+
+    /// Run `git add -f` for `paths` (a gitignored link is staged on purpose).
+    fn git_add_force(dir: &std::path::Path, paths: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["add", "-f"])
+            .args(paths)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git add failed");
+        assert!(status.success(), "git add -f must succeed for {paths:?}");
+    }
+
+    /// A tracked symbolic link is never read through: not to a file in the repository, not to a
+    /// folder, not to a file outside the repository, not to nothing. Each is listed as a symbolic
+    /// link, and the line total counts only the real files.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_symlink_is_listed_and_never_read_or_counted() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let outside = base.path().join("acme-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.rs"), "fn leaked_outside() {}\n").unwrap();
+        let root = base.path().join("acme-repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        git_init(&root);
+        std::fs::write(root.join(".gitignore"), "ignored-link.rs\n").unwrap();
+        std::fs::write(root.join("src/real.rs"), "fn real() {}\n").unwrap();
+        std::fs::write(root.join("lib/a.rs"), "fn lib_a() {}\n").unwrap();
+        symlink("real.rs", root.join("src/inside-link.rs")).unwrap();
+        symlink(outside.join("secret.rs"), root.join("src/outside-link.rs")).unwrap();
+        symlink("../lib", root.join("src/folder-link")).unwrap();
+        symlink(
+            base.path().join("acme-nothing.rs"),
+            root.join("src/dangling.rs"),
+        )
+        .unwrap();
+        symlink(outside.join("secret.rs"), root.join("ignored-link.rs")).unwrap();
+        git_add(
+            &root,
+            &[
+                ".gitignore",
+                "src/real.rs",
+                "lib/a.rs",
+                "src/inside-link.rs",
+                "src/outside-link.rs",
+                "src/folder-link",
+                "src/dangling.rs",
+            ],
+        );
+        git_add_force(&root, &["ignored-link.rs"]);
+
+        let extracted =
+            read_local_repo_files(&root, &crate::onboard::scope::RepoScope::none()).expect("scan");
+        let mut paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            [".gitignore", "lib/a.rs", "src/real.rs"],
+            "only real files are read"
+        );
+        assert!(
+            extracted
+                .files
+                .iter()
+                .all(|(_, c)| !c.contains("leaked_outside")),
+            "a file outside the repository must not be read through a link"
+        );
+        assert_eq!(
+            extracted.symlinks,
+            [
+                "ignored-link.rs",
+                "src/dangling.rs",
+                "src/folder-link",
+                "src/inside-link.rs",
+                "src/outside-link.rs"
+            ],
+            "every link is listed, none dropped"
+        );
+        let real: Vec<(String, String)> = extracted
+            .files
+            .iter()
+            .filter(|(p, _)| p.ends_with(".rs"))
+            .cloned()
+            .collect();
+        let (lines, _) = propose::count_source_lines(&real);
+        assert_eq!(lines, 2, "a link's target is never counted");
+        // It reaches Coverage under its own reason, with the client-facing label.
+        let mut list = crate::scan_ledger::SkippedFileList::default();
+        list.push(
+            "acme/repo",
+            "src/inside-link.rs".to_string(),
+            crate::scan_ledger::SkipReason::Symlink,
+        );
+        assert_eq!(list.totals().symlink, 1);
+        assert_eq!(
+            crate::scan_ledger::SkipReason::Symlink.label(),
+            "a symbolic link; the file it points to is not read through it"
         );
     }
 
