@@ -2716,3 +2716,58 @@ fn the_cache_miss_figure_is_read_from_a_record_written_before_it_existed() {
     let usage: crate::stage_telemetry::StageUsage = serde_json::from_str(old).expect("old record");
     assert_eq!(usage.cache_miss_turns, 0);
 }
+
+// ─── the context window bounds a piece's conversation ────────────────────────────────────────
+
+/// A model the registry gives a 200,000 token window.
+const SMALL_WINDOW_MODEL: &str = "claude-haiku-4-5-20251001";
+
+#[tokio::test]
+async fn a_conversation_that_would_pass_the_context_window_sends_no_further_request() {
+    let window = crate::model_registry::context_window_for(SMALL_WINDOW_MODEL)
+        .expect("the registry lists the model");
+    assert_eq!(window, 200_000);
+    // 2,000 lines of 49 bytes: one Read returns about 100,000 bytes.
+    let big: String = (0..2_000)
+        .map(|i| format!("{i:04} {}\n", "x".repeat(43)))
+        .collect();
+    let mut files = repo();
+    files[0].1 = big;
+    // One reply asks for the same page seven times: about 700,000 bytes of results, past 90
+    // percent of 200,000 tokens at the estimator's 3 bytes a token.
+    let reads: Vec<Value> = (0..7)
+        .map(|i| call(&format!("r{i}"), "Read", json!({"file_path": "src/a.rs"})))
+        .collect();
+    let wire = ScriptedWire::new(vec![tools_reply(reads)]);
+    let wire_dyn: Arc<dyn FinderWire> = wire.clone();
+    let (pause, _) = pause_recorder();
+    let agent = ApiPieceAgent::new(SMALL_WINDOW_MODEL, "sk-test-not-a-real-key")
+        .with_wire(wire_dyn)
+        .with_pause(pause)
+        .with_meter(Arc::new(UsageMeter::default()));
+    let run = run_ok(&agent, &room_of(&files), &limits()).await;
+    assert_eq!(wire.calls(), 1, "the second request was never sent");
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why)
+            if why.starts_with(super::CONTEXT_FULL_PREFIX)),
+        "got {:?}",
+        run.stop
+    );
+    assert_eq!(run.usage.len(), 1, "the paid turn is kept");
+    assert!(
+        run.trace.is_empty(),
+        "reads whose results were never sent cover nothing: {:?}",
+        run.trace
+    );
+}
+
+#[tokio::test]
+async fn a_conversation_inside_the_window_is_sent_as_before() {
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![call("r", "Read", json!({"file_path": "src/a.rs"}))]),
+        text_reply("done"),
+    ]);
+    let run = run_ok(&agent(&wire), &room(), &limits()).await;
+    assert_eq!(run.stop, AgentStop::Finished);
+    assert_eq!(wire.calls(), 2);
+}

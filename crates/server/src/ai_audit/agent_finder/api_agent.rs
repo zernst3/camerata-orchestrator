@@ -583,6 +583,20 @@ impl ApiPieceAgent {
         usage_of(&counted)
     }
 
+    /// The reason the next request must not be sent, when its estimated size passes
+    /// [`CONTEXT_FILL_PERCENT`] of the model's context window.
+    fn context_stop(&self, body: &Value) -> Option<String> {
+        let window = crate::ai_audit::request_budget::context_window_tokens(&self.model);
+        let limit = window / 100 * CONTEXT_FILL_PERCENT;
+        let estimated = super::super::repo_map::estimate_tokens(body.to_string().len());
+        (estimated > limit).then(|| {
+            format!(
+                "{CONTEXT_FULL_PREFIX} (about {estimated} tokens against a window of {window}); \
+                 no further request was sent"
+            )
+        })
+    }
+
     /// The loop. Every failure past this point is a stop with the usage so far, never an `Err`.
     async fn drive(
         &self,
@@ -642,6 +656,14 @@ impl ApiPieceAgent {
                 limits.max_turn_tokens,
             );
             cache_the_conversation(&mut body);
+            // A request the model's window cannot take is never sent: the piece ends here with a
+            // stop a resume answers by halving it. The window is the registry's, never a figure
+            // of ours; the estimate is the one the batch stages use, with a margin.
+            if let Some(why) = self.context_stop(&body) {
+                // The results of the turn just served were never delivered: they cover nothing.
+                pending.clear();
+                break AgentStop::Failed(why);
+            }
 
             let reply = match self.send_with_retry(&body, use_caching).await {
                 Ok(reply) => reply,

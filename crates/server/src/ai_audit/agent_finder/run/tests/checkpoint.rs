@@ -551,3 +551,15 @@ async fn a_one_file_piece_that_hit_its_turn_limit_cannot_be_halved_and_stays_a_n
         );
     }
 }
+
+#[tokio::test]
+async fn a_piece_stopped_before_a_request_past_the_context_window_is_halved_on_the_resume() {
+    let why = format!(
+        "{} (about 190000 tokens against a window of 200000): no further request was sent",
+        super::super::super::api_agent::CONTEXT_FULL_PREFIX
+    );
+    let (seen, failed, extras, _) = resume_after(AgentStop::Failed(why), true).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(seen.contains(&"src/c.rs".to_string()), "{seen:?}");
+    assert_halves_cover_the_parent(&extras);
+}
