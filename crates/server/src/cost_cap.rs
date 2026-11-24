@@ -64,6 +64,10 @@
 //! The first pass of a run is always admitted (nothing has been spent), so a cap smaller than
 //! one pass still lets that one pass finish.
 //!
+//! An agent finder piece is admitted once for all its turns, so it checks the run's limit
+//! ([`crate::ai_audit::UsageMeter::retry_blocked`]) before every turn after the first and stops
+//! with a spend-limit stop, recorded as a failed part like any other stage the limit stopped.
+//!
 //! # What the cap needs from every call
 //!
 //! A cost. With a cap set, every model the run will call is checked for a list price before

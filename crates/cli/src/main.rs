@@ -379,8 +379,10 @@ enum Command {
     /// plus what the noise filter excluded. No model, no network. This is the number a quote is
     /// priced on. See `camerata::count_cmd`'s module doc comment.
     Count {
-        /// The repo (or folder) to count.
-        repo: PathBuf,
+        /// The repo (or folder) to count; give several paths for a project of several repos
+        /// (with --estimate: a line per repo and the total).
+        #[arg(required = true)]
+        repo: Vec<PathBuf>,
         /// Print JSON instead of the plain-text table.
         #[arg(long)]
         json: bool,
@@ -393,6 +395,14 @@ enum Command {
         /// means the same files in both. Without it the folder's own name.
         #[arg(long = "repo-name")]
         repo_name: Option<String>,
+        /// Add the full-scan cost estimate: counted lines / 1,000 x dollars per 1,000 counted
+        /// lines. Without --cost-per-1k-usd the documented measured constant is used.
+        #[arg(long)]
+        estimate: bool,
+        /// Dollars per 1,000 counted lines from your own earlier run (the figure the stage table
+        /// of `camerata inspect` prints). Implies --estimate.
+        #[arg(long = "cost-per-1k-usd")]
+        cost_per_1k_usd: Option<f64>,
     },
 
     /// Compare two inspections of the SAME fixture: exit 1 when cost per 1K counted lines rose
@@ -680,15 +690,24 @@ async fn main() -> anyhow::Result<()> {
             json,
             exclude,
             repo_name,
+            estimate,
+            cost_per_1k_usd,
         } => {
             println!(
                 "{}",
-                camerata::count_cmd::run_count(&CountArgs {
-                    repo,
-                    json,
-                    exclude,
-                    repo_name
-                })?
+                camerata::count_cmd::run_count_many(
+                    &repo,
+                    &CountArgs {
+                        repo: repo[0].clone(),
+                        json,
+                        exclude,
+                        repo_name,
+                    },
+                    camerata::count_cmd::EstimateArgs {
+                        estimate,
+                        cost_per_1k_usd,
+                    }
+                )?
             );
             Ok(())
         }

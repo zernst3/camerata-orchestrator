@@ -475,6 +475,14 @@ impl ApiPieceAgent {
                     usage.len()
                 ));
             }
+            // The run's own limit, before every turn after the first: a piece is admitted once
+            // for all its turns, so without this check a long piece runs past the limit by up to
+            // its whole ceiling.
+            if !usage.is_empty() && self.meter.as_ref().is_some_and(|m| m.retry_blocked()) {
+                break AgentStop::SpendLimit(
+                    "the run's spend limit blocks the next turn of this piece".to_string(),
+                );
+            }
             let (mut body, use_caching) = build_anthropic_request_body_with_limit(
                 &self.model,
                 Some(&system),

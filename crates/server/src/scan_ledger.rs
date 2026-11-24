@@ -1129,6 +1129,11 @@ pub struct SkippedTotals {
     /// decode: file-name checks only. These are also counted in `oversize`.
     #[serde(default)]
     pub secret_oversize_not_text: usize,
+    /// Files over the file size limit and under the ceiling that the run's total secret search
+    /// budget (`onboard::files::MAX_SECRET_SEARCH_TOTAL_BYTES`) left unsearched: file-name checks
+    /// only. These are also counted in `oversize`.
+    #[serde(default)]
+    pub secret_over_budget: usize,
 }
 
 impl SkippedTotals {
@@ -1403,9 +1408,16 @@ impl SkippedFileList {
     }
 
     /// Record what the secret checks did over the files not read for the inspection: `searched`
-    /// had their contents searched, `over_ceiling` and `not_text` (over-limit files) got file-name
-    /// checks only. Called once per repo when the deterministic floor ran.
-    pub fn record_secret_search(&mut self, searched: usize, over_ceiling: usize, not_text: usize) {
+    /// had their contents searched, `over_ceiling`, `not_text` and `over_budget` (over-limit files)
+    /// got file-name checks only. Called once per repo when the deterministic floor ran.
+    pub fn record_secret_search(
+        &mut self,
+        searched: usize,
+        over_ceiling: usize,
+        not_text: usize,
+        over_budget: usize,
+    ) {
+        self.totals.secret_over_budget += over_budget;
         self.totals.secret_search_ran = true;
         self.totals.secret_searched += searched;
         self.totals.secret_over_ceiling += over_ceiling;

@@ -647,7 +647,11 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
                     crate::failure::MAX_RECORD_MESSAGE_CHARS,
                 )),
                 class: Some(class.as_str().to_string()),
-                cost_usd: 0.0,
+                // A refusal carries what the call was billed: the money was paid, so a resumed
+                // run's starting spend must hold it.
+                cost_usd: crate::llm::refusal_billed(e)
+                    .and_then(|b| b.cost_usd)
+                    .unwrap_or(0.0),
                 reason: None,
                 output_path: None,
             }

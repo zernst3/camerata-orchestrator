@@ -314,6 +314,13 @@ fn secret_search_sentence(totals: &SkippedTotals, beyond: &str) -> Option<String
     if totals.secret_over_ceiling > 0 {
         parts.push(format!("{} over {ceiling}", totals.secret_over_ceiling));
     }
+    if totals.secret_over_budget > 0 {
+        parts.push(format!(
+            "{} past the {} search budget for one run",
+            totals.secret_over_budget,
+            crate::onboard::files::secret_search_budget_label()
+        ));
+    }
     if totals.beyond_file_cap > 0 {
         parts.push(format!("{} {beyond}", totals.beyond_file_cap));
     }
@@ -329,6 +336,7 @@ fn secret_search_sentence(totals: &SkippedTotals, beyond: &str) -> Option<String
         ));
     }
     let unsearched = totals.secret_over_ceiling
+        + totals.secret_over_budget
         + totals.beyond_file_cap
         + not_text
         + totals.excluded_by_agreement;

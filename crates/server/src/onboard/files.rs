@@ -101,6 +101,45 @@ pub fn secret_scan_label() -> String {
     format!("{} MB", MAX_SECRET_SCAN_BYTES / (1024 * 1024))
 }
 
+/// The most bytes the secret search opens in over-limit files in ONE run, all repos together.
+/// Each such file is at most [`MAX_SECRET_SCAN_BYTES`] (20 MB), but there is no cap on how many
+/// there are, so a repo of data dumps could make the floor read gigabytes one file after another.
+/// 200 MB is ten files of the ceiling size, or hundreds of ordinary 1 to 5 MB bundles and
+/// fixtures: far above what real source repos hold, read one file at a time. Files are searched in path order (repos in the run's order); a file that does not fit
+/// in what is left is NOT searched, only checked by name, and is reported as "not searched for
+/// secrets" wherever over-limit files are reported.
+pub(crate) const MAX_SECRET_SEARCH_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
+
+/// The secret search budget as a client reads it ("200 MB").
+pub fn secret_search_budget_label() -> String {
+    format!("{} MB", MAX_SECRET_SEARCH_TOTAL_BYTES / (1024 * 1024))
+}
+
+/// Split `candidates` (over-limit files the secret search could open) into those that fit in the
+/// run's remaining budget and those that do not, in path order. `used` is the bytes the run has
+/// already spent; it grows by each file that fits. A file that exactly fills what is left fits;
+/// a file that does not fit is skipped and a later, smaller one may still fit. Pure.
+pub(crate) fn plan_secret_search(
+    candidates: &[String],
+    sizes: &std::collections::HashMap<String, u64>,
+    used: &mut u64,
+    budget: u64,
+) -> (Vec<String>, Vec<String>) {
+    let mut ordered: Vec<&String> = candidates.iter().collect();
+    ordered.sort();
+    let (mut searched, mut over_budget) = (Vec::new(), Vec::new());
+    for rel in ordered {
+        let size = sizes.get(rel).copied().unwrap_or(0);
+        if used.saturating_add(size) <= budget {
+            *used += size;
+            searched.push(rel.clone());
+        } else {
+            over_budget.push(rel.clone());
+        }
+    }
+    (searched, over_budget)
+}
+
 /// What reading one file for the secret checks gave.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SecretRead {
@@ -2517,6 +2556,49 @@ mod tests {
                 "the key material must not be quoted: {shown}"
             );
         }
+    }
+
+    fn sizes_of(pairs: &[(&str, u64)]) -> std::collections::HashMap<String, u64> {
+        pairs.iter().map(|(p, n)| ((*p).to_string(), *n)).collect()
+    }
+
+    /// The total budget has a hard edge: a file that exactly fills what is left is searched, one
+    /// byte more is not, and the order is by path whatever order the walk listed the files in.
+    #[test]
+    fn the_secret_search_budget_has_a_hard_edge_and_a_stable_order() {
+        let sizes = sizes_of(&[("b.js", 60), ("a.js", 40), ("c.js", 1)]);
+        let listed = |names: &[&str]| names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+        // Just under: 40 + 60 = 100 fits a budget of 100 exactly (the edge itself is inside).
+        let mut used = 0;
+        let (searched, over) =
+            plan_secret_search(&listed(&["b.js", "a.js"]), &sizes, &mut used, 100);
+        assert_eq!(
+            (searched, over, used),
+            (listed(&["a.js", "b.js"]), vec![], 100)
+        );
+        // Just over: one more byte and the last file in path order is not searched.
+        let mut used = 0;
+        let (searched, over) =
+            plan_secret_search(&listed(&["b.js", "a.js", "c.js"]), &sizes, &mut used, 100);
+        assert_eq!(searched, listed(&["a.js", "b.js"]));
+        assert_eq!(over, listed(&["c.js"]));
+        assert_eq!(used, 100, "an unsearched file spends nothing");
+        // The budget is the run's: bytes spent by an earlier repo leave less for the next.
+        let mut used = 50;
+        let (searched, over) =
+            plan_secret_search(&listed(&["a.js", "b.js"]), &sizes, &mut used, 100);
+        assert_eq!((searched, over), (listed(&["a.js"]), listed(&["b.js"])));
+        assert_eq!(used, 90);
+    }
+
+    #[test]
+    fn the_secret_search_budget_is_whole_files_of_the_ceiling_size() {
+        assert_eq!(
+            MAX_SECRET_SEARCH_TOTAL_BYTES % MAX_SECRET_SCAN_BYTES as u64,
+            0
+        );
+        assert!(MAX_SECRET_SEARCH_TOTAL_BYTES >= MAX_SECRET_SCAN_BYTES as u64);
+        assert_eq!(secret_search_budget_label(), "200 MB");
     }
 
     /// The secret search reads at most the ceiling plus one byte: a file that grew after the walk
