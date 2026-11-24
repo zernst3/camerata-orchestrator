@@ -1168,6 +1168,28 @@ fn the_new_saved_fields_are_kept_as_numbers_and_typed_values() {
         j.pointer("/ledger/input/skipped_files/2/reason"),
         Some(&json!("generated_unsearched"))
     );
+    assert_eq!(
+        j.pointer("/ledger/input/skipped_files/3/reason"),
+        Some(&json!("not_inspected_type"))
+    );
+    assert_eq!(
+        j.pointer("/ledger/input/skipped_files/4/reason"),
+        Some(&json!("not_inspected_versions_only"))
+    );
+    for field in ["not_inspected_type", "not_inspected_versions_only"] {
+        assert!(
+            j.pointer(&format!("/ledger/input/skipped_totals/{field}"))
+                .is_some(),
+            "{field}"
+        );
+    }
+    // Their paths are hashed, never raw.
+    let hashed = j
+        .pointer("/ledger/input/skipped_files/3/path")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert!(hashed.starts_with("p:"), "{hashed}");
+    assert!(!everything(&bundle).contains("report.vb"));
 
     // A pin field holding a path or a sentence is rejected, not passed.
     let (mut run, ledger, failures) = fixtures();

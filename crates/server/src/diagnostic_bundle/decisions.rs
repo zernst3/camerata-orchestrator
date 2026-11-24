@@ -52,6 +52,8 @@ pub mod enums {
         "excluded_never_read",
         "generated",
         "generated_unsearched",
+        "not_inspected_type",
+        "not_inspected_versions_only",
     ];
     pub const STAGE: &[&str] = &[
         "scan_pass",

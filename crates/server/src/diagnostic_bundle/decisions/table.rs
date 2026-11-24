@@ -179,6 +179,8 @@ pub(super) fn build_standard() -> DecisionTable {
             ("excluded_never_read", Number),
             ("generated", Number),
             ("generated_unsearched", Number),
+            ("not_inspected_type", Number),
+            ("not_inspected_versions_only", Number),
             ("secret_over_budget", Number),
             ("secret_search_ran", Bool),
             ("secret_searched", Number),

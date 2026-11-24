@@ -61,7 +61,9 @@
     "skipped_files": [
       {"repo": "acme-web", "path": "assets/acme-logo.svg", "reason": "oversize", "bytes": 2048000},
       {"repo": "acme-web", "path": "src/gen/schema.ts", "reason": "generated", "bytes": 5000},
-      {"repo": "acme-web", "path": "src/gen/big.ts", "reason": "generated_unsearched", "bytes": 2100000}
+      {"repo": "acme-web", "path": "src/gen/big.ts", "reason": "generated_unsearched", "bytes": 2100000},
+      {"repo": "acme-web", "path": "src/legacy/Report.vb", "reason": "not_inspected_type", "bytes": 800},
+      {"repo": "acme-web", "path": "Gemfile", "reason": "not_inspected_versions_only", "bytes": 300}
     ],
     "skipped_beyond_cap_total": 0,
     "skipped_totals": {
@@ -77,6 +79,8 @@
       "secret_oversize_not_text": 0,
       "generated": 2,
       "generated_unsearched": 1,
+      "not_inspected_type": 4,
+      "not_inspected_versions_only": 2,
       "secret_over_budget": 1
     },
     "file_cap_hits": [{"repo": "acme-web", "not_scanned": 0, "limit": 2000}]
