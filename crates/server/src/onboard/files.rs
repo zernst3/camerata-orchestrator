@@ -68,7 +68,8 @@ fn join_with_and(items: &[String]) -> String {
 pub fn inspected_types_sentence() -> String {
     format!(
         "The inspection reads {}. A file that declares itself generated in a \
-         comment near its top is listed under Coverage as {}.",
+         comment near its top is listed under Coverage as {}. A file of a type not inspected \
+         yet is listed under Coverage as not read.",
         inspected_types(),
         generated_label()
     )
@@ -494,6 +495,167 @@ const BUILD_BASENAMES: &[&str] = &[
     "justfile",
 ];
 
+/// Hand-written file types the inspection does NOT read yet (GitHub #338, "list now, inspect
+/// later"): the single source of truth for them. An entry starting with `.` is an extension
+/// (matched without case); any other entry is an exact file name. A file of one of these types is
+/// not read, billed or searched for secrets, and is listed under "not read" with
+/// [`not_inspected_label`] in `camerata count`, the pre-start check and Coverage, so "every
+/// hand-written file is inspected or listed" holds. Noise folders and files, the project's
+/// exclusion list and every admission list above win: a type here is only consulted for a file
+/// that none of them reads or prunes. Admitting a type means moving it from here into an
+/// admission list.
+pub(crate) const NOT_INSPECTED_TYPES: &[&str] = &[
+    // .NET: Razor views and components, project and solution files, MSBuild includes, VB and F#.
+    ".cshtml",
+    ".razor",
+    ".csproj",
+    ".vbproj",
+    ".fsproj",
+    ".sln",
+    ".props",
+    ".targets",
+    ".vb",
+    ".fs",
+    ".fsx",
+    ".fsi",
+    // Schemas: GraphQL, Prisma, Protobuf and Thrift.
+    ".graphql",
+    ".gql",
+    ".prisma",
+    ".proto",
+    ".thrift",
+    // Stylesheets and templates outside the admitted ones.
+    ".sass",
+    ".styl",
+    ".twig",
+    ".liquid",
+    ".haml",
+    ".slim",
+    ".mustache",
+    // Docs and source in languages the inspection does not read yet.
+    ".rst",
+    ".lua",
+    ".pl",
+    ".pm",
+    ".ex",
+    ".exs",
+    ".erl",
+    ".hs",
+    ".clj",
+    ".groovy",
+    ".r",
+    ".m",
+    ".mm",
+    ".zsh",
+    ".bash",
+    ".psm1",
+    ".cmake",
+    ".nix",
+    // C++ sources and headers the admitted list (c, cpp, h, cc, hpp) does not carry.
+    ".cxx",
+    ".hh",
+    ".hxx",
+    // .NET web and desktop markup and resources.
+    ".aspx",
+    ".ascx",
+    ".master",
+    ".xaml",
+    ".resx",
+    // Other templates and scripts.
+    ".jsp",
+    ".handlebars",
+    ".phtml",
+    ".cmd",
+    // Ruby and iOS build files.
+    ".rake",
+    ".gemspec",
+    "Gemfile",
+    "Rakefile",
+    "Podfile",
+    "Vagrantfile",
+    "Brewfile",
+    "Pipfile",
+];
+
+/// Whether `path` is a hand-written file of a type the inspection does not read yet
+/// ([`NOT_INSPECTED_TYPES`]). Pure: it says nothing about noise or exclusions, which the walk
+/// checks first.
+pub(crate) fn is_not_inspected_type(path: &str) -> bool {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    let ext = match basename.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => Some(ext.to_ascii_lowercase()),
+        _ => None,
+    };
+    NOT_INSPECTED_TYPES
+        .iter()
+        .any(|entry| match entry.strip_prefix('.') {
+            Some(want) => ext.as_deref() == Some(want),
+            None => basename == *entry,
+        })
+}
+
+/// The reason a file of a type not inspected yet is not read, as Coverage, `camerata count` and
+/// the pre-start check state it.
+pub fn not_inspected_label() -> String {
+    camerata_api_types::audit::NOT_INSPECTED_TYPE_LABEL.to_string()
+}
+
+/// [`not_inspected_label`] worded for a count in a list ("2 of a file type not inspected yet").
+pub fn not_inspected_in_a_list() -> String {
+    camerata_api_types::audit::NOT_INSPECTED_TYPE_IN_A_LIST.to_string()
+}
+
+/// The reason for a file of a type not inspected yet that the engine still opens to read its
+/// declared runtime or package versions.
+pub fn not_inspected_versions_label() -> String {
+    camerata_api_types::audit::NOT_INSPECTED_VERSIONS_LABEL.to_string()
+}
+
+/// [`not_inspected_versions_label`] worded for a count in a list.
+pub fn not_inspected_versions_in_a_list() -> String {
+    camerata_api_types::audit::NOT_INSPECTED_VERSIONS_IN_A_LIST.to_string()
+}
+
+/// Whether the engine opens this file, though its type is not inspected yet, to read its declared
+/// runtime or package versions. The one home of the answer, and derived from the readers' own
+/// lists (the runtime audit's `reader_for` and the dependency audit's manifest rules), so it
+/// cannot drift from them. Meaningful only for a path [`is_not_inspected_type`] accepts.
+pub(crate) fn is_versions_only_type(path: &str) -> bool {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    crate::runtime_audit::reads_declared_runtime(basename)
+        || crate::dep_audit::reads_package_manifest(basename)
+}
+
+/// `paths` (all of a type not inspected yet) split into those with the plain label and those the
+/// engine still opens for declared versions, each in the order given.
+pub(crate) fn split_not_inspected(paths: &[String]) -> (Vec<String>, Vec<String>) {
+    paths
+        .iter()
+        .cloned()
+        .partition(|p| !is_versions_only_type(p))
+}
+
+/// The type of a file as an operator reads it: its extension with a dot, lowercased (".cshtml"),
+/// or the whole name when it has none ("Gemfile").
+pub(crate) fn type_key(path: &str) -> String {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    match basename.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => format!(".{}", ext.to_ascii_lowercase()),
+        _ => basename.to_string(),
+    }
+}
+
+/// `paths` counted by [`type_key`], most files first and then by name.
+pub(crate) fn type_tally<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<(String, usize)> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for path in paths {
+        *counts.entry(type_key(path)).or_insert(0) += 1;
+    }
+    let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
 /// The [`TextKind`] of `path`, or `None` when it is code or config (not one of the kinds admitted
 /// by item 32). The one list every reader uses: admission ([`is_admissible_text`]) and rule
 /// routing (`scan_routing`) both ask this function.
@@ -733,6 +895,15 @@ pub struct ExtractedRepo {
     /// inspected file is billed": it does not reach dependencies, build output, lockfiles or
     /// files excluded by agreement.
     pub generated: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet ([`NOT_INSPECTED_TYPES`]),
+    /// by path: not read, billed or searched for secrets, and listed under "not read" with
+    /// [`not_inspected_label`]. Never a noise path or a file excluded by agreement: those win.
+    /// Their sizes are in `skipped_sizes`.
+    pub not_inspected: Vec<String>,
+    /// Files neither admitted, listed, noise nor excluded, counted by type ([`type_key`]), most
+    /// files first: the operator-only tally in `camerata count --json` that makes a new silent
+    /// type visible on the first count. Never shown to a client.
+    pub unclassified_types: Vec<(String, usize)>,
     /// The indexes (into the project's list) of every pattern that matched at least one walked
     /// file, of any kind. A pattern in no repo's list of these matches nothing.
     pub matched_patterns: Vec<usize>,
@@ -789,6 +960,7 @@ impl ExtractedRepo {
         self.excluded_noise_paths.sort();
         self.excluded_by_agreement.sort();
         self.generated.sort();
+        self.not_inspected.sort();
         self
     }
 
@@ -952,6 +1124,8 @@ struct WalkSink {
     excluded_noise_paths: Vec<String>,
     reference: ReferenceSink,
     generated: Vec<String>,
+    not_inspected: Vec<String>,
+    unclassified: std::collections::BTreeMap<String, usize>,
 }
 
 impl WalkSink {
@@ -965,6 +1139,8 @@ impl WalkSink {
             excluded_noise_paths: Vec::new(),
             reference: ReferenceSink::new(HARD_CAP_REFERENCE_FILES),
             generated: Vec::new(),
+            not_inspected: Vec::new(),
+            unclassified: std::collections::BTreeMap::new(),
         }
     }
 
@@ -984,7 +1160,7 @@ impl WalkSink {
         if !hits.is_empty() {
             // An agreed exclusion wins over every other class: never read, never counted in any
             // figure (noise included), named only as excluded by agreement.
-            if admissible {
+            if admissible || is_not_inspected_type(&rel) {
                 if let Some(len) = len() {
                     self.admitted.sizes.insert(rel.clone(), len);
                 }
@@ -998,7 +1174,23 @@ impl WalkSink {
         if noise && admissible && is_generated_only_noise(&rel, &self.extra_dirs) {
             self.reference.accept(&rel, full);
         }
-        if noise || !admissible {
+        if noise {
+            return;
+        }
+        if !admissible {
+            // A hand-written type the inspection does not read yet is named, never opened, so
+            // Coverage lists it instead of leaving it silent. Noise and exclusions returned above.
+            // A tracked file missing from disk has no size and is not listed, as an admitted or
+            // generated one is skipped.
+            let size = len();
+            if is_not_inspected_type(&rel) {
+                if let Some(len) = size {
+                    self.admitted.sizes.insert(rel.clone(), len);
+                    self.not_inspected.push(rel);
+                }
+            } else if size.is_some() {
+                *self.unclassified.entry(type_key(&rel)).or_insert(0) += 1;
+            }
             return;
         }
         // A file that declares itself generated in a comment near its top is not read for the
@@ -1030,6 +1222,12 @@ impl WalkSink {
             skipped_long_line: self.admitted.long_line,
             long_line_contents: self.admitted.long_line_contents,
             generated: self.generated,
+            not_inspected: self.not_inspected,
+            unclassified_types: {
+                let mut tally: Vec<(String, usize)> = self.unclassified.into_iter().collect();
+                tally.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                tally
+            },
             skipped_sizes: self.admitted.sizes,
             file_cap: self.admitted.cap,
             excluded_noise: self.excluded_noise_paths.len(),
@@ -2847,5 +3045,120 @@ mod tests {
         // Excluded by agreement, it no longer blocks.
         let agreed = scan_excluding(dir.path(), &["app/data/wide.js"]);
         assert!(agreed.over_limit_files().is_empty());
+    }
+
+    /// GitHub #338: every entry of the not-inspected list is a type no admission list reads, so a
+    /// file is never both read and listed as not read; and the walk lists such a file only when
+    /// nothing prunes or excludes it first.
+    #[test]
+    fn a_type_not_inspected_yet_is_listed_only_when_nothing_else_claims_it() {
+        for entry in NOT_INSPECTED_TYPES {
+            let path = match entry.strip_prefix('.') {
+                Some(ext) => format!("src/sample.{ext}"),
+                None => format!("src/{entry}"),
+            };
+            assert!(is_not_inspected_type(&path), "{path}");
+            assert!(!is_admissible_text(&path), "{path} is admitted and listed");
+        }
+        assert!(is_not_inspected_type("Views/Index.CSHTML"));
+        assert!(!is_not_inspected_type("src/main.rs"));
+        assert!(!is_not_inspected_type("src/gemfile"));
+
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.rs", "fn a() {}\n");
+        write(dir.path(), "schema.graphql", "type Query { a: Int }\n");
+        write(dir.path(), "Views/Index.cshtml", "<h1>Hi</h1>\n");
+        write(dir.path(), "Gemfile", "source 'https://rubygems.org'\n");
+        write(
+            dir.path(),
+            "node_modules/dep/schema.graphql",
+            "type Dep { a: Int }\n",
+        );
+        write(dir.path(), "vendor/lib/view.twig", "{{ a }}\n");
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["src/a.rs"]);
+        assert_eq!(
+            extracted.not_inspected,
+            ["Gemfile", "Views/Index.cshtml", "schema.graphql"]
+        );
+        // Noise stays noise, and is not counted as excluded noise either (as before).
+        assert_eq!(extracted.excluded_noise, 0);
+        assert!(extracted.skipped_sizes.contains_key("schema.graphql"));
+        // An agreed exclusion wins: the excluded view is named as excluded by agreement, like an
+        // admissible file, and is not listed as not inspected.
+        let agreed = scan_excluding(dir.path(), &["app/Views/**"]);
+        assert_eq!(agreed.not_inspected, ["Gemfile", "schema.graphql"]);
+        assert_eq!(agreed.excluded_by_agreement, ["Views/Index.cshtml"]);
+    }
+
+    /// Round 1: which listed names carry the second label is derived from the readers' own
+    /// lists, so a name a reader opens cannot be called plainly not read, and none is missed.
+    #[test]
+    fn the_names_the_readers_open_carry_the_versions_label() {
+        for opened in [
+            "src/App.csproj",
+            "a/b.fsproj",
+            "a/b.VBPROJ",
+            "Directory.Build.props",
+            "Gemfile",
+            "Pipfile",
+            "mix.exs",
+        ] {
+            assert!(is_not_inspected_type(opened), "{opened} is listed");
+            assert!(
+                is_versions_only_type(opened),
+                "{opened} is read for versions"
+            );
+        }
+        for plain in [
+            "Views/Index.cshtml",
+            "Directory.Packages.props",
+            "Rakefile",
+            "a.sln",
+        ] {
+            assert!(is_not_inspected_type(plain), "{plain} is listed");
+            assert!(
+                !is_versions_only_type(plain),
+                "{plain} is read by no reader"
+            );
+        }
+        // Every listed entry with a reader is one of the names above: nothing the readers open
+        // is left plain.
+        let opened: Vec<&str> = NOT_INSPECTED_TYPES
+            .iter()
+            .copied()
+            .filter(|e| {
+                let sample = match e.strip_prefix('.') {
+                    Some(ext) => format!("sample.{ext}"),
+                    None => (*e).to_string(),
+                };
+                is_versions_only_type(&sample)
+            })
+            .collect();
+        assert_eq!(
+            opened,
+            [".csproj", ".vbproj", ".fsproj", "Gemfile", "Pipfile"]
+        );
+        let (plain, versions) =
+            split_not_inspected(&["a/Index.cshtml".to_string(), "a/App.csproj".to_string()]);
+        assert_eq!(
+            (plain, versions),
+            (
+                vec!["a/Index.cshtml".to_string()],
+                vec!["a/App.csproj".to_string()]
+            )
+        );
+    }
+
+    /// Round 1: the method text says a file of a type not inspected yet is listed as not read.
+    #[test]
+    fn the_method_sentence_states_the_not_read_listing() {
+        assert!(
+            inspected_types_sentence().contains(
+                "A file of a type not inspected yet is listed under Coverage as not read."
+            ),
+            "{}",
+            inspected_types_sentence()
+        );
     }
 }

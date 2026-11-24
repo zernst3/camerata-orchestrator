@@ -359,6 +359,7 @@ fn report_from_walk_with(
             long_line: extracted.skipped_long_line,
             generated: extracted.generated,
             generated_unsearched: Vec::new(),
+            not_inspected_type: Vec::new(),
             excluded_never_read: never_read,
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
@@ -423,6 +424,7 @@ fn a_generated_file_is_named_in_coverage_as_scanned_for_secrets_only_and_not_bil
             long_line: Vec::new(),
             generated: extracted.generated,
             generated_unsearched: Vec::new(),
+            not_inspected_type: Vec::new(),
             excluded_never_read: Vec::new(),
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
@@ -472,6 +474,7 @@ fn a_generated_file_that_was_not_searched_is_worded_as_not_searched() {
             long_line: Vec::new(),
             generated: vec!["a/Searched.Designer.cs".to_string()],
             generated_unsearched: vec!["b/Not.Designer.cs".to_string()],
+            not_inspected_type: Vec::new(),
             excluded_never_read: Vec::new(),
             sizes: &sizes,
             file_cap: 20_000,
@@ -889,6 +892,7 @@ fn a_never_read_pattern_is_counted_once_and_is_not_a_file() {
                 long_line: Vec::new(),
                 generated: Vec::new(),
                 generated_unsearched: Vec::new(),
+                not_inspected_type: Vec::new(),
                 excluded_never_read: vec!["*/node_modules/**".to_string()],
                 sizes: &sizes,
                 file_cap: 20_000,
@@ -947,4 +951,40 @@ fn the_secrets_sentence_names_files_the_search_budget_left_unsearched() {
         sentence.contains("10 of these files were still searched"),
         "{sentence}"
     );
+}
+
+/// Round 1: a file of a type not inspected yet beside another not-read reason. Each reason is
+/// counted once, the total is their sum, Coverage says the file is not billed, and the secret
+/// sentence counts it as not searched.
+#[test]
+fn a_type_not_inspected_yet_mixes_with_another_reason_and_is_stated_as_not_billed() {
+    let mut sizes = HashMap::new();
+    sizes.insert("big.json".to_string(), 3_000_000u64);
+    sizes.insert("Views/Index.cshtml".to_string(), 40u64);
+    let mut list = SkippedFileList::default();
+    list.record_repo(
+        "owner/repo",
+        RepoSkips {
+            oversize: vec!["big.json".to_string()],
+            beyond_cap: Vec::new(),
+            not_text: Vec::new(),
+            excluded_by_agreement: Vec::new(),
+            long_line: Vec::new(),
+            generated: Vec::new(),
+            generated_unsearched: Vec::new(),
+            not_inspected_type: vec!["Views/Index.cshtml".to_string()],
+            excluded_never_read: Vec::new(),
+            sizes: &sizes,
+            file_cap: 20_000,
+        },
+    );
+    let totals = list.totals();
+    assert_eq!((totals.oversize, totals.not_inspected_type), (1, 1));
+    assert_eq!(totals.total(), 2);
+    let sentence = super::coverage_gaps::skipped_summary_sentence(&totals, &[]).unwrap();
+    assert!(
+        sentence.contains("1 of a file type not inspected yet (not billed)"),
+        "{sentence}"
+    );
+    assert!(sentence.starts_with("2 files were not read"), "{sentence}");
 }

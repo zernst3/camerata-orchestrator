@@ -130,6 +130,11 @@ const RULES: &[Rule] = &[
     },
 ];
 
+/// Whether `file_name` is a manifest this module covers.
+pub(super) fn is_manifest(file_name: &str) -> bool {
+    rule_for(file_name).is_some()
+}
+
 fn rule_for(file_name: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| match r.manifest.strip_prefix('*') {
         Some(ext) => file_name.ends_with(ext),

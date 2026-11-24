@@ -41,6 +41,11 @@
 //! ledger, and so can never be reported "verified clean". Findings come only from this module.
 
 mod detect;
+
+/// Whether the runtime audit opens a file of this name to read a declared runtime version.
+pub(crate) fn reads_declared_runtime(file_name: &str) -> bool {
+    detect::reader_for(file_name).is_some()
+}
 mod eol;
 mod nvd;
 #[cfg(test)]

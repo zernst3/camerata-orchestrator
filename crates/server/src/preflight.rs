@@ -39,6 +39,9 @@ pub struct RepoScanFacts {
     pub generated_lines: usize,
     /// The generated files' paths, in path order, so the pre-start check names them.
     pub generated_paths: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet, in path order: not read,
+    /// billed or searched for secrets, and named by the pre-start check.
+    pub not_inspected_paths: Vec<String>,
 }
 
 /// Read each source the way the scan does and count what the AI tier will be given. A source
@@ -103,6 +106,7 @@ pub async fn gather_scan_facts(
         let matched_patterns = extracted.matched_patterns.clone();
         let generated_files = extracted.generated.len();
         let generated_paths = extracted.generated.clone();
+        let not_inspected_paths = extracted.not_inspected.clone();
         out.push(RepoScanFacts {
             repo: spec.to_string(),
             files: extracted.files,
@@ -115,6 +119,7 @@ pub async fn gather_scan_facts(
             generated_files,
             generated_lines,
             generated_paths,
+            not_inspected_paths,
         });
     }
     out
@@ -134,6 +139,7 @@ fn unreadable(spec: &str, why: &str) -> RepoScanFacts {
         generated_files: 0,
         generated_lines: 0,
         generated_paths: Vec::new(),
+        not_inspected_paths: Vec::new(),
     }
 }
 
@@ -165,6 +171,17 @@ pub struct RepoSizeWire {
     /// them (capped there) as the command line does.
     #[serde(default)]
     pub generated_paths: Vec<String>,
+    /// Hand-written files of a type the inspection does not read yet, in the form the exclusion
+    /// list uses: not read, billed or searched for secrets. The desktop names them (capped there)
+    /// as the command line does.
+    #[serde(default)]
+    pub not_inspected_paths: Vec<String>,
+    /// The part of the list above that the engine still opens for declared runtime and package
+    /// versions (a project file, a `Gemfile`): not billed or searched for secrets, and never
+    /// called plainly not read. Named separately so the desktop words them as the command line
+    /// does.
+    #[serde(default)]
+    pub not_inspected_versions_only_paths: Vec<String>,
     /// The read limit as a person reads it ("1 MB"), from the engine's own constant, so the
     /// desktop never states a number the engine does not apply.
     #[serde(default)]
@@ -250,6 +267,20 @@ pub fn repo_sizes(
                     .iter()
                     .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
                     .collect(),
+                not_inspected_paths: crate::onboard::files::split_not_inspected(
+                    &f.not_inspected_paths,
+                )
+                .0
+                .iter()
+                .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
+                .collect(),
+                not_inspected_versions_only_paths: crate::onboard::files::split_not_inspected(
+                    &f.not_inspected_paths,
+                )
+                .1
+                .iter()
+                .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
+                .collect(),
                 read_limit: crate::onboard::files::max_file_label(),
                 secret_search_limit: crate::onboard::files::secret_scan_label(),
                 unmatched_patterns: Vec::new(),
@@ -276,6 +307,8 @@ pub fn repo_sizes(
                 generated_files: 0,
                 generated_lines: 0,
                 generated_paths: Vec::new(),
+                not_inspected_paths: Vec::new(),
+                not_inspected_versions_only_paths: Vec::new(),
                 read_limit: crate::onboard::files::max_file_label(),
                 secret_search_limit: crate::onboard::files::secret_scan_label(),
                 unmatched_patterns: Vec::new(),
