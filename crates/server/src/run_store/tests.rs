@@ -599,6 +599,49 @@ fn a_resume_is_refused_in_plain_words_when_anything_it_depends_on_differs() {
     ));
 }
 
+/// The tree-changed refusal names the changed paths of that repo, at most twenty, then how many
+/// more. An operator-only message.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_tree_changed_refusal_names_the_changed_paths_up_to_twenty() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    drop(store);
+    let record = read_record(&id).unwrap();
+    let refuse_now = || {
+        check_resume(&ResumeCheck {
+            record: &record,
+            ai_scan_key: &key(),
+            models: &models(),
+            trees: vec![("acme/api".to_string(), tree_state(repo.path()))],
+            build: &engine_pin::BuildId::current(),
+            corpus_version: None,
+        })
+    };
+    // One stray file: named.
+    std::fs::write(repo.path().join("acme-stray.txt"), "x\n").unwrap();
+    let one = refuse_now();
+    assert!(
+        matches!(&one, Err(RunStoreError::Refused(m))
+            if m.contains("acme-stray.txt") && !m.contains("more")),
+        "{one:?}"
+    );
+    // An edit and twenty-five strays: twenty named, then "and 6 more".
+    std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
+    for n in 1..=25 {
+        std::fs::write(repo.path().join(format!("acme-stray-{n:02}.txt")), "x\n").unwrap();
+    }
+    let many = refuse_now();
+    let Err(RunStoreError::Refused(message)) = &many else {
+        panic!("{many:?}")
+    };
+    // 27 changed paths in all: the edit, 26 strays (the first one too).
+    assert!(message.contains("and 7 more"), "{message}");
+    assert_eq!(message.matches(".txt").count(), 20, "{message}");
+}
+
 #[test]
 #[serial_test::serial(process_env)]
 fn the_tree_a_run_left_behind_is_accepted_and_a_complete_run_is_a_no_op() {
