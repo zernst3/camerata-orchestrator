@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: scripts/install-cargo-sweep-weekly.sh fills in __REPO_DIR__ (this checkout) and __HOME__ (your home directory). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.camerata.cargo-sweep-weekly</string>
+
+  <!-- Runs scripts/cargo-sweep-weekly.sh every Sunday at 3 AM: cargo-sweep --time 7 on every
+       cargo target under the repos folder, except kept scan builds (camerata-scan-*).
+       Install:  scripts/install-cargo-sweep-weekly.sh -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO_DIR__/scripts/cargo-sweep-weekly.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/cargo-sweep-weekly.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/cargo-sweep-weekly.log</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

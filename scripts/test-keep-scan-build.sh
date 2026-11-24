@@ -11,6 +11,9 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # dry run changes nothing
 "$S" t1 --dry-run | grep -q "Nothing changed" || fail "dry run text"
+"$S" t1 --dry-run | grep -qxF 'export CAMERATA_STATE_DIR="$HOME/camerata-scan-state/t1"' || fail "dry run missing the state dir export line"
+"$S" t1 --dry-run | grep -q "Run every scan command (count, inspect, resume, diagnose) from $base/camerata-scan-t1 with that variable set" || fail "dry run missing run-from line"
+"$S" t1 --dry-run | grep -q "Keep this folder until the package is delivered" || fail "dry run missing keep-folder line"
 [ -z "$(git tag)" ] || fail "dry run created a tag"
 [ ! -e "$base/camerata-scan-t1" ] || fail "dry run created a folder"
 
@@ -20,6 +23,18 @@ if "$S" t1 --no-build 2>/dev/null; then fail "dirty tree accepted"; fi
 git checkout -q f; echo x > untracked
 if "$S" t1 --no-build 2>/dev/null; then fail "untracked file accepted"; fi
 mv untracked "$base/untracked.keep"
+
+# files under .claude/ never refuse (the main checkout always carries a local settings change)
+mkdir .claude; echo '{}' > .claude/settings.json; git add .claude/settings.json; git commit -q -m settings
+echo '{"local":1}' > .claude/settings.json
+"$S" t1 --dry-run 2>&1 | grep -q "Nothing changed" || fail "modified tracked file under .claude/ refused"
+echo y > .claude/scratch.txt
+"$S" t1 --dry-run 2>&1 | grep -q "Nothing changed" || fail "untracked file under .claude/ refused"
+# ... but a change elsewhere still refuses, even alongside the .claude/ ones
+echo b >> f
+if "$S" t1 --dry-run 2>/dev/null; then fail "modified file elsewhere accepted next to .claude/ changes"; fi
+git checkout -q f
+git checkout -q .claude/settings.json; rm .claude/scratch.txt
 
 # real run: local tag plus worktree at the tag, no remote needed
 "$S" t1 --no-build >/dev/null
