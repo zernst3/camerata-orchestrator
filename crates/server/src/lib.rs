@@ -57,6 +57,7 @@ pub mod csv_cell;
 pub mod decisions;
 pub mod decompose;
 pub mod dep_audit;
+pub mod diagnostic_bundle;
 pub mod draft;
 pub mod edits;
 pub mod enforcement_ledger;
