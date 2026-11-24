@@ -151,10 +151,10 @@ pub struct StageUsage {
     /// that is counted at its cost ceiling (`record_unanswered`) is in `busy_ms` instead.
     #[serde(default)]
     pub failed_busy_ms: u64,
-    /// Turns after the first of a finder piece whose reply showed the conversation was not read
-    /// from the prompt cache (it read nothing from it). Each one pays the cache
-    /// write price for the whole context again. Counted for the finder stage only; zero for every
-    /// other stage. Operator-only; never exported.
+    /// Finder turns (after a piece's first) that did not read back the prefix the turn before
+    /// them wrote to the prompt cache. Each one pays the cache write price for the context again.
+    /// Counted for the finder stage only; zero for every other stage. Operator-only; never
+    /// exported.
     #[serde(default)]
     pub cache_miss_turns: u64,
 }

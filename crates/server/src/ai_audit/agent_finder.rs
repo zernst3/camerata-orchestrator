@@ -174,24 +174,19 @@ pub struct AgentRun {
 }
 
 impl TurnUsage {
-    /// Whether this turn, taken as a turn after the first of a piece, missed the prompt cache:
-    /// it read nothing from the cache. A turn that wrote more than it read still hit the cache
-    /// (new tool results are written), so it is not a miss.
-    pub fn is_cache_miss(&self) -> bool {
-        self.cache_read_input_tokens == 0
+    /// Whether this turn missed the prompt cache, given the turn before it in the same
+    /// conversation: it did not read back all that the previous request had read or written. The
+    /// system block has its own breakpoint, so a turn that misses the conversation still reads
+    /// the system prefix and `cache_read` alone cannot tell; and new tool results only add
+    /// writes, so a turn that reads back the whole previous prefix is a hit however much it
+    /// writes.
+    pub fn is_cache_miss_after(&self, previous: &TurnUsage) -> bool {
+        self.cache_read_input_tokens
+            < previous.cache_read_input_tokens + previous.cache_creation_input_tokens
     }
 }
 
 impl AgentRun {
-    /// Turns after the first of this run that missed the prompt cache. Operator-only figure.
-    pub fn cache_miss_turns(&self) -> u64 {
-        self.usage
-            .iter()
-            .skip(1)
-            .filter(|t| t.is_cache_miss())
-            .count() as u64
-    }
-
     /// A run that ended with `stop` and recorded nothing.
     pub fn empty(stop: AgentStop) -> Self {
         Self {

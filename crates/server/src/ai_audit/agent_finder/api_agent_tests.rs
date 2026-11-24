@@ -2010,25 +2010,24 @@ fn finder_cache_miss_turns(meter: &UsageMeter) -> u64 {
 }
 
 #[tokio::test]
-async fn turns_after_the_first_that_read_nothing_from_the_cache_are_counted() {
+async fn a_turn_that_does_not_read_back_the_previous_prefix_is_a_miss_however_large_its_write() {
     let wire = ScriptedWire::new(vec![
         // The first turn writes the context and reads nothing: never a miss.
         reply_cached(vec![glob_call("a")], "tool_use", 0, 5_000),
-        // Read the whole context back: a hit.
+        // Reads back what the first wrote: a hit.
         reply_cached(vec![glob_call("b")], "tool_use", 5_000, 300),
-        // Read nothing: a miss.
-        reply_cached(vec![glob_call("c")], "tool_use", 0, 5_300),
-        // Read something but wrote more than it read: still a hit (new results are written).
-        reply_cached(vec![glob_call("d")], "tool_use", 100, 5_200),
-        // A hit again.
-        reply_cached(vec![text_reply_block("done")], "end_turn", 5_300, 50),
+        // Reads only the system prefix, not the 5,300 the turn before had: a miss.
+        reply_cached(vec![glob_call("c")], "tool_use", 1_200, 5_100),
+        // Reads back all 6,300 the turn before had and writes 80,000 of new results: a hit.
+        reply_cached(vec![glob_call("d")], "tool_use", 6_300, 80_000),
+        // Reads back all 86,300: a hit.
+        reply_cached(vec![text_reply_block("done")], "end_turn", 86_300, 50),
     ]);
     let meter = Arc::new(UsageMeter::default());
     let (agent, _) = metered(&wire, &meter);
     let run = run_ok(&agent, &room(), &limits()).await;
     assert_eq!(run.usage.len(), 5);
-    assert_eq!(run.cache_miss_turns(), 1, "per piece");
-    assert_eq!(finder_cache_miss_turns(&meter), 1, "per run");
+    assert_eq!(finder_cache_miss_turns(&meter), 1);
     let table = meter.stage_telemetry(0).render_table();
     assert!(table.contains("finder cache-miss turns: 1"), "{table}");
 }
@@ -2047,8 +2046,7 @@ async fn a_piece_of_one_turn_counts_no_miss_and_the_run_adds_its_pieces() {
         5_000,
     )]);
     let (agent_one, _) = metered(&one, &meter);
-    let run = run_ok(&agent_one, &room(), &limits()).await;
-    assert_eq!(run.cache_miss_turns(), 0);
+    let _ = run_ok(&agent_one, &room(), &limits()).await;
     assert_eq!(finder_cache_miss_turns(&meter), 0);
 
     for _ in 0..2 {
@@ -2057,13 +2055,44 @@ async fn a_piece_of_one_turn_counts_no_miss_and_the_run_adds_its_pieces() {
             reply_cached(vec![text_reply_block("done")], "end_turn", 0, 5_200),
         ]);
         let (agent, _) = metered(&wire, &meter);
-        let run = run_ok(&agent, &room(), &limits()).await;
-        assert_eq!(run.cache_miss_turns(), 1);
+        let _ = run_ok(&agent, &room(), &limits()).await;
     }
     assert_eq!(
         finder_cache_miss_turns(&meter),
         2,
         "one in each of two pieces"
+    );
+}
+
+#[tokio::test]
+async fn a_follow_ups_first_turn_is_compared_with_the_last_turn_of_the_step_before() {
+    // The first step ends having read 5,000 and written 100. A follow-up that reads only the
+    // system prefix (the cache expired) is a miss; the next follow-up, which reads back the
+    // whole 7,300, is not.
+    let wire = ScriptedWire::new(vec![
+        reply_cached(vec![glob_call("a")], "tool_use", 0, 5_000),
+        reply_cached(vec![text_reply_block("done")], "end_turn", 5_000, 100),
+        reply_cached(vec![text_reply_block("again")], "end_turn", 1_200, 6_100),
+        reply_cached(vec![text_reply_block("and again")], "end_turn", 7_300, 40),
+    ]);
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, _) = metered(&wire, &meter);
+    let room = room();
+    let first = run_ok(&agent, &room, &limits()).await;
+    assert_eq!(finder_cache_miss_turns(&meter), 0);
+    let unread = vec!["src/b.rs".to_string()];
+    let second =
+        crate::ai_audit::agent_finder::send_again(&agent, &room, &first, &unread, &limits())
+            .await
+            .expect("the follow up");
+    assert_eq!(finder_cache_miss_turns(&meter), 1, "the cache had expired");
+    let _ = crate::ai_audit::agent_finder::send_again(&agent, &room, &second, &unread, &limits())
+        .await
+        .expect("the second follow up");
+    assert_eq!(
+        finder_cache_miss_turns(&meter),
+        1,
+        "the third read it all back"
     );
 }
 

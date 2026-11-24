@@ -86,6 +86,8 @@ struct Kept {
     /// The run's frame token. The system text names it from the first request on, so a
     /// follow-up must keep it.
     nonce: FrameNonce,
+    /// The last turn the provider answered, so a follow-up's first turn can be compared with it.
+    last_turn: Option<TurnUsage>,
 }
 
 /// The conversations a transport keeps so a follow-up can continue one. An entry lives until the
@@ -214,7 +216,13 @@ impl ApiPieceAgent {
         Ok(())
     }
 
-    fn keep(&self, messages: Vec<Value>, spent_usd: f64, nonce: FrameNonce) -> ConversationHandle {
+    fn keep(
+        &self,
+        messages: Vec<Value>,
+        spent_usd: f64,
+        nonce: FrameNonce,
+        last_turn: Option<TurnUsage>,
+    ) -> ConversationHandle {
         let mut store = self
             .store
             .lock()
@@ -227,6 +235,7 @@ impl ApiPieceAgent {
                 messages,
                 spent_usd,
                 nonce,
+                last_turn,
             },
         );
         ConversationHandle::new(format!("api:{}:{n}", self.token))
@@ -442,6 +451,7 @@ impl ApiPieceAgent {
         shown: Vec<String>,
         spent_before: f64,
         nonce: &FrameNonce,
+        mut last_turn: Option<TurnUsage>,
     ) -> AgentRun {
         let tools = tool_schemas();
         let system = with_untrusted_clause(SYSTEM_TEXT.to_string(), nonce);
@@ -523,13 +533,16 @@ impl ApiPieceAgent {
             };
             trace.append(&mut pending);
             let turn = self.account(&reply);
-            // A turn after the first that did not read the conversation from the cache pays the
-            // write price for the whole context again; count it (no change to what is sent).
-            if !usage.is_empty() && turn.is_cache_miss() {
-                if let Some(meter) = &self.meter {
+            // A turn that did not read back what the turn before it wrote pays the write price
+            // for the context again; count it (no change to what is sent). The first turn of a
+            // piece has no turn before it; a follow-up's first turn is compared with the last
+            // turn of the step before it.
+            if let (Some(previous), Some(meter)) = (&last_turn, &self.meter) {
+                if turn.is_cache_miss_after(previous) {
                     meter.record_cache_miss_turn(Stage::Finder);
                 }
             }
+            last_turn = Some(turn.clone());
             let cost_known = turn.cost_usd.is_some();
             spent += turn.cost_usd.unwrap_or(0.0);
             usage.push(turn);
@@ -603,7 +616,7 @@ impl ApiPieceAgent {
             usage,
             stop,
             shown_in_full,
-            conversation: self.keep(messages, spent, nonce.clone()),
+            conversation: self.keep(messages, spent, nonce.clone(), last_turn),
         }
     }
 }
@@ -620,7 +633,7 @@ impl PieceAgent for ApiPieceAgent {
         let messages = vec![json!({"role": "user", "content": brief})];
         let nonce = nonce_for_room(room);
         Ok(self
-            .drive(room, messages, limits, Vec::new(), 0.0, &nonce)
+            .drive(room, messages, limits, Vec::new(), 0.0, &nonce, None)
             .await)
     }
 
@@ -639,7 +652,15 @@ impl PieceAgent for ApiPieceAgent {
         let (text, shown) = turn.render_framed(room, &kept.nonce);
         messages.push(json!({"role": "user", "content": text}));
         let run = self
-            .drive(room, messages, limits, shown, kept.spent_usd, &kept.nonce)
+            .drive(
+                room,
+                messages,
+                limits,
+                shown,
+                kept.spent_usd,
+                &kept.nonce,
+                kept.last_turn,
+            )
             .await;
         // The step's own handle continues the piece from here.
         self.forget(&prior.conversation);
