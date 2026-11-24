@@ -118,7 +118,7 @@ pub(super) fn is_checklist_path(path: &str) -> bool {
     normalize(path).as_deref() == Some(CHECKLIST_PATH)
 }
 
-/// The tree file: every path of the repository, one a line.
+/// The tree file: every file of the repository, grouped by folder (see [`group_tree`]).
 const TREE_PATH: &str = "_camerata/context/tree.txt";
 const NEIGHBOURS_PATH: &str = "_camerata/context/neighbours.md";
 const CONTEXT_LIST_PATH: &str = "_camerata/context/context-files.txt";
@@ -141,6 +141,60 @@ fn normalize(path: &str) -> Option<String> {
         }
     }
     Some(parts.join("/"))
+}
+
+/// The first line of the tree file: it tells the reader how to read the rest.
+pub(super) const TREE_HEADER: &str = "Folders end with /. The files of a folder are listed under it, indented. Join them to get a path, for example src/ then   a.rs is src/a.rs.";
+
+/// The tree file's text: the [`TREE_HEADER`] line, then for each folder that holds a file, one line with the folder's path from
+/// the root and a closing `/` (the root is `./`), then the names of its files, one a line, each
+/// indented by two spaces. A folder's path is written once, not before every file. A line ending
+/// in `/` is a folder (a file name never holds a `/`), and every other line is a file of the
+/// folder above it, so every path can be rebuilt ([`expand_tree`]). Folders come in path order,
+/// the root first, so `src/` is followed by `src/a/` and then `src-x/`.
+pub(super) fn group_tree(paths: &[&str]) -> String {
+    let mut folders: BTreeMap<Vec<&str>, Vec<&str>> = BTreeMap::new();
+    for path in paths {
+        let mut parts: Vec<&str> = path.split('/').collect();
+        let name = parts.pop().unwrap_or("");
+        folders.entry(parts).or_default().push(name);
+    }
+    let mut out = format!("{TREE_HEADER}\n");
+    for (folder, names) in &folders {
+        if folder.is_empty() {
+            out.push_str("./\n");
+        } else {
+            out.push_str(&folder.join("/"));
+            out.push_str("/\n");
+        }
+        for name in names {
+            out.push_str("  ");
+            out.push_str(name);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The paths a grouped tree text names, in the order it lists them: the inverse of
+/// [`group_tree`], which skips the header line (tests only).
+#[cfg(test)]
+pub(super) fn expand_tree(text: &str) -> Vec<String> {
+    let mut folder = String::new();
+    let mut paths = Vec::new();
+    for line in text.lines().skip(1) {
+        if let Some(path) = line.strip_suffix('/') {
+            folder = if path == "." {
+                String::new()
+            } else {
+                format!("{path}/")
+            };
+        } else {
+            let name = line.strip_prefix("  ").unwrap_or(line);
+            paths.push(format!("{folder}{name}"));
+        }
+    }
+    paths
 }
 
 /// How many leading folders `a` and `b` share.
@@ -266,7 +320,7 @@ impl Room {
 
         let mut tree_paths: Vec<&str> = repo.iter().map(|(p, _)| p.as_str()).collect();
         tree_paths.sort_unstable();
-        let tree: String = tree_paths.iter().map(|p| format!("{p}\n")).collect();
+        let tree = group_tree(&tree_paths);
 
         let context_list = if context_idx.is_empty() {
             "none\n".to_string()

@@ -1,6 +1,6 @@
 //! Tests for the review room (design sections 1 and 2).
 
-use super::room::{Room, RoomError, MAX_READ_LINES, OUT_DIR};
+use super::room::{expand_tree, group_tree, TREE_HEADER, Room, RoomError, MAX_READ_LINES, OUT_DIR};
 use super::Piece;
 
 fn f(path: &str, text: &str) -> (String, String) {
@@ -67,14 +67,29 @@ fn the_room_holds_the_piece_the_context_files_and_the_four_harness_files() {
 }
 
 #[test]
-fn the_tree_lists_every_file_of_the_repository() {
+fn the_tree_lists_every_file_of_the_repository_grouped_by_folder() {
     let r = room();
-    let tree = r
-        .read("_camerata/context/tree.txt", 1, 100)
-        .expect("tree reads");
-    for p in ["src/main.rs", "src/util.rs", "src/other.rs", "README.md"] {
-        assert!(tree.text.contains(p), "{p} not in the tree: {}", tree.text);
-    }
+    let stored = r
+        .file_pairs()
+        .into_iter()
+        .find(|(p, _)| p == "_camerata/context/tree.txt")
+        .expect("the room stores a tree")
+        .1;
+    assert_eq!(
+        stored,
+        format!(
+            "{TREE_HEADER}\n./\n  README.md\nsrc/\n  main.rs\n  other.rs\n  util.rs\n"
+        )
+    );
+    assert!(TREE_HEADER.is_ascii() && !TREE_HEADER.contains('-') && !TREE_HEADER.contains('\n'));
+    assert_eq!(
+        expand_tree(&stored),
+        ["README.md", "src/main.rs", "src/other.rs", "src/util.rs"]
+    );
+    assert!(
+        !stored.contains("src/main.rs"),
+        "a folder's path is written once, not before each file"
+    );
 }
 
 #[test]
@@ -783,4 +798,123 @@ fn the_plain_read_serves_no_file_but_the_checklist() {
         r.read_plain("../_camerata/checklist.md", 1, 10),
         Err(RoomError::Invalid(_))
     ));
+}
+
+// ─── the grouped tree ────────────────────────────────────────────────────────────────────────
+
+/// Paths with deep folders, a file and a folder sharing a name, folders that sort between each
+/// other oddly, root files, a leading space and a multi-byte letter.
+fn tree_sample() -> Vec<&'static str> {
+    vec![
+        "Cargo.toml",
+        "README.md",
+        "src.rs",
+        "src/a/b/c/deep.rs",
+        "src/a/b/c/deeper.rs",
+        "src/a/b/mod.rs",
+        "src/a/mod.rs",
+        "src/lib.rs",
+        "src/util.rs",
+        "src/util/mod.rs",
+        "src/util/strings.rs",
+        "src-x/y.rs",
+        "src.d/z.rs",
+        "docs/guide/caf\u{e9}.md",
+        "docs/ spaced name.md",
+        " odd folder/ odd file.txt",
+        "tests/api/one.rs",
+        "tests/api/two.rs",
+    ]
+}
+
+fn sorted(mut paths: Vec<String>) -> Vec<String> {
+    paths.sort_unstable();
+    paths
+}
+
+#[test]
+fn the_grouped_tree_expands_back_to_the_same_paths() {
+    let mut paths = tree_sample();
+    paths.sort_unstable();
+    let grouped = group_tree(&paths);
+    let back = expand_tree(&grouped);
+    assert_eq!(
+        sorted(back.clone()),
+        paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+        "no path is lost, added or changed:\n{grouped}"
+    );
+    assert_eq!(back.len(), paths.len(), "no path is listed twice");
+}
+
+#[test]
+fn the_grouped_tree_round_trips_every_shape_of_input() {
+    for paths in [
+        vec![],
+        vec!["only.rs"],
+        vec!["a/b.rs"],
+        vec!["a.rs", "b.rs", "c.rs"],
+        vec!["a/b/c/d/e/f.rs"],
+        vec!["x/a.rs", "x/b/c.rs", "x/d.rs"],
+        vec!["dir/file with spaces.txt", "dir/.hidden", "dir/ends.dot."],
+    ] {
+        let mut paths = paths;
+        paths.sort_unstable();
+        let back = expand_tree(&group_tree(&paths));
+        assert_eq!(
+            sorted(back),
+            paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            "{paths:?}"
+        );
+    }
+}
+
+#[test]
+fn the_grouped_tree_writes_each_folder_once_and_is_smaller_than_one_path_a_line() {
+    let mut paths = tree_sample();
+    paths.sort_unstable();
+    let grouped = group_tree(&paths);
+    let flat: String = paths.iter().map(|p| format!("{p}\n")).collect();
+    let body = grouped
+        .strip_prefix(&format!("{TREE_HEADER}\n"))
+        .expect("the header leads");
+    assert!(
+        body.len() < flat.len(),
+        "grouped {} bytes (header left out), flat {} bytes",
+        body.len(),
+        flat.len()
+    );
+    for folder in ["src/a/b/c/", "src/util/", "tests/api/", "docs/guide/"] {
+        assert_eq!(
+            grouped.lines().filter(|l| *l == folder).count(),
+            1,
+            "{folder} is written once:\n{grouped}"
+        );
+    }
+    assert!(!grouped.contains("src/a/b/c/deep.rs"), "no path prefix before a file");
+    assert!(
+        body.starts_with("./\n  Cargo.toml\n  README.md\n  src.rs\n"),
+        "root files come first, under `./`:\n{grouped}"
+    );
+}
+
+#[test]
+fn the_room_serves_the_grouped_tree_for_a_repository_of_many_folders() {
+    let files: Vec<(String, String)> = tree_sample()
+        .iter()
+        .map(|p| f(p, "// x\n"))
+        .chain([f("src/main.rs", "fn main() {}\n")])
+        .collect();
+    let r = Room::build(&piece(&["src/main.rs"]), &files, "# checklist\n").room;
+    let stored = r
+        .file_pairs()
+        .into_iter()
+        .find(|(p, _)| p == "_camerata/context/tree.txt")
+        .expect("tree")
+        .1;
+    let mut expected: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
+    expected.sort_unstable();
+    assert_eq!(sorted(expand_tree(&stored)), expected);
+    // The agent reads it through the Read tool like any file.
+    let read = r.read("_camerata/context/tree.txt", 1, 1_000).expect("read");
+    assert!(read.text.contains("src/a/b/c/\n"), "{}", read.text);
 }
