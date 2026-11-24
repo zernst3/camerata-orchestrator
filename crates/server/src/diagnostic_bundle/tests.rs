@@ -1050,6 +1050,41 @@ fn a_refusal_on_a_key_never_prints_the_key() {
     assert!(!format!("{err}").to_lowercase().contains("acmeledger"));
 }
 
+/// A one-word value under a `fix` or `audit` key outside the model settings is not a model id:
+/// it must not exempt a client word from the leak check.
+#[test]
+fn a_word_under_a_fix_key_outside_the_models_does_not_weaken_the_leak_check() {
+    let (run, mut ledger, failures) = fixtures();
+    set(
+        &mut ledger,
+        "/discarded/by_reason",
+        json!({"acmeledger": 3}),
+    );
+    set(
+        &mut ledger,
+        "/stage_telemetry/review_flags/fix",
+        json!("acmeledger"),
+    );
+    let wrong = DecisionTable::standard().with(
+        "ledger.discarded.by_reason",
+        Node::Keys(super::decisions::KeyClass::Verbatim),
+    );
+    let mut o = opts();
+    o.home_folder = Some("acmeledger".to_string());
+    let bundle = build_with(
+        &run,
+        Some(&ledger),
+        Some(&failures),
+        &o,
+        &wrong,
+        BundleSalt::generate(),
+    );
+    assert!(
+        bundle.leak_result().is_err(),
+        "the client word leaked past the leak check"
+    );
+}
+
 /// M3: folder words shared with a stage name or a model id do not refuse a clean bundle.
 #[test]
 fn a_client_folder_named_like_an_engine_word_does_not_refuse_a_clean_bundle() {

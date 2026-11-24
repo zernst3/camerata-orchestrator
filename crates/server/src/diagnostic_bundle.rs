@@ -334,16 +334,9 @@ fn model_ids(v: &Value, out: &mut BTreeSet<String>) {
         if let Value::Object(m) = v {
             for (k, v) in m {
                 match v {
-                    Value::String(s)
-                        if k == "model"
-                            || k.ends_with("_model")
-                            || k == "audit"
-                            || k == "fix"
-                            || k == "calibration"
-                            || k == "group_review" =>
-                    {
-                        add(s)
-                    }
+                    // The role keys (`audit`, `fix`, ...) name a model only inside `models`,
+                    // which the next arm covers: elsewhere a `fix` can hold the client's text.
+                    Value::String(s) if k == "model" || k.ends_with("_model") => add(s),
                     Value::Object(inner) if k == "models" => {
                         inner.keys().for_each(|k| add(k));
                         for v in inner.values() {
