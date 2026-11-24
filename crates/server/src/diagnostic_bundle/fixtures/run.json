@@ -12,7 +12,7 @@
   "repos": [
     {
       "name": "acme-web",
-      "dir": "/Users/zach/clients/acme/acme-web",
+      "dir": "/Users/auditor/clients/acme/acme-web",
       "commit": "4f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c",
       "clean": true,
       "tree_at_start": "tree-start-digest-acme",
@@ -20,7 +20,7 @@
     },
     {
       "name": "acme-api",
-      "dir": "/Users/zach/clients/acme/acme-api",
+      "dir": "/Users/auditor/clients/acme/acme-api",
       "commit": null,
       "clean": false,
       "tree_at_start": "tree-start-digest-api",
@@ -50,8 +50,8 @@
   },
   "nonce_seed": "00ff00ff00ff00ff00ff00ff00ff00ff",
   "args": {
-    "repo": "/Users/zach/clients/acme/acme-web",
-    "extra_repos": ["/Users/zach/clients/acme/acme-api"],
+    "repo": "/Users/auditor/clients/acme/acme-web",
+    "extra_repos": ["/Users/auditor/clients/acme/acme-api"],
     "budget_usd": 40.0,
     "verbose": false,
     "model": null,

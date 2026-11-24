@@ -794,7 +794,7 @@ mod unit {
 
     #[test]
     fn the_vocabulary_holds_no_fixture_word() {
-        for word in ["acme", "billing", "charge", "zach", "const", "root"] {
+        for word in ["acme", "billing", "charge", "auditor", "const", "root"] {
             assert!(!vocab().contains(word), "`{word}` is in the vocabulary");
         }
         assert!(vocab().len() > 300);

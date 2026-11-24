@@ -377,7 +377,7 @@ mod tests {
             &args,
             &out,
             Default::default(),
-            Some("zach".into()),
+            Some("auditor".into()),
         )
         .expect("written");
         assert!(done.json.starts_with(&out));

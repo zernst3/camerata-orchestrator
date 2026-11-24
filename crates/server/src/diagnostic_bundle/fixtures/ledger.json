@@ -90,7 +90,7 @@
     "absolute": 1,
     "backslash": 0,
     "prose": 0,
-    "worst_example": "/Users/zach/clients/acme/acme-web/src/billing/charge.ts",
+    "worst_example": "/Users/auditor/clients/acme/acme-web/src/billing/charge.ts",
     "offending_rows": 1
   },
   "evidence": {

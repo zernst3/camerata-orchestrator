@@ -20,7 +20,7 @@ const LEDGER: &str = include_str!("fixtures/ledger.json");
 const FAILURES: &str = include_str!("fixtures/failures.json");
 
 /// The path the design plants: a client file under the operator's home.
-const CLIENT_PATH: &str = "/Users/zach/clients/acme/acme-web/src/billing/charge.ts";
+const CLIENT_PATH: &str = "/Users/auditor/clients/acme/acme-web/src/billing/charge.ts";
 /// The code line test 2 plants, and every identifier it holds.
 const CODE_LINE: &str = "const invoiceTotal = applyDiscount(cartItems, couponCode);";
 const CODE_IDENTIFIERS: [&str; 5] = [
@@ -47,7 +47,7 @@ fn opts() -> BuildOptions {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-        home_folder: Some("zach".to_string()),
+        home_folder: Some("auditor".to_string()),
         lookup_dir: None,
     }
 }
@@ -89,11 +89,11 @@ fn repos() -> Vec<RepoInfo> {
     vec![
         RepoInfo {
             name: "acme-web".to_string(),
-            dir: "/Users/zach/clients/acme/acme-web".to_string(),
+            dir: "/Users/auditor/clients/acme/acme-web".to_string(),
         },
         RepoInfo {
             name: "acme-api".to_string(),
-            dir: "/Users/zach/clients/acme/acme-api".to_string(),
+            dir: "/Users/auditor/clients/acme/acme-api".to_string(),
         },
     ]
 }
@@ -209,8 +209,8 @@ fn engine_location_keeps_only_camerata_code() {
         Some("crates/server/src/diagnostic_bundle/sanitize.rs:41")
     );
     for refused in [
-        "/Users/zach/clients/acme/crates/server/src/x.rs",
-        "/Users/zach/clients/acme/crates/server/src/x.rs:3",
+        "/Users/auditor/clients/acme/crates/server/src/x.rs",
+        "/Users/auditor/clients/acme/crates/server/src/x.rs:3",
         "crates/acme_billing/src/charge.rs",
         "crates/acme_billing/src/charge.rs:7",
         "crates/server/src/../../acme/x.rs:1",
@@ -324,7 +324,7 @@ fn a_planted_client_path_never_reaches_the_bundle() {
     let (_dir, files) = written(&bundle);
     for text in [everything(&bundle), files] {
         assert!(!text.contains(&CLIENT_PATH.to_lowercase()));
-        for word in ["acme", "billing", "charge", "zach"] {
+        for word in ["acme", "billing", "charge", "auditor"] {
             assert!(!text.contains(word), "`{word}` reached the bundle");
         }
     }
@@ -408,7 +408,7 @@ fn named_paths_shows_paths_and_still_strips_secrets_and_code() {
     assert!(message.contains("src/billing/charge.ts"), "{message}");
     let all = everything(&bundle);
     assert!(
-        !all.contains("/users/zach"),
+        !all.contains("/users/auditor"),
         "an absolute path is shown repo-relative"
     );
     assert!(!all.contains(&secret.value.to_lowercase()));
@@ -423,7 +423,7 @@ fn named_paths_shows_paths_and_still_strips_secrets_and_code() {
     let repos = repos();
     let mut named_tokens = PathTokens::new(&salt, &repos, true);
     assert!(named_tokens
-        .token("../../Users/zach/notes.txt", 1)
+        .token("../../Users/auditor/notes.txt", 1)
         .starts_with("p:"));
     assert_eq!(named_tokens.token("src/a.ts", 1), "src/a.ts");
     assert!(!files.contains(&secret.value.to_lowercase()));
@@ -608,7 +608,7 @@ fn leak_check_refuses_the_write() {
 #[test]
 fn a_client_path_in_an_origin_field_is_dropped() {
     let (run, ledger, mut failures) = fixtures();
-    let planted_a = "/Users/zach/clients/acme/crates/server/src/x.rs";
+    let planted_a = "/Users/auditor/clients/acme/crates/server/src/x.rs";
     let planted_b = "crates/acme_billing/src/charge.rs";
     set(
         &mut failures,
@@ -780,7 +780,7 @@ fn the_bundle_keeps_what_a_developer_needs() {
     assert_eq!(j.pointer("/run/repos/1/tree_changed"), Some(&json!(false)));
     assert_eq!(j.pointer("/run/plan/0/id"), Some(&json!("repo-1:scan")));
     assert_eq!(j.pointer("/run/plan/1/id"), Some(&json!("merge")));
-    assert_eq!(j.pointer("/run/args/repo"), Some(&json!(33)));
+    assert_eq!(j.pointer("/run/args/repo"), Some(&json!(36)));
     assert_eq!(j.pointer("/run/args/verbose"), Some(&json!(false)));
     assert!(j.pointer("/run/run_id").is_none());
     assert!(j.pointer("/run/nonce_seed").is_none());
@@ -1237,7 +1237,7 @@ fn the_new_saved_fields_are_kept_as_numbers_and_typed_values() {
     set(
         &mut run,
         "/pin/corpus_version",
-        json!("/Users/zach/clients/acme"),
+        json!("/Users/auditor/clients/acme"),
     );
     set(&mut run, "/segments/0/elapsed_ms", json!(CLIENT_PATH));
     let bundle = bundle_of(&run, &ledger, &failures, &opts());
