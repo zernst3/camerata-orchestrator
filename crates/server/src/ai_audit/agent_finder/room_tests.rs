@@ -997,7 +997,9 @@ fn the_room_serves_the_grouped_tree_for_a_repository_of_many_folders() {
 #[test]
 fn a_search_of_the_tree_returns_bare_names_and_the_header_says_where_the_folder_is() {
     let r = room();
-    let hits = r.grep("main", Some("_camerata/context/tree.txt")).expect("grep");
+    let hits = r
+        .grep("main", Some("_camerata/context/tree.txt"))
+        .expect("grep");
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hits[0].text, "  main.rs", "no folder in the hit");
     let tree = r
@@ -1013,7 +1015,10 @@ fn a_search_of_the_tree_returns_bare_names_and_the_header_says_where_the_folder_
         .rev()
         .find(|l| l.ends_with('/'))
         .expect("a folder line above");
-    assert_eq!(*folder, "src/", "the nearest line above that ends with / is the folder");
+    assert_eq!(
+        *folder, "src/",
+        "the nearest line above that ends with / is the folder"
+    );
 }
 
 #[test]
@@ -1029,7 +1034,10 @@ fn a_checklist_over_the_line_cap_ends_with_a_notice_that_gives_the_next_offset()
         first.text,
         format!("{cut}500 more lines; read again with offset 2001 to see them.\n")
     );
-    assert_eq!(first.lines_returned, MAX_READ_LINES, "the notice is not a line read");
+    assert_eq!(
+        first.lines_returned, MAX_READ_LINES,
+        "the notice is not a line read"
+    );
     // The offset it names reads the rest, with no notice, and the two pages are the whole text.
     let rest = r
         .read_plain("_camerata/checklist.md", 2_001, MAX_READ_LINES)
@@ -1046,6 +1054,8 @@ fn a_checklist_over_the_line_cap_ends_with_a_notice_that_gives_the_next_offset()
         exact
     );
     let r = room_with_checklist(&text);
-    let short = r.read_plain("_camerata/checklist.md", 1, 10).expect("short");
+    let short = r
+        .read_plain("_camerata/checklist.md", 1, 10)
+        .expect("short");
     assert!(!short.text.contains("more lines"), "{}", short.text);
 }

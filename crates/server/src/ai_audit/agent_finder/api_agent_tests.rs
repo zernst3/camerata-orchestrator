@@ -966,7 +966,11 @@ async fn a_rate_limit_waits_thirty_seconds_with_jitter_and_the_retry_after_wins(
         "no retry-after: 30 s, plus or minus 30 percent, got {:?}",
         waits[0]
     );
-    assert_eq!(waits[1], Duration::from_secs(7), "the retry-after wins");
+    assert!(
+        (7_000..=8_400).contains(&(waits[1].as_millis() as u64)),
+        "the retry-after wins, never shortened, spread up by at most 20 percent: {:?}",
+        waits[1]
+    );
     // The same body went each time.
     let bodies = wire.bodies();
     assert_eq!(bodies[0], bodies[1]);
@@ -1061,10 +1065,10 @@ async fn a_stop_raised_during_a_wait_ends_it_with_no_further_request() {
 
 #[tokio::test]
 async fn waiting_out_a_rate_limit_stops_at_the_deadline_and_fails_as_before() {
-    // retry-after of 300 s (the most honoured): six waits fill the 30 minutes, the seventh would
-    // pass them.
+    // retry-after of 300 s (the most honoured), spread up by at most 20 percent: five waits
+    // always fit in the 30 minutes and a seventh request is never needed.
     let wire = ScriptedWire::new(
-        (0..7)
+        (0..8)
             .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
             .collect(),
     );
@@ -1076,14 +1080,42 @@ async fn waiting_out_a_rate_limit_stops_at_the_deadline_and_fails_as_before() {
         "got {:?}",
         run.stop
     );
-    assert_eq!(wire.calls(), 7);
-    assert_eq!(waits_of(&pauses), vec![Duration::from_secs(300); 6]);
+    let waits = waits_of(&pauses);
+    assert!((5..=6).contains(&waits.len()), "{waits:?}");
+    assert!(
+        waits.iter().all(|w| (300..=360).contains(&w.as_secs())),
+        "{waits:?}"
+    );
+    assert!(waits.iter().sum::<Duration>() <= Duration::from_secs(30 * 60));
+    assert_eq!(wire.calls(), waits.len() + 1);
     assert!(run.usage.is_empty());
     assert_eq!(
         meter.health().streak(),
         0,
-        "a rate limit is a pause, not an outage"
+        "a rate limit is not a transport streak"
     );
+}
+
+#[tokio::test]
+async fn a_retry_after_is_never_shortened_and_the_waits_are_spread_upward() {
+    let mut script: Vec<Reply> = (0..10)
+        .map(|_| http(429, "rate_limit_error", "slow", Some(100)))
+        .collect();
+    script.push(text_reply("done"));
+    let wire = ScriptedWire::new(script);
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(run.stop, AgentStop::Finished);
+    let waits = waits_of(&pauses);
+    assert_eq!(waits.len(), 10);
+    assert!(
+        waits
+            .iter()
+            .all(|w| (100_000..=120_000).contains(&(w.as_millis() as u64))),
+        "never under what the provider asked, at most 20 percent over: {waits:?}"
+    );
+    assert!(waits.iter().any(|w| *w != waits[0]), "{waits:?}");
 }
 
 #[tokio::test]
@@ -1100,7 +1132,10 @@ async fn a_rate_limit_that_never_clears_stops_the_run_so_no_next_piece_starts() 
     let run = run_ok(&agent, &room(), &limits()).await;
 
     assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
-    assert!(meter.outage_stopped(), "the deadline stops the run, as an outage does");
+    assert!(
+        meter.outage_stopped(),
+        "the deadline stops the run, as an outage does"
+    );
     let trigger = meter.health().trigger().expect("a trigger is recorded");
     assert_eq!(
         trigger.class,
@@ -1111,7 +1146,9 @@ async fn a_rate_limit_that_never_clears_stops_the_run_so_no_next_piece_starts() 
     // The next piece does not start: no request goes out for it.
     let sent = wire.calls();
     let waits = waits_of(&pauses).len();
-    let next = agent.run(&room(), "Review the next piece.", &limits()).await;
+    let next = agent
+        .run(&room(), "Review the next piece.", &limits())
+        .await;
     assert!(next.is_err(), "a stopped run starts no piece");
     assert_eq!(wire.calls(), sent);
     assert_eq!(waits_of(&pauses).len(), waits, "and waits for nothing");
