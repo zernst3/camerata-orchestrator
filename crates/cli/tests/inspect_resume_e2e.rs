@@ -1135,7 +1135,9 @@ mod batch {
         async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
             let n = self.0.submits.fetch_add(1, Ordering::SeqCst);
             let id = format!("msgbatch_{n}");
-            self.0.submitted_items.fetch_add(items.len(), Ordering::SeqCst);
+            self.0
+                .submitted_items
+                .fetch_add(items.len(), Ordering::SeqCst);
             self.0.items.lock().unwrap().insert(id.clone(), items);
             Ok(id)
         }
