@@ -1693,6 +1693,20 @@ async fn the_finders_own_client_reads_a_reply_that_comes_after_the_old_limit() {
     assert!(reply.text.contains("slow but whole"), "{}", reply.text);
 }
 
+#[test]
+fn the_finders_request_goes_through_the_finders_own_client() {
+    let source = include_str!("../../api_agent_driver.rs");
+    let body = source
+        .split("pub(crate) async fn post_anthropic_body(")
+        .nth(1)
+        .expect("the finder's post function")
+        .split("\n}\n")
+        .next()
+        .expect("its body");
+    assert!(body.contains("finder_http_client()"), "{body}");
+    assert!(!body.contains("agent_http_client()"), "{body}");
+}
+
 #[tokio::test]
 async fn a_provider_that_never_answers_ends_the_piece_failed_with_the_usage_kept() {
     // A local listener that accepts connections and never writes a byte.
