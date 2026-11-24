@@ -135,6 +135,8 @@ pub struct RunHealth {
     streak: Mutex<Streak>,
     stopped: AtomicBool,
     trigger: Mutex<Option<OutageTrigger>>,
+    /// How many model calls have succeeded in all, never reset ([`Self::successes`]).
+    successes: std::sync::atomic::AtomicU64,
     clock: Clock,
 }
 
@@ -164,6 +166,7 @@ impl RunHealth {
             streak: Mutex::new(Streak::default()),
             stopped: AtomicBool::new(false),
             trigger: Mutex::new(None),
+            successes: std::sync::atomic::AtomicU64::new(0),
             clock,
         }
     }
@@ -187,6 +190,13 @@ impl RunHealth {
     /// A model call succeeded: the provider is reachable, so the streak starts over.
     pub fn note_success(&self) {
         *self.streak_lock() = Streak::default();
+        self.successes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many model calls have succeeded so far. A call that waits out a rate limit reads it
+    /// before it starts and hands it back to [`Self::note_wait_exhausted`].
+    pub fn successes(&self) -> u64 {
+        self.successes.load(Ordering::SeqCst)
     }
 
     /// A model call failed after its retries, with `class`. `detail` is a short note for the
@@ -229,15 +239,23 @@ impl RunHealth {
         }
     }
 
-    /// A rate limit or an overload did not clear within the longest a call waits for one. The
-    /// provider is answering but will not serve the run, and every piece would wait the same
-    /// time and fail the same way: stop the run, cleanly and resumable, as an outage does, so the
-    /// pieces in flight stop at their next check and no new piece starts.
-    pub fn note_wait_exhausted(&self, detail: &str) {
+    /// A rate limit or an overload did not clear within the longest a call waits for one.
+    /// `successes_before` is [`Self::successes`] as the call started. If no call succeeded since,
+    /// the provider is answering but will not serve the run at all, and every piece would wait
+    /// the same time and fail the same way: stop the run, cleanly and resumable, as an outage
+    /// does, so the pieces in flight stop at their next check and no new piece starts. If some
+    /// call did succeed, the refusal is this piece's own (a request too large for the limit, say)
+    /// and the run goes on: only this piece fails, and a resume runs it again. Returns whether the
+    /// run was stopped.
+    pub fn note_wait_exhausted(&self, detail: &str, successes_before: u64) -> bool {
+        if self.successes() != successes_before {
+            return false;
+        }
         self.trip(
             FailureClass::RateLimited,
             format!("a rate limit or overload did not clear in time (last: {detail})"),
         );
+        true
     }
 
     fn trip(&self, class: FailureClass, detail: String) {
@@ -340,10 +358,24 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_that_ran_out_stops_the_run_only_if_no_call_succeeded_meanwhile() {
+        let (h, _) = health();
+        let before = h.successes();
+        h.note_success(); // another piece's call got through while this one waited
+        assert_eq!(h.successes(), before + 1);
+        assert!(!h.note_wait_exhausted("HTTP 429", before));
+        assert!(!h.is_stopped(), "the refusal is this piece's own");
+        assert!(h.trigger().is_none());
+        // With nothing succeeding since the call started, the same refusal stops the run.
+        assert!(h.note_wait_exhausted("HTTP 429", h.successes()));
+        assert!(h.is_stopped());
+    }
+
+    #[test]
     fn a_rate_limit_that_did_not_clear_stops_the_run_and_says_so() {
         let (h, _) = health();
         assert_eq!(h.stop_phrase(), STOP_PHRASE_UNREACHABLE, "not stopped yet");
-        h.note_wait_exhausted("HTTP 429: slow down");
+        assert!(h.note_wait_exhausted("HTTP 429: slow down", h.successes()));
         assert!(h.is_stopped());
         let trigger = h.trigger().expect("trigger");
         assert_eq!(trigger.class, FailureClass::RateLimited);

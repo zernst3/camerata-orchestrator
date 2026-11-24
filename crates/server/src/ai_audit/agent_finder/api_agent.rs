@@ -366,6 +366,9 @@ impl ApiPieceAgent {
         let mut attempts: Vec<AttemptRecord> = Vec::new();
         let mut retries = 0usize;
         let mut waited = Duration::ZERO;
+        // What the run had succeeded at when this call started: a wait that runs out stops the
+        // run only if nothing has succeeded since ([`RunHealth::note_wait_exhausted`]).
+        let successes_at_start = self.meter.as_ref().map(|m| m.health().successes());
         loop {
             let mut record = AttemptRecord::new("api", &self.model);
             let attempt_started = std::time::Instant::now();
@@ -480,11 +483,13 @@ impl ApiPieceAgent {
             }
             attempts.push(record);
             if wait_exhausted {
-                // The call waited as long as it may and the provider still refuses: every other
-                // piece would do the same. Stop the run, as an outage does, so they stop at their
-                // next check and no new piece starts.
-                if let Some(meter) = &self.meter {
-                    meter.health().note_wait_exhausted(&message);
+                // The call waited as long as it may and the provider still refuses. If no call of
+                // the run got through meanwhile, every other piece would do the same: stop the
+                // run, as an outage does, so they stop at their next check and no new piece
+                // starts. If one did, this piece alone fails (as RateLimited) and a resume runs
+                // it again.
+                if let (Some(meter), Some(before)) = (&self.meter, successes_at_start) {
+                    meter.health().note_wait_exhausted(&message, before);
                 }
             }
             let mut failure = LlmCallFailure::new(class, message);

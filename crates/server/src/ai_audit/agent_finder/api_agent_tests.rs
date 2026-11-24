@@ -1158,6 +1158,83 @@ async fn a_rate_limit_that_never_clears_stops_the_run_so_no_next_piece_starts() 
     assert!(meter.snapshot().cost_usd.abs() < 1e-12);
 }
 
+/// A pause that lets the other tasks of the test run (a real wait would), then returns.
+fn yielding_pause() -> PauseFn {
+    Arc::new(|_| Box::pin(tokio::task::yield_now()))
+}
+
+#[tokio::test]
+async fn one_piece_refused_forever_fails_alone_while_another_pieces_calls_succeed() {
+    let refused = ScriptedWire::new(
+        (0..8)
+            .map(|_| http(429, "rate_limit_error", "too big for the limit", Some(300)))
+            .collect(),
+    );
+    let served = ScriptedWire::new(vec![text_reply("done")]);
+    let meter = Arc::new(UsageMeter::default());
+    let make = |wire: &Arc<ScriptedWire>| {
+        let dyn_wire: Arc<dyn FinderWire> = wire.clone();
+        ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
+            .with_wire(dyn_wire)
+            .with_pause(yielding_pause())
+            .with_meter(Arc::clone(&meter))
+    };
+    let (starved, other) = (make(&refused), make(&served));
+    let (room_a, room_b, lim) = (room(), room(), limits());
+    let (a, b) = tokio::join!(
+        starved.run(&room_a, "Review the big piece.", &lim),
+        other.run(&room_b, "Review the small piece.", &lim),
+    );
+    let (a, b) = (a.expect("sent"), b.expect("sent"));
+
+    assert_eq!(b.stop, AgentStop::Finished, "the other piece is served");
+    assert!(
+        matches!(&a.stop, AgentStop::Failed(why) if why.contains("too big")),
+        "the starved piece fails alone: {:?}",
+        a.stop
+    );
+    assert!(
+        !meter.outage_stopped(),
+        "a run whose other calls succeed does not stop"
+    );
+    assert!(meter.health().trigger().is_none());
+    // The next piece still starts.
+    let next = ScriptedWire::new(vec![text_reply("done")]);
+    let again = make(&next)
+        .run(&room(), "Review the next piece.", &limits())
+        .await;
+    assert_eq!(again.expect("starts").stop, AgentStop::Finished);
+}
+
+#[tokio::test]
+async fn a_success_that_arrives_during_the_wait_prevents_the_stop() {
+    let wire = ScriptedWire::new(
+        (0..8)
+            .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
+            .collect(),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let seen = Arc::clone(&meter);
+    let waits = Arc::new(Mutex::new(0usize));
+    let pause: PauseFn = Arc::new(move |_| {
+        let mut n = waits.lock().expect("lock");
+        *n += 1;
+        if *n == 3 {
+            // A call of some other piece succeeds in the middle of this wait.
+            seen.health().note_success();
+        }
+        Box::pin(async {})
+    });
+    let dyn_wire: Arc<dyn FinderWire> = wire.clone();
+    let agent = ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
+        .with_wire(dyn_wire)
+        .with_pause(pause)
+        .with_meter(Arc::clone(&meter));
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+    assert!(!meter.outage_stopped(), "a success since the call began");
+}
+
 #[tokio::test]
 async fn an_overload_is_waited_out_under_the_same_deadline_then_fails() {
     let wire = ScriptedWire::new(
