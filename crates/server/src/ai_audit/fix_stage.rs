@@ -246,22 +246,23 @@ pub(super) fn build_fix_specific_block(
             .map(str::to_string)
     };
     // A rule's remediation that several findings of this call share is printed once, under a
-    // rule heading, and each of those findings refers to it. One finding keeps its own line.
+    // rule heading, and each of those findings refers to it. That needs every finding of the rule
+    // in this call to resolve to one text; a rule seen with two texts keeps each finding's own
+    // line, so no two headings carry the same rule name. One finding keeps its own line too.
     let mut shared: Vec<(String, String)> = Vec::new();
     for f in findings {
-        let Some(rem) = remediation_of(f) else {
-            continue;
-        };
-        let key = (f.rule_id.clone(), rem);
-        if shared.contains(&key) {
+        if shared.iter().any(|(rule_id, _)| *rule_id == f.rule_id) {
             continue;
         }
-        let same = findings
+        let texts: Vec<Option<String>> = findings
             .iter()
-            .filter(|g| g.rule_id == key.0 && remediation_of(g).as_deref() == Some(key.1.as_str()))
-            .count();
-        if same > 1 {
-            shared.push(key);
+            .filter(|g| g.rule_id == f.rule_id)
+            .map(|g| remediation_of(g))
+            .collect();
+        if let Some(Some(rem)) = texts.first() {
+            if texts.len() > 1 && texts.iter().all(|t| t.as_deref() == Some(rem.as_str())) {
+                shared.push((f.rule_id.clone(), rem.clone()));
+            }
         }
     }
     for (rule_id, rem) in &shared {

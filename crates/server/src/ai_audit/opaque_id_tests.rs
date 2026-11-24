@@ -221,3 +221,51 @@ fn findings_of_one_rule_share_one_printed_remediation() {
 fn nonce_for_fix() -> crate::prompt_frame::FrameNonce {
     crate::prompt_frame::FrameNonce::generate_avoiding(&[])
 }
+
+/// One rule whose two options each have their own remediation text.
+fn rule_with_two_options(rule_id: &str, first: &str, second: &str) -> camerata_rules::Rule {
+    let mut rule = rule_with_remediation(rule_id, first);
+    let mut other = rule.options[0].clone();
+    other.id = "second".to_string();
+    other.remediation = Some(second.to_string());
+    rule.options.push(other);
+    rule
+}
+
+/// A rule seen under two options in one call, each shared by two findings, has two different
+/// texts: no heading is shared (two headings both reading "Rule X" would be ambiguous), and every
+/// finding keeps its own remediation line.
+#[test]
+fn a_rule_with_two_remediation_texts_in_one_call_is_not_shared() {
+    const FIRST: &str = "Move the check into the shared guard.";
+    const SECOND: &str = "Delete the duplicate handler.";
+    let mut corpus = camerata_rules::RuleSet::default();
+    corpus.push(rule_with_two_options("ARCH-A-1", FIRST, SECOND));
+    let mut findings = Vec::new();
+    for (i, option) in ["default", "default", "second", "second"]
+        .iter()
+        .enumerate()
+    {
+        let mut f = finding("src/work.ts", i + 1, "`runWork` takes `raw`", "runWork");
+        f.rule_id = "ARCH-A-1".to_string();
+        f.evaluated_option_id = Some(option.to_string());
+        findings.push(f);
+    }
+    let refs: Vec<&Finding> = findings.iter().collect();
+    let ids: Vec<String> = (0..4).map(|i| format!("f{i}")).collect();
+    let block = build_fix_specific_block(
+        &refs,
+        &ids,
+        &files(),
+        Some(&corpus),
+        &std::collections::HashMap::new(),
+        &nonce_for_fix(),
+    );
+    assert!(
+        !block.contains("Rule ARCH-A-1: generic remediation"),
+        "{block}"
+    );
+    assert!(!block.contains("is given above under rule"), "{block}");
+    assert_eq!(block.matches(FIRST).count(), 2, "{block}");
+    assert_eq!(block.matches(SECOND).count(), 2, "{block}");
+}
