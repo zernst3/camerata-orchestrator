@@ -57,6 +57,21 @@
     "model": null,
     "efficiency": {"warm_schedule": true, "label": "acmeweb"}
   },
+  "pin": {
+    "build": {
+      "version": "0.0.0",
+      "commit": "4f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c",
+      "dirty": false,
+      "prompt_schema": 12,
+      "clone_prompt_schema": 3
+    },
+    "corpus_version": "9a8b7c6d5e4f",
+    "clone_judge_model": "model-judge-1"
+  },
+  "segments": [
+    {"started_unix_ms": 1795601700000, "finished_unix_ms": 1795603500000, "elapsed_ms": 1800000},
+    {"started_unix_ms": 1795604000000, "finished_unix_ms": 1795604400000, "elapsed_ms": 400000}
+  ],
   "estimate_usd": 12.5,
   "plan": [
     {

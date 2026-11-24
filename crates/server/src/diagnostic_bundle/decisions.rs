@@ -50,6 +50,8 @@ pub mod enums {
         "excluded_by_agreement",
         "long_line",
         "excluded_never_read",
+        "generated",
+        "generated_unsearched",
     ];
     pub const STAGE: &[&str] = &[
         "scan_pass",
@@ -79,6 +81,25 @@ pub mod enums {
     pub const SCAN_MODE: &[&str] = &["sequential", "parallel", "batch"];
     pub const FINDER: &[&str] = &["agent", "engine"];
     pub const LINE_ENDING: &[&str] = &["lf", "crlf", "mixed", "none"];
+    /// The ledger stage names the engine writes (`record_stage` and its callers, and the
+    /// constants `UNFOLD_STAGE`, `FIX_MERGE_STAGE`, `PLACE_MERGE_STAGE`, `LEDGER_STAGE`,
+    /// `CONSENSUS_STAGE` and `STAGE_SAMPLE_NAME`). A name not listed is rejected, never kept
+    /// as text. `the_ledger_stage_list_holds_the_engines_stage_constants` pins the constants.
+    pub const LEDGER_STAGE: &[&str] = &[
+        "cross-family-merge",
+        "ai-location-merge",
+        "external-tool-preview-merge",
+        "evidence-gate-synthesis",
+        "report-build-partition",
+        "runtime-audit-merge",
+        "unfold-also-locations",
+        "dependency-audit-merge",
+        "ai-group-review",
+        "ai-calibration",
+        "fix-merge",
+        "place-merge",
+        "consensus",
+    ];
 
     /// Every list, for the leak check's set of engine words.
     pub const ALL: &[&[&str]] = &[
@@ -95,6 +116,7 @@ pub mod enums {
         SCAN_MODE,
         FINDER,
         LINE_ENDING,
+        LEDGER_STAGE,
     ];
 }
 
@@ -111,6 +133,11 @@ pub enum ValueClass {
     Timestamp,
     /// The value only when it is one of these serde names.
     Enum(&'static [&'static str]),
+    /// Lower-case hex of at most 64 characters (a commit or a digest); anything else is
+    /// rejected.
+    Hex,
+    /// A version or a corpus digest: `^[A-Za-z0-9.+_-]{0,64}$`; anything else is rejected.
+    Version,
     /// The id when the shipped corpus has it, else `rule:<12 hex>` (salted).
     RuleId,
     /// The value when it matches `^[a-z0-9.:\[\]-]{1,64}$`.
@@ -152,6 +179,9 @@ pub enum KeyClass {
     /// An engine-written identifier (`invented_precondition`): kept when it is a lower-case
     /// snake-case word, else the word skeleton.
     EngineKey,
+    /// The key exactly as it is. Only a deliberately wrong table in a test uses it.
+    #[cfg(test)]
+    Verbatim,
 }
 
 /// One entry of the table.
@@ -303,7 +333,7 @@ fn listed_field(k: &str) -> &str {
     }
 }
 
-fn model_id_ok(s: &str) -> bool {
+pub(crate) fn model_id_ok(s: &str) -> bool {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(r"^[a-z0-9.:\[\]-]{1,64}$").expect("model id pattern"))
         .is_match(s)
@@ -504,6 +534,8 @@ impl<'w, 's> Walker<'w, 's> {
                     text_skeleton(k, self.paths, ordinal)
                 }
             }
+            #[cfg(test)]
+            KeyClass::Verbatim => k.to_string(),
         })
     }
 
@@ -571,6 +603,18 @@ impl<'w, 's> Walker<'w, 's> {
                 Some(s) => Value::String(redact_secrets(s)),
                 None => (v.is_number() || v.is_boolean()).then(|| v.clone())?,
             },
+            Hex => {
+                let s = s?;
+                (s.len() <= 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')))
+                    .then(|| v.clone())?
+            }
+            Version => {
+                let s = s?;
+                (s.len() <= 64
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '_' | '-')))
+                .then(|| v.clone())?
+            }
             ErrorType => {
                 let s = s?;
                 error_type_ok(s).then(|| v.clone())?

@@ -789,7 +789,8 @@ async fn main() -> anyhow::Result<()> {
                 };
                 match camerata::diagnose_cmd::run_bundle(&args).await {
                     Ok(outcome) => {
-                        print!("{}", outcome.render());
+                        print!("{}", outcome.render_preview());
+                        eprint!("\n{}", outcome.render_local());
                         Ok(())
                     }
                     Err(e) => {

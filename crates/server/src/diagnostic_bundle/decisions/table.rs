@@ -28,6 +28,29 @@ pub(super) fn build_standard() -> DecisionTable {
             ("nonce_seed", Drop),
         ],
     );
+    // The build, rule library and clone judge a run started on, and its wall-clock segments.
+    t.leaves(
+        "run.pin.build",
+        &[
+            ("version", Version),
+            ("commit", Hex),
+            ("dirty", Bool),
+            ("prompt_schema", Number),
+            ("clone_prompt_schema", Number),
+        ],
+    );
+    t.leaves(
+        "run.pin",
+        &[("corpus_version", Version), ("clone_judge_model", ModelId)],
+    );
+    t.leaves(
+        "run.segments[]",
+        &[
+            ("started_unix_ms", Number),
+            ("finished_unix_ms", Number),
+            ("elapsed_ms", Number),
+        ],
+    );
     ai_scan_key(&mut t, "run.ai_scan_key");
     t.leaves(
         "run.models",
@@ -108,7 +131,7 @@ pub(super) fn build_standard() -> DecisionTable {
     t.leaves(
         "ledger.stages[]",
         &[
-            ("stage", Allowed),
+            ("stage", Enum(e::LEDGER_STAGE)),
             ("repo", Repo),
             ("rows_in", Number),
             ("rows_out", Number),
@@ -154,6 +177,9 @@ pub(super) fn build_standard() -> DecisionTable {
             ("excluded_by_agreement", Number),
             ("long_line", Number),
             ("excluded_never_read", Number),
+            ("generated", Number),
+            ("generated_unsearched", Number),
+            ("secret_over_budget", Number),
             ("secret_search_ran", Bool),
             ("secret_searched", Number),
             ("secret_over_ceiling", Number),
@@ -231,7 +257,7 @@ pub(super) fn build_standard() -> DecisionTable {
     t.leaves(
         "ledger.fix_merge",
         &[
-            ("stage", Allowed),
+            ("stage", Enum(e::LEDGER_STAGE)),
             ("sub_groups_in", Number),
             ("fixes_out", Number),
         ],
@@ -242,7 +268,7 @@ pub(super) fn build_standard() -> DecisionTable {
     t.leaves(
         "ledger.place_merge",
         &[
-            ("stage", Allowed),
+            ("stage", Enum(e::LEDGER_STAGE)),
             ("rows_in", Number),
             ("places_out", Number),
             ("carried", Number),
@@ -522,6 +548,13 @@ fn stage_telemetry(t: &mut DecisionTable, base: &str) {
             ("wasted_input_tokens", Number),
             ("wasted_output_tokens", Number),
             ("wasted_cost_usd", Number),
+            ("busy_ms", Number),
+            ("wasted_busy_ms", Number),
+            ("first_call_unix_ms", Number),
+            ("last_call_unix_ms", Number),
+            ("batch_wait_ms", Number),
+            ("failed_busy_ms", Number),
+            ("cache_miss_turns", Number),
         ],
     );
     t.insert(

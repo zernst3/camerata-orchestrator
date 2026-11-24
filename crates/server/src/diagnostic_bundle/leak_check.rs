@@ -6,7 +6,8 @@
 //! - any path segment or file stem of 4 or more characters seen in the three inputs (not under
 //!   `--named-paths`, where the bundle shows paths on purpose).
 //!
-//! One hit refuses the write and names the key path, never the value.
+//! One hit refuses the write and names the key path, never the value (for a hit on a map key,
+//! the parent path and `<key>`).
 //!
 //! Words are compared whole, lower-cased, split on anything that is not a letter or digit, the
 //! same way the skeleton splits. A segment that is itself an engine word (a vocabulary word, a
@@ -259,8 +260,14 @@ fn check_value(path: &str, v: &Value, inputs: &LeakInputs) -> Result<(), LeakRef
                     format!("{path}.{k}")
                 };
                 if let Some(kind) = inputs.hit(k) {
+                    // The parent path only: the key is what leaked, and it must not be printed.
+                    let parent = if path.is_empty() {
+                        "<key>".to_string()
+                    } else {
+                        format!("{path}.<key>")
+                    };
                     return Err(LeakRefusal {
-                        key_path: format!("{child} (the key)"),
+                        key_path: format!("{parent} (the key)"),
                         kind,
                     });
                 }

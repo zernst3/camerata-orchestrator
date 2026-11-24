@@ -56,6 +56,27 @@ fn table(out: &mut String, header: &[&str], rows: &[Vec<String>]) {
     }
 }
 
+/// The key names the bundle and its table spell out: every other key is data, so it is text
+/// that leaves and is listed.
+fn fixed_keys() -> &'static BTreeSet<String> {
+    static KEYS: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let mut keys = super::decisions::DecisionTable::standard().field_names();
+        for k in [
+            "bundle id format made_at engine_version os arch named_paths run ledger failures",
+            "coverage leaves kept dropped rejected undecided rejected_values leak_check shapes",
+            "status files not_probed path present bytes lines longest_line line_ending utf8",
+            "bom ends_with_newline repo tree_changed",
+        ]
+        .iter()
+        .flat_map(|l| l.split(' '))
+        {
+            keys.insert(k.to_string());
+        }
+        keys
+    })
+}
+
 fn strings(v: &Value, skip: &[&str], path: &str, out: &mut BTreeSet<String>) {
     match v {
         Value::String(x) if !x.is_empty() => {
@@ -64,6 +85,9 @@ fn strings(v: &Value, skip: &[&str], path: &str, out: &mut BTreeSet<String>) {
         Value::Array(a) => a.iter().for_each(|v| strings(v, skip, path, out)),
         Value::Object(m) => {
             for (k, v) in m {
+                if !k.is_empty() && !fixed_keys().contains(k) {
+                    out.insert(k.clone());
+                }
                 let child = if path.is_empty() {
                     k.clone()
                 } else {

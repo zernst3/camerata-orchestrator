@@ -19,6 +19,9 @@ pub const MAX_SKELETON_INPUT_CHARS: usize = 8192;
 /// order or phone number.
 pub const MAX_KEPT_DIGITS: usize = 6;
 
+/// The most digits one whitespace word may hold, in all its pieces, for its numbers to be kept.
+pub const MAX_WORD_DIGITS: usize = 8;
+
 /// The file extensions a path token names. Any other extension shows as `other`: an unusual
 /// extension can name a client's own tool.
 pub const ADMITTED_EXTENSIONS: &[&str] = &[
@@ -265,6 +268,9 @@ pub struct PathTokens<'a> {
     seen: BTreeSet<String>,
     /// Under `--named-paths`, every repo-relative path shown as it is, for the leak check.
     shown: BTreeSet<String>,
+    /// Every repo-relative path met in a typed `Path` leaf. Under `--named-paths` a word of a
+    /// text is shown as it is only when it is one of these.
+    typed: BTreeSet<String>,
 }
 
 /// A path made repo-relative where it can be.
@@ -284,7 +290,19 @@ impl<'a> PathTokens<'a> {
             lookup: BTreeMap::new(),
             seen: BTreeSet::new(),
             shown: BTreeSet::new(),
+            typed: BTreeSet::new(),
         }
+    }
+
+    /// The typed paths a first walk met, so a second walk can tell them from a text's words.
+    pub fn typed(&self) -> &BTreeSet<String> {
+        &self.typed
+    }
+
+    /// This tokenizer knowing `typed` paths from the start.
+    pub fn with_typed(mut self, typed: BTreeSet<String>) -> Self {
+        self.typed = typed;
+        self
     }
 
     /// The salt, for the other hashes of the same bundle (custom rule ids, unknown repos).
@@ -374,12 +392,24 @@ impl<'a> PathTokens<'a> {
     /// `--named-paths` the repo-relative path (an absolute path outside every repo is still
     /// hashed: it names the operator's machine, not the client's code).
     pub fn token(&mut self, raw: &str, ordinal: u32) -> String {
+        self.token_inner(raw, ordinal, false)
+    }
+
+    /// The token for a word met inside a free text. Under `--named-paths` it is shown as it is
+    /// only when it equals a path met in a typed `Path` leaf of the same bundle; any other
+    /// dotted or slashed word (`customer.taxId`, a host name, an email) is hashed.
+    pub fn text_token(&mut self, raw: &str, ordinal: u32) -> String {
+        self.token_inner(raw, ordinal, true)
+    }
+
+    fn token_inner(&mut self, raw: &str, ordinal: u32, from_text: bool) -> String {
         self.seen.insert(raw.to_string());
         let n = self.normalize(raw, ordinal);
+        let allowed = !from_text || self.typed.contains(&n.path);
         // A path that climbs (`..`) or starts at a home (`~`) can name the operator's machine:
         // it is hashed even under `--named-paths`.
         let climbs = n.path.split('/').any(|seg| seg == "..") || n.path.starts_with('~');
-        if self.named_paths && n.relative && !climbs {
+        if self.named_paths && allowed && n.relative && !climbs {
             self.shown.insert(n.path.clone());
             return n.path;
         }
@@ -395,6 +425,8 @@ impl<'a> PathTokens<'a> {
     /// The value of a `Path` leaf: the token plus `@<depth>` (how many folders deep the file
     /// sits, counting the file), or under `--named-paths` the repo-relative path.
     pub fn leaf(&mut self, raw: &str, ordinal: u32) -> String {
+        let normal = self.normalize(raw, ordinal).path;
+        self.typed.insert(normal);
         let token = self.token(raw, ordinal);
         if self.named_paths && !token.starts_with("p:") {
             return token;
@@ -449,12 +481,12 @@ pub fn looks_like_path(token: &str) -> bool {
 }
 
 fn is_fraction(token: &str) -> bool {
-    token.split_once('/').is_some_and(|(a, b)| {
-        !a.is_empty()
-            && !b.is_empty()
-            && a.chars().all(|c| c.is_ascii_digit())
-            && b.chars().all(|c| c.is_ascii_digit())
-    })
+    let short_number = |s: &str| {
+        !s.is_empty() && s.len() <= MAX_KEPT_DIGITS && s.chars().all(|c| c.is_ascii_digit())
+    };
+    token
+        .split_once('/')
+        .is_some_and(|(a, b)| short_number(a) && short_number(b))
 }
 
 // ── The vocabulary ───────────────────────────────────────────────────────────────────────────
@@ -619,19 +651,24 @@ fn plain_word(word: &str, paths: &mut PathTokens<'_>, ordinal: u32, out: &mut Ve
     let trimmed = trimmed.trim_end_matches(['.', ',', ';', ':']);
     if !trimmed.is_empty() && looks_like_path(trimmed) {
         let (path, suffix) = split_line_suffix(trimmed);
-        out.push(format!("{}{suffix}", paths.token(path, ordinal)));
+        out.push(format!("{}{suffix}", paths.text_token(path, ordinal)));
         return;
     }
     if is_fraction(trimmed) {
         out.push(trimmed.to_string());
         return;
     }
+    // A word holding many digits in all (a phone or account number split by dashes or dots)
+    // keeps none of its numbers.
+    let digits = word.chars().filter(char::is_ascii_digit).count();
     for piece in word.split(|c: char| !c.is_alphanumeric()) {
         if piece.is_empty() {
             continue;
         }
         let lower = piece.to_lowercase();
-        let number = piece.len() <= MAX_KEPT_DIGITS && piece.chars().all(|c| c.is_ascii_digit());
+        let number = digits <= MAX_WORD_DIGITS
+            && piece.len() <= MAX_KEPT_DIGITS
+            && piece.chars().all(|c| c.is_ascii_digit());
         if number || vocab().contains(&lower) {
             out.push(lower);
         } else {
@@ -647,7 +684,9 @@ fn split_line_suffix(token: &str) -> (&str, &str) {
         let head = &token[..cut];
         match head.rfind(':') {
             Some(at)
-                if at + 1 < head.len() && head[at + 1..].chars().all(|c| c.is_ascii_digit()) =>
+                if at + 1 < head.len()
+                    && head[at + 1..].len() <= MAX_KEPT_DIGITS
+                    && head[at + 1..].chars().all(|c| c.is_ascii_digit()) =>
             {
                 cut = at;
             }

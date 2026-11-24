@@ -126,6 +126,8 @@ pub struct WrittenBundle {
     pub preview: PathBuf,
     /// The operator's lookup file, when the run's folder was known and a path was hashed.
     pub lookup: Option<PathBuf>,
+    /// Plain notes for the operator (a folder others can read).
+    pub notes: Vec<String>,
 }
 
 /// Why nothing was written.
@@ -223,7 +225,23 @@ pub(crate) fn build_with(
     let now = chrono::Utc::now();
     let id = bundle_id(now);
     let repos = repos_of(run);
-    let mut paths = PathTokens::new(&salt, &repos, opts.named_paths);
+    // Under `--named-paths` a first walk collects the paths met in typed `Path` leaves, so the
+    // real walk shows a word of a text only when it is one of them, wherever it comes first.
+    let typed = if opts.named_paths {
+        let mut first = PathTokens::new(&salt, &repos, true);
+        let mut w = Walker::new(table, &mut first, &opts.known_rule_ids);
+        w.walk("run", run);
+        if let Some(l) = ledger {
+            w.walk("ledger", l);
+        }
+        if let Some(f) = failures {
+            w.walk("failures", f);
+        }
+        first.typed().clone()
+    } else {
+        BTreeSet::new()
+    };
+    let mut paths = PathTokens::new(&salt, &repos, opts.named_paths).with_typed(typed);
     let mut walker = Walker::new(table, &mut paths, &opts.known_rule_ids);
 
     let mut run_out = walker.walk("run", run);
@@ -268,6 +286,14 @@ pub(crate) fn build_with(
         .collect();
     let mut engine_terms = opts.known_rule_ids.clone();
     engine_terms.insert(crate::run_store::engine_version());
+    // The run's model ids are the operator's settings, not the client's.
+    model_ids(run, &mut engine_terms);
+    if let Some(l) = ledger {
+        model_ids(l, &mut engine_terms);
+    }
+    if let Some(f) = failures {
+        model_ids(f, &mut engine_terms);
+    }
     let leak_inputs = LeakInputs::collect(
         &inputs,
         &repos,
@@ -294,6 +320,47 @@ pub(crate) fn build_with(
         leak_inputs,
         leak_result,
     }
+}
+
+/// Every model id an input names: a string under a key `model` or ending `_model`, a value of
+/// `models` (except lists, which hold the client's own patterns), and the keys of `models`.
+fn model_ids(v: &Value, out: &mut BTreeSet<String>) {
+    let mut add = |s: &str| {
+        if decisions::model_id_ok(s) {
+            out.insert(s.to_string());
+        }
+    };
+    fn walk(v: &Value, add: &mut impl FnMut(&str)) {
+        if let Value::Object(m) = v {
+            for (k, v) in m {
+                match v {
+                    Value::String(s)
+                        if k == "model"
+                            || k.ends_with("_model")
+                            || k == "audit"
+                            || k == "fix"
+                            || k == "calibration"
+                            || k == "group_review" =>
+                    {
+                        add(s)
+                    }
+                    Value::Object(inner) if k == "models" => {
+                        inner.keys().for_each(|k| add(k));
+                        for v in inner.values() {
+                            if let Value::String(s) = v {
+                                add(s);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                walk(v, add);
+            }
+        } else if let Value::Array(a) = v {
+            a.iter().for_each(|v| walk(v, add));
+        }
+    }
+    walk(v, &mut add);
 }
 
 /// Each repo of the run gets its label and whether its tree changed during the run, in place
@@ -391,25 +458,54 @@ fn add_shapes(
 /// `camerata-diagnostic-<id>.json` and `camerata-diagnostic-<id>.preview.txt`, and the lookup
 /// file into the run's folder. Refused, writing nothing, when the leak check found anything.
 pub fn write(bundle: &DiagnosticBundle, out_dir: &Path) -> Result<WrittenBundle, WriteError> {
+    let is_default = default_out_dir().as_deref() == Some(out_dir);
+    write_in(bundle, out_dir, is_default)
+}
+
+/// [`write`], told whether `out_dir` is the default folder (which is made private every time).
+pub(crate) fn write_in(
+    bundle: &DiagnosticBundle,
+    out_dir: &Path,
+    is_default: bool,
+) -> Result<WrittenBundle, WriteError> {
     if let Err(r) = &bundle.leak_result {
         return Err(WriteError::Leak(r.clone()));
     }
     // Once more, on exactly what is about to be written.
     leak_check(&bundle.json, &bundle.preview, &bundle.leak_inputs).map_err(WriteError::Leak)?;
     let io = |e: std::io::Error| WriteError::Io(e.to_string());
-    // A folder this creates is private to the operator (0700). An existing folder named with
-    // `--out` keeps its permissions: changing them on the operator's own folder would surprise.
-    // The files themselves are always 0600.
-    if !out_dir.is_dir() {
+    let mut notes = Vec::new();
+    // A folder this creates is private to the operator (0700). The default folder is made
+    // private every time. An existing folder named with `--out` keeps its permissions
+    // (changing the operator's own folder would surprise), and a note says when others can
+    // read it. The files themselves are always 0600.
+    let existed = out_dir.is_dir();
+    if !existed {
         crate::run_store::create_private_dir(out_dir).map_err(io)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if is_default {
+            std::fs::set_permissions(out_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(io)?;
+        } else if existed {
+            let mode = std::fs::metadata(out_dir).map_err(io)?.permissions().mode();
+            if mode & 0o044 != 0 {
+                notes.push(
+                    "the output folder is readable by other users; the bundle files are \
+                     private (0600), but their names and times are visible"
+                        .to_string(),
+                );
+            }
+        }
     }
     let stem = format!("camerata-diagnostic-{}", bundle.id);
     let json_path = out_dir.join(format!("{stem}.json"));
     let preview_path = out_dir.join(format!("{stem}.preview.txt"));
     let text =
         serde_json::to_vec_pretty(&bundle.json).map_err(|e| WriteError::Io(e.to_string()))?;
-    crate::run_store::write_atomic(&json_path, &text).map_err(io)?;
-    crate::run_store::write_atomic(&preview_path, bundle.preview.as_bytes()).map_err(io)?;
+    // The lookup first: a bundle whose tokens cannot be translated is not left behind.
     let lookup = match &bundle.lookup_dir {
         Some(dir) if dir.is_dir() && !bundle.lookup.is_empty() => {
             let path = dir.join(format!("diagnostic-lookup-{}.json", bundle.id));
@@ -420,9 +516,12 @@ pub fn write(bundle: &DiagnosticBundle, out_dir: &Path) -> Result<WrittenBundle,
         }
         _ => None,
     };
+    crate::run_store::write_atomic(&json_path, &text).map_err(io)?;
+    crate::run_store::write_atomic(&preview_path, bundle.preview.as_bytes()).map_err(io)?;
     Ok(WrittenBundle {
         json: json_path,
         preview: preview_path,
         lookup,
+        notes,
     })
 }

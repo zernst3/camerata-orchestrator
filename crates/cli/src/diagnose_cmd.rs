@@ -57,10 +57,20 @@ pub struct BundleOutcome {
 }
 
 impl BundleOutcome {
-    /// The text the command prints.
-    pub fn render(&self) -> String {
+    /// The text meant to be read and passed on: the preview, and the reminder to read it.
+    /// Printed on stdout. It holds no path of this machine and no note.
+    pub fn render_preview(&self) -> String {
         let mut out = self.preview.clone();
-        out.push('\n');
+        out.push_str(
+            "\nNothing was sent anywhere. Read the preview before you pass the bundle on.\n",
+        );
+        out
+    }
+
+    /// The notes and the three paths, which name this machine's state folder. Printed on
+    /// stderr, under a line saying they are local only.
+    pub fn render_local(&self) -> String {
+        let mut out = String::from("Local only, do not send:\n");
         for note in &self.notes {
             out.push_str(&format!("note: {note}\n"));
         }
@@ -73,9 +83,6 @@ impl BundleOutcome {
             )),
             None => out.push_str("lookup:  none (no path was hashed)\n"),
         }
-        out.push_str(
-            "Nothing was sent anywhere. Read the preview before you pass the bundle on.\n",
-        );
         out
     }
 }
@@ -191,9 +198,15 @@ fn optional_input(
 }
 
 /// The rule ids of the shipped corpus, shown in a bundle as they are.
+///
+/// Only the bundled corpus counts: `CAMERATA_CORPUS_PATH` may name a folder with rules written
+/// for one client, and their ids must be hashed, not shown. A missing folder gives an empty
+/// set, so every id is hashed.
 async fn shipped_rule_ids() -> std::collections::BTreeSet<String> {
-    let (corpus, _errors) =
-        camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+    let (corpus, _errors) = camerata_rules::load_corpus_lenient(std::path::Path::new(
+        camerata_rules::DEFAULT_CORPUS_PATH,
+    ))
+    .await;
     corpus.iter().map(|r| r.id.0.clone()).collect()
 }
 
@@ -270,11 +283,15 @@ pub fn bundle_from(
             json: written.json,
             preview_path: written.preview,
             lookup: written.lookup,
-            notes,
+            notes: {
+                notes.extend(written.notes);
+                notes
+            },
         }),
         Err(e @ WriteError::Leak(_)) => Err(BundleError::Refused(format!(
-            "{e}. A field reached the bundle that must not: report the key path to the \
-             developers so the decision table can be fixed"
+            "{e}. A field reached the bundle that must not: report the location above (it \
+             names where, never what; a map key shows as `<key>`) to the developers so the \
+             decision table can be fixed"
         ))),
         Err(e) => Err(BundleError::Failed(e.to_string())),
     }
@@ -372,9 +389,8 @@ mod tests {
         assert!(!text.contains("acme"), "{text}");
         assert!(!text.contains("billing"));
         assert!(text.contains("\"lines\": 1"), "the shape probe ran: {text}");
-        let rendered = done.render();
-        assert!(rendered.contains("Leak check: passed"));
-        assert!(rendered.contains("never send it"));
+        assert!(done.render_preview().contains("Leak check: passed"));
+        assert!(done.render_local().contains("never send it"));
         assert_eq!(run_preview(&done.json).unwrap(), done.preview);
 
         // An explicit file that does not exist is an error, not a silent gap.
@@ -395,6 +411,56 @@ mod tests {
         assert!(done.notes.iter().any(|n| n.contains("integrity ledger")));
         let text = std::fs::read_to_string(&done.json).unwrap();
         assert!(text.contains("\"ledger\": \"absent\""));
+    }
+
+    /// M4: the shipped rule ids come from the bundled corpus, whatever CAMERATA_CORPUS_PATH says.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_corpus_override_does_not_widen_the_shipped_rule_ids() {
+        let custom = tempfile::tempdir().unwrap();
+        let sample = std::path::Path::new(camerata_rules::DEFAULT_CORPUS_PATH)
+            .join("csharp/csharp-ienumerable-collections-1.toml");
+        let text = std::fs::read_to_string(&sample).unwrap().replace(
+            "CSHARP-IENUMERABLE-COLLECTIONS-1",
+            "ACME-NO-DIRECT-LEDGER-WRITES-1",
+        );
+        std::fs::write(custom.path().join("custom.toml"), text).unwrap();
+        let bundled = shipped_rule_ids().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", custom.path());
+        let with_override = shipped_rule_ids().await;
+        assert!(!with_override.contains("ACME-NO-DIRECT-LEDGER-WRITES-1"));
+        assert_eq!(with_override, bundled);
+        assert!(!bundled.is_empty(), "the bundled corpus has rules");
+        // An override pointing nowhere changes nothing either.
+        let _gone = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", "/nonexistent/x");
+        assert_eq!(shipped_rule_ids().await, bundled);
+    }
+
+    /// L8: the notes and the three paths are not in the text meant to be passed on.
+    #[test]
+    fn local_notes_and_paths_are_kept_apart_from_the_preview() {
+        let out = BundleOutcome {
+            preview: "Camerata diagnostic bundle x\nLeak check: passed\n".into(),
+            json: PathBuf::from("/data/b.json"),
+            preview_path: PathBuf::from("/data/b.preview.txt"),
+            lookup: Some(PathBuf::from("/state/runs/r/diagnostic-lookup-x.json")),
+            notes: vec!["no integrity ledger at /state/acme-web-1/x.ledger.json".into()],
+        };
+        let stdout = out.render_preview();
+        assert!(stdout.contains("Leak check: passed"));
+        for local in ["/data/b.json", "/state/", "note:", "lookup"] {
+            assert!(!stdout.contains(local), "`{local}` is on stdout:\n{stdout}");
+        }
+        let local = out.render_local();
+        assert!(local.starts_with("Local only, do not send"), "{local}");
+        for part in [
+            "/data/b.json",
+            "/data/b.preview.txt",
+            "diagnostic-lookup-x.json",
+            "note:",
+        ] {
+            assert!(local.contains(part), "`{part}` missing:\n{local}");
+        }
     }
 
     #[test]

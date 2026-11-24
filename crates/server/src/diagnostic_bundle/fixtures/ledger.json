@@ -37,7 +37,7 @@
   ],
   "stages": [
     {
-      "stage": "merge",
+      "stage": "cross-family-merge",
       "repo": "acme-web",
       "rows_in": 20,
       "rows_out": 15,
@@ -59,7 +59,9 @@
     "engine_artifacts_admitted": 0,
     "audit_model": "model-audit-1",
     "skipped_files": [
-      {"repo": "acme-web", "path": "assets/acme-logo.svg", "reason": "oversize", "bytes": 2048000}
+      {"repo": "acme-web", "path": "assets/acme-logo.svg", "reason": "oversize", "bytes": 2048000},
+      {"repo": "acme-web", "path": "src/gen/schema.ts", "reason": "generated", "bytes": 5000},
+      {"repo": "acme-web", "path": "src/gen/big.ts", "reason": "generated_unsearched", "bytes": 2100000}
     ],
     "skipped_beyond_cap_total": 0,
     "skipped_totals": {
@@ -72,7 +74,10 @@
       "secret_search_ran": true,
       "secret_searched": 3,
       "secret_over_ceiling": 0,
-      "secret_oversize_not_text": 0
+      "secret_oversize_not_text": 0,
+      "generated": 2,
+      "generated_unsearched": 1,
+      "secret_over_budget": 1
     },
     "file_cap_hits": [{"repo": "acme-web", "not_scanned": 0, "limit": 2000}]
   },
@@ -117,12 +122,12 @@
     "rules_failed": 0
   },
   "fix_merge": {
-    "stage": "fix merge",
+    "stage": "fix-merge",
     "sub_groups_in": 5,
     "fixes_out": 4,
     "folded": [["fix-member-acme-1", "fix-acme-2"]]
   },
-  "place_merge": {"stage": "place merge", "rows_in": 30, "places_out": 25, "carried": 5},
+  "place_merge": {"stage": "place-merge", "rows_in": 30, "places_out": 25, "carried": 5},
   "conventions": {
     "rules": [
       {
@@ -156,6 +161,13 @@
           "wasted_input_tokens": 20000,
           "wasted_output_tokens": 0,
           "wasted_cost_usd": 0.5,
+          "busy_ms": 90000,
+          "wasted_busy_ms": 15000,
+          "first_call_unix_ms": 1795601800000,
+          "last_call_unix_ms": 1795603400000,
+          "batch_wait_ms": 4000,
+          "failed_busy_ms": 2000,
+          "cache_miss_turns": 3,
           "models": {"model-audit-1": 12}
         }
       }

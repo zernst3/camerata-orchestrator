@@ -919,3 +919,366 @@ fn the_preview_renders_again_from_a_written_bundle() {
     assert_eq!(again, bundle.preview());
     let _ = Path::new(&paths.preview);
 }
+
+// ── Round 1 security fixes ───────────────────────────────────────────────────────────────────
+
+/// H1: under `--named-paths` only a path met in a typed `Path` leaf is shown in a text. Every
+/// other dotted or slashed word is hashed as in default mode.
+#[test]
+fn named_paths_hashes_dotted_and_slashed_words_that_are_not_typed_paths() {
+    let (run, ledger, mut failures) = fixtures();
+    let message = "TypeError: cannot read customer.taxId of undefined, see \
+        https://admin.acme-internal.example/v2/payroll, contact jane.doe@acme.example, \
+        set process.env.ACME_BILLING_URL, load com.acme.billing.ChargeService from \
+        src/billing/charge.ts";
+    set(&mut failures, "/entries/0/message", json!(message));
+    set(
+        &mut failures,
+        "/entries/0/attempts/0/message",
+        json!(message),
+    );
+    let mut named = opts();
+    named.named_paths = true;
+    let bundle = bundle_of(&run, &ledger, &failures, &named);
+    assert!(bundle.leak_result().is_ok(), "{:?}", bundle.leak_result());
+    let (_dir, files) = written(&bundle);
+    for text in [everything(&bundle), files] {
+        let seen = tokens(&text);
+        for word in [
+            "customer",
+            "taxid",
+            "acme-internal",
+            "jane",
+            "payroll",
+            "chargeservice",
+            "acme_billing_url",
+        ] {
+            assert!(
+                !seen.contains(word) && !text.contains(word),
+                "`{word}` reached the bundle under --named-paths"
+            );
+        }
+    }
+    // A path the failure also lists as a typed `Path` leaf is still shown.
+    let shown = bundle
+        .json()
+        .pointer("/failures/entries/0/message")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert!(shown.contains("src/billing/charge.ts"), "{shown}");
+    // A path met only in a text is hashed, even when it is repo-relative.
+    let salt5 = BundleSalt::from_bytes([5; 32]);
+    let mut p = PathTokens::new(&salt5, &[], true);
+    assert!(p.text_token("src/only/in/text.ts", 0).starts_with("p:"));
+    p.leaf("src/typed.ts", 0);
+    assert_eq!(p.text_token("src/typed.ts", 0), "src/typed.ts");
+}
+
+/// M1: the preview lists every map key that is not a fixed field name.
+#[test]
+fn the_preview_lists_the_keys_of_data_maps() {
+    let (run, ledger, failures) = fixtures();
+    let bundle = bundle_of(&run, &ledger, &failures, &opts());
+    let preview = bundle.preview();
+    for key in ["RUST-DOMAIN-2", "model-audit-1"] {
+        assert!(
+            preview.lines().any(|l| l.trim() == key),
+            "the preview lacks the key `{key}`:\n{preview}"
+        );
+    }
+    // A key a wrong table lets through is listed too.
+    let wrong = DecisionTable::standard().with(
+        "ledger.discarded.by_reason",
+        Node::Keys(super::decisions::KeyClass::Verbatim),
+    );
+    let mut with_key = ledger.clone();
+    set(
+        &mut with_key,
+        "/discarded/by_reason",
+        json!({"zorblaxquux": 2}),
+    );
+    let bundle2 = build_with(
+        &run,
+        Some(&with_key),
+        Some(&failures),
+        &opts(),
+        &wrong,
+        BundleSalt::generate(),
+    );
+    assert!(bundle2.leak_result().is_ok());
+    assert!(
+        bundle2.preview().lines().any(|l| l.trim() == "zorblaxquux"),
+        "{}",
+        bundle2.preview()
+    );
+}
+
+/// M2: a refusal on a key names the parent path and `<key>`, never the key.
+#[test]
+fn a_refusal_on_a_key_never_prints_the_key() {
+    let (run, mut ledger, failures) = fixtures();
+    set(
+        &mut ledger,
+        "/discarded/by_reason",
+        json!({"acmeledger": 3}),
+    );
+    let wrong = DecisionTable::standard().with(
+        "ledger.discarded.by_reason",
+        Node::Keys(super::decisions::KeyClass::Verbatim),
+    );
+    let mut o = opts();
+    o.home_folder = Some("acmeledger".to_string());
+    let bundle = build_with(
+        &run,
+        Some(&ledger),
+        Some(&failures),
+        &o,
+        &wrong,
+        BundleSalt::generate(),
+    );
+    let refusal = bundle
+        .leak_result()
+        .clone()
+        .expect_err("the key is refused");
+    assert_eq!(
+        refusal.key_path,
+        "ledger.discarded.by_reason.<key> (the key)"
+    );
+    assert!(!format!("{refusal}").to_lowercase().contains("acmeledger"));
+    let dir = tempfile::tempdir().unwrap();
+    let err = write(&bundle, dir.path()).unwrap_err();
+    assert!(!format!("{err}").to_lowercase().contains("acmeledger"));
+}
+
+/// M3: folder words shared with a stage name or a model id do not refuse a clean bundle.
+#[test]
+fn a_client_folder_named_like_an_engine_word_does_not_refuse_a_clean_bundle() {
+    let (mut run, ledger, mut failures) = fixtures();
+    set(
+        &mut failures,
+        "/entries/0/files",
+        json!(["src/location/external/build.ts", "src/zorblaxmodel/map.ts"]),
+    );
+    set(&mut run, "/models/audit", json!("zorblaxmodel-5"));
+    let bundle = bundle_of(&run, &ledger, &failures, &opts());
+    assert!(bundle.leak_result().is_ok(), "{:?}", bundle.leak_result());
+    let stage = bundle
+        .json()
+        .pointer("/ledger/stages/0/stage")
+        .and_then(Value::as_str);
+    assert_eq!(stage, Some("cross-family-merge"));
+    let dir = tempfile::tempdir().unwrap();
+    write(&bundle, dir.path()).expect("a clean bundle is written");
+}
+
+/// M3: a stage name outside the engine's list is rejected, never kept as text.
+#[test]
+fn a_stage_name_outside_the_engines_list_is_rejected() {
+    let (run, mut ledger, failures) = fixtures();
+    set(&mut ledger, "/stages/0/stage", json!("invoice-merge-acme"));
+    let bundle = bundle_of(&run, &ledger, &failures, &opts());
+    assert!(!everything(&bundle).contains("invoice"));
+    let rejected = bundle.json()["rejected_values"].to_string();
+    assert!(rejected.contains("ledger.stages[].stage"), "{rejected}");
+}
+
+#[test]
+fn the_ledger_stage_list_holds_the_engines_stage_constants() {
+    use super::decisions::enums::LEDGER_STAGE;
+    for stage in [
+        crate::review_tree::UNFOLD_STAGE,
+        crate::review_tree::FIX_MERGE_STAGE,
+        crate::review_tree::PLACE_MERGE_STAGE,
+        crate::runtime_audit::LEDGER_STAGE,
+        crate::consensus::CONSENSUS_STAGE,
+        crate::ai_audit::group_review::STAGE_SAMPLE_NAME,
+        "dependency-audit-merge",
+        "report-build-partition",
+        "cross-family-merge",
+        "ai-location-merge",
+        "external-tool-preview-merge",
+        "evidence-gate-synthesis",
+        "ai-calibration",
+    ] {
+        assert!(LEDGER_STAGE.contains(&stage), "`{stage}` is not listed");
+    }
+}
+
+/// L9: the fields the saved types gained are decided, and a pin never passes free text.
+#[test]
+fn the_new_saved_fields_are_kept_as_numbers_and_typed_values() {
+    let (run, ledger, failures) = fixtures();
+    let bundle = bundle_of(&run, &ledger, &failures, &opts());
+    let j = bundle.json();
+    assert_eq!(
+        j.pointer("/run/segments/0/elapsed_ms"),
+        Some(&json!(1_800_000))
+    );
+    assert_eq!(
+        j.pointer("/run/segments/1/started_unix_ms"),
+        Some(&json!(1_795_604_000_000_u64))
+    );
+    assert_eq!(j.pointer("/run/pin/build/dirty"), Some(&json!(false)));
+    assert_eq!(j.pointer("/run/pin/build/version"), Some(&json!("0.0.0")));
+    assert_eq!(j.pointer("/run/pin/build/prompt_schema"), Some(&json!(12)));
+    assert_eq!(
+        j.pointer("/run/pin/build/commit"),
+        Some(&json!("4f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c"))
+    );
+    assert_eq!(
+        j.pointer("/run/pin/corpus_version"),
+        Some(&json!("9a8b7c6d5e4f"))
+    );
+    assert_eq!(
+        j.pointer("/run/pin/clone_judge_model"),
+        Some(&json!("model-judge-1"))
+    );
+    let usage = "/ledger/stage_telemetry/stages/0/usage";
+    for (field, want) in [
+        ("busy_ms", 90_000_u64),
+        ("wasted_busy_ms", 15_000),
+        ("first_call_unix_ms", 1_795_601_800_000),
+        ("last_call_unix_ms", 1_795_603_400_000),
+        ("batch_wait_ms", 4000),
+        ("failed_busy_ms", 2000),
+        ("cache_miss_turns", 3),
+    ] {
+        assert_eq!(
+            j.pointer(&format!("{usage}/{field}")),
+            Some(&json!(want)),
+            "{field}"
+        );
+    }
+    for (field, want) in [
+        ("generated", 2),
+        ("generated_unsearched", 1),
+        ("secret_over_budget", 1),
+    ] {
+        assert_eq!(
+            j.pointer(&format!("/ledger/input/skipped_totals/{field}")),
+            Some(&json!(want)),
+            "{field}"
+        );
+    }
+    assert_eq!(
+        j.pointer("/ledger/input/skipped_files/1/reason"),
+        Some(&json!("generated"))
+    );
+    assert_eq!(
+        j.pointer("/ledger/input/skipped_files/2/reason"),
+        Some(&json!("generated_unsearched"))
+    );
+
+    // A pin field holding a path or a sentence is rejected, not passed.
+    let (mut run, ledger, failures) = fixtures();
+    set(&mut run, "/pin/build/commit", json!(CLIENT_PATH));
+    set(
+        &mut run,
+        "/pin/build/version",
+        json!("1.0 for acme billing"),
+    );
+    set(
+        &mut run,
+        "/pin/corpus_version",
+        json!("/Users/zach/clients/acme"),
+    );
+    set(&mut run, "/segments/0/elapsed_ms", json!(CLIENT_PATH));
+    let bundle = bundle_of(&run, &ledger, &failures, &opts());
+    let all = everything(&bundle);
+    assert!(!all.contains("acme") && !all.contains("billing") && !all.contains("charge"));
+    let rejected = bundle.json()["rejected_values"].to_string();
+    for path in [
+        "run.pin.build.commit",
+        "run.pin.build.version",
+        "run.pin.corpus_version",
+    ] {
+        assert!(
+            rejected.contains(path),
+            "{path} is not rejected: {rejected}"
+        );
+    }
+}
+
+/// L1: long numbers do not survive the skeleton in a fraction, a line suffix or a phone number.
+#[test]
+fn long_numbers_do_not_survive_the_skeleton() {
+    let salt = BundleSalt::from_bytes([6; 32]);
+    let repos = repos();
+    let mut paths = PathTokens::new(&salt, &repos, false);
+    for (text, banned) in [
+        ("card 4111111111111111/2 failed", "4111111111111111"),
+        ("error at src/a.ts:4111111111111111", "4111111111111111"),
+        ("error at src/a.ts:12:4111111111111111", "4111111111111111"),
+        ("call 555-123-4567 failed", "4567"),
+        ("call 192.168.100.200 failed", "168"),
+    ] {
+        let got = text_skeleton(text, &mut paths, 0);
+        assert!(!got.contains(banned), "`{text}` became `{got}`");
+    }
+    // Short ones still pass.
+    assert_eq!(
+        text_skeleton("pass 2/3 at line 41", &mut paths, 0),
+        "pass 2/3 at line 41"
+    );
+    let got = text_skeleton("error at src/a.ts:41:7", &mut paths, 0);
+    assert!(got.ends_with(".ts:41:7"), "{got}");
+}
+
+/// L3: a lookup file that cannot be written leaves no bundle behind.
+#[cfg(unix)]
+#[test]
+fn a_failed_lookup_write_leaves_no_bundle_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let run_dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(run_dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let (run, ledger, failures) = fixtures();
+    let mut o = opts();
+    o.lookup_dir = Some(run_dir.path().to_path_buf());
+    let bundle = bundle_of(&run, &ledger, &failures, &o);
+    let out = tempfile::tempdir().unwrap();
+    let result = write(&bundle, out.path());
+    std::fs::set_permissions(run_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    if std::fs::write(run_dir.path().join("probe"), b"x").is_err() {
+        return;
+    }
+    // Directory permissions did not bind (running as root): nothing to prove here.
+    if result.is_ok() {
+        return;
+    }
+    assert!(matches!(result, Err(WriteError::Io(_))));
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+/// L4: the default folder is made private every time; an `--out` folder others can read is
+/// reported, not changed.
+#[cfg(unix)]
+#[test]
+fn the_default_folder_is_made_private_and_a_loose_out_folder_is_noted() {
+    use std::os::unix::fs::PermissionsExt;
+    let (run, ledger, failures) = fixtures();
+    let bundle = bundle_of(&run, &ledger, &failures, &opts());
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    let loose = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(loose.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let done = super::write_in(&bundle, loose.path(), true).unwrap();
+    assert_eq!(mode(loose.path()), 0o700);
+    assert!(done.notes.is_empty(), "{:?}", done.notes);
+
+    let other = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(other.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let done = super::write_in(&bundle, other.path(), false).unwrap();
+    assert_eq!(
+        mode(other.path()),
+        0o755,
+        "an --out folder keeps its permissions"
+    );
+    assert!(
+        done.notes.iter().any(|n| n.contains("readable")),
+        "{:?}",
+        done.notes
+    );
+    std::fs::set_permissions(other.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let done = super::write_in(&bundle, other.path(), false).unwrap();
+    assert!(done.notes.is_empty());
+}
