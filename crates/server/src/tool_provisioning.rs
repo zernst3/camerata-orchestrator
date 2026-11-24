@@ -272,6 +272,14 @@ pub fn bundled_semgrep_rules_dir() -> PathBuf {
     manifest.join("assets").join("semgrep-rules")
 }
 
+/// The `semgrep --version` probe command, with the fixed semgrep child environment.
+fn semgrep_probe_command(bin: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg("--version").kill_on_drop(true);
+    camerata_core::apply_semgrep_env(cmd.as_std_mut());
+    cmd
+}
+
 /// Probe whether semgrep is already provisioned and healthy.  Returns `true`
 /// when the binary exists AND responds to `semgrep --version` with exit 0.
 /// A `false` return means the caller should (re-)provision.
@@ -281,12 +289,7 @@ pub async fn semgrep_is_provisioned(venv: &Path) -> bool {
         return false;
     }
     // Version probe: a broken venv / corrupted binary would fail here.
-    match tokio::process::Command::new(&bin)
-        .arg("--version")
-        .kill_on_drop(true)
-        .output()
-        .await
-    {
+    match semgrep_probe_command(&bin).output().await {
         Ok(out) => out.status.success(),
         Err(_) => false,
     }
@@ -1338,6 +1341,23 @@ async fn interpreter_available(program: impl AsRef<std::ffi::OsStr>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The provisioning health probe runs semgrep: it must not call the vendor.
+    #[test]
+    fn semgrep_probe_carries_the_version_check_off_env() {
+        let cmd = semgrep_probe_command(Path::new("/x/semgrep"));
+        let v = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| {
+                *k == std::ffi::OsStr::new(camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_ENV)
+            })
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(
+            v.as_deref(),
+            Some(camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_OFF)
+        );
+    }
     use tempfile::TempDir;
 
     // ── W30 eslint version-pin parsing (pure) ─────────────────────────────────

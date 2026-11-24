@@ -229,16 +229,22 @@ struct ManifestCheckOutput {
 /// at the cost of a shell fork — acceptable for per-task gates that already run
 /// cargo builds. We capture output (rather than `.status()`) so a failing check
 /// can feed its verbatim toolchain diagnostics into the Layer-2 bounce.
+/// The `sh -c <command>` process for one manifest check. A manifest command may run semgrep,
+/// so it carries the fixed semgrep child environment (no vendor version check).
+fn manifest_check_command(worktree: &Path, command: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", command])
+        .current_dir(worktree)
+        .kill_on_drop(true);
+    camerata_core::apply_semgrep_env(cmd.as_std_mut());
+    cmd
+}
+
 async fn run_manifest_check(
     worktree: &Path,
     command: &str,
 ) -> std::io::Result<ManifestCheckOutput> {
-    let out = Command::new("sh")
-        .args(["-c", command])
-        .current_dir(worktree)
-        .kill_on_drop(true)
-        .output()
-        .await?;
+    let out = manifest_check_command(worktree, command).output().await?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     Ok(ManifestCheckOutput {
@@ -266,6 +272,15 @@ pub enum VersionCheckOutcome {
     ToolAbsent { reason: String },
 }
 
+/// The `<tool> --version` probe process. The tool name comes from the manifest and may be
+/// semgrep, so the probe carries the fixed semgrep child environment.
+fn version_probe_command(tool: &str) -> Command {
+    let mut cmd = Command::new(tool);
+    cmd.arg("--version").kill_on_drop(true);
+    camerata_core::apply_semgrep_env(cmd.as_std_mut());
+    cmd
+}
+
 /// Verify a locally installed `tool` against a `pinned` version string.
 ///
 /// Runs `<tool> --version` (not via shell, to avoid PATH confusion) and delegates
@@ -277,12 +292,7 @@ pub enum VersionCheckOutcome {
 pub async fn check_tool_version(tool: &str, pinned: &str) -> VersionCheckOutcome {
     // Spawn `<tool> --version` directly (no sh -c) so we query the tool that
     // would be found on PATH — the same one the check command would invoke.
-    let output = match Command::new(tool)
-        .arg("--version")
-        .kill_on_drop(true)
-        .output()
-        .await
-    {
+    let output = match version_probe_command(tool).output().await {
         Ok(o) => o,
         Err(e) => {
             return VersionCheckOutcome::ToolAbsent {
@@ -401,6 +411,33 @@ fn extract_version_token(output: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::manifest::ManifestCheck;
+
+    fn child_env(cmd: &Command, key: &str) -> Option<String> {
+        cmd.as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    /// A manifest `tool` field may name semgrep: its `--version` probe must not call the vendor.
+    #[test]
+    fn version_probe_carries_the_semgrep_version_check_off_env() {
+        let cmd = version_probe_command("semgrep");
+        assert_eq!(
+            child_env(&cmd, camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_ENV).as_deref(),
+            Some(camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_OFF)
+        );
+    }
+
+    /// A manifest check command (`sh -c`) may run semgrep: it carries the same env.
+    #[test]
+    fn manifest_check_carries_the_semgrep_version_check_off_env() {
+        let cmd = manifest_check_command(Path::new("."), "semgrep --config rules .");
+        assert_eq!(
+            child_env(&cmd, camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_ENV).as_deref(),
+            Some(camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_OFF)
+        );
+    }
     use std::fs;
 
     fn tmpdir() -> std::path::PathBuf {

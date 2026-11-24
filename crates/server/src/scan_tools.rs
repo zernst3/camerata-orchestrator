@@ -1397,6 +1397,16 @@ fn semgrep_args(rules_dir: &str) -> Vec<String> {
     .collect()
 }
 
+/// The one place a scan tool process is built: working directory, arguments and the fixed
+/// child environment. Every tool run goes through here so no call path can skip the semgrep
+/// environment (no vendor version check, see [`camerata_core::semgrep_env`]).
+fn tool_process(dir: &Path, program: &str, args: &[&str]) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args).current_dir(dir).kill_on_drop(true);
+    camerata_core::apply_semgrep_env(cmd.as_std_mut());
+    cmd
+}
+
 async fn run_capture_stdout(
     dir: &Path,
     program: &str,
@@ -1408,12 +1418,7 @@ async fn run_capture_stdout(
     match on_progress {
         None => {
             // Fast path: no heartbeat needed. Buffer everything.
-            let out = tokio::process::Command::new(program)
-                .args(args)
-                .current_dir(dir)
-                .kill_on_drop(true)
-                .output()
-                .await?;
+            let out = tool_process(dir, program, args).output().await?;
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             Ok((stdout, out.status.success(), stderr))
@@ -1423,10 +1428,7 @@ async fn run_capture_stdout(
             // every line.  Stderr is captured separately (piped, read to the end
             // AFTER stdout closes) so it doesn't interleave with the JSON stdout
             // the parsers expect but is still available as failure evidence.
-            let mut child = tokio::process::Command::new(program)
-                .args(args)
-                .current_dir(dir)
-                .kill_on_drop(true)
+            let mut child = tool_process(dir, program, args)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()?;
@@ -4256,6 +4258,37 @@ mod tests {
     /// caller builds a `CoverageNote` rather than reporting a clean preview. The fix changes
     /// the MESSAGE (see `req_c11_an_empty_stdout_error_names_the_tool_stderr_not_a_parse_
     /// position`), never the fail-closed posture.
+    /// Every scan tool process is built by `tool_process`; it must carry the semgrep
+    /// version-check-off env so the semgrep run (whatever program path) never calls the vendor.
+    #[test]
+    fn scan_tool_command_carries_the_semgrep_version_check_off_env() {
+        let cmd = tool_process(Path::new("."), "/venv/bin/semgrep", &["--sarif"]);
+        let v = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| {
+                *k == std::ffi::OsStr::new(camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_ENV)
+            })
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(
+            v.as_deref(),
+            Some(camerata_core::semgrep_env::SEMGREP_VERSION_CHECK_OFF)
+        );
+    }
+
+    /// The semgrep scan keeps metrics off and takes rules only from the given local directory.
+    #[test]
+    fn semgrep_args_are_offline_only() {
+        let args = semgrep_args("/local/rules");
+        assert!(args.iter().any(|a| a == "--metrics=off"));
+        let at = args.iter().position(|a| a == "--config").unwrap();
+        assert_eq!(args[at + 1], "/local/rules");
+        assert!(!args.iter().any(|a| a == "auto"
+            || a.starts_with("p/")
+            || a.starts_with("r/")
+            || a.contains("://")));
+    }
+
     #[test]
     fn req_c11_empty_eslint_stdout_is_an_error_never_a_clean_preview() {
         assert!(
