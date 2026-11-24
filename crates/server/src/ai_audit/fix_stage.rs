@@ -236,6 +236,41 @@ pub(super) fn build_fix_specific_block(
     nonce: &crate::prompt_frame::FrameNonce,
 ) -> String {
     let mut out = String::new();
+    // The generic remediation of each finding (the text of the rule's resolved option).
+    let remediation_of = |f: &Finding| -> Option<String> {
+        let rule = corpus?.get_by_id(&f.rule_id)?;
+        let opt = rule.resolved_option(f.evaluated_option_id.as_deref())?;
+        opt.remediation
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+    };
+    // A rule's remediation that several findings of this call share is printed once, under a
+    // rule heading, and each of those findings refers to it. That needs every finding of the rule
+    // in this call to resolve to one text; a rule seen with two texts keeps each finding's own
+    // line, so no two headings carry the same rule name. One finding keeps its own line too.
+    let mut shared: Vec<(String, String)> = Vec::new();
+    for f in findings {
+        if shared.iter().any(|(rule_id, _)| *rule_id == f.rule_id) {
+            continue;
+        }
+        let texts: Vec<Option<String>> = findings
+            .iter()
+            .filter(|g| g.rule_id == f.rule_id)
+            .map(|g| remediation_of(g))
+            .collect();
+        if let Some(Some(rem)) = texts.first() {
+            if texts.len() > 1 && texts.iter().all(|t| t.as_deref() == Some(rem.as_str())) {
+                shared.push((f.rule_id.clone(), rem.clone()));
+            }
+        }
+    }
+    for (rule_id, rem) in &shared {
+        out.push_str(&format!(
+            "Rule {rule_id}: generic remediation (inspiration only; your fix must be SPECIFIC \
+             to each finding, not a restatement of this): {rem}\n\n"
+        ));
+    }
     for (i, f) in findings.iter().enumerate() {
         let id = &ids[i];
         out.push_str(&format!(
@@ -278,14 +313,17 @@ pub(super) fn build_fix_specific_block(
             &format!("finding {id}"),
             &evidence,
         ));
-        if let Some(rule) = corpus.and_then(|c| c.get_by_id(&f.rule_id)) {
-            if let Some(opt) = rule.resolved_option(f.evaluated_option_id.as_deref()) {
-                if let Some(rem) = opt.remediation.as_deref().filter(|s| !s.trim().is_empty()) {
-                    out.push_str(&format!(
-                        "This rule's generic remediation (inspiration only — your fix must be \
-                         SPECIFIC to this finding, not a restatement of this): {rem}\n"
-                    ));
-                }
+        if let Some(rem) = remediation_of(f) {
+            if shared.contains(&(f.rule_id.clone(), rem.clone())) {
+                out.push_str(&format!(
+                    "This rule's generic remediation is given above under rule {}.\n",
+                    f.rule_id
+                ));
+            } else {
+                out.push_str(&format!(
+                    "This rule's generic remediation (inspiration only — your fix must be \
+                     SPECIFIC to this finding, not a restatement of this): {rem}\n"
+                ));
             }
         }
         if let Some(reason) = feedback.get(&i) {
