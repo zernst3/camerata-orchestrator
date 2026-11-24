@@ -41,6 +41,11 @@ GD="$(git -C "$WT/gf" rev-parse --absolute-git-dir)"; echo garbage > "$GD/index"
 git init -q -b main "$T/other" && echo s > "$T/other/src.txt" && git -C "$T/other" add src.txt && git -C "$T/other" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$WT/mc/target" "$WT/um/target" "$WT/run/target" "$T/other/target" "$WT/mc/target/x"
 for d in "$WT/mc/target" "$WT/um/target" "$WT/run/target" "$WT/uo/target" "$T/other/target"; do echo "Signature: 8a477f597d28d172789f06886806bc55" > "$d/CACHEDIR.TAG"; done
+# a kept scan build: idle, release build plus incremental cache, never swept at any tier
+SC="$T/camerata-scan-t1"
+mkdir -p "$SC/target/release" "$SC/target/debug/incremental"
+echo bin > "$SC/target/release/camerata-server"; echo inc > "$SC/target/debug/incremental/x"
+echo "Signature: 8a477f597d28d172789f06886806bc55" > "$SC/target/CACHEDIR.TAG"
 # stand-ins for running builds. A symlink named cargo gives sleep that process name.
 ln -s /bin/sleep "$T/bin/cargo"
 printf '#!/bin/bash\nsleep 120\n' > "$T/bin/rustc"; chmod +x "$T/bin/rustc"
@@ -123,5 +128,9 @@ done
 [ -d "$WT/run/target" ] && r=present || r=gone;  ok "real running worktree target kept" present "$r"
 [ -d "$T/other/target" ] && r=present || r=gone;    ok "real idle repo target dropped (tier 3)" gone "$r"
 [ -f "$T/other/src.txt" ] && r=present || r=gone;     ok "real repo source survives" present "$r"
+[ -f "$SC/target/CACHEDIR.TAG" ] && r=present || r=gone;                 ok "real kept scan build target survives (all tiers)" present "$r"
+[ -f "$SC/target/release/camerata-server" ] && r=present || r=gone;      ok "real kept scan build release survives" present "$r"
+[ -f "$SC/target/debug/incremental/x" ] && r=present || r=gone;          ok "real kept scan build incremental survives" present "$r"
+runguard --dry-run | grep -qF "keep camerata-scan-" && r=logged || r=silent; ok "kept scan build is logged" logged "$r"
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILED"
 exit "$fail"

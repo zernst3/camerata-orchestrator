@@ -172,9 +172,18 @@ still_idle() {
     return 0
 }
 
+# True when path $1 has a component named camerata-scan-*: a kept scan build (see
+# scripts/keep-scan-build.sh). Its target/release is the binary that finishes a multi-day
+# inspection, so no tier, sweep or worktree step may ever act on it, active or idle.
+is_scan_path() {
+    case "$1/" in */camerata-scan-*/*) return 0 ;; esac
+    return 1
+}
+
 # Only regenerable build output goes through here: a target/ dir or something under one, never a
 # symlink.
 remove_path() {
+    if is_scan_path "$1"; then log "REFUSED to remove $1: kept scan build"; return; fi
     case "$1" in
         */target|*/target/*) ;;
         *) log "REFUSED to remove $1: not a target/ path"; return ;;
@@ -212,6 +221,7 @@ log "start; free=$(free_gib) GiB"
 if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
     for wt in "$ORCH_REPO"/.claude/worktrees/*; do
         [ -e "$wt" ] || continue
+        if is_scan_path "$wt"; then log "keep $wt (kept scan build, never swept)"; continue; fi
         if [ -L "$wt" ]; then log "keep $wt: symlink, ignored"; continue; fi
         [ -d "$wt" ] || continue
         [ -e "$wt/.git" ] || continue
@@ -281,6 +291,7 @@ list_targets() {
 # above, before cargo-sweep runs), a recent commit, or modified tracked files in the owning
 # checkout; never file mtimes, which APFS clones and cargo-sweep itself rewrite.
 IDLE_TARGETS="$(list_targets | while read -r t; do
+    if is_scan_path "$t"; then log "keep ${t#"${t%%camerata-scan-*}"} (kept scan build, never swept)" >&2; continue; fi
     if is_active "$(dirname "$t")"; then log "skip active $t ($ACTIVE_WHY)" >&2; else echo "$t"; fi
 done)"
 
