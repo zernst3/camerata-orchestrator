@@ -198,7 +198,10 @@ pub mod coordinator;
 pub use coordinator::{Coordinator, CoordinatorError, RunReport};
 
 pub mod fleet;
+
+pub mod semgrep_env;
 pub use fleet::{FleetCoordinator, FleetReport, FleetStage, StageReport};
+pub use semgrep_env::apply_semgrep_env;
 
 // LivenessTracker moved to the `camerata-liveness` leaf crate (Phase 1b).
 // Import it from `camerata_liveness::LivenessTracker` directly.
