@@ -917,7 +917,6 @@ fn the_grouped_tree_writes_each_folder_once_and_is_smaller_than_one_path_a_line(
     let mut paths = tree_sample();
     paths.sort_unstable();
     let grouped = group_tree(&paths);
-    let flat: String = paths.iter().map(|p| format!("{p}\n")).collect();
     let body = grouped
         .strip_prefix(&format!("{TREE_HEADER}\n"))
         .expect("the header leads");
