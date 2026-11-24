@@ -94,7 +94,8 @@ struct Streak {
 /// What stopped the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutageTrigger {
-    /// `Transport` (a streak) or `AuthOrBilling` (one failure).
+    /// `Transport` (a streak), `AuthOrBilling` (one failure) or `RateLimited` (a wait that did
+    /// not clear in time).
     pub class: FailureClass,
     /// A plain sentence naming what happened. Operator only.
     pub detail: String,
@@ -219,6 +220,17 @@ impl RunHealth {
             | FailureClass::OutageStop
             | FailureClass::Io => {}
         }
+    }
+
+    /// A rate limit or an overload did not clear within the longest a call waits for one. The
+    /// provider is answering but will not serve the run, and every piece would wait the same
+    /// time and fail the same way: stop the run, cleanly and resumable, as an outage does, so the
+    /// pieces in flight stop at their next check and no new piece starts.
+    pub fn note_wait_exhausted(&self, detail: &str) {
+        self.trip(
+            FailureClass::RateLimited,
+            format!("a rate limit or overload did not clear in time (last: {detail})"),
+        );
     }
 
     fn trip(&self, class: FailureClass, detail: String) {

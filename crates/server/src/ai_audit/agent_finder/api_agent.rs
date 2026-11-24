@@ -424,6 +424,7 @@ impl ApiPieceAgent {
                     || status
                         .as_ref()
                         .is_some_and(|(code, _)| matches!(code, 429 | 503 | 529)));
+            let mut wait_exhausted = false;
             let delay = if !retryable {
                 None
             } else if wait_out {
@@ -433,7 +434,8 @@ impl ApiPieceAgent {
                         |d| d.min(MAX_RETRY_AFTER),
                     )
                     .max(Duration::from_secs(1));
-                (waited + d <= WAIT_OUT_DEADLINE).then_some(d)
+                wait_exhausted = waited + d > WAIT_OUT_DEADLINE;
+                (!wait_exhausted).then_some(d)
             } else if retries < BACKOFF_SECS.len() {
                 let d = retry_after.map_or_else(
                     || jittered(Duration::from_secs(BACKOFF_SECS[retries])),
@@ -460,6 +462,14 @@ impl ApiPieceAgent {
                 continue;
             }
             attempts.push(record);
+            if wait_exhausted {
+                // The call waited as long as it may and the provider still refuses: every other
+                // piece would do the same. Stop the run, as an outage does, so they stop at their
+                // next check and no new piece starts.
+                if let Some(meter) = &self.meter {
+                    meter.health().note_wait_exhausted(&message);
+                }
+            }
             let mut failure = LlmCallFailure::new(class, message);
             failure.attempts = attempts;
             failure.retryable = retryable;

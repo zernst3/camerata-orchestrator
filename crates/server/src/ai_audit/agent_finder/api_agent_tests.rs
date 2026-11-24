@@ -1087,6 +1087,41 @@ async fn waiting_out_a_rate_limit_stops_at_the_deadline_and_fails_as_before() {
 }
 
 #[tokio::test]
+async fn a_rate_limit_that_never_clears_stops_the_run_so_no_next_piece_starts() {
+    // Every answer is a 429 with the longest retry-after: the call waits out its deadline.
+    let wire = ScriptedWire::new(
+        (0..8)
+            .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
+            .collect(),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    assert!(!meter.outage_stopped());
+    let run = run_ok(&agent, &room(), &limits()).await;
+
+    assert!(matches!(run.stop, AgentStop::Failed(_)), "{:?}", run.stop);
+    assert!(meter.outage_stopped(), "the deadline stops the run, as an outage does");
+    let trigger = meter.health().trigger().expect("a trigger is recorded");
+    assert_eq!(
+        trigger.class,
+        camerata_llm::failure::FailureClass::RateLimited
+    );
+    assert!(trigger.detail.contains("slow"), "{}", trigger.detail);
+
+    // The next piece does not start: no request goes out for it.
+    let sent = wire.calls();
+    let waits = waits_of(&pauses).len();
+    let next = agent.run(&room(), "Review the next piece.", &limits()).await;
+    assert!(next.is_err(), "a stopped run starts no piece");
+    assert_eq!(wire.calls(), sent);
+    assert_eq!(waits_of(&pauses).len(), waits, "and waits for nothing");
+
+    // Nothing was booked twice or at all: no turn was answered.
+    assert!(run.usage.is_empty());
+    assert!(meter.snapshot().cost_usd.abs() < 1e-12);
+}
+
+#[tokio::test]
 async fn an_overload_is_waited_out_under_the_same_deadline_then_fails() {
     let wire = ScriptedWire::new(
         (0..200)
