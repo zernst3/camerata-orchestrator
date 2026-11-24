@@ -938,8 +938,18 @@ async fn a_spend_limit_with_an_unpriced_model_is_refused_before_the_first_call()
 
 // ─── 6. retry, refusal, outage ───────────────────────────────────────────────────────────────
 
+/// The waits the transport asked for during one call.
+fn waits_of(pauses: &Pauses) -> Vec<Duration> {
+    pauses.lock().expect("lock").clone()
+}
+
+fn within_jitter(d: Duration, secs: u64) -> bool {
+    let (lo, hi) = (secs * 700, secs * 1_300);
+    (lo..=hi).contains(&(d.as_millis() as u64))
+}
+
 #[tokio::test]
-async fn a_rate_limit_is_retried_on_the_engines_schedule_and_the_retry_after_wins() {
+async fn a_rate_limit_waits_thirty_seconds_with_jitter_and_the_retry_after_wins() {
     let wire = ScriptedWire::new(vec![
         http(429, "rate_limit_error", "slow down", None),
         http(429, "rate_limit_error", "slow down", Some(7)),
@@ -950,10 +960,14 @@ async fn a_rate_limit_is_retried_on_the_engines_schedule_and_the_retry_after_win
     let run = run_ok(&agent, &room(), &limits()).await;
     assert_eq!(run.stop, AgentStop::Finished);
     assert_eq!(wire.calls(), 3);
-    assert_eq!(
-        *pauses.lock().expect("lock"),
-        vec![Duration::from_secs(2), Duration::from_secs(7)]
+    let waits = waits_of(&pauses);
+    assert_eq!(waits.len(), 2);
+    assert!(
+        within_jitter(waits[0], 30),
+        "no retry-after: 30 s, plus or minus 30 percent, got {:?}",
+        waits[0]
     );
+    assert_eq!(waits[1], Duration::from_secs(7), "the retry-after wins");
     // The same body went each time.
     let bodies = wire.bodies();
     assert_eq!(bodies[0], bodies[1]);
@@ -965,27 +979,123 @@ async fn a_rate_limit_is_retried_on_the_engines_schedule_and_the_retry_after_win
     );
 }
 
-#[tokio::test]
-async fn an_overload_waits_longer_and_gives_up_after_its_schedule() {
-    let script = (0..5)
-        .map(|_| http(529, "overloaded_error", "busy", None))
+async fn ten_refusals_then_a_good_reply(status: u16, error_type: &str) {
+    let mut script: Vec<Reply> = (0..10)
+        .map(|_| http(status, error_type, "busy", None))
         .collect();
+    script.push(text_reply("done"));
     let wire = ScriptedWire::new(script);
     let meter = Arc::new(UsageMeter::default());
     let (agent, pauses) = metered(&wire, &meter);
-    let result = agent.run(&room(), "Review.", &limits()).await;
-    // Nothing came back, so nothing was billed, but a request was sent: still Ok with Failed.
-    let run = result.expect("a request was sent, so the run returns Ok");
+    let run = run_ok(&agent, &room(), &limits()).await;
+
+    assert_eq!(run.stop, AgentStop::Finished, "{status}: the piece finishes");
+    assert_eq!(wire.calls(), 11);
+    let waits = waits_of(&pauses);
+    assert_eq!(waits.len(), 10);
+    assert!(
+        waits.iter().all(|w| within_jitter(*w, 30)),
+        "{status}: {waits:?}"
+    );
+    assert!(
+        waits.iter().any(|w| *w != waits[0]),
+        "{status}: ten waits with jitter are not all the same: {waits:?}"
+    );
+    assert_eq!(run.usage.len(), 1, "waiting bills nothing");
+    let (baseline, _) = spend_after(vec![text_reply("done")]).await;
+    assert!(
+        (meter.snapshot().cost_usd - baseline).abs() < 1e-9,
+        "nothing was spent or booked while waiting"
+    );
+    assert_eq!(meter.health().streak(), 0, "{status}: not a failure");
+}
+
+#[tokio::test]
+async fn ten_rate_limits_in_a_row_are_waited_out_and_the_piece_finishes() {
+    ten_refusals_then_a_good_reply(429, "rate_limit_error").await;
+}
+
+#[tokio::test]
+async fn ten_overloads_in_a_row_are_waited_out_and_the_piece_finishes() {
+    ten_refusals_then_a_good_reply(529, "overloaded_error").await;
+}
+
+#[tokio::test]
+async fn a_stop_raised_during_a_wait_ends_it_with_no_further_request() {
+    let wire = ScriptedWire::new(vec![
+        http(429, "rate_limit_error", "slow down", None),
+        text_reply("never sent"),
+    ]);
+    let meter = Arc::new(UsageMeter::default());
+    let raised = Arc::clone(&meter);
+    let pause: PauseFn = Arc::new(move |_| {
+        // A credit stop arrives while the call waits.
+        raised.health().note_failure(
+            camerata_llm::failure::FailureClass::AuthOrBilling,
+            "credit balance",
+        );
+        Box::pin(async {})
+    });
+    let dyn_wire: Arc<dyn FinderWire> = wire.clone();
+    let agent = ApiPieceAgent::new(MODEL, "sk-test-not-a-real-key")
+        .with_wire(dyn_wire)
+        .with_pause(pause)
+        .with_meter(Arc::clone(&meter));
+    let run = run_ok(&agent, &room(), &limits()).await;
+
+    assert_eq!(wire.calls(), 1, "the request is not sent again after the stop");
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if why.starts_with("the run stopped because")),
+        "a stop ends the wait as a stop between turns does, got {:?}",
+        run.stop
+    );
+    assert!(run.usage.is_empty());
+}
+
+#[tokio::test]
+async fn waiting_out_a_rate_limit_stops_at_the_deadline_and_fails_as_before() {
+    // retry-after of 300 s (the most honoured): six waits fill the 30 minutes, the seventh would
+    // pass them.
+    let wire = ScriptedWire::new(
+        (0..7)
+            .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
+            .collect(),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert!(
+        matches!(&run.stop, AgentStop::Failed(why) if why.contains("slow")),
+        "got {:?}",
+        run.stop
+    );
+    assert_eq!(wire.calls(), 7);
+    assert_eq!(waits_of(&pauses), vec![Duration::from_secs(300); 6]);
+    assert!(run.usage.is_empty());
+    assert_eq!(meter.health().streak(), 0, "a rate limit is a pause, not an outage");
+}
+
+#[tokio::test]
+async fn an_overload_is_waited_out_under_the_same_deadline_then_fails() {
+    let wire = ScriptedWire::new(
+        (0..200)
+            .map(|_| http(529, "overloaded_error", "busy", None))
+            .collect(),
+    );
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, pauses) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
     assert!(
         matches!(&run.stop, AgentStop::Failed(why) if why.contains("busy")),
         "got {:?}",
         run.stop
     );
-    assert_eq!(wire.calls(), 5);
-    assert_eq!(
-        *pauses.lock().expect("lock"),
-        [5, 20, 60, 120].map(Duration::from_secs).to_vec()
-    );
+    let waits = waits_of(&pauses);
+    let total: Duration = waits.iter().sum();
+    assert!(total <= Duration::from_secs(30 * 60), "{total:?}");
+    // 30 s waits, 21 to 39 s each: between 46 and 86 of them fill 30 minutes.
+    assert!((46..=86).contains(&waits.len()), "{} waits", waits.len());
+    assert_eq!(wire.calls(), waits.len() + 1);
     assert!(run.usage.is_empty());
 }
 
@@ -1060,10 +1170,10 @@ async fn failures_and_successes_feed_the_run_health_record() {
     assert_eq!(run.stop, AgentStop::Finished);
     assert_eq!(meter.health().streak(), 0, "a reply clears the streak");
 
-    // A rate limit that outlasts its retries is a pause, not an outage.
+    // A rate limit that outlasts the deadline is a pause, not an outage.
     let wire = ScriptedWire::new(
-        (0..4)
-            .map(|_| http(429, "rate_limit_error", "slow", None))
+        (0..7)
+            .map(|_| http(429, "rate_limit_error", "slow", Some(300)))
             .collect(),
     );
     let (agent, _) = metered(&wire, &meter);
