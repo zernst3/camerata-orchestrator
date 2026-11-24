@@ -1,0 +1,86 @@
+id = "IAC-TERRAFORM-ACCESS-LOGGING-1"
+version = 1
+title = "Application and Classic load balancers and data buckets defined in Terraform have access logging turned on"
+domain = "iac:terraform"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-778"]
+# Where this rule can apply, so the scan sends it only with Terraform files. The subject is a
+# resource block in Terraform configuration or a value in a Terraform variables file.
+applies_to = { paths = ["**/*.tf", "**/*.tf.json", "**/*.tfvars", "**/*.tfvars.json"] }
+# Severity ceiling. Missing access logs do not expose anything by themselves; they remove the
+# record needed to investigate an incident. Never more than medium.
+max_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Applies to internet facing Application and Classic load balancers and to storage buckets that hold application or customer data. Network and Gateway load balancers are outside the rule. The bucket that receives the logs is outside the rule, because logging a log bucket to itself creates a loop. Buckets that hold only build artifacts or public static assets are outside the rule. Development and short lived test environments are judged leniently. The logging resource can sit in a different file or module from the bucket or load balancer, so the whole configuration is read before one is judged unlogged. No mechanical detector ships for this rule; coverage comes from reading the Terraform files."
+
+[[sources]]
+url = "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-access-logs.html"
+title = "Elastic Load Balancing User Guide: Access logs for your Application Load Balancer"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/elb-controls.html"
+title = "AWS Security Hub controls for Elastic Load Balancing: ELB.5, Application and Classic Load Balancers logging should be enabled"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html"
+title = "Amazon S3 User Guide: Logging requests with server access logging"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"
+title = "AWS Security Hub controls for Amazon S3: S3.9, S3 general purpose buckets should have server access logging enabled"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/778.html"
+title = "CWE-778: Insufficient Logging"
+
+[decision]
+question = "Do the load balancers and data buckets in this Terraform configuration record who accessed them?"
+default = "load-balancers-and-data-buckets-log-access"
+why = """
+Access logs are the record of who requested what and when. They are off by default on load
+balancers and storage buckets, and they cannot be produced after the fact: when an incident or a
+customer question arrives, either the logs were being written or the answer is unknown. Without
+them a team cannot tell whether exposed data was actually downloaded, which addresses an attack
+came from or how long it went on. Turning them on is a few lines of Terraform and a bucket to hold
+them, with a retention period so the cost stays bounded.
+"""
+
+[[option]]
+id = "load-balancers-and-data-buckets-log-access"
+label = "Internet facing Application and Classic load balancers and data buckets write access logs to a dedicated log bucket"
+directive = """
+Every internet facing Application or Classic load balancer declared in Terraform writes access
+logs: `aws_lb` resources of the application type and `aws_elb` resources carry an `access_logs`
+block with `enabled = true` and a target bucket. Network load balancers are not covered. Every
+storage bucket that
+holds application or customer data has an `aws_s3_bucket_logging` resource that sends server access
+logs to a separate log bucket. Other clouds follow the same commitment with their own logging
+arguments. The log bucket is private, is not its own logging target and has a lifecycle rule that
+sets how long logs are kept.
+"""
+remediation = """
+Add an `access_logs` block with `enabled = true` to the load balancer in `<path>`, or an
+`aws_s3_bucket_logging` resource for the bucket, pointing at a dedicated private log bucket with a
+lifecycle rule for retention. Verify by running `terraform plan` and confirming the logging
+configuration is created, then make a request and confirm a log object appears in the log bucket.
+"""
+effort = "low"
+why = "Access logs written from the start let the team answer who accessed what during an incident, which cannot be reconstructed afterward."
+
+[[option]]
+id = "no-access-logs-on-load-balancers-or-data-buckets"
+violates = true
+label = "An internet facing Application or Classic load balancer or a data bucket is declared with access logging off"
+directive = "An internet facing Application or Classic load balancer or a bucket holding application or customer data is declared with no access logging configuration or with logging explicitly disabled."
+remediation = """
+Add an `access_logs` block with `enabled = true` to the load balancer in `<path>`, or an
+`aws_s3_bucket_logging` resource for the bucket, pointing at a dedicated private log bucket with a
+lifecycle rule for retention. Verify by running `terraform plan` and confirming the logging
+configuration is created, then make a request and confirm a log object appears in the log bucket.
+"""
+effort = "low"
+why = "No record exists of who requested what, so after an incident the team cannot tell whether data was downloaded, where an attack came from or how long it lasted. That record cannot be recreated later."

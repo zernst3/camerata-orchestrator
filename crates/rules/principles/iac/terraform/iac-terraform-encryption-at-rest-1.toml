@@ -1,0 +1,89 @@
+id = "IAC-TERRAFORM-ENCRYPTION-AT-REST-1"
+version = 1
+title = "Databases and disk volumes defined in Terraform are encrypted at rest"
+domain = "iac:terraform"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-311"]
+# Where this rule can apply, so the scan sends it only with Terraform files. The subject is a
+# resource block in Terraform configuration or a value in a Terraform variables file.
+applies_to = { paths = ["**/*.tf", "**/*.tf.json", "**/*.tfvars", "**/*.tfvars.json"] }
+# Severity bounds. Unencrypted storage is a real gap that most compliance frameworks name, but it
+# needs a second failure (a leaked snapshot, a shared backup, lost media) to expose data. Medium
+# at least, high at most.
+min_severity = "medium"
+max_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "Applies to resources whose provider default is unencrypted storage: Amazon RDS instances and clusters, Amazon EBS volumes and the root and data volumes of instances and launch templates. Amazon S3 buckets are outside the rule because Amazon S3 encrypts every new object by default. An account level `aws_ebs_encryption_by_default` resource satisfies the rule for EBS volumes in that account and region. That default can also be turned on outside the repository, so a finding on an EBS volume states that an account level encryption default could not be seen from the Terraform files. A read replica or a database restored from a snapshot inherits the encryption of its source, so it is judged by its source. No mechanical detector ships for this rule; coverage comes from reading the Terraform files."
+
+[[sources]]
+url = "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.Encryption.html"
+title = "Amazon RDS User Guide: Encrypting Amazon RDS resources"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/rds-controls.html"
+title = "AWS Security Hub controls for Amazon RDS: RDS.3, RDS DB instances should have encryption at-rest enabled (maps to CIS AWS Foundations Benchmark v3.0.0 recommendation 2.3.1)"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"
+title = "AWS Security Hub controls for Amazon EC2: EC2.7, EBS default encryption should be enabled (maps to CIS AWS Foundations Benchmark v3.0.0 recommendation 2.2.1)"
+
+[[sources]]
+url = "https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final"
+title = "NIST SP 800-53 Rev. 5, Security and Privacy Controls for Information Systems and Organizations: control SC-28, Protection of Information at Rest"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/311.html"
+title = "CWE-311: Missing Encryption of Sensitive Data"
+
+[decision]
+question = "Is the stored data of every database and disk volume this Terraform configuration creates encrypted?"
+default = "databases-and-volumes-encrypted-at-rest"
+why = """
+Encryption at rest protects the copies of data that leave the running system: snapshots, automated
+backups, replicas and the underlying disks. Without it, a snapshot shared with the wrong account
+or a backup copied to the wrong place is readable as it stands. For Amazon RDS and Amazon EBS the
+provider default is unencrypted, so a resource that says nothing is unencrypted. The setting is
+also hard to change later: an existing unencrypted RDS instance cannot be switched in place and
+has to be rebuilt from an encrypted copy of a snapshot. That makes it far cheaper to set when the
+resource is first written than after it holds production data.
+"""
+
+[[option]]
+id = "databases-and-volumes-encrypted-at-rest"
+label = "Every database and disk volume is declared with encryption at rest turned on"
+directive = """
+Every database and disk volume declared in Terraform is encrypted at rest. `aws_db_instance` and
+`aws_rds_cluster` resources set `storage_encrypted = true`. `aws_ebs_volume` resources and the
+`root_block_device` and `ebs_block_device` blocks of instances and launch templates set
+`encrypted = true`, or the account declares `aws_ebs_encryption_by_default` with `enabled = true`.
+Other clouds follow the same commitment wherever the provider lets encryption be turned off. A
+customer managed key is named where the data is sensitive enough to need its own key policy.
+"""
+remediation = """
+Set `storage_encrypted = true` on the database, or `encrypted = true` on the volume, in `<path>`.
+For an existing unencrypted RDS instance, take a snapshot, copy the snapshot with encryption turned
+on and restore the instance from the encrypted copy, because encryption cannot be added in place.
+Verify by running `terraform plan` and confirming the argument is set, then confirm the resource
+reports encrypted storage in the provider console or command line.
+"""
+effort = "medium"
+why = "Encrypted storage keeps snapshots, backups and disks unreadable to anyone who obtains a copy without also holding the key."
+
+[[option]]
+id = "database-or-volume-stored-unencrypted"
+violates = true
+label = "A database or disk volume is declared without encryption at rest"
+directive = "A database or disk volume is declared with encryption at rest turned off or left at an unencrypted provider default."
+remediation = """
+Set `storage_encrypted = true` on the database, or `encrypted = true` on the volume, in `<path>`.
+For an existing unencrypted RDS instance, take a snapshot, copy the snapshot with encryption turned
+on and restore the instance from the encrypted copy, because encryption cannot be added in place.
+Verify by running `terraform plan` and confirming the argument is set, then confirm the resource
+reports encrypted storage in the provider console or command line.
+"""
+effort = "medium"
+why = "The data, its snapshots and its backups are stored in readable form, so a snapshot shared with the wrong account or a copied backup exposes every record with no further barrier. Most security reviews and compliance frameworks also treat unencrypted production data as a failed control."

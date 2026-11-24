@@ -148,6 +148,14 @@
 "GO-WEB-MIDDLEWARE-CROSS-CUTTING-1" = { version = 4, hash = "sha256:f49bbb828bb435d34bcebaae310d3b80133da6e996ab1ecef5e026efd2f5888a" }
 "GO-WEB-REQUEST-BINDING-VALIDATION-1" = { version = 4, hash = "sha256:655216c2c6ddbad6965e6dc60b1bc0cc3a67047a4f5be2bf18fdc82f13363eb4" }
 "GO-WEB-STRUCTURED-ERROR-RESPONSES-1" = { version = 4, hash = "sha256:10e10d9fa212d5f13f71669ca46272a1d89b1060c5fdf95a316fbcd209d8d7b3" }
+"IAC-TERRAFORM-ACCESS-LOGGING-1" = { version = 1, hash = "sha256:cbae3c1415fdbd007a70cda9ed3b9075f8c32e08bcc1839e1abc3519299f92c1" }
+"IAC-TERRAFORM-DATABASE-EXPOSURE-1" = { version = 1, hash = "sha256:5fe398fc9d4d1287f7336d72b37b684117228ac8d8e87d8081915d859e716563" }
+"IAC-TERRAFORM-DELETION-PROTECTION-1" = { version = 1, hash = "sha256:713f9b06f125085d3f7986a2cc8bdf47fd507e8a3f488878b53b4f64ed5f321b" }
+"IAC-TERRAFORM-ENCRYPTION-AT-REST-1" = { version = 1, hash = "sha256:49890eaccfbe1aa05e9aea656802302483f73c30188c0bc75dfb6afec8a7f348" }
+"IAC-TERRAFORM-NETWORK-EXPOSURE-1" = { version = 1, hash = "sha256:d94b6aac503422a5abcf28bf0e122bb72c8d0c5daa8f0cc903bbd79dedc73f25" }
+"IAC-TERRAFORM-PUBLIC-BUCKET-1" = { version = 1, hash = "sha256:5146aaf88860be1b9977bca9becdad2010e442d33ac8ca5fad3835e4bccabe9d" }
+"IAC-TERRAFORM-REMOTE-STATE-1" = { version = 1, hash = "sha256:8bf4370030ac78b7f626e9d5ef4ba302bca7ef81800c25e75ab138af7d716bf9" }
+"IAC-TERRAFORM-WILDCARD-IAM-POLICY-1" = { version = 1, hash = "sha256:621acf8dcc8046d2ab438b061aacd30de48f97ded85918890511ff32e895f1fe" }
 "INTEGRATION-API-CONTRACT-1" = { version = 4, hash = "sha256:15aeb657ba8929befba42bcdbedfb8ab04704f76b9ca5b74df11d67fb85297ea" }
 "INTEGRATION-AUTH-SEAM-1" = { version = 4, hash = "sha256:536869aabbe769db1bda2e39e9d70eaec33606dd5ad69767bcbd3455a59c9930" }
 "INTEGRATION-EVENT-WIRING-1" = { version = 4, hash = "sha256:81e65fbb16bfbf80b07a0efd411260b2e6cb0e375d2cc0570eb55f68e08f1fbb" }

@@ -1,0 +1,84 @@
+id = "IAC-TERRAFORM-DELETION-PROTECTION-1"
+version = 1
+title = "Production databases defined in Terraform have deletion protection turned on and keep a final snapshot"
+domain = "iac:terraform"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-693"]
+# Where this rule can apply, so the scan sends it only with Terraform files. The subject is a
+# resource block in Terraform configuration or a value in a Terraform variables file.
+applies_to = { paths = ["**/*.tf", "**/*.tf.json", "**/*.tfvars", "**/*.tfvars.json"] }
+# Severity ceiling. Follows AWS Security Hub: medium for a cluster (RDS.7) and low for a single
+# instance (RDS.8). A database whose environment is not stated is low. Never more than medium.
+max_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Applies to managed databases that serve production. A database is production when its name, workspace, variables or directory say so. One marked as development, test, preview or otherwise disposable is outside the rule. Where the configuration does not state the environment, the database is not assumed to be production: a finding on it is rated low and says that the environment was not stated. For a stated production database the rating follows AWS Security Hub: medium for an RDS cluster and low for a single RDS instance. An unset `deletion_protection` argument is a fault only on AWS, where it defaults to off. Google Cloud SQL defaults it to on, so only an explicit `false` counts there. A shared module that takes deletion protection as a variable is judged by the value its production callers pass. No mechanical detector ships for this rule; coverage comes from reading the Terraform files."
+
+[[sources]]
+url = "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_DeleteInstance.html"
+title = "Amazon RDS User Guide: Deleting a DB instance (deletion protection and final snapshots)"
+
+[[sources]]
+url = "https://docs.aws.amazon.com/securityhub/latest/userguide/rds-controls.html"
+title = "AWS Security Hub controls for Amazon RDS: RDS.7 (RDS clusters should have deletion protection enabled, medium severity) and RDS.8 (RDS DB instances should have deletion protection enabled, low severity)"
+
+[[sources]]
+url = "https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle"
+title = "HashiCorp Terraform documentation: lifecycle meta-argument reference (prevent_destroy)"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/693.html"
+title = "CWE-693: Protection Mechanism Failure"
+
+[decision]
+question = "What stops a single Terraform run from deleting a production database and its data?"
+default = "production-databases-protected-from-deletion"
+why = """
+Terraform will destroy a database as readily as it creates one. Renaming a resource, changing an
+argument that forces replacement or running `terraform destroy` in the wrong workspace all produce
+a plan that deletes the database. With `skip_final_snapshot = true` nothing is kept. The
+provider's deletion protection flag makes the cloud service itself refuse the delete until someone
+turns the flag off on purpose, which turns a one step accident into a deliberate two step change.
+On AWS it is off by default, so an RDS database that does not set it is unprotected.
+"""
+
+[[option]]
+id = "production-databases-protected-from-deletion"
+label = "Production databases set deletion protection and take a final snapshot before any delete"
+directive = """
+Every production database declared in Terraform has deletion protection on. `aws_db_instance` and
+`aws_rds_cluster` resources set `deletion_protection = true`, because AWS leaves it off when the
+argument is unset. On clouds where protection defaults to on, such as Google Cloud SQL, it is
+never set to `false`. Production databases name a `final_snapshot_identifier` and do not set
+`skip_final_snapshot = true`, so a deliberate delete still leaves a recoverable copy. A
+`lifecycle` block with `prevent_destroy = true` is a welcome second guard but does not replace the
+provider flag, because it only protects against deletes that go through this configuration.
+Development and disposable environments can leave protection off. A database whose environment
+the configuration does not state is not assumed to be production.
+"""
+remediation = """
+Set `deletion_protection = true` on the production database in `<path>`, remove
+`skip_final_snapshot = true` and set a `final_snapshot_identifier`. If the values come from
+variables, set them in the production variables file and leave development environments as they
+are. Verify by running `terraform plan` and confirming the argument changes in place, then confirm
+the database shows deletion protection as enabled in the provider console or command line.
+"""
+effort = "low"
+why = "With deletion protection on, the cloud service refuses to delete the database until someone deliberately turns the flag off, so a mistaken plan cannot destroy production data in one step."
+
+[[option]]
+id = "production-database-can-be-deleted-in-one-step"
+violates = true
+label = "A production database has deletion protection off or skips its final snapshot"
+directive = "A production database on AWS is declared with `deletion_protection` unset or set to `false`. On other clouds the fault is `deletion_protection` set to `false`. The same fault covers a production database declared with `skip_final_snapshot = true`."
+remediation = """
+Set `deletion_protection = true` on the production database in `<path>`, remove
+`skip_final_snapshot = true` and set a `final_snapshot_identifier`. Verify by running
+`terraform plan` and confirming the argument changes in place, then confirm the database shows
+deletion protection as enabled in the provider console or command line.
+"""
+effort = "low"
+why = "One mistaken apply, a resource rename that forces replacement or a destroy run in the wrong workspace deletes the production database. With the final snapshot skipped, the data is gone with it and recovery depends on whatever separate backups exist."
