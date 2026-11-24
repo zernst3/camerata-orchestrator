@@ -144,11 +144,11 @@ fn normalize(path: &str) -> Option<String> {
 }
 
 /// The first line of the tree file: it tells the reader how to read the rest.
-pub(super) const TREE_HEADER: &str = "Folders end with /. The files of a folder are listed under it, indented. Join them to get a path, for example src/ then   a.rs is src/a.rs.";
+pub(super) const TREE_HEADER: &str = "Folders end with /. The files of a folder are listed under it, indented. Join them to get a path, for example src/ then  a.rs is src/a.rs. A search of this file shows only the file name; its folder is the nearest line above that ends with /.";
 
-/// The tree file's text: the [`TREE_HEADER`] line, then for each folder that holds a file, one line with the folder's path from
-/// the root and a closing `/` (the root is `./`), then the names of its files, one a line, each
-/// indented by two spaces. A folder's path is written once, not before every file. A line ending
+/// The tree file's text: the [`TREE_HEADER`] line, then for each folder that holds a file, one
+/// line with the folder's path from the root and a closing `/` (the root is `./`), then the names
+/// of its files, one a line, each indented by two spaces. A folder's path is written once, not before every file. A line ending
 /// in `/` is a folder (a file name never holds a `/`), and every other line is a file of the
 /// folder above it, so every path can be rebuilt ([`expand_tree`]). Folders come in path order,
 /// the root first, so `src/` is followed by `src/a/` and then `src-x/`.

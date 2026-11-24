@@ -79,6 +79,16 @@ fn the_tree_lists_every_file_of_the_repository_grouped_by_folder() {
         stored,
         format!("{TREE_HEADER}\n./\n  README.md\nsrc/\n  main.rs\n  other.rs\n  util.rs\n")
     );
+    assert!(
+        TREE_HEADER.contains("src/ then  a.rs is src/a.rs.") && !TREE_HEADER.contains("   a.rs"),
+        "the example shows the real two space indent: {TREE_HEADER}"
+    );
+    assert!(
+        TREE_HEADER.contains(
+            "A search of this file shows only the file name; its folder is the nearest line above that ends with /."
+        ),
+        "{TREE_HEADER}"
+    );
     assert!(TREE_HEADER.is_ascii() && !TREE_HEADER.contains('-') && !TREE_HEADER.contains('\n'));
     assert_eq!(
         expand_tree(&stored),
@@ -982,4 +992,26 @@ fn the_room_serves_the_grouped_tree_for_a_repository_of_many_folders() {
         .read("_camerata/context/tree.txt", 1, 1_000)
         .expect("read");
     assert!(read.text.contains("src/a/b/c/\n"), "{}", read.text);
+}
+
+#[test]
+fn a_search_of_the_tree_returns_bare_names_and_the_header_says_where_the_folder_is() {
+    let r = room();
+    let hits = r.grep("main", Some("_camerata/context/tree.txt")).expect("grep");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].text, "  main.rs", "no folder in the hit");
+    let tree = r
+        .file_pairs()
+        .into_iter()
+        .find(|(p, _)| p == "_camerata/context/tree.txt")
+        .expect("tree")
+        .1;
+    let lines: Vec<&str> = tree.lines().collect();
+    let at = hits[0].line - 1;
+    let folder = lines[..at]
+        .iter()
+        .rev()
+        .find(|l| l.ends_with('/'))
+        .expect("a folder line above");
+    assert_eq!(*folder, "src/", "the nearest line above that ends with / is the folder");
 }
