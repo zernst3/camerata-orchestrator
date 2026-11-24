@@ -803,6 +803,12 @@ impl UsageMeter {
         self.health.note_success();
     }
 
+    /// A turn after the first of a finder piece missed the prompt cache
+    /// ([`crate::stage_telemetry::StageMeter::record_cache_miss_turn`]).
+    pub fn record_cache_miss_turn(&self, stage: Stage) {
+        self.stages.record_cache_miss_turn(stage);
+    }
+
     /// A Message Batches round of `stage` ended (its results were read): its time joins the
     /// stage's figures ([`crate::stage_telemetry::StageMeter::record_batch_round`]).
     pub fn record_batch_round(&self, stage: Stage, started_unix_ms: u64, ended_unix_ms: u64) {

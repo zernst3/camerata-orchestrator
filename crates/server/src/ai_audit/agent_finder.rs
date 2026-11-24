@@ -173,7 +173,25 @@ pub struct AgentRun {
     pub conversation: ConversationHandle,
 }
 
+impl TurnUsage {
+    /// Whether this turn, taken as a turn after the first of a piece, missed the prompt cache:
+    /// it read nothing from the cache. A turn that wrote more than it read still hit the cache
+    /// (new tool results are written), so it is not a miss.
+    pub fn is_cache_miss(&self) -> bool {
+        self.cache_read_input_tokens == 0
+    }
+}
+
 impl AgentRun {
+    /// Turns after the first of this run that missed the prompt cache. Operator-only figure.
+    pub fn cache_miss_turns(&self) -> u64 {
+        self.usage
+            .iter()
+            .skip(1)
+            .filter(|t| t.is_cache_miss())
+            .count() as u64
+    }
+
     /// A run that ended with `stop` and recorded nothing.
     pub fn empty(stop: AgentStop) -> Self {
         Self {

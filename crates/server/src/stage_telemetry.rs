@@ -151,6 +151,12 @@ pub struct StageUsage {
     /// that is counted at its cost ceiling (`record_unanswered`) is in `busy_ms` instead.
     #[serde(default)]
     pub failed_busy_ms: u64,
+    /// Turns after the first of a finder piece whose reply showed the conversation was not read
+    /// from the prompt cache (it read nothing from it). Each one pays the cache
+    /// write price for the whole context again. Counted for the finder stage only; zero for every
+    /// other stage. Operator-only; never exported.
+    #[serde(default)]
+    pub cache_miss_turns: u64,
 }
 
 /// Wall-clock now, in Unix milliseconds. The one clock the run figures read.
@@ -230,6 +236,7 @@ impl StageUsage {
         self.wasted_busy_ms = self.wasted_busy_ms.saturating_add(other.wasted_busy_ms);
         self.batch_wait_ms = self.batch_wait_ms.saturating_add(other.batch_wait_ms);
         self.failed_busy_ms = self.failed_busy_ms.saturating_add(other.failed_busy_ms);
+        self.cache_miss_turns = self.cache_miss_turns.saturating_add(other.cache_miss_turns);
         self.first_call_unix_ms = match (self.first_call_unix_ms, other.first_call_unix_ms) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -606,6 +613,14 @@ impl StageMeter {
         });
     }
 
+    /// A turn after the first of a finder piece missed the prompt cache: adds one to the stage's
+    /// `cache_miss_turns`.
+    pub fn record_cache_miss_turn(&self, stage: Stage) {
+        self.with_stage(stage, |u| {
+            u.cache_miss_turns = u.cache_miss_turns.saturating_add(1)
+        });
+    }
+
     /// One Message Batches round of `stage`, from `started_unix_ms` to `ended_unix_ms` (its
     /// results read): widens the stage's first and last stamps to cover the round and adds the
     /// wait to `batch_wait_ms`. Batch rows carry no per-call time, so this is the stage's timing
@@ -955,6 +970,16 @@ impl StageTelemetry {
             let models = s.usage.render_models();
             if !models.is_empty() {
                 writeln!(out, "  {} model: {models}", s.stage.label()).ok();
+            }
+            if s.stage == Stage::Finder || s.usage.cache_miss_turns > 0 {
+                writeln!(
+                    out,
+                    "  {} cache-miss turns: {} (turns after a piece's first that did not read \
+                     the conversation from the cache)",
+                    s.stage.label(),
+                    s.usage.cache_miss_turns
+                )
+                .ok();
             }
         }
         if let Some(rejections) = &self.detail_rejections {

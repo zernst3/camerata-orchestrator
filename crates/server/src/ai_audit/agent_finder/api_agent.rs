@@ -523,6 +523,13 @@ impl ApiPieceAgent {
             };
             trace.append(&mut pending);
             let turn = self.account(&reply);
+            // A turn after the first that did not read the conversation from the cache pays the
+            // write price for the whole context again; count it (no change to what is sent).
+            if !usage.is_empty() && turn.is_cache_miss() {
+                if let Some(meter) = &self.meter {
+                    meter.record_cache_miss_turn(Stage::Finder);
+                }
+            }
             let cost_known = turn.cost_usd.is_some();
             spent += turn.cost_usd.unwrap_or(0.0);
             usage.push(turn);
@@ -702,22 +709,61 @@ fn non_empty_content(content: &Value) -> Value {
     }
 }
 
-/// Put the cache breakpoint on the last block of the last message of the body, so each turn
-/// reads the conversation so far from the cache. Only the body carries it, never the stored
-/// conversation.
-fn cache_the_conversation(body: &mut Value) {
-    let Some(last) = body["messages"].as_array_mut().and_then(|m| m.last_mut()) else {
-        return;
-    };
+/// The most `cache_control` breakpoints one request may carry (a provider limit).
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// How many `cache_control` markers a request body carries, anywhere in it.
+fn count_cache_breakpoints(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| usize::from(k == "cache_control") + count_cache_breakpoints(v))
+            .sum(),
+        Value::Array(items) => items.iter().map(count_cache_breakpoints).sum(),
+        _ => 0,
+    }
+}
+
+/// Put a breakpoint on the last block of `message`, turning a plain text content into one block
+/// to hold it. A block that already carries one is left as it is.
+fn mark_message_end(message: &mut Value) {
     let breakpoint = json!({"type": "ephemeral"});
-    if let Some(text) = last["content"].as_str().map(str::to_string) {
-        last["content"] = json!([{"type": "text", "text": text, "cache_control": breakpoint}]);
-    } else if let Some(block) = last["content"]
+    if let Some(text) = message["content"].as_str().map(str::to_string) {
+        message["content"] = json!([{"type": "text", "text": text, "cache_control": breakpoint}]);
+    } else if let Some(block) = message["content"]
         .as_array_mut()
         .and_then(|blocks| blocks.last_mut())
         .filter(|b| b.is_object())
     {
-        block["cache_control"] = breakpoint;
+        if block.get("cache_control").is_none() {
+            block["cache_control"] = breakpoint;
+        }
+    }
+}
+
+/// Put the cache breakpoints on the conversation of the body, so each turn reads the conversation
+/// so far from the cache. Two move with the conversation: one on the last block of the last
+/// message, and one on the end of the previous request's last message (the user message two
+/// places before the last: each turn adds the reply and the next user message). The provider
+/// looks back only about 20 blocks from a breakpoint for an earlier entry, and a turn of many
+/// parallel tool results adds more than that, so without the second one the next turn misses the
+/// cache and writes the whole context again. The system block carries its own, and the request
+/// never carries more than [`MAX_CACHE_BREAKPOINTS`]. Only the body carries them, never the
+/// stored conversation, and no other byte of the body changes.
+fn cache_the_conversation(body: &mut Value) {
+    let Some(messages) = body["messages"].as_array_mut() else {
+        return;
+    };
+    let count = messages.len();
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    mark_message_end(last);
+    if count >= 3 && messages[count - 3]["role"] == "user" {
+        // The last one is on, so count what the body carries with the previous one added.
+        if count_cache_breakpoints(body) < MAX_CACHE_BREAKPOINTS {
+            mark_message_end(&mut body["messages"][count - 3]);
+        }
     }
 }
 

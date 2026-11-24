@@ -144,6 +144,7 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
         // The run figures: timing, and the model ids the telemetry names.
         "elapsed_ms",
         "busy_ms",
+        "cache_miss_turns",
         "first_call_unix_ms",
         "last_call_unix_ms",
         "started_unix_ms",

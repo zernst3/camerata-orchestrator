@@ -1023,11 +1023,14 @@ async fn send_again_adds_one_user_turn_with_the_unread_files_text_redacted() {
     // The earlier turns are the same bytes.
     let earlier = request["messages"].as_array().expect("list");
     let before = bodies[1]["messages"].as_array().expect("list");
-    // Only the rolling cache breakpoint moves from one request to the next.
+    // Only the rolling cache breakpoints move from one request to the next (the first message
+    // is one text block when it carries one, plain text when it does not: the same content).
     let plain = |m: &Value| {
-        let mut s = m.to_string();
-        s = s.replace(r#","cache_control":{"type":"ephemeral"}"#, "");
-        s
+        let mut m = without_markers(m);
+        if let Some(text) = m["content"].as_str().map(str::to_string) {
+            m["content"] = json!([{"type": "text", "text": text}]);
+        }
+        m.to_string()
     };
     let earlier: Vec<String> = earlier[..3].iter().map(plain).collect();
     let before: Vec<String> = before.iter().map(plain).collect();
@@ -1832,4 +1835,242 @@ async fn a_timed_out_call_carries_the_time_it_waited_into_the_stage_figures() {
         "the timed-out call's wait is counted: {}",
         finder.busy_ms
     );
+}
+
+// ─── 7. the cache breakpoints and the cache-miss counter ─────────────────────────────────────
+
+/// A reply that reports what it read from and wrote to the prompt cache.
+fn reply_cached(content: Vec<Value>, stop_reason: &str, read: u64, write: u64) -> Reply {
+    let v = json!({
+        "id": "msg_test", "type": "message", "role": "assistant", "model": MODEL,
+        "content": content, "stop_reason": stop_reason,
+        "usage": {"input_tokens": 1_000, "output_tokens": 500,
+                  "cache_read_input_tokens": read, "cache_creation_input_tokens": write}
+    });
+    let mut r = response(&v, 1_000, 500, read);
+    r.cache_creation_input_tokens = write;
+    Ok(r)
+}
+
+fn glob_call(id: &str) -> Value {
+    call(id, "Glob", json!({"pattern": "*.rs"}))
+}
+
+/// Where the breakpoints of a body are: the indexes of the messages whose blocks carry one.
+fn marked_messages(body: &Value) -> Vec<usize> {
+    body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| super::count_cache_breakpoints(m) > 0)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_turn_of_twelve_tool_results_keeps_a_breakpoint_at_the_previous_turns_end() {
+    let twelve: Vec<Value> = (0..12).map(|i| glob_call(&format!("t{i}"))).collect();
+    let wire = ScriptedWire::new(vec![
+        tools_reply(vec![glob_call("a")]),
+        tools_reply(twelve),
+        tools_reply(vec![glob_call("b")]),
+        text_reply("done"),
+    ]);
+    let _ = run_ok(&agent(&wire), &room(), &limits()).await;
+    let bodies = wire.bodies();
+    assert_eq!(bodies.len(), 4);
+    // Messages per request: 1, 3, 5, 7. The last message is always marked; from the third
+    // message on, so is the previous request's last message (two places before it).
+    for (i, body) in bodies.iter().enumerate() {
+        let n = body["messages"].as_array().expect("list").len();
+        let want: Vec<usize> = if n >= 3 {
+            vec![n - 3, n - 1]
+        } else {
+            vec![n - 1]
+        };
+        assert_eq!(marked_messages(body), want, "request {i} of {n} messages");
+        assert!(
+            super::count_cache_breakpoints(body) <= 4,
+            "request {i}: more than 4 breakpoints"
+        );
+    }
+    // The third request holds the twelve results as its last message; the breakpoint sits on the
+    // last of those twelve blocks, and the previous request's end is marked too.
+    let third = &bodies[2];
+    let results = third["messages"][4]["content"].as_array().expect("blocks");
+    assert_eq!(results.len(), 12);
+    assert!(results[..11]
+        .iter()
+        .all(|b| b.get("cache_control").is_none()));
+    assert_eq!(results[11]["cache_control"], json!({"type": "ephemeral"}));
+    let previous = third["messages"][2]["content"].as_array().expect("blocks");
+    assert_eq!(
+        previous.last().expect("block")["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    // The system block, the previous end and the last message: three in all.
+    assert_eq!(super::count_cache_breakpoints(third), 3);
+}
+
+/// The body with every `cache_control` marker taken out.
+fn without_markers(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(k, _)| *k != "cache_control")
+                .map(|(k, v)| (k.clone(), without_markers(v)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_markers).collect()),
+        other => other.clone(),
+    }
+}
+
+#[test]
+fn placing_the_breakpoints_changes_no_byte_outside_the_markers() {
+    let tools = super::tool_schemas();
+    let mut messages = vec![json!({"role": "user", "content": "Review the code."})];
+    for turn in 0..3 {
+        messages.push(json!({"role": "assistant", "content": [
+            {"type": "text", "text": "reading"},
+            call(&format!("c{turn}"), "Glob", json!({"pattern": "*.rs"})),
+        ]}));
+        let results: Vec<(String, String)> = (0..12)
+            .map(|i| (format!("c{turn}"), format!("result {turn} {i}")))
+            .collect();
+        crate::api_agent_driver::append_tool_results(
+            &mut messages,
+            crate::api_agent_driver::ApiShape::Anthropic,
+            &results,
+        );
+    }
+    let (before, _) = crate::api_agent_driver::build_anthropic_request_body_with_limit(
+        MODEL,
+        Some("system text"),
+        &messages,
+        &tools,
+        32_000,
+    );
+    let mut after = before.clone();
+    super::cache_the_conversation(&mut after);
+    assert_ne!(before, after, "the markers were placed");
+    assert_eq!(
+        without_markers(&before).to_string(),
+        without_markers(&after).to_string(),
+        "only cache_control markers may differ"
+    );
+    assert_eq!(super::count_cache_breakpoints(&after), 3);
+}
+
+#[test]
+fn the_conversation_never_takes_a_request_past_four_breakpoints() {
+    let mark = json!({"type": "ephemeral"});
+    let mut body = json!({
+        "system": [{"type": "text", "text": "s", "cache_control": mark}],
+        "tools": [{"name": "Read", "cache_control": mark}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "a", "cache_control": mark}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "b"}]},
+            {"role": "user", "content": [{"type": "text", "text": "c"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "d"}]},
+            {"role": "user", "content": [{"type": "text", "text": "e"}]},
+        ],
+    });
+    super::cache_the_conversation(&mut body);
+    // Three were there; the last message took the fourth and the previous end found no room.
+    assert_eq!(super::count_cache_breakpoints(&body), 4);
+    assert_eq!(marked_messages(&body), vec![0, 4]);
+}
+
+#[test]
+fn a_short_conversation_gets_only_the_breakpoints_it_can_place() {
+    let mut one = json!({"messages": [{"role": "user", "content": "hi"}]});
+    super::cache_the_conversation(&mut one);
+    assert_eq!(marked_messages(&one), vec![0]);
+    assert_eq!(one["messages"][0]["content"][0]["text"], "hi");
+    let mut two = json!({"messages": [
+        {"role": "user", "content": [{"type": "text", "text": "a"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "b"}]},
+    ]});
+    super::cache_the_conversation(&mut two);
+    assert_eq!(marked_messages(&two), vec![1]);
+    let mut empty = json!({"messages": []});
+    super::cache_the_conversation(&mut empty);
+    assert_eq!(empty, json!({"messages": []}));
+}
+
+fn finder_cache_miss_turns(meter: &UsageMeter) -> u64 {
+    meter
+        .stage_telemetry(0)
+        .stages
+        .iter()
+        .find(|s| s.stage == Stage::Finder)
+        .map_or(0, |s| s.usage.cache_miss_turns)
+}
+
+#[tokio::test]
+async fn turns_after_the_first_that_read_nothing_from_the_cache_are_counted() {
+    let wire = ScriptedWire::new(vec![
+        // The first turn writes the context and reads nothing: never a miss.
+        reply_cached(vec![glob_call("a")], "tool_use", 0, 5_000),
+        // Read the whole context back: a hit.
+        reply_cached(vec![glob_call("b")], "tool_use", 5_000, 300),
+        // Read nothing: a miss.
+        reply_cached(vec![glob_call("c")], "tool_use", 0, 5_300),
+        // Read something but wrote more than it read: still a hit (new results are written).
+        reply_cached(vec![glob_call("d")], "tool_use", 100, 5_200),
+        // A hit again.
+        reply_cached(vec![text_reply_block("done")], "end_turn", 5_300, 50),
+    ]);
+    let meter = Arc::new(UsageMeter::default());
+    let (agent, _) = metered(&wire, &meter);
+    let run = run_ok(&agent, &room(), &limits()).await;
+    assert_eq!(run.usage.len(), 5);
+    assert_eq!(run.cache_miss_turns(), 1, "per piece");
+    assert_eq!(finder_cache_miss_turns(&meter), 1, "per run");
+    let table = meter.stage_telemetry(0).render_table();
+    assert!(table.contains("finder cache-miss turns: 1"), "{table}");
+}
+
+fn text_reply_block(text: &str) -> Value {
+    json!({"type": "text", "text": text})
+}
+
+#[tokio::test]
+async fn a_piece_of_one_turn_counts_no_miss_and_the_run_adds_its_pieces() {
+    let meter = Arc::new(UsageMeter::default());
+    let one = ScriptedWire::new(vec![reply_cached(
+        vec![text_reply_block("done")],
+        "end_turn",
+        0,
+        5_000,
+    )]);
+    let (agent_one, _) = metered(&one, &meter);
+    let run = run_ok(&agent_one, &room(), &limits()).await;
+    assert_eq!(run.cache_miss_turns(), 0);
+    assert_eq!(finder_cache_miss_turns(&meter), 0);
+
+    for _ in 0..2 {
+        let wire = ScriptedWire::new(vec![
+            reply_cached(vec![glob_call("a")], "tool_use", 0, 5_000),
+            reply_cached(vec![text_reply_block("done")], "end_turn", 0, 5_200),
+        ]);
+        let (agent, _) = metered(&wire, &meter);
+        let run = run_ok(&agent, &room(), &limits()).await;
+        assert_eq!(run.cache_miss_turns(), 1);
+    }
+    assert_eq!(
+        finder_cache_miss_turns(&meter),
+        2,
+        "one in each of two pieces"
+    );
+}
+
+#[test]
+fn the_cache_miss_figure_is_read_from_a_record_written_before_it_existed() {
+    let old = r#"{"calls":1,"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,
+        "cache_creation_input_tokens":0,"cost_usd":0.0}"#;
+    let usage: crate::stage_telemetry::StageUsage = serde_json::from_str(old).expect("old record");
+    assert_eq!(usage.cache_miss_turns, 0);
 }
