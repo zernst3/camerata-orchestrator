@@ -8,7 +8,8 @@
 #   --no-build  tag and add the worktree, but skip the cargo build
 #
 # It does exactly this, and nothing else:
-#   1. refuses unless the working tree is clean (no uncommitted or untracked files);
+#   1. refuses unless the working tree is clean (no uncommitted or untracked files; paths under
+#      .claude/ are ignored);
 #   2. creates the LOCAL tag scan-build/<name> on HEAD;
 #   3. adds a worktree at <parent of main checkout>/camerata-scan-<name> on that tag
 #      (outside .claude/worktrees, so remove-merged-worktree.sh never sweeps it);
@@ -40,7 +41,8 @@ main="$(dirname "$common")"
 tag="scan-build/$name"
 dest="$(dirname "$main")/camerata-scan-$name"
 
-if [ -n "$(git -C "$top" status --porcelain)" ]; then
+# Paths under .claude/ are ignored here: the main checkout always carries a local settings change.
+if [ -n "$(git -C "$top" status --porcelain -- . ':(exclude).claude')" ]; then
     echo "Refusing: the working tree has uncommitted or untracked changes. Commit them first; a kept build must be a clean commit." >&2
     exit 1
 fi
