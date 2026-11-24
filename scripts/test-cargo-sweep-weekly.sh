@@ -6,6 +6,8 @@
 set -u
 SUT="${1:-$(cd "$(dirname "$0")" && pwd)/cargo-sweep-weekly.sh}"
 T="$(mktemp -d)"; T="$(cd -P "$T" && pwd)"
+mkdir -p "$T/root/.claude/worktrees/x/target" "$T/root/.hidden/proj/target"
+for d in .claude/worktrees/x .hidden/proj; do echo "Signature: 8a477f597d28d172789f06886806bc55" > "$T/root/$d/target/CACHEDIR.TAG"; done
 mkdir -p "$T/bin" "$T/root/camerata-scan-t1/target/release" "$T/root/ordinary/target" "$T/root/my-camerata-scan-x/target"
 for d in camerata-scan-t1 ordinary my-camerata-scan-x; do echo "Signature: 8a477f597d28d172789f06886806bc55" > "$T/root/$d/target/CACHEDIR.TAG"; done
 cat > "$T/bin/cargo-sweep" <<F
@@ -30,6 +32,9 @@ ok "scan build never passed to cargo-sweep" not "$(swept "$T/root/camerata-scan-
 ok "ordinary repo swept" swept "$(swept "$T/root/ordinary")"
 ok "my-camerata-scan-x is not protected" swept "$(swept "$T/root/my-camerata-scan-x")"
 grep -qF "keep camerata-scan-t1/target (kept scan build, never swept)" "$T/out" && r=logged || r=silent; ok "kept scan build logged" logged "$r"
+
+ok "dot-folder .claude/worktrees target not swept" not "$(swept "$T/root/.claude/worktrees/x")"
+ok "dot-folder .hidden target not swept" not "$(swept "$T/root/.hidden/proj")"
 
 run "$T/root" --dry-run > "$T/out"
 [ -s "$T/calls" ] && r=ran || r=none; ok "dry run calls nothing" none "$r"

@@ -37,6 +37,8 @@ log "start; root=$REPOS_ROOT, older than $DAYS days"
 find "$REPOS_ROOT" -maxdepth 6 -type f -name CACHEDIR.TAG -path '*/target/CACHEDIR.TAG' 2>/dev/null |
     sed 's|/CACHEDIR.TAG$||' | while read -r t; do
     if is_scan_path "$t"; then log "keep ${t#"${t%%camerata-scan-*}"} (kept scan build, never swept)"; continue; fi
+    # The old `cargo-sweep --recursive` skipped dot-folders (.claude/worktrees/*, where agents build).
+    case "/${t#"$REPOS_ROOT"/}" in */.*) log "keep $t (dot-folder, left alone like the old job)"; continue ;; esac
     proj="$(dirname "$t")"
     if [ "$DRY_RUN" = 1 ]; then log "[dry-run] would sweep $proj"; continue; fi
     log "sweeping $proj"

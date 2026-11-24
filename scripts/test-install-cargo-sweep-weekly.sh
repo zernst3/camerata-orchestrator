@@ -28,4 +28,11 @@ ok "unrelated job untouched" no "$(grep -E 'bootout|disable' "$T/calls" | grep -
 ok "only one disable call" 1 "$(grep -c '^disable' "$T/calls")"
 echo "$out" | grep -qF "launchctl enable gui/$u/dev.old.cargo-sweep" && r=yes || r=no; ok "prints how to undo" yes "$r"
 [ -f "$LA/dev.old.cargo-sweep.plist" ] && r=kept || r=gone; ok "old plist left in place" kept "$r"
+ok "undo prints the bootstrap line with the old plist path" yes "$(echo "$out" | grep -qF "launchctl bootstrap gui/$u $LA/dev.old.cargo-sweep.plist" && echo yes || echo no)"
+# run from a linked worktree: the baked-in script path must be the main checkout's
+M="$T/main"; mkdir -p "$M/scripts/launchd"; cp "$here/install-cargo-sweep-weekly.sh" "$M/scripts/"; cp "$here"/launchd/dev.camerata.cargo-sweep-weekly.plist "$M/scripts/launchd/"
+git -C "$M" init -q -b main && git -C "$M" add -A && git -C "$M" -c user.email=t@t -c user.name=t commit -q -m i && git -C "$M" worktree add -q "$T/wt" -b w
+: > "$T/calls"; M="$(cd -P "$M" && pwd)"
+env HOME="$T/home" PATH="$T/bin:$PATH" bash "$T/wt/scripts/install-cargo-sweep-weekly.sh" >/dev/null 2>&1
+grep -qF "$M/scripts/cargo-sweep-weekly.sh" "$LA/dev.camerata.cargo-sweep-weekly.plist" && r=main || r=worktree; ok "run from a worktree bakes in the main checkout path" main "$r"
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILED"; exit "$fail"

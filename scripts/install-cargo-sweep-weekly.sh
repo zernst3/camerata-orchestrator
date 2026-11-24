@@ -7,7 +7,10 @@
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 dest="$HOME/Library/LaunchAgents/dev.camerata.cargo-sweep-weekly.plist"
-repo="$(dirname "$here")"
+# The main checkout, found through the shared git directory (as cargo-disk-guard.sh does), so
+# running this from a linked worktree still bakes in the main checkout's script path.
+common="$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [ -n "$common" ]; then repo="$(dirname "$common")"; else repo="$(dirname "$here")"; fi
 sed -e "s|__REPO_DIR__|$repo|g" -e "s|__HOME__|$HOME|g" \
   "$here/launchd/dev.camerata.cargo-sweep-weekly.plist" > "$dest"
 if grep -q '__[A-Z_]*__' "$dest"; then
@@ -24,7 +27,9 @@ for oldlabel in $(launchctl list 2>/dev/null | awk '{print $3}' | grep -E '\.car
   sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$oldplist" | grep -q 'cargo-sweep' || continue
   launchctl bootout "gui/$uid/$oldlabel" 2>/dev/null || true
   launchctl disable "gui/$uid/$oldlabel"
-  echo "old job disabled: $oldlabel (plist left in place). To undo: launchctl enable gui/$uid/$oldlabel"
+  echo "old job disabled: $oldlabel (plist left in place). To undo:"
+  echo "  launchctl enable gui/$uid/$oldlabel"
+  echo "  launchctl bootstrap gui/$uid $oldplist"
 done
 launchctl bootout "gui/$(id -u)" "$dest" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$dest"
