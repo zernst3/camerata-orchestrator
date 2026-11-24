@@ -135,7 +135,8 @@ fn the_count_lists_both_files_as_not_read_and_bills_neither() {
     let text = count.to_text();
     assert!(
         text.contains(
-            "not read, this file type is not inspected yet (2 files): \
+            "not read, this file type is not inspected yet (2 files, by type: 1 .cshtml, \
+             1 .graphql): \
              Views/Home/Index.cshtml; schema.graphql\n"
         ),
         "{text}"
@@ -219,8 +220,8 @@ async fn coverage_lists_both_files_as_not_read_and_the_billed_volume_is_unchange
     assert_eq!(
         gaps.skipped_summary.as_deref(),
         Some(
-            "2 files were not read for the inspection: 2 of a file type not inspected yet. \
-             2 files were not searched for secrets: 2 of a file type not inspected yet."
+            "2 files were not read for the inspection: 2 of a file type not inspected yet \
+             (not billed). 2 files were not searched for secrets: 2 of a file type not inspected yet."
         )
     );
     // The noise schema is in no Coverage row.

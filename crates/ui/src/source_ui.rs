@@ -1026,6 +1026,12 @@ pub fn OverLimitNotice(
         camerata_ui_core::readiness::not_inspected_note(block.not_inspected_paths.len());
     let not_inspected_paths =
         camerata_ui_core::readiness::not_inspected_paths_line(&block.not_inspected_paths);
+    let versions_text = camerata_ui_core::readiness::not_inspected_versions_note(
+        block.not_inspected_versions_only_paths.len(),
+    );
+    let versions_paths = camerata_ui_core::readiness::not_inspected_paths_line(
+        &block.not_inspected_versions_only_paths,
+    );
     rsx! {
         div { class: "scan-block-hint over-limit-notice", role: "alert",
             if !generated_text.is_empty() {
@@ -1039,6 +1045,12 @@ pub fn OverLimitNotice(
             }
             if !not_inspected_paths.is_empty() {
                 p { class: "not-inspected-files-paths", "{not_inspected_paths}" }
+            }
+            if !versions_text.is_empty() {
+                p { class: "not-inspected-versions-note", "{versions_text}" }
+            }
+            if !versions_paths.is_empty() {
+                p { class: "not-inspected-versions-paths", "{versions_paths}" }
             }
             if !text.is_empty() {
                 p { "{text}" }

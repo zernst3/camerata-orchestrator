@@ -1783,6 +1783,8 @@ mod tests {
             crate::scan_ledger::SkipReason::ExcludedNeverRead.label(),
             crate::scan_ledger::SkipReason::NotInspectedType.label(),
             crate::onboard::files::not_inspected_in_a_list(),
+            crate::scan_ledger::SkipReason::NotInspectedVersionsOnly.label(),
+            crate::onboard::files::not_inspected_versions_in_a_list(),
             closes_rules(&["A".to_string(), "B".to_string()]),
             places_count(3),
             more_in_sheet(4, FIX_PLAN),

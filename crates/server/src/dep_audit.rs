@@ -50,6 +50,11 @@ use crate::onboard::{CoverageNote, Finding};
 use crate::tool_provisioning;
 
 mod manifests;
+
+/// Whether the dependency audit opens a file of this name as a package manifest.
+pub(crate) fn reads_package_manifest(file_name: &str) -> bool {
+    manifests::is_manifest(file_name)
+}
 pub use manifests::{scrub_local_paths, unread_files_sentence};
 
 /// When this environment variable is set (to any non-empty value), `run_dep_audit`

@@ -1113,6 +1113,10 @@ pub struct SkippedTotals {
     /// (`onboard::files::NOT_INSPECTED_TYPES`): not read, billed or searched for secrets.
     #[serde(default)]
     pub not_inspected_type: usize,
+    /// The same, for the files the engine still opens to read their declared runtime or package
+    /// versions ([`SkipReason::NotInspectedVersionsOnly`]): not billed or searched for secrets.
+    #[serde(default)]
+    pub not_inspected_versions_only: usize,
     /// Patterns in Excluded by agreement that match only files never read anyway. Patterns, not
     /// files: each is counted once per run, however many repos it was recorded for.
     #[serde(default)]
@@ -1152,6 +1156,7 @@ impl SkippedTotals {
             SkipReason::Generated => self.generated,
             SkipReason::GeneratedUnsearched => self.generated_unsearched,
             SkipReason::NotInspectedType => self.not_inspected_type,
+            SkipReason::NotInspectedVersionsOnly => self.not_inspected_versions_only,
             SkipReason::ExcludedNeverRead => self.excluded_never_read,
         }
     }
@@ -1167,6 +1172,7 @@ impl SkippedTotals {
             + self.generated
             + self.generated_unsearched
             + self.not_inspected_type
+            + self.not_inspected_versions_only
     }
 
     fn add(&mut self, reason: SkipReason) {
@@ -1179,6 +1185,7 @@ impl SkippedTotals {
             SkipReason::Generated => self.generated += 1,
             SkipReason::GeneratedUnsearched => self.generated_unsearched += 1,
             SkipReason::NotInspectedType => self.not_inspected_type += 1,
+            SkipReason::NotInspectedVersionsOnly => self.not_inspected_versions_only += 1,
             SkipReason::ExcludedNeverRead => self.excluded_never_read += 1,
         }
     }
@@ -1383,6 +1390,10 @@ impl SkippedFileList {
     /// file limit. The one call the scan makes per repo.
     pub fn record_repo(&mut self, repo: &str, skips: RepoSkips<'_>) {
         let not_scanned = skips.beyond_cap.len();
+        // The files of a type not inspected yet that the engine still opens for declared
+        // versions carry their own reason: never plainly "not read".
+        let (not_inspected_plain, not_inspected_versions) =
+            crate::onboard::files::split_not_inspected(&skips.not_inspected_type);
         for (paths, reason) in [
             (skips.oversize, SkipReason::Oversize),
             (skips.beyond_cap, SkipReason::BeyondFileCap),
@@ -1391,7 +1402,8 @@ impl SkippedFileList {
             (skips.long_line, SkipReason::LongLine),
             (skips.generated, SkipReason::Generated),
             (skips.generated_unsearched, SkipReason::GeneratedUnsearched),
-            (skips.not_inspected_type, SkipReason::NotInspectedType),
+            (not_inspected_plain, SkipReason::NotInspectedType),
+            (not_inspected_versions, SkipReason::NotInspectedVersionsOnly),
             (skips.excluded_never_read, SkipReason::ExcludedNeverRead),
         ] {
             for path in paths {
@@ -1486,6 +1498,10 @@ pub enum SkipReason {
     /// (`onboard::files::NOT_INSPECTED_TYPES`, GitHub #338): never opened, so not read, billed or
     /// searched for secrets. Listed so Coverage is never silent about a hand-written file.
     NotInspectedType,
+    /// A file of a type not inspected yet that the engine still opens to read its declared runtime
+    /// or package versions (a project file, a `Gemfile`): not billed or searched for secrets, and
+    /// never called plainly not read.
+    NotInspectedVersionsOnly,
     /// An Excluded by agreement pattern that matches only files Camerata never reads anyway: the
     /// exclusion removed nothing that would have been read or billed.
     ExcludedNeverRead,
@@ -1506,6 +1522,9 @@ impl SkipReason {
             SkipReason::Generated => crate::onboard::files::generated_label(),
             SkipReason::GeneratedUnsearched => crate::onboard::files::generated_unsearched_label(),
             SkipReason::NotInspectedType => crate::onboard::files::not_inspected_label(),
+            SkipReason::NotInspectedVersionsOnly => {
+                crate::onboard::files::not_inspected_versions_label()
+            }
             SkipReason::ExcludedNeverRead => {
                 "excluded by agreement; nothing here is read by default".to_string()
             }

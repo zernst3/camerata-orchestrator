@@ -223,6 +223,9 @@ pub struct OverLimitBlock {
     /// Hand-written files of a type the inspection does not read yet (repo-qualified when several
     /// repos are read): not read, billed or searched for secrets. A statement, never a hold.
     pub not_inspected_paths: Vec<String>,
+    /// Files of a type not inspected yet that the engine still opens for their declared runtime
+    /// and package versions: not billed or searched for secrets. Never called plainly not read.
+    pub not_inspected_versions_only_paths: Vec<String>,
 }
 
 /// How many generated paths the pre-start check names before it says how many more there are.
@@ -232,6 +235,13 @@ impl OverLimitBlock {
     /// This block with the files of a type not inspected yet the server named.
     pub fn with_not_inspected_paths(mut self, paths: Vec<String>) -> Self {
         self.not_inspected_paths = paths;
+        self
+    }
+
+    /// This block with the files of a type not inspected yet that are opened for declared
+    /// versions, as the server named them.
+    pub fn with_not_inspected_versions_only_paths(mut self, paths: Vec<String>) -> Self {
+        self.not_inspected_versions_only_paths = paths;
         self
     }
 
@@ -283,6 +293,7 @@ pub fn over_limit_block(
             generated_lines: 0,
             generated_paths: Vec::new(),
             not_inspected_paths: Vec::new(),
+            not_inspected_versions_only_paths: Vec::new(),
         })
 }
 
@@ -340,6 +351,19 @@ pub fn not_inspected_note(n: usize) -> String {
         "{n} {} will not be read for the inspection, billed or searched for secrets: {}.",
         if n == 1 { "file" } else { "files" },
         camerata_api_types::audit::NOT_INSPECTED_TYPE_LABEL
+    )
+}
+
+/// The sentence for `n` files of a type not inspected yet that the engine still opens for their
+/// declared runtime and package versions. Empty when there are none.
+pub fn not_inspected_versions_note(n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!(
+        "{n} {} not billed or searched for secrets: {}.",
+        if n == 1 { "file is" } else { "files are" },
+        camerata_api_types::audit::NOT_INSPECTED_VERSIONS_LABEL
     )
 }
 
@@ -871,6 +895,18 @@ mod tests {
         assert!(text.contains("g/f9.cs"), "{text}");
         assert!(!text.contains("g/f10.cs"), "{text}");
         assert!(text.ends_with("; and 3 more."), "{text}");
+    }
+
+    #[test]
+    fn files_opened_for_versions_are_never_called_not_read() {
+        assert!(not_inspected_versions_note(0).is_empty());
+        let note = not_inspected_versions_note(2);
+        assert_eq!(
+            note,
+            "2 files are not billed or searched for secrets: this file type is not inspected yet; \
+             only its declared runtime and package versions are checked."
+        );
+        assert!(!note.contains("not read"), "{note}");
     }
 
     /// GitHub #338: files of a type not inspected yet are stated with the reason and listed with

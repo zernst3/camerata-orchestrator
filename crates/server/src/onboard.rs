@@ -2592,6 +2592,7 @@ pub async fn audit_repos_with_llm_controlled(
                     excluded_by_agreement,
                     generated,
                     not_inspected,
+                    unclassified_types: _,
                 },
                 noise_lines,
             )) => {

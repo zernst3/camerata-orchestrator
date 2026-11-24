@@ -514,6 +514,13 @@ pub const GENERATED_UNSEARCHED_LABEL: &str =
 pub const NOT_INSPECTED_TYPE_LABEL: &str = "this file type is not inspected yet";
 /// [`NOT_INSPECTED_TYPE_LABEL`] after a count in a list ("2 of a file type not inspected yet").
 pub const NOT_INSPECTED_TYPE_IN_A_LIST: &str = "of a file type not inspected yet";
+/// The reason for a file of a type not inspected yet that the engine still opens to read its
+/// declared runtime or package versions (a project file, a `Gemfile`): never plainly "not read".
+pub const NOT_INSPECTED_VERSIONS_LABEL: &str = "this file type is not inspected yet; only its \
+     declared runtime and package versions are checked";
+/// [`NOT_INSPECTED_VERSIONS_LABEL`] after a count in a list.
+pub const NOT_INSPECTED_VERSIONS_IN_A_LIST: &str =
+    "of a file type not inspected yet, only its declared runtime and package versions checked";
 
 #[cfg(test)]
 mod tests {

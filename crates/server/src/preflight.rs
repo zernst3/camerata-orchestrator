@@ -176,6 +176,12 @@ pub struct RepoSizeWire {
     /// as the command line does.
     #[serde(default)]
     pub not_inspected_paths: Vec<String>,
+    /// The part of the list above that the engine still opens for declared runtime and package
+    /// versions (a project file, a `Gemfile`): not billed or searched for secrets, and never
+    /// called plainly not read. Named separately so the desktop words them as the command line
+    /// does.
+    #[serde(default)]
+    pub not_inspected_versions_only_paths: Vec<String>,
     /// The read limit as a person reads it ("1 MB"), from the engine's own constant, so the
     /// desktop never states a number the engine does not apply.
     #[serde(default)]
@@ -261,11 +267,20 @@ pub fn repo_sizes(
                     .iter()
                     .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
                     .collect(),
-                not_inspected_paths: f
-                    .not_inspected_paths
-                    .iter()
-                    .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
-                    .collect(),
+                not_inspected_paths: crate::onboard::files::split_not_inspected(
+                    &f.not_inspected_paths,
+                )
+                .0
+                .iter()
+                .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
+                .collect(),
+                not_inspected_versions_only_paths: crate::onboard::files::split_not_inspected(
+                    &f.not_inspected_paths,
+                )
+                .1
+                .iter()
+                .map(|p| crate::onboard::scope::pattern_form(requested, spec, p))
+                .collect(),
                 read_limit: crate::onboard::files::max_file_label(),
                 secret_search_limit: crate::onboard::files::secret_scan_label(),
                 unmatched_patterns: Vec::new(),
@@ -293,6 +308,7 @@ pub fn repo_sizes(
                 generated_lines: 0,
                 generated_paths: Vec::new(),
                 not_inspected_paths: Vec::new(),
+                not_inspected_versions_only_paths: Vec::new(),
                 read_limit: crate::onboard::files::max_file_label(),
                 secret_search_limit: crate::onboard::files::secret_scan_label(),
                 unmatched_patterns: Vec::new(),

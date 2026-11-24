@@ -252,13 +252,24 @@ pub(super) fn skipped_summary_sentence(
         SkipReason::Generated,
         SkipReason::GeneratedUnsearched,
         SkipReason::NotInspectedType,
+        SkipReason::NotInspectedVersionsOnly,
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)
     .map(|r| {
         let label = match r {
             SkipReason::BeyondFileCap => beyond.clone(),
-            SkipReason::NotInspectedType => crate::onboard::files::not_inspected_in_a_list(),
+            // These files are never billed, said here as the generated labels say it.
+            SkipReason::NotInspectedType => {
+                format!(
+                    "{} (not billed)",
+                    crate::onboard::files::not_inspected_in_a_list()
+                )
+            }
+            SkipReason::NotInspectedVersionsOnly => format!(
+                "{} (not billed)",
+                crate::onboard::files::not_inspected_versions_in_a_list()
+            ),
             _ => in_a_list(&r.label()),
         };
         format!("{} {label}", totals.of(r))
@@ -344,12 +355,20 @@ fn secret_search_sentence(totals: &SkippedTotals, beyond: &str) -> Option<String
             crate::onboard::files::not_inspected_in_a_list()
         ));
     }
+    if totals.not_inspected_versions_only > 0 {
+        parts.push(format!(
+            "{} {}",
+            totals.not_inspected_versions_only,
+            crate::onboard::files::not_inspected_versions_in_a_list()
+        ));
+    }
     let unsearched = totals.secret_over_ceiling
         + totals.secret_over_budget
         + totals.beyond_file_cap
         + not_text
         + totals.excluded_by_agreement
-        + totals.not_inspected_type;
+        + totals.not_inspected_type
+        + totals.not_inspected_versions_only;
     let mut out: Vec<String> = Vec::new();
     if totals.secret_searched > 0 {
         out.push(format!(
