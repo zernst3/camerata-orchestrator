@@ -139,6 +139,11 @@ echo "mutants-in-diff: test filter: ${shown}"
 echo "mutants-in-diff: timeout ${timeout}s, ${jobs} job(s), output in ${out}/mutants.out"
 
 mkdir -p "$out"
+# cargo-mutants builds in a copy without `.git`, where crates/server/build.rs finds no commit
+# and the export tests that need one (release_gate::published_example_tests) fail the
+# unmutated baseline. The build script takes the commit from this variable instead.
+CAMERATA_GIT_COMMIT="$(git rev-parse HEAD)"
+export CAMERATA_GIT_COMMIT
 start="$(date +%s)"
 set +e
 set -f
