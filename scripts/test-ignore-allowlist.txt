@@ -24,7 +24,7 @@ crates/checks/src/extract/clone/tests/perf.rs::perf_generated_rust_parses  # per
 crates/checks/src/extract/clone/tests/perf.rs::perf_tokenizer_throughput  # perf: tokenizer throughput harness
 
 # Live network
-crates/llm/src/llm.rs::complete_fails_closed_when_safe_set_never_loaded_live_smoke_test  # live network: calls the live OpenRouter endpoints API
+crates/llm/src/llm.rs::complete_fails_closed_when_safe_set_never_loaded_live_smoke_test  # live network: calls the live model-provider endpoints API
 crates/server/src/tool_provisioning.rs::fresh_eslint_provisioning_installs_the_pinned_tree_from_the_lockfile  # live network: npm ci against the registry (or a warm npm cache)
 crates/scaffold/src/skeleton.rs::generated_skeleton_compiles  # live network: fetches and builds the full dependency graph for native and wasm32
 
