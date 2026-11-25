@@ -3290,7 +3290,7 @@ mod tests {
     /// that stops it being written there at all, so a client running an audit does not find
     /// two unexplained vendor-named files in their `git status` afterwards.
     ///
-    /// The state dir is process environment (`CAMERATA_STATE_DIR`, `HOME`, `XDG_CACHE_HOME`),
+    /// The state dir is process environment (`CAMERATA_STATE_DIR`, `HOME`, `XDG_DATA_HOME`),
     /// and the `redaction_tests` in this same binary mutate `HOME`. The test therefore takes the
     /// workspace `process_env` key and pins the state dir with an `EnvGuard`, so the three
     /// `state_dir::dir()` reads below can never straddle another test's mutation (it flaked

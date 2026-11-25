@@ -26,3 +26,5 @@ tokio = { workspace = true, features = ["io-util", "rt", "time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "rt", "macros", "time"] }
+# The state folder migration tests build real old and new folders in a temporary directory.
+tempfile = "3"

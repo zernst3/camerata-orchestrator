@@ -12,10 +12,11 @@
 //!
 //! # Test seam
 //!
-//! `CAMERATA_STATE_DIR`, when set and non-blank, replaces the platform cache directory
-//! (`~/Library/Caches` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere); `camerata/` is
-//! still appended, mirroring `CAMERATA_DATA_DIR` (see [`crate::app_dirs`]). It is read ONLY when
-//! set, so a normal install is unchanged.
+//! `CAMERATA_STATE_DIR`, when set and non-blank, replaces the platform application data
+//! directory (`~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share`
+//! elsewhere); `camerata/` is still appended, mirroring `CAMERATA_DATA_DIR` (see
+//! [`crate::app_dirs`]). It is read ONLY when set, so a normal install is unchanged, and nothing
+//! is moved from the old cache folder while it is set (see `camerata_api_types::state_dir`).
 
 #[cfg(test)]
 use std::ffi::OsStr;
@@ -298,31 +299,31 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_default_is_library_caches() {
+    fn macos_default_is_application_support() {
         assert_eq!(
             dir_from(
                 None,
                 Some(OsStr::new("/Users/auditor")),
                 Some(OsStr::new("/ignored"))
             ),
-            PathBuf::from("/Users/auditor/Library/Caches/camerata")
+            PathBuf::from("/Users/auditor/Library/Application Support/camerata")
         );
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn linux_default_prefers_xdg_cache_home_then_dot_cache() {
+    fn linux_default_prefers_xdg_data_home_then_local_share() {
         assert_eq!(
             dir_from(
                 None,
                 Some(OsStr::new("/home/u")),
-                Some(OsStr::new("/x/cache"))
+                Some(OsStr::new("/x/data"))
             ),
-            PathBuf::from("/x/cache/camerata")
+            PathBuf::from("/x/data/camerata")
         );
         assert_eq!(
             dir_from(None, Some(OsStr::new("/home/u")), None),
-            PathBuf::from("/home/u/.cache/camerata")
+            PathBuf::from("/home/u/.local/share/camerata")
         );
     }
 
