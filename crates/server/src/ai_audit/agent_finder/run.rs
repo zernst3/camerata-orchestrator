@@ -1314,7 +1314,35 @@ pub async fn with_agent_override<F: std::future::Future>(
 
 /// Whether a test agent stands in for the run's piece agent (see [`with_agent_override`]).
 pub fn agent_override_is_set() -> bool {
+    #[cfg(feature = "test-support")]
+    {
+        if AGENT_FACTORY_OVERRIDE.try_with(|_| ()).is_ok() {
+            return true;
+        }
+    }
     AGENT_OVERRIDE.try_with(|_| ()).is_ok()
+}
+
+/// Builds a test agent from the run's shared meter (`test-support` only).
+#[cfg(feature = "test-support")]
+pub type AgentFactoryOverride = std::sync::Arc<
+    dyn Fn(std::sync::Arc<UsageMeter>) -> std::sync::Arc<dyn PieceAgent> + Send + Sync,
+>;
+
+#[cfg(feature = "test-support")]
+tokio::task_local! {
+    static AGENT_FACTORY_OVERRIDE: AgentFactoryOverride;
+}
+
+/// Run `fut` with a test agent that is built, once for each repository, from the run's own
+/// shared meter: the seam that lets a test put the real API transport over a scripted wire, with
+/// every turn counted on the run's meter. Carried with the future like [`with_agent_override`].
+#[cfg(feature = "test-support")]
+pub async fn with_agent_factory_override<F: std::future::Future>(
+    factory: AgentFactoryOverride,
+    fut: F,
+) -> F::Output {
+    AGENT_FACTORY_OVERRIDE.scope(factory, fut).await
 }
 
 pub use super::cli_agent::EngagementKind;
@@ -1549,6 +1577,27 @@ pub(crate) async fn find_repo_for_run_with(
             meter.map(|m| &**m),
         )
         .await;
+    }
+    #[cfg(feature = "test-support")]
+    {
+        if let Ok(factory) = AGENT_FACTORY_OVERRIDE.try_with(std::sync::Arc::clone) {
+            let shared_meter = meter.map_or_else(
+                || std::sync::Arc::new(UsageMeter::with_controls(controls.clone())),
+                std::sync::Arc::clone,
+            );
+            let agent = factory(shared_meter);
+            return find_repo(
+                &*agent,
+                repo,
+                files,
+                selected,
+                corpus,
+                controls,
+                &options,
+                meter.map(|m| &**m),
+            )
+            .await;
+        }
     }
     let setup = FINDER_SETUP.try_with(std::sync::Arc::clone).ok();
     let llm_key = llm

@@ -282,10 +282,18 @@ impl ApiPieceAgent {
     }
 
     /// Replace the wait between two attempts (tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub(crate) fn with_pause(mut self, pause: PauseFn) -> Self {
+    pub fn with_pause(mut self, pause: PauseFn) -> Self {
         self.pause = Some(pause);
+        self
+    }
+
+    /// Replace the HTTP call with a scripted one, from outside the crate (`test-support` only).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_scripted_wire(mut self, wire: Arc<dyn scripted::ScriptedWire>) -> Self {
+        self.wire = Some(Arc::new(scripted::Adapter(wire)));
         self
     }
 
@@ -1273,6 +1281,76 @@ fn list_tools() -> String {
         "{} and {last}",
         TOOL_NAMES[..TOOL_NAMES.len() - 1].join(", ")
     )
+}
+
+/// The scripted wire for tests outside this crate (`test-support` only): the same seam as
+/// [`FinderWire`], with a public failure type.
+#[cfg(feature = "test-support")]
+pub mod scripted {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::Value;
+
+    use super::FinderWire;
+    use crate::api_agent_driver::AnthropicPostError;
+    use crate::llm::LlmResponse;
+
+    /// Why a scripted send gave no reply.
+    #[derive(Debug, Clone)]
+    pub enum ScriptedFailure {
+        /// An HTTP answer that is not a success.
+        Http {
+            status: u16,
+            body: String,
+            retry_after: Option<Duration>,
+        },
+        /// No answer at all.
+        Network(String),
+        /// The wait for the reply timed out.
+        ReplyTimeout(String),
+        /// A success status with a body that is not JSON.
+        BadReply(String),
+    }
+
+    /// One scripted POST of a Messages body.
+    #[async_trait::async_trait]
+    pub trait ScriptedWire: Send + Sync {
+        async fn send(
+            &self,
+            body: &Value,
+            use_caching: bool,
+        ) -> Result<LlmResponse, ScriptedFailure>;
+    }
+
+    pub(super) struct Adapter(pub(super) Arc<dyn ScriptedWire>);
+
+    #[async_trait::async_trait]
+    impl FinderWire for Adapter {
+        async fn send(
+            &self,
+            body: &Value,
+            use_caching: bool,
+        ) -> Result<LlmResponse, AnthropicPostError> {
+            self.0
+                .send(body, use_caching)
+                .await
+                .map_err(|failure| match failure {
+                    ScriptedFailure::Http {
+                        status,
+                        body,
+                        retry_after,
+                    } => AnthropicPostError::Http {
+                        status,
+                        body,
+                        retry_after,
+                    },
+                    ScriptedFailure::Network(e) => AnthropicPostError::Network(e),
+                    ScriptedFailure::ReplyTimeout(e) => AnthropicPostError::ReplyTimeout(e),
+                    ScriptedFailure::BadReply(e) => AnthropicPostError::BadReply(e),
+                })
+        }
+    }
 }
 
 #[cfg(test)]
