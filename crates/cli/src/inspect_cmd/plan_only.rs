@@ -400,13 +400,23 @@ async fn plan(
                 controls.checkpoint.run_folder = None;
                 controls.checkpoint.sink =
                     camerata_server::cost_checkpoint::CheckpointSink::new(move |cp| {
-                        *slot
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(cp.pause_message());
+                        slot.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get_or_insert_with(|| cp.pause_message());
                     });
                 let meter = UsageMeter::with_controls(controls.clone());
-                if meter.projection_stops_piece() {
+                // The order a real run checks in: the clone judge's stage boundary (it comes
+                // before the finder when a clone rule is selected, and prices the stages without
+                // the joints calls), then the finder's first piece. The first pause is the
+                // run's.
+                let first_repo = facts.first().map_or("", |f| f.repo.as_str());
+                let judge_stops = judge_selected
+                    && meter.stage_blocked_unless_stored(
+                        first_repo,
+                        camerata_server::ai_audit::STAGE_CLONE_JUDGE,
+                        false,
+                    );
+                if judge_stops || meter.projection_stops_piece() {
                     let why = paused
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
