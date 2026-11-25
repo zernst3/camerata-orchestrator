@@ -191,6 +191,7 @@ async fn sealed_report(feeds: &Feeds) -> SealedReport {
             started_at: "2026-10-28T00:00:00Z".to_string(),
             finished_at: "2026-10-28T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
+            scanned_with: None,
         },
         recommendations: HashMap::new(),
         failed_passes: Vec::new(),

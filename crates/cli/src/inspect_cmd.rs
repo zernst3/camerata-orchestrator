@@ -1372,6 +1372,7 @@ pub async fn run_inspect_pipeline_with(
                 estimate_usd: controls.estimate_hint_usd,
                 include_alternatives: corpus.is_some(),
                 origin: camerata_server::run_store::RunOrigin::Cli,
+                restarted_from: None,
                 project_id: None,
                 pin: engine_pin.clone(),
             }) {
@@ -1685,6 +1686,12 @@ pub async fn run_inspect_pipeline_with(
     // `&ScanReport` (see `ScanReport::seal`'s doc comment for the compile-time guarantee this
     // establishes).
     report.run_id.clone_from(&run_id);
+    // The build this inspection was scanned with (issue #341): the saved run's pin, which a resume
+    // keeps, else the pin this run computed. An export by any later build states it as it was.
+    report.provenance.scanned_with = Some(store.as_ref().and_then(|s| s.record().pin).map_or_else(
+        || camerata_server::run_store::engine_pin::ScanBuild::from_pin(&engine_pin),
+        |pin| camerata_server::run_store::engine_pin::ScanBuild::from_pin(&pin),
+    ));
     let report = report.seal();
 
     // The operator's rewrite advisory, beside the failure report in the state directory and never

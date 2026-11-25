@@ -137,6 +137,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
         estimate_usd: Some(10.0),
         include_alternatives: true,
         origin: RunOrigin::Cli,
+        restarted_from: None,
         project_id: None,
     })
     .unwrap()

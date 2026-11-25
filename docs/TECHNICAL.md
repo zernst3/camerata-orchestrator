@@ -7794,6 +7794,32 @@ release (the cockpit itself now calls the new ones). The scan screen offers the 
 one on app start and when a project is opened (`cockpit/saved_inspections.rs`), through the same
 plan preview, resume request and `LoadingGuard` (`run_what_remains`) as the incomplete-scan banner.
 
+**The build that starts an inspection finishes it (issue #341).** Every unfinished row also says
+`Started on build <12 characters>` (`InspectionSummary.started_on_build`, from the run's pin), and
+`built_from` names the folder that build was compiled in (`BuildId::built_from`, the workspace root
+at compile time; operator state only, never exported, dropped by the diagnostic bundle). A row
+started on another commit is `other_build`: `resumable_here` is false, the row shows the refusal
+(`engine_pin::other_build_refusal`, the same sentence `check_resume` gives, naming the folder when
+known) in place of "Run what remains", and `POST /api/inspections/:id/resume` refuses it with 409
+before any job exists. "Start again on this build" calls `POST /api/inspections/:id/restart`, which
+starts the saved request again from scratch as a NEW run that records `RunRecord.restarted_from`,
+with the incremental cache off, so no stored reply of the other build is reused.
+
+**The builds in the package (issue #341).** The scan saves the build it ran on as
+`ScanProvenance.scanned_with` (`ScanBuild`: version, commit, dirty, rule library), from the run's pin,
+so a later export by another build states it as saved. `CoverJson.scanned_with` and
+`json/inspection.json`'s `provenance.scanned_with` carry it beside `engine_commit` and
+`corpus_version`, which keep meaning the exporting build. `manifest.json`'s `inspection` block has
+`scanned_with` and `package_built_with` objects and keeps `engine_version` for old readers; its
+`corpus_version` is the scan's saved library when recorded. An internal README states one line,
+`Scanned with and package built with: Camerata 0.4.0, build 1a2b3c4d5e6f`, when the builds match,
+else `Scanned with: ...` then `Package built with: ...` (`Scanned with: not recorded` for an
+inspection saved before this), with `(built with uncommitted changes)` after a dirty build; the
+release gate renders the same lines from the manifest (`render_build_lines`) and holds them equal.
+The client PDF's last page carries one sentence (owner ruling Q2): "Inspected with Camerata
+<version> (reference <12 characters>). The full technical record is in the manifest file included
+with this report.", from the scanning build, and nothing else that identifies a build.
+
 **Where a run is resumed.** A run records its origin (`RunOrigin`): the arguments saved with a cockpit
 run are the scan request (`AuditReq`), those of a command line run are the flags (`InspectArgs`),
 and each is read back only where it was written. The cockpit restores the request from `run.json`

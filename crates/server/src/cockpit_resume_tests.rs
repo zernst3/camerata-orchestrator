@@ -500,6 +500,7 @@ fn saved_cockpit_run(
         estimate_usd: None,
         include_alternatives: false,
         origin: rs::RunOrigin::Cockpit,
+        restarted_from: None,
         project_id: None,
     })
     .unwrap()
@@ -536,6 +537,7 @@ fn saved_cockpit_run_in(
         estimate_usd: None,
         include_alternatives: false,
         origin: rs::RunOrigin::Cockpit,
+        restarted_from: None,
         project_id: project_id.map(str::to_string),
     })
     .unwrap()
@@ -1820,9 +1822,23 @@ async fn a_plain_request_scan_shows_its_group_review_row_in_agent_activity() {
 
 // ---- the engine pin (V1 item 39): the build that starts an inspection finishes it ----
 
-/// A cockpit inspection saved on another build is not resumed on this one: the plan route
-/// returns the refusal in plain words, and "Run what remains" starts no job and makes no model
-/// call.
+/// The run folders under the state directory.
+fn run_folders() -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(crate::run_store::runs_dir())
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+/// A cockpit inspection saved on another build is not resumed on this one (issue #341):
+/// `/api/inspections` reports it as `other_build` and not `resumable_here`, the plan route returns
+/// the refusal in plain words, and "Run what remains" is refused by the route itself (409) with
+/// no job started, no run folder made and no model call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(process_env)]
 async fn a_cockpit_inspection_started_on_another_build_cannot_be_continued() {
@@ -1832,29 +1848,172 @@ async fn a_cockpit_inspection_started_on_another_build_cannot_be_continued() {
     let rig = interrupted_scan().await;
     patch_saved_run(&rig.run_id, |v| {
         v["pin"]["build"]["commit"] = serde_json::json!("1234567890abcdef1234567890abcdef12345678");
+        v["pin"]["build"]["built_from"] = serde_json::json!("/Users/auditor/camerata-scan-acme");
     });
     std::fs::remove_file(&rig.group_review_down).unwrap();
     let app = router(rig.state.clone());
+
+    let (status, listed) = get_json(app.clone(), "/api/inspections").await;
+    assert_eq!(status, StatusCode::OK);
+    let row = listed["inspections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == rig.run_id.as_str())
+        .unwrap_or_else(|| panic!("listed: {listed}"))
+        .clone();
+    assert_eq!(row["other_build"], true, "{row}");
+    assert_eq!(row["resumable_here"], false, "{row}");
+    assert_eq!(row["started_on_build"], "1234567890ab", "{row}");
+    assert_eq!(
+        row["built_from"], "/Users/auditor/camerata-scan-acme",
+        "{row}"
+    );
+    assert!(
+        row["build_refusal"].as_str().is_some_and(
+            |r| r.contains("must finish it") && r.contains("/Users/auditor/camerata-scan-acme")
+        ),
+        "{row}"
+    );
+
     let (status, plan) = get_json(app, &format!("/api/inspections/{}/plan", rig.run_id)).await;
     assert_eq!(status, StatusCode::OK);
     let refusal = plan["refusal"].as_str().unwrap_or_default();
     assert!(refusal.contains("started on build 1234567890ab"), "{plan}");
+
     let calls_before = stage_calls(&rig.log).len();
-    let job = resume_job(&rig).await;
-    assert_eq!(job.status, "failed", "{:?}", job.message);
-    assert!(
-        job.message
-            .clone()
-            .unwrap_or_default()
-            .contains("must finish it"),
-        "{:?}",
-        job.message
-    );
+    let folders_before = run_folders();
+    let segments_before = crate::run_store::read_record(&rig.run_id).unwrap().segments;
+    let resume = run_resume_start(
+        State(rig.state.clone()),
+        Path(rig.run_id.clone()),
+        Query(ResumeQuery::default()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resume.status(), StatusCode::CONFLICT);
+    let body = body_json(resume).await;
+    assert!(body["job_id"].is_null(), "no job is started: {body}");
+    assert_eq!(body["other_build"], true, "{body}");
+    let why = body["error"].as_str().unwrap_or_default();
+    assert!(why.contains("must finish it"), "{body}");
+    assert!(why.contains("/Users/auditor/camerata-scan-acme"), "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         stage_calls(&rig.log).len(),
         calls_before,
         "no model call was made"
     );
+    assert_eq!(run_folders(), folders_before, "no run was made");
+    assert_eq!(
+        crate::run_store::read_record(&rig.run_id).unwrap().segments,
+        segments_before,
+        "the saved run was not opened"
+    );
+}
+
+/// "Start again on this build" (issue #341): `POST /api/inspections/:id/restart` starts the saved
+/// inspection again from scratch on this build, as a new run that records `restarted_from` and
+/// this build's pin. It reuses no stored reply: the scan's own model calls are sent again. The
+/// saved run another build started is left as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn an_inspection_another_build_started_is_started_again_on_this_build() {
+    if !camerata_test_env::python3_on_path_for("an_inspection_another_build_started_is_started") {
+        return;
+    }
+    let rig = interrupted_scan().await;
+    patch_saved_run(&rig.run_id, |v| {
+        v["pin"]["build"]["commit"] = serde_json::json!("1234567890abcdef1234567890abcdef12345678");
+    });
+    std::fs::remove_file(&rig.group_review_down).unwrap();
+    let saved_before = std::fs::read(
+        crate::run_store::runs_dir()
+            .join(&rig.run_id)
+            .join("run.json"),
+    )
+    .unwrap();
+    let audit_calls = |log: &std::path::Path| {
+        stage_calls(log)
+            .iter()
+            .filter(|c| c.as_str() == "audit")
+            .count()
+    };
+    let audits_before = audit_calls(&rig.log);
+    assert!(audits_before > 0, "the first scan called the model");
+
+    let restart = run_restart_start(State(rig.state.clone()), Path(rig.run_id.clone()))
+        .await
+        .into_response();
+    assert_eq!(restart.status(), StatusCode::OK);
+    let job_id = body_json(restart).await["job_id"]
+        .as_str()
+        .expect("a job")
+        .to_string();
+    let job = finished(&rig.state, &job_id).await;
+    assert_eq!(job.status, "done", "{:?}", job.message);
+
+    let report = rig.state.get_last_scan(&rig.project_id).unwrap();
+    let new_id = report
+        .run_id
+        .clone()
+        .expect("the restart is saved as a run");
+    assert_ne!(new_id, rig.run_id, "a new run, not the saved one");
+    let record = crate::run_store::read_record(&new_id).unwrap();
+    assert_eq!(record.restarted_from.as_deref(), Some(rig.run_id.as_str()));
+    assert_eq!(
+        record.pin.expect("pinned").build,
+        crate::run_store::engine_pin::BuildId::current(),
+        "started on this build"
+    );
+    assert_eq!(
+        audit_calls(&rig.log),
+        audits_before * 2,
+        "every scan call was sent again: no stored reply was reused"
+    );
+    assert_eq!(
+        report.provenance.scanned_with,
+        Some(crate::onboard::ScanBuild::from_pin(
+            &crate::run_store::read_record(&new_id).unwrap().pin.unwrap()
+        )),
+        "the report states the build that scanned it"
+    );
+    assert_eq!(
+        std::fs::read(
+            crate::run_store::runs_dir()
+                .join(&rig.run_id)
+                .join("run.json")
+        )
+        .unwrap(),
+        saved_before,
+        "the saved run is left as it was"
+    );
+    // A run that is not this project's, or not the app's, is refused with no job.
+    let missing = run_restart_start(State(rig.state.clone()), Path("no-such-run".to_string()))
+        .await
+        .into_response();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+/// The route is mounted where the app calls it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn the_restart_route_answers_under_the_inspections_namespace() {
+    use tower::ServiceExt;
+    let state_dir = tempfile::tempdir().unwrap();
+    let _g = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state_dir.path());
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/inspections/no-such-run/restart")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 /// A saved inspection with no pin (started before builds were recorded) and one whose rule

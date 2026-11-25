@@ -67,6 +67,65 @@ pub(super) async fn wait_for_audit_job(job_id: &str) {
     .await;
 }
 
+/// "Start again on this build" for the saved inspection `run_id` (one another build started): the
+/// server starts it again from scratch on this build, as a new run, and answers with the job id;
+/// or the plain reason it cannot.
+pub(super) async fn start_again_on_this_build(run_id: &str) -> Result<String, String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/inspections/{run_id}/restart",
+            crate::bff_base()
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the app's server: {e}"))?;
+    let ok = resp.status().is_success();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if ok {
+        body["job_id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "the server did not return a job".to_string())
+    } else {
+        Err(body["error"]
+            .as_str()
+            .unwrap_or("the inspection could not be started again")
+            .to_string())
+    }
+}
+
+/// What a row offers in place of a plain "Run what remains" when another build started it: the
+/// refusal in plain words and, for a cockpit inspection, "Start again on this build".
+fn other_build_block(
+    row: &SavedInspection,
+    busy: bool,
+    on_restart: Option<EventHandler<String>>,
+) -> Element {
+    let Some(refusal) = row.other_build_refusal() else {
+        return rsx! {};
+    };
+    rsx! {
+        p { class: "onboard-gate-b scan-resume-refusal saved-inspection-other-build", "{refusal}" }
+        if row.can_start_again_here() {
+            button {
+                class: "scan-start-again",
+                r#type: "button",
+                disabled: busy,
+                title: "Start this inspection again from the beginning on this build. Nothing from the earlier run is reused.",
+                onclick: {
+                    let id = row.id.clone();
+                    move |_| {
+                        if let Some(handler) = on_restart {
+                            handler.call(id.clone());
+                        }
+                    }
+                },
+                "Start again on this build"
+            }
+        }
+    }
+}
+
 /// The offer: the newest unfinished inspection with "Run what remains", and the others listed.
 /// Renders nothing when there is nothing to offer or list.
 #[component]
@@ -80,6 +139,8 @@ pub(super) fn SavedInspectionsPanel(
     #[props(default)] error: Option<String>,
     #[props(default)] on_plan: Option<EventHandler<String>>,
     #[props(default)] on_resume: Option<EventHandler<String>>,
+    // "Start again on this build", for an inspection another build started.
+    #[props(default)] on_restart: Option<EventHandler<String>>,
 ) -> Element {
     let offer = camerata_ui_core::saved_inspections::offer(saved);
     if offer.offered.is_none() && offer.others.is_empty() {
@@ -122,6 +183,9 @@ pub(super) fn SavedInspectionsPanel(
                     div {
                         p { class: "onboard-gate-h", "{offered.headline()}" }
                         p { class: "onboard-gate-b", "{offered.summary()}" }
+                        if let Some(line) = offered.started_on_line() {
+                            p { class: "onboard-gate-hint saved-inspection-build", "{line}" }
+                        }
                         if !offered.reasons.is_empty() {
                             ul { class: "saved-inspection-reasons",
                                 for (i , why) in offered.reasons.iter().enumerate() {
@@ -129,22 +193,26 @@ pub(super) fn SavedInspectionsPanel(
                                 }
                             }
                         }
-                        button {
-                            class: "scan-run-what-remains",
-                            r#type: "button",
-                            disabled: busy,
-                            title: "Show what would run again and what it should cost. Nothing is sent until you confirm.",
-                            onclick: {
-                                let id = offered.id.clone();
-                                move |_| {
-                                    if let Some(handler) = on_plan {
-                                        handler.call(id.clone());
+                        if offered.other_build {
+                            {other_build_block(&offered, busy, on_restart)}
+                        } else {
+                            button {
+                                class: "scan-run-what-remains",
+                                r#type: "button",
+                                disabled: busy,
+                                title: "Show what would run again and what it should cost. Nothing is sent until you confirm.",
+                                onclick: {
+                                    let id = offered.id.clone();
+                                    move |_| {
+                                        if let Some(handler) = on_plan {
+                                            handler.call(id.clone());
+                                        }
                                     }
-                                }
-                            },
-                            "Run what remains"
+                                },
+                                "Run what remains"
+                            }
+                            {plan_block(&offered.id)}
                         }
-                        {plan_block(&offered.id)}
                         if let Some(why) = error.clone() {
                             p { class: "onboard-gate-b scan-resume-refusal", "{why}" }
                         }
@@ -158,6 +226,10 @@ pub(super) fn SavedInspectionsPanel(
                         for other in offer.others.iter() {
                             li { key: "{other.id}",
                                 span { "{other.list_line()}" }
+                                if let Some(line) = other.started_on_line() {
+                                    p { class: "onboard-gate-hint saved-inspection-build", "{line}" }
+                                }
+                                {other_build_block(other, busy, on_restart)}
                                 if other.resumable_here {
                                     button {
                                         class: "scan-run-what-remains saved-inspection-other-button",
@@ -203,7 +275,33 @@ mod tests {
             estimate_usd: 0.25,
             resumable_here: matches!(status, SavedStatus::Interrupted | SavedStatus::Incomplete),
             reasons: Vec::new(),
+            started_on_build: Some("aaaaaaaaaaaa".to_string()),
+            built_from: None,
+            other_build: false,
+            build_refusal: None,
         }
+    }
+
+    const KEPT_FOLDER: &str = "/Users/auditor/camerata-scan-acme";
+    const OTHER_BUILD_REFUSAL: &str = "This inspection was started on build 1a2b3c4d5e6f and \
+        cannot be continued on this build (aaaaaaaaaaaa). The build that starts an inspection \
+        must finish it. Open build 1a2b3c4d5e6f from the folder \
+        /Users/auditor/camerata-scan-acme to run what remains, or start the inspection again on \
+        this build.";
+
+    /// A cockpit inspection started on another build, as `GET /api/inspections` lists it.
+    fn other_build_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "r1", "started": "2026-10-29T10:00:00Z", "repos": ["acme/one"],
+            "status": "interrupted", "origin": "cockpit", "remaining_parts": 6,
+            "estimate_usd": 0.4, "resumable_here": false, "reasons": [],
+            "started_on_build": "1a2b3c4d5e6f", "built_from": KEPT_FOLDER,
+            "other_build": true, "build_refusal": OTHER_BUILD_REFUSAL
+        })
+    }
+
+    fn other_build_row() -> SavedInspection {
+        serde_json::from_value(other_build_json()).unwrap()
     }
 
     fn render(saved: Vec<SavedInspection>, plan: Option<(String, ResumePlanView)>) -> String {
@@ -340,6 +438,122 @@ mod tests {
         assert!(!html.contains("Run what remains"), "{html}");
     }
 
+    #[test]
+    fn every_unfinished_row_says_which_build_started_it() {
+        let html = render(
+            vec![
+                row("new", "2026-10-29T10:00:00Z", SavedStatus::Interrupted),
+                row("old", "2026-10-27T10:00:00Z", SavedStatus::Incomplete),
+            ],
+            None,
+        );
+        assert_eq!(
+            html.matches("Started on build aaaaaaaaaaaa").count(),
+            2,
+            "the offer and the listed row: {html}"
+        );
+    }
+
+    /// An inspection another build started shows the refusal (naming the kept folder) in place of
+    /// "Run what remains", with "Start again on this build".
+    #[test]
+    fn an_inspection_another_build_started_shows_the_refusal_and_start_again() {
+        let html = render(vec![other_build_row()], None);
+        assert!(html.contains("Started on build 1a2b3c4d5e6f"), "{html}");
+        assert!(html.contains("must finish it"), "{html}");
+        assert!(html.contains(KEPT_FOLDER), "{html}");
+        assert!(html.contains("Start again on this build"), "{html}");
+        assert!(!html.contains("Run what remains"), "{html}");
+        assert!(!html.contains("not sent again"), "{html}");
+        assert!(!html.contains("camerata inspect --resume"), "{html}");
+    }
+
+    thread_local! {
+        static PANEL_ROWS: std::cell::RefCell<Vec<SavedInspection>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The real panel, its "Start again on this build" wired to the same request the scan screen
+    /// sends ([`start_again_on_this_build`]).
+    fn panel_with_start_again() -> Element {
+        let saved = PANEL_ROWS.with(|r| r.borrow().clone());
+        rsx! {
+            SavedInspectionsPanel {
+                saved,
+                on_plan: EventHandler::new(|id: String| {
+                    spawn(async move {
+                        let _ = super::super::scan::resume_plan(&id).await;
+                    });
+                }),
+                on_resume: EventHandler::new(|id: String| {
+                    spawn(async move {
+                        let _ = super::super::scan::resume_start(&id).await;
+                    });
+                }),
+                on_restart: EventHandler::new(|id: String| {
+                    spawn(async move {
+                        let _ = start_again_on_this_build(&id).await;
+                    });
+                }),
+            }
+        }
+    }
+
+    /// A real click on "Start again on this build" asks the server to start the inspection again
+    /// (`POST /api/inspections/r1/restart`) and asks for no plan and no resume.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn clicking_start_again_on_this_build_starts_the_inspection_again() {
+        use dioxus::dioxus_core::{ElementId, Mutation};
+        use std::any::Any;
+        use std::rc::Rc;
+        use std::time::Duration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/inspections/r1/restart"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"job_id": "j2"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+
+        PANEL_ROWS.with(|r| *r.borrow_mut() = vec![other_build_row()]);
+        let mut vdom = VirtualDom::new(panel_with_start_again);
+        let edits = vdom.rebuild_to_vec();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("must finish it"), "{html}");
+        assert!(!html.contains("Run what remains"), "{html}");
+        let clicks: Vec<ElementId> = edits
+            .edits
+            .iter()
+            .filter_map(|e| match e {
+                Mutation::NewEventListener { name, id } if name == "click" => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clicks.len(), 1, "only Start again is clickable: {html}");
+        let data: Box<dyn Any> = Box::new(dioxus::html::SerializedMouseData::default());
+        let platform: Rc<dyn Any> = Rc::new(dioxus::html::PlatformEventData::new(data));
+        vdom.runtime().handle_event(
+            "click",
+            dioxus::dioxus_core::Event::new(platform, true),
+            clicks[0],
+        );
+        let until = tokio::time::Instant::now() + Duration::from_millis(500);
+        while tokio::time::Instant::now() < until {
+            let _ = tokio::time::timeout(Duration::from_millis(10), vdom.wait_for_work()).await;
+            let _ = vdom.render_immediate_to_vec();
+        }
+        let requests = server.received_requests().await.unwrap_or_default();
+        let paths: Vec<String> = requests.iter().map(|r| r.url.path().to_string()).collect();
+        assert_eq!(paths, vec!["/api/inspections/r1/restart".to_string()]);
+    }
+
     #[tokio::test]
     #[serial_test::serial(process_env)]
     async fn the_list_is_fetched_from_the_inspections_endpoint() {
@@ -454,6 +668,32 @@ mod tests {
             assert!(html.contains("This inspection was interrupted"), "{html}");
             assert!(html.contains("Run what remains"), "{html}");
             assert!(html.contains("6 parts remain"), "{html}");
+        }
+
+        /// The scan screen itself, for an inspection another build started: the refusal and
+        /// "Start again on this build", never "Run what remains".
+        #[tokio::test(flavor = "current_thread")]
+        #[serial_test::serial(process_env)]
+        async fn an_inspection_another_build_started_is_offered_to_start_again_on_the_screen() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/inspections"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "project_id": "p1",
+                    "inspections": [other_build_json()]
+                })))
+                .mount(&server)
+                .await;
+            let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+            let mut vdom = VirtualDom::new(screen_without_a_scan);
+            vdom.rebuild_in_place();
+            pump(&mut vdom, 700).await;
+            let html = dioxus_ssr::render(&vdom);
+            assert!(html.contains("This inspection was interrupted"), "{html}");
+            assert!(html.contains("Started on build 1a2b3c4d5e6f"), "{html}");
+            assert!(html.contains("must finish it"), "{html}");
+            assert!(html.contains("Start again on this build"), "{html}");
+            assert!(!html.contains("Run what remains"), "{html}");
         }
     }
 }

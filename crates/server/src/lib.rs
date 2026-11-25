@@ -1650,6 +1650,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/inspections/:id/plan", get(run_resume_plan))
         .route("/api/inspections/:id/resume", post(run_resume_start))
+        .route("/api/inspections/:id/restart", post(run_restart_start))
         .route("/api/runs/:id/plan", get(run_resume_plan))
         .route("/api/runs/:id/resume", post(run_resume_start))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
@@ -2595,6 +2596,11 @@ async fn onboard_audit(
             .as_ref()
             .map(project_chosen_options)
             .unwrap_or_default();
+        // The build this scan runs on, as the package will state it (issue #341). This route
+        // saves no run, so the pin is the running binary's and the rules it loaded.
+        let scanned_with = crate::run_store::engine_pin::ScanBuild::from_pin(
+            &crate::run_store::engine_pin::EnginePin::for_run(corpus.as_ref(), &run_controls),
+        );
         let audit = Box::pin(crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
             &sources,
@@ -2629,6 +2635,7 @@ async fn onboard_audit(
             &selected,
             corpus.as_ref(),
         );
+        report.provenance.scanned_with = Some(scanned_with);
         // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
         // incremental. Only when there's an active project to key it to.
         if let Some(id) = &project_id {
@@ -2849,6 +2856,7 @@ pub(crate) async fn start_audit_job(
     // What the run was asked, saved with the run so it can be resumed with the same request.
     let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
     let resume_run = options.resume_run.clone();
+    let restarted_from = options.restarted_from.clone();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -3163,6 +3171,9 @@ pub(crate) async fn start_audit_job(
             // The build and the rule library this run starts on (or must still be on to resume),
             // read from the running binary and the rules it loaded.
             let engine_pin = rs::engine_pin::EnginePin::for_run(corpus.as_ref(), &run_controls);
+            // The scanning build as the package will state it, from this pin (a resume keeps the
+            // saved run's own, see below).
+            let pin_scanned_with = rs::engine_pin::ScanBuild::from_pin(&engine_pin);
             if resume_run.is_none() {
                 let client_engagement = engagement_project
                     .as_ref()
@@ -3282,6 +3293,7 @@ pub(crate) async fn start_audit_job(
                     estimate_usd: None,
                     include_alternatives: corpus.is_some(),
                     origin: rs::RunOrigin::Cockpit,
+                    restarted_from: restarted_from.clone(),
                     project_id: project_id.clone(),
                     pin: engine_pin,
                 }) {
@@ -3569,6 +3581,17 @@ pub(crate) async fn start_audit_job(
 
             // The run is complete when no part failed or was left out; a scan that is not can be
             // resumed with "Run what remains". The export is the operator's own later step.
+            // The build this inspection was scanned with, saved with the report so an export by
+            // any later build states it as it was (issue #341): the saved run's pin, which a
+            // resume keeps, else the pin this job computed.
+            report.provenance.scanned_with = Some(
+                run_store
+                    .as_ref()
+                    .and_then(|store| store.record().pin)
+                    .map_or(pin_scanned_with, |pin| {
+                        rs::engine_pin::ScanBuild::from_pin(&pin)
+                    }),
+            );
             if let Some(store) = &run_store {
                 report.run_id = Some(store.run_id());
                 crate::run_store::finish_run(store, &report, true);
@@ -4782,7 +4805,14 @@ pub struct ManifestProvenance {
     /// only on an internal package: the release gate refuses a package that records any, and a
     /// complete run's manifest and README are unchanged.
     pub incomplete: Vec<String>,
+    /// The build the inspection was scanned with, as the scan saved it (from the cover,
+    /// [`crate::report_export::CoverJson::scanned_with`]); `None` for an inspection saved before
+    /// it was recorded. The package build is the running binary ([`Self::package_built_with`]).
+    pub scanned_with: Option<crate::onboard::ScanBuild>,
 }
+
+/// The README's words for an inspection saved before its scanning build was recorded.
+pub const SCANNED_WITH_NOT_RECORDED: &str = "not recorded";
 
 impl ManifestProvenance {
     /// The report cover's repos and generated-at, with each repo's commit taken from the cover's
@@ -4809,8 +4839,19 @@ impl ManifestProvenance {
         Self {
             repos,
             generated_at: cover.generated_at.clone(),
+            scanned_with: cover.scanned_with.clone(),
             ..Self::default()
         }
+    }
+
+    /// The build making this package: the running binary, never supplied by a caller.
+    pub fn package_built_with(&self) -> crate::onboard::ScanBuild {
+        crate::onboard::ScanBuild::package_build()
+    }
+
+    /// The README's build lines (issue #341), see [`render_build_lines`].
+    pub fn build_lines(&self) -> String {
+        render_build_lines(self.scanned_with.as_ref(), &self.package_built_with())
     }
 
     /// Camerata's own version as the manifest and README both state it, so a finding can always
@@ -4842,7 +4883,11 @@ impl ManifestProvenance {
             .collect();
         let mut inspection = serde_json::json!({
             "repos": repos,
+            // Kept for readers of packages made before the two builds below were recorded: the
+            // build that made this package, with its full commit.
             "engine_version": self.engine_version(),
+            "scanned_with": self.scanned_with.as_ref().map(|b| b.manifest_json(true)),
+            "package_built_with": self.package_built_with().manifest_json(false),
             "corpus_version": self.corpus_version,
             "rules_last_reviewed": self.rules_last_reviewed,
             "model_backend": self.model.as_ref().map(|m| &m.backend),
@@ -4908,7 +4953,7 @@ impl ManifestProvenance {
                 out.push_str(&format!("Commit ({}): {commit}{note}\n", repo.name));
             }
         }
-        out.push_str(&format!("Engine version: {}\n", self.engine_version()));
+        out.push_str(&self.build_lines());
         if let Some(corpus) = &self.corpus_version {
             out.push_str(&format!("Corpus version: {corpus}\n"));
         }
@@ -4977,6 +5022,38 @@ pub const ENGINE_DIRTY: bool = match option_env!("CAMERATA_GIT_DIRTY") {
     Some(flag) => flag.len() == 1 && flag.as_bytes()[0] == b'1',
     None => false,
 };
+
+/// The README's build lines (issue #341): one line when the scanning build and the package build
+/// are the same build, two when they differ, and "Scanned with: not recorded" before the package
+/// line for an inspection saved before the scanning build was recorded. Each line ends with a
+/// newline. The README renders it from the provenance and the release gate from the manifest's
+/// `scanned_with` and `package_built_with`, so the two must agree.
+pub fn render_build_lines(
+    scanned: Option<&crate::onboard::ScanBuild>,
+    package: &crate::onboard::ScanBuild,
+) -> String {
+    match scanned {
+        Some(scanned) if scanned.same_build(package) => {
+            format!("{BUILD_LINE_SAME}{}\n", scanned.readme_label())
+        }
+        Some(scanned) => format!(
+            "{BUILD_LINE_SCANNED}{}\n{BUILD_LINE_PACKAGE}{}\n",
+            scanned.readme_label(),
+            package.readme_label()
+        ),
+        None => format!(
+            "{BUILD_LINE_SCANNED}{SCANNED_WITH_NOT_RECORDED}\n{BUILD_LINE_PACKAGE}{}\n",
+            package.readme_label()
+        ),
+    }
+}
+
+/// The README build line when the inspection was scanned with the build that made the package.
+pub const BUILD_LINE_SAME: &str = "Scanned with and package built with: ";
+/// The README line of the scanning build when it is not the package build (or not recorded).
+pub const BUILD_LINE_SCANNED: &str = "Scanned with: ";
+/// The README line of the package build when it is not the scanning build.
+pub const BUILD_LINE_PACKAGE: &str = "Package built with: ";
 
 /// The README line of an internal package made from a run that did not complete.
 pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this inspection did not \

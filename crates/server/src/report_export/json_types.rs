@@ -121,6 +121,15 @@ pub struct CoverJson {
     /// same value as `manifest.json`'s `inspection.corpus_version` and the README's "Corpus
     /// version" line. `None` when the export ran without a loaded corpus.
     pub corpus_version: Option<String>,
+    /// The build the inspection was SCANNED with, as the scan saved it
+    /// ([`crate::onboard::ScanProvenance::scanned_with`]); `None` for a report saved before it
+    /// was recorded. [`Self::engine_commit`] and [`Self::corpus_version`] keep meaning the
+    /// exporting build. Carried into `json/inspection.json` and `manifest.json`.
+    pub scanned_with: Option<crate::onboard::ScanBuild>,
+    /// The client PDF's one last-page sentence about the build (owner ruling Q2), from
+    /// [`Self::scanned_with`] ([`crate::onboard::ScanBuild::pdf_sentence`]); `None` (no
+    /// sentence) when the scanning build is not recorded or recorded no commit.
+    pub inspected_with: Option<String>,
     /// `%Y-%m-%d %H:%M UTC` (M5) — of when this PDF was generated (NOT the scan time —
     /// that's `audited_refs`/provenance; this is "as-of" for the export itself).
     pub generated_at: String,

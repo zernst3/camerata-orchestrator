@@ -1563,6 +1563,18 @@ pub(crate) async fn run_resume_start(
         )
             .into_response();
     }
+    // A run another build started is refused here, before any job exists: the build that starts
+    // an inspection must finish it. The app offers "Start again on this build" instead.
+    if let Some(why) = crate::run_store::engine_pin::other_build_refusal(
+        record.pin.as_ref(),
+        &crate::run_store::engine_pin::BuildId::current(),
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": why, "other_build": true })),
+        )
+            .into_response();
+    }
     let req: AuditReq =
         match serde_json::from_value(record.args) {
             Ok(r) => r,
@@ -1580,6 +1592,74 @@ pub(crate) async fn run_resume_start(
         query.apply(req),
         AuditJobOptions {
             resume_run: Some(id),
+            ..AuditJobOptions::default()
+        },
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "job_id": job_id })),
+    )
+        .into_response()
+}
+
+/// `POST /api/inspections/:id/restart`: start the saved cockpit inspection `id` again, from
+/// scratch, on this build ("Start again on this build", offered for an inspection another build
+/// started). The same job the scan button starts, with the request the inspection was saved with,
+/// as a NEW run that records `restarted_from`. It reuses no stored reply: the new run has its own
+/// journal, and the project's incremental cache is not read (its replies may come from the other
+/// build). Refused, with no job, for a run of another project or one not started from the app.
+pub(crate) async fn run_restart_start(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let record = match crate::run_store::read_record(&id) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    if let Some(why) = resume_project_refusal(&state, &record) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response();
+    }
+    if record.origin != crate::run_store::RunOrigin::Cockpit {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "this inspection was started from the command line, so the app cannot \
+                          start it again; run camerata inspect again instead"
+            })),
+        )
+            .into_response();
+    }
+    let mut req: AuditReq = match serde_json::from_value(record.args) {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "this inspection was not started from the app, so the app cannot \
+                              start it again"
+                })),
+            )
+                .into_response()
+        }
+    };
+    // From scratch: no baseline from the incremental cache, whichever build left it.
+    req.incremental = false;
+    let job_id = start_audit_job(
+        &state,
+        req,
+        AuditJobOptions {
+            restarted_from: Some(id),
             ..AuditJobOptions::default()
         },
     )
@@ -1681,6 +1761,10 @@ pub(crate) struct AuditJobOptions {
     /// The saved run to resume instead of starting a new one ("Run what remains"). The job then
     /// runs only the parts that are not done, through [`crate::run_store::open_for_resume`].
     pub resume_run: Option<String>,
+    /// The saved run this job starts again from scratch ("Start again on this build"), recorded
+    /// on the new run ([`crate::run_store::RunRecord::restarted_from`]). Never set with
+    /// `resume_run`.
+    pub restarted_from: Option<String>,
 }
 
 /// The commits a delta retest ran between.

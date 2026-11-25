@@ -293,6 +293,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<crate::run_store::RunStore> {
         estimate_usd: None,
         include_alternatives: false,
         origin: RunOrigin::Cli,
+        restarted_from: None,
         project_id: None,
     })
     .unwrap()

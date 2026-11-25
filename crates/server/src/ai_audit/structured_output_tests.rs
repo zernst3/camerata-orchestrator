@@ -613,6 +613,7 @@ fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
         estimate_usd: None,
         include_alternatives: false,
         origin: RunOrigin::Cli,
+        restarted_from: None,
         project_id: None,
     })
     .unwrap()

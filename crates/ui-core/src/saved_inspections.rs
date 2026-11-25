@@ -41,11 +41,26 @@ pub struct SavedInspection {
     pub remaining_parts: usize,
     #[serde(default)]
     pub estimate_usd: f64,
-    /// Whether this screen can resume it: unfinished and started here.
+    /// Whether this screen can resume it: unfinished, started here and on this build.
     #[serde(default)]
     pub resumable_here: bool,
     #[serde(default)]
     pub reasons: Vec<String>,
+    /// The first 12 characters of the commit of the build it was started on; `None` when the
+    /// run recorded none.
+    #[serde(default)]
+    pub started_on_build: Option<String>,
+    /// The folder the build it was started on was made in, when recorded.
+    #[serde(default)]
+    pub built_from: Option<String>,
+    /// Started on another build than this one: "Run what remains" is refused here (the build
+    /// that starts an inspection must finish it).
+    #[serde(default)]
+    pub other_build: bool,
+    /// The server's refusal for [`Self::other_build`], in plain words, naming the folder when
+    /// it is known.
+    #[serde(default)]
+    pub build_refusal: Option<String>,
 }
 
 /// The body of `GET /api/inspections`.
@@ -93,6 +108,13 @@ impl SavedInspection {
         };
         let parts = self.remaining_parts;
         let noun = if parts == 1 { "part" } else { "parts" };
+        if self.other_build {
+            // Nothing of it carries over to this build: no cost of finishing it, no stored work.
+            return format!(
+                "Started {} on {repos}. {parts} {noun} remain.",
+                self.started
+            );
+        }
         format!(
             "Started {} on {repos}. {parts} {noun} remain; finishing it should cost about ${:.2} \
              more. Work already paid for is not sent again.",
@@ -119,9 +141,36 @@ impl SavedInspection {
         }
     }
 
+    /// "Started on build 1a2b3c4d5e6f", for every unfinished inspection whose build is recorded.
+    pub fn started_on_line(&self) -> Option<String> {
+        if !self.is_unfinished() {
+            return None;
+        }
+        self.started_on_build
+            .as_deref()
+            .map(|build| format!("Started on build {build}"))
+    }
+
+    /// The refusal shown in place of "Run what remains" for an inspection another build started.
+    pub fn other_build_refusal(&self) -> Option<String> {
+        (self.is_unfinished() && self.other_build).then(|| {
+            self.build_refusal.clone().unwrap_or_else(|| {
+                "This inspection was started on another build and cannot be continued on this \
+                 build. The build that starts an inspection must finish it."
+                    .to_string()
+            })
+        })
+    }
+
+    /// Whether this screen offers "Start again on this build": an unfinished cockpit inspection
+    /// another build started (the app holds the request it was started with).
+    pub fn can_start_again_here(&self) -> bool {
+        self.is_unfinished() && self.other_build && self.origin == "cockpit"
+    }
+
     /// For an unfinished inspection another place must resume, where that is.
     pub fn resume_elsewhere(&self) -> Option<String> {
-        (self.is_unfinished() && !self.resumable_here).then(|| {
+        (self.is_unfinished() && !self.resumable_here && !self.other_build).then(|| {
             format!(
                 "Started from the command line: resume it with camerata inspect --resume {}",
                 self.id
@@ -131,13 +180,13 @@ impl SavedInspection {
 }
 
 /// Decide what to show for `all` (any order). The newest unfinished inspection this screen can
-/// resume is offered; every other unfinished or running one is listed, newest first. A live
-/// inspection is never offered.
+/// resume, or start again on this build when another build started it, is offered; every other
+/// unfinished or running one is listed, newest first. A live inspection is never offered.
 pub fn offer(mut all: Vec<SavedInspection>) -> Offer {
     all.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| b.id.cmp(&a.id)));
     let offered_at = all
         .iter()
-        .position(|r| r.is_unfinished() && r.resumable_here);
+        .position(|r| r.is_unfinished() && (r.resumable_here || r.can_start_again_here()));
     let offered = offered_at.map(|i| all.remove(i));
     let others = all
         .into_iter()
@@ -161,7 +210,95 @@ mod tests {
             estimate_usd: 0.5,
             resumable_here: matches!(status, SavedStatus::Interrupted | SavedStatus::Incomplete),
             reasons: Vec::new(),
+            started_on_build: Some("aaaaaaaaaaaa".to_string()),
+            built_from: None,
+            other_build: false,
+            build_refusal: None,
         }
+    }
+
+    /// A cockpit row started on another build, as the server lists it.
+    fn other_build_row(id: &str, started: &str) -> SavedInspection {
+        SavedInspection {
+            resumable_here: false,
+            started_on_build: Some("1a2b3c4d5e6f".to_string()),
+            built_from: Some("/Users/auditor/camerata-scan-acme".to_string()),
+            other_build: true,
+            build_refusal: Some(
+                "This inspection was started on build 1a2b3c4d5e6f and cannot be continued on \
+                 this build (aaaaaaaaaaaa). The build that starts an inspection must finish it."
+                    .to_string(),
+            ),
+            ..row(id, started, SavedStatus::Interrupted)
+        }
+    }
+
+    #[test]
+    fn every_unfinished_row_says_which_build_started_it() {
+        let interrupted = row("a", "t", SavedStatus::Interrupted);
+        assert_eq!(
+            interrupted.started_on_line().as_deref(),
+            Some("Started on build aaaaaaaaaaaa")
+        );
+        assert_eq!(row("b", "t", SavedStatus::Complete).started_on_line(), None);
+        let mut unknown = row("c", "t", SavedStatus::Incomplete);
+        unknown.started_on_build = None;
+        assert_eq!(unknown.started_on_line(), None);
+    }
+
+    /// An inspection another build started is still the one offered (it is the newest unfinished
+    /// one), but to start again on this build, never to run what remains; it does not claim the
+    /// work already paid for carries over, and it is not sent to the command line.
+    #[test]
+    fn an_inspection_another_build_started_is_offered_to_start_again_only() {
+        let offer = offer(vec![
+            row("old", "2026-10-27T10:00:00Z", SavedStatus::Incomplete),
+            other_build_row("new", "2026-10-29T10:00:00Z"),
+        ]);
+        let offered = offer.offered.expect("the newest unfinished one is offered");
+        assert_eq!(offered.id, "new");
+        assert!(offered.can_start_again_here());
+        assert!(!offered.resumable_here);
+        assert!(
+            !offered.summary().contains("not sent again"),
+            "{}",
+            offered.summary()
+        );
+        assert_eq!(offered.resume_elsewhere(), None);
+        assert_eq!(offer.others.len(), 1);
+        assert!(!offer.others[0].can_start_again_here());
+
+        // One the command line started on another build: listed, and neither resumed nor
+        // started again here.
+        let mut cli = other_build_row("cli-1", "2026-10-29T10:00:00Z");
+        cli.origin = "cli".to_string();
+        assert!(!cli.can_start_again_here());
+        let offer = super::offer(vec![cli]);
+        assert!(offer.offered.is_none());
+    }
+
+    #[test]
+    fn the_build_fields_parse_and_default_when_absent() {
+        let parsed: SavedInspection = serde_json::from_value(serde_json::json!({
+            "id": "r1", "status": "interrupted", "origin": "cockpit",
+            "started_on_build": "1a2b3c4d5e6f", "built_from": "/Users/auditor/camerata-scan-acme",
+            "other_build": true, "resumable_here": false,
+            "build_refusal": "This inspection was started on build 1a2b3c4d5e6f"
+        }))
+        .unwrap();
+        assert!(parsed.other_build);
+        assert_eq!(parsed.started_on_build.as_deref(), Some("1a2b3c4d5e6f"));
+        assert_eq!(
+            parsed.built_from.as_deref(),
+            Some("/Users/auditor/camerata-scan-acme")
+        );
+        let old: SavedInspection = serde_json::from_value(serde_json::json!({
+            "id": "r1", "status": "interrupted"
+        }))
+        .unwrap();
+        assert!(!old.other_build);
+        assert_eq!(old.started_on_build, None);
+        assert_eq!(old.build_refusal, None);
     }
 
     #[test]

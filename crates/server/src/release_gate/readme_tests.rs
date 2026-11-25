@@ -43,7 +43,7 @@ fn package_for(internal: bool) -> ProductPackage {
 }
 
 /// What a client README must never name: how the inspection was run.
-const OPERATOR_WORDS: [&str; 14] = [
+const OPERATOR_WORDS: [&str; 16] = [
     "Model (",
     "Model backend",
     "Model provider",
@@ -52,6 +52,8 @@ const OPERATOR_WORDS: [&str; 14] = [
     "Corpus version",
     "Corpus rules applied",
     "Engine version",
+    "Scanned with",
+    "Package built with",
     "commit",
     "Commit (",
     "Release checks",
@@ -111,7 +113,8 @@ fn an_internal_readme_carries_the_provenance_lines_and_the_disclaimer() {
     for expected in [
         "Model backend: api\n",
         "Model (the scan): claude-sonnet-5\n",
-        "Engine version: camerata ",
+        "Package built with: Camerata ",
+        "Scanned with: not recorded\n",
         "Release checks: ",
         "Repos inspected: ",
         "Prepared for: Example Client Ltd\n",
@@ -135,6 +138,9 @@ fn the_gate_refuses_a_client_readme_that_carries_a_provenance_line() {
         "Release checks: secrets, manifest (all passed)",
         "Model (the scan): claude-sonnet-5",
         "Engine version: camerata 0.0.0",
+        "Scanned with: Camerata 0.0.0, build 1a2b3c4d5e6f",
+        "Scanned with and package built with: Camerata 0.0.0",
+        "Package built with: Camerata 0.0.0",
         "Corpus version: sha256:abc",
         "Commit (acme/portal): abcdef1234567890",
         "Model backend: api",

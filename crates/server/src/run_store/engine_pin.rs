@@ -22,6 +22,13 @@ pub struct BuildId {
     pub prompt_schema: u32,
     /// The clone advisory's prompt schema number.
     pub clone_prompt_schema: u32,
+    /// The folder the binary was built from (the workspace root `cargo` compiled it in), so a
+    /// refusal can say where the build that started an inspection is kept. Operator state only:
+    /// it is a local path, never part of the build's identity ([`check_pin`] compares commits)
+    /// and never exported ([`ScanBuild`] leaves it out). `None` for a pin saved before it was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_from: Option<String>,
 }
 
 impl BuildId {
@@ -34,6 +41,7 @@ impl BuildId {
             dirty: crate::ENGINE_DIRTY,
             prompt_schema: crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
             clone_prompt_schema: crate::onboard::clone_advisory::cache::PROMPT_SCHEMA_VERSION,
+            built_from: compiled_in_folder(),
         }
     }
 
@@ -52,6 +60,7 @@ impl BuildId {
             dirty: false,
             prompt_schema: crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
             clone_prompt_schema: crate::onboard::clone_advisory::cache::PROMPT_SCHEMA_VERSION,
+            built_from: None,
         }
     }
 
@@ -77,6 +86,142 @@ pub mod test_build {
 
 fn short(commit: &str) -> String {
     commit.chars().take(12).collect()
+}
+
+/// The workspace root this crate was compiled in (`crates/server` is two folders below it).
+#[cfg(not(test))]
+fn compiled_in_folder() -> Option<String> {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|root| root.to_string_lossy().into_owned())
+}
+
+/// The build an inspection was scanned with, as the package states it (README, `manifest.json`,
+/// `json/inspection.json` and the PDF's last page). Saved on the scan's
+/// [`crate::onboard::ScanProvenance::scanned_with`] from the run's [`EnginePin`] at scan time, so
+/// an export made later, by a newer build, reads it and never recomputes it. Holds no local path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanBuild {
+    /// The crate version of the scanning build.
+    pub version: String,
+    /// The full git commit of the scanning build; `None` outside a git checkout.
+    pub commit: Option<String>,
+    /// Whether the scanning build had uncommitted changes.
+    pub dirty: bool,
+    /// [`camerata_rules::corpus_version`] of the rule library the scan loaded; `None` when none
+    /// loaded.
+    pub corpus_version: Option<String>,
+}
+
+impl ScanBuild {
+    /// The scanning build, from the pin the run was started on.
+    pub fn from_pin(pin: &EnginePin) -> Self {
+        Self {
+            version: pin.build.version.clone(),
+            commit: pin.build.commit.clone(),
+            dirty: pin.build.dirty,
+            corpus_version: Some(pin.corpus_version.clone()).filter(|c| !c.is_empty()),
+        }
+    }
+
+    /// The build running now, the one that builds a package: its version, commit and dirty flag
+    /// (the rule library is the export's own, see [`crate::ManifestProvenance::corpus_version`]).
+    pub fn package_build() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: crate::ENGINE_COMMIT.map(str::to_string),
+            dirty: crate::ENGINE_DIRTY,
+            corpus_version: None,
+        }
+    }
+
+    /// The first 12 characters of the commit, the build's reference in client text.
+    pub fn short_commit(&self) -> Option<String> {
+        self.commit.as_deref().map(short)
+    }
+
+    /// Whether `other` is the same build: version, commit and dirty flag.
+    pub fn same_build(&self, other: &Self) -> bool {
+        self.version == other.version && self.commit == other.commit && self.dirty == other.dirty
+    }
+
+    /// The README's words for this build: `Camerata 0.4.0, build 1a2b3c4d5e6f`, with
+    /// `(built with uncommitted changes)` after a dirty one; the version alone when no commit
+    /// was recorded.
+    pub fn readme_label(&self) -> String {
+        let mut out = format!("Camerata {}", self.version);
+        if let Some(short) = self.short_commit() {
+            out.push_str(&format!(", build {short}"));
+        }
+        if self.dirty {
+            out.push_str(&format!(" {UNCOMMITTED_NOTE}"));
+        }
+        out
+    }
+
+    /// The one sentence the client PDF's last page carries about the build (owner ruling Q2).
+    /// `None` when the scanning build recorded no commit: there is no reference to give.
+    pub fn pdf_sentence(&self) -> Option<String> {
+        let short = self.short_commit()?;
+        Some(format!(
+            "Inspected with Camerata {} (reference {short}). The full technical record is in the \
+             manifest file included with this report.",
+            self.version
+        ))
+    }
+
+    /// The manifest's object for this build. `with_corpus` adds `corpus_version` (the scanning
+    /// build's; the package build's rule library is the manifest's own `corpus_version`).
+    pub fn manifest_json(&self, with_corpus: bool) -> serde_json::Value {
+        let mut out = serde_json::json!({
+            "version": self.version,
+            "commit": self.commit,
+            "dirty": self.dirty,
+        });
+        if with_corpus {
+            out["corpus_version"] = serde_json::json!(self.corpus_version);
+        }
+        out
+    }
+}
+
+/// The README's note after a build with uncommitted changes.
+pub const UNCOMMITTED_NOTE: &str = "(built with uncommitted changes)";
+
+/// Whether a saved run was started on another commit than the running build (both recorded).
+/// The case the app answers with "Start again on this build".
+pub fn is_other_build(saved: Option<&EnginePin>, now: &BuildId) -> bool {
+    match (saved.and_then(|p| p.build.commit.as_ref()), &now.commit) {
+        (Some(saved), Some(now)) => saved != now,
+        _ => false,
+    }
+}
+
+/// The refusal for a saved run started on another commit than the running build, naming the
+/// folder that build was made in when the pin recorded it; `None` when it is the same commit (or
+/// either commit is unknown, which [`check_pin`] refuses in its own words).
+pub fn other_build_refusal(saved: Option<&EnginePin>, now: &BuildId) -> Option<String> {
+    if !is_other_build(saved, now) {
+        return None;
+    }
+    let saved = saved?;
+    let saved_short = saved.build.short_commit().unwrap_or_default();
+    let now_short = now.short_commit().unwrap_or_default();
+    let open = match saved
+        .build
+        .built_from
+        .as_deref()
+        .filter(|f| !f.trim().is_empty())
+    {
+        Some(folder) => format!("Open build {saved_short} from the folder {folder}"),
+        None => format!("Open build {saved_short}"),
+    };
+    Some(format!(
+        "This inspection was started on build {saved_short} and cannot be continued on this build \
+         ({now_short}). The build that starts an inspection must finish it. {open} to run what \
+         remains, or start the inspection again on this build."
+    ))
 }
 
 /// The identity saved with a run: the build, the rule library and the clone judge model.
@@ -154,13 +299,13 @@ pub fn check_pin(
         );
     };
     let saved_short = saved.build.short_commit();
-    let Some(now_commit) = &now.commit else {
+    if now.commit.is_none() {
         return Err(format!(
             "This copy of Camerata does not know which build it is, so it cannot continue a saved \
              inspection. Open build {} to run what remains, or start the inspection again.",
             saved_short.as_deref().unwrap_or("(unknown)")
         ));
-    };
+    }
     if saved.build.commit.is_none() {
         return Err(
             "This inspection was started on a build that did not record its commit, so it \
@@ -168,15 +313,8 @@ pub fn check_pin(
                 .to_string(),
         );
     }
-    if saved.build.commit.as_ref() != Some(now_commit) {
-        return Err(format!(
-            "This inspection was started on build {} and cannot be continued on this build ({}). \
-             The build that starts an inspection must finish it. Open build {} to run what remains, \
-             or start the inspection again on this build.",
-            saved_short.as_deref().unwrap_or("(unknown)"),
-            short(now_commit),
-            saved_short.as_deref().unwrap_or("(unknown)"),
-        ));
+    if let Some(refusal) = other_build_refusal(Some(saved), now) {
+        return Err(refusal);
     }
     if !saved.build.dirty && now.dirty {
         return Err(format!(

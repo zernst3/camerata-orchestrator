@@ -2015,6 +2015,12 @@ pub fn build_report_json_with_counts(
         camerata_version: report.provenance.camerata_version.clone(),
         engine_commit: crate::ENGINE_COMMIT.map(str::to_string),
         corpus_version: corpus.map(camerata_rules::corpus_version),
+        scanned_with: report.provenance.scanned_with.clone(),
+        inspected_with: report
+            .provenance
+            .scanned_with
+            .as_ref()
+            .and_then(crate::onboard::ScanBuild::pdf_sentence),
         // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
         generated_at: generated_at_label(&report.provenance),
         client_name: clean_client_name(&opts.client_name),
