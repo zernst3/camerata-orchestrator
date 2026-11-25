@@ -753,6 +753,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.7.9",
  "camerata-agent",
  "camerata-api-types",
  "camerata-checks",
@@ -773,6 +774,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "http-body-util",
  "pdf-extract",
  "regex",
  "serde",
@@ -780,6 +782,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "tokio",
+ "tower",
  "wiremock",
  "zip",
 ]
