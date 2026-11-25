@@ -51,6 +51,9 @@ pub struct UsageMeter {
     checkpoint: std::sync::Mutex<crate::cost_checkpoint::CheckpointState>,
     /// Where the cockpit's job state hears of each checkpoint.
     job_sink: std::sync::Mutex<crate::cost_checkpoint::CheckpointSink>,
+    /// Which cached prefixes the batch runner has already warmed this run (#240), so a follow
+    /// round or a second stage call does not warm the same prefix again.
+    warm: super::stage_batch::WarmBook,
 }
 
 mod checkpoint;
@@ -113,6 +116,11 @@ impl UsageMeter {
             controls,
             ..Self::default()
         }
+    }
+
+    /// The batch runner's record of the prefixes it has warmed this run.
+    pub(super) fn warm_book(&self) -> &super::stage_batch::WarmBook {
+        &self.warm
     }
 
     /// TEST SUPPORT: this meter with `health` as its outage counter (one on an injected clock).

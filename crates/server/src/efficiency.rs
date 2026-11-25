@@ -121,6 +121,11 @@ efficiency_measures! {
     /// fully read sends the rule the whole files, as before. Off: `candidates` is ignored
     /// entirely and every prompt is the rank-7 prompt.
     candidates_prefilter => "rules that name a candidate locator are sent only the matched sites",
+    /// #240: a Message Batch submission whose items carry a prompt-cache mark sends its first
+    /// marked item in real time and waits for the reply before the rest go out, so every other
+    /// item reads the shared prefix instead of paying to write it again. Off: the whole
+    /// submission goes out at once, as before.
+    batch_warm => "a batch submission's first cache-marked item runs in real time to warm the cache for the rest",
 }
 
 impl EfficiencyConfig {
@@ -283,5 +288,16 @@ mod tests {
         );
         let err = EfficiencyConfig::from_env_value(Some("nonsense=off")).unwrap_err();
         assert!(err.starts_with(EFFICIENCY_ENV), "{err}");
+    }
+
+    #[test]
+    fn batch_warm_is_on_by_default_can_be_switched_off_and_is_on_the_line() {
+        let mut config = EfficiencyConfig::default();
+        assert!(config.batch_warm);
+        assert!(config.render().contains("batch_warm=on"));
+        config.apply_entry("batch_warm=off").unwrap();
+        assert!(!config.batch_warm);
+        assert_eq!(config.disabled(), vec!["batch_warm"]);
+        assert!(config.render().contains("batch_warm=off"));
     }
 }

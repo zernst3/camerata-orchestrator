@@ -1151,6 +1151,13 @@ pub struct LlmRequest {
     /// [`RoomOutput`] and [`LlmRequest::with_room_output`]). `None` = today's read-only grant,
     /// byte for byte. Ignored by the API backend and by a request with no repo-read folder.
     pub room_output: Option<RoomOutput>,
+    /// The prompt-cache time-to-live this request's cache marks ask for on the real-time API
+    /// path. `None` = the transport's own choice ([`CacheTtl::from_env`]), byte for byte what it
+    /// always was. A caller that must match the TTL of a Message Batch item (the batch runner's
+    /// warm call) sets it with [`LlmRequest::with_cache_ttl`]. Not part of the request's
+    /// identity: the run store's request key does not read it. Ignored by the CLI backend, by
+    /// non-Anthropic vendors and by a request with no cache mark.
+    pub cache_ttl: Option<CacheTtl>,
 }
 
 /// The one write a clean-room call may make: files under `<room_dir>/_camerata/out/`, nowhere
@@ -1181,7 +1188,15 @@ impl LlmRequest {
             temperature: None,
             response_schema: None,
             room_output: None,
+            cache_ttl: None,
         }
+    }
+
+    /// Ask for `ttl` on this request's cache marks instead of the transport's own choice.
+    #[must_use]
+    pub fn with_cache_ttl(mut self, ttl: CacheTtl) -> Self {
+        self.cache_ttl = Some(ttl);
+        self
     }
 
     /// Let the CLI-backend model write into `room_dir/_camerata/out/` and nowhere else, run
@@ -2546,8 +2561,9 @@ impl Llm {
             )
         })?;
 
-        let basis = PriceBasis::realtime();
-        let mut body = messages_request_body(req, model, basis.cache_ttl);
+        let (mut body, cache_ttl) = realtime_body(req, model);
+        let mut basis = PriceBasis::realtime();
+        basis.cache_ttl = cache_ttl;
         body["stream"] = serde_json::json!(true);
         let max_tokens = body["max_tokens"].as_u64().unwrap_or(0);
         let idle = env_secs("CAMERATA_LLM_IDLE_SECS", 120);
@@ -2909,6 +2925,32 @@ pub fn build_batch_item(
             temperature: req.temperature_for(model),
         },
     }
+}
+
+/// The body a real-time call sends, and the cache TTL it asks for. A request with no
+/// [`LlmRequest::cache_ttl`] is the ordinary real-time body ([`messages_request_body`]). One that
+/// has it is a WARM call for a Message Batch item: its body is exactly that item's `params`
+/// ([`build_batch_item`]), so the provider, which keys the cache on the model, the system text,
+/// the messages, the cache marks and every other setting, writes the entry the batch items read.
+/// The real-time extras (`thinking` display) are left out for that reason: equality is the rule.
+fn realtime_body(req: &LlmRequest, model: &str) -> (serde_json::Value, CacheTtl) {
+    match req.cache_ttl {
+        None => {
+            let ttl = CacheTtl::from_env();
+            (messages_request_body(req, model, ttl), ttl)
+        }
+        Some(ttl) => (batch_params_body(req, model, ttl), ttl),
+    }
+}
+
+/// The `params` of the batch item `req` would be, as a `/v1/messages` body (absent fields left out).
+fn batch_params_body(req: &LlmRequest, model: &str, ttl: CacheTtl) -> serde_json::Value {
+    let item = build_batch_item("warm", req, model, ttl);
+    let mut body = serde_json::to_value(&item.params).unwrap_or_default();
+    if let Some(fields) = body.as_object_mut() {
+        fields.retain(|_, v| !v.is_null());
+    }
+    body
 }
 
 /// The body of a batch upload: the items, as the Batches API takes them.
@@ -4092,6 +4134,50 @@ mod tests {
         assert_eq!(r.model, "claude-opus-5");
         assert_eq!(r.max_tokens, 100);
         assert!(r.cache_breakpoints.is_empty(), "caching off by default");
+    }
+
+    /// A warm call's body is the batch item's `params`, field for field.
+    #[test]
+    fn a_warm_calls_body_is_the_batch_items_params_field_for_field() {
+        for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"] {
+            let req = LlmRequest::new("SHARED PREFIX. the tail")
+                .with_system("the system text")
+                .with_model(model)
+                .with_max_tokens(1024)
+                .with_effort("low")
+                .with_response_schema(two_field_schema())
+                .with_cache_prefix_len("SHARED PREFIX. ".len());
+            let ttl = CacheTtl::OneHour;
+            let item = build_batch_item("x", &req, model, ttl);
+            let want = serde_json::to_value(&item.params).unwrap();
+            let warm = req.clone().with_cache_ttl(ttl);
+            let (body, got_ttl) = realtime_body(&warm, model);
+            assert_eq!(got_ttl, ttl);
+            for field in ["model", "max_tokens", "system", "messages", "output_config"] {
+                assert_eq!(body[field], want[field], "{model}: field {field}");
+            }
+            assert_eq!(
+                body["messages"][0]["content"][0]["cache_control"]["ttl"],
+                "1h"
+            );
+            // Nothing else: no `thinking`, nothing the batch item does not carry.
+            let mut keys: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
+            let mut want_keys: Vec<_> = want
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, _)| k.clone())
+                .collect();
+            keys.sort();
+            want_keys.sort();
+            assert_eq!(keys, want_keys, "{model}");
+            // The ordinary real-time body is a different thing (it asks for thinking).
+            let (plain, _) = realtime_body(&req, model);
+            if crate::model_registry::accepts_effort(model) {
+                assert!(plain.get("thinking").is_some(), "{model}");
+            }
+        }
     }
 
     #[test]

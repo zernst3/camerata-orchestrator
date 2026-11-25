@@ -189,7 +189,8 @@
       "terse_output": true,
       "batch_default": true,
       "applies_to_routing": true,
-      "candidates_prefilter": true
+      "candidates_prefilter": true,
+      "batch_warm": true
     },
     "fix_outcome": {
       "sent_to_model": 4,
@@ -252,7 +253,8 @@
     "terse_output": true,
     "batch_default": true,
     "applies_to_routing": true,
-    "candidates_prefilter": true
+    "candidates_prefilter": true,
+    "batch_warm": true
   },
   "cost_cap": {
     "cap_usd": 40.0,

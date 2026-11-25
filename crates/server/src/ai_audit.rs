@@ -310,6 +310,8 @@ mod detail_regen_tests;
 
 mod batch_mode;
 
+#[cfg(test)]
+mod cache_layout_tests;
 mod calibration;
 #[cfg(test)]
 mod calibration_tests;

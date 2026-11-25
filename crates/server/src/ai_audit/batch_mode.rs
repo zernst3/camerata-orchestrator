@@ -99,6 +99,34 @@ pub(crate) fn one_hour_cache_is_cheaper(items: usize) -> bool {
     items >= 2
 }
 
+/// THE WARM RULE (#240): whether a submission sends its first cache-marked item in real time,
+/// and waits for the reply, before the rest are submitted.
+///
+/// A batch runs its items side by side, so items that start before the first has written the
+/// cache each write the shared prefix again, at the 1-hour write price. One call that has
+/// finished first turns every later item into a read. It needs a prefix to share, so:
+///
+/// * `batch_warm` off: never.
+/// * fewer than two marked items: never (nothing to share).
+/// * the batch asks for the 5-minute cache: the warm write would be a 5-minute one and is likely
+///   to have expired before the batch starts. Never.
+/// * `cache_unproven`: an earlier warm reply in this run reported no cache write and no cache
+///   read, so the prefix is under the model's minimum cacheable size and the marks do nothing;
+///   another warm call would only be a real-time call at full price. Never.
+pub(crate) fn should_warm_batch(
+    eff: crate::efficiency::EfficiencyConfig,
+    marked_items: usize,
+    cache_unproven: bool,
+    batch_ttl: CacheTtl,
+) -> bool {
+    eff.batch_warm && marked_items >= 2 && !cache_unproven && batch_ttl == CacheTtl::OneHour
+}
+
+/// True when a reply shows the cache did nothing: no tokens written and none read.
+pub(crate) fn reply_shows_no_caching(resp: &LlmResponse) -> bool {
+    resp.cache_creation_input_tokens == 0 && resp.cache_read_input_tokens == 0
+}
+
 /// The Message Batches calls the batch scan path makes. A seam so the path runs against a fake
 /// in tests; production implements it on the real [`Llm`].
 #[async_trait::async_trait]
