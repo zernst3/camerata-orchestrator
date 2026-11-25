@@ -287,6 +287,17 @@ enum Command {
         /// else is the saved run's. A run that is already complete says so and does nothing.
         #[arg(long, value_name = "RUN-ID|latest")]
         resume: Option<String>,
+        /// Print what this run would take on, then stop: per repo the files, lines and bytes
+        /// admitted and the files left out by reason; per piece its files, bytes, context and
+        /// checklist bytes, first request size and turn limit; the pre-flight cost projection
+        /// (projected, API prices) and the spend limit it would run under; every warning. Makes
+        /// no model call and no network call, reads no credential and saves nothing (no run, no
+        /// ledger, no rooms). Its figures use relative paths and never file text. Give the
+        /// same flags as the real run. Exits 0 when a real run would start, non-zero with the
+        /// reason when it would refuse (a spend limit under the projection, a build with
+        /// uncommitted changes on a client run).
+        #[arg(long = "plan-only", conflicts_with = "resume")]
+        plan_only: bool,
     },
 
     /// Measure run-to-run drift: run the full AI pass twice over `--repo` with every answer
@@ -655,6 +666,7 @@ async fn main() -> anyhow::Result<()> {
             finder_force_pieces,
             compare_with,
             resume,
+            plan_only,
         } => {
             if let Some(run) = resume {
                 return run_resume_cmd(&run, &repo, export, max_cost_usd).await;
@@ -662,7 +674,7 @@ async fn main() -> anyhow::Result<()> {
             let mut repos = repo.into_iter();
             // Without `--resume`, clap guarantees at least one repo, an export and a client.
             let first = repos.next().unwrap_or_default();
-            run_inspect_cmd(InspectArgs {
+            let args = InspectArgs {
                 repo: first,
                 also_repos: repos.collect(),
                 repo_names: repo_name,
@@ -693,8 +705,11 @@ async fn main() -> anyhow::Result<()> {
                     compare_with,
                 },
                 exclude,
-            })
-            .await
+            };
+            if plan_only {
+                return run_plan_only_cmd(args).await;
+            }
+            run_inspect_cmd(args).await
         }
         Command::Repeatability {
             repo,
@@ -944,6 +959,18 @@ async fn run_repeatability_cmd(
 /// error-handling shape in this file).
 async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
     report_inspect_result(inspect_cmd::run_inspect(args).await)
+}
+
+/// `inspect --plan-only`'s handler: print the figures and exit 0, or say why a real run would
+/// refuse and exit with that refusal's code. Nothing is run, saved or sent.
+async fn run_plan_only_cmd(args: InspectArgs) -> anyhow::Result<()> {
+    match inspect_cmd::plan_only::run_plan_only(args).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("camerata inspect --plan-only: {e}");
+            std::process::exit(e.exit_code());
+        }
+    }
 }
 
 /// `inspect --resume`'s handler: the same report and exit codes as a run.
@@ -1379,6 +1406,29 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn plan_only_parses_with_a_run_and_never_with_resume() {
+        let run = [
+            "camerata",
+            "inspect",
+            "--plan-only",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+        ];
+        match Cli::try_parse_from(run).expect("must parse").command {
+            Command::Inspect { plan_only, .. } => assert!(plan_only),
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["camerata", "inspect", "--plan-only", "--resume", "latest"])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn inspect_takes_repeated_repos_with_one_name_each() {
         let cli = Cli::try_parse_from([
             "camerata",
@@ -1470,7 +1520,9 @@ mod cli_parse_tests {
                 finder_force_pieces,
                 compare_with,
                 resume,
+                plan_only,
             } => {
+                assert!(!plan_only, "a real run unless --plan-only is given");
                 assert!(exclude.is_empty(), "nothing is excluded unless agreed");
                 assert!(resume.is_none(), "a new run unless --resume is given");
                 assert_eq!(

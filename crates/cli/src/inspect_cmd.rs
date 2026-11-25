@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod finder;
+pub mod plan_only;
 pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
