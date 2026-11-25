@@ -236,11 +236,28 @@ async fn a_reused_folder_of_a_stale_worktree_registration_is_not_deleted_or_coun
         "and it is not in the record: {:?}",
         record.items
     );
-    assert!(
-        record.items.iter().all(|i| !i.path.contains("scratch")),
-        "{:?}",
-        record.items
-    );
+    // Nothing at or under the reused folder's parent is recorded. Compared inside the fixture,
+    // never on the absolute path: the temp root may itself contain "scratch" (TMPDIR under a
+    // scratch folder), and then every recorded path would match (#344). The substring check
+    // on the part below the root is the old check minus the temp prefix, so it is no weaker.
+    let scratch = fx.root.join("scratch");
+    for recorded in &record.items {
+        let path = Path::new(&recorded.path);
+        assert!(
+            !path.starts_with(&scratch),
+            "{} is under the reused folder's parent {}: {:?}",
+            recorded.path,
+            scratch.display(),
+            record.items
+        );
+        let below_root = path.strip_prefix(&fx.root).unwrap_or(path);
+        assert!(
+            !below_root.to_string_lossy().contains("scratch"),
+            "{} names the scratch folder: {:?}",
+            recorded.path,
+            record.items
+        );
+    }
 }
 
 /// H2, end to end: the override points at a linked worktree of the client's clone. Nothing is
