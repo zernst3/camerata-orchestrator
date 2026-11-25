@@ -665,4 +665,189 @@ mod batches {
         })
         .await;
     }
+    // ── A credit stop in a batch, then a resume after the credit is back ──────────────────────
+
+    const CREDIT_OUT: &str = "Your credit balance is too low to access the Anthropic API.";
+
+    /// A batch API that answers every item, except that while the credit is out the row of
+    /// `item-1` comes back as a credit error. It counts the rows it answered per item.
+    struct CreditBatches {
+        credit_out: std::sync::atomic::AtomicBool,
+        /// What each submit was sent: `(custom id, item name)`.
+        sent: std::sync::Mutex<Vec<Vec<(String, String)>>>,
+        answered: std::sync::Mutex<Vec<String>>,
+        realtime: Counting,
+    }
+
+    #[async_trait::async_trait]
+    impl BatchApi for CreditBatches {
+        fn has_api_key(&self) -> bool {
+            true
+        }
+        fn realtime(&self) -> &dyn LlmPort {
+            &self.realtime
+        }
+        async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+            None
+        }
+        async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+            let mut sent = self.sent.lock().unwrap();
+            sent.push(
+                items
+                    .into_iter()
+                    .map(|i| {
+                        let text = i.params.messages[0].content.to_string();
+                        let name = (0..3)
+                            .map(|n| format!("item-{n}"))
+                            .find(|n| text.contains(&format!("ITEM={n};")))
+                            .unwrap_or_default();
+                        (i.custom_id, name)
+                    })
+                    .collect(),
+            );
+            Ok(format!("msgbatch_c{}", sent.len()))
+        }
+        async fn poll(&self, _id: &str) -> anyhow::Result<BatchStatus> {
+            Ok(BatchStatus {
+                processing_status: "ended".to_string(),
+                request_counts: BatchRequestCounts::default(),
+            })
+        }
+        async fn fetch(&self, id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+            let which: usize = id.trim_start_matches("msgbatch_c").parse().unwrap();
+            let sent = self.sent.lock().unwrap()[which - 1].clone();
+            let out = self.credit_out.load(Ordering::SeqCst);
+            Ok(sent
+                .into_iter()
+                .map(|(custom_id, name)| {
+                    if out && name == "item-1" {
+                        return BatchResultRow {
+                            custom_id,
+                            response: None,
+                            error: Some(CREDIT_OUT.to_string()),
+                            billed: None,
+                        };
+                    }
+                    self.answered.lock().unwrap().push(name);
+                    BatchResultRow {
+                        custom_id,
+                        response: Some(LlmResponse {
+                            text: "answer".to_string(),
+                            model: "claude-sonnet-5-5".to_string(),
+                            backend: "api".to_string(),
+                            cost_usd: Some(1.0),
+                            input_tokens: Some(100),
+                            output_tokens: Some(10),
+                            cache_read_input_tokens: 0,
+                            cache_creation_input_tokens: 0,
+                            or_cache_discount: None,
+                            truncated: false,
+                            reported_model: None,
+                            cli_cost_usd: None,
+                            elapsed_ms: None,
+                        }),
+                        error: None,
+                        billed: None,
+                    }
+                })
+                .collect())
+        }
+    }
+
+    /// Attempt one stops on a credit error for `item-1`; the credit comes back; attempt two
+    /// resumes the same run. With `fresh_checkpoint` the second attempt has no stage checkpoint,
+    /// so the stage submits the whole set again and only the journal can tell what is paid.
+    async fn credit_stop_then_resume(fresh_checkpoint: bool) {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let fake = Arc::new(CreditBatches {
+            credit_out: std::sync::atomic::AtomicBool::new(true),
+            sent: std::sync::Mutex::new(Vec::new()),
+            answered: std::sync::Mutex::new(Vec::new()),
+            realtime: Counting::new(),
+        });
+        let dir = store.checkpoint_dir();
+        seeded(async {
+            let api = crate::run_store::journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let cp = StageCheckpoint::new(&dir, "calibration_acme_widgets");
+            let meter = capped(None, 0.0);
+            let mut first = items();
+            let ctx = StageCtx {
+                repo: REPO,
+                model: "claude-sonnet-5-5",
+                realtime: api.realtime(),
+                batch: Some(&api),
+                meter: Some(&meter),
+                job: None,
+                checkpoint: Some(&cp),
+                settings: StageSettings::default(),
+                feedback: None,
+            };
+            let out = run_stage(Stage::Calibration, &mut first, StageMode::Batch, &ctx).await;
+            assert_eq!(
+                out.failed.len(),
+                1,
+                "the credit row failed: {:?}",
+                out.failed
+            );
+            assert!(meter.outage_stopped(), "the credit error stopped the run");
+        })
+        .await;
+        let id = store.run_id();
+        drop(store);
+
+        fake.credit_out.store(false, Ordering::SeqCst);
+        let store = RunStore::open(&id).unwrap();
+        seeded(async {
+            let api = crate::run_store::journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let name = if fresh_checkpoint {
+                "calibration_acme_widgets_again"
+            } else {
+                "calibration_acme_widgets"
+            };
+            let cp = StageCheckpoint::new(&dir, name);
+            let meter = capped(None, store.stored_usd());
+            let mut second = items();
+            let ctx = StageCtx {
+                repo: REPO,
+                model: "claude-sonnet-5-5",
+                realtime: api.realtime(),
+                batch: Some(&api),
+                meter: Some(&meter),
+                job: None,
+                checkpoint: Some(&cp),
+                settings: StageSettings::default(),
+                feedback: None,
+            };
+            let out = run_stage(Stage::Calibration, &mut second, StageMode::Batch, &ctx).await;
+            assert!(
+                out.failed.is_empty(),
+                "the resume finishes: {:?}",
+                out.failed
+            );
+            assert_eq!(second.got.len(), 3, "every item has its answer");
+        })
+        .await;
+        let mut answered = fake.answered.lock().unwrap().clone();
+        answered.sort();
+        assert_eq!(
+            answered,
+            ["item-0", "item-1", "item-2"],
+            "every item was answered, and paid for, once"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial(process_env)]
+    async fn a_credit_stop_in_a_batch_stage_then_a_resume_with_credit_completes() {
+        credit_stop_then_resume(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial(process_env)]
+    async fn a_credit_stop_then_a_resume_that_submits_the_whole_set_again_pays_only_the_failed_row()
+    {
+        credit_stop_then_resume(true).await;
+    }
 }
