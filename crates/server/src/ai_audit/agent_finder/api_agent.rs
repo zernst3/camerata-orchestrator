@@ -207,7 +207,8 @@ pub(super) const CONTEXT_FULL_PREFIX: &str =
 /// "input length and `max_tokens` exceed context limit", or a 413 / `request_too_large`).
 pub(super) const REQUEST_TOO_LARGE_PREFIX: &str = "the request was too large for the model: ";
 
-/// The request was sent and the provider did not answer in time, on every attempt. A connect
+/// The request was sent and the provider did not answer in time on the last attempt, the one whose
+/// failure ends the piece (the earlier attempts' messages are not kept in the stop). A connect
 /// time-out (no request reached the provider) never carries this.
 pub(super) const REPLY_TIMEOUT_PREFIX: &str = "the provider did not answer in time: ";
 

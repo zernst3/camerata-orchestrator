@@ -34,21 +34,20 @@ impl UsageMeter {
         st.pieces_done += already_done.min(total);
     }
 
-    /// `halves` of the pieces just announced are halves of a piece cut in two on a resume. They
-    /// are one planned piece's work between them, so the projection counts two as one left.
-    pub fn begin_halves(&self, halves: usize) {
-        self.checkpoint_state().halves_left += halves;
+    /// `total` of the works just announced are halves of a piece cut in two on a resume, `held`
+    /// of them held by a stored attempt. A split piece is still one planned piece, so a half
+    /// counts as half a piece, planned and done.
+    pub fn begin_halves(&self, total: usize, held: usize) {
+        let mut st = self.checkpoint_state();
+        st.halves_total += total;
+        st.halves_done += held.min(total);
     }
 
-    /// A half finished (call before [`Self::piece_finished`]).
+    /// A half finished by paying for it (call before [`Self::piece_finished`]).
     pub fn half_finished(&self) {
         let mut st = self.checkpoint_state();
-        st.halves_left = st.halves_left.saturating_sub(1);
-    }
-
-    /// The repository's pieces are over: no half is waiting any more.
-    pub fn end_halves(&self) {
-        self.checkpoint_state().halves_left = 0;
+        st.halves_done += 1;
+        st.fresh_halves += 1;
     }
 
     /// One piece finished clean. `cost_usd` is what it cost this attempt (`None` when it was not
@@ -90,21 +89,27 @@ impl UsageMeter {
     ) -> CostCheckpoint {
         let plan = self.controls.checkpoint.plan.clone().unwrap_or_default();
         let spent = self.limit_spend_usd();
-        let planned = plan.pieces.max(st.pieces_total);
+        // In planned pieces: a half is half a piece, so a split piece is counted once, on both
+        // sides, however the plan counted it (the plan is in unsplit pieces).
+        let half = |n: usize| n as f64 * 0.5;
+        let total_eq = st.pieces_total as f64 - half(st.halves_total);
+        let done_eq = st.pieces_done as f64 - half(st.halves_done);
+        let planned_eq = (plan.pieces as f64).max(total_eq);
+        let planned = planned_eq.ceil() as usize;
         // While the finder runs: every piece planned and not done. At a stage boundary the
         // finder is over for the repository: a piece that did not finish is not run again in
         // this attempt, but the pieces of repositories not begun yet still are.
-        let pieces_left = if later_spent.is_some() {
-            planned.saturating_sub(st.pieces_total)
+        let left_eq = if later_spent.is_some() {
+            planned_eq - total_eq
         } else {
-            let left = planned.saturating_sub(st.pieces_done);
-            let halves = st.halves_left.min(left);
-            left - halves + halves.div_ceil(2)
-        };
+            planned_eq - done_eq
+        }
+        .max(0.0);
+        let pieces_left = left_eq.ceil() as usize;
         let projected = projected_total(&ProjectionInput {
             spent_usd: spent,
-            pieces_left,
-            finished_pieces: st.fresh_done,
+            pieces_left: left_eq,
+            finished_pieces: st.fresh_done as f64 - half(st.fresh_halves),
             finished_cost_usd: st.fresh_cost_usd,
             preflight_per_piece_usd: plan.per_piece_usd,
             joints_usd: if later_spent.is_some() {
@@ -116,7 +121,7 @@ impl UsageMeter {
             later_spent_usd: later_spent.unwrap_or(0.0),
             assumed_problems: plan.assumed_problems,
             problems_found: st.problems_found,
-            pieces_done: st.pieces_done,
+            pieces_done: done_eq.ceil() as usize,
             pieces_planned: planned,
         });
         CostCheckpoint {

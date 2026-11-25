@@ -779,11 +779,13 @@ pub async fn find_repo(
             .filter(|w| !matches!(w, Work::Fresh(_)))
             .count();
         m.begin_pieces(works.len(), held);
-        // The halves still to run (a stored half is held, not left).
+        // The halves among the works, and the ones a stored attempt holds.
+        let is_half = |w: &Work| halves.contains(&w.piece().key);
         m.begin_halves(
+            works.iter().filter(|w| is_half(w)).count(),
             works
                 .iter()
-                .filter(|w| matches!(w, Work::Fresh(p) if halves.contains(&p.key)))
+                .filter(|w| is_half(w) && !matches!(w, Work::Fresh(_)))
                 .count(),
         );
     }
@@ -809,9 +811,6 @@ pub async fn find_repo(
         .collect()
         .await;
     reports.sort_by_key(|r| r.index);
-    if let Some(m) = meter {
-        m.end_halves();
-    }
 
     let mut failed: Vec<FailedPass> = Vec::new();
     let mut extras = FinderExtras::default();

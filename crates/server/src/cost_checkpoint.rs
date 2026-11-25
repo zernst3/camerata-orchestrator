@@ -112,10 +112,10 @@ pub struct CheckpointSettings {
 pub struct ProjectionInput {
     /// What the run has spent, counting a resume's stored spend.
     pub spent_usd: f64,
-    /// Pieces not yet finished (in flight ones included).
-    pub pieces_left: usize,
-    /// Pieces this run finished by paying for them, and what they cost.
-    pub finished_pieces: usize,
+    /// Pieces not yet finished (in flight ones included); a half-done split piece is a fraction.
+    pub pieces_left: f64,
+    /// Pieces this run finished by paying for them (a half counts half), and what they cost.
+    pub finished_pieces: f64,
     pub finished_cost_usd: f64,
     pub preflight_per_piece_usd: f64,
     /// The joints calls still to come (zero at a stage boundary).
@@ -137,8 +137,8 @@ pub struct ProjectionInput {
 /// assumed, when it assumed any).
 #[must_use]
 pub fn projected_total(i: &ProjectionInput) -> f64 {
-    let per_piece = if i.finished_pieces > 0 {
-        i.finished_cost_usd / i.finished_pieces as f64
+    let per_piece = if i.finished_pieces > 0.0 {
+        i.finished_cost_usd / i.finished_pieces
     } else {
         i.preflight_per_piece_usd
     };
@@ -152,7 +152,7 @@ pub fn projected_total(i: &ProjectionInput) -> f64 {
         _ => i.later_stages_usd,
     };
     let later = (later - i.later_spent_usd).max(0.0);
-    i.spent_usd + i.pieces_left as f64 * per_piece + i.joints_usd + later
+    i.spent_usd + i.pieces_left * per_piece + i.joints_usd + later
 }
 
 pub use camerata_api_types::cost_checkpoint::CostCheckpoint;
@@ -162,9 +162,13 @@ pub use camerata_api_types::cost_checkpoint::CostCheckpoint;
 pub(crate) struct CheckpointState {
     pub pieces_total: usize,
     pub pieces_done: usize,
-    /// Pieces of this attempt that are halves of a piece an earlier attempt could not finish and
-    /// that are not done yet. Two halves are one planned piece's work, so they count as one left.
-    pub halves_left: usize,
+    /// Works of this attempt that are halves of a piece an earlier attempt could not finish, and
+    /// how many of them are done (held ones included). A planned piece is counted once however
+    /// many halves it was cut in, so a half counts as half a piece done and half a piece planned.
+    pub halves_total: usize,
+    pub halves_done: usize,
+    /// The halves this attempt finished by paying for them.
+    pub fresh_halves: usize,
     pub fresh_done: usize,
     pub fresh_cost_usd: f64,
     pub problems_found: usize,
@@ -183,8 +187,8 @@ mod tests {
     fn base() -> ProjectionInput {
         ProjectionInput {
             spent_usd: 10.0,
-            pieces_left: 4,
-            finished_pieces: 2,
+            pieces_left: 4.0,
+            finished_pieces: 2.0,
             finished_cost_usd: 6.0,
             preflight_per_piece_usd: 1.0,
             joints_usd: 0.0,
@@ -206,10 +210,10 @@ mod tests {
     #[test]
     fn the_pre_flight_figure_prices_the_pieces_left_while_none_has_finished() {
         let i = ProjectionInput {
-            finished_pieces: 0,
+            finished_pieces: 0.0,
             finished_cost_usd: 0.0,
             spent_usd: 0.0,
-            pieces_left: 5,
+            pieces_left: 5.0,
             preflight_per_piece_usd: 2.0,
             ..base()
         };
@@ -246,7 +250,7 @@ mod tests {
     #[test]
     fn nothing_left_projects_the_spend() {
         let i = ProjectionInput {
-            pieces_left: 0,
+            pieces_left: 0.0,
             ..base()
         };
         assert!((projected_total(&i) - 10.0).abs() < 1e-9);
@@ -260,7 +264,7 @@ mod tests {
             problems_found: 5,
             pieces_done: 2,
             pieces_planned: 4,
-            pieces_left: 0,
+            pieces_left: 0.0,
             spent_usd: 0.0,
             ..base()
         };
@@ -271,7 +275,7 @@ mod tests {
     #[test]
     fn the_joints_figure_counts_and_the_later_spend_comes_off() {
         let i = ProjectionInput {
-            pieces_left: 0,
+            pieces_left: 0.0,
             joints_usd: 1.5,
             later_stages_usd: 4.0,
             later_spent_usd: 1.0,
