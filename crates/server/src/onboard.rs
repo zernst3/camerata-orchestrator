@@ -978,7 +978,15 @@ pub struct ScanProvenance {
     /// previously persisted report still loads.
     #[serde(default)]
     pub model_sessions: Vec<crate::llm::ModelSession>,
+    /// The build this inspection was scanned with: version, commit, dirty flag and rule library,
+    /// filled from the run's pin at scan time (issue #341). An export made later, by a newer
+    /// build, states it as saved and never recomputes it. `None` for a report saved before it was
+    /// recorded; the package then says "Scanned with: not recorded".
+    #[serde(default)]
+    pub scanned_with: Option<ScanBuild>,
 }
+
+pub use crate::run_store::engine_pin::ScanBuild;
 
 /// The full scan result across one or more repos. Brownfield onboarding treats a
 /// SET of inter-related repos (e.g. a .NET API + a Python worker + a React app) as
@@ -4118,6 +4126,9 @@ pub async fn audit_repos_with_llm_controlled(
         // Filled by [`audit_repos`], the one place that builds a real CLI `Llm`; an injected
         // [`crate::llm::LlmPort`] has no Claude Code sessions to report.
         model_sessions: Vec::new(),
+        // Filled by the caller from the run's pin (the cockpit job, the synchronous route and
+        // `camerata inspect`), which knows the build and the rule library the run started on.
+        scanned_with: None,
     };
     // Stamp `ai_covered` exactly here, not earlier: `run_ai_review` may have been forced false
     // above (the `Blocked` gate), and `report.ai_error` (from `first_ai_error`) only reaches its
@@ -8308,6 +8319,7 @@ mod tests {
                 cwd: "/work/me/api".to_string(),
                 created_at: "2026-07-23T00:01:00Z".to_string(),
             }],
+            scanned_with: None,
         };
         let json = serde_json::to_string(&prov).unwrap();
         let back: ScanProvenance = serde_json::from_str(&json).unwrap();

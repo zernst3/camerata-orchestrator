@@ -877,3 +877,11 @@ Not performed in this engagement:
     ]
   ]
 ]
+
+// Issue #341, owner ruling Q2: the one plain sentence about the build that inspected the code
+// (the scanning build, saved with the scan; never the build that made this PDF). The full
+// technical record is in the package's manifest. Absent when the scan recorded no build.
+#if d.cover.at("inspected_with", default: none) != none [
+  #v(0.3cm)
+  #text(size: 8pt, fill: ink_faint)[#d.cover.inspected_with]
+]

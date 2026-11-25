@@ -26,6 +26,8 @@ pub(super) fn build_standard() -> DecisionTable {
             ("project_id", Drop),
             ("project_key", Drop),
             ("nonce_seed", Drop),
+            // A run id, like `run_id`.
+            ("restarted_from", Drop),
         ],
     );
     // The build, rule library and clone judge a run started on, and its wall-clock segments.
@@ -37,6 +39,8 @@ pub(super) fn build_standard() -> DecisionTable {
             ("dirty", Bool),
             ("prompt_schema", Number),
             ("clone_prompt_schema", Number),
+            // A local folder (the operator's home path): never in a bundle.
+            ("built_from", Drop),
         ],
     );
     t.leaves(

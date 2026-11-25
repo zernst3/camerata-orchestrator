@@ -206,7 +206,9 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
             saved_plan.set(Some((run_id, plan)));
         });
     });
-    let on_saved_resume = EventHandler::new(move |run_id: String| {
+    // "Run what remains" (`restart` false) and "Start again on this build" (`restart` true, for an
+    // inspection another build started) run the same way: one job, the Bombe held throughout.
+    let start_saved_job = move |run_id: String, restart: bool| {
         let repos = saved_for_resume
             .iter()
             .find(|r| r.id == run_id)
@@ -221,7 +223,13 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
             // scan started before the view was left), so the report appears there.
             let result = run_what_remains(
                 loading_count,
-                || async { resume_start(&run_id).await },
+                || async {
+                    if restart {
+                        super::saved_inspections::start_again_on_this_build(&run_id).await
+                    } else {
+                        resume_start(&run_id).await
+                    }
+                },
                 |jid| async move {
                     active_audit_job.set(Some(jid.clone()));
                     repo.set(repos.join("\n"));
@@ -235,10 +243,23 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
             saved_busy.set(false);
             saved_epoch += 1;
             if let Err(why) = result {
-                saved_error.set(Some(format!("Cannot resume now: {why}")));
+                let lead = if restart {
+                    "Cannot start it again now"
+                } else {
+                    "Cannot resume now"
+                };
+                saved_error.set(Some(format!("{lead}: {why}")));
             }
         });
-    });
+    };
+    let on_saved_resume = {
+        let mut start = start_saved_job.clone();
+        EventHandler::new(move |run_id: String| start(run_id, false))
+    };
+    let on_saved_restart = {
+        let mut start = start_saved_job;
+        EventHandler::new(move |run_id: String| start(run_id, true))
+    };
 
     // Greenfield-specific state: the new repo's name, the local directory to create,
     // the selected corpus rules to bake in, the in-progress flag, and the scaffold result.
@@ -388,6 +409,7 @@ pub(in crate::cockpit) fn OnboardView(connection: Option<ProviderView>) -> Eleme
                         error: saved_error(),
                         on_plan: Some(on_saved_plan),
                         on_resume: Some(on_saved_resume),
+                        on_restart: Some(on_saved_restart),
                     }
                 }
                 div { class: "onboard-repo-block",

@@ -1506,6 +1506,9 @@ pub struct ReadmeProvenance {
     /// repo name to (commit, "uncommitted changes" note present), from `Commit (repo): sha`.
     pub commits: BTreeMap<String, (String, bool)>,
     pub engine_version: Option<String>,
+    /// The build lines (issue #341), verbatim and in README order: `Scanned with and package
+    /// built with: ...`, `Scanned with: ...`, `Package built with: ...`.
+    pub build_lines: Vec<String>,
     pub corpus_version: Option<String>,
     pub rules_last_reviewed: Option<String>,
     pub model_backend: Option<String>,
@@ -1569,6 +1572,15 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
             }
         } else if let Some(v) = line.strip_prefix("Engine version: ") {
             p.engine_version = Some(v.to_string());
+        } else if [
+            crate::BUILD_LINE_SAME,
+            crate::BUILD_LINE_SCANNED,
+            crate::BUILD_LINE_PACKAGE,
+        ]
+        .iter()
+        .any(|opening| line.starts_with(opening))
+        {
+            p.build_lines.push(line.to_string());
         } else if let Some(v) = line.strip_prefix("Corpus version: ") {
             p.corpus_version = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Rules last reviewed on ") {
@@ -1606,12 +1618,15 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
 /// The README lines of a provenance block, by their opening words. A client README names none of
 /// them: it says what each file is and how to import the tickets, and nothing about how the
 /// inspection was run.
-const PROVENANCE_LINE_OPENINGS: [&str; 16] = [
+const PROVENANCE_LINE_OPENINGS: [&str; 18] = [
     "Prepared for: ",
     "Repos inspected: ",
     "Generated: ",
     "Commit (",
     "Engine version: ",
+    // Both `Scanned with: ` and `Scanned with and package built with: `.
+    "Scanned with",
+    "Package built with: ",
     "Corpus version: ",
     "Corpus rules applied: ",
     "Rules last reviewed on ",
@@ -1702,8 +1717,57 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
     if parsed.commits != manifest_commits {
         mismatch("Commit");
     }
-    if parsed.engine_version != manifest_str(manifest, "engine_version") {
-        mismatch("Engine version");
+    // The builds (issue #341). A package that records `package_built_with` states its builds in
+    // the build lines, rendered here from the manifest's two objects, and its `engine_version`
+    // (kept for old readers) names that same package build. A package made before then states
+    // `Engine version:` alone.
+    let package_built_with = manifest["inspection"]
+        .get("package_built_with")
+        .and_then(|v| serde_json::from_value::<crate::onboard::ScanBuild>(v.clone()).ok());
+    match &package_built_with {
+        Some(package) => {
+            let scanned_value = &manifest["inspection"]["scanned_with"];
+            let scanned =
+                serde_json::from_value::<crate::onboard::ScanBuild>(scanned_value.clone());
+            match (scanned_value.is_null(), &scanned) {
+                (false, Err(_)) => mismatch("Scanned with"),
+                _ => {
+                    let scanned = scanned.ok();
+                    let expected: Vec<String> =
+                        crate::render_build_lines(scanned.as_ref(), package)
+                            .lines()
+                            .map(str::to_string)
+                            .collect();
+                    if parsed.build_lines != expected {
+                        mismatch("Scanned with");
+                    }
+                    // The inspection's rule library is the one it was scanned with, when saved.
+                    if let Some(corpus) = scanned.as_ref().and_then(|b| b.corpus_version.as_ref()) {
+                        if manifest_str(manifest, "corpus_version").as_ref() != Some(corpus) {
+                            mismatch("Corpus version (scanned with)");
+                        }
+                    }
+                }
+            }
+            let named = match &package.commit {
+                Some(commit) => format!("camerata {} (commit {commit})", package.version),
+                None => format!("camerata {}", package.version),
+            };
+            if manifest_str(manifest, "engine_version") != Some(named) {
+                mismatch("Engine version");
+            }
+            if parsed.engine_version.is_some() {
+                mismatch("Engine version");
+            }
+        }
+        None => {
+            if parsed.engine_version != manifest_str(manifest, "engine_version") {
+                mismatch("Engine version");
+            }
+            if !parsed.build_lines.is_empty() {
+                mismatch("Scanned with");
+            }
+        }
     }
     if parsed.corpus_version != manifest_str(manifest, "corpus_version") {
         mismatch("Corpus version");
@@ -1799,6 +1863,12 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
     // Generic: every non-null value in the manifest's inspection block is in the README.
     if let Some(inspection) = manifest["inspection"].as_object() {
         for (key, value) in inspection {
+            // `engine_version` names the package build with its full commit, which the README
+            // states as `Package built with` (twelve characters); it is held to
+            // `package_built_with` above instead.
+            if key == "engine_version" && package_built_with.is_some() {
+                continue;
+            }
             let rendered: Vec<String> = match value {
                 Value::String(s) => vec![s.clone()],
                 Value::Array(items) => items

@@ -133,6 +133,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
             started_at: "2026-10-11T00:00:00Z".to_string(),
             finished_at: "2026-10-11T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
+            scanned_with: None,
         },
         recommendations: HashMap::new(),
         failed_passes: Vec::new(),

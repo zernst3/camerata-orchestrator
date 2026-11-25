@@ -396,6 +396,7 @@ async fn regenerate_sample_report() {
             started_at: "2026-07-26T15:30:00Z".to_string(),
             finished_at: "2026-07-26T15:42:00Z".to_string(),
             model_sessions: Vec::new(),
+            scanned_with: None,
         },
         recommendations: std::collections::HashMap::new(),
         failed_passes: Vec::new(),

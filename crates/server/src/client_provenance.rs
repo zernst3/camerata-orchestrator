@@ -62,10 +62,10 @@ pub fn export_provenance(
 /// inputs (and testable without a file).
 ///
 /// - `repos`/`generated_at`/commits come from the cover ([`ManifestProvenance::from_cover`]).
-/// - `corpus_version` is the digest of the WHOLE loaded corpus, or `None` when no corpus is
-///   loaded. It identifies the rules the exporting process had, which is the scan's corpus when
-///   the scan and the export run against the same build (the CLI always, the server unless it
-///   was rebuilt in between).
+/// - `corpus_version` is the digest of the rule library the inspection was scanned with, as the
+///   scan saved it ([`crate::onboard::ScanProvenance::scanned_with`]). For an inspection saved
+///   before that was recorded it is the digest of the WHOLE loaded corpus, or `None` when no
+///   corpus is loaded.
 /// - `rules_last_reviewed` is the oldest effective review date across the rules the scan
 ///   audited (`provenance.audited_rule_ids`). It is `None` when there is no corpus or no
 ///   watermark, when the scan audited nothing, when any audited rule id is not in the loaded
@@ -83,7 +83,13 @@ pub fn export_provenance_with(
         provenance.cost_cap_reached && report.ledger.cost_cap().is_some_and(|cap| cap.cost_unknown);
     provenance.incomplete = report.incomplete_reasons();
     provenance.vulnerability_data = report.provenance.vulnerability_data.clone();
-    provenance.corpus_version = corpus.map(corpus_version);
+    // The rule library the inspection was SCANNED with, as the scan saved it; the exporting
+    // build's own library only for an inspection saved before that was recorded.
+    provenance.corpus_version = provenance
+        .scanned_with
+        .as_ref()
+        .and_then(|b| b.corpus_version.clone())
+        .or_else(|| corpus.map(corpus_version));
     provenance.rules_last_reviewed = match (watermark, rules_used_by_scan(report, corpus)) {
         (Some(watermark), Some(used)) => client_rules_last_reviewed(watermark, &used),
         _ => None,

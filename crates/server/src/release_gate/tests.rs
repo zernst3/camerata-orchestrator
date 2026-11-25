@@ -90,6 +90,7 @@ pub(crate) fn scan_report() -> ScanReport {
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
+            scanned_with: None,
         },
         recommendations: HashMap::new(),
         failed_passes: Vec::new(),
@@ -815,8 +816,23 @@ fn provenance_check_flags_a_readme_manifest_mismatch() {
         "control"
     );
 
-    let wrong_engine = readme.replace("Engine version: camerata ", "Engine version: camerata 9");
-    let problems = verify_readme_provenance(&wrong_engine, &manifest);
+    // The build lines (issue #341) replaced the `Engine version:` line: a README that names
+    // another build is caught, and so is a manifest whose `engine_version` (kept for old readers)
+    // names another build than its `package_built_with`.
+    assert!(readme.contains("Scanned with: not recorded\n"), "{readme}");
+    let wrong_build = readme.replace(
+        "Package built with: Camerata ",
+        "Package built with: Camerata 9",
+    );
+    assert_ne!(wrong_build, readme, "the tamper applies");
+    let problems = verify_readme_provenance(&wrong_build, &manifest);
+    assert!(
+        problems.iter().any(|q| q.location == "Scanned with"),
+        "{problems:?}"
+    );
+    let mut wrong_engine = manifest.clone();
+    wrong_engine["inspection"]["engine_version"] = json!("camerata 9.9.9");
+    let problems = verify_readme_provenance(&readme, &wrong_engine);
     assert!(
         problems.iter().any(|q| q.location == "Engine version"),
         "{problems:?}"
@@ -2202,3 +2218,8 @@ fn the_gate_catches_a_matrix_that_counts_a_problem_the_cover_does_not() {
         "{failure}"
     );
 }
+
+/// Issue #341, step B: the package states the build that scanned the inspection and the build
+/// that made the package.
+#[path = "scanned_with_tests.rs"]
+mod scanned_with;

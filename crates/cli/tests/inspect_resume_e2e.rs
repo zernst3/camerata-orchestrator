@@ -1385,6 +1385,7 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
             estimate_usd: None,
             include_alternatives: false,
             origin: rs::RunOrigin::Cockpit,
+            restarted_from: None,
             project_id: None,
         })
         .unwrap();
@@ -1732,6 +1733,7 @@ fn the_client_start_check_refuses_a_dirty_or_commitless_build_and_never_an_inter
         dirty,
         prompt_schema: 1,
         clone_prompt_schema: 1,
+        built_from: None,
     };
     let sha = "a".repeat(40);
     assert!(check(true, &build(Some(&sha), false)).is_ok());

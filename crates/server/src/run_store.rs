@@ -479,6 +479,10 @@ pub struct RunRecord {
     /// for a run saved before it was recorded, which cannot be resumed.
     #[serde(default)]
     pub pin: Option<engine_pin::EnginePin>,
+    /// The saved run this one was started again from (see [`NewRun::restarted_from`]); `None`
+    /// for a run started from scratch and for runs saved before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_from: Option<String>,
     /// Names the project (the repos together) so the cleanup and `latest` can find its runs.
     pub project_key: String,
     pub repos: Vec<RepoRecord>,
@@ -950,6 +954,9 @@ pub struct NewRun {
     pub project_id: Option<String>,
     /// The build and rule library this run starts on, from [`engine_pin::EnginePin::for_run`].
     pub pin: engine_pin::EnginePin,
+    /// The saved run this one starts again ("Start again on this build", for a run another build
+    /// started); `None` for a run started from scratch. The new run reuses none of its replies.
+    pub restarted_from: Option<String>,
 }
 
 /// A fresh run id: the time, then six random hex digits.
@@ -1038,6 +1045,7 @@ impl RunStore {
             attempt: 1,
             engine_version: engine_version(),
             pin: Some(new.pin),
+            restarted_from: new.restarted_from,
             project_key: new.project_key,
             repos,
             rules_fingerprint: new.ai_scan_key.directives_fingerprint.clone(),
@@ -1557,10 +1565,24 @@ pub struct InspectionSummary {
     /// The expected cost of resuming it, in US dollars; 0 when nothing remains.
     pub estimate_usd: f64,
     /// Whether "Run what remains" can be offered here: it is interrupted or incomplete (never live
-    /// or complete) and this place started it.
+    /// or complete), this place started it, and it was started on this build (never when
+    /// [`Self::other_build`]).
     pub resumable_here: bool,
     /// Why an incomplete inspection is incomplete, in plain words.
     pub reasons: Vec<String>,
+    /// The first 12 characters of the commit of the build it was started on; `None` for a run
+    /// saved before builds were recorded, or on a build that recorded no commit.
+    pub started_on_build: Option<String>,
+    /// The folder the build it was started on was made in ([`engine_pin::BuildId::built_from`]),
+    /// when the pin recorded it. Operator state, shown in the app only.
+    pub built_from: Option<String>,
+    /// True when it was started on another commit than this build: "Run what remains" is refused
+    /// here (the build that starts an inspection must finish it), and the app offers "Start again
+    /// on this build" instead.
+    pub other_build: bool,
+    /// The refusal for [`Self::other_build`], in the words a resume would refuse with
+    /// ([`engine_pin::other_build_refusal`]), naming the kept folder when it is known.
+    pub build_refusal: Option<String>,
 }
 
 /// Every saved inspection under `root` that `belongs` to the project being asked about, newest
@@ -1572,6 +1594,7 @@ pub fn list_inspections_in(
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
+    let now = engine_pin::BuildId::current();
     let mut out: Vec<InspectionSummary> = entries
         .filter_map(Result::ok)
         .filter_map(|e| {
@@ -1595,6 +1618,10 @@ pub fn list_inspections_in(
             } else {
                 0.0
             };
+            let build_refusal = unfinished
+                .then(|| engine_pin::other_build_refusal(record.pin.as_ref(), &now))
+                .flatten();
+            let other_build = build_refusal.is_some();
             Some(InspectionSummary {
                 id: record.run_id.clone(),
                 started: record.created_at.clone(),
@@ -1603,8 +1630,12 @@ pub fn list_inspections_in(
                 origin: record.origin,
                 remaining_parts,
                 estimate_usd,
-                resumable_here: unfinished && record.origin == RunOrigin::Cockpit,
+                resumable_here: unfinished && record.origin == RunOrigin::Cockpit && !other_build,
                 reasons: record.incomplete_reasons.clone(),
+                started_on_build: record.pin.as_ref().and_then(|p| p.build.short_commit()),
+                built_from: record.pin.as_ref().and_then(|p| p.build.built_from.clone()),
+                other_build,
+                build_refusal,
             })
         })
         .collect();

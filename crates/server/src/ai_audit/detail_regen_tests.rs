@@ -2421,6 +2421,7 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
             estimate_usd: None,
             include_alternatives: false,
             origin: crate::run_store::RunOrigin::Cli,
+            restarted_from: None,
             project_id: None,
         })
         .unwrap();

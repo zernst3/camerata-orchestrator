@@ -144,6 +144,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
         estimate_usd: Some(10.0),
         include_alternatives: true,
         origin: RunOrigin::Cli,
+        restarted_from: None,
         project_id: None,
     })
     .unwrap()
@@ -768,6 +769,7 @@ fn make_run(root: &std::path::Path, id: &str, project: &str, commit: &str, statu
         attempt: 1,
         engine_version: engine_version(),
         pin: None,
+        restarted_from: None,
         project_key: project.to_string(),
         repos: vec![RepoRecord {
             name: "a/b".to_string(),
@@ -1130,6 +1132,7 @@ fn cockpit_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
         estimate_usd: Some(10.0),
         include_alternatives: false,
         origin: RunOrigin::Cockpit,
+        restarted_from: None,
         project_id: None,
     })
     .unwrap()
@@ -1232,6 +1235,7 @@ fn the_listing_holds_only_the_runs_the_caller_says_belong_to_the_project() {
         estimate_usd: None,
         include_alternatives: false,
         origin: RunOrigin::Cockpit,
+        restarted_from: None,
         project_id: None,
     })
     .unwrap();
@@ -3065,3 +3069,8 @@ fn a_client_inspection_does_not_start_on_a_dirty_or_commitless_build() {
         None
     );
 }
+
+/// Issue #341, steps B and C: the build a saved run was started on, as the app lists it and as
+/// the package states it.
+#[path = "build_listing_tests.rs"]
+mod build_listing;

@@ -102,6 +102,7 @@ fn report() -> ScanReport {
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
+            scanned_with: None,
         },
         recommendations: HashMap::new(),
         failed_passes: Vec::new(),
@@ -299,10 +300,13 @@ fn gate7_readme_provenance_lines_equal_the_manifest_provenance() {
         })
         .collect();
     assert_eq!(parsed.commits, manifest_commits);
-    assert_eq!(
-        parsed.engine_version,
-        manifest_str(&manifest, "engine_version")
-    );
+    // The builds: the README's build lines are the manifest's two build objects (issue #341);
+    // `engine_version` stays in the manifest for old readers and is no README line.
+    let (stated, rendered) = build_lines_of(&readme, &manifest);
+    assert_eq!(stated, rendered, "{readme}");
+    assert!(!stated.is_empty(), "{readme}");
+    assert_eq!(parsed.engine_version, None, "{readme}");
+    assert!(manifest_str(&manifest, "engine_version").is_some());
     assert_eq!(
         parsed.corpus_version,
         manifest_str(&manifest, "corpus_version")
@@ -330,9 +334,9 @@ fn gate7_readme_provenance_lines_equal_the_manifest_provenance() {
     );
     assert_eq!(parsed.rules_last_reviewed.as_deref(), Some("2026-10-18"));
     assert!(parsed
-        .engine_version
-        .as_deref()
-        .is_some_and(|v| v.starts_with("camerata ")));
+        .build_lines
+        .iter()
+        .any(|l| l.contains("built with: Camerata ")));
 }
 
 /// The README must carry EVERY non-null value the manifest's `inspection` block carries, found
@@ -408,10 +412,31 @@ fn gate7_absent_provenance_is_null_in_the_manifest_and_omitted_from_the_readme()
         "no fabricated review date: {readme}"
     );
 
-    // The always-present lines still agree.
-    assert_eq!(
-        parsed.engine_version,
-        manifest_str(&manifest, "engine_version")
+    // The always-present lines still agree: the scanning build is not recorded, and says so.
+    let (stated, rendered) = build_lines_of(&readme, &manifest);
+    assert_eq!(stated, rendered, "{readme}");
+    assert!(
+        manifest["inspection"]["scanned_with"].is_null(),
+        "{manifest}"
     );
+    assert!(readme.contains("Scanned with: not recorded\n"), "{readme}");
     assert!(parsed.repos.is_some() && parsed.generated.is_some());
+}
+
+/// The README's build lines (issue #341), as the README states them and as the manifest's
+/// `scanned_with` and `package_built_with` objects render them.
+fn build_lines_of(readme: &str, manifest: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    let parsed = parse_readme_provenance(readme);
+    let object = |key: &str| {
+        serde_json::from_value::<camerata_server::onboard::ScanBuild>(
+            manifest["inspection"][key].clone(),
+        )
+        .ok()
+    };
+    let package = object("package_built_with").expect("the manifest names the package build");
+    let expected = camerata_server::render_build_lines(object("scanned_with").as_ref(), &package)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    (parsed.build_lines, expected)
 }
