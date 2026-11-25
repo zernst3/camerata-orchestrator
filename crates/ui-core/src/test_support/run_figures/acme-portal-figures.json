@@ -1,0 +1,9 @@
+{
+  "wall_clock_ms": 3723000,
+  "sessions": 2,
+  "batches": [
+    { "stage": "scan_pass", "submitted": 0, "processing": 1, "ended": 4 },
+    { "stage": "calibration", "submitted": 2, "processing": 0, "ended": 3 },
+    { "stage": "fix_generation", "submitted": 0, "processing": 0, "ended": 5 }
+  ]
+}

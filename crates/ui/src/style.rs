@@ -1301,6 +1301,11 @@ html, body {
 .review-stats-total { margin: 4px 0; font-variant-numeric: tabular-nums; }
 .review-stats-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
 .review-stats-table th, .review-stats-table td { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); }
+/* The Run figures panel (#293): one table, view buttons above it, Copy below. */
+.run-figures-views { margin: 10px 0 6px; flex-wrap: wrap; }
+.run-figures-table td:first-child { color: var(--ink); font-weight: 600; }
+.run-figures-empty td { color: var(--ink-faint); font-weight: 400; }
+.run-figures .cost-panel-actions { margin-top: 10px; align-items: center; }
 .pane-snippet {
   margin: 0 0 8px; padding: 6px 8px; overflow-x: auto;
   border: 1px solid var(--line); border-radius: 3px;

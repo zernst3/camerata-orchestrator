@@ -597,6 +597,35 @@ pub(in crate::cockpit) struct ScanReportView {
     /// model design 2026-11-20). Empty for a report saved before the model.
     #[serde(default)]
     pub conventions: Vec<camerata_api_types::audit::RuleConvention>,
+    /// The Run figures panel's report source (#293): the report's line total, its per-language
+    /// volumes and its ledger, kept as the server sent them so a saved draft round-trips them
+    /// unchanged. Read only through [`Self::run_figures_report`], which keeps counts and
+    /// timings and nothing else. `None` for a report saved before they existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_lines: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_lines_by_language: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<serde_json::Value>,
+}
+
+impl ScanReportView {
+    /// The report's part of the run figures: counts and timings only. A field that does not
+    /// read as its figure is left not recorded.
+    pub(in crate::cockpit) fn run_figures_report(
+        &self,
+    ) -> camerata_ui_core::run_figures::ReportFigures {
+        fn read<T: serde::de::DeserializeOwned>(v: &Option<serde_json::Value>) -> Option<T> {
+            v.as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+        }
+        camerata_ui_core::run_figures::ReportFigures {
+            code_lines: read(&self.code_lines),
+            code_lines_by_language: read(&self.code_lines_by_language),
+            files_scanned: Some(self.files_scanned as u64),
+            ledger: read(&self.ledger),
+        }
+    }
 }
 
 /// `GET /api/projects/:id/standards`: the active rulings on the standards of the latest

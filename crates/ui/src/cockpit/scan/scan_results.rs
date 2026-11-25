@@ -1749,6 +1749,18 @@ pub(in crate::cockpit) fn ScanResults(report: ScanReportView) -> Element {
                 if auditing() || audited.is_some() {
                     crate::agent_activity::AgentActivity { run_id: "scan-audit".to_string() }
                 }
+                // The finished run's figures (#293): operator only, metrics only, never part of
+                // the client package. The report gives scope and stage figures; the run's saved
+                // folder gives wall clock and batch status.
+                if !auditing() {
+                    if let Some(a) = audited.as_ref() {
+                        RunFiguresSection {
+                            key: "{a.run_id.clone().unwrap_or_default()}",
+                            report: a.run_figures_report(),
+                            run_id: a.run_id.clone(),
+                        }
+                    }
+                }
             }
 
             // ── Findings (after the audit runs) ────────────────────────────────

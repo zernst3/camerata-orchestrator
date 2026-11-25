@@ -109,6 +109,7 @@ mod onboard;
 mod queue_table;
 mod repo_health;
 mod rescan;
+mod run_figures_panel;
 mod scan_results;
 mod wire;
 pub use audit_calls::*;
@@ -121,6 +122,7 @@ pub use onboard::*;
 pub use queue_table::*;
 pub use repo_health::*;
 pub use rescan::*;
+pub(crate) use run_figures_panel::*;
 pub use scan_results::*;
 pub(super) use wire::*;
 
