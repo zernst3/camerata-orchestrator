@@ -11,14 +11,16 @@
 # disk pressure.
 #
 # Everything it deletes is regenerable build output or an already-merged worktree. It never
-# touches a worktree with uncommitted changes, never deletes any branch, never removes
+# touches a worktree with uncommitted changes, deletes a branch only with plain `git branch -d`
+# right after its merged worktree was removed (git refuses unmerged ones; main, feat/audit-report-export,
+# backup/*, scan-build/* and the main checkout's branch are never deleted), never removes
 # a worktree with no commits of its own, and
 # never touches anything a running cargo/rustc uses, whose branch committed in the last
 # ACTIVE_MINUTES, or that has modified tracked files.
 #
 # Tiers (free space on the data volume):
-#   always          remove merged, idle worktrees under .claude/worktrees/ (any name, + their
-#                   branches); drop the target/ of idle, unmerged ones
+#   always          remove merged, idle worktrees under .claude/worktrees/ (any name) and
+#                   delete their merged branches (git branch -d); drop the target/ of idle, unmerged ones
 #   < TIER1_GIB     cargo-sweep --time 1 across REPOS_ROOT
 #   < TIER2_GIB     delete target/*/incremental and target/release in idle repos
 #   < TIER3_GIB     delete the whole target/ of every idle repo (full rebuild next time)
@@ -217,11 +219,32 @@ branch_merged() {
     return 1
 }
 
+# True for branches that must never be deleted, even when merged.
+protected_branch() {
+    local br="$1" cur
+    case "$br" in main|feat/audit-report-export|backup/*|scan-build/*) return 0 ;; esac
+    cur="$(git -C "$ORCH_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    [ -n "$cur" ] && [ "$cur" = "$br" ] && return 0
+    return 1
+}
+
+# Delete merged branch $1 after its worktree is gone: plain -d only, git refuses unmerged ones.
+delete_merged_branch() {
+    local br="$1" msg
+    if protected_branch "$br"; then log "branch kept: $br (protected)"; return; fi
+    if msg="$(git -C "$ORCH_REPO" branch -d "$br" 2>&1)"; then
+        log "deleted merged branch $br"
+    else
+        log "branch kept: $br (git refused: $(printf '%s' "$msg" | tr '\n' ' '))"
+    fi
+}
+
 log "start; free=$(free_gib) GiB"
 
 # ── 1. worktrees ───────────────────────────────────────────────────────────────────────────
 # Removes only whole worktrees (git worktree remove, no force) that are merged, clean, have work
-# of their own and are idle. Branches are NEVER deleted (branch cleanup is manual).
+# of their own and are idle. Right after a worktree is removed, its branch is deleted with plain
+# `git branch -d` (never -D, so git itself refuses anything not fully merged), except protected ones.
 if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
     for wt in "$ORCH_REPO"/.claude/worktrees/*; do
         [ -e "$wt" ] || continue
@@ -250,7 +273,8 @@ if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
         if [ "$merged" = 1 ] && [ -z "$dirty" ]; then
             if [ "$DRY_RUN" = 1 ]; then
                 log "[dry-run] would remove merged worktree $wt (branch $branch): merged, clean, idle, has own commits"
-                log "branch kept: $branch (branch cleanup is manual)"
+                if protected_branch "$branch"; then log "branch kept: $branch (protected)"
+                else log "[dry-run] would delete merged branch $branch"; fi
             else
                 still_idle "$wt" || continue
                 sz="$(du -sh "$wt" 2>/dev/null | cut -f1)"
@@ -258,7 +282,7 @@ if [ -d "$ORCH_REPO/.git" ] || [ -f "$ORCH_REPO/.git" ]; then
                 [ -z "$ign" ] || log "ignored files that go with $wt: $(printf '%s' "$ign" | tr '\n' ' ')"
                 if git -C "$ORCH_REPO" worktree remove "$wt" 2>/dev/null; then
                     log "removed merged worktree $wt (branch $branch, $sz)"
-                    log "branch kept: $branch (branch cleanup is manual)"
+                    delete_merged_branch "$branch"
                 else
                     log "keep worktree $wt: git refused to remove it"
                 fi

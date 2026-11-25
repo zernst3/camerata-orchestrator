@@ -26,6 +26,7 @@ mkbranch() { # name dir
 for n in mc md mu run ra tb gf wl; do mkbranch "$n" "$WT/$n"; done
 mkbranch "sp" "$WT/sp ace"
 mkbranch "backup/x" "$WT/bk"
+mkbranch "scan-build/y" "$WT/sb"
 mkbranch "ext" "$T/ext"; ln -s "$T/ext" "$WT/link"
 g worktree add -q -b um "$WT/um" main
 gw "$WT/um" commit -q --allow-empty -m "unmerged work"
@@ -83,6 +84,12 @@ listed() { echo "$out" | grep -qF "would remove merged worktree $WT/$1 " && echo
 ok "dry mc merged clean idle" remove "$(listed mc)"
 ok "dry sp path with spaces" remove "$(listed 'sp ace')"
 ok "dry bk backup/x merged (worktree only)" remove "$(listed bk)"
+for b in mc sp backup/x scan-build/y um; do
+    git -C "$ORCH" rev-parse --verify -q "refs/heads/$b" >/dev/null && r=exists || r=deleted
+    ok "dry run deletes no branch ($b)" exists "$r"
+done
+echo "$out" | grep -qF "[dry-run] would delete merged branch mc" && r=logged || r=silent; ok "dry run logs would-delete for mc" logged "$r"
+echo "$out" | grep -qF "would delete merged branch backup/x" && r=logged || r=silent; ok "dry run does not offer backup/x" silent "$r"
 ok "dry fr fresh no commits" keep "$(listed fr)"
 ok "dry fo fresh at old base" keep "$(listed fo)"
 ok "dry wm worktree on main" keep "$(listed wm)"
@@ -119,10 +126,15 @@ ok "below tier2: fresh um/target dropped" drop "$(T1=100000 T2=100000 T3=0 tgt u
 
 # REAL pass inside the temp repo only, with real (huge) thresholds so every tier fires
 TIER=100000 runguard | sed 's/^/  real: /'
-for b in main backup/x uo fr fo mc md mu run ra tb gf wl sp um ext; do
+for b in main backup/x scan-build/y uo fr fo md mu run ra tb gf wl um ext; do
     git -C "$ORCH" rev-parse --verify -q "refs/heads/$b" >/dev/null && r=exists || r=deleted
     ok "branch $b survives" exists "$r"
 done
+for b in mc sp; do
+    git -C "$ORCH" rev-parse --verify -q "refs/heads/$b" >/dev/null && r=exists || r=deleted
+    ok "real merged branch $b deleted with its worktree" deleted "$r"
+done
+[ -d "$WT/sb" ] && r=present || r=gone; ok "real scan-build/y worktree removed" gone "$r"
 [ -d "$WT/mc" ] && r=present || r=gone;      ok "real mc worktree removed" gone "$r"
 [ -d "$WT/sp ace" ] && r=present || r=gone;  ok "real 'sp ace' worktree removed" gone "$r"
 [ -d "$WT/bk" ] && r=present || r=gone;      ok "real bk worktree removed" gone "$r"
@@ -157,5 +169,10 @@ bo="$(DRY_RUN=0; log() { echo "$*"; }; eval "$(awk '/^is_scan_path\(\)/,/^}/; /^
 [ -f "$T/camerata-scan-t4/target/release/b" ] && r=present || r=gone; ok "remove_path refuses a scan path" present "$r"
 [ -f "$T/plain/target/release/b" ] && r=present || r=gone; ok "remove_path still removes an ordinary target path" gone "$r"
 echo "$bo" | grep -q "REFUSED.*kept scan build" && r=logged || r=silent; ok "remove_path logs the refusal" logged "$r"
+# branch deletion backstop: plain -d refuses an unmerged branch; protected names are never tried
+bd="$(DRY_RUN=0; ORCH_REPO="$ORCH"; log() { echo "$*"; }; eval "$(awk '/^protected_branch\(\)/,/^}/; /^delete_merged_branch\(\)/,/^}/' "$GUARD")"; delete_merged_branch um; delete_merged_branch main)"
+git -C "$ORCH" rev-parse --verify -q refs/heads/um >/dev/null && r=exists || r=deleted; ok "branch -d refuses unmerged um" exists "$r"
+echo "$bd" | grep -q "branch kept: um (git refused:" && r=logged || r=silent; ok "refusal is logged with git's reason" logged "$r"
+echo "$bd" | grep -q "branch kept: main (protected)" && r=logged || r=silent; ok "main is protected" logged "$r"
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILED"
 exit "$fail"
