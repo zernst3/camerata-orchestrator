@@ -35,7 +35,13 @@ pub(super) enum Reply {
     Missing,
     /// A failed item that was nevertheless billed (a model refusal).
     Refused,
+    /// A failed item the provider refused for credit (not billed): [`CREDIT_ERROR`].
+    CreditError,
 }
+
+/// The provider's row error when the account has no credit left. It is not billed.
+pub(super) const CREDIT_ERROR: &str =
+    "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing.";
 
 fn response(text: &str, truncated: bool, cost: f64) -> LlmResponse {
     LlmResponse {
@@ -193,7 +199,11 @@ impl FakeBatch {
             })
             .collect()
     }
-    fn submitted_ids(&self) -> Vec<Vec<String>> {
+    /// Real-time calls so far (the end-of-run second try and the truncation retry).
+    pub(super) fn realtime_calls(&self) -> usize {
+        self.realtime.calls.load(Ordering::SeqCst)
+    }
+    pub(super) fn submitted_ids(&self) -> Vec<Vec<String>> {
         self.submissions
             .lock()
             .unwrap()
@@ -286,20 +296,21 @@ impl BatchApi for FakeBatch {
                         billed: Some(self.reply("", false)),
                         ..row(None, Some("the model refused this request (refusal)"))
                     }),
+                    Reply::CreditError => Some(row(None, Some(CREDIT_ERROR))),
                 }
             })
             .collect())
     }
 }
 
-fn eff(batch_default: bool) -> EfficiencyConfig {
+pub(super) fn eff(batch_default: bool) -> EfficiencyConfig {
     EfficiencyConfig {
         batch_default,
         ..EfficiencyConfig::default()
     }
 }
 
-fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
+pub(super) fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
     UsageMeter::with_controls(RunControls {
         scope: Default::default(),
         finder: Default::default(),
