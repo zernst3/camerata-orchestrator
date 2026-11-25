@@ -38,16 +38,32 @@ baselines) as they are: the script does not run them.
 `CAMERATA_NEXTEST_JOBS` to change it, for example `CAMERATA_NEXTEST_JOBS=8` when nothing else
 is running. To go back, restore the `cargo test` line; nothing else depends on nextest.
 
+## Why the partitions extract into the checkout
+
+Some tests (in `crates/cli/tests` and `crates/gateway/tests`) find a binary through the
+compile-time `env!("CARGO_BIN_EXE_camerata")`, an absolute path baked in when the test is
+built. An archive extracted anywhere else leaves that path empty and those tests fail with "No
+such file or directory". The partition jobs therefore extract with `--extract-to .`, which
+puts the binaries back at `./target`, the path the build job compiled them at (GitHub checks
+every job out to the same path). Reading `CARGO_BIN_EXE_*` at run time instead
+(`std::env::var`, which nextest sets) would remove the constraint; that is a test change and
+has not been made.
+
 ## Measured (Linux, 4 cores, same commit, binaries already built)
 
 | | `cargo test --workspace` | nextest |
 |---|---|---|
 | test binaries | 190 (+ 30 doctest targets) | 190 |
 | tests | 14,300 (14,281 run, 19 ignored) | 14,300 (14,281 run, 19 skipped) |
-| doctests | 11 (10 run, 1 ignored) | run separately with `cargo test --doc` |
-| wall time | 3,102 s | 1,646 s before the priority override |
+| doctests | 11 (10 run, 1 ignored) | the same 11, through `cargo test --doc` (11 s) |
+| wall time, 4 tests at once | 3,102 s | 1,646 s (no priority override) |
+| wall time, `-j 3` | | 1,502 s (with the priority override) |
 
-The test names match one for one. The suite's floor is one test,
-`ai_audit::runner_adoption_tests::a_resumed_30k_site_calibration_resubmits_nothing_already_absorbed`,
-which takes about 21 minutes on its own; `.config/nextest.toml` starts it first. Making that
-test faster is the largest remaining gain, for both runners.
+The test names match one for one. On CI the four partitions ran 3,645, 3,596, 3,544 and 3,496
+tests (14,281 together).
+
+The suite's floor is one test,
+`ai_audit::runner_adoption_tests::a_resumed_30k_site_calibration_resubmits_nothing_already_absorbed`:
+about 21 minutes on its own here and about 37 minutes on a GitHub runner, where every other
+partition finishes in 5 to 8 minutes. `.config/nextest.toml` starts it first. Making that test
+faster is the largest remaining gain, for both runners; more partitions cannot help until then.
