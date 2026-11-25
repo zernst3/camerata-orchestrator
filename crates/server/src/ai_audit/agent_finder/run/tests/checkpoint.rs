@@ -4,8 +4,13 @@
 
 use std::sync::Mutex;
 
+use super::super::super::api_agent::{
+    CONTEXT_FULL_PREFIX, CUT_OFF_TWICE_PREFIX, PIECE_CEILING_PREFIX, REPLY_TIMEOUT_PREFIX,
+    REQUEST_TOO_LARGE_PREFIX,
+};
+use super::super::FinderExtras;
 use super::*;
-use crate::ai_audit::UsageMeter;
+use crate::ai_audit::{FailedPass, UsageMeter};
 use crate::cost_checkpoint::{
     CheckpointPlan, CheckpointSettings, CheckpointSink, CostCheckpoint, CAUSE_PROJECTED,
     CHECKPOINT_FILE,
@@ -275,4 +280,349 @@ async fn a_two_repository_run_pauses_in_the_first_with_the_whole_runs_pieces_pri
     .unwrap();
     assert_eq!(agent.seen.lock().unwrap().len(), 1, "one piece in all");
     assert!(!other.3.is_empty());
+}
+
+// ─── a piece that fails the same way every time is cut in two on the resume ──────────────────
+
+fn quick_joints() -> ScriptedAgent {
+    ScriptedAgent::new(vec![
+        out("problems-1.json", &json!([])),
+        out("leads-answers.json", &json!([])),
+    ])
+    .with_usage(usage(0.5))
+}
+
+fn three_files() -> Vec<(String, String)> {
+    let mut files = repo_files();
+    files.push(("src/c.rs".to_string(), rust_file(3)));
+    files
+}
+
+async fn run_three(
+    agent: &dyn PieceAgent,
+    dir: &std::path::Path,
+    meter: &UsageMeter,
+) -> FinderResult {
+    in_run(
+        dir,
+        find_repo(
+            agent,
+            REPO,
+            &three_files(),
+            &rules(),
+            &corpus(),
+            &RunControls::default(),
+            &two_pieces(),
+            Some(meter),
+        ),
+    )
+    .await
+    .unwrap()
+}
+
+/// Part one (a.rs) finishes and part two (b.rs and c.rs) ends on `stop`; then the resume gets a
+/// model that answers. Returns what the resume ran, its failed parts, its extras and the cost it
+/// replayed as resumed. `expect_halves` says which scripts the resume is given: one for each half,
+/// or one for the whole of part two.
+async fn resume_after(
+    stop: AgentStop,
+    expect_halves: bool,
+) -> (Vec<String>, Vec<FailedPass>, FinderExtras, f64) {
+    let dir = tempfile::tempdir().unwrap();
+    let stopped = ScriptedAgent::new(vec![])
+        .with_stop(stop)
+        .with_usage(usage(0.2));
+    let first = ByPiece::new(vec![
+        ("src/a.rs", part("src/a.rs", 6, 1.0)),
+        ("src/b.rs", stopped),
+        ("joints", quick_joints()),
+    ]);
+    let meter = UsageMeter::default();
+    let (_, _, _, failed, _, _) = run_three(&first, dir.path(), &meter).await;
+    assert_eq!(
+        failed.len(),
+        1,
+        "part two is the one failed part: {failed:?}"
+    );
+
+    let mut scripts = vec![
+        ("src/a.rs", part("src/a.rs", 6, 1.0)),
+        ("joints", quick_joints()),
+    ];
+    if expect_halves {
+        scripts.push(("src/b.rs", part("src/b.rs", 4, 1.0)));
+        scripts.push(("src/c.rs", part("src/c.rs", 3, 1.0)));
+    } else {
+        scripts.push((
+            "src/b.rs",
+            ScriptedAgent::new(full_script(
+                &[("src/b.rs", 4), ("src/c.rs", 3)],
+                vec![],
+                vec![],
+                vec![
+                    answer_clean("ARCH-ONE-1", "src/b.rs", 1),
+                    answer_clean("SEC-TWO-1", "src/c.rs", 1),
+                ],
+            ))
+            .with_usage(usage(1.0)),
+        ));
+    }
+    let second = ByPiece::new(scripts);
+    let meter2 = UsageMeter::default();
+    let (_, _, _, failed2, _, extras) = run_three(&second, dir.path(), &meter2).await;
+    let seen = second.seen.lock().unwrap().clone();
+    (seen, failed2, extras, meter2.snapshot().resumed_cost_usd)
+}
+
+/// The halves together read exactly the parent's files, each in full, and no coverage record
+/// stands for the parent itself.
+fn assert_halves_cover_the_parent(extras: &FinderExtras) {
+    assert_eq!(extras.coverage.len(), 3, "a.rs plus the two halves");
+    let mut read: Vec<String> = Vec::new();
+    for c in &extras.coverage {
+        for (file, state) in &c.files {
+            assert_eq!(*state, FileState::ReadInFull, "{file}");
+            read.push(file.clone());
+        }
+        assert!(c.still_unread.is_empty(), "{:?}", c.still_unread);
+    }
+    read.sort();
+    assert_eq!(read, ["src/a.rs", "src/b.rs", "src/c.rs"], "each file once");
+    let halves: Vec<&str> = extras
+        .coverage
+        .iter()
+        .map(|c| c.piece_key.as_str())
+        .filter(|k| k.ends_with("/a") || k.ends_with("/b"))
+        .collect();
+    assert_eq!(
+        halves.len(),
+        2,
+        "{halves:?}: the parent has no record of its own"
+    );
+}
+
+#[tokio::test]
+async fn a_piece_that_hit_its_turn_limit_runs_as_two_halves_on_the_resume_and_nothing_twice() {
+    let (seen, failed, extras, resumed) =
+        resume_after(AgentStop::TurnLimit("60 turns".into()), true).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(
+        !seen.contains(&"src/a.rs".to_string()),
+        "the finished part is replayed, not run: {seen:?}"
+    );
+    assert_eq!(
+        seen.iter().filter(|k| *k == "src/b.rs").count(),
+        1,
+        "{seen:?}"
+    );
+    assert_eq!(
+        seen.iter().filter(|k| *k == "src/c.rs").count(),
+        1,
+        "{seen:?}"
+    );
+    assert_eq!(
+        seen.iter().filter(|k| *k == "joints").count(),
+        1,
+        "{seen:?}"
+    );
+    assert_halves_cover_the_parent(&extras);
+    // The stored part one (1.0) and the stopped parent's paid turns (0.2) are replayed as resumed.
+    assert!((resumed - 1.2).abs() < 1e-9, "{resumed}");
+}
+
+#[tokio::test]
+async fn a_piece_that_reached_its_own_spend_ceiling_is_halved_but_the_runs_limit_is_not_a_reason() {
+    let (seen, failed, extras, _) = resume_after(
+        AgentStop::SpendLimit(format!(
+            "{PIECE_CEILING_PREFIX}$4.00 was reached after 9 turns"
+        )),
+        true,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(seen.contains(&"src/c.rs".to_string()), "{seen:?}");
+    assert_halves_cover_the_parent(&extras);
+}
+
+#[tokio::test]
+async fn a_reply_cut_off_at_the_output_limit_twice_is_halved_on_the_resume() {
+    let (seen, failed, extras, _) = resume_after(
+        AgentStop::Failed(format!("{CUT_OFF_TWICE_PREFIX}32000 tokens twice")),
+        true,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(seen.contains(&"src/c.rs".to_string()), "{seen:?}");
+    assert_halves_cover_the_parent(&extras);
+}
+
+#[tokio::test]
+async fn a_prompt_too_long_400_is_halved_on_the_resume() {
+    let (seen, failed, extras, _) = resume_after(
+        AgentStop::Failed(format!(
+            "{REQUEST_TOO_LARGE_PREFIX}Anthropic API HTTP 400: prompt is too long"
+        )),
+        true,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(seen.contains(&"src/c.rs".to_string()), "{seen:?}");
+    assert_halves_cover_the_parent(&extras);
+}
+
+#[tokio::test]
+async fn repeated_time_outs_are_halved_on_the_resume() {
+    let (seen, failed, extras, _) = resume_after(
+        AgentStop::Failed(format!(
+            "{REPLY_TIMEOUT_PREFIX}Anthropic API request failed: operation timed out"
+        )),
+        true,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(seen.contains(&"src/c.rs".to_string()), "{seen:?}");
+    assert_halves_cover_the_parent(&extras);
+}
+
+#[tokio::test]
+async fn a_transient_stop_reruns_the_piece_whole_and_never_splits_it() {
+    let transient = [
+        AgentStop::Failed("Anthropic API HTTP 429: rate limit exceeded".into()),
+        AgentStop::Failed("Anthropic API request failed: connect: operation timed out".into()),
+        AgentStop::Failed("Anthropic API HTTP 400: some other bad request".into()),
+        AgentStop::Failed("Anthropic API HTTP 529: overloaded".into()),
+        AgentStop::Failed("Anthropic API request failed: connection reset by peer".into()),
+        AgentStop::Failed(
+            "the run stopped because the provider failed repeatedly; no further request was sent"
+                .into(),
+        ),
+        AgentStop::SpendLimit("the run's spend limit blocks the next turn of this piece".into()),
+    ];
+    for stop in transient {
+        let (seen, failed, _, _) = resume_after(stop.clone(), false).await;
+        assert!(failed.is_empty(), "{stop:?}: {failed:?}");
+        assert!(
+            !seen.contains(&"src/c.rs".to_string()),
+            "{stop:?} must not split: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter().filter(|k| *k == "src/b.rs").count(),
+            1,
+            "{stop:?}: {seen:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_one_file_piece_that_hit_its_turn_limit_cannot_be_halved_and_stays_a_named_failed_part() {
+    let dir = tempfile::tempdir().unwrap();
+    let stopped = || {
+        ByPiece::new(vec![
+            ("src/a.rs", part("src/a.rs", 6, 1.0)),
+            (
+                "src/b.rs",
+                part("src/b.rs", 4, 1.0).with_stop(AgentStop::TurnLimit("60 turns".into())),
+            ),
+            ("joints", quick_joints()),
+        ])
+    };
+    let files = repo_files();
+    for attempt in 0..2 {
+        let agent = stopped();
+        let meter = UsageMeter::default();
+        let (_, _, _, failed, _, _) = in_run(
+            dir.path(),
+            find_repo(
+                &agent,
+                REPO,
+                &files,
+                &rules(),
+                &corpus(),
+                &RunControls::default(),
+                &two_pieces(),
+                Some(&meter),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failed.len(), 1, "attempt {attempt}: {failed:?}");
+        assert_eq!(failed[0].files, vec!["src/b.rs".to_string()]);
+        assert!(
+            failed[0].reason.contains("turn limit"),
+            "{}",
+            failed[0].reason
+        );
+        let seen = agent.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().filter(|k| *k == "src/b.rs").count(),
+            1,
+            "attempt {attempt}: the single file runs once, whole: {seen:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_piece_stopped_before_a_request_past_the_context_window_is_halved_on_the_resume() {
+    let why = format!(
+        "{} (about 190000 tokens against a window of 200000): no further request was sent",
+        CONTEXT_FULL_PREFIX
+    );
+    let (seen, failed, extras, _) = resume_after(AgentStop::Failed(why), true).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(seen.contains(&"src/c.rs".to_string()), "{seen:?}");
+    assert_halves_cover_the_parent(&extras);
+}
+
+/// Two files, then a third: the first attempt (no limit) finishes part one and stops part two;
+/// the resume runs under a spend limit just above its estimate.
+#[tokio::test]
+async fn a_piece_that_splits_on_the_resume_does_not_pause_the_run_by_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let stopped = ScriptedAgent::new(vec![])
+        .with_stop(AgentStop::TurnLimit("60 turns".into()))
+        .with_usage(usage(0.2));
+    let first = ByPiece::new(vec![
+        ("src/a.rs", part("src/a.rs", 6, 1.0)),
+        ("src/b.rs", stopped),
+        ("joints", quick_joints()),
+    ]);
+    let meter = UsageMeter::default();
+    let (_, _, _, failed, _, _) = run_three(&first, dir.path(), &meter).await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+
+    // The resume: 1.2 is stored (part one 1.0, the stopped parent 0.2). The run planned 2 pieces
+    // at 1.0 each. Part two's halves cost 0.4 each, so the whole run ends at 2.0, under 2.5.
+    let seen: Lines = Lines::default();
+    let mut c = controls(2.5, 1.2, None, &seen);
+    c.checkpoint.plan.as_mut().unwrap().pieces = 2;
+    let meter2 = UsageMeter::with_controls(c.clone());
+    let second = ByPiece::new(vec![
+        ("src/a.rs", part("src/a.rs", 6, 1.0)),
+        ("src/b.rs", part("src/b.rs", 4, 0.4)),
+        ("src/c.rs", part("src/c.rs", 3, 0.4)),
+        ("joints", quick_joints()),
+    ]);
+    let (_, _, _, failed2, _, _) = in_run(
+        dir.path(),
+        find_repo(
+            &second,
+            REPO,
+            &three_files(),
+            &rules(),
+            &corpus(),
+            &c,
+            &two_pieces(),
+            Some(&meter2),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        meter2.checkpoint_stop().is_none(),
+        "the split alone paused the run: {:?}",
+        meter2.checkpoint_stop()
+    );
+    assert!(failed2.is_empty(), "{failed2:?}");
+    let ran = second.seen.lock().unwrap().clone();
+    assert!(ran.contains(&"src/c.rs".to_string()), "{ran:?}");
 }

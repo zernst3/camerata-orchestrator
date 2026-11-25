@@ -1689,6 +1689,10 @@ pub(crate) enum AnthropicPostError {
     },
     /// The request never got an answer (connect, timeout, dropped connection).
     Network(String),
+    /// The request was sent and the wait for its reply (or its body) timed out: past connecting,
+    /// so the provider took the request and did not answer in time. A connect time-out is
+    /// [`Self::Network`].
+    ReplyTimeout(String),
     /// HTTP 200 with `stop_reason: "refusal"`: the whole reply, usage included.
     Refusal(Value),
     /// A success status with a body that is not JSON.
@@ -1702,7 +1706,9 @@ impl AnthropicPostError {
             Self::Http { status, body, .. } => {
                 anyhow::anyhow!("Anthropic API HTTP {}: {body}", status_text(status))
             }
-            Self::Network(e) => anyhow::anyhow!("Anthropic API request failed: {e}"),
+            Self::Network(e) | Self::ReplyTimeout(e) => {
+                anyhow::anyhow!("Anthropic API request failed: {e}")
+            }
             Self::Refusal(v) => crate::llm::refusal_error(&v)
                 .unwrap_or_else(|| anyhow::anyhow!("the model refused the request")),
             Self::BadReply(e) => anyhow::anyhow!("parse Anthropic response JSON: {e}"),
@@ -1758,7 +1764,18 @@ pub(crate) async fn post_anthropic_body_to(
 
     let (status, headers, text) = send_and_read_with_headers(builder.json(body), "Anthropic API")
         .await
-        .map_err(|e| AnthropicPostError::Network(format!("{e:#}")))?;
+        .map_err(|e| {
+            // Past connecting, a timed out wait for the reply or its body is the provider's.
+            let reply_timeout = e.chain().any(|c| {
+                c.downcast_ref::<reqwest::Error>()
+                    .is_some_and(|r| r.is_timeout() && !r.is_connect())
+            });
+            if reply_timeout {
+                AnthropicPostError::ReplyTimeout(format!("{e:#}"))
+            } else {
+                AnthropicPostError::Network(format!("{e:#}"))
+            }
+        })?;
     let retry_after = headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())

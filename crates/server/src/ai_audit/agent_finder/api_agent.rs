@@ -120,6 +120,18 @@ const RETRY_AFTER_SPREAD_PERCENT: u64 = 20;
 /// The longest hit line a Grep returns.
 const MAX_GREP_LINE_CHARS: usize = 400;
 
+/// Whether an HTTP failure says the request is too large for the model: a 413 or a
+/// `request_too_large` error, or a 400 saying the prompt is too long or that the input length and
+/// `max_tokens` exceed the context limit. The same body would be refused again.
+fn request_too_large(status: u16, error_type: Option<&str>, message: &str) -> bool {
+    if status == 413 || error_type == Some("request_too_large") {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    status == 400
+        && (lower.contains("prompt is too long") || lower.contains("exceed context limit"))
+}
+
 /// One conversation a transport keeps, and what its piece has spent so far (one ceiling per
 /// piece, however many steps it takes).
 #[derive(Debug, Clone)]
@@ -175,6 +187,34 @@ pub(super) fn run_stopped_text(meter: &UsageMeter) -> String {
         meter.stop_phrase()
     )
 }
+
+// The split-worthy stops. A piece that ends on a stop whose text begins with one of these (or on
+// `AgentStop::TurnLimit`) would end the same way if run again whole, so a resume halves it
+// (`run/piece.rs` `splits_on_resume` matches ONLY these, by `starts_with`). Each one is put at the
+// front of the text where the stop is made, so the match cannot drift from the message.
+
+/// A piece stopped at its own spend ceiling (not the run's spend limit).
+pub(super) const PIECE_CEILING_PREFIX: &str = "the piece's spend ceiling of ";
+
+/// A reply cut off at the output limit twice.
+pub(super) const CUT_OFF_TWICE_PREFIX: &str = "the reply was cut off at the output limit of ";
+
+/// A piece stopped before a request that would pass the model's context window.
+pub(super) const CONTEXT_FULL_PREFIX: &str =
+    "the next request would pass the model's context window";
+
+/// The provider refused the request as too large for the model (a 400 "prompt is too long" or
+/// "input length and `max_tokens` exceed context limit", or a 413 / `request_too_large`).
+pub(super) const REQUEST_TOO_LARGE_PREFIX: &str = "the request was too large for the model: ";
+
+/// The request was sent and the provider did not answer in time on the last attempt, the one whose
+/// failure ends the piece (the earlier attempts' messages are not kept in the stop). A connect
+/// time-out (no request reached the provider) never carries this.
+pub(super) const REPLY_TIMEOUT_PREFIX: &str = "the provider did not answer in time: ";
+
+/// The share of the context window a request may fill, in percent; the rest is the safety margin
+/// for the estimate.
+const CONTEXT_FILL_PERCENT: usize = 90;
 
 /// How the text of a piece stopped by the run's own stop begins; the class of the stop is read
 /// from it ([`super::run`]).
@@ -386,7 +426,15 @@ impl ApiPieceAgent {
                     None,
                     false,
                 ),
-                Err(AnthropicPostError::Network(e)) => {
+                Err(
+                    err @ (AnthropicPostError::Network(_) | AnthropicPostError::ReplyTimeout(_)),
+                ) => {
+                    let reply_timeout = matches!(err, AnthropicPostError::ReplyTimeout(_));
+                    let (AnthropicPostError::Network(e) | AnthropicPostError::ReplyTimeout(e)) =
+                        err
+                    else {
+                        unreachable!("matched above")
+                    };
                     // A call that timed out may still have been billed and nothing came back to
                     // price it from: it counts once, at the request's cost ceiling. A failure
                     // that never reached the model counts nothing.
@@ -395,7 +443,13 @@ impl ApiPieceAgent {
                     }
                     (
                         FailureClass::Transport,
-                        format!("Anthropic API request failed: {e}"),
+                        // Only a time-out of the wait for the reply says the request itself is
+                        // too slow to answer; a connect time-out is the network and reruns whole.
+                        if reply_timeout {
+                            format!("{REPLY_TIMEOUT_PREFIX}Anthropic API request failed: {e}")
+                        } else {
+                            format!("Anthropic API request failed: {e}")
+                        },
                         None,
                         true,
                         None,
@@ -424,7 +478,13 @@ impl ApiPieceAgent {
                         matches!(status, 529 | 503) || etype.as_deref() == Some("overloaded_error");
                     (
                         class,
-                        format!("Anthropic API HTTP {status}: {message}"),
+                        if request_too_large(status, etype.as_deref(), &message) {
+                            format!(
+                                "{REQUEST_TOO_LARGE_PREFIX}Anthropic API HTTP {status}: {message}"
+                            )
+                        } else {
+                            format!("Anthropic API HTTP {status}: {message}")
+                        },
                         Some((status, text)),
                         retryable,
                         retry_after,
@@ -567,6 +627,23 @@ impl ApiPieceAgent {
         usage_of(&counted)
     }
 
+    /// The reason the next request must not be sent, when its estimated size passes
+    /// [`CONTEXT_FILL_PERCENT`] of the model's context window, counting the turn's output limit.
+    fn context_stop(&self, body: &Value, output_tokens: u32) -> Option<String> {
+        let window = crate::ai_audit::request_budget::context_window_tokens(&self.model);
+        let limit = window / 100 * CONTEXT_FILL_PERCENT;
+        // The turn may write up to its output limit, and the window holds both; the estimate of
+        // the prompt alone (3 bytes a token) can run low on dense code.
+        let estimated = super::super::repo_map::estimate_tokens(body.to_string().len())
+            + output_tokens as usize;
+        (estimated > limit).then(|| {
+            format!(
+                "{CONTEXT_FULL_PREFIX} (about {estimated} tokens against a window of {window}); \
+                 no further request was sent"
+            )
+        })
+    }
+
     /// The loop. Every failure past this point is a stop with the usage so far, never an `Err`.
     async fn drive(
         &self,
@@ -605,7 +682,7 @@ impl ApiPieceAgent {
             }
             if spent >= limits.ceiling_usd {
                 break AgentStop::SpendLimit(format!(
-                    "the piece's spend ceiling of ${:.2} was reached after {} turns (${spent:.2} spent)",
+                    "{PIECE_CEILING_PREFIX}${:.2} was reached after {} turns (${spent:.2} spent)",
                     limits.ceiling_usd,
                     usage.len()
                 ));
@@ -626,6 +703,14 @@ impl ApiPieceAgent {
                 limits.max_turn_tokens,
             );
             cache_the_conversation(&mut body);
+            // A request the model's window cannot take is never sent: the piece ends here with a
+            // stop a resume answers by halving it. The window is the registry's, never a figure
+            // of ours; the estimate is the one the batch stages use, with a margin.
+            if let Some(why) = self.context_stop(&body, limits.max_turn_tokens) {
+                // The results of the turn just served were never delivered: they cover nothing.
+                pending.clear();
+                break AgentStop::Failed(why);
+            }
 
             let reply = match self.send_with_retry(&body, use_caching).await {
                 Ok(reply) => reply,
@@ -689,7 +774,7 @@ impl ApiPieceAgent {
             if message["stop_reason"].as_str() == Some("max_tokens") {
                 if continued {
                     break AgentStop::Failed(format!(
-                        "the reply was cut off at the output limit of {} tokens twice",
+                        "{CUT_OFF_TWICE_PREFIX}{} tokens twice",
                         limits.max_turn_tokens
                     ));
                 }

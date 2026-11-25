@@ -35,6 +35,8 @@ pub(super) struct Shared<'a> {
     pub meter: Option<&'a UsageMeter>,
     /// How many pieces (and halves of refused pieces) the repository is reviewed in.
     pub n_pieces: usize,
+    /// The keys of the pieces that are halves of a piece cut in two on a resume.
+    pub halves: HashSet<String>,
     /// Where each model call shows in Agent activity; `None` shows nothing.
     pub activity: Option<super::FinderActivity>,
 }
@@ -126,6 +128,10 @@ pub(super) struct PieceReport {
     pub runs: Vec<AgentRun>,
     /// True when the model refused the piece.
     pub refused: bool,
+    /// True when the piece ended on a stop that would repeat on a whole rerun (its turn limit,
+    /// its own spend ceiling, an output limit hit twice, a prompt too long, repeated time-outs, a
+    /// request that would pass the context window): a resume runs it in two halves.
+    pub split_on_resume: bool,
     pub replayed: bool,
     /// The rule ids on the piece's checklist.
     pub checklist_rules: Vec<String>,
@@ -672,7 +678,33 @@ pub(super) fn stop_class(stop: &AgentStop) -> FailureClass {
         AgentStop::Failed(why) if why.starts_with(super::super::api_agent::RUN_STOPPED_PREFIX) => {
             FailureClass::OutageStop
         }
+        AgentStop::Failed(why) if why.starts_with(super::super::api_agent::CONTEXT_FULL_PREFIX) => {
+            FailureClass::Content
+        }
         AgentStop::Failed(why) => crate::ai_audit::classify_pass_error(&anyhow::anyhow!("{why}")),
+    }
+}
+
+/// Whether a piece that ended on `stop` would end the same way if run again whole, so a resume
+/// cuts it in two. A transient cause (a rate limit, an overload, a network failure, a credit,
+/// spend-limit or outage stop) never splits: those run whole again.
+pub(super) fn splits_on_resume(stop: &AgentStop) -> bool {
+    use super::super::api_agent::{
+        CONTEXT_FULL_PREFIX, CUT_OFF_TWICE_PREFIX, PIECE_CEILING_PREFIX, REPLY_TIMEOUT_PREFIX,
+        REQUEST_TOO_LARGE_PREFIX,
+    };
+    match stop {
+        AgentStop::TurnLimit(_) => true,
+        AgentStop::SpendLimit(why) => why.starts_with(PIECE_CEILING_PREFIX),
+        AgentStop::Failed(why) => [
+            CUT_OFF_TWICE_PREFIX,
+            CONTEXT_FULL_PREFIX,
+            REQUEST_TOO_LARGE_PREFIX,
+            REPLY_TIMEOUT_PREFIX,
+        ]
+        .iter()
+        .any(|p| why.starts_with(p)),
+        AgentStop::Finished | AgentStop::Refused(_) => false,
     }
 }
 
@@ -786,6 +818,7 @@ pub(super) fn report_of(
     let mut partial: Vec<(String, String)> = Vec::new();
     if let Some(run) = stopped {
         report.refused = matches!(run.stop, AgentStop::Refused(_));
+        report.split_on_resume = splits_on_resume(&run.stop);
         let kind = match run.stop {
             AgentStop::Refused(_) => "refused",
             AgentStop::TurnLimit(_) => "turn_limit",
