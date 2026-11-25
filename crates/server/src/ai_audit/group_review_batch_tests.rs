@@ -788,3 +788,115 @@ fn the_estimate_is_the_batch_price_when_the_stage_runs_batched() {
         "{batched} vs {full}"
     );
 }
+
+// ── A credit stop during the rule summaries keeps its class and resumes ─────────────────────
+
+/// Answers every call with the stand-in reply, except that, while `stop` is set, a rule-level
+/// summary call fails with a credit error. Keeps who it was asked.
+struct CreditStopsSummaries {
+    stop: std::sync::atomic::AtomicBool,
+    chunks_asked: AtomicUsize,
+    summaries_asked: AtomicUsize,
+}
+
+impl CreditStopsSummaries {
+    fn new(stop: bool) -> Self {
+        Self {
+            stop: std::sync::atomic::AtomicBool::new(stop),
+            chunks_asked: AtomicUsize::new(0),
+            summaries_asked: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmPort for CreditStopsSummaries {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let is_summary = req
+            .system
+            .as_deref()
+            .is_some_and(|s| s.starts_with(&rule_summary_system_prompt()));
+        if !is_summary {
+            self.chunks_asked.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.summaries_asked.fetch_add(1, Ordering::SeqCst);
+            if self.stop.load(Ordering::SeqCst) {
+                return Err(anyhow::Error::new(
+                    camerata_llm::failure::LlmCallFailure::new(
+                        FailureClass::AuthOrBilling,
+                        CREDIT_ERROR,
+                    ),
+                ));
+            }
+        }
+        let text = reply_for(req.system.as_deref(), &req.prompt);
+        let mut r = response(&text);
+        r.backend = "stub".to_string();
+        r.cost_usd = Some(0.01);
+        Ok(r)
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let resp = self.complete(req).await?;
+        on_delta(&resp.text);
+        Ok(resp)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_credit_stop_during_the_rule_summaries_keeps_its_class_and_a_resume_asks_only_them() {
+    let dir = tempfile::tempdir().unwrap();
+    // One rule group over a chunk's size: two chunk calls and one rule-level summary call.
+    let sites = MAX_CHUNK_MEMBERS + 20;
+
+    // First process: the chunks are read, the summary call is refused for credit.
+    let first = CreditStopsSummaries::new(true);
+    let mut report = report_of(&[(SQL, sites)]);
+    let meter = UsageMeter::default();
+    checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        run(&mut report, &first, false, Some(&meter)),
+    )
+    .await;
+    let summary_failures: Vec<_> = report
+        .failed_passes
+        .iter()
+        .filter(|f| f.reason.contains("rule-level summary"))
+        .collect();
+    assert_eq!(summary_failures.len(), 1, "{:?}", report.failed_passes);
+    assert_eq!(
+        summary_failures[0].class,
+        FailureClass::AuthOrBilling,
+        "a credit stop keeps its class"
+    );
+    assert_eq!(first.chunks_asked.load(Ordering::SeqCst), 2);
+
+    // Second process, credit restored: only the failed summary is asked, and every summary is
+    // there when it ends.
+    let second = CreditStopsSummaries::new(false);
+    let mut report = report_of(&[(SQL, sites)]);
+    let outcome = checkpoint::with_run_checkpoints(
+        Some(dir.path().to_path_buf()),
+        run(&mut report, &second, false, None),
+    )
+    .await;
+    assert_eq!(
+        second.chunks_asked.load(Ordering::SeqCst),
+        0,
+        "no chunk was read again"
+    );
+    assert_eq!(second.summaries_asked.load(Ordering::SeqCst), 1);
+    assert!(
+        report.failed_passes.is_empty(),
+        "{:?}",
+        report.failed_passes
+    );
+    assert_eq!(outcome.rules_reviewed, 1, "{outcome:?}");
+    assert_eq!(outcome.rules_failed, 0);
+}

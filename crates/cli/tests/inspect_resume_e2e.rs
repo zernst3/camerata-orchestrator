@@ -1191,11 +1191,6 @@ mod batch {
         let mut a = args(&[repo], &["acme/one"], export);
         a.realtime = false;
         a.batch = true;
-        // This test counts the requests each attempt submits as batch items. The warm call
-        // (#240) moves a stage's first request to real time, and the interrupted attempt and the
-        // resume run their stages apart, so it would move a different request in each. The
-        // warm call has its own tests in `stage_batch_tests`.
-        a.efficiency.push("batch_warm=off".to_string());
         a
     }
 
@@ -1297,9 +1292,14 @@ mod batch {
         // counted as requests, not batches: the group review reads the report as it stands, so
         // the interrupted attempt sent its one rule group in a batch of its own and the resume
         // sent the other, where the uninterrupted run sent both in one.
+        // Every request, batched or sent in real time, is answered by the model once, so the
+        // model's call count is the requests an attempt sent. With warming on, the uninterrupted
+        // run sends both rule groups in one submission and warms one of them in real time; the
+        // interrupted and resumed attempts each send one group alone and never warm. So the
+        // batch items differ by one between the runs and the totals do not.
         assert_eq!(
-            api.submitted_items.load(Ordering::SeqCst),
-            healthy.submitted_items.load(Ordering::SeqCst),
+            api.model.calls(),
+            healthy.model.calls(),
             "the requests submitted before the interruption were not submitted again"
         );
         let ids = api.submitted_ids.lock().unwrap().clone();

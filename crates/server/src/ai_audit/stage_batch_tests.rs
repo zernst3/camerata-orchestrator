@@ -3246,3 +3246,27 @@ async fn the_batch_is_admitted_again_after_the_warm_call_has_spent() {
         .iter()
         .all(|f| f.class == FailureClass::SpendLimit));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_warm_call_does_not_block_the_prefix_for_the_next_submission() {
+    // The first warm call fails; the second submission (same prefix) tries again and warms.
+    let api = api_with(Realtime::new(|id, nth| {
+        if nth == 0 && id == "item-000" {
+            (Duration::from_secs(1), Err(content_error("boom")))
+        } else {
+            (Duration::from_secs(1), Ok(cache_writing_reply(id)))
+        }
+    }));
+    let out = run_two_submissions(&api).await;
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(out.absorbed.len(), 6);
+    let warmed: Vec<String> = api.realtime.calls().iter().map(|c| c.id.clone()).collect();
+    assert_eq!(warmed, ids(&["item-000", "item-003"]));
+    assert_eq!(
+        api.submitted_item_ids(),
+        vec![
+            ids(&["item-000", "item-001", "item-002"]),
+            ids(&["item-004", "item-005"])
+        ]
+    );
+}

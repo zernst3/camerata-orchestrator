@@ -2135,7 +2135,12 @@ pub async fn review_groups(
 
     // Apply every rule group's replies to the rows and to the tree the final build starts from.
     let mut tree = report.tree.clone().unwrap_or_default();
-    let mut prev_failed: Vec<(usize, String)> = Vec::new();
+    let mut prev_failed: Vec<(
+        usize,
+        String,
+        FailureClass,
+        Vec<camerata_llm::failure::AttemptRecord>,
+    )> = Vec::new();
     for (wi, work) in works.iter().enumerate() {
         let chunk_replies: Vec<ChunkReply<'_>> = work
             .chunks
@@ -2165,9 +2170,13 @@ pub async fn review_groups(
     }
     if let Some(ran) = &summary_ran {
         for f in &ran.failed {
+            // The class the runner gave the failure (a credit stop stays a credit stop), as for
+            // a failed chunk above, never a blanket Content.
             prev_failed.push((
                 works.iter().position(|w| w.summary_id == f.id).unwrap_or(0),
                 f.reason.clone(),
+                f.class,
+                f.attempts.clone(),
             ));
         }
     }
@@ -2208,7 +2217,7 @@ pub async fn review_groups(
             scope_note: false,
         });
     }
-    for (wi, reason) in prev_failed {
+    for (wi, reason, class, attempts) in prev_failed {
         let work = &works[wi];
         report.failed_passes.push(FailedPass {
             repo: repo_label.clone(),
@@ -2219,9 +2228,9 @@ pub async fn review_groups(
                 work.label, work.node_id
             ),
             files_not_reviewed: 0,
-            class: FailureClass::Content,
+            class,
             files: Vec::new(),
-            attempts: Vec::new(),
+            attempts,
             scope_note: false,
         });
     }

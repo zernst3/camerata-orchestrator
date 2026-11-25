@@ -2365,7 +2365,6 @@ where
     if warms.warmed_recently(&key) {
         return Warmed::Not;
     }
-    warms.mark_warmed(&key);
 
     // The spend limit and the outage stop are checked the way a real-time call checks them, but
     // a refusal here records nothing as "not run": the batch path has its own gate and decides.
@@ -2428,6 +2427,9 @@ where
             return Warmed::Not;
         }
     };
+    // Marked only now: a refused or failed warm call leaves the prefix unwarmed, so the next
+    // submission tries again.
+    warms.mark_warmed(&key);
     if reply_shows_no_caching(&resp) {
         warms.mark_dead(stage.label());
         let note = format!(
