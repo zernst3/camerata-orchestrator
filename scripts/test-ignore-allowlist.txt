@@ -1,0 +1,49 @@
+# Tests that may be #[ignore]d. Read by scripts/check-test-ignores.sh, which fails on any
+# ignored test in a tracked .rs file that is not named here.
+#
+# A test that exposes a bug is never ignored: it stays red until the fix lands, and a red
+# branch does not merge. An ignore is allowed only for an on-demand harness, in one of these
+# categories:
+#   perf, live network, keychain, real tokens, outside data, baseline re-approval,
+#   external tool, wall time (run by the gate)
+# "wall time (run by the gate)" is for a correctness test that is ignored only because it is
+# slow; the gate runs it as its own step.
+#
+# Format: one entry per line, `path::fn_name  # category: short reason`.
+# Blank lines and lines starting with `#` are comments.
+
+# Baseline re-approval
+crates/ui/tests/visual.rs::visual_approve  # baseline re-approval: rewrites the visual baselines, run through scripts/visual-approve.sh
+crates/server/tests/generate_sample_report.rs::regenerate_sample_report  # baseline re-approval: rewrites the sample-report fixtures on demand
+
+# Perf
+crates/ui/tests/visual.rs::visual_measure_noise  # perf: prints per-image render noise against the baselines
+crates/checks/src/extract/clone/tests/perf.rs::perf_twenty_thousand_file_repo  # perf: clone detection on a generated large repository, release mode
+crates/checks/src/extract/clone/tests/perf.rs::perf_real_corpus  # perf: clone detection over the directories in CLONE_PERF_ROOTS
+crates/checks/src/extract/clone/tests/perf.rs::perf_generated_rust_parses  # perf: parse throughput harness
+crates/checks/src/extract/clone/tests/perf.rs::perf_tokenizer_throughput  # perf: tokenizer throughput harness
+
+# Live network
+crates/llm/src/llm.rs::complete_fails_closed_when_safe_set_never_loaded_live_smoke_test  # live network: calls the live OpenRouter endpoints API
+crates/server/src/tool_provisioning.rs::fresh_eslint_provisioning_installs_the_pinned_tree_from_the_lockfile  # live network: npm ci against the registry (or a warm npm cache)
+crates/scaffold/src/skeleton.rs::generated_skeleton_compiles  # live network: fetches and builds the full dependency graph for native and wasm32
+
+# Keychain
+crates/llm/src/credentials.rs::production_keyring_store_is_not_the_mock_round_trip  # keychain: touches the real OS keychain and may raise a permission dialog
+
+# Real tokens
+crates/server/tests/benchmark_supabase_fixture.rs::full_grade_supabase_fixture_scan  # real tokens: runs the real AI scan and grades it
+
+# Outside data
+crates/server/tests/firebase_scan_e2e.rs::a_named_open_source_firebase_app_scans_from_disk  # outside data: needs a checkout named by CAMERATA_FIREBASE_SAMPLE
+crates/server/tests/release_gate_acceptance.rs::acceptance_known_leaks_are_flagged_in_the_old_exports  # outside data: reads the sweep exports outside the repository
+crates/server/tests/release_gate_acceptance.rs::acceptance_portal_placeholders_stay_readable_and_the_secrets_check_is_clean  # outside data: reads the sweep exports outside the repository
+crates/server/src/ai_audit/stored_replay_tests.rs::the_stored_fix_replies_keep_their_real_inventions_out  # outside data: reads stored run stores named by CAMERATA_STORED_RUNS
+crates/server/src/ai_audit/stored_replay_tests.rs::the_stored_fix_replies_against_the_real_repository  # outside data: reads stored run stores and a fixture repository (CAMERATA_STORED_RUNS, CAMERATA_REAL_REPO)
+
+# External tool
+crates/preview/src/process.rs::spawns_a_real_dx_serve_and_reports_a_url  # external tool: spawns a real dx serve against a local Dioxus app
+
+# Wall time (run by the gate)
+crates/server/src/xlsx_export/tests/export_scale.rs::a_report_of_30000_rows_across_100_rules_exports_to_xlsx_and_pdf  # wall time (run by the gate): the 30,000-row export including the PDF render
+crates/server/src/release_gate/evasion_tests.rs::a_compiled_pdf_with_a_key_in_its_text_is_refused_by_the_rendered_text_check  # wall time (run by the gate): compiles a real PDF with typst
