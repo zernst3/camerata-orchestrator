@@ -26,6 +26,8 @@ use super::{
     hex, now, read_json, write_atomic, FinishFailure, PartKind, PartStatus, ResumeEstimate,
     RunRecord, RunStore,
 };
+use camerata_llm::failure::FailureClass;
+
 use crate::ai_audit::BatchApi;
 use crate::llm::{
     BatchItem, BatchRequestCounts, BatchResultRow, BatchStatus, CacheTtl, LlmPort, LlmRequest,
@@ -889,13 +891,22 @@ struct BatchFile {
 }
 
 impl StoredRow {
-    /// Whether the row is answered from the store on a resume. It is the batch twin of
-    /// [`replays_on_resume`] for a call that finished: a row with a reply is `Done` and is
-    /// replayed, never paid again. A row with an error (billed or not), an expired or a missing
-    /// one is the twin of [`EntryStatus::Failed`], which is asked again, and what it was billed
-    /// stays in the stored spend ([`stored_spend`]) exactly as a failed call's cost does.
-    fn is_good(&self) -> bool {
-        self.response.is_some()
+    /// Whether the row is sent again on a resume: only a row the account refused for billing
+    /// (the class that stops a run, [`FailureClass::AuthOrBilling`]) with no reply and nothing
+    /// billed. Such a row never ran, and the stage did not send it again in its attempt.
+    ///
+    /// Every other row stays as it was stored and is replayed as before: a reply is `Done`
+    /// ([`replays_on_resume`]); a refusal or any other error was already dealt with by the
+    /// stage in that attempt (it resent the item as a batch of its own, which is stored under
+    /// its own hash and found by the stage on the resume), and sending it from here too would
+    /// pay for it twice or duplicate a batch that may be running. What a row was billed stays in
+    /// the stored spend ([`stored_spend`]).
+    fn needs_resend(&self) -> bool {
+        self.response.is_none()
+            && self.billed.is_none()
+            && self.error.as_deref().is_some_and(|e| {
+                camerata_llm::failure::classify_text(e).0 == FailureClass::AuthOrBilling
+            })
     }
 }
 
@@ -917,15 +928,16 @@ fn batch_chain(dir: &Path, key: &str, n: usize) -> Vec<(String, usize, BatchFile
     chain
 }
 
-/// The rows of a chain as one set, in the order of the first batch: the first good row of an item
-/// wins, and an item with none carries its latest failed row. `None` when the first batch has no
+/// The rows of a chain as one set, in the order of the first batch: a row that is not to be sent
+/// again ([`StoredRow::needs_resend`]) wins over the rows after it, and an item with none carries
+/// its latest row. `None` when the first batch has no
 /// fetched rows.
 fn merged_rows(chain: &[(String, usize, BatchFile)]) -> Option<Vec<StoredRow>> {
     let mut merged = chain.first()?.2.rows.clone()?;
     for (_, _, file) in &chain[1..] {
         for row in file.rows.iter().flatten() {
             match merged.iter_mut().find(|m| m.custom_id == row.custom_id) {
-                Some(m) if !m.is_good() => *m = row.clone(),
+                Some(m) if m.needs_resend() => *m = row.clone(),
                 Some(_) => {}
                 None => merged.push(row.clone()),
             }
@@ -1028,39 +1040,54 @@ impl BatchApi for JournalBatchApi {
             let again: Vec<BatchItem> = items
                 .iter()
                 .filter(|i| {
-                    !merged
+                    merged
                         .iter()
-                        .any(|r| r.custom_id == i.custom_id && r.is_good())
+                        .find(|r| r.custom_id == i.custom_id)
+                        .is_none_or(StoredRow::needs_resend)
                 })
                 .cloned()
                 .collect();
             if again.is_empty() {
-                // Every row has a good reply: the stored rows answer it, nothing is sent.
+                // No row is to be sent again: the stored rows answer it, nothing is sent.
                 self.remember(&chain[0].2.batch_id, &key, n, (key.as_str(), n));
                 return Ok(chain[0].2.batch_id.clone());
             }
-            // Some rows have no good reply (a credit stop, an error, expired): only those go out
-            // again, as a new batch stored like any other and chained to this one. The caller
+            // Some rows were refused for billing, or have no row at all: only those go out again, as a new batch stored like any other and chained to this one. The caller
             // gets the new id, and its fetch returns the stored good rows with the new rows.
             let key2 = hash_items(&again);
-            let n2 = (0..)
-                .find(|i| !batch_path(&dir, &key2, *i).exists())
-                .unwrap_or(0);
-            let custom_ids = again.iter().map(|i| i.custom_id.clone()).collect();
-            let batch_id = self.inner.submit(again).await?;
-            let record = BatchFile {
-                key: key2.clone(),
-                n: n2,
-                batch_id: batch_id.clone(),
-                submitted_at: now(),
-                attempt: self.store.record().attempt,
-                custom_ids,
-                rows: None,
-                follow: None,
-            };
-            if let Ok(bytes) = serde_json::to_vec(&record) {
-                let _ = write_atomic(&batch_path(&dir, &key2, n2), &bytes);
+            let mut link_to = None;
+            let mut n2 = 0;
+            while let Some(file) = read_json::<BatchFile>(&batch_path(&dir, &key2, n2)) {
+                // A batch of these very items that was submitted and never linked or fetched (a
+                // kill between its record and the link, or the stage's own batch of them) may be
+                // running and billed: adopt it, never submit the items twice.
+                if file.rows.is_none() && !chain.iter().any(|(k, i, _)| *k == key2 && *i == n2) {
+                    link_to = Some(file.batch_id.clone());
+                    break;
+                }
+                n2 += 1;
             }
+            let batch_id = match link_to {
+                Some(id) => id,
+                None => {
+                    let custom_ids = again.iter().map(|i| i.custom_id.clone()).collect();
+                    let batch_id = self.inner.submit(again).await?;
+                    let record = BatchFile {
+                        key: key2.clone(),
+                        n: n2,
+                        batch_id: batch_id.clone(),
+                        submitted_at: now(),
+                        attempt: self.store.record().attempt,
+                        custom_ids,
+                        rows: None,
+                        follow: None,
+                    };
+                    if let Ok(bytes) = serde_json::to_vec(&record) {
+                        let _ = write_atomic(&batch_path(&dir, &key2, n2), &bytes);
+                    }
+                    batch_id
+                }
+            };
             let mut linked = tail.clone();
             linked.follow = Some((key2.clone(), n2));
             if let Ok(bytes) = serde_json::to_vec(&linked) {

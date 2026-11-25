@@ -799,6 +799,7 @@ mod batches {
 
         fake.credit_out.store(false, Ordering::SeqCst);
         let store = RunStore::open(&id).unwrap();
+        let stored_before = crate::run_store::journal::stored_spend(store.dir());
         seeded(async {
             let api = crate::run_store::journal::JournalBatchApi::new(fake.clone(), store.clone());
             let name = if fresh_checkpoint {
@@ -827,6 +828,19 @@ mod batches {
                 out.failed
             );
             assert_eq!(second.got.len(), 3, "every item has its answer");
+            // The stored rows are paid once: the resume adds the one resent row to the store, and
+            // the limit's figure holds what was stored plus at most that row, never the stored
+            // rows a second time.
+            let stored_after = crate::run_store::journal::stored_spend(store.dir());
+            assert!(
+                (stored_after - stored_before - 1.0).abs() < 1e-6,
+                "one resent row: {stored_before} -> {stored_after}"
+            );
+            let limit = meter.limit_spend_usd();
+            assert!(
+                limit >= stored_before - 1e-6 && limit <= stored_after + 1e-6,
+                "limit {limit} between stored {stored_before} and {stored_after}"
+            );
         })
         .await;
         let mut answered = fake.answered.lock().unwrap().clone();
