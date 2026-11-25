@@ -1119,6 +1119,495 @@ mod batches {
         })
         .await;
     }
+
+    const CREDIT: &str = "Your credit balance is too low to access the Anthropic API.";
+
+    /// A batch API that answers every item with a reply costing $0.50, except the items named in
+    /// `credit_fail`, which come back as a credit error. Each submit gets its own id and the fake
+    /// keeps what each one was sent.
+    #[derive(Default)]
+    struct Ledger {
+        sent: std::sync::Mutex<Vec<Vec<String>>>,
+        credit_fail: std::sync::Mutex<Vec<String>>,
+        /// Items whose next fetched row is a transient error (taken off the list as it is used).
+        transient_fail: std::sync::Mutex<Vec<String>>,
+        /// Items whose row is a refusal: an error with what the call was billed.
+        refused: std::sync::Mutex<Vec<String>>,
+        /// Items the next fetched batch leaves out (taken off the list as it is used).
+        omitted: std::sync::Mutex<Vec<String>>,
+        fetches: AtomicUsize,
+        realtime: Option<Scripted>,
+    }
+
+    impl Ledger {
+        fn failing(ids: &[&str]) -> Self {
+            Self {
+                credit_fail: std::sync::Mutex::new(ids.iter().map(|s| s.to_string()).collect()),
+                realtime: Some(Scripted::new()),
+                ..Self::default()
+            }
+        }
+        fn restore_credit(&self) {
+            self.credit_fail.lock().unwrap().clear();
+        }
+        fn fail_credit(&self, ids: &[&str]) {
+            *self.credit_fail.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn fail_once(&self, ids: &[&str]) {
+            *self.transient_fail.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn omit_once(&self, ids: &[&str]) {
+            *self.omitted.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn refuse(&self, ids: &[&str]) {
+            *self.refused.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn sent(&self) -> Vec<Vec<String>> {
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BatchApi for Ledger {
+        fn has_api_key(&self) -> bool {
+            true
+        }
+        fn realtime(&self) -> &dyn LlmPort {
+            self.realtime.as_ref().unwrap()
+        }
+        async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+            None
+        }
+        async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+            let mut sent = self.sent.lock().unwrap();
+            sent.push(items.into_iter().map(|i| i.custom_id).collect());
+            Ok(format!("msgbatch_{}", sent.len()))
+        }
+        async fn poll(&self, _id: &str) -> anyhow::Result<BatchStatus> {
+            Ok(BatchStatus {
+                processing_status: "ended".to_string(),
+                request_counts: BatchRequestCounts::default(),
+            })
+        }
+        async fn fetch(&self, id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            let which: usize = id.trim_start_matches("msgbatch_").parse().unwrap();
+            let ids = self.sent.lock().unwrap()[which - 1].clone();
+            let failing = self.credit_fail.lock().unwrap().clone();
+            let refused = self.refused.lock().unwrap().clone();
+            let left_out: Vec<String> = std::mem::take(&mut *self.omitted.lock().unwrap());
+            Ok(ids
+                .into_iter()
+                .filter(|c| !left_out.contains(c))
+                .map(|custom_id| {
+                    if refused.contains(&custom_id) {
+                        return BatchResultRow {
+                            response: None,
+                            error: Some("the model declined to answer".to_string()),
+                            billed: Some(response("", 0.5)),
+                            custom_id,
+                        };
+                    }
+                    {
+                        let mut once = self.transient_fail.lock().unwrap();
+                        if let Some(at) = once.iter().position(|c| *c == custom_id) {
+                            once.remove(at);
+                            return BatchResultRow {
+                                response: None,
+                                error: Some("internal server error, please retry".to_string()),
+                                billed: None,
+                                custom_id,
+                            };
+                        }
+                    }
+                    let failed = failing.contains(&custom_id);
+                    BatchResultRow {
+                        response: (!failed).then(|| response(r#"{"findings":[]}"#, 0.5)),
+                        error: failed.then(|| CREDIT.to_string()),
+                        billed: None,
+                        custom_id,
+                    }
+                })
+                .collect())
+        }
+    }
+
+    fn named(cid: &str) -> BatchItem {
+        let mut i = item();
+        i.custom_id = cid.to_string();
+        i.params.messages[0].content = serde_json::json!(format!("ask {cid}"));
+        i
+    }
+
+    fn three() -> Vec<BatchItem> {
+        vec![named("i1"), named("i2"), named("i3")]
+    }
+
+    fn ids_of(rows: &[BatchResultRow]) -> Vec<String> {
+        rows.iter().map(|r| r.custom_id.clone()).collect()
+    }
+
+    /// Attempt one: the three items go out and the second comes back as a credit error. The
+    /// store is reopened (a new attempt) and returned with the fake.
+    async fn after_a_credit_stop() -> (Arc<RunStore>, Arc<Ledger>, tempfile::TempDir) {
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let fake = Arc::new(Ledger::failing(&["i2"]));
+        let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+        let id = api.submit(three()).await.unwrap();
+        let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+        assert_eq!(rows.iter().filter(|r| r.response.is_some()).count(), 2);
+        drop(api);
+        (reopen(store), fake, repo)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_resume_sends_only_the_rows_without_a_good_reply_and_pays_for_the_rest_once() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            let spent_before = journal::stored_spend(store.dir());
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            assert_eq!(
+                fake.sent(),
+                vec![
+                    vec!["i1".to_string(), "i2".to_string(), "i3".to_string()],
+                    vec!["i2".to_string()]
+                ],
+                "exactly one new batch, with only the item that had no good reply"
+            );
+            assert_eq!(api.poll(&id).await.unwrap().processing_status, "ended");
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows
+                .iter()
+                .all(|r| r.response.is_some() && r.error.is_none()));
+            assert_eq!(
+                fake.fetches.load(Ordering::SeqCst),
+                2,
+                "the stored rows were not fetched again"
+            );
+            // The stored spend is the two good rows of the first batch plus the one new row.
+            let spent = journal::stored_spend(store.dir());
+            assert!((spent_before - 1.0).abs() < 1e-9, "{spent_before}");
+            assert!((spent - 1.5).abs() < 1e-9, "{spent}");
+            // Fetched again, it is answered from the store, and a stage's next resume sends nothing.
+            let again = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&again), ["i1", "i2", "i3"]);
+            drop(api);
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(fake.sent().len(), 2, "all rows are good: no inner submit");
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows.iter().all(|r| r.response.is_some()));
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_resent_row_that_fails_again_stops_cleanly_and_a_third_attempt_sends_it_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            // The credit is still out on the second attempt.
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows[0].response.is_some() && rows[2].response.is_some());
+            assert!(
+                rows[1].response.is_none(),
+                "the failed row is still a failure"
+            );
+            assert_eq!(rows[1].error.as_deref(), Some(CREDIT));
+            drop(api);
+
+            let store = reopen(store);
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            assert_eq!(
+                fake.sent().into_iter().skip(1).collect::<Vec<_>>(),
+                vec![vec!["i2".to_string()], vec!["i2".to_string()]],
+                "the third attempt sends the row again, alone"
+            );
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows.iter().all(|r| r.response.is_some()));
+            assert!(
+                (journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9,
+                "the rows with a good reply are paid once"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_batch_sent_for_failed_rows_and_not_fetched_is_not_sent_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            fake.restore_credit();
+            let first = {
+                let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+                api.submit(three()).await.unwrap()
+                // The process dies here: the new batch was submitted, not fetched.
+            };
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store);
+            let second = api.submit(three()).await.unwrap();
+            assert_eq!(
+                second, first,
+                "the batch that may be running is the one returned"
+            );
+            assert_eq!(fake.sent().len(), 2, "nothing was submitted a third time");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn after_a_restart_the_resent_batch_fetched_by_id_still_returns_the_stored_good_rows() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            fake.restore_credit();
+            let resend = {
+                let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+                api.submit(three()).await.unwrap()
+            };
+            // A new process: the stage polls and fetches by id and never calls submit.
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            assert_eq!(api.poll(&resend).await.unwrap().processing_status, "ended");
+            let rows = api.fetch(&resend, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows.iter().all(|r| r.response.is_some()));
+            assert_eq!(fake.sent().len(), 2, "nothing was submitted again");
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    fn one(cid: &str) -> Vec<BatchItem> {
+        vec![named(cid)]
+    }
+
+    /// A batch of three in which `i2` had a transient error and `i3` was refused for credit; the
+    /// stage then sent `i2` again as a batch of its own. Returns the id of that retry batch.
+    async fn stage_retry_then_credit_stop(
+        fetch_retry: bool,
+    ) -> (Arc<RunStore>, Arc<Ledger>, String, tempfile::TempDir) {
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let fake = Arc::new(Ledger::failing(&["i3"]));
+        fake.fail_once(&["i2"]);
+        let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+        let id = api.submit(three()).await.unwrap();
+        api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+        let retry = api.submit(one("i2")).await.unwrap();
+        if fetch_retry {
+            let rows = api.fetch(&retry, CacheTtl::FiveMinutes).await.unwrap();
+            assert!(rows[0].response.is_some(), "the stage's retry answered");
+        }
+        drop(api);
+        (reopen(store), fake, retry, repo)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_row_the_stage_retried_itself_is_not_sent_again_by_the_resume() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _retry, _repo) = stage_retry_then_credit_stop(true).await;
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            assert_eq!(
+                fake.sent(),
+                vec![
+                    vec!["i1".to_string(), "i2".to_string(), "i3".to_string()],
+                    vec!["i2".to_string()],
+                    vec!["i3".to_string()],
+                ],
+                "only the credit row goes out again; the transient row is the stage's"
+            );
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(
+                rows[1].response.is_none(),
+                "the stored transient row is replayed"
+            );
+            // The stage sends i2 again, as it did before: its own stored batch answers it.
+            let again = api.submit(one("i2")).await.unwrap();
+            let rows = api.fetch(&again, CacheTtl::FiveMinutes).await.unwrap();
+            assert!(rows[0].response.is_some());
+            assert_eq!(fake.sent().len(), 3, "nothing was paid for twice");
+            // i1 + i2 (retry) + i3 (resent) once each.
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn an_item_missing_from_the_head_and_retried_by_the_stage_is_not_sent_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let repo = git_repo();
+            let store = new_run(&repo);
+            let fake = Arc::new(Ledger::failing(&["i3"]));
+            fake.omit_once(&["i2"]);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i3"], "the batch left i2 out");
+            // The stage sends the missing item again as a batch of its own, and it answers.
+            let retry = api.submit(one("i2")).await.unwrap();
+            api.fetch(&retry, CacheTtl::FiveMinutes).await.unwrap();
+            drop(api);
+            let store = reopen(store);
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(
+                fake.sent(),
+                vec![
+                    vec!["i1".to_string(), "i2".to_string(), "i3".to_string()],
+                    vec!["i2".to_string()],
+                    vec!["i3".to_string()],
+                ],
+                "only the credit row goes out again; the missing item is the stage's to retry"
+            );
+            let again = api.submit(one("i2")).await.unwrap();
+            api.fetch(&again, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(fake.sent().len(), 3, "the stored retry answers it");
+            // i1 + i2 (retry) + i3 (resent) once each.
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_stage_retry_that_was_not_fetched_at_the_stop_returns_the_same_id() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, retry, _repo) = stage_retry_then_credit_stop(false).await;
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            api.submit(three()).await.unwrap();
+            let again = api.submit(one("i2")).await.unwrap();
+            assert_eq!(
+                again, retry,
+                "the batch that may be running is the one returned"
+            );
+            assert_eq!(fake.sent().len(), 3, "the retry was not submitted again");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_stage_retry_that_failed_for_credit_is_sent_again_once_through_its_own_chain() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let repo = git_repo();
+            let store = new_run(&repo);
+            let fake = Arc::new(Ledger::failing(&[]));
+            fake.fail_once(&["i2"]);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            fake.fail_credit(&["i2"]);
+            let retry = api.submit(one("i2")).await.unwrap();
+            let rows = api.fetch(&retry, CacheTtl::FiveMinutes).await.unwrap();
+            assert!(rows[0].error.is_some());
+            drop(api);
+            let store = reopen(store);
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store);
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            let again = api.submit(one("i2")).await.unwrap();
+            let rows = api.fetch(&again, CacheTtl::FiveMinutes).await.unwrap();
+            assert!(rows[0].response.is_some());
+            assert_eq!(
+                fake.sent().iter().filter(|b| **b == ["i2"]).count(),
+                2,
+                "the retry batch and exactly one resend of it"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_refusal_row_is_replayed_and_never_sent_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let repo = git_repo();
+            let store = new_run(&repo);
+            let fake = Arc::new(Ledger::failing(&[]));
+            fake.refuse(&["i2"]);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            drop(api);
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(fake.sent().len(), 1, "no inner submit for a refusal");
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows[1].response.is_none() && rows[1].billed.is_some());
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_resend_whose_link_was_never_written_is_adopted_not_submitted_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let (store, fake, _repo) = after_a_credit_stop().await;
+            fake.restore_credit();
+            let resend = {
+                let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+                api.submit(three()).await.unwrap()
+            };
+            // The process was killed after the new batch's record and before the link: take the
+            // link off the chain's first file.
+            for entry in std::fs::read_dir(store.dir().join("batches")).unwrap() {
+                let path = entry.unwrap().path();
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                if !v["follow"].is_null() {
+                    v["follow"] = serde_json::Value::Null;
+                    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+                }
+            }
+            let store = reopen(store);
+            let api = journal::JournalBatchApi::new(fake.clone(), store);
+            let adopted = api.submit(three()).await.unwrap();
+            assert_eq!(adopted, resend, "the batch already submitted is adopted");
+            assert_eq!(fake.sent().len(), 2, "nothing was submitted a third time");
+            let rows = api.fetch(&adopted, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+            assert!(rows.iter().all(|r| r.response.is_some()));
+        })
+        .await;
+    }
 }
 
 #[test]

@@ -1771,7 +1771,7 @@ async fn rehearse(scale: Scale, faults: Faults) {
 }
 
 /// A credit error on one row of a batch stops the run and the row is not sent again; a resume,
-/// with the credit back, finishes the run. The second half does not hold: see the ignore reason.
+/// with the credit back, sends only that row again and finishes the run.
 async fn credit_row_then_resume(scale: Scale) {
     let state = tempfile::tempdir().unwrap();
     let _guards = zero_token_env(state.path());
@@ -1833,7 +1833,6 @@ fn the_full_size_rehearsal_of_the_whole_scan_runs_to_a_gated_export() {
 
 #[test]
 #[serial_test::serial(process_env)]
-#[ignore = "bug: a resume replays the stored credit-error row of a batch instead of sending the item again (JournalBatchApi::submit and fetch in run_store/journal.rs return the stored batch id and rows for the same items), so the item fails again and a run stopped for credit can never finish"]
 fn a_resume_after_a_credit_row_in_a_batch_sends_the_row_again_and_finishes() {
     if !typst_available("a_resume_after_a_credit_row_in_a_batch") {
         return;
