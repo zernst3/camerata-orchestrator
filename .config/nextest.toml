@@ -1,0 +1,55 @@
+# cargo-nextest configuration (issue #340: the same tests, run faster).
+#
+# nextest runs every test in its own process, so a test can no longer observe another test's
+# process-global state (environment variables, statics, the current directory). It does NOT
+# run doctests: every gate that runs nextest also runs `cargo test --doc` separately.
+#
+# Neither profile retries a failure or kills a slow test. A retry would turn a flaky test
+# green, and a timeout would turn a slow test red; both would change what the gate means.
+# Slow tests are REPORTED, never terminated.
+#
+# Profiles:
+#   default  the local gate (scripts/gate-nextest-local.sh) and any bare `cargo nextest run`
+#   ci       the GitHub partition jobs: JUnit output for per-test timings
+#            (scripts/nextest-slowest.sh reads it)
+#
+# See docs/NEXTEST_GATE.md.
+
+[store]
+# Relative to the workspace root. JUnit files land in target/nextest/<profile>/.
+dir = "target/nextest"
+
+[profile.default]
+retries = 0
+# Run everything and report every failure, like `cargo test --no-fail-fast`.
+fail-fast = false
+# Flag a test as SLOW after each 60 s period it is still running. No `terminate-after`:
+# a slow test is reported, never killed.
+slow-timeout = { period = "60s" }
+# Print a failing test's output as soon as it fails and again in the final summary, so the
+# failure is at the bottom of a long log.
+failure-output = "immediate-final"
+# The final summary lists slow tests as well as failures.
+final-status-level = "slow"
+
+[profile.ci]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "60s" }
+failure-output = "immediate-final"
+final-status-level = "slow"
+
+[profile.ci.junit]
+# Written to target/nextest/ci/junit.xml. Every <testcase> carries its wall time.
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true
+
+# Scheduling only: start the longest test first. On its own it runs for about 21 minutes (Linux,
+# debug build), longer than the rest of the suite needs on 4 threads, so the wall time of a run
+# is roughly "when it starts + 21 minutes". Left to the default order it started about 6 minutes
+# in. This changes no test and no verdict; a filter that matches nothing (the test renamed) only
+# loses the head start. Overrides in the default profile apply to the ci profile too.
+[[profile.default.overrides]]
+filter = 'test(=ai_audit::runner_adoption_tests::a_resumed_30k_site_calibration_resubmits_nothing_already_absorbed)'
+priority = 100
