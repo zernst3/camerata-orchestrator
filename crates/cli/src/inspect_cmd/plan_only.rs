@@ -23,7 +23,7 @@ use camerata_server::scan_ledger::SkipReason;
 
 use super::{
     cli_version_refusal, curated_rule_selection, preflight, validate_args, write_start_warnings,
-    InspectArgs, InspectError, Seams,
+    InspectArgs, InspectError,
 };
 
 /// The basis every cost figure here is printed under.
@@ -81,7 +81,8 @@ fn prior_baseline_exists(path: &std::path::Path) -> bool {
 fn piece_line(i: usize, count: usize, p: &PieceFigures) -> String {
     format!(
         "  piece {} of {} ({}): {} files, {} lines, {} bytes; context {} files, {} bytes; \
-         checklist {} bytes; first request about {} tokens; turn limit {}",
+         checklist {} bytes; first request about {} tokens; at least {} tokens once every file is \
+         read (lower bound) against a guard of {}; turn limit {}",
         i + 1,
         count,
         p.unit,
@@ -92,21 +93,22 @@ fn piece_line(i: usize, count: usize, p: &PieceFigures) -> String {
         n(p.context_bytes),
         n(p.checklist_bytes),
         n(p.first_request_tokens),
+        n(p.peak_tokens),
+        n(p.guard_tokens),
         p.turn_limit
     )
 }
 
 /// The figures, then `Ok` when a real run would start and an error naming why it would not.
-/// The text goes to `seams.preflight_sink` in one piece, before the result is returned, so a
-/// refusal still prints what it was measured on. `seams.llm` is accepted so a test can prove
-/// it is never called; `seams.resume` is not allowed.
+/// The text goes to `sink` in one piece, before the result is returned, so a refusal still prints
+/// what it was measured on. No model seam is taken: nothing here has a model to call.
 pub async fn run_plan_only_with(
     args: InspectArgs,
     has_api_key: bool,
-    seams: Seams<'_>,
+    sink: &(dyn Fn(&str) + Sync),
 ) -> Result<(), InspectError> {
-    let (text, verdict) = plan(args, has_api_key, &seams).await?;
-    (seams.preflight_sink)(&text);
+    let (text, verdict) = plan(args, has_api_key).await?;
+    sink(&text);
     verdict
 }
 
@@ -117,29 +119,14 @@ pub async fn run_plan_only(args: InspectArgs) -> Result<(), InspectError> {
         args.client_engagement,
         &camerata_server::run_store::engine_pin::BuildId::current(),
     )?;
-    run_plan_only_with(
-        args,
-        true,
-        Seams {
-            resume: None,
-            llm: None,
-            preflight_sink: &|text| print!("{text}"),
-        },
-    )
-    .await
+    run_plan_only_with(args, true, &|text| print!("{text}")).await
 }
 
 #[allow(clippy::too_many_lines)]
 async fn plan(
     args: InspectArgs,
     has_api_key: bool,
-    seams: &Seams<'_>,
 ) -> Result<(String, Result<(), InspectError>), InspectError> {
-    if seams.resume.is_some() {
-        return Err(InspectError::Failed(
-            "--plan-only cannot be combined with --resume".to_string(),
-        ));
-    }
     validate_args(&args, has_api_key)?;
     let mut controls = args.run_controls()?;
     let sources = args.resolve_sources()?;
@@ -154,7 +141,13 @@ async fn plan(
     if let Some(why) = refusal {
         return Err(InspectError::Failed(why));
     }
-    write_start_warnings(&mut std::io::stderr(), &warnings);
+    // What a real run prints to stderr here is part of the plan's own warnings.
+    let mut start_warnings: Vec<u8> = Vec::new();
+    write_start_warnings(&mut start_warnings, &warnings);
+    let mut flags: Vec<String> = String::from_utf8_lossy(&start_warnings)
+        .lines()
+        .map(str::to_string)
+        .collect();
 
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new(), &controls.scope).await;
     let selected = curated_rule_selection(&scan.proposed_rules);
@@ -174,6 +167,9 @@ async fn plan(
         &backend_resolution,
         controls.efficiency,
     );
+    if let Some(notice) = &mode_choice.notice {
+        flags.push(format!("note: {notice}"));
+    }
     let batch = mode_choice.mode == ScanMode::Batch;
     let model = args.model.as_deref().filter(|m| !m.trim().is_empty());
     let calibration_model = args
@@ -215,7 +211,7 @@ async fn plan(
     }
     if let Some(why) = cli_version_refusal(
         matches!(backend_resolution, BackendResolution::Cli),
-        seams.llm.is_some(),
+        false,
         &models,
         camerata_server::claude_version::check_run_models,
     ) {
@@ -325,13 +321,13 @@ async fn plan(
     };
 
     let mut verdict: Result<(), InspectError> = Ok(());
-    let mut flags: Vec<String> = pf
-        .text
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with("WARNING") || l.starts_with("note:"))
-        .map(str::to_string)
-        .collect();
+    flags.extend(
+        pf.text
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("WARNING") || l.starts_with("note:"))
+            .map(str::to_string),
+    );
     if agent {
         let finder_model = camerata_server::ai_audit::agent_finder::finder_model_for(&controls);
         let empty = camerata_rules::RuleSet::default();
@@ -353,7 +349,7 @@ async fn plan(
                 writeln!(out, "{}", piece_line(i, figures.len(), p)).ok();
                 if p.over_guard() {
                     flags.push(format!(
-                        "WARNING: {} piece {} could reach about {} tokens if every file were \
+                        "WARNING: {} piece {} would hold at least {} tokens once every file is \
                          read, over the context guard of {}; a real run would stop it and cut it \
                          in two on a resume",
                         fact.repo,
@@ -423,6 +419,17 @@ async fn plan(
                     verdict = Err(InspectError::Failed(format!(
                         "a real run would refuse to go on: the spend limit is under the \
                          projection ({BASIS}). {why}"
+                    )));
+                }
+            } else if batch {
+                // The engine finder on a batch: the run's own gate, checked before a submission,
+                // with the pre-flight estimate as its projection (no exact count is made here).
+                controls.estimate_hint_usd = projected;
+                let meter = UsageMeter::with_controls(controls.clone());
+                if let Some(why) = meter.batch_refusal_reason(None) {
+                    flags.push(format!("WARNING: {why}"));
+                    verdict = Err(InspectError::Failed(format!(
+                        "a real run would refuse to go on ({BASIS}): {why}"
                     )));
                 }
             } else if projected

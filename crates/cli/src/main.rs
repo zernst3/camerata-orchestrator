@@ -292,7 +292,7 @@ enum Command {
         /// checklist bytes, first request size and turn limit; the pre-flight cost projection
         /// (projected, API prices) and the spend limit it would run under; every warning. Makes
         /// no model call and no network call, reads no credential and saves nothing (no run, no
-        /// ledger, no rooms). Prints figures and relative paths only, never file text. Give the
+        /// ledger, no rooms). Its figures use relative paths and never file text. Give the
         /// same flags as the real run. Exits 0 when a real run would start, non-zero with the
         /// reason when it would refuse (a spend limit under the projection, a build with
         /// uncommitted changes on a client run).
