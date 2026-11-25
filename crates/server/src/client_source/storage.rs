@@ -41,7 +41,9 @@ pub struct StorageRoots {
     pub home: Option<PathBuf>,
     /// `<data_dir>/camerata`: where `scan-cache.json`, the inspections and the records live.
     pub data_dir: Option<PathBuf>,
-    /// The CLI's cache directory ([`crate::scan_cache::state_dir::dir`]).
+    /// The run state folder: saved runs and the CLI's scan caches and ledgers
+    /// ([`crate::scan_cache::state_dir::dir`]). On a default install it is the same folder as
+    /// `data_dir`.
     pub cli_state_dir: Option<PathBuf>,
     /// Claude Code's `~/.claude/projects`.
     pub claude_projects_dir: Option<PathBuf>,

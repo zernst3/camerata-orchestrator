@@ -33,6 +33,8 @@ fn load_prior_manifest_rejects_v1_and_deletes_it() {
     let state = tempfile::tempdir().expect("state dir");
     let _home = EnvGuard::set("HOME", state.path());
     let _xdg = EnvGuard::set("XDG_CACHE_HOME", state.path());
+    let _xdg_data = EnvGuard::set("XDG_DATA_HOME", state.path());
+    let _no_override = EnvGuard::remove("CAMERATA_STATE_DIR");
     let repo = tempfile::tempdir().expect("repo dir");
 
     let p = planted(SecretShape::SupabaseSecretKey);
@@ -61,6 +63,8 @@ fn load_prior_manifest_keeps_a_current_manifest() {
     let state = tempfile::tempdir().expect("state dir");
     let _home = EnvGuard::set("HOME", state.path());
     let _xdg = EnvGuard::set("XDG_CACHE_HOME", state.path());
+    let _xdg_data = EnvGuard::set("XDG_DATA_HOME", state.path());
+    let _no_override = EnvGuard::remove("CAMERATA_STATE_DIR");
     let repo = tempfile::tempdir().expect("repo dir");
 
     let current = camerata_server::scan_cache::ManifestBuilder::new().finish();

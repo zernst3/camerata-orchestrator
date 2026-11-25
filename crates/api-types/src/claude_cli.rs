@@ -222,14 +222,18 @@ impl Drop for PromptWriter {
 }
 
 /// The engine-owned folder the per-call system prompt files live in:
-/// `<Camerata state dir>/tmp/system-prompts/` ([`crate::state_dir::dir`]), never `$TMPDIR`.
+/// `<Camerata cache dir>/tmp/system-prompts/` ([`crate::state_dir::cache_dir`]), never `$TMPDIR`.
+/// The files are disposable (removed after each call and swept at start), so they stay in the
+/// cache folder rather than beside the saved runs.
 ///
 /// Each call's file is client data (the chat's carries project layers), so it must not sit in a
 /// shared temp folder, and a quit that skips destructors (`process::exit`, SIGKILL, a crash) must
 /// not leave it behind for good: [`remove_live_system_prompts`] runs from the shutdown handler and
 /// [`sweep_leftover_system_prompts`] at server start.
 pub fn system_prompt_root() -> std::path::PathBuf {
-    crate::state_dir::dir().join("tmp").join("system-prompts")
+    crate::state_dir::cache_dir()
+        .join("tmp")
+        .join("system-prompts")
 }
 
 /// The directories of the system prompt files whose calls are in flight in this process.
@@ -611,10 +615,10 @@ mod tests {
     }
 
     #[test]
-    fn the_root_is_the_engine_state_folder_and_not_the_temp_folder() {
+    fn the_root_is_the_engine_cache_folder_and_not_the_temp_folder() {
         let root = system_prompt_root();
         assert!(root.ends_with("tmp/system-prompts"), "{root:?}");
-        assert!(root.starts_with(crate::state_dir::dir()), "{root:?}");
+        assert!(root.starts_with(crate::state_dir::cache_dir()), "{root:?}");
     }
 
     /// A process that is gone leaves its directory behind; the next start removes it, and leaves

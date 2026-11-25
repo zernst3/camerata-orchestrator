@@ -5269,10 +5269,21 @@ twin it is named.
 
 ### The state folder layout
 
-The per user state folder (`crates/server/src/scan_cache/state_dir.rs`): `~/Library/Caches/camerata/`
-on macOS, `$XDG_CACHE_HOME/camerata` or `~/.cache/camerata` elsewhere, the temp folder if there is no
-`HOME`. `CAMERATA_STATE_DIR` replaces the platform cache directory (`camerata/` is still appended).
-Nothing here is written into the scanned repository. The key `<key>` is `<name>-<fnv32 of the
+The per user state folder (`crates/api-types/src/state_dir.rs`, re-exported from
+`crates/server/src/scan_cache/state_dir.rs`): `~/Library/Application Support/camerata/` on macOS,
+`$XDG_DATA_HOME/camerata` or `~/.local/share/camerata` elsewhere, the temp folder if there is no
+`HOME`. On a default install it is the same folder as the app's stores. `CAMERATA_STATE_DIR`
+replaces the platform data directory (`camerata/` is still appended). Nothing here is written into
+the scanned repository.
+
+Earlier versions kept this folder in the platform cache folder (`~/Library/Caches/camerata/` on
+macOS, `$XDG_CACHE_HOME/camerata` or `~/.cache/camerata` elsewhere), which macOS may empty under
+disk pressure. On first use, when the new folder has no saved runs, everything there except `tmp/`
+is moved to the new folder: renamed, or copied, verified byte for byte and only then removed from
+the old folder. A run in use, another Camerata process still using the old folder or a name already
+taken in the new folder stops the move before anything changes; the old folder then stays in use,
+untouched, and one log line on stderr says why. Nothing is moved while `CAMERATA_STATE_DIR` is set.
+The per call system prompt files (`tmp/system-prompts/`) are disposable and stay in the cache folder. The key `<key>` is `<name>-<fnv32 of the
 canonical path>` for one repo and `project-<count>-<hash of the sorted paths>` for several.
 
 | Path | What it is |
@@ -5625,8 +5636,8 @@ The report written is a sweep-redacted clone, never the caller's copy.
 tool-provisioning `RealToolingProtected`): when the running executable is a cargo test binary, a path
 under the real home, data, cache or `~/.claude` directory is refused whatever the roots say. Network
 git steps go through `GitRemotes`, which tests point at local bare repositories. Seams:
-`CAMERATA_DATA_DIR` replaces the platform data directory and `CAMERATA_STATE_DIR` the platform cache
-directory (`camerata/` is appended to both); `AppState::from_data_dir` is the restart seam.
+`CAMERATA_DATA_DIR` replaces the platform data directory for the app's stores and `CAMERATA_STATE_DIR`
+the platform data directory for the state folder (`camerata/` is appended to both); `AppState::from_data_dir` is the restart seam.
 
 **Reading code for a finding** (`read.rs`, `onboard/finding_context.rs`): from the inspected commit
 through git objects (`git cat-file blob <sha>:<path>`, size-capped and redacted), never the working

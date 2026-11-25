@@ -23,7 +23,10 @@ struct Faulty {
 
 impl Ops for Faulty {
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        let blocked = self.fail_rename_from.as_ref().is_some_and(|d| from.starts_with(d))
+        let blocked = self
+            .fail_rename_from
+            .as_ref()
+            .is_some_and(|d| from.starts_with(d))
             || self.fail_rename_of.as_deref() == Some(from);
         if blocked {
             return Err(std::io::Error::other("injected rename failure"));
@@ -69,11 +72,8 @@ fn fixture() -> Fixture {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            old.join("runs/r-1"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        std::fs::set_permissions(old.join("runs/r-1"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
     }
     Fixture {
         _root: root,
@@ -94,7 +94,11 @@ fn snapshot(root: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
             if name.starts_with(".state-") {
                 continue;
             }
-            let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             if path.is_dir() {
                 out.insert(rel, None);
                 walk(root, &path, out);
@@ -149,7 +153,9 @@ fn runs_and_bookkeeping_move_by_rename() {
     let before = snapshot(&fx.old);
     let out = migrate(&fx.old, &fx.new);
     match &out {
-        MigrationOutcome::Moved { method, leftovers, .. } => {
+        MigrationOutcome::Moved {
+            method, leftovers, ..
+        } => {
             assert_eq!(*method, MoveMethod::Renamed);
             assert!(leftovers.is_empty(), "{leftovers:?}");
         }
@@ -169,7 +175,9 @@ fn a_rename_that_fails_falls_back_to_copy_then_verify() {
     };
     let out = migrate_with(&fx.old, &fx.new, &ops);
     match &out {
-        MigrationOutcome::Moved { method, leftovers, .. } => {
+        MigrationOutcome::Moved {
+            method, leftovers, ..
+        } => {
             assert_eq!(*method, MoveMethod::Copied);
             assert!(leftovers.is_empty(), "{leftovers:?}");
         }
@@ -183,12 +191,20 @@ fn a_rename_that_fails_falls_back_to_copy_then_verify() {
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, 0o700, "a run folder stays private after a copy");
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "a run folder stays private after a copy"
+        );
     }
 }
 
 fn assert_old_intact(fx: &Fixture, before: &BTreeMap<String, Option<Vec<u8>>>) {
-    assert_eq!(&snapshot(&fx.old), before, "the old folder is exactly as it was");
+    assert_eq!(
+        &snapshot(&fx.old),
+        before,
+        "the old folder is exactly as it was"
+    );
     assert!(
         !fx.new.join("runs").exists(),
         "the new folder holds no runs, so the next start tries again"
@@ -207,10 +223,7 @@ fn a_failed_copy_leaves_the_old_folder_intact_and_keeps_it() {
         ..Faulty::default()
     };
     let out = migrate_with(&fx.old, &fx.new, &ops);
-    assert!(
-        matches!(out, MigrationOutcome::KeptOld { .. }),
-        "{out:?}"
-    );
+    assert!(matches!(out, MigrationOutcome::KeptOld { .. }), "{out:?}");
     assert_old_intact(&fx, &before);
 }
 
@@ -226,10 +239,7 @@ fn a_rename_that_fails_part_way_is_put_back_before_anything_else() {
         ..Faulty::default()
     };
     let out = migrate_with(&fx.old, &fx.new, &ops);
-    assert!(
-        matches!(out, MigrationOutcome::KeptOld { .. }),
-        "{out:?}"
-    );
+    assert!(matches!(out, MigrationOutcome::KeptOld { .. }), "{out:?}");
     assert_old_intact(&fx, &before);
 }
 
@@ -273,10 +283,7 @@ fn a_run_in_use_is_not_moved() {
     held.try_lock().unwrap();
     let before = snapshot(&fx.old);
     let out = migrate(&fx.old, &fx.new);
-    assert!(
-        matches!(out, MigrationOutcome::KeptOld { .. }),
-        "{out:?}"
-    );
+    assert!(matches!(out, MigrationOutcome::KeptOld { .. }), "{out:?}");
     assert_old_intact(&fx, &before);
     drop(held);
 }
@@ -287,10 +294,7 @@ fn a_name_already_taken_in_the_new_folder_stops_the_move_before_it_starts() {
     write(&fx.new.join("web-0011aabb.ledger.json"), "someone else's");
     let before = snapshot(&fx.old);
     let out = migrate(&fx.old, &fx.new);
-    assert!(
-        matches!(out, MigrationOutcome::KeptOld { .. }),
-        "{out:?}"
-    );
+    assert!(matches!(out, MigrationOutcome::KeptOld { .. }), "{out:?}");
     assert_eq!(snapshot(&fx.old), before);
     assert_eq!(
         std::fs::read_to_string(fx.new.join("web-0011aabb.ledger.json")).unwrap(),

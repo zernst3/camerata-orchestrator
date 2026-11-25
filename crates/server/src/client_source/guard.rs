@@ -417,7 +417,10 @@ pub(crate) fn protected_reason(
         own_data.push(("Camerata's data folder", canonicalize_existing_prefix(d)));
     }
     if let Some(d) = &roots.cli_state_dir {
-        own_data.push(("Camerata's cache folder", canonicalize_existing_prefix(d)));
+        own_data.push((
+            "Camerata's run state folder",
+            canonicalize_existing_prefix(d),
+        ));
     }
     if let Some(d) = &roots.claude_projects_dir {
         own_data.push((

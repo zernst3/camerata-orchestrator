@@ -48,7 +48,12 @@ fn the_override_wins_on_every_platform_and_camerata_is_appended() {
             PathBuf::from("/sandbox/state/camerata")
         );
         assert_eq!(
-            cache_dir_for(platform, os("/sandbox/state"), os("/home/u"), os("/x/cache")),
+            cache_dir_for(
+                platform,
+                os("/sandbox/state"),
+                os("/home/u"),
+                os("/x/cache")
+            ),
             PathBuf::from("/sandbox/state/camerata"),
             "the disposable files follow the override too"
         );
