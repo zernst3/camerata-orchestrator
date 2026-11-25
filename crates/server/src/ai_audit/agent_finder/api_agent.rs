@@ -634,8 +634,7 @@ impl ApiPieceAgent {
         let limit = window / 100 * CONTEXT_FILL_PERCENT;
         // The turn may write up to its output limit, and the window holds both; the estimate of
         // the prompt alone (3 bytes a token) can run low on dense code.
-        let estimated = super::super::repo_map::estimate_tokens(body.to_string().len())
-            + output_tokens as usize;
+        let estimated = estimated_request_tokens(body, output_tokens);
         (estimated > limit).then(|| {
             format!(
                 "{CONTEXT_FULL_PREFIX} (about {estimated} tokens against a window of {window}); \
@@ -1089,28 +1088,69 @@ pub(crate) fn tool_schemas() -> Vec<Value> {
     ]
 }
 
-/// The estimated size, in tokens, of the first request of a piece: the system text, the tool list
-/// and `brief`, built by the same builder the loop uses and counted the way the context guard
-/// counts. The room's files are read by tool calls later and are not in it. Makes no call and
-/// reads nothing but `room`; `camerata inspect --plan-only` prints it.
-pub(crate) fn first_request_tokens(
+/// The estimated size of a request body, in tokens, with the turn's output limit counted: the one
+/// piece of arithmetic the context guard ([`ApiPieceAgent::context_stop`]) and `camerata inspect
+/// --plan-only` both use. The prompt is the serialized JSON body at 3 bytes a token.
+fn estimated_request_tokens(body: &Value, output_tokens: u32) -> usize {
+    super::super::repo_map::estimate_tokens(body.to_string().len()) + output_tokens as usize
+}
+
+/// The request bodies a piece's conversation would carry, sized for `camerata inspect
+/// --plan-only`: the first request, and the request after the model has read every file of
+/// `room` whole, page by page, through the Read tool (numbered, framed and JSON-escaped as the
+/// loop sends them). Both are counted by [`estimated_request_tokens`], the guard's own
+/// arithmetic, so they compare with [`context_guard_tokens`]. Makes no call. The second figure
+/// is a lower bound: the model's own replies, its writes and its other tool calls are not in it.
+pub(crate) fn request_sizes(
     model: &str,
     room: &Room,
     brief: &str,
     max_tokens: u32,
-) -> usize {
+) -> (usize, usize) {
     let nonce = nonce_for_room(room);
     let system = with_untrusted_clause(SYSTEM_TEXT.to_string(), &nonce);
-    let messages = vec![json!({"role": "user", "content": brief})];
-    let (mut body, _) = build_anthropic_request_body_with_limit(
-        model,
-        Some(&system),
-        &messages,
-        &tool_schemas(),
-        max_tokens,
-    );
-    cache_the_conversation(&mut body);
-    super::super::repo_map::estimate_tokens(body.to_string().len())
+    let tools = tool_schemas();
+    let size_of = |messages: &[Value]| {
+        let (mut body, _) = build_anthropic_request_body_with_limit(
+            model,
+            Some(&system),
+            messages,
+            &tools,
+            max_tokens,
+        );
+        cache_the_conversation(&mut body);
+        estimated_request_tokens(&body, max_tokens)
+    };
+    let mut messages = vec![json!({"role": "user", "content": brief})];
+    let first = size_of(&messages);
+    for (n, path) in room.paths().iter().enumerate() {
+        let id = format!("toolu_{n}");
+        messages.push(json!({"role": "assistant", "content": [
+            {"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": path}}
+        ]}));
+        let is_checklist = super::room::is_checklist_path(path);
+        let mut shown = String::new();
+        let mut next = 1usize;
+        loop {
+            let page = if is_checklist {
+                room.read_plain(path, next, MAX_READ_LINES)
+            } else {
+                room.read(path, next, MAX_READ_LINES)
+            };
+            let Ok(out) = page else { break };
+            if out.lines_returned == 0 {
+                break;
+            }
+            shown.push_str(&if is_checklist {
+                out.text
+            } else {
+                fence(&nonce, path, &out.text)
+            });
+            next += out.lines_returned;
+        }
+        append_tool_results(&mut messages, ApiShape::Anthropic, &[(id, shown)]);
+    }
+    (first, size_of(&messages))
 }
 
 /// The most tokens a request (its output limit counted) may reach before the loop stops the piece

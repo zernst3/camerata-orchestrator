@@ -21,12 +21,15 @@ pub struct PieceFigures {
     pub context_bytes: usize,
     /// Bytes of the checklist file the room serves.
     pub checklist_bytes: usize,
-    /// Estimated tokens of the first request (system text, tools and brief; the room's files are
-    /// read later, by tool calls).
+    /// Estimated size of the first request (system text, tools and brief; the room's files are
+    /// read later, by tool calls), the turn's output limit included, by the context guard's own
+    /// arithmetic.
     pub first_request_tokens: usize,
-    /// Estimated tokens the conversation holds if the model reads every file of the room whole,
-    /// the first request and one turn's output limit included. Counted the way the context guard
-    /// counts, so it is comparable with [`Self::guard_tokens`].
+    /// A LOWER BOUND on the largest request of the piece: the conversation after the model has
+    /// read every file of the room whole through the Read tool (numbered lines, framed and
+    /// JSON-escaped as the loop sends them), measured by the context guard's own arithmetic, so it
+    /// compares with [`Self::guard_tokens`]. The model's replies, writes and other tool calls are
+    /// not in it.
     pub peak_tokens: usize,
     /// The most a request may reach before the loop stops the piece (the context guard).
     pub guard_tokens: usize,
@@ -83,13 +86,12 @@ pub fn piece_figures(
                 .map(|(_, t)| t.len())
                 .sum()
         };
-        let first = api_agent::first_request_tokens(
+        let (first, peak) = api_agent::request_sizes(
             model,
             &room,
             brief_text::PIECE_BRIEF,
             limits.max_turn_tokens,
         );
-        let room_bytes: usize = held.iter().map(|(_, t)| t.len()).sum();
         out.push(PieceFigures {
             repo: repo.to_string(),
             unit: piece.unit.clone(),
@@ -100,9 +102,7 @@ pub fn piece_figures(
             context_bytes: size_of(room.context_files()),
             checklist_bytes: rendered.len(),
             first_request_tokens: first,
-            peak_tokens: first
-                + super::super::super::repo_map::estimate_tokens(room_bytes)
-                + limits.max_turn_tokens as usize,
+            peak_tokens: peak,
             guard_tokens,
             turn_limit: limits.max_turns,
         });
