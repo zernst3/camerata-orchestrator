@@ -12,6 +12,7 @@ mod activity;
 mod conventions;
 mod joints;
 mod piece;
+mod plan;
 mod rating;
 #[cfg(test)]
 mod tests;
@@ -39,6 +40,7 @@ use crate::stage_telemetry::Stage;
 pub use activity::FinderActivity;
 use camerata_api_types::audit::RuleConvention;
 use piece::{PieceReport, Shared, StoredPiece};
+pub use plan::{piece_figures, PieceFigures};
 
 /// Settings of one finder run that are not on [`RunControls`].
 #[derive(Debug, Clone, PartialEq)]

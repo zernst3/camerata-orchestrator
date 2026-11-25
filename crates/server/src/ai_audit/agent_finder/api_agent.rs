@@ -1089,6 +1089,36 @@ pub(crate) fn tool_schemas() -> Vec<Value> {
     ]
 }
 
+/// The estimated size, in tokens, of the first request of a piece: the system text, the tool list
+/// and `brief`, built by the same builder the loop uses and counted the way the context guard
+/// counts. The room's files are read by tool calls later and are not in it. Makes no call and
+/// reads nothing but `room`; `camerata inspect --plan-only` prints it.
+pub(crate) fn first_request_tokens(
+    model: &str,
+    room: &Room,
+    brief: &str,
+    max_tokens: u32,
+) -> usize {
+    let nonce = nonce_for_room(room);
+    let system = with_untrusted_clause(SYSTEM_TEXT.to_string(), &nonce);
+    let messages = vec![json!({"role": "user", "content": brief})];
+    let (mut body, _) = build_anthropic_request_body_with_limit(
+        model,
+        Some(&system),
+        &messages,
+        &tool_schemas(),
+        max_tokens,
+    );
+    cache_the_conversation(&mut body);
+    super::super::repo_map::estimate_tokens(body.to_string().len())
+}
+
+/// The most tokens a request (its output limit counted) may reach before the loop stops the piece
+/// instead of sending it: [`CONTEXT_FILL_PERCENT`] of the model's context window.
+pub(crate) fn context_guard_tokens(model: &str) -> usize {
+    crate::ai_audit::request_budget::context_window_tokens(model) / 100 * CONTEXT_FILL_PERCENT
+}
+
 /// The run's frame token: drawn once per run over every text the room serves, so it occurs in
 /// none of them. A seeded run (a resumable one) draws it from its seed instead, the same rule as
 /// the engine finder's.
