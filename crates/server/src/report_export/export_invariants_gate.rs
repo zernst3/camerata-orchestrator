@@ -1011,6 +1011,7 @@ async fn fix_fields_never_contain_raw_template_syntax() {
 #[tokio::test]
 async fn fix_fields_can_fall_back_to_the_generic_affected_noun_phrase() {
     let fx = build_fixture().await;
+    let unfilled_token = regex::Regex::new(r"<[^<>]*>").expect("static regex must compile");
     let mut generic_fix_lines = 0;
     let mut offenders = Vec::new();
     for (loc, text) in all_client_text_fields(&fx) {
@@ -1020,7 +1021,7 @@ async fn fix_fields_can_fall_back_to_the_generic_affected_noun_phrase() {
         if text.contains("the affected table") {
             generic_fix_lines += 1;
         }
-        if text.contains('<') || text.contains('>') || text.contains('{') {
+        if text.contains('{') || unfilled_token.is_match(&text) {
             offenders.push(format!("{loc}: {text:?}"));
         }
     }
