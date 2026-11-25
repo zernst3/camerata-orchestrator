@@ -486,9 +486,12 @@ impl LlmPort for Quiet {
     }
 }
 
+/// What one piece was given: piece files, context files, checklist bytes, turn limit.
+type PieceSeen = (usize, usize, usize, usize);
+
 /// An agent that records the room and limits each piece is given, then stops the piece.
 struct Recorder {
-    seen: Arc<Mutex<Vec<(usize, usize, usize, usize)>>>,
+    seen: Arc<Mutex<Vec<PieceSeen>>>,
     calls: Arc<AtomicUsize>,
 }
 
@@ -526,10 +529,7 @@ impl PieceAgent for Recorder {
 
 /// Run a real pipeline over `repo` with the recorder; returns the pre-flight texts it printed,
 /// what each piece was given, and a debug dump of the result (where a pause note would show).
-async fn real_run(
-    repo: &Path,
-    cap: Option<f64>,
-) -> (Vec<String>, Vec<(usize, usize, usize, usize)>, String) {
+async fn real_run(repo: &Path, cap: Option<f64>) -> (Vec<String>, Vec<PieceSeen>, String) {
     let out = tempfile::tempdir().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let agent = Recorder {
