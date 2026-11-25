@@ -15,16 +15,26 @@
 # An empty filtered diff exits 0 with a one-line note.
 #
 # The test run is narrowed further by a name filter, derived from the changed risk files: each
-# file's module stem (`scan_ledger`, `coverage_gaps`, `cost_checkpoint`, `checkpoint`; a `mod.rs`
-# gives its directory's name), and for a non-test file under one of the directory risk paths
-# that directory's module too (`report_export`, `release_gate`, `run_store`, `usage_meter`), because
-# those modules keep their tests in sibling `*_tests` files named after the behaviour, not the
-# file. libtest matches each word as a substring, so `coverage_gaps` also selects
-# `coverage_gaps_tests`. The whole unit suite takes about 25 minutes on a 4-core container (four
+# file's module stem (`scan_ledger`, `coverage_gaps`, `cost_checkpoint`, `checkpoint`; a
+# `mod.rs` gives its directory's name), and for a non-test file under one of the directory risk
+# paths that directory's module too (`report_export`, `release_gate`, `run_store`,
+# `usage_meter`), because those modules keep their tests in sibling `*_tests` files named after
+# the behaviour, not the file. A billing file (`usage_meter`, `cost_checkpoint`) also adds the
+# modules that test the limit through the stages obeying it (`efficiency_cap`,
+# `group_review_tests`, `spend_limit`, `cost_cap`, `resume_limit`). libtest matches each word as
+# a substring, so `coverage_gaps` also selects `coverage_gaps_tests`.
+#
+# Why a filter at all: the whole unit suite takes about 25 minutes on a 4-core container (four
 # scale tests dominate it), which is minutes per mutant; the filtered run takes seconds to about
 # a minute, so a mutant costs about one incremental rebuild plus that. The price is that a test
 # elsewhere that would catch a mutant is not run: confirm each survivor against the wider suite
 # before calling it a gap (MUTANTS_TEST_FILTER=all, or a module list of your own).
+#
+# Four scale tests take several minutes each in a debug build and are skipped by default
+# (`--skip`, never `#[ignore]`): one is a release gate secrets test and one a resume test, so a
+# diff in those areas wants a full run with MUTANTS_INCLUDE_SLOW=1 before release. Their full
+# names contain `ai_audit`, `release_gate` or `report_export`, so the filter alone would select
+# them.
 #
 # Commit first: cargo-mutants mutates a copy of the working tree, and the diff is of commits,
 # so uncommitted edits to a risk path would make the diff and the tree disagree.
@@ -32,8 +42,10 @@
 # Settings (environment):
 #   MUTANTS_TEST_FILTER  space-separated libtest name filters in place of the derived stems,
 #                        or `all` for no filter (the whole unit suite: slow)
+#   MUTANTS_INCLUDE_SLOW `1` to keep the four scale tests skipped by default (above)
 #   MUTANTS_TIMEOUT      seconds one mutant's test run may take before it counts as a timeout
-#                        (default 120: the filtered run takes seconds, a hung mutant does not)
+#                        (default 300: the filtered runs measured 1 to 45 seconds alone, and
+#                        two jobs at once can double that; a hung mutant waits this long)
 #   MUTANTS_JOBS         mutants built and tested at once (default 2; each job holds its own
 #                        build directory of about 4 GiB)
 #   MUTANTS_OUT          where cargo-mutants writes mutants.out (default target/mutants-in-diff)
@@ -75,7 +87,13 @@ crates/server/src/scan_ledger.rs
 crates/server/src/onboard/files.rs
 crates/server/src/report_export/'
 
-timeout="${MUTANTS_TIMEOUT:-120}"
+# The scale tests skipped unless MUTANTS_INCLUDE_SLOW=1 (see the header).
+slow_tests='a_resumed_30k_site_calibration_resubmits_nothing_already_absorbed
+a_five_thousand_file_repo_assembles_within_the_window_and_the_batch_limit
+gate_failure_message_never_contains_the_secret
+a_package_of_thirty_thousand_places_clears_the_release_gate'
+
+timeout="${MUTANTS_TIMEOUT:-300}"
 jobs="${MUTANTS_JOBS:-2}"
 out="${MUTANTS_OUT:-target/mutants-in-diff}"
 
@@ -113,6 +131,11 @@ else
         print f
         # A changed test file holds no mutants: its directory module would only add run time.
         if (f ~ /tests$/ || $0 ~ /\/tests\//) next
+        # The spend limit and checkpoint are tested through the stages that obey them.
+        if ($0 ~ /usage_meter|cost_checkpoint/) {
+          print "efficiency_cap"; print "group_review_tests"; print "spend_limit"
+          print "cost_cap"; print "resume_limit"
+        }
         for (i = 1; i <= n; i++) {
           if (index($0, d[i]) == 1) {
             m = split(d[i], dp, "/")
@@ -122,6 +145,12 @@ else
       }' |
     sort -u | tr '\n' ' ')"
   set +f
+fi
+skips=""
+if [ "${MUTANTS_INCLUDE_SLOW:-0}" != "1" ]; then
+  for t in $slow_tests; do
+    skips="$skips --skip $t"
+  done
 fi
 if [ "$filter" = "all" ]; then
   filter=""
@@ -136,7 +165,17 @@ n_mutants="$(cargo mutants --list --in-diff "$diff_file" --package camerata-serv
 echo "mutants-in-diff: ${files_changed} risk-path file(s) changed in ${base}...HEAD;" \
   "${n_mutants} mutant(s)"
 echo "mutants-in-diff: test filter: ${shown}"
+if [ -n "$skips" ]; then
+  echo "mutants-in-diff: skipping the four scale tests (MUTANTS_INCLUDE_SLOW=1 keeps them)"
+fi
 echo "mutants-in-diff: timeout ${timeout}s, ${jobs} job(s), output in ${out}/mutants.out"
+
+# A dry run (`--list` among the extra arguments) prints the mutants and stops: no summary.
+for arg in ${1+"$@"}; do
+  if [ "$arg" = "--list" ]; then
+    exec cargo mutants --in-diff "$diff_file" --package camerata-server ${1+"$@"}
+  fi
+done
 
 mkdir -p "$out"
 # cargo-mutants builds in a copy without `.git`, where crates/server/build.rs finds no commit
@@ -147,7 +186,7 @@ export CAMERATA_GIT_COMMIT
 start="$(date +%s)"
 set +e
 set -f
-# The filter is word-split on purpose: each word is one libtest filter.
+# The filter and skips are word-split on purpose: each word is one libtest argument.
 # shellcheck disable=SC2086
 cargo mutants \
   --in-diff "$diff_file" \
@@ -158,11 +197,21 @@ cargo mutants \
   --output "$out" \
   --no-shuffle \
   ${1+"$@"} \
-  -- -- $filter
+  -- -- $filter $skips
 status=$?
 set +f
 set -e
 elapsed=$(($(date +%s) - start))
+
+# 0, 2 and 3 mean mutants were tested. Anything else (a usage error, 4 for a failed baseline)
+# tested none, and the output folder may hold an earlier run's lists: no summary from those.
+case "$status" in
+  0 | 2 | 3) ;;
+  *)
+    echo "mutants-in-diff: cargo-mutants exited ${status} after ${elapsed}s; no mutants tested" >&2
+    exit "$status"
+    ;;
+esac
 
 count() {
   if [ -f "$out/mutants.out/$1" ]; then
