@@ -21,11 +21,12 @@ pub struct PieceFigures {
     pub context_bytes: usize,
     /// Bytes of the checklist file the room serves.
     pub checklist_bytes: usize,
-    /// Estimated size of the first request (system text, tools and brief; the room's files are
-    /// read later, by tool calls), the turn's output limit included, by the context guard's own
-    /// arithmetic.
+    /// Estimated input of the first request (system text, tools and brief; the room's files are
+    /// read later, by tool calls), the output reserve NOT included.
     pub first_request_tokens: usize,
-    /// A LOWER BOUND on the largest request of the piece: the conversation after the model has
+    /// The output reserve the context guard counts on top of a request: one turn's output limit.
+    pub output_reserve_tokens: usize,
+    /// A LOWER BOUND on the largest request of the piece, the output reserve included: the conversation after the model has
     /// read every file of the room whole through the Read tool (numbered lines, framed and
     /// JSON-escaped as the loop sends them), measured by the context guard's own arithmetic, so it
     /// compares with [`Self::guard_tokens`]. The model's replies, writes and other tool calls are
@@ -101,7 +102,8 @@ pub fn piece_figures(
             context_files: room.context_files().len(),
             context_bytes: size_of(room.context_files()),
             checklist_bytes: rendered.len(),
-            first_request_tokens: first,
+            first_request_tokens: first.saturating_sub(limits.max_turn_tokens as usize),
+            output_reserve_tokens: limits.max_turn_tokens as usize,
             peak_tokens: peak,
             guard_tokens,
             turn_limit: limits.max_turns,

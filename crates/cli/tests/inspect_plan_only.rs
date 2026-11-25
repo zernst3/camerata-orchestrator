@@ -147,6 +147,8 @@ async fn plan_only_prints_the_figures_and_changes_nothing() {
         "context 0 files",
         "checklist",
         "first request about",
+        "tokens in (plus 32,000 output reserve)",
+        "output reserve included (lower bound)",
         "turn limit",
         "projected, API prices",
         "spend limit it would run under: none",

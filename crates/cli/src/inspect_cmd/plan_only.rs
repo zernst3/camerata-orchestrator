@@ -81,8 +81,9 @@ fn prior_baseline_exists(path: &std::path::Path) -> bool {
 fn piece_line(i: usize, count: usize, p: &PieceFigures) -> String {
     format!(
         "  piece {} of {} ({}): {} files, {} lines, {} bytes; context {} files, {} bytes; \
-         checklist {} bytes; first request about {} tokens; at least {} tokens once every file is \
-         read (lower bound) against a guard of {}; turn limit {}",
+         checklist {} bytes; first request about {} tokens in (plus {} output reserve); at least {} tokens \
+         once every file is read, output reserve included (lower bound), against a guard of {}; \
+         turn limit {}",
         i + 1,
         count,
         p.unit,
@@ -93,6 +94,7 @@ fn piece_line(i: usize, count: usize, p: &PieceFigures) -> String {
         n(p.context_bytes),
         n(p.checklist_bytes),
         n(p.first_request_tokens),
+        n(p.output_reserve_tokens),
         n(p.peak_tokens),
         n(p.guard_tokens),
         p.turn_limit
