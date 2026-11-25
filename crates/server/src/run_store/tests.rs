@@ -3065,3 +3065,8 @@ fn a_client_inspection_does_not_start_on_a_dirty_or_commitless_build() {
         None
     );
 }
+
+/// Issue 342: saved runs move out of the platform cache folder into the app data folder, and a
+/// run saved in the old place still resumes from the new one.
+#[path = "tests/state_dir_migration.rs"]
+mod state_dir_migration;
