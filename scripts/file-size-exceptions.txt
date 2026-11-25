@@ -1,0 +1,36 @@
+# Rust files allowed to exceed the 3000-line limit of scripts/check-file-size.sh.
+# Format: <ceiling> <path>. The ceiling is the file's line count when it was listed;
+# the file may shrink but never grow past it. Remove an entry once its file is at or
+# under 3000 lines. Sorted largest first. Never raise a ceiling to make the gate pass:
+# split the file instead (GitHub issue #278).
+10176 crates/ui/src/cockpit/uow.rs
+8952 crates/server/src/onboard.rs
+8283 crates/ui/src/cockpit/rules.rs
+7570 crates/server/src/xlsx_export.rs
+7489 crates/ui/src/style.rs
+7168 crates/rules/src/lib.rs
+7047 crates/llm/src/llm.rs
+6743 crates/ui/src/cockpit.rs
+6146 crates/server/src/api_agent_driver.rs
+5617 crates/ui/src/cockpit/viewer.rs
+5314 crates/server/src/lib.rs
+5097 crates/server/src/uow.rs
+4969 crates/server/src/scan_tools.rs
+4893 crates/ui-core/src/triage.rs
+4643 crates/server/src/scan_ledger.rs
+4504 crates/checks/src/shared_constant_checker.rs
+4252 crates/server/src/workspace.rs
+4234 crates/server/src/dev_implement_run.rs
+4203 crates/ui-core/src/scan.rs
+4191 crates/ui/src/cockpit/stack.rs
+3888 crates/cli/src/inspect_cmd.rs
+3756 crates/server/src/ai_audit/detail_regen_tests.rs
+3683 crates/gateway/src/lib.rs
+3535 crates/ui/src/chat.rs
+3424 crates/server/src/ai_audit/group_review_tests.rs
+3176 crates/llm/src/model_registry.rs
+3164 crates/server/src/onboard/files.rs
+3148 crates/checks/src/multilang.rs
+3067 crates/server/src/run_store/tests.rs
+3057 crates/server/src/tests/runs_feedback.rs
+3023 crates/checks/src/extract/ecma.rs

@@ -3968,6 +3968,15 @@ runs in CI as its own named step, ahead of the full test gate
 There are none today: the one it was created for (an absorbed merge site
 observable in no artifact) was fixed, and its assertion now runs green by default.
 
+### `./scripts/check-file-size.sh`
+
+`./scripts/check-file-size.sh` fails when a tracked `.rs` file under `crates/` or `tools/`
+exceeds 3,000 lines, unless it is listed in `scripts/file-size-exceptions.txt`, whose recorded
+ceiling (the file's size when listed) it may shrink below but never grow past; a listed file
+back within 3,000 lines must be removed from the list. `./scripts/test-check-file-size.sh`
+proves the gate on a throwaway copy of the tree, and the list only ever shrinks: split a file,
+never raise its ceiling (GitHub issue #278).
+
 ### The requirement-traceability gate
 
 `crates/server/tests/requirement_traceability.rs` fails the build if any product
