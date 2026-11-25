@@ -899,7 +899,7 @@ impl ScriptedWire for ScriptWire {
             .is_ok()
         {
             let n = self.shared.hiccups_played.fetch_add(1, Ordering::SeqCst);
-            let (status, kind) = if n % 2 == 0 {
+            let (status, kind) = if n.is_multiple_of(2) {
                 (429, "rate_limit_error")
             } else {
                 (529, "overloaded_error")
@@ -908,7 +908,7 @@ impl ScriptedWire for ScriptWire {
                 status,
                 body: json!({"type": "error", "error": {"type": kind, "message": "slow down"}})
                     .to_string(),
-                retry_after: (n % 2 == 0).then(|| Duration::from_secs(2)),
+                retry_after: n.is_multiple_of(2).then(|| Duration::from_secs(2)),
             });
         }
         // The credit runs out: the provider answers 400 with its own words, every time.
@@ -1079,6 +1079,8 @@ fn script_for(room: &Room, joints: bool, shared: &Shared) -> Vec<Vec<Value>> {
 
 /// The agent the run is given for each repository: the REAL API transport, a new one for each
 /// call (each over its own script), all on the run's shared meter.
+type PauseFn = Arc<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 struct Rehearsal {
     meter: Arc<UsageMeter>,
     shared: Arc<Shared>,
@@ -1093,11 +1095,10 @@ impl Rehearsal {
         });
         let shared = self.shared.clone();
         // Every wait is answered at once and counted.
-        let pause: Arc<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync> =
-            Arc::new(move |_| {
-                shared.pauses.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async {})
-            });
+        let pause: PauseFn = Arc::new(move |_| {
+            shared.pauses.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {})
+        });
         Arc::new(
             ApiPieceAgent::new(DEFAULT_FINDER_MODEL, "sk-ant-rehearsal-not-a-real-key")
                 .with_meter(self.meter.clone())
@@ -1481,7 +1482,6 @@ async fn rehearse(scale: Scale, faults: Faults) {
             "the stopped run says it is incomplete"
         );
     }
-    let a_cost = a.actual_usage.as_ref().map(|u| u.cost_usd);
     let mut paid = paid_by(&a);
     let sends_after_credit_error = shared.credit_errors.load(Ordering::SeqCst);
     let spend_after_a = spend.micro();
