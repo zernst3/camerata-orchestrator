@@ -882,8 +882,8 @@ struct BatchFile {
     /// The fetched results, once there are some.
     #[serde(default)]
     rows: Option<Vec<StoredRow>>,
-    /// The batch a later attempt sent for this one's rows that had no good response (an error of
-    /// any kind, expired, missing): its file's `(key, n)`. That batch is an ordinary batch file
+    /// The batch a later attempt sent for this one's rows that were refused for
+    /// billing (no reply, nothing billed): its file's `(key, n)`. That batch is an ordinary batch file
     /// and may carry a follow-up of its own, so the files form a chain from the batch the stage
     /// first submitted. The chain is read as ONE set of rows ([`merged_rows`]).
     #[serde(default)]
@@ -1043,7 +1043,7 @@ impl BatchApi for JournalBatchApi {
                     merged
                         .iter()
                         .find(|r| r.custom_id == i.custom_id)
-                        .is_none_or(StoredRow::needs_resend)
+                        .is_some_and(StoredRow::needs_resend)
                 })
                 .cloned()
                 .collect();
@@ -1052,8 +1052,11 @@ impl BatchApi for JournalBatchApi {
                 self.remember(&chain[0].2.batch_id, &key, n, (key.as_str(), n));
                 return Ok(chain[0].2.batch_id.clone());
             }
-            // Some rows were refused for billing, or have no row at all: only those go out again, as a new batch stored like any other and chained to this one. The caller
-            // gets the new id, and its fetch returns the stored good rows with the new rows.
+            // Some rows were refused for billing: only those go out again, as a new batch stored
+            // like any other and chained to this one. A row the batch left out is not one of them:
+            // the stage retries a missing item itself, as a batch of its own that is stored under
+            // its own hash. The caller gets the new id, and its fetch returns the stored rows with
+            // the new rows.
             let key2 = hash_items(&again);
             let mut link_to = None;
             let mut n2 = 0;

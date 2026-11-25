@@ -1133,6 +1133,8 @@ mod batches {
         transient_fail: std::sync::Mutex<Vec<String>>,
         /// Items whose row is a refusal: an error with what the call was billed.
         refused: std::sync::Mutex<Vec<String>>,
+        /// Items the next fetched batch leaves out (taken off the list as it is used).
+        omitted: std::sync::Mutex<Vec<String>>,
         fetches: AtomicUsize,
         realtime: Option<Scripted>,
     }
@@ -1153,6 +1155,9 @@ mod batches {
         }
         fn fail_once(&self, ids: &[&str]) {
             *self.transient_fail.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        }
+        fn omit_once(&self, ids: &[&str]) {
+            *self.omitted.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
         }
         fn refuse(&self, ids: &[&str]) {
             *self.refused.lock().unwrap() = ids.iter().map(|s| s.to_string()).collect();
@@ -1190,8 +1195,10 @@ mod batches {
             let ids = self.sent.lock().unwrap()[which - 1].clone();
             let failing = self.credit_fail.lock().unwrap().clone();
             let refused = self.refused.lock().unwrap().clone();
+            let left_out: Vec<String> = std::mem::take(&mut *self.omitted.lock().unwrap());
             Ok(ids
                 .into_iter()
+                .filter(|c| !left_out.contains(c))
                 .map(|custom_id| {
                     if refused.contains(&custom_id) {
                         return BatchResultRow {
@@ -1444,6 +1451,46 @@ mod batches {
             let rows = api.fetch(&again, CacheTtl::FiveMinutes).await.unwrap();
             assert!(rows[0].response.is_some());
             assert_eq!(fake.sent().len(), 3, "nothing was paid for twice");
+            // i1 + i2 (retry) + i3 (resent) once each.
+            assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn an_item_missing_from_the_head_and_retried_by_the_stage_is_not_sent_again() {
+        seeded(async {
+            let (_s, _g) = state_dir();
+            let repo = git_repo();
+            let store = new_run(&repo);
+            let fake = Arc::new(Ledger::failing(&["i3"]));
+            fake.omit_once(&["i2"]);
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            let rows = api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(ids_of(&rows), ["i1", "i3"], "the batch left i2 out");
+            // The stage sends the missing item again as a batch of its own, and it answers.
+            let retry = api.submit(one("i2")).await.unwrap();
+            api.fetch(&retry, CacheTtl::FiveMinutes).await.unwrap();
+            drop(api);
+            let store = reopen(store);
+            fake.restore_credit();
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let id = api.submit(three()).await.unwrap();
+            api.fetch(&id, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(
+                fake.sent(),
+                vec![
+                    vec!["i1".to_string(), "i2".to_string(), "i3".to_string()],
+                    vec!["i2".to_string()],
+                    vec!["i3".to_string()],
+                ],
+                "only the credit row goes out again; the missing item is the stage's to retry"
+            );
+            let again = api.submit(one("i2")).await.unwrap();
+            api.fetch(&again, CacheTtl::FiveMinutes).await.unwrap();
+            assert_eq!(fake.sent().len(), 3, "the stored retry answers it");
             // i1 + i2 (retry) + i3 (resent) once each.
             assert!((journal::stored_spend(store.dir()) - 1.5).abs() < 1e-9);
         })
