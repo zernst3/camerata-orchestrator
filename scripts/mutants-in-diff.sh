@@ -9,7 +9,7 @@
 #   MUTANTS_JOBS=3 scripts/mutants-in-diff.sh origin/main
 #
 # It diffs <base-ref>...HEAD (the merge base to HEAD, so only this branch's own changes count),
-# keeps the risk paths below, and runs cargo-mutants in diff mode on the camerata-server unit
+# keeps the risk paths below and runs cargo-mutants in diff mode on the camerata-server unit
 # tests. `--cargo-arg=--lib` keeps both the per-mutant build and the test run to the library
 # target, so the 80-odd end-to-end binaries under crates/server/tests are neither built nor run.
 # An empty filtered diff exits 0 with a one-line note.
