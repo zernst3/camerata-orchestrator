@@ -54,7 +54,9 @@ pub const BFF_ADDR: &str = "127.0.0.1:8787";
 /// [`BFF_ADDR`].
 pub fn bff_addr() -> String {
     server_process::bff_addr_from(
-        std::env::var(server_process::SERVER_ADDR_ENV).ok().as_deref(),
+        std::env::var(server_process::SERVER_ADDR_ENV)
+            .ok()
+            .as_deref(),
         BFF_ADDR,
     )
 }

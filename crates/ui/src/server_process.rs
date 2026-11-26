@@ -117,7 +117,6 @@ pub enum LaunchDecision {
     /// A healthy camerata BFF answers, but from another build or on another data or state folder
     /// (#566): do not attach to it, do not spawn over it and do not kill it. The sentence names
     /// both sides.
-    #[allow(dead_code)] // scaffold (#566): decide_reuse_or_spawn builds it in the next commit
     Refuse(String),
 }
 
@@ -176,14 +175,24 @@ pub async fn decide_reuse_or_spawn(base_url: &str, expected: &ExpectedServer) ->
     match crate::build_guard::probe(&probe_client(), base_url).await {
         None => LaunchDecision::SpawnNew,
         Some(server) => {
-            let _ = (expected, server);
-            LaunchDecision::ReuseExisting
+            let ui = expected.ui_build.as_deref();
+            match crate::build_guard::find_mismatch(ui, &expected.folders, &server) {
+                None => LaunchDecision::ReuseExisting,
+                Some(mismatch) => {
+                    let line = crate::build_guard::mismatch_line(
+                        &mismatch,
+                        ui,
+                        &expected.folders,
+                        &server,
+                    );
+                    LaunchDecision::Refuse(refusal_sentence(base_url, &line))
+                }
+            }
         }
     }
 }
 
 /// The sentence the launcher prints when it refuses a server.
-#[allow(dead_code)] // scaffold (#566): decide_reuse_or_spawn uses it in the next commit
 fn refusal_sentence(base_url: &str, line: &str) -> String {
     format!(
         "[camerata-ui] not attaching to the camerata server on {base_url}: {line} An inspection \
@@ -668,8 +677,14 @@ mod tests {
         else {
             panic!("a server of another build must be refused");
         };
-        assert!(why.contains("commit 11111111"), "names the app build: {why}");
-        assert!(why.contains("commit 22222222"), "names the server build: {why}");
+        assert!(
+            why.contains("commit 11111111"),
+            "names the app build: {why}"
+        );
+        assert!(
+            why.contains("commit 22222222"),
+            "names the server build: {why}"
+        );
     }
 
     /// #566: a healthy server of the same build on another data folder (a dev server on the same
@@ -706,7 +721,10 @@ mod tests {
             .expect_err("a server on another data folder must be refused")
             .to_string();
         assert!(err.contains(DEV_DATA) && err.contains(ACME_DATA), "{err}");
-        assert!(!err.contains("could not spawn"), "nothing was spawned: {err}");
+        assert!(
+            !err.contains("could not spawn"),
+            "nothing was spawned: {err}"
+        );
     }
 
     /// #566: a server the app starts inherits the app's `CAMERATA_DATA_DIR` and
@@ -733,10 +751,7 @@ mod tests {
         let cfg = ServerLaunchConfig {
             addr: "127.0.0.1:8790".to_string(),
             bin: script,
-            extra_env: vec![(
-                "CAMERATA_ENV_DUMP".to_string(),
-                dump.display().to_string(),
-            )],
+            extra_env: vec![("CAMERATA_ENV_DUMP".to_string(), dump.display().to_string())],
             health_timeout: Duration::from_secs(1),
             expected: expected(),
         };
@@ -756,7 +771,10 @@ mod tests {
     #[test]
     fn the_address_comes_from_the_environment_when_set() {
         assert_eq!(bff_addr_from(None, "127.0.0.1:8787"), "127.0.0.1:8787");
-        assert_eq!(bff_addr_from(Some("  "), "127.0.0.1:8787"), "127.0.0.1:8787");
+        assert_eq!(
+            bff_addr_from(Some("  "), "127.0.0.1:8787"),
+            "127.0.0.1:8787"
+        );
         assert_eq!(
             bff_addr_from(Some(" 127.0.0.1:8790 "), "127.0.0.1:8787"),
             "127.0.0.1:8790"
@@ -864,7 +882,10 @@ mod tests {
             extra_env: vec![
                 ("HOME".to_string(), scratch.display().to_string()),
                 ("CAMERATA_DATA_DIR".to_string(), data.display().to_string()),
-                ("CAMERATA_STATE_DIR".to_string(), state.display().to_string()),
+                (
+                    "CAMERATA_STATE_DIR".to_string(),
+                    state.display().to_string(),
+                ),
                 // Keep the child fully offline/inert: no GitHub polling from a test.
                 ("CAMERATA_GITHUB_TOKEN".to_string(), String::new()),
             ],

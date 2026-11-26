@@ -70,16 +70,36 @@ pub enum Mismatch {
 
 /// The first reason the app must not run against `server`, or `None` when it may: the build is
 /// compared first ([`builds_match`]), then the data folder, then the state folder.
-pub fn find_mismatch(ui: Option<&str>, folders: &Folders, server: &ServerBuild) -> Option<Mismatch> {
+pub fn find_mismatch(
+    ui: Option<&str>,
+    folders: &Folders,
+    server: &ServerBuild,
+) -> Option<Mismatch> {
     if !builds_match(ui, server) {
         return Some(Mismatch::Build);
     }
-    let _ = folders;
+    // A server that does not name a folder cannot be shown to use the inspection's: refused.
+    if server.data_dir.is_none() || server.data_dir != folders.data_dir {
+        return Some(Mismatch::DataFolder);
+    }
+    if server.state_dir.is_none() || server.state_dir != folders.state_dir {
+        return Some(Mismatch::StateFolder);
+    }
     None
 }
 
-fn describe_folder(folder: Option<&str>) -> String {
-    folder.map_or_else(|| "a folder it does not name".to_string(), str::to_string)
+/// "The app uses the data folder X. The server uses the data folder Y.", with a side that names
+/// no folder said plainly instead.
+fn folder_sides(kind: &str, app: Option<&str>, server: Option<&str>) -> String {
+    let app = app.map_or_else(
+        || format!("The app finds no {kind} folder."),
+        |f| format!("The app uses the {kind} folder {f}."),
+    );
+    let server = server.map_or_else(
+        || format!("The server does not name its {kind} folder."),
+        |f| format!("The server uses the {kind} folder {f}."),
+    );
+    format!("{app} {server}")
 }
 
 /// One sentence that names both sides of `mismatch`, for the launcher's log and the screen.
@@ -95,15 +115,15 @@ pub fn mismatch_line(
             describe_ui(ui),
             describe_server(server)
         ),
-        Mismatch::DataFolder => format!(
-            "The app uses the data folder {}. The server uses the data folder {}.",
-            describe_folder(folders.data_dir.as_deref()),
-            describe_folder(server.data_dir.as_deref())
+        Mismatch::DataFolder => folder_sides(
+            "data",
+            folders.data_dir.as_deref(),
+            server.data_dir.as_deref(),
         ),
-        Mismatch::StateFolder => format!(
-            "The app uses the state folder {}. The server uses the state folder {}.",
-            describe_folder(folders.state_dir.as_deref()),
-            describe_folder(server.state_dir.as_deref())
+        Mismatch::StateFolder => folder_sides(
+            "state",
+            folders.state_dir.as_deref(),
+            server.state_dir.as_deref(),
         ),
     }
 }
@@ -597,7 +617,8 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("CAMERATA_DATA_DIR=&lt;folder&gt;")
+            html.contains("CAMERATA_DATA_DIR=&#60;folder&#62;")
+                || html.contains("CAMERATA_DATA_DIR=&lt;folder&gt;")
                 || html.contains("CAMERATA_DATA_DIR=<folder>"),
             "the screen gives the one launch command: {html}"
         );
@@ -626,7 +647,10 @@ mod tests {
         let html = folder_screen(Some(ACME_DATA), Some(DEV_STATE)).await;
         assert_folder_screen(&html, "state folders");
         assert!(html.contains(ACME_STATE), "names the app's folder: {html}");
-        assert!(html.contains(DEV_STATE), "names the server's folder: {html}");
+        assert!(
+            html.contains(DEV_STATE),
+            "names the server's folder: {html}"
+        );
     }
 
     /// A server that does not name its data folder cannot be shown to use the inspection's.
@@ -635,7 +659,10 @@ mod tests {
     async fn a_server_that_names_no_data_folder_is_refused() {
         let html = folder_screen(None, Some(ACME_STATE)).await;
         assert_folder_screen(&html, "data folders");
-        assert!(html.contains("a folder it does not name"), "{html}");
+        assert!(
+            html.contains("The server does not name its data folder."),
+            "{html}"
+        );
     }
 
     /// The inspection's own server, on its own folders, shows the cockpit.
@@ -657,7 +684,11 @@ mod tests {
         let f = acme_folders();
         let ui = Some(UI_COMMIT);
         assert_eq!(
-            find_mismatch(ui, &f, &server(UI_COMMIT, Some(ACME_DATA), Some(ACME_STATE))),
+            find_mismatch(
+                ui,
+                &f,
+                &server(UI_COMMIT, Some(ACME_DATA), Some(ACME_STATE))
+            ),
             None
         );
         assert_eq!(
