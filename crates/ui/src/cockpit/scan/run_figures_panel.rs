@@ -54,7 +54,7 @@ pub(crate) fn RunFiguresPanel(
                 span { class: "det-progress-title", "Run figures" }
                 span { class: "det-progress-count", "Operator only. Never part of the client package." }
             }
-            div { class: "triage-switch run-figures-views",
+            div { class: "run-figures-views",
                 for v in FiguresView::ALL {
                     button {
                         key: "{v.key()}",
