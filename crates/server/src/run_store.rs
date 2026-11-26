@@ -629,10 +629,12 @@ pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
 }
 
 /// Write `bytes` to `path` so a reader (or a crash) sees the old file or the new one, whole.
+/// A write or rename that fails removes the temporary file: it holds the same content (model
+/// replies or a report derived from client code) and must not be left behind.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let tmp = temp_path_for(path);
-    {
+    let written = (|| {
         let mut file = std::fs::File::create(&tmp)?;
         #[cfg(unix)]
         {
@@ -641,8 +643,24 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         }
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
+    written
+}
+
+/// The file in a run's folder that holds the run's sealed report: the whole report the app's
+/// review screens read, so a command line run can be reviewed. Never part of an export.
+pub const REPORT_FILE: &str = "report.json";
+
+/// Write the sealed `report` as JSON to `path` (a temporary file in the same folder, then a
+/// rename), readable by its owner only. It reads back as a [`crate::onboard::ScanReport`].
+pub fn write_report(path: &Path, report: &crate::onboard::SealedReport) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(report).map_err(std::io::Error::other)?;
+    write_atomic(path, &bytes)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -2063,8 +2081,9 @@ pub fn runs_of_project(
 // ── Cleanup ──────────────────────────────────────────────────────────────────────────────────
 
 /// Delete the oldest runs of `project_key` beyond the newest `keep`. A run that is not complete
-/// is deleted only when a newer complete run exists for the same commits, and a run a live
-/// process works on is never deleted. Returns the ids deleted.
+/// is deleted only when a newer complete run exists for the same commits, and neither a run a
+/// live process works on nor a client engagement's run (it holds the sealed report the app
+/// imports) is ever deleted here. Returns the ids deleted.
 pub fn prune_runs(project_key: &str, keep: usize) -> Vec<String> {
     prune_runs_in(&runs_dir(), project_key, keep)
 }
@@ -2083,6 +2102,14 @@ pub fn prune_runs_in(root: &Path, project_key: &str, keep: usize) -> Vec<String>
     for (idx, run) in runs.iter().enumerate().skip(keep) {
         let dir = root.join(&run.run_id);
         if liveness_of(&dir) == Liveness::Live {
+            continue;
+        }
+        // A client engagement's run holds the only copy of its sealed report: never cleaned up.
+        let client_engagement = run
+            .args
+            .get("client_engagement")
+            .and_then(serde_json::Value::as_bool);
+        if client_engagement == Some(true) {
             continue;
         }
         let allowed = run.status == RunStatus::Complete

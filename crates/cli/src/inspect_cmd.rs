@@ -1386,6 +1386,18 @@ pub async fn run_inspect_pipeline_with(
                     );
                     Some(store)
                 }
+                // A client engagement is paid for: without its run folder an interruption or a
+                // failed part could not be resumed and its sealed report would have no home, so it
+                // does not start. Only an internal run goes on without one.
+                Err(e) if args.client_engagement => {
+                    return Err(InspectError::Failed(format!(
+                        "this client inspection did not start: its run folder could not be \
+                         created ({e}). A client inspection is saved as it goes, so that an \
+                         interruption or a failed part can be resumed and its report is kept. \
+                         Nothing was sent to a model. Make the state folder writable, then \
+                         start again."
+                    )));
+                }
                 Err(e) => {
                     eprintln!(
                         "camerata inspect: this run cannot be saved ({e}); it will run, but it \
@@ -1692,6 +1704,33 @@ pub async fn run_inspect_pipeline_with(
     report.run_id.clone_from(&run_id);
     let report = report.seal();
 
+    // The sealed report, saved in the run's own folder (never in the export) so the app can
+    // review a command line run. Saved before anything can mark the run complete. A complete run
+    // whose report could not be saved ends here, incomplete and resumable, and its resume saves
+    // it. A run that did not complete ends as it would have, with its own exit code and account,
+    // and says the report was not saved too; it is never marked complete either.
+    let report_path = match &store {
+        Some(store) => store.dir().join(camerata_server::run_store::REPORT_FILE),
+        // Only an internal run has no run folder (a client engagement does not start without one).
+        None => saved_report_beside(&ledger_file),
+    };
+    let not_saved = camerata_server::run_store::write_report(&report_path, &report)
+        .err()
+        .map(|e| report_not_saved(&report_path, &e, run_id.as_deref()));
+    let ledger_summary = match &not_saved {
+        None => format!(
+            "{ledger_summary}\nsaved report (never exported): {}",
+            report_path.display()
+        ),
+        Some(message) if report.incomplete_reasons().is_empty() => {
+            finish_run(store.as_ref(), &report, false);
+            return Err(InspectError::Failed(format!(
+                "{message}\nNo export was written."
+            )));
+        }
+        Some(message) => format!("{ledger_summary}\n{message}"),
+    };
+
     // The operator's rewrite advisory, beside the failure report in the state directory and never
     // in any zip (owner ruling: fix or rewrite is the architect's call alone). Computed from the
     // sealed report, whose review tree holds the Fixes, and written before the export so a run the
@@ -1769,7 +1808,14 @@ pub async fn run_inspect_pipeline_with(
                         run_notes,
                     }))
                 }
-                other => other,
+                other => {
+                    // The refusal keeps its own exit code; the report that was not saved is said
+                    // beside it.
+                    if let Some(message) = &not_saved {
+                        eprintln!("camerata inspect: {message}");
+                    }
+                    other
+                }
             });
         }
     };
@@ -1835,6 +1881,37 @@ fn open_for_resume(
             }
             other => InspectError::Failed(other.to_string()),
         },
+    )
+}
+
+/// Where the sealed report goes for a run with no run folder (its store could not be created):
+/// beside the ledger, as `<stem>.report.json`.
+fn saved_report_beside(ledger_file: &Path) -> PathBuf {
+    let name = ledger_file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = name.strip_suffix(".ledger.json").unwrap_or(&name);
+    ledger_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.report.json"))
+}
+
+/// The plain message of a run whose sealed report could not be saved.
+fn report_not_saved(path: &Path, error: &std::io::Error, run_id: Option<&str>) -> String {
+    let next = match run_id {
+        Some(id) => format!(
+            "Run {id} is kept and is not complete: `camerata inspect --resume {id}` saves the \
+             report and finishes the run, once that folder can be written to."
+        ),
+        None => "This run has no saved run to resume: run it again once that folder can be \
+                 written to."
+            .to_string(),
+    };
+    format!(
+        "the report was not saved: could not write {} ({error}). {next}",
+        path.display()
     )
 }
 
@@ -2410,6 +2487,33 @@ mod finder_tests;
 mod tests {
     use super::*;
     use camerata_server::scan_ledger::StageAccounting;
+
+    /// A run with no run folder saves its report beside the ledger, under the ledger's stem.
+    #[test]
+    fn a_run_with_no_run_folder_saves_its_report_beside_the_ledger() {
+        assert_eq!(
+            saved_report_beside(Path::new("/state/camerata/acme-one-1234abcd.ledger.json")),
+            PathBuf::from("/state/camerata/acme-one-1234abcd.report.json")
+        );
+    }
+
+    /// The message says the report was not saved, where, and how to finish the run.
+    #[test]
+    fn the_report_not_saved_message_says_what_happened_and_what_to_do() {
+        let e = std::io::Error::other("read-only folder");
+        let saved = report_not_saved(Path::new("/state/runs/r1/report.json"), &e, Some("r1"));
+        assert!(saved.starts_with("the report was not saved"), "{saved}");
+        assert!(saved.contains("/state/runs/r1/report.json"), "{saved}");
+        assert!(saved.contains("read-only folder"), "{saved}");
+        assert!(
+            saved.contains("`camerata inspect --resume r1` saves the report and finishes the run"),
+            "{saved}"
+        );
+        assert!(saved.contains("can be written to."), "{saved}");
+        assert!(!saved.contains("stored replies"), "{saved}");
+        let unsaved = report_not_saved(Path::new("/x.report.json"), &e, None);
+        assert!(unsaved.contains("no saved run to resume"), "{unsaved}");
+    }
 
     /// A refusal for a split rule names the rule and says where it is decided.
     #[test]

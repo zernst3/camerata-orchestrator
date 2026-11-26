@@ -873,6 +873,51 @@ fn cleanup_keeps_the_newest_and_never_drops_an_incomplete_run_without_a_newer_co
     assert!(!deleted.contains(&"20261002".to_string()), "{deleted:?}");
 }
 
+/// A client engagement's run holds the only copy of its sealed report until the app imports it:
+/// the cleanup never deletes it, however many newer runs there are. An internal run beside it
+/// still goes.
+#[test]
+fn cleanup_never_deletes_a_client_engagement_run() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    for id in [
+        "20261006", "20261005", "20261004", "20261003", "20261002", "20261001",
+    ] {
+        make_run(r, id, "p", "c0", RunStatus::Complete);
+    }
+    let record = r.join("20261001").join("run.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    value["args"] = serde_json::json!({ "client_engagement": true });
+    std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+    let deleted = prune_runs_in(r, "p", 3);
+    assert!(
+        r.join("20261001").exists(),
+        "the client engagement's run is kept: {deleted:?}"
+    );
+    assert!(deleted.contains(&"20261002".to_string()), "{deleted:?}");
+}
+
+/// A write that fails at the rename leaves no temporary file behind: it holds the content.
+#[test]
+fn a_failed_atomic_write_removes_its_temporary_file() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join(REPORT_FILE);
+    // A folder that is not empty squats on the name, so the rename fails.
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("occupied"), b"x").unwrap();
+    assert!(write_atomic(&target, b"excerpt of client code").is_err());
+    let names: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec![REPORT_FILE.to_string()],
+        "no temporary file is left"
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn wrapping_a_plain_completer_journals_it() {

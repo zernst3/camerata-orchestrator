@@ -203,13 +203,15 @@ async fn two_repos_with_the_same_path_are_one_project_one_report_one_cache() {
         listed.contains(&canon(&a)) && listed.contains(&canon(&b)),
         "{listed:?}"
     );
+    // The cache, the ledger, the report an internal run with no run folder would save beside the
+    // ledger, and the list.
     assert_eq!(
         camerata_server::scan_cache::state_dir::project_files_covering(
             &state.path().join("camerata"),
             &a
         )
         .len(),
-        3
+        4
     );
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&caches[0]).unwrap()).unwrap();

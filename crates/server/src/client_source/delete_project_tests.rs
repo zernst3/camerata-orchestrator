@@ -195,6 +195,7 @@ fn seed(
     for suffix in [
         ".cache.json",
         ".ledger.json",
+        ".report.json",
         ".finder-run.json",
         ".run-difference.md",
     ] {
@@ -212,6 +213,7 @@ fn seed(
     );
     put(cli.join(format!("{set}.cache.json")), sentinel.to_string());
     put(cli.join(format!("{set}.ledger.json")), sentinel.to_string());
+    put(cli.join(format!("{set}.report.json")), sentinel.to_string());
 
     // A saved run of the project, with a finder room and a trace inside it.
     let run_dir = cli.join("runs").join(format!("run-{tag}"));

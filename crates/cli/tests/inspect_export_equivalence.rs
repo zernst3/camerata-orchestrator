@@ -416,12 +416,14 @@ async fn a_saved_and_reloaded_report_exports_the_package_the_report_in_memory_ex
         return;
     }
     let mut report = fixture_report();
-    report.findings[0].fix_specific =
-        Some("Read the key with `std::env::var(\"API_KEY\")` and keep it out of `config.rs`.".into());
+    report.findings[0].fix_specific = Some(
+        "Read the key with `std::env::var(\"API_KEY\")` and keep it out of `config.rs`.".into(),
+    );
     report.findings[0].review.escalation_state =
         camerata_api_types::review::EscalationState::Escalated;
-    report.findings[1].fix_specific =
-        Some("Build the URL with ``format!(\"{}`x`\", base)`` and pass the secret in a header.".into());
+    report.findings[1].fix_specific = Some(
+        "Build the URL with ``format!(\"{}`x`\", base)`` and pass the secret in a header.".into(),
+    );
     let in_memory = report.seal();
     let saved = serde_json::to_vec(&in_memory).expect("the sealed report serializes");
     let reloaded: ScanReport = serde_json::from_slice(&saved).expect("and reads back");

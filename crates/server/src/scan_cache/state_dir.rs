@@ -70,13 +70,15 @@ pub fn ledger_path(repo: &Path) -> PathBuf {
     dir().join(format!("{}.ledger.json", repo_state_key(repo)))
 }
 
-/// Both bookkeeping files for `repo` under an explicit state directory, for callers (source
-/// deletion) that must name them without reading the process environment.
-pub fn repo_state_files_in(state_dir: &Path, repo: &Path) -> [PathBuf; 2] {
+/// The bookkeeping files for `repo` under an explicit state directory, for callers (source
+/// deletion) that must name them without reading the process environment: the cache, the
+/// ledger, and the sealed report an internal run with no run folder saves beside the ledger.
+pub fn repo_state_files_in(state_dir: &Path, repo: &Path) -> [PathBuf; 3] {
     let key = repo_state_key(repo);
     [
         state_dir.join(format!("{key}.cache.json")),
         state_dir.join(format!("{key}.ledger.json")),
+        state_dir.join(format!("{key}.report.json")),
     ]
 }
 
@@ -141,8 +143,8 @@ pub fn write_project_repos(repos: &[PathBuf]) -> std::io::Result<PathBuf> {
 }
 
 /// Every file of every multi-repo project under `state_dir` whose `.repos.json` lists
-/// `checkout` (canonical): its cache, ledger and the list itself, three paths per project. A list
-/// that is not valid JSON names no folder and is left alone.
+/// `checkout` (canonical): its cache, ledger, saved report and the list itself, four paths per
+/// project. A list that is not valid JSON names no folder and is left alone.
 pub fn project_files_covering(state_dir: &Path, checkout: &Path) -> Vec<PathBuf> {
     let wanted = canonical_string(checkout);
     let Ok(entries) = std::fs::read_dir(state_dir) else {
@@ -166,6 +168,7 @@ pub fn project_files_covering(state_dir: &Path, checkout: &Path) -> Vec<PathBuf>
             let stem = name.trim_end_matches(".repos.json");
             out.push(state_dir.join(format!("{stem}.cache.json")));
             out.push(state_dir.join(format!("{stem}.ledger.json")));
+            out.push(state_dir.join(format!("{stem}.report.json")));
             out.push(state_dir.join(name));
         }
     }
@@ -246,10 +249,11 @@ mod tests {
             [
                 "project-2-11111111.cache.json",
                 "project-2-11111111.ledger.json",
+                "project-2-11111111.report.json",
                 "project-2-11111111.repos.json"
             ]
         );
-        assert_eq!(project_files_covering(&state, &b).len(), 6);
+        assert_eq!(project_files_covering(&state, &b).len(), 8);
         assert!(project_files_covering(&state, &root.path().join("zzz")).is_empty());
         assert!(project_files_covering(&root.path().join("missing"), &a).is_empty());
     }
@@ -345,14 +349,15 @@ mod tests {
     }
 
     #[test]
-    fn repo_state_files_are_the_cache_and_the_ledger_under_the_given_dir() {
+    fn repo_state_files_are_the_cache_the_ledger_and_the_saved_report_under_the_given_dir() {
         let files =
             repo_state_files_in(Path::new("/state/camerata"), Path::new("/clients/one/web"));
         assert_eq!(
-            files,
-            [
+            files.to_vec(),
+            vec![
                 PathBuf::from("/state/camerata/web-d646b970.cache.json"),
                 PathBuf::from("/state/camerata/web-d646b970.ledger.json"),
+                PathBuf::from("/state/camerata/web-d646b970.report.json"),
             ]
         );
     }

@@ -1025,7 +1025,7 @@ const EXPECTED_CHANGES: &[(&str, &str)] = &[
 /// The number of option remediation texts in the shipped rule library. Update with the corpus.
 const EXPECTED_CORPUS_TEXTS: usize = 537;
 /// The number of fixture fix texts found in the repo's Rust sources. Update when fixtures change.
-const EXPECTED_FIXTURE_TEXTS: usize = 26;
+const EXPECTED_FIXTURE_TEXTS: usize = 28;
 
 /// Safety net: every fix text the repo ships (the rule library's remediation texts, the fixtures'
 /// model-written fix texts, plus every row of `backtick_cases`) goes through round 0 and the

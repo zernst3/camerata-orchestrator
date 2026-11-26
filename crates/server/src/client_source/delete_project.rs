@@ -512,6 +512,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
             for (cat, name) in [
                 ("CLI scan cache", format!("{key}.cache.json")),
                 ("CLI ledger", format!("{key}.ledger.json")),
+                ("CLI saved report", format!("{key}.report.json")),
                 ("finder run file", format!("{key}.finder-run.json")),
                 ("run difference note", format!("{key}.run-difference.md")),
             ] {
@@ -527,6 +528,7 @@ async fn build(state: &AppState, project_id: &str, preview: bool) -> Result<Buil
             for (cat, name) in [
                 ("CLI scan cache", format!("{stem}.cache.json")),
                 ("CLI ledger", format!("{stem}.ledger.json")),
+                ("CLI saved report", format!("{stem}.report.json")),
                 ("CLI folder list", format!("{stem}.repos.json")),
                 ("finder run file", format!("{stem}.finder-run.json")),
                 ("run difference note", format!("{stem}.run-difference.md")),

@@ -318,13 +318,13 @@ async fn delete_purges_cli_cache_and_ledger_under_state_dir_by_path_key() {
     let fx = fixture();
     let cli = fx.roots().cli_state_dir.unwrap();
     std::fs::create_dir_all(&cli).unwrap();
-    let [cache, ledger] = repo_state_files_in(&cli, &fx.checkout);
+    let [cache, ledger, _] = repo_state_files_in(&cli, &fx.checkout);
     std::fs::write(&cache, "{\"findings\":[]}").unwrap();
     std::fs::write(&ledger, "{}").unwrap();
     // Another repo's files in the same directory must survive.
     let other_repo = fx.root.join("work/acme/other-repo");
     std::fs::create_dir_all(&other_repo).unwrap();
-    let [other_cache, other_ledger] = repo_state_files_in(&cli, &other_repo);
+    let [other_cache, other_ledger, _] = repo_state_files_in(&cli, &other_repo);
     std::fs::write(&other_cache, "{}").unwrap();
     std::fs::write(&other_ledger, "{}").unwrap();
 
@@ -343,8 +343,8 @@ async fn delete_purges_cli_cache_and_ledger_under_state_dir_by_path_key() {
 }
 
 /// A `camerata inspect` run over several repos keeps ONE cache and ONE ledger under a
-/// `project-<n>-<hash>` key, with a `.repos.json` beside them listing the canonical folders it
-/// covers. Deleting a source removes every project file whose list contains that checkout (and
+/// `project-<n>-<hash>` key (and, for an internal run with no run folder, its saved report), with
+/// a `.repos.json` beside them listing the canonical folders it covers. Deleting a source removes every project file whose list contains that checkout (and
 /// only those), so "delete" still leaves no copy of the client's code behind.
 #[tokio::test]
 async fn delete_purges_the_cli_project_cache_that_covers_the_checkout() {
@@ -362,10 +362,12 @@ async fn delete_purges_the_cli_project_cache_that_covers_the_checkout() {
             cli.join(format!("{key}.repos.json")),
             cli.join(format!("{key}.cache.json")),
             cli.join(format!("{key}.ledger.json")),
+            cli.join(format!("{key}.report.json")),
         ];
         std::fs::write(&files[0], serde_json::to_string(&list).unwrap()).unwrap();
         std::fs::write(&files[1], "{\"findings\":[]}").unwrap();
         std::fs::write(&files[2], "{}").unwrap();
+        std::fs::write(&files[3], "{}").unwrap();
         files
     };
     let covering = write_project("project-2-aaaaaaaa", &[&fx.checkout, &other_repo]);
@@ -388,7 +390,7 @@ async fn delete_purges_the_cli_project_cache_that_covers_the_checkout() {
         .iter()
         .filter(|i| i.path.contains("project-2-aaaaaaaa"))
         .collect();
-    assert_eq!(removed.len(), 3, "{removed:?}");
+    assert_eq!(removed.len(), 4, "{removed:?}");
     assert!(removed.iter().all(|i| i.outcome == PurgeOutcome::Removed));
 }
 
