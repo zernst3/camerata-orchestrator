@@ -546,3 +546,83 @@ fn the_plan_matches_a_real_run_on_admission_several_repos_and_piece_order() {
         );
     });
 }
+
+/// An incremental run (a current baseline and no `--full`) with the agent finder is refused under
+/// `--plan-only` with the message a real run refuses it with, before any figure is printed; with
+/// `--full` the same plan goes ahead.
+#[test]
+#[serial_test::serial(process_env)]
+fn an_incremental_run_is_refused_under_plan_only_with_the_real_runs_message() {
+    on_a_big_stack(async {
+        let state = tempfile::tempdir().unwrap();
+        let _state =
+            camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path().to_str().unwrap());
+        let _no_keychain = camerata_test_env::EnvGuard::set("CAMERATA_NO_KEYCHAIN", "1");
+        let _dep = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("api");
+        stage_big_repo(&repo);
+        let out = tempfile::tempdir().unwrap();
+        let mut incremental = args(&[(&repo, "acme/api")], &out.path().join("inspect.zip"));
+        incremental.full = false;
+        // This repository has no `seeds` folder, and a pattern that matches nothing is refused.
+        incremental.exclude.clear();
+
+        // A baseline a real run would build on.
+        let (manifest, _) = incremental.state_paths();
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, r#"{"version":3}"#).unwrap();
+        let baseline: camerata_server::scan_cache::ScanManifest =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert!(
+            baseline.is_current(),
+            "the fixture's baseline must be one a real run builds on"
+        );
+
+        let printed = Mutex::new(String::new());
+        let planned = run_plan_only_with(incremental.clone(), true, &|t| {
+            printed.lock().unwrap().push_str(t);
+        })
+        .await;
+        let Err(InspectError::Failed(why)) = planned else {
+            panic!("an incremental run must be refused under --plan-only: {planned:?}");
+        };
+        assert!(
+            why.starts_with(
+                "--finder agent needs a full inspection; it cannot re-inspect only the files \
+                 that changed. Pass --full to inspect everything."
+            ),
+            "{why}"
+        );
+        assert!(
+            printed.into_inner().unwrap().is_empty(),
+            "a refused plan prints no figures"
+        );
+
+        let real = Box::pin(run_inspect_pipeline_with(
+            incremental.clone(),
+            true,
+            &camerata_server::credentials::MemoryCredentialStore::new(),
+            Seams {
+                resume: None,
+                llm: Some(&Quiet),
+                preflight_sink: &|_| {},
+            },
+        ))
+        .await;
+        let Err(InspectError::Failed(real_why)) = real else {
+            panic!("a real incremental run with the agent finder is refused: {real:?}");
+        };
+        assert_eq!(
+            why, real_why,
+            "the plan's refusal differs from the real run's"
+        );
+        assert!(manifest.exists(), "the baseline is kept");
+
+        let mut full = incremental;
+        full.full = true;
+        run_plan_only_with(full, true, &|_| {})
+            .await
+            .expect("with --full the same plan goes ahead");
+    });
+}
