@@ -1777,3 +1777,7 @@ async fn a_client_inspection_is_refused_at_start_on_a_dirty_or_commitless_build(
         "{err}"
     );
 }
+
+/// The sealed report the command line saves in the run folder (#561).
+#[path = "inspect_resume_e2e/saved_report.rs"]
+mod saved_report;
