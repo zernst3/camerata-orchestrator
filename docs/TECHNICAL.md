@@ -7751,7 +7751,15 @@ default, is fine) and recompute to the run's pinned digest. The export fails clo
 snapshot, a digest mismatch or a parse error refuses it with `{ ok: false, gate: "rule_snapshot",
 reason, message }`, and a missing one names the backfill command (`camerata run snapshot-rules
 --run <id> --from <rule library folder>`). There is no fallback to "AI-advisory, model-inferred"
-citations any more. A review screen without a verified snapshot shows no rule data. Renderer,
+citations any more. A review screen without a verified snapshot shows no rule data.
+
+*Backfill.* A run made before snapshots were kept is given one with `camerata run snapshot-rules
+--run <id> --from <rule library folder>` (`rule_snapshot::backfill`, shared, so the app can call
+it too). It loads the folder the way an inspection loads its library and refuses, writing nothing,
+unless every rule file loads and the folder's digest equals the run's pinned rule digest; a run
+with no pin, no rule library or an id that is a path is refused, and a run that already keeps a
+snapshot that verifies is left as it is. An app inspection made from the run picks the snapshot up
+at its next export and keeps a copy of it. Renderer,
 wording and format fixes in a newer build apply to an older run; the rule content stays the
 inspection's.
 

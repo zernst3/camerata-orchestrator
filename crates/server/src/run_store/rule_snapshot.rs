@@ -429,7 +429,9 @@ pub async fn backfill(run_id: &str, folder: &Path) -> Result<Backfilled, Backfil
         return Err(refuse(RefusalKind::NoRules));
     }
     if let Ok(kept) = read_run_dir(&run_dir) {
-        return Ok(Backfilled::AlreadyKept { digest: kept.digest });
+        return Ok(Backfilled::AlreadyKept {
+            digest: kept.digest,
+        });
     }
     let shown = folder.display().to_string();
     if !folder.is_dir() {

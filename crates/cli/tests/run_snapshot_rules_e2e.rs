@@ -23,8 +23,7 @@ fn copy(from: &Path, to: &Path) {
 
 /// A run pinned to the bundled library, made as runs were before snapshots were kept.
 async fn old_run() -> (String, PathBuf) {
-    let (live, errors) =
-        camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+    let (live, errors) = camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
     assert!(errors.is_empty());
     let repo = tempfile::tempdir().unwrap();
     let store = rs::RunStore::create(rs::NewRun {

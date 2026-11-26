@@ -215,7 +215,10 @@ async fn a_run_that_cannot_take_a_snapshot_is_refused_by_name() {
     );
     assert!(!snapshot_folder(&run.run_id).exists());
     // No such run, and a run id that is a path.
-    for id in ["20261126T000000Z-000000".to_string(), format!("../runs/{}", run.run_id)] {
+    for id in [
+        "20261126T000000Z-000000".to_string(),
+        format!("../runs/{}", run.run_id),
+    ] {
         let err = backfill(&id, folder.path()).await.expect_err("refused");
         assert!(
             matches!(&err, BackfillRefusal::Run(r) if matches!(r.kind, RefusalKind::RunUnreadable(_))),
