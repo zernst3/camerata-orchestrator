@@ -79,3 +79,8 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # `xlsx_export::build_workbook` writes (chrono::Utc::now(), minute precision) before comparing
 # entry content — see that test file's own doc comment.
 regex = "1"
+# `tests/app_cli_parity/`: drives the app's scan job and export through the server's own router
+# in process. Same version pins as `camerata-server`'s own dependencies.
+axum = "0.7"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

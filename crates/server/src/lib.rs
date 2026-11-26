@@ -130,6 +130,8 @@ mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;
 mod scan_cli_version;
+#[cfg(any(test, feature = "test-support"))]
+pub mod scan_job_llm;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
@@ -3314,12 +3316,23 @@ pub(crate) async fn start_audit_job(
                 Some(usage_ledger.clone()),
             )
             .with_session_sink(sessions.clone());
+            // A test's scripted model stands in for the real client (`scan_job_llm`, test builds
+            // only); a production build always asks the real one.
+            #[cfg(any(test, feature = "test-support"))]
+            let scripted = crate::scan_job_llm::installed();
+            #[cfg(any(test, feature = "test-support"))]
+            let base: &dyn crate::llm::LlmPort = match &scripted {
+                Some(llm) => llm.as_ref(),
+                None => &real,
+            };
+            #[cfg(not(any(test, feature = "test-support")))]
+            let base: &dyn crate::llm::LlmPort = &real;
             let journaled = run_store
                 .as_ref()
-                .map(|s| rs::journal::wrap(&real, s.clone()));
+                .map(|s| rs::journal::wrap(base, s.clone()));
             let model_seam: &dyn crate::llm::LlmPort = match &journaled {
                 Some(j) => j.as_ref(),
-                None => &real,
+                None => base,
             };
             // The review tree's stage 2 reads the final report with the run's own controls, and
             // never runs where the compliance gate blocked the AI review.
