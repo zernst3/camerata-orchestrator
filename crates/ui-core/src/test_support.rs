@@ -2,6 +2,7 @@
 //! the gallery subcommand also reads, so [`review_fixtures`] is always compiled.
 
 pub mod review_fixtures;
+pub mod run_figures;
 
 #[cfg(test)]
 use std::collections::BTreeSet;

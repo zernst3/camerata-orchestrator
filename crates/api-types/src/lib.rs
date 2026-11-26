@@ -84,6 +84,7 @@ pub mod review_timing;
 pub mod review_view;
 pub mod rewrite_advisory;
 pub mod run;
+pub mod run_figures;
 pub mod site_key;
 pub mod snippet;
 pub mod state_dir;

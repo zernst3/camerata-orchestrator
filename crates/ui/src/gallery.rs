@@ -28,6 +28,7 @@ mod export_states;
 pub(crate) mod inspection_settings_states;
 mod inspection_states;
 mod queue_states;
+mod run_figures_states;
 mod shell_states;
 mod tree_states;
 
@@ -215,6 +216,11 @@ const SPEC: &[(&str, &str, &[&str])] = &[
             "help-open",
         ],
     ),
+    (
+        "run-figures",
+        "#293",
+        &["summary", "batches", "not-recorded"],
+    ),
     ("app", "build-guard", &["build-mismatch"]),
 ];
 
@@ -234,6 +240,7 @@ fn built_renderers() -> Vec<BuiltRenderer> {
     all.extend(settings_states::states());
     all.extend(inspection_settings_states::states());
     all.extend(inspection_states::states());
+    all.extend(run_figures_states::states());
     all.extend(app_states::states());
     all
 }

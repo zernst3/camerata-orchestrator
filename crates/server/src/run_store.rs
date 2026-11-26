@@ -37,6 +37,7 @@
 //! there are (files in a chunk, findings in a batch) depends on the stage before it.
 
 pub mod engine_pin;
+pub mod figures;
 pub mod journal;
 
 use std::path::{Path, PathBuf};

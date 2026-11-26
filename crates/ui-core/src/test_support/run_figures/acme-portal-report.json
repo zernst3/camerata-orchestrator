@@ -1,0 +1,145 @@
+{
+  "repos": ["acme/portal"],
+  "stacks": [],
+  "files_scanned": 311,
+  "test_file_count": 40,
+  "files_excluded": 27,
+  "code_chars": 1904417,
+  "code_lines": 48213,
+  "code_lines_by_language": [
+    { "language": "Rust", "lines": 30111 },
+    { "language": "TypeScript", "lines": 15002 },
+    { "language": "SQL", "lines": 3100 }
+  ],
+  "excluded_mechanical_rules": [],
+  "findings": [
+    {
+      "repo": "acme/portal",
+      "path": "src/acme_billing/ledger_secret.rs",
+      "line": 77,
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "severity": "high",
+      "snippet": "format!(\"select * from acme_accounts where id = {}\", id)",
+      "detail": "raw SQL built from a request value in acme_billing",
+      "status": "active",
+      "kind": "defect"
+    }
+  ],
+  "proposed_rules": [],
+  "gated": false,
+  "message": null,
+  "run_id": "20261124T101500Z-a1b2c3",
+  "ledger": {
+    "rules": [],
+    "stages": [],
+    "input": {
+      "files_scanned": 311,
+      "files_excluded": 27,
+      "code_chars": 1904417,
+      "engine_artifacts_admitted": 0,
+      "audit_model": "claude-sonnet-5",
+      "skipped_files": [
+        { "repo": "acme/portal", "path": "assets/acme_huge_export.json", "reason": "oversize" }
+      ],
+      "skipped_beyond_cap_total": 0,
+      "skipped_totals": {
+        "oversize": 6,
+        "beyond_file_cap": 0,
+        "not_text": 4,
+        "excluded_by_agreement": 3,
+        "long_line": 0,
+        "generated": 2,
+        "generated_unsearched": 0,
+        "not_inspected_type": 0,
+        "not_inspected_versions_only": 0,
+        "excluded_never_read": 5,
+        "secret_search_ran": false
+      },
+      "file_cap_hits": []
+    },
+    "stage_telemetry": {
+      "counted_lines": 48213,
+      "stages": [
+        {
+          "stage": "scan_pass",
+          "usage": {
+            "calls": 120,
+            "input_tokens": 1234567,
+            "output_tokens": 98765,
+            "cache_read_input_tokens": 654321,
+            "cache_creation_input_tokens": 111111,
+            "cost_usd": 0.0,
+            "cost_reported_calls": 0,
+            "wasted_calls": 2,
+            "wasted_input_tokens": 1500,
+            "wasted_output_tokens": 300,
+            "wasted_cost_usd": 0.0,
+            "models": { "claude-sonnet-5": 120 },
+            "busy_ms": 2401000,
+            "wasted_busy_ms": 12000,
+            "first_call_unix_ms": 1795000000000,
+            "last_call_unix_ms": 1795000750000,
+            "batch_wait_ms": 640000,
+            "failed_busy_ms": 0,
+            "cache_miss_turns": 0
+          }
+        },
+        {
+          "stage": "calibration",
+          "usage": {
+            "calls": 37,
+            "input_tokens": 222333,
+            "output_tokens": 44455,
+            "cache_read_input_tokens": 100001,
+            "cache_creation_input_tokens": 9000,
+            "cost_usd": 0.0,
+            "cost_reported_calls": 0,
+            "wasted_calls": 0,
+            "wasted_input_tokens": 0,
+            "wasted_output_tokens": 0,
+            "wasted_cost_usd": 0.0,
+            "models": { "claude-sonnet-5": 30, "claude-haiku-5": 7 },
+            "busy_ms": 305000,
+            "wasted_busy_ms": 0,
+            "first_call_unix_ms": 1795000800000,
+            "last_call_unix_ms": 1795000965000,
+            "batch_wait_ms": 0,
+            "failed_busy_ms": 0,
+            "cache_miss_turns": 0
+          }
+        },
+        {
+          "stage": "fix_generation",
+          "usage": {
+            "calls": 9,
+            "input_tokens": 50505,
+            "output_tokens": 7007,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 0.0,
+            "cost_reported_calls": 0,
+            "wasted_calls": 0,
+            "wasted_input_tokens": 0,
+            "wasted_output_tokens": 0,
+            "wasted_cost_usd": 0.0,
+            "models": { "claude-haiku-5": 9 },
+            "busy_ms": 0,
+            "wasted_busy_ms": 0,
+            "first_call_unix_ms": null,
+            "last_call_unix_ms": null,
+            "batch_wait_ms": 0,
+            "failed_busy_ms": 0,
+            "cache_miss_turns": 0
+          }
+        }
+      ],
+      "efficiency": null,
+      "fix_outcome": null,
+      "routing": null,
+      "candidates": null,
+      "detail_rejections": null,
+      "review_flags": null,
+      "repo_maps": null
+    }
+  }
+}

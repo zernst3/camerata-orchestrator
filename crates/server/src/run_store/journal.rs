@@ -880,10 +880,46 @@ struct BatchFile {
     /// The fetched results, once there are some.
     #[serde(default)]
     rows: Option<Vec<StoredRow>>,
+    /// The provider's `processing_status` at the last poll this run recorded (`in_progress`,
+    /// `canceling`, `ended`), so the Run figures panel can say a batch is still processing.
+    /// Written only when it changes. Operator-only; never exported. `None` before the first
+    /// poll, and on a file written before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_status: Option<String>,
 }
 
 fn batch_path(dir: &Path, key: &str, n: usize) -> std::path::PathBuf {
     dir.join("batches").join(format!("{key}-{n}.json"))
+}
+
+/// Every batch the run in `dir` submitted, by id, with where it stands: ended once its results
+/// were read or the last recorded poll said so, processing when that poll said the provider was
+/// still at it, else submitted. Ids only leave this module for the Run figures count, which
+/// never shows them.
+pub(crate) fn stored_batch_states(
+    dir: &Path,
+) -> Vec<(String, camerata_api_types::run_figures::BatchState)> {
+    use camerata_api_types::run_figures::BatchState;
+    let Ok(entries) = std::fs::read_dir(dir.join("batches")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, BatchState)> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| read_json::<BatchFile>(&e.path()))
+        .map(|file| {
+            let state = if file.rows.is_some() {
+                BatchState::Ended
+            } else {
+                file.last_status
+                    .as_deref()
+                    .map_or(BatchState::Submitted, BatchState::from_provider)
+            };
+            (file.batch_id, state)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// The batch calls of a run, stored. A batch already submitted is never submitted again: its id is
@@ -959,6 +995,7 @@ impl BatchApi for JournalBatchApi {
             attempt: self.store.record().attempt,
             custom_ids,
             rows: None,
+            last_status: None,
         };
         if let Ok(bytes) = serde_json::to_vec(&record) {
             let _ = write_atomic(&batch_path(&dir, &key, n), &bytes);
@@ -976,7 +1013,11 @@ impl BatchApi for JournalBatchApi {
                 request_counts: BatchRequestCounts::default(),
             });
         }
-        self.inner.poll(batch_id).await
+        let polled = self.inner.poll(batch_id).await;
+        if let Ok(status) = &polled {
+            self.note_status(batch_id, &status.processing_status);
+        }
+        polled
     }
 
     async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
@@ -1007,6 +1048,29 @@ impl BatchApi for JournalBatchApi {
 }
 
 impl JournalBatchApi {
+    /// Keep the provider's word for where `batch_id` stands on its stored file, when it changed.
+    fn note_status(&self, batch_id: &str, processing_status: &str) {
+        let Some((key, n)) = self
+            .by_id
+            .lock()
+            .ok()
+            .and_then(|m| m.get(batch_id).cloned())
+        else {
+            return;
+        };
+        let path = batch_path(self.store.dir(), &key, n);
+        let Some(mut stored) = read_json::<BatchFile>(&path) else {
+            return;
+        };
+        if stored.last_status.as_deref() == Some(processing_status) {
+            return;
+        }
+        stored.last_status = Some(processing_status.to_string());
+        if let Ok(bytes) = serde_json::to_vec(&stored) {
+            let _ = write_atomic(&path, &bytes);
+        }
+    }
+
     fn stored_rows(&self, batch_id: &str) -> Option<Vec<StoredRow>> {
         let (key, n) = self.by_id.lock().ok()?.get(batch_id).cloned()?;
         read_json::<BatchFile>(&batch_path(self.store.dir(), &key, n))?.rows

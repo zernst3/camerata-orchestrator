@@ -39,6 +39,7 @@ pub mod review_timer;
 pub mod rewrite_advisory;
 pub mod rules;
 pub mod run;
+pub mod run_figures;
 pub mod save_queue;
 pub mod saved_inspections;
 pub mod scan;

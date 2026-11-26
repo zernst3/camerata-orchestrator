@@ -1648,6 +1648,7 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/reviewed-report",
             get(crate::edits::routes::get_reviewed_report),
         )
+        .route("/api/inspections/:id/figures", get(inspection_figures))
         .route("/api/inspections/:id/plan", get(run_resume_plan))
         .route("/api/inspections/:id/resume", post(run_resume_start))
         .route("/api/runs/:id/plan", get(run_resume_plan))

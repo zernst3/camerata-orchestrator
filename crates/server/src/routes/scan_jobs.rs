@@ -1486,6 +1486,30 @@ pub(crate) async fn run_resume_plan(
     }
 }
 
+/// `GET /api/inspections/:id/figures`: the run figures only the saved run's folder holds (the
+/// sessions' wall clock and each batch stage's batch status), for the app's operator-only Run
+/// figures panel (GitHub #293). Metrics only: no batch id, path or repository name. Read-only, and
+/// nothing the client package is built from is read or written. 404 for an id that names no saved
+/// run (or is not a run id at all), with no path in the answer.
+pub(crate) async fn inspection_figures(Path(id): Path<String>) -> impl IntoResponse {
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no saved run with this id" })),
+        )
+            .into_response()
+    };
+    if !crate::run_store::figures::is_run_id(&id) {
+        return not_found();
+    }
+    let dir = crate::run_store::runs_dir().join(&id);
+    match tokio::task::spawn_blocking(move || crate::run_store::figures::record_figures(&dir)).await
+    {
+        Ok(Ok(figures)) => (StatusCode::OK, Json(figures)).into_response(),
+        _ => not_found(),
+    }
+}
+
 /// The query of `POST /api/inspections/:id/resume`. `max_cost_usd` raises the spend limit the
 /// saved run was started with (the operator approving a paused run's new estimate); absent, the
 /// saved limit stands. The limit is not part of the run's identity, so a resume accepts a new one.
