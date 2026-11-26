@@ -28,7 +28,7 @@
 //! or cannot parse a file sends the rule the whole files of that chunk instead.
 
 use serde::de::{self, Deserializer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 
 /// A deterministic candidate-site locator. Each one is a statement filter over the SQL
 /// statement splitter (`camerata_checks::supabase::splitter`); the filter is deliberately WIDE
@@ -123,6 +123,21 @@ impl<'de> Deserialize<'de> for Candidates {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = CandidatesToml::deserialize(deserializer)?;
         Candidates::new(&raw.locator).map_err(de::Error::custom)
+    }
+}
+
+/// The same shape [`Deserialize`] reads (`{ locator = "<name>" }`), so a serialized locator
+/// reads back unchanged (a run's rule snapshot relies on it).
+impl Serialize for Candidates {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Shape {
+            locator: &'static str,
+        }
+        Shape {
+            locator: self.locator.name(),
+        }
+        .serialize(serializer)
     }
 }
 

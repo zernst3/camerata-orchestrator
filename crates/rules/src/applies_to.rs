@@ -39,7 +39,7 @@
 //! file whose language cannot be determined is treated as a match (see `scan_routing`).
 
 use serde::de::{self, Deserializer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 
 /// The language keys a file extension can resolve to. This is the closed vocabulary for
 /// `applies_to.languages`; `camerata-server`'s `scan_routing` resolves a file to one of these
@@ -213,6 +213,26 @@ impl<'de> Deserialize<'de> for AppliesTo {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = AppliesToToml::deserialize(deserializer)?;
         AppliesTo::new(raw.paths, raw.languages, raw.contains_any).map_err(de::Error::custom)
+    }
+}
+
+/// The same shape [`Deserialize`] reads (`paths`, `languages`, `contains_any`), so a serialized
+/// scope reads back through the validating constructor unchanged (a run's rule snapshot relies on
+/// it).
+impl Serialize for AppliesTo {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Shape<'a> {
+            paths: &'a [String],
+            languages: &'a [String],
+            contains_any: &'a [String],
+        }
+        Shape {
+            paths: &self.paths,
+            languages: &self.languages,
+            contains_any: &self.contains_any,
+        }
+        .serialize(serializer)
     }
 }
 
