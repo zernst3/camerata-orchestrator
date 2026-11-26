@@ -3308,6 +3308,11 @@ pub(crate) async fn start_audit_job(
                     }
                 },
             };
+            // The cost checkpoint records into the run's folder, and a resume starts its projection
+            // from the checkpoint the earlier attempt left there, as on the command line.
+            if let Some(store) = &run_store {
+                store.arm_checkpoint(&mut run_controls);
+            }
             // The run's own delimiter seed, carried with the audit future below (never global).
             let token_seed = run_store.as_ref().map(|s| s.nonce_seed());
             let sessions = crate::llm::SessionSink::new();

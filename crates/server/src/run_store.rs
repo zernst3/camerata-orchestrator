@@ -1167,6 +1167,21 @@ impl RunStore {
         crate::checkpoint::checkpoint_dir_of(&self.dir)
     }
 
+    /// Point the run's cost checkpoint at this run's folder, where each checkpoint is recorded
+    /// ([`crate::cost_checkpoint::CHECKPOINT_FILE`]), and, when `controls` carries no pre-flight
+    /// plan (a resume has none), start the projection from the checkpoint the earlier attempt
+    /// left there. THE one place this is decided: the command line and the app's scan job both
+    /// call it, so a resume at a raised limit still under the projection pauses before its first
+    /// fresh piece on both, and the app's resume route can tell a checkpoint pause from the
+    /// folder (`checkpoint_stopped`).
+    pub fn arm_checkpoint(&self, controls: &mut crate::cost_cap::RunControls) {
+        if controls.checkpoint.plan.is_none() {
+            controls.checkpoint.plan =
+                crate::cost_checkpoint::CheckpointPlan::from_stored(&self.dir);
+        }
+        controls.checkpoint.run_folder = Some(self.dir.clone());
+    }
+
     /// Keep the incremental-scan baseline the run started from. A resume starts from this one,
     /// not from the cache file an attempt since may have replaced, so the resumed scan covers the
     /// same files as the run it continues.

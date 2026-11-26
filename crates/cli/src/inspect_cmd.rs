@@ -1409,13 +1409,10 @@ pub async fn run_inspect_pipeline_with(
         }
     };
     // The cost checkpoint records into the run's folder and prints each line as the run goes.
+    // A resume has no pre-flight estimate: it starts from what the earlier attempt recorded (the
+    // app's scan job arms it through the same function).
     if let Some(s) = &store {
-        // A resume has no pre-flight estimate: it starts from what the earlier attempt recorded.
-        if controls.checkpoint.plan.is_none() {
-            controls.checkpoint.plan =
-                camerata_server::cost_checkpoint::CheckpointPlan::from_stored(s.dir());
-        }
-        controls.checkpoint.run_folder = Some(s.dir().to_path_buf());
+        s.arm_checkpoint(&mut controls);
     }
     controls.checkpoint.sink = camerata_server::cost_checkpoint::CheckpointSink::new(|cp| {
         println!("{}", cp.operator_text());
