@@ -137,6 +137,10 @@ pub(crate) struct SubgroupFacts {
     pub fix: String,
     /// The primary row's own fix for its code, as the worked example.
     pub worked_example: String,
+    /// `fix` and `worked_example` with their code-span backticks intact (the PDF sets the code
+    /// runs from them; every plain-text artifact reads the plain forms above).
+    pub fix_raw: String,
+    pub worked_example_raw: String,
     /// The Fix order of the sub-group, by the one Fix rule ([`class_of_fix`]).
     pub class: FixClass,
     pub is_dependency: bool,
@@ -332,6 +336,8 @@ fn subgroup_facts_with(
                 open: sites,
                 effort: String::new(),
                 fix: DEPENDENCY_FIX.to_string(),
+                fix_raw: DEPENDENCY_FIX.to_string(),
+                worked_example_raw: example.clone(),
                 worked_example: example,
                 is_dependency: true,
             });
@@ -439,6 +445,8 @@ fn subgroup_facts_with(
             effort,
             fix: primary.fix.clone().unwrap_or_default(),
             worked_example: primary.fix_specific.clone().unwrap_or_default(),
+            fix_raw: primary.fix_raw.clone().unwrap_or_default(),
+            worked_example_raw: primary.fix_specific_raw.clone().unwrap_or_default(),
             is_dependency: false,
         });
     }
@@ -579,6 +587,9 @@ pub(crate) struct FixFacts {
     pub fix: String,
     /// The primary's own fix for its code, as the worked example.
     pub worked_example: String,
+    /// `fix` and `worked_example` with their code-span backticks intact (see [`SubgroupFacts`]).
+    pub fix_raw: String,
+    pub worked_example_raw: String,
     /// The three folders holding most of the open places, with their counts.
     pub folders: Vec<String>,
     /// The Fix order, or the class when no place of it is for action: [`class_of_fix`] over the
@@ -835,11 +846,17 @@ fn fold_fix(
             fix_texts.push(m.fix.clone());
         }
     }
-    let worked_example = members
+    let (worked_example, worked_example_raw) = members
         .iter()
-        .map(|m| m.worked_example.clone())
-        .find(|w| !w.is_empty())
+        .map(|m| (m.worked_example.clone(), m.worked_example_raw.clone()))
+        .find(|(w, _)| !w.is_empty())
         .unwrap_or_default();
+    let mut fix_raw_texts: Vec<String> = Vec::new();
+    for m in &members {
+        if !m.fix_raw.is_empty() && !fix_raw_texts.contains(&m.fix_raw) {
+            fix_raw_texts.push(m.fix_raw.clone());
+        }
+    }
     let mut categories: Vec<String> = Vec::new();
     for m in &members {
         if !m.category.is_empty() && !categories.contains(&m.category) {
@@ -882,7 +899,9 @@ fn fold_fix(
         escalated: live_all.iter().filter(|s| s.escalated).count(),
         effort,
         fix: fix_texts.join("\n\n"),
+        fix_raw: fix_raw_texts.join("\n\n"),
         worked_example,
+        worked_example_raw,
         folders: top_folders(
             folder_basis
                 .iter()
@@ -1099,19 +1118,22 @@ fn escalated_places(rows: &[FindingRow]) -> Vec<crate::report_export::EscalatedS
                 decisions.push(state);
             }
         }
+        // The fix written for this place (its head row's own), else the rule's, cut from the RAW
+        // text so the code runs survive; `what_to_do` is the same runs as plain text.
+        let what_to_do_segments = crate::report_export::first_sentences_raw(
+            head.fix_specific_raw
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .or(head.fix_raw.as_deref())
+                .unwrap_or_default(),
+            2,
+            400,
+        );
         out.push(crate::report_export::EscalatedSiteJson {
             place: vocabulary::place_text(&head.repo, &head.path, head.line),
             rules_line: format!("{}: {}", vocabulary::H_RULES, rules.join(", ")),
-            // The fix written for this place (its head row's own), else the rule's.
-            what_to_do: crate::report_export::first_sentences(
-                head.fix_specific
-                    .as_deref()
-                    .filter(|t| !t.trim().is_empty())
-                    .or(head.fix.as_deref())
-                    .unwrap_or_default(),
-                2,
-                400,
-            ),
+            what_to_do: crate::report_export::fix_text::join_plain(&what_to_do_segments),
+            what_to_do_segments,
             effort: String::new(),
             group: head.facts.group.clone(),
             fix_id: head.facts.fix_id.clone(),
@@ -1167,14 +1189,17 @@ pub(crate) fn pdf_sections(
     // What each escalated place's Fix asks of the reader, in two sentences, and its effort.
     for entry in &mut escalated {
         if let Some(g) = facts.iter().find(|g| g.id == entry.fix_id) {
-            // Last resort: the Fix's own text.
+            // Last resort: the Fix's own text, from the RAW form so the code runs survive and the
+            // cut never lands inside a span.
             if entry.what_to_do.is_empty() {
                 let text = if g.worked_example.is_empty() {
-                    &g.fix
+                    &g.fix_raw
                 } else {
-                    &g.worked_example
+                    &g.worked_example_raw
                 };
-                entry.what_to_do = crate::report_export::first_sentences(text, 2, 400);
+                entry.what_to_do_segments = crate::report_export::first_sentences_raw(text, 2, 400);
+                entry.what_to_do =
+                    crate::report_export::fix_text::join_plain(&entry.what_to_do_segments);
             }
             entry.effort = g.effort.clone();
         }

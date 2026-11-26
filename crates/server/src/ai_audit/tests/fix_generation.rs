@@ -283,6 +283,54 @@ fn the_fix_prompt_and_the_checker_agree_on_snippets() {
     );
 }
 
+#[test]
+fn the_fix_prompt_tells_the_model_how_to_write_code_that_holds_backticks() {
+    let prompt = fix_specific_system_prompt();
+    assert!(prompt.contains("LONGER run of backticks"), "{prompt}");
+    assert!(prompt.contains("`` echo `date` ``"), "{prompt}");
+    assert!(
+        prompt.contains("sql`select id from posts limit 30`"),
+        "{prompt}"
+    );
+}
+
+/// M4: the grounding check reads code spans with the one parser, so a fix that wraps code in a
+/// longer run of backticks is grounded like any other. The old single-backtick regex paired the
+/// backticks of `` echo `date` `` wrongly and read the name after it as prose.
+#[test]
+fn find_ungrounded_identifier_reads_double_backtick_code_with_the_one_parser() {
+    let fix = "Run `` echo `date` `` and then `real_one`.";
+    assert_eq!(
+        find_ungrounded_identifier(fix, "x"),
+        Some("real_one".to_string())
+    );
+    // The same name in the evidence is grounded.
+    assert_eq!(find_ungrounded_identifier(fix, "real_one"), None);
+    // A tagged template is code: its table is checked, and a grounded one passes.
+    let tagged = "Use sql`select id from ghost_table limit 30` here.";
+    assert_eq!(
+        find_ungrounded_identifier(tagged, "x"),
+        Some("ghost_table".to_string())
+    );
+    assert_eq!(find_ungrounded_identifier(tagged, "ghost_table"), None);
+}
+
+/// The grounding check reads code spans with the one parser. When the parser calls a text
+/// ambiguous (ONE literal prose run), the check must still treat the backtick-delimited regions
+/// as code: a platform name in a snippet (`req.json()`) must not be read as a file name in prose.
+#[test]
+fn a_literal_text_is_still_grounded_by_its_backtick_regions() {
+    // "helper`x`" is ambiguous (a backtick glued to a word), so the parser keeps the whole text
+    // as prose. `await req.json()` is code and must not reach the file-name scan.
+    let fix = "Call the helper`x` and then `await req.json()` first.";
+    assert_eq!(find_ungrounded_identifier(fix, "x"), None);
+    // A name that is not in the evidence is still found inside such a text.
+    assert_eq!(
+        find_ungrounded_identifier("Call the helper`x` and then `ghost_name` first.", "x"),
+        Some("ghost_name".to_string())
+    );
+}
+
 // ── fix_contradicts_detail (pure, rule-based) ───────────────────────────────────────
 
 #[test]

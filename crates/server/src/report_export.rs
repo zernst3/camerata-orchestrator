@@ -2350,18 +2350,129 @@ pub(crate) fn audited_dependencies_note(
     Some(note)
 }
 
-/// The first `sentences` sentences of `text` on one line, cut at a word at `max_chars`.
+/// The first `sentences` sentences of `text` on one line, cut at a word at `max_chars`. `text` is
+/// plain: it is never parsed for code spans.
 pub(crate) fn first_sentences(text: &str, sentences: usize, max_chars: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let chars: Vec<char> = flat.chars().collect();
-    let mut end = chars.len();
-    let mut seen = 0;
-    for (i, c) in chars.iter().enumerate() {
-        let ends_sentence = matches!(c, '.' | '!' | '?')
-            && chars.get(i + 1).is_none_or(|next| next.is_whitespace())
+    fix_text::join_plain(&cut_segments(
+        vec![fix_text::Seg::Text(flat)],
+        sentences,
+        max_chars,
+    ))
+}
+
+/// [`first_sentences`] of RAW fix text (code-span backticks intact), as text and code runs. A "."
+/// inside code never ends a sentence, and the character limit never cuts inside a code span or a
+/// tagged template: it cuts before the span, or after it when the span fits.
+pub(crate) fn first_sentences_raw(
+    raw: &str,
+    sentences: usize,
+    max_chars: usize,
+) -> Vec<fix_text::Seg> {
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let segs = fix_text::segments(&flat);
+    // An ambiguous text is ONE prose run that holds backticks: the literal cut applies. Every
+    // other caller of `cut_segments` behaves as before.
+    if let [fix_text::Seg::Text(t)] = segs.as_slice() {
+        if t.contains('`') {
+            return cut_literal(t, sentences, max_chars);
+        }
+    }
+    cut_segments(segs, sentences, max_chars)
+}
+
+/// The cut of a LITERAL fix text (the ambiguity rule's one prose run), for the PDF card only: the
+/// workbook keeps the full text. The code between the first and the last backtick is never cut
+/// inside, and no more than twice the cap is ever emitted.
+/// - The region (first to last backtick) ends within twice the cap: show through the end of the
+///   sentence that holds the last backtick (a "." or "?" inside the region is not a sentence end);
+///   if that passes twice the cap, cut at a word after the region and add "...".
+/// - The region ends beyond twice the cap: cut BEFORE the first backtick, at a word within the
+///   cap, with "..." (even if only a few words remain). A first backtick at the very start leaves
+///   nothing to show: the result is "..." alone.
+fn cut_literal(t: &str, sentences: usize, max_chars: usize) -> Vec<fix_text::Seg> {
+    let chars: Vec<char> = t.chars().collect();
+    let first = chars.iter().position(|c| *c == '`').unwrap_or(0);
+    let last = chars.iter().rposition(|c| *c == '`').unwrap_or(0);
+    let hard = max_chars * 2;
+    let ends_sentence = |i: usize| {
+        matches!(chars[i], '.' | '!' | '?')
+            && chars.get(i + 1).is_none_or(|n| n.is_whitespace())
             && chars
                 .get(i + 2)
-                .is_none_or(|n| n.is_uppercase() || !n.is_alphabetic());
+                .is_none_or(|n| n.is_uppercase() || !n.is_alphabetic())
+    };
+    let trim = |s: String| s.trim_end_matches([',', ';', ':', ' ']).to_string();
+    let text = if last < hard {
+        let mut end = chars.len();
+        let mut seen = 0;
+        for i in (0..chars.len()).filter(|i| *i < first || *i > last) {
+            if ends_sentence(i) {
+                seen += 1;
+                if seen == sentences {
+                    end = i + 1;
+                    break;
+                }
+            }
+        }
+        let after_last = (last + 1..chars.len())
+            .find(|&i| ends_sentence(i))
+            .map_or(chars.len(), |i| i + 1);
+        end = end.max(after_last);
+        if end > hard {
+            let at = (last + 1..hard)
+                .rev()
+                .find(|&i| chars[i] == ' ')
+                .unwrap_or(hard);
+            trim(chars[..at].iter().collect()) + "..."
+        } else {
+            chars[..end].iter().collect()
+        }
+    } else if first == 0 {
+        "...".to_string()
+    } else {
+        let head = &chars[..first];
+        let cut = if head.len() > max_chars {
+            head[..max_chars]
+                .iter()
+                .rposition(|c| *c == ' ')
+                .unwrap_or(max_chars)
+        } else {
+            head.len()
+        };
+        trim(head[..cut].iter().collect()) + "..."
+    };
+    vec![fix_text::Seg::Text(text)]
+}
+
+fn cut_segments(
+    segs: Vec<fix_text::Seg>,
+    sentences: usize,
+    max_chars: usize,
+) -> Vec<fix_text::Seg> {
+    use fix_text::Seg;
+    // One entry per character: the character, whether it is code, and its segment's index.
+    let mut chars: Vec<(char, bool, usize)> = Vec::new();
+    for (si, seg) in segs.iter().enumerate() {
+        let (t, code) = match seg {
+            Seg::Text(t) => (t, false),
+            Seg::Code(t) => (t, true),
+        };
+        chars.extend(t.chars().map(|c| (c, code, si)));
+    }
+    // Guarded characters are never cut inside and never end a sentence: the code runs. `gid` says
+    // which guarded span a character belongs to.
+    let guard: Vec<bool> = chars.iter().map(|c| c.1).collect();
+    let gid: Vec<usize> = chars.iter().map(|c| c.2).collect();
+    let mut end = chars.len();
+    let mut seen = 0;
+    for (i, (c, _, _)) in chars.iter().enumerate() {
+        let ends_sentence = !guard[i]
+            && matches!(c, '.' | '!' | '?')
+            && chars.get(i + 1).is_none_or(|n| n.0.is_whitespace())
+            && chars
+                .get(i + 2)
+                .is_none_or(|n| n.0.is_uppercase() || !n.0.is_alphabetic());
         if ends_sentence {
             seen += 1;
             if seen == sentences {
@@ -2370,13 +2481,56 @@ pub(crate) fn first_sentences(text: &str, sentences: usize, max_chars: usize) ->
             }
         }
     }
-    let mut out: String = chars[..end].iter().collect();
-    if out.chars().count() > max_chars {
-        let cut: String = out.chars().take(max_chars).collect();
-        out = match cut.rfind(' ') {
-            Some(at) => cut[..at].trim_end_matches([',', ';', ':']).to_string() + "...",
-            None => cut + "...",
-        };
+    chars.truncate(end);
+    let mut ellipsis = false;
+    let mut at_word = false;
+    if chars.len() > max_chars {
+        ellipsis = true;
+        let mut limit = max_chars;
+        // A limit inside a code span backs up to before the span (the whole span when it is first).
+        if limit < chars.len() && guard[limit] && gid[limit - 1] == gid[limit] {
+            let id = gid[limit];
+            let span_start = gid.iter().position(|g| *g == id).unwrap_or(0);
+            if span_start > 0 {
+                limit = span_start;
+            } else {
+                limit = chars.len();
+                ellipsis = false;
+            }
+        }
+        if ellipsis {
+            // Cut at the last space outside code before the limit, else at the limit.
+            let space = (0..limit).rev().find(|&i| chars[i].0 == ' ' && !guard[i]);
+            at_word = space.is_some();
+            chars.truncate(space.unwrap_or(limit));
+        }
+    }
+    // Rebuild the runs from the kept characters.
+    let mut out: Vec<Seg> = Vec::new();
+    let mut last: Option<usize> = None;
+    for (c, code, si) in &chars {
+        if last != Some(*si) {
+            out.push(if *code {
+                Seg::Code(String::new())
+            } else {
+                Seg::Text(String::new())
+            });
+            last = Some(*si);
+        }
+        if let Some(Seg::Text(t) | Seg::Code(t)) = out.last_mut() {
+            t.push(*c);
+        }
+    }
+    if ellipsis {
+        if let Some(Seg::Text(t)) = out.last_mut() {
+            if at_word {
+                let trimmed = t.trim_end_matches([',', ';', ':']).len();
+                t.truncate(trimmed);
+            }
+            t.push_str("...");
+        } else {
+            out.push(Seg::Text("...".to_string()));
+        }
     }
     out
 }
@@ -2467,6 +2621,33 @@ pub fn render_data_json(json: &AuditReportJson) -> anyhow::Result<String> {
     if let Some(map) = value.as_object_mut() {
         for unread in UNREAD_BY_THE_TEMPLATE {
             map.remove(unread);
+        }
+    }
+    // The template parses no backticks: Rust hands it the text and code runs, the same ones the
+    // plain-text artifacts print (`fix_text::segments`), so the surfaces cannot drift.
+    let seg_values = |segs: &[fix_text::Seg]| -> serde_json::Value {
+        segs.iter()
+            .map(|s| match s {
+                fix_text::Seg::Text(t) => serde_json::json!({"code": false, "text": t}),
+                fix_text::Seg::Code(t) => serde_json::json!({"code": true, "text": t}),
+            })
+            .collect::<Vec<_>>()
+            .into()
+    };
+    for (i, item) in json.escalations.items.iter().enumerate() {
+        let segs = if item.what_to_do_segments.is_empty() && !item.what_to_do.is_empty() {
+            vec![fix_text::Seg::Text(item.what_to_do.clone())]
+        } else {
+            item.what_to_do_segments.clone()
+        };
+        if let Some(entry) = value.pointer_mut(&format!("/escalations/items/{i}")) {
+            entry["what_to_do_segments"] = seg_values(&segs);
+            entry["headline_segments"] = seg_values(&fix_text::segments(&item.headline));
+        }
+    }
+    for (i, item) in json.three_things.items.iter().enumerate() {
+        if let Some(entry) = value.pointer_mut(&format!("/three_things/items/{i}")) {
+            entry["headline_segments"] = seg_values(&fix_text::segments(&item.headline));
         }
     }
     serde_json::to_string(&value).context("could not serialize the report to JSON")

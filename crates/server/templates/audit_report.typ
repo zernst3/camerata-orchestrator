@@ -99,25 +99,12 @@
   out.intersperse(h(0pt, weak: true)).join()
 }
 
-// Fix text (a rule's authored remediation, or the model's codebase-specific fix). Rust has
-// already joined the source's hard line wraps (`report_export::fix_text::prepare`), so a
-// single newline never reaches here; a blank line ("\n\n") is a paragraph break. A
-// `single-backtick span` is set as inline mono (raw), the way the authored text marks code,
-// instead of printing the backticks. Anything that is not a well-formed span (an unclosed
-// backtick, a run of two or more) stays literal. The regex matches non-empty, backtick-free
-// bodies only, and `breakable` keeps a long path from running off the page.
-#let fix_runs(s) = {
-  let out = ()
-  let pos = 0
-  for m in s.matches(regex("`[^`]+`")) {
-    if m.start > pos { out.push(s.slice(pos, m.start)) }
-    out.push(breakable(m.text.slice(1, -1)))
-    pos = m.end
-  }
-  if pos < s.len() { out.push(s.slice(pos)) }
-  out.join()
-}
-#let fix_body(s) = s.split("\n\n").map(fix_runs).join(parbreak())
+// Fix text (a rule's authored remediation, or the model's codebase-specific fix) and headlines.
+// This template parses NO backticks: Rust (`report_export::fix_text::segments`) splits the text
+// into runs, each `(code: bool, text: str)`, so the PDF and the plain-text artifacts read the same
+// code. A code run is set as inline mono (raw); `breakable` keeps a long path from running off the
+// page. A prose run is printed as it is.
+#let fix_runs(segs) = segs.map(sg => if sg.code { breakable(sg.text) } else { sg.text }).join()
 
 // Branding (2026-09-13 review, owner's hard constraint): Camerata is the licensable
 // APPLICATION; the auditing agency running it is not Camerata's to name. `d.cover.brand` is
@@ -484,7 +471,7 @@
   #panel[
     #for item in d.three_things.items [
       #block(above: 4pt, below: 10pt)[
-        #severity_chip(item.severity) #h(2pt) #text(weight: 600, fill: ink)[#fix_runs(item.headline)]
+        #severity_chip(item.severity) #h(2pt) #text(weight: 600, fill: ink)[#fix_runs(item.headline_segments)]
         #linebreak()
         #text(font: mono, size: 8pt, fill: ink_faint)[#breakable(item.place, n: 60)]
         #if item.closes_line != "" [
@@ -614,14 +601,14 @@
   #v(4pt)
   #for item in d.escalations.items.slice(0, calc.min(d.escalations.items.len(), d.escalations.cap)) [
     #block(breakable: false, above: 6pt, below: 8pt)[
-      #severity_chip(lower(item.severity)) #h(2pt) #text(weight: 600, fill: ink)[#fix_runs(item.headline)]
+      #severity_chip(lower(item.severity)) #h(2pt) #text(weight: 600, fill: ink)[#fix_runs(item.headline_segments)]
       #linebreak()
       #text(font: mono, size: 8pt, fill: ink_faint)[#breakable(item.place, n: 60)]
       #linebreak()
       #text(size: 8.5pt, fill: ink_soft)[#item.rules_line]
       #if item.what_to_do != "" [
         #linebreak()
-        #text(weight: 600, size: 9pt, fill: accent)[#W.what_to_do: ]#text(size: 9pt)[#fix_body(item.what_to_do)]
+        #text(weight: 600, size: 9pt, fill: accent)[#W.what_to_do: ]#text(size: 9pt)[#fix_runs(item.what_to_do_segments)]
       ]
       #linebreak()
       #text(font: mono, size: 8pt, fill: ink_faint)[#W.effort: #or_not_estimated(item.effort) · #W.decision_so_far: #item.decision]

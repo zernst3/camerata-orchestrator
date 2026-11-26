@@ -242,14 +242,22 @@ async fn pdf_text_extraction_detects_a_raw_secret_when_the_gate_is_bypassed() {
 }
 
 /// Set every headline of the data (the top three's and the escalated places') to `raw`: the one
-/// string of a problem the PDF prints, now that it prints no snippet.
+/// string of a problem the PDF prints, now that it prints no snippet. The template sets the
+/// headline from its `headline_segments` (Rust parses the code spans, the template parses
+/// none), so the hand-built data carries the same text as one prose run.
 fn set_every_headline(value: &mut Value, raw: &str) {
     match value {
         Value::Object(map) => {
+            let planted = format!("const key = \"{raw}\";");
+            if map.get("headline").is_some_and(Value::is_string) {
+                map.insert("headline".to_string(), Value::String(planted.clone()));
+                map.insert(
+                    "headline_segments".to_string(),
+                    serde_json::json!([{"code": false, "text": planted}]),
+                );
+            }
             for (key, item) in map.iter_mut() {
-                if key == "headline" && item.is_string() {
-                    *item = Value::String(format!("const key = \"{raw}\";"));
-                } else {
+                if key != "headline" && key != "headline_segments" {
                     set_every_headline(item, raw);
                 }
             }

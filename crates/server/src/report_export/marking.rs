@@ -30,6 +30,10 @@ pub struct EscalatedSiteJson {
     pub rules_line: String,
     /// The Fix's change in at most two sentences.
     pub what_to_do: String,
+    /// `what_to_do` as text and code runs, built from the RAW fix text. The PDF sets these and
+    /// parses nothing itself. Not serialized: [`render_data_json`] hands it to the template.
+    #[serde(skip)]
+    pub what_to_do_segments: Vec<fix_text::Seg>,
     /// The Fix's effort band, in words; empty when it is not estimated.
     pub effort: String,
 }

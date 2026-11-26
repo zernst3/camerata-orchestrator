@@ -195,6 +195,13 @@ pub struct FindingRow {
     /// latter is a pipeline gap only (C3-1b), never a hedge; the `fix` column below still
     /// carries the rule's authored remediation in that case.
     fix_specific: Option<String>,
+    /// `fix_specific` with its code-span backticks intact (not in the wire contract): the PDF
+    /// sets the code runs from it. Skipped on serialization.
+    #[serde(skip)]
+    fix_specific_raw: Option<String>,
+    /// `fix` with its code-span backticks intact (not in the wire contract). Skipped.
+    #[serde(skip)]
+    fix_raw: Option<String>,
     /// The rule's AUTHORED, client-facing remediation text (see [`crate::report_export::resolve_fix_for_row`]), with this
     /// finding's placeholder tokens already substituted — SECONDARY context now that
     /// `fix_specific` above is the primary fix. `None` — rendered as a blank cell / JSON
@@ -567,13 +574,16 @@ fn partition_rows_for(
         // markdown backticks dropped. The PDF keeps the backticks and sets them as mono.
         // R1-3: kind-aware, so a deviation row falls back to the rule's default option's
         // remediation here exactly as in the PDF data.
-        let fix = crate::report_export::resolve_fix_for_row(
+        let fix_raw = crate::report_export::resolve_fix_for_row(
             &f.rule_id,
             corpus,
             f,
             chosen_option_for_rule,
         )
-        .map(|s| crate::report_export::fix_text::plain(&s));
+        .map(|s| crate::report_export::fix_text::prepare(&s));
+        let fix = fix_raw
+            .as_deref()
+            .map(crate::report_export::fix_text::plain);
         // C4-P3: calibration's effort, else the rule's authored band (see
         // `report_export::resolve_effort`'s doc comment) — never `f.effort` alone, so a
         // deterministic/RLS-replay floor finding with an authored band doesn't render "not
@@ -685,6 +695,12 @@ fn partition_rows_for(
                 .as_deref()
                 .map(crate::report_export::fix_text::plain)
                 .filter(|s| !s.is_empty()),
+            fix_specific_raw: f
+                .fix_specific
+                .as_deref()
+                .map(crate::report_export::fix_text::prepare)
+                .filter(|s| !s.is_empty()),
+            fix_raw,
             fix_type: {
                 let specific = f
                     .fix_specific
