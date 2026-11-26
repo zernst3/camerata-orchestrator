@@ -1381,6 +1381,46 @@ pub(crate) fn stored_spend(dir: &Path) -> f64 {
             }
         }
     }
+    all + stored_finder_spend(dir)
+}
+
+/// What the agent finder's stored pieces in `dir` cost: the finder keeps each finished piece (and
+/// its joints call) in its stage checkpoint (`checkpoints/finder_<repo>.jsonl`), never under
+/// `calls/`, and a resume replays every one of them onto the meter as resumed usage. So the
+/// stored figure holds them too, the last line of each key as the replay reads it, priced from
+/// its tokens when no cost was recorded, as the replay prices it. Other stages' checkpoint lines
+/// are not added: their replies are already under `calls/` or `batches/`.
+fn stored_finder_spend(dir: &Path) -> f64 {
+    let checkpoints = crate::checkpoint::checkpoint_dir_of(dir);
+    let Ok(entries) = std::fs::read_dir(&checkpoints) else {
+        return 0.0;
+    };
+    let mut all = 0.0f64;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name
+            .strip_suffix(".jsonl")
+            .filter(|s| s.starts_with("finder_"))
+        else {
+            continue;
+        };
+        for line in crate::checkpoint::StageCheckpoint::new(&checkpoints, stem).absorbed() {
+            all += line.cost_usd.unwrap_or_else(|| {
+                crate::llm::usage_cost_usd(
+                    &line.model,
+                    &crate::llm::CallUsage {
+                        input: line.input_tokens,
+                        output: line.output_tokens,
+                        cache_read: line.cache_read_input_tokens,
+                        cache_creation: line.cache_creation_input_tokens,
+                        cache_creation_1h: None,
+                    },
+                    crate::llm::PriceBasis::realtime(),
+                )
+                .unwrap_or(0.0)
+            });
+        }
+    }
     all
 }
 
