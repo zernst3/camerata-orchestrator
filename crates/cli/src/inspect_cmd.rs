@@ -1325,29 +1325,13 @@ pub async fn run_inspect_pipeline_with(
         };
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
-        // The cost checkpoint's pre-flight figures for the agent finder: the cost of one piece,
-        // from the finder's own estimate, and the joints call that follows the pieces. The estimate
-        // prices the finder stage only, so the later stages (group review, fix) have no figure yet.
+        // The cost checkpoint's pre-flight figures for the agent finder (`--plan-only` builds the
+        // same plan with the same function).
         if controls.finder == camerata_server::ai_audit::agent_finder::FinderChoice::Agent {
-            let parts: Vec<_> = facts
-                .iter()
-                .map(|r| {
-                    camerata_server::preflight::agent_finder_estimate(
-                        r,
-                        controls.finder_force_pieces,
-                    )
-                })
-                .collect();
-            let total = camerata_ui_core::scan::sum_agent_finder(&parts);
-            if total.pieces > 0 {
-                let joints = total.joints_calls as f64
-                    * camerata_ui_core::scan::AGENT_FINDER_USD_PER_JOINTS_CALL;
-                controls.checkpoint.plan = Some(camerata_server::cost_checkpoint::CheckpointPlan {
-                    pieces: total.pieces,
-                    per_piece_usd: ((total.expected_usd - joints) / total.pieces as f64).max(0.0),
-                    joints_usd: joints,
-                    ..camerata_server::cost_checkpoint::CheckpointPlan::default()
-                });
+            if let Some(plan) =
+                preflight::agent_finder_checkpoint_plan(&facts, controls.finder_force_pieces)
+            {
+                controls.checkpoint.plan = Some(plan);
             }
         }
         preflight_text = Some(pf.text);

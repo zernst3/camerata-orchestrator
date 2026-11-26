@@ -363,27 +363,11 @@ async fn plan(
             )
             .ok();
             if agent {
-                let parts: Vec<_> = facts
-                    .iter()
-                    .map(|r| {
-                        camerata_server::preflight::agent_finder_estimate(
-                            r,
-                            controls.finder_force_pieces,
-                        )
-                    })
-                    .collect();
-                let total = camerata_ui_core::scan::sum_agent_finder(&parts);
-                if total.pieces > 0 {
-                    let joints = total.joints_calls as f64
-                        * camerata_ui_core::scan::AGENT_FINDER_USD_PER_JOINTS_CALL;
-                    controls.checkpoint.plan =
-                        Some(camerata_server::cost_checkpoint::CheckpointPlan {
-                            pieces: total.pieces,
-                            per_piece_usd: ((total.expected_usd - joints) / total.pieces as f64)
-                                .max(0.0),
-                            joints_usd: joints,
-                            ..camerata_server::cost_checkpoint::CheckpointPlan::default()
-                        });
+                // The real run's own plan, from the function the real run builds it with.
+                if let Some(plan) =
+                    preflight::agent_finder_checkpoint_plan(&facts, controls.finder_force_pieces)
+                {
+                    controls.checkpoint.plan = Some(plan);
                 }
                 let paused: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
                 let slot = paused.clone();

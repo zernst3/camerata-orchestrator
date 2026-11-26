@@ -468,6 +468,33 @@ pub fn build_agent_finder(inputs: &PreflightInputs<'_>, force_pieces: Option<usi
     }
 }
 
+/// The cost checkpoint's plan for an agent finder run: the cost of one piece, from the finder's
+/// own estimate, and the joints calls that follow the pieces. The estimate prices the finder stage
+/// only, so the later stages (group review, fix) have no figure yet. `None` when no piece is
+/// planned. A real run and `--plan-only` both build their plan here, so the plan's spend-limit
+/// check runs on the real run's own figures.
+pub(crate) fn agent_finder_checkpoint_plan(
+    repos: &[RepoScanFacts],
+    force_pieces: Option<usize>,
+) -> Option<camerata_server::cost_checkpoint::CheckpointPlan> {
+    let parts: Vec<_> = repos
+        .iter()
+        .map(|r| camerata_server::preflight::agent_finder_estimate(r, force_pieces))
+        .collect();
+    let total = camerata_ui_core::scan::sum_agent_finder(&parts);
+    if total.pieces == 0 {
+        return None;
+    }
+    let joints =
+        total.joints_calls as f64 * camerata_ui_core::scan::AGENT_FINDER_USD_PER_JOINTS_CALL;
+    Some(camerata_server::cost_checkpoint::CheckpointPlan {
+        pieces: total.pieces,
+        per_piece_usd: ((total.expected_usd - joints) / total.pieces as f64).max(0.0),
+        joints_usd: joints,
+        ..camerata_server::cost_checkpoint::CheckpointPlan::default()
+    })
+}
+
 /// Whether the ceiling is worth a line of its own: more than a cent above the expected figure.
 fn ceiling_is_above(expected: f64, ceiling: f64) -> bool {
     ceiling - expected > 0.005
