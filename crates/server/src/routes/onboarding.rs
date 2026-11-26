@@ -107,6 +107,9 @@ pub(crate) async fn onboard_symbol_refs(
 #[derive(serde::Deserialize)]
 pub(crate) struct FindingFixQuery {
     pub(crate) rule_id: String,
+    /// The project whose inspection the modal shows; the active project when absent.
+    #[serde(default)]
+    pub(crate) project_id: Option<String>,
 }
 
 /// `GET /api/onboard/finding-fix?rule_id=` — the recommended-fix lookup for the scan-review
@@ -117,25 +120,32 @@ pub(crate) struct FindingFixQuery {
 /// byte-identical output across all three surfaces: one function, three callers, never a
 /// second divergent computation.
 ///
+/// The rules are the ones the project's latest inspection ran with (its run's snapshot, #560),
+/// never the live library, so the modal shows the fix the client package will carry. The
+/// project is `project_id` when given, else the active project.
+///
 /// Always 200; body is `{ "fix": "..." }` or `{ "fix": null }` — `null` (never a fabricated
-/// sentence, and never the rule's `directive`) when the corpus is absent, the rule id has no
-/// corpus entry, or the rule has no adopted default option/authored `remediation` — same
-/// degrade-soft contract as `resolve_fix` itself. No project/repo resolution needed (the corpus
-/// is global, not per-project), so unlike `onboard_finding_context` this handler takes no
-/// `State`. This is a RULE-level lookup (this modal has only a `rule_id`, no specific finding),
+/// sentence, and never the rule's `directive`) when there is no project, inspection or verified
+/// rule snapshot, the rule id has no entry in it, or the rule has no adopted default
+/// option/authored `remediation` — same degrade-soft contract as `resolve_fix` itself. This is
+/// a RULE-level lookup (this modal has only a `rule_id`, no specific finding),
 /// so it resolves `resolve_fix` against `Finding::default()` — an authored remediation's
 /// placeholder tokens render with their readable generic filler (e.g. "the affected table")
 /// rather than naming a real object, exactly like any other finding whose detector didn't
 /// capture one.
 pub(crate) async fn onboard_finding_fix(
+    State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<FindingFixQuery>,
 ) -> impl IntoResponse {
-    let corpus_path = camerata_rules::corpus_path();
-    let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
-    } else {
-        None
-    };
+    let project_id = q
+        .project_id
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| state.projects.active().map(|p| p.id));
+    let corpus = project_id.as_deref().and_then(|id| {
+        let latest = state.inspections.latest(id)?;
+        crate::export_rules::rules_for_review(&state, id, latest.report.run_id.as_deref())
+    });
     let fix = crate::report_export::resolve_fix(
         &q.rule_id,
         corpus.as_ref(),
