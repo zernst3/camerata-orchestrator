@@ -18,8 +18,7 @@ use camerata_server::ai_audit::agent_finder::run::{piece_figures, PieceFigures};
 use camerata_server::ai_audit::agent_finder::FinderChoice;
 use camerata_server::ai_audit::{ScanMode, UsageMeter};
 use camerata_server::llm::{resolve_backend, BackendResolution};
-use camerata_server::onboard::files::ExtractedRepo;
-use camerata_server::scan_ledger::SkipReason;
+use camerata_server::onboard::count::RepoCount;
 
 use super::{
     cli_version_refusal, curated_rule_selection, preflight, validate_args, write_start_warnings,
@@ -42,27 +41,16 @@ fn n(v: usize) -> String {
     out
 }
 
-/// The files a repo's walk left out, by the reason Coverage gives, counts only.
-fn left_out(extracted: &ExtractedRepo) -> Vec<(String, usize)> {
-    let mut rows = vec![
-        (SkipReason::Oversize, extracted.skipped_oversize.len()),
-        (SkipReason::LongLine, extracted.skipped_long_line.len()),
-        (SkipReason::NotText, extracted.skipped_unreadable.len()),
-        (
-            SkipReason::BeyondFileCap,
-            extracted.skipped_beyond_cap.len(),
-        ),
-        (
-            SkipReason::ExcludedByAgreement,
-            extracted.excluded_by_agreement.len(),
-        ),
-        (SkipReason::Generated, extracted.generated.len()),
-        (SkipReason::NotInspectedType, extracted.not_inspected.len()),
-        (SkipReason::Symlink, extracted.symlinks.len()),
-    ];
-    rows.retain(|(_, count)| *count > 0);
-    rows.into_iter()
-        .map(|(reason, count)| (reason.label(), count))
+/// The files a repo's walk left out, by the reason Coverage gives and in its order, counts only.
+/// The groups are `camerata count`'s, from the same walk, so a reason Coverage names (a type
+/// opened for declared versions only, a name that is not UTF-8 text) is never folded into
+/// another or dropped here.
+fn left_out(count: &RepoCount) -> Vec<(String, usize)> {
+    count
+        .not_read
+        .iter()
+        .filter(|g| !g.files.is_empty())
+        .map(|g| (g.reason.clone(), g.files.len()))
         .collect()
 }
 
@@ -253,7 +241,7 @@ async fn plan(
         let repo_scope = controls.scope.for_repo(spec);
         let dir = dir.clone();
         let walk = tokio::task::spawn_blocking(move || {
-            camerata_server::onboard::files::read_local_repo_files(&dir, &repo_scope)
+            camerata_server::onboard::count::count_repo(&dir, &repo_scope)
         })
         .await
         .map_err(|e| InspectError::Failed(format!("could not read {spec}: {e}")))?
