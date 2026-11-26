@@ -31,6 +31,7 @@ pub mod release_gate_cmd;
 /// `camerata repeatability`: the full AI pass twice, every answer cache bypassed, and the
 /// difference between the two runs (H5).
 pub mod repeatability_cmd;
+pub mod run_snapshot_cmd;
 /// `camerata seed-review`: write a demo review project into a data directory (no model).
 pub mod seed_review_cmd;
 pub mod worktracker_demo;

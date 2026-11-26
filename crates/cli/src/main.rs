@@ -80,10 +80,15 @@ enum Command {
 
     /// List canonical stories for the active project via the BFF (GET /api/stories).
     Stories,
-    /// Get the current state of a governed run by id via the BFF (GET /api/runs/:id).
+    /// Get the current state of a governed run by id via the BFF (GET /api/runs/:id), or work
+    /// on a saved inspection run (`camerata run snapshot-rules`).
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Run {
         /// The run id, e.g. as returned by `start-run`.
-        run_id: String,
+        #[arg(required = true)]
+        run_id: Option<String>,
+        #[command(subcommand)]
+        action: Option<RunAction>,
     },
     /// List every Unit of Work for the active project via the BFF (GET /api/uows).
     Uows,
@@ -449,6 +454,23 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum RunAction {
+    /// Save the rule snapshot of an inspection run made before snapshots were kept, so it can be
+    /// exported. Loads the rule library in `--from`, refuses unless its digest equals the run's
+    /// pinned rule digest, and only then writes the snapshot into the run's folder. It never
+    /// guesses and writes nothing on a refusal (exit 1).
+    SnapshotRules {
+        /// The saved run's id, as `camerata inspect` or the export refusal printed it.
+        #[arg(long, value_name = "ID")]
+        run: String,
+        /// The rule library folder the inspection ran with (the `principles` folder of the
+        /// build that ran it).
+        #[arg(long, value_name = "FOLDER")]
+        from: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum DiagnoseAction {
     /// Write a diagnostic bundle for a run and print its preview. Reads three operator files
     /// only: the run's `run.json`, the integrity ledger and the failure report. Every field is
@@ -600,8 +622,22 @@ async fn main() -> anyhow::Result<()> {
             let client = make_client(bff_url);
             print_result(camerata::http_cmd::handle_stories(&client).await)
         }
-        Command::Run { run_id } => {
+        Command::Run {
+            action: Some(RunAction::SnapshotRules { run, from }),
+            ..
+        } => match camerata::run_snapshot_cmd::snapshot_rules(&run, &from).await {
+            Ok(line) => {
+                println!("{line}");
+                Ok(())
+            }
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                std::process::exit(1);
+            }
+        },
+        Command::Run { run_id, .. } => {
             let client = make_client(bff_url);
+            let run_id = run_id.unwrap_or_default();
             print_result(camerata::http_cmd::handle_run(&client, &run_id).await)
         }
         Command::Uows => {
@@ -1253,10 +1289,43 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn run_snapshot_rules_takes_the_run_and_the_folder() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "run",
+            "snapshot-rules",
+            "--run",
+            "20261126T000000Z-abc123",
+            "--from",
+            "/Users/auditor/camerata/crates/rules/principles",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Run {
+                run_id: None,
+                action: Some(RunAction::SnapshotRules { run, from }),
+            } => {
+                assert_eq!(run, "20261126T000000Z-abc123");
+                assert_eq!(
+                    from,
+                    PathBuf::from("/Users/auditor/camerata/crates/rules/principles")
+                );
+            }
+            other => panic!("expected snapshot-rules, got {other:?}"),
+        }
+        // Both flags are required.
+        assert!(Cli::try_parse_from(["camerata", "run", "snapshot-rules", "--run", "r"]).is_err());
+        assert!(Cli::try_parse_from(["camerata", "run", "snapshot-rules", "--from", "f"]).is_err());
+    }
+
+    #[test]
     fn run_requires_a_run_id_positional() {
         let cli = Cli::try_parse_from(["camerata", "run", "run-42"]).expect("must parse");
         match cli.command {
-            Command::Run { run_id } => assert_eq!(run_id, "run-42"),
+            Command::Run {
+                run_id,
+                action: None,
+            } => assert_eq!(run_id.as_deref(), Some("run-42")),
             other => panic!("expected Command::Run, got a different variant: {other:?}"),
         }
         assert!(Cli::try_parse_from(["camerata", "run"]).is_err());
