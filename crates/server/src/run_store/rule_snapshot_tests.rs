@@ -337,3 +337,27 @@ fn a_run_without_a_snapshot_or_without_rules_refuses_by_name() {
         RefusalKind::RunUnreadable(_)
     ));
 }
+
+#[test]
+fn a_value_that_reads_back_changed_is_refused() {
+    // A scope's language is normalized on reading, so "Rust" in the file would read as "rust":
+    // the rule read is not the rule kept, even though its digest would match.
+    let mut set = RuleSet::default();
+    let mut rule = camerata_rules::bare_rule("ACME-SNAP-3", "acme");
+    rule.applies_to = Some(
+        camerata_rules::AppliesTo::new(Vec::new(), vec!["rust".to_string()], Vec::new())
+            .expect("a scope"),
+    );
+    set.push(rule);
+    let (digest, bytes) = encode(&set);
+    let mut value: Value = serde_json::from_slice(&bytes).expect("json");
+    value["rules"][0]["applies_to"]["languages"][0] = Value::String("Rust".to_string());
+    let err = decode(&serde_json::to_vec(&value).expect("json"), &digest).expect_err("refused");
+    assert_eq!(
+        err,
+        RefusalKind::Dropped {
+            rule: "ACME-SNAP-3".to_string(),
+            field: "`applies_to.languages[0]`".to_string()
+        }
+    );
+}

@@ -482,16 +482,28 @@ async fn when_the_kept_copy_is_gone_the_run_folder_still_answers() {
 async fn the_finding_modal_fix_comes_from_the_snapshot() {
     let live = live_rules().await;
     let fx = fixture(&snapshot_rules(&live), |_| {}).await;
-    assert!(fx.state.projects.set_active(&fx.project_id));
+    // Another project is active: the named project's inspection answers.
+    let other = fx
+        .state
+        .projects
+        .create("Acme Other", vec!["acme/other".to_string()])
+        .expect("project");
     let app = router(fx.state.clone());
-    for uri in [
-        format!(
-            "/api/onboard/finding-fix?rule_id={RULE}&project_id={}",
-            fx.project_id
+    for (active, uri) in [
+        (
+            other.id.clone(),
+            format!(
+                "/api/onboard/finding-fix?rule_id={RULE}&project_id={}",
+                fx.project_id
+            ),
         ),
         // No project named: the active project's inspection.
-        format!("/api/onboard/finding-fix?rule_id={RULE}"),
+        (
+            fx.project_id.clone(),
+            format!("/api/onboard/finding-fix?rule_id={RULE}"),
+        ),
     ] {
+        assert!(fx.state.projects.set_active(&active));
         let resp = app
             .clone()
             .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
