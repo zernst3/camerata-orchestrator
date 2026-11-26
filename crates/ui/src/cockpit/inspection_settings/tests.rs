@@ -308,6 +308,12 @@ fn apply_step(project: &mut Value, step: &str, model: &str) {
         other => panic!("unknown step {other}"),
     };
     project[section][key] = json!(model);
+    // The server clears the finder moved note when a finder is picked (#565).
+    if step == "finder" {
+        if let Some(review) = project["review"].as_object_mut() {
+            review.remove("finder_moved_to_agent");
+        }
+    }
 }
 
 /// A new project as the server stores it.
@@ -536,6 +542,40 @@ async fn a_new_project_shows_the_recipe_with_no_run_and_no_inspection_result() {
     assert!(
         fake.writes.borrow().is_empty(),
         "showing the settings writes nothing"
+    );
+}
+
+/// #565: an old project that opened on the Agent finder shows the one line note; picking a finder
+/// on the real select clears it. A new project shows no note.
+#[tokio::test(flavor = "current_thread")]
+async fn an_old_project_shows_the_finder_moved_note_until_a_finder_is_picked() {
+    use camerata_api_types::project::FINDER_MOVED_NOTE;
+    let fresh = mounted(&Fake::new(), false).await;
+    assert!(
+        !fresh.html().contains(FINDER_MOVED_NOTE),
+        "a new project has no note"
+    );
+    drop(fresh);
+
+    let fake = Fake::new();
+    fake.project.borrow_mut()["review"]["finder_moved_to_agent"] = json!(true);
+    let mut screen = mounted(&fake, false).await;
+    let html = screen.html();
+    assert!(
+        html.contains(FINDER_MOVED_NOTE),
+        "the old project must show the finder moved note: {html}"
+    );
+    assert!(select_of(&html, "is-model-finder").contains("value=\"agent\" selected"));
+    screen.pick("is-model-finder", "agent");
+    screen.pump(300).await;
+    assert_eq!(
+        *fake.writes.borrow(),
+        [("p-1".to_string(), "finder".to_string(), "agent".to_string())]
+    );
+    let html = screen.html();
+    assert!(
+        !html.contains(FINDER_MOVED_NOTE),
+        "picking a finder clears the note: {html}"
     );
 }
 

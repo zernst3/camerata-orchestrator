@@ -307,6 +307,7 @@ impl InspectArgs {
                 clone_judge_model: String::new(),
                 sample_size_per_run: defaults.sample_size_per_run,
                 finder: defaults.finder,
+                finder_moved_to_agent: false,
             },
             efficiency,
             max_cost_usd,

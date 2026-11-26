@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use camerata_api_types::project::{ProjectBackend, ProjectFinder};
 use camerata_ui_core::inspection_settings::{
-    conflict_line, each_run_lines, engagement_model_conflicts, model_groups, rows,
+    conflict_line, each_run_lines, engagement_model_conflicts, finder_moved_note, model_groups, rows,
     save_failure_line, unused_rows_button, InspectionValues, RowSpec, SaveFailure, Stage,
     FINDER_CHOICES, MODELS_NOTE, RUN_IN_FLIGHT_NOTE,
 };
@@ -269,6 +269,7 @@ pub(crate) fn InspectionSettingsView(props: InspectionSettingsViewProps) -> Elem
     let epoch = props.epoch;
     let run_locked = props.run_in_flight;
     let finder_is_agent = values.finder == ProjectFinder::Agent;
+    let finder_note = finder_moved_note(&project.review);
 
     rsx! {
         div {
@@ -292,6 +293,13 @@ pub(crate) fn InspectionSettingsView(props: InspectionSettingsViewProps) -> Elem
                     models_loading: props.models_loading,
                     locked,
                     on_event,
+                }
+            }
+            if let Some(note) = finder_note {
+                p {
+                    class: "audit-model-hint inspection-settings-finder-note",
+                    role: "status",
+                    "{note}"
                 }
             }
             if let Some(text) = reveal {

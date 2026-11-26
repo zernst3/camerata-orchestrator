@@ -341,6 +341,13 @@ pub const MODELS_NOTE: &str = "Models come from this project, never the environm
 pub const RUN_IN_FLIGHT_NOTE: &str =
     "A run is in flight, so these settings are locked until it finishes.";
 
+/// The one line under the Finder row for a project saved before the finder setting existed: it
+/// now opens on the Agent finder. `None` once the operator has picked a finder.
+pub fn finder_moved_note(review: &ReviewSettings) -> Option<&'static str> {
+    let _ = review;
+    None
+}
+
 /// The conflict line: shown when the backend is CLI and Client engagement is on. A pure function
 /// of the two values; the server's pre-flight stays the authority.
 pub fn conflict_line(backend: ProjectBackend, client_engagement: bool) -> Option<&'static str> {

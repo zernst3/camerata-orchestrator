@@ -366,7 +366,21 @@ pub struct ReviewSettings {
     /// written before the setting existed loads as the engine.
     #[serde(default = "legacy_finder")]
     pub finder: ProjectFinder,
+    /// True when the project was saved before the finder setting existed and so opened on the
+    /// agent finder (the default) instead of the engine it ran before. While it is true the
+    /// settings show [`FINDER_MOVED_NOTE`]; picking a finder clears it. Not written when false, so
+    /// a project file that never moved is unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub finder_moved_to_agent: bool,
 }
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// The one line the settings show while [`ReviewSettings::finder_moved_to_agent`] is true.
+pub const FINDER_MOVED_NOTE: &str =
+    "This project was saved before the finder setting existed, so it now opens on the Agent finder.";
 
 /// The default `sample_size_per_run`: the size design A2b suggests for an early engagement.
 pub const DEFAULT_SAMPLE_SIZE_PER_RUN: usize = 50;
@@ -465,6 +479,7 @@ impl Default for ReviewSettings {
             clone_judge_model: String::new(),
             sample_size_per_run: default_sample_size_per_run(),
             finder: ProjectFinder::default(),
+            finder_moved_to_agent: false,
         }
     }
 }
@@ -485,8 +500,11 @@ mod review_settings_tests {
         assert!(fresh.dup_check_model.is_empty());
         assert!(fresh.clone_judge_model.is_empty());
         assert_eq!(CLONE_JUDGE_DEFAULT_MODEL, "claude-haiku-5-5");
-        // A project saved before the settings existed still loads as the engine.
-        assert_eq!(ReviewSettings::legacy().finder, ProjectFinder::Engine);
+        // #565: a project saved before the settings existed opens on the agent finder, with the
+        // note that says so.
+        assert_eq!(ReviewSettings::legacy().finder, ProjectFinder::Agent);
+        assert!(ReviewSettings::legacy().finder_moved_to_agent);
+        assert!(!fresh.finder_moved_to_agent);
     }
 
     #[test]
@@ -534,13 +552,12 @@ mod review_settings_tests {
 
     #[test]
     fn a_project_written_before_the_settings_existed_loads_with_the_defaults() {
-        // The design values, on the engine finder: such a project has always run the engine, and a
-        // new project's default (the agent finder) is not applied to it.
+        // The design values on the agent finder (#565), with the note that the finder moved.
         let s: ReviewSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, ReviewSettings::legacy());
         assert_eq!(
             ReviewSettings {
-                finder: ProjectFinder::Agent,
+                finder_moved_to_agent: false,
                 ..s
             },
             ReviewSettings::default()
@@ -581,16 +598,36 @@ mod review_settings_tests {
         );
     }
 
-    /// Outside review Part 1 item 3: a new settings value runs the agent finder; the legacy load
-    /// (no `finder` key) stays on the engine.
+    /// #565 (replacing outside review Part 1 item 3's "a legacy load stays on engine"): a new
+    /// settings value and a load with no `finder` key both run the agent finder; the load says
+    /// it moved. A saved finder is kept, with no note.
     #[test]
-    fn the_review_settings_default_to_the_agent_finder_and_a_legacy_load_stays_on_engine() {
+    fn an_old_project_with_no_finder_key_opens_on_the_agent_finder_with_a_note() {
         assert_eq!(ProjectFinder::default(), ProjectFinder::Agent);
         assert_eq!(ReviewSettings::default().finder, ProjectFinder::Agent);
-        let legacy: ReviewSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(legacy.finder, ProjectFinder::Engine);
-        let saved: ReviewSettings = serde_json::from_str(r#"{"finder":"engine"}"#).unwrap();
-        assert_eq!(saved.finder, ProjectFinder::Engine);
+        let old: ReviewSettings =
+            serde_json::from_str(r#"{"group_review_model":"claude-opus-5-5"}"#).unwrap();
+        assert_eq!(old.finder, ProjectFinder::Agent);
+        assert!(
+            old.finder_moved_to_agent,
+            "a load with no finder key must carry the moved note"
+        );
+        for (json, finder) in [
+            (r#"{"finder":"engine"}"#, ProjectFinder::Engine),
+            (r#"{"finder":"agent"}"#, ProjectFinder::Agent),
+        ] {
+            let saved: ReviewSettings = serde_json::from_str(json).unwrap();
+            assert_eq!(saved.finder, finder, "{json}");
+            assert!(!saved.finder_moved_to_agent, "{json}");
+        }
+        // The note survives a save and a reload, until a finder is picked.
+        let reloaded: ReviewSettings =
+            serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(reloaded, old);
+        // Settings that never moved write no note key, so their file is unchanged.
+        assert!(!serde_json::to_string(&ReviewSettings::default())
+            .unwrap()
+            .contains("finder_moved_to_agent"));
     }
 
     #[test]

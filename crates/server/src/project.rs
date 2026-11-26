@@ -1453,8 +1453,8 @@ mod finder_setting_tests {
     use camerata_api_types::project::ProjectFinder;
 
     /// Outside review Part 1 item 3: a new project runs the agent finder on Opus 5.5 for both the
-    /// finder and the group review; a project saved before the setting existed, and one that saved
-    /// Engine, stay Engine.
+    /// finder and the group review; one that saved Engine stays Engine. A project saved before the
+    /// setting existed opens on the agent finder (#565).
     #[test]
     fn a_new_project_defaults_to_the_agent_finder_on_opus_5_5() {
         let store = ProjectStore::new();
@@ -1477,22 +1477,25 @@ mod finder_setting_tests {
 
     #[test]
     fn a_saved_project_keeps_its_saved_finder() {
-        // Saved before the finder setting existed: Engine, as it has always loaded.
+        // Saved before the finder setting existed: the agent finder, with the note (#565).
         let legacy: Project =
             serde_json::from_value(serde_json::json!({ "id": "old", "name": "Old" })).unwrap();
-        assert_eq!(legacy.review.finder, ProjectFinder::Engine);
+        assert_eq!(legacy.review.finder, ProjectFinder::Agent);
+        assert!(legacy.review.finder_moved_to_agent);
         // Saved with Engine chosen: stays Engine.
         let saved: Project = serde_json::from_value(serde_json::json!({
             "id": "e", "name": "E", "review": { "finder": "engine" },
         }))
         .unwrap();
         assert_eq!(saved.review.finder, ProjectFinder::Engine);
-        // Saved with a review block that has no finder key: Engine too.
+        // Saved with a review block that has no finder key: the agent finder too (#565).
         let partial: Project = serde_json::from_value(serde_json::json!({
             "id": "p", "name": "P", "review": { "escalation_floor": 7 },
         }))
         .unwrap();
-        assert_eq!(partial.review.finder, ProjectFinder::Engine);
+        assert_eq!(partial.review.finder, ProjectFinder::Agent);
+        assert!(partial.review.finder_moved_to_agent);
+        assert_eq!(partial.review.escalation_floor, 7);
     }
 
     #[test]
