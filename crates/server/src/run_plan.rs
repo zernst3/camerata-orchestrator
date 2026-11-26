@@ -384,6 +384,12 @@ pub async fn plan(inputs: PlanInputs) -> Result<RunPlan, String> {
 
     // The full-scan estimate and its suggested limit, as `camerata count --estimate` prints them.
     let full_scan = FullScanEstimate::of(counted, None);
+    writeln!(
+        out,
+        "\n== FULL-SCAN ESTIMATE (as camerata count --estimate prints it) =="
+    )
+    .ok();
+    writeln!(out, "  {}", full_scan.text("Full-scan estimate")).ok();
 
     // The spend limit, decided by the run's own check.
     match (controls.max_cost_usd, pf.estimate_usd) {

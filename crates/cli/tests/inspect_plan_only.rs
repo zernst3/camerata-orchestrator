@@ -667,3 +667,49 @@ fn camerata_n(v: usize) -> String {
     }
     out
 }
+
+/// The plan carries the full-scan estimate `camerata count --estimate` prints for the same repo,
+/// word for word: the point figure, the range and the suggested spend limit, on the same counted
+/// lines. The app's pre-flight shows this plan, so the suggested limit is the same on both.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn the_plan_carries_the_count_estimate_and_its_suggested_limit() {
+    let state = tempfile::tempdir().unwrap();
+    let _state =
+        camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path().to_str().unwrap());
+    let _no_keychain = camerata_test_env::EnvGuard::set("CAMERATA_NO_KEYCHAIN", "1");
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("api");
+    stage_repo(&repo, 40);
+    let out = tempfile::tempdir().unwrap();
+
+    let (text, result) = plan(args(
+        &[(&repo, "acme/api")],
+        &out.path().join("inspect.zip"),
+        None,
+    ))
+    .await;
+    result.expect("nothing blocks, so plan-only succeeds");
+
+    let counted = camerata::count_cmd::run_count_with_estimate(
+        &camerata::count_cmd::CountArgs {
+            repo: repo.clone(),
+            json: false,
+            exclude: Vec::new(),
+            repo_name: Some("acme/api".to_string()),
+        },
+        camerata::count_cmd::EstimateArgs {
+            estimate: true,
+            cost_per_1k_usd: None,
+        },
+    )
+    .unwrap();
+    let estimate = &counted[counted
+        .find("Full-scan estimate:")
+        .expect("count prints its estimate")..];
+    assert!(
+        text.contains(estimate),
+        "the plan does not carry count's estimate {estimate:?}:\n{text}"
+    );
+    assert!(text.contains("Suggested spend limit: $"), "{text}");
+}
