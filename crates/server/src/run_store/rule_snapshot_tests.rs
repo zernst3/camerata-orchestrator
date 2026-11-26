@@ -324,9 +324,10 @@ fn a_run_without_a_snapshot_or_without_rules_refuses_by_name() {
     let err = read_run(&store.run_id()).expect_err("refused");
     assert_eq!(err.kind, RefusalKind::Missing);
     assert_eq!(err.run_id.as_deref(), Some(store.run_id().as_str()));
-    // A run id that is not one.
+    // A run id that is not one: never a path out of the run store, even to a real run.
+    let around = format!("../runs/{}", store.run_id());
     assert!(matches!(
-        read_run("../elsewhere").expect_err("refused").kind,
+        read_run(&around).expect_err("refused").kind,
         RefusalKind::RunUnreadable(_)
     ));
     assert!(matches!(

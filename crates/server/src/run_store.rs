@@ -18,6 +18,9 @@
 //!   the order it asked ([`journal`]).
 //! * `batches/<key>-<n>.json` - one file per submitted Message Batch: its id the moment the submit
 //!   returned, and its results once fetched.
+//! * `rules/sha256-<hex>.json` - the rule snapshot: the parsed rules the run loaded, named by the
+//!   rule digest its pin records. Every export reads its rules from it, never from the live
+//!   library ([`rule_snapshot`]).
 //!
 //! Every file is written to a temporary name and renamed, so a process killed at any instant
 //! leaves the previous complete file or the new complete file, never half of one.
