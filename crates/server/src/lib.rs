@@ -3005,7 +3005,10 @@ pub(crate) async fn start_audit_job(
     // project-agnostic recent_scan fallback, and the persisted inspection entry) through the
     // ONE shared writer, `AppState::set_last_scan`, the instant the report is final.
     let scan_state = state.clone();
-    tokio::spawn(async move {
+    // A test's stand-in finder agent, read here and carried into the job's own task (production
+    // sets none).
+    let agent_override = crate::ai_audit::agent_finder::run::current_agent_override();
+    let job_body = async move {
         // PANIC GUARD (see `run_job_body_with_panic_guard`'s doc comment for the full
         // rationale): everything below runs the entire AI + deterministic pipeline in this
         // detached background task. `body_jobs` / `body_jid` are clones moved into the
@@ -3661,7 +3664,10 @@ pub(crate) async fn start_audit_job(
             body_jobs.finish(&body_jid, report);
         })
         .await;
-    });
+    };
+    tokio::spawn(
+        crate::ai_audit::agent_finder::run::with_carried_agent_override(agent_override, job_body),
+    );
 
     job_id
 }
@@ -5304,6 +5310,9 @@ mod preview_evidence_tests;
 
 #[cfg(test)]
 mod cockpit_resume_tests;
+
+#[cfg(test)]
+mod cockpit_stop_resume_tests;
 
 #[cfg(test)]
 mod greenfield_lock_tests;
