@@ -506,6 +506,25 @@ fn a_run_is_refused_when_no_rule_library_is_loaded() {
 }
 
 #[test]
+fn a_run_that_recorded_no_rule_library_is_refused_even_when_none_is_loaded() {
+    let mut record = run_record_json(RUN);
+    record["pin"]["corpus_version"] = "".into();
+    let folder = run_folder_with(&record, None);
+    crate::run_store::write_report(&folder.dir.join(REPORT_FILE), &fixture_report().seal())
+        .unwrap();
+    let app = app();
+    let r = refused(
+        &app,
+        &ImportRequest {
+            rule_digest: "",
+            ..request(&folder.dir)
+        },
+    );
+    assert_eq!(r.code(), "rule_digest_mismatch");
+    assert!(r.to_string().contains("(none recorded)"), "{r}");
+}
+
+#[test]
 fn a_run_with_no_saved_report_is_refused() {
     let folder = run_folder_with(&run_record_json(RUN), None);
     let app = app();
