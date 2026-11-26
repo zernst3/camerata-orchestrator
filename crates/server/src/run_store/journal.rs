@@ -848,6 +848,10 @@ struct StoredRow {
     response: Option<StoredResponse>,
     error: Option<String>,
     billed: Option<StoredResponse>,
+    /// A row a gone batch owed ([`StoredRow::owed_by_gone`]): it never ran and nothing was
+    /// fetched for it. Only ever built in memory, when a chain is read; never stored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    gone: bool,
 }
 
 impl StoredRow {
@@ -857,6 +861,19 @@ impl StoredRow {
             response: row.response.as_ref().map(StoredResponse::of),
             error: row.error.clone(),
             billed: row.billed.as_ref().map(StoredResponse::of),
+            gone: false,
+        }
+    }
+
+    /// The row a batch the provider no longer has owed for `custom_id`: no reply, nothing
+    /// billed, and sent again on a resume ([`StoredRow::needs_resend`]).
+    fn owed_by_gone(custom_id: &str) -> Self {
+        Self {
+            custom_id: custom_id.to_string(),
+            response: None,
+            error: Some(GONE_ROW_ERROR.to_string()),
+            billed: None,
+            gone: true,
         }
     }
 
@@ -888,6 +905,56 @@ struct BatchFile {
     /// first submitted. The chain is read as ONE set of rows ([`merged_rows`]).
     #[serde(default)]
     follow: Option<(String, usize)>,
+    /// What the provider answered when it no longer had this batch, before its rows were fetched
+    /// (its results expired, or it is gone: [`batch_answer_is_gone`]). Such a batch is never
+    /// polled, fetched or handed back again: its rows are owed ([`StoredRow::owed_by_gone`]), and
+    /// the next submit of its items sends them once, as a batch chained to this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gone: Option<String>,
+}
+
+/// The error of a row a gone batch owed, should one ever reach a caller (a later batch left it
+/// out). The stage reads it as a failed row and asks for the item again.
+const GONE_ROW_ERROR: &str =
+    "the batch this request was sent in no longer exists at the provider, so it has no result";
+
+/// Why a batch that ended with every request expired or canceled, and whose results could not be
+/// fetched, is read as gone.
+const ENDED_WITHOUT_RESULTS: &str = "the batch ended with every request expired or canceled \
+     and its results could not be fetched";
+
+/// The provider no longer has a batch: the journal's answer for a batch it recorded as gone, and
+/// the context of a fetch that failed for a batch that ended without results. The stage reads it
+/// as gone (`stage_batch::batch_is_gone`), so its gone-batch recovery runs.
+#[derive(Debug)]
+pub(crate) struct BatchGone {
+    /// What the provider answered when the batch was found gone.
+    pub(crate) answer: String,
+}
+
+impl std::fmt::Display for BatchGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.answer)
+    }
+}
+
+impl std::error::Error for BatchGone {}
+
+/// Whether the provider's answer `e` for a poll or fetch says the batch is gone for good (not
+/// found or expired). The stage's own reading, so the journal and the stage agree.
+fn batch_answer_is_gone(e: &anyhow::Error) -> bool {
+    crate::ai_audit::stage_batch::batch_is_gone(e)
+}
+
+/// Whether a poll status says the batch ended and produced nothing: no request succeeded or
+/// errored, and at least one expired or was canceled. Nothing in it ran or was billed.
+fn ended_without_results(status: &BatchStatus) -> bool {
+    let c = &status.request_counts;
+    status.processing_status == "ended"
+        && c.succeeded == 0
+        && c.errored == 0
+        && c.processing == 0
+        && c.expired + c.canceled > 0
 }
 
 impl StoredRow {
@@ -901,12 +968,16 @@ impl StoredRow {
     /// its own hash and found by the stage on the resume), and sending it from here too would
     /// pay for it twice or duplicate a batch that may be running. What a row was billed stays in
     /// the stored spend ([`stored_spend`]).
+    ///
+    /// A row a gone batch owed is sent again too ([`StoredRow::owed_by_gone`]): it never ran, and
+    /// nothing can ever be fetched for it.
     fn needs_resend(&self) -> bool {
-        self.response.is_none()
-            && self.billed.is_none()
-            && self.error.as_deref().is_some_and(|e| {
-                camerata_llm::failure::classify_text(e).0 == FailureClass::AuthOrBilling
-            })
+        self.gone
+            || (self.response.is_none()
+                && self.billed.is_none()
+                && self.error.as_deref().is_some_and(|e| {
+                    camerata_llm::failure::classify_text(e).0 == FailureClass::AuthOrBilling
+                }))
     }
 }
 
@@ -928,14 +999,29 @@ fn batch_chain(dir: &Path, key: &str, n: usize) -> Vec<(String, usize, BatchFile
     chain
 }
 
+/// The rows a batch file answers for: its fetched rows, or for a gone batch the rows it owed
+/// ([`StoredRow::owed_by_gone`]). `None` for a batch not fetched and not gone.
+fn file_rows(file: &BatchFile) -> Option<Vec<StoredRow>> {
+    match (&file.rows, &file.gone) {
+        (Some(rows), _) => Some(rows.clone()),
+        (None, Some(_)) => Some(
+            file.custom_ids
+                .iter()
+                .map(|c| StoredRow::owed_by_gone(c))
+                .collect(),
+        ),
+        (None, None) => None,
+    }
+}
+
 /// The rows of a chain as one set, in the order of the first batch: a row that is not to be sent
 /// again ([`StoredRow::needs_resend`]) wins over the rows after it, and an item with none carries
-/// its latest row. `None` when the first batch has no
-/// fetched rows.
+/// its latest row. A gone batch counts as the rows it owed ([`file_rows`]). `None` when the first
+/// batch has no fetched rows and is not gone.
 fn merged_rows(chain: &[(String, usize, BatchFile)]) -> Option<Vec<StoredRow>> {
-    let mut merged = chain.first()?.2.rows.clone()?;
+    let mut merged = file_rows(&chain.first()?.2)?;
     for (_, _, file) in &chain[1..] {
-        for row in file.rows.iter().flatten() {
+        for row in file_rows(file).iter().flatten() {
             match merged.iter_mut().find(|m| m.custom_id == row.custom_id) {
                 Some(m) if m.needs_resend() => *m = row.clone(),
                 Some(_) => {}
@@ -974,6 +1060,9 @@ pub struct JournalBatchApi {
     realtime: JournalRealtime,
     /// Batch id -> where it is stored, for the batches this attempt submitted or found.
     by_id: std::sync::Mutex<HashMap<String, Slot>>,
+    /// The batches whose last poll in this attempt said they ended without results
+    /// ([`ended_without_results`]).
+    ended_empty: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl JournalBatchApi {
@@ -986,6 +1075,7 @@ impl JournalBatchApi {
             inner,
             store,
             by_id: Default::default(),
+            ended_empty: Default::default(),
         }
     }
 
@@ -1030,9 +1120,11 @@ impl BatchApi for JournalBatchApi {
         let dir = self.store.dir().to_path_buf();
         let chain = batch_chain(&dir, &key, n);
         if let Some((tail_key, tail_n, tail)) = chain.last() {
-            if tail.rows.is_none() {
+            if tail.rows.is_none() && tail.gone.is_none() {
                 // Submitted before and not fetched (the batch itself, or the one sent for its
                 // failed rows): it may be running or finished and billed. Never submit it again.
+                // A batch the provider said it no longer has is not handed back: nothing can be
+                // fetched from it, and the rows it owed are sent again below.
                 self.remember(&tail.batch_id, tail_key, *tail_n, (key.as_str(), n));
                 return Ok(tail.batch_id.clone());
             }
@@ -1048,9 +1140,15 @@ impl BatchApi for JournalBatchApi {
                 .cloned()
                 .collect();
             if again.is_empty() {
-                // No row is to be sent again: the stored rows answer it, nothing is sent.
-                self.remember(&chain[0].2.batch_id, &key, n, (key.as_str(), n));
-                return Ok(chain[0].2.batch_id.clone());
+                // No row is to be sent again: the stored rows answer it, nothing is sent. The id
+                // handed back is the first batch of the chain that was fetched (the first batch
+                // itself, unless it is gone), so a poll and fetch of it read the stored rows.
+                let (k, i, answered) = chain
+                    .iter()
+                    .find(|(_, _, f)| f.rows.is_some())
+                    .unwrap_or(&chain[0]);
+                self.remember(&answered.batch_id, k, *i, (key.as_str(), n));
+                return Ok(answered.batch_id.clone());
             }
             // Some rows were refused for billing: only those go out again, as a new batch stored
             // like any other and chained to this one. A row the batch left out is not one of them:
@@ -1063,8 +1161,12 @@ impl BatchApi for JournalBatchApi {
             while let Some(file) = read_json::<BatchFile>(&batch_path(&dir, &key2, n2)) {
                 // A batch of these very items that was submitted and never linked or fetched (a
                 // kill between its record and the link, or the stage's own batch of them) may be
-                // running and billed: adopt it, never submit the items twice.
-                if file.rows.is_none() && !chain.iter().any(|(k, i, _)| *k == key2 && *i == n2) {
+                // running and billed: adopt it, never submit the items twice. A gone batch has
+                // nothing to adopt.
+                if file.rows.is_none()
+                    && file.gone.is_none()
+                    && !chain.iter().any(|(k, i, _)| *k == key2 && *i == n2)
+                {
                     link_to = Some(file.batch_id.clone());
                     break;
                 }
@@ -1084,6 +1186,7 @@ impl BatchApi for JournalBatchApi {
                         custom_ids,
                         rows: None,
                         follow: None,
+                        gone: None,
                     };
                     if let Ok(bytes) = serde_json::to_vec(&record) {
                         let _ = write_atomic(&batch_path(&dir, &key2, n2), &bytes);
@@ -1110,6 +1213,7 @@ impl BatchApi for JournalBatchApi {
             custom_ids,
             rows: None,
             follow: None,
+            gone: None,
         };
         if let Ok(bytes) = serde_json::to_vec(&record) {
             let _ = write_atomic(&batch_path(&dir, &key, n), &bytes);
@@ -1127,7 +1231,27 @@ impl BatchApi for JournalBatchApi {
                 request_counts: BatchRequestCounts::default(),
             });
         }
-        self.inner.poll(batch_id).await
+        if let Some(answer) = self.gone_answer(batch_id) {
+            return Err(anyhow::Error::new(BatchGone { answer }));
+        }
+        match self.inner.poll(batch_id).await {
+            Ok(status) => {
+                if let Ok(mut ended) = self.ended_empty.lock() {
+                    if ended_without_results(&status) {
+                        ended.insert(batch_id.to_string());
+                    } else {
+                        ended.remove(batch_id);
+                    }
+                }
+                Ok(status)
+            }
+            Err(e) => {
+                if batch_answer_is_gone(&e) {
+                    self.mark_gone(batch_id, &e);
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn cancel_batch(&self, batch_id: &str) -> anyhow::Result<()> {
@@ -1138,7 +1262,33 @@ impl BatchApi for JournalBatchApi {
         if let Some(rows) = self.stored_rows(batch_id) {
             return Ok(rows.iter().map(StoredRow::replayed).collect());
         }
-        let rows = self.inner.fetch(batch_id, ttl).await?;
+        if let Some(answer) = self.gone_answer(batch_id) {
+            return Err(anyhow::Error::new(BatchGone { answer }));
+        }
+        let rows = match self.inner.fetch(batch_id, ttl).await {
+            Ok(rows) => rows,
+            Err(e) if batch_answer_is_gone(&e) => {
+                self.mark_gone(batch_id, &e);
+                return Err(e);
+            }
+            Err(e) => {
+                let ended_empty = self
+                    .ended_empty
+                    .lock()
+                    .is_ok_and(|ended| ended.contains(batch_id));
+                if !ended_empty {
+                    return Err(e);
+                }
+                // The batch ended with nothing run (every request expired or was canceled) and
+                // its results cannot be fetched: nothing will ever come from it, and nothing in
+                // it was billed. It is gone, so the stage's recovery sends its items once more.
+                let e = e.context(BatchGone {
+                    answer: ENDED_WITHOUT_RESULTS.to_string(),
+                });
+                self.mark_gone(batch_id, &e);
+                return Err(e);
+            }
+        };
         let found = self.slot_of(batch_id);
         let Some(slot) = found else {
             return Ok(rows);
@@ -1211,6 +1361,36 @@ impl JournalBatchApi {
             (slot.view.0.as_str(), slot.view.1),
         );
         Some(slot)
+    }
+
+    /// What the provider answered when it no longer had `batch_id`, if the journal recorded it as
+    /// gone before its rows were fetched.
+    fn gone_answer(&self, batch_id: &str) -> Option<String> {
+        let slot = self.slot_of(batch_id)?;
+        let file = read_json::<BatchFile>(&batch_path(self.store.dir(), &slot.key, slot.n))?;
+        if file.rows.is_some() {
+            return None;
+        }
+        file.gone
+    }
+
+    /// Record `batch_id` as gone with the provider's answer `e`, so no later attempt polls,
+    /// fetches or hands it back again. A batch already fetched keeps its rows.
+    fn mark_gone(&self, batch_id: &str, e: &anyhow::Error) {
+        let Some(slot) = self.slot_of(batch_id) else {
+            return;
+        };
+        let path = batch_path(self.store.dir(), &slot.key, slot.n);
+        let Some(mut file) = read_json::<BatchFile>(&path) else {
+            return;
+        };
+        if file.rows.is_some() || file.gone.is_some() {
+            return;
+        }
+        file.gone = Some(format!("{e:#}"));
+        if let Ok(bytes) = serde_json::to_vec(&file) {
+            let _ = write_atomic(&path, &bytes);
+        }
     }
 
     /// The stored rows a fetch of `batch_id` answers: the batch is fetched and stored, and the

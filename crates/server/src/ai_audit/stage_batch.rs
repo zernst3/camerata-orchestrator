@@ -1671,7 +1671,14 @@ fn disclose_orphaned_submissions(stage: Stage, ctx: &StageCtx<'_>) {
 /// `not_found_error`). Read from the typed failure's HTTP status and error type when the
 /// transport produced one, else from the text of the error (a stub, a wrapped message). A
 /// transient failure (a 5xx, a timeout, a rate limit) is NOT gone: the batch may still be there.
-fn batch_is_gone(e: &anyhow::Error) -> bool {
+pub(crate) fn batch_is_gone(e: &anyhow::Error) -> bool {
+    // The run journal recorded the batch as gone in an earlier attempt, or read a batch that
+    // ended without results as gone (#356).
+    if e.downcast_ref::<crate::run_store::journal::BatchGone>()
+        .is_some()
+    {
+        return true;
+    }
     if let Some(f) = failure::call_failure_of(e) {
         let typed = f.http.as_ref().is_some_and(|(status, body)| {
             matches!(*status, 404 | 410) || body.contains("not_found_error")
