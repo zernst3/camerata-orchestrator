@@ -20,8 +20,8 @@ use std::rc::Rc;
 
 use camerata_api_types::project::{ProjectBackend, ProjectFinder};
 use camerata_ui_core::inspection_settings::{
-    conflict_line, each_run_lines, engagement_model_conflicts, finder_moved_note, model_groups, rows,
-    save_failure_line, unused_rows_button, InspectionValues, RowSpec, SaveFailure, Stage,
+    conflict_line, each_run_lines, engagement_model_conflicts, finder_moved_note, model_groups,
+    rows, save_failure_line, unused_rows_button, InspectionValues, RowSpec, SaveFailure, Stage,
     FINDER_CHOICES, MODELS_NOTE, RUN_IN_FLIGHT_NOTE,
 };
 use camerata_ui_core::models::ModelsResp;

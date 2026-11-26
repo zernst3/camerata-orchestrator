@@ -452,6 +452,9 @@ pub struct Project {
     /// `cli_active` value sits alongside it in the same JSON blob: `cli_active` is simply an
     /// unknown, ignored key (`Project` carries no `#[serde(deny_unknown_fields)]`). See
     /// `legacy_cli_active_key_is_ignored_and_backend_defaults_to_cli` for the migration test.
+    /// The project store goes one step further when it loads its file (#565): a CLIENT
+    /// ENGAGEMENT with no `backend` key opens on `Api`, the only backend it may run on; see
+    /// `camerata_server::project::open_old_client_engagements_on_the_api`.
     #[serde(default)]
     pub backend: ProjectBackend,
     /// Who the inspection is FOR: the client company named in every export's confidentiality

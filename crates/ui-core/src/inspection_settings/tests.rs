@@ -374,5 +374,8 @@ fn the_finder_moved_note_follows_the_flag() {
     };
     assert_eq!(finder_moved_note(&moved), Some(FINDER_MOVED_NOTE));
     assert_eq!(finder_moved_note(&ReviewSettings::for_new_project()), None);
-    assert_eq!(finder_moved_note(&ReviewSettings::legacy()), Some(FINDER_MOVED_NOTE));
+    assert_eq!(
+        finder_moved_note(&ReviewSettings::legacy()),
+        Some(FINDER_MOVED_NOTE)
+    );
 }

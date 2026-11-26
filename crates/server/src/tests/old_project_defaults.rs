@@ -22,7 +22,10 @@ fn load_old_store() -> (crate::project::ProjectStore, std::path::PathBuf) {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("projects.json");
     std::fs::write(&path, OLD_STORE).unwrap();
-    (crate::project::ProjectStore::load_or_new(path.clone()), path)
+    (
+        crate::project::ProjectStore::load_or_new(path.clone()),
+        path,
+    )
 }
 
 /// The old file still loads: every project, the active pointer and the counter survive.
@@ -46,7 +49,10 @@ fn an_old_project_file_still_loads() {
 fn an_old_client_engagement_with_no_backend_setting_opens_on_the_api_backend() {
     let (store, path) = load_old_store();
     let ledger = store.get("proj-1").unwrap();
-    assert!(ledger.client_engagement, "an old project is a client engagement");
+    assert!(
+        ledger.client_engagement,
+        "an old project is a client engagement"
+    );
     assert_eq!(
         ledger.backend,
         ProjectBackend::Api,
@@ -85,7 +91,10 @@ fn an_old_project_with_no_finder_setting_opens_on_the_agent_finder_with_a_note()
     assert_eq!(billing.review.finder, ProjectFinder::Engine);
     assert!(!billing.review.finder_moved_to_agent);
     assert_eq!(billing.review.escalation_floor, 7);
-    assert!(!FINDER_MOVED_NOTE.contains(','), "{FINDER_MOVED_NOTE}");
+    assert!(
+        !FINDER_MOVED_NOTE.contains('\u{2014}') && !FINDER_MOVED_NOTE.contains('\u{2013}'),
+        "no dash in operator text: {FINDER_MOVED_NOTE}"
+    );
 }
 
 async fn post_step(state: &AppState, id: &str, step: &str, model: &str) -> serde_json::Value {
@@ -121,7 +130,9 @@ async fn picking_a_finder_clears_the_moved_note() {
         "picking a finder must clear the moved note"
     );
     assert!(
-        body["project"]["review"].get("finder_moved_to_agent").is_none(),
+        body["project"]["review"]
+            .get("finder_moved_to_agent")
+            .is_none(),
         "{body}"
     );
 }

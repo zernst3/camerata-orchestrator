@@ -1381,7 +1381,8 @@ async fn a_cockpit_resume_with_a_different_group_review_pick_is_refused() {
             &rig.project_id,
             camerata_api_types::project::ReviewSettings {
                 group_review_model: "claude-fable-5-2".to_string(),
-                ..camerata_api_types::project::ReviewSettings::legacy()
+                finder: camerata_api_types::project::ProjectFinder::Engine,
+                ..camerata_api_types::project::ReviewSettings::default()
             },
         )
         .expect("the project exists")
@@ -1970,7 +1971,8 @@ async fn a_cockpit_resume_keeps_the_clone_judge_the_inspection_started_on() {
             &rig.project_id,
             camerata_api_types::project::ReviewSettings {
                 clone_judge_model: "claude-sonnet-5-5".to_string(),
-                ..camerata_api_types::project::ReviewSettings::legacy()
+                finder: camerata_api_types::project::ProjectFinder::Engine,
+                ..camerata_api_types::project::ReviewSettings::default()
             },
         )
         .expect("the project exists")

@@ -344,8 +344,9 @@ pub const RUN_IN_FLIGHT_NOTE: &str =
 /// The one line under the Finder row for a project saved before the finder setting existed: it
 /// now opens on the Agent finder. `None` once the operator has picked a finder.
 pub fn finder_moved_note(review: &ReviewSettings) -> Option<&'static str> {
-    let _ = review;
-    None
+    review
+        .finder_moved_to_agent
+        .then_some(camerata_api_types::project::FINDER_MOVED_NOTE)
 }
 
 /// The conflict line: shown when the backend is CLI and Client engagement is on. A pure function
