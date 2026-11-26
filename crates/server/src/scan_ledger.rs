@@ -1120,6 +1120,10 @@ pub struct SkippedTotals {
     /// Symbolic links: never followed, so what one points to is not read through it.
     #[serde(default)]
     pub symlink: usize,
+    /// Tracked files whose NAME is not UTF-8 text: the file is not read, and its contents were
+    /// never looked at.
+    #[serde(default)]
+    pub name_not_text: usize,
     /// Patterns in Excluded by agreement that match only files never read anyway. Patterns, not
     /// files: each is counted once per run, however many repos it was recorded for.
     #[serde(default)]
@@ -1162,6 +1166,7 @@ impl SkippedTotals {
             SkipReason::NotInspectedVersionsOnly => self.not_inspected_versions_only,
             SkipReason::ExcludedNeverRead => self.excluded_never_read,
             SkipReason::Symlink => self.symlink,
+            SkipReason::NameNotText => self.name_not_text,
         }
     }
 
@@ -1178,6 +1183,7 @@ impl SkippedTotals {
             + self.not_inspected_type
             + self.not_inspected_versions_only
             + self.symlink
+            + self.name_not_text
     }
 
     fn add(&mut self, reason: SkipReason) {
@@ -1193,6 +1199,7 @@ impl SkippedTotals {
             SkipReason::NotInspectedVersionsOnly => self.not_inspected_versions_only += 1,
             SkipReason::ExcludedNeverRead => self.excluded_never_read += 1,
             SkipReason::Symlink => self.symlink += 1,
+            SkipReason::NameNotText => self.name_not_text += 1,
         }
     }
 }
@@ -1363,6 +1370,9 @@ pub struct RepoSkips<'a> {
     pub excluded_never_read: Vec<String>,
     /// Symbolic links (`onboard::files::symlink_label`): never followed, so never read through.
     pub symlink: Vec<String>,
+    /// Tracked paths whose name is not UTF-8 text (`onboard::files::name_not_text_label`), shown
+    /// with each invalid byte as a hex escape: the file is not read.
+    pub name_not_text: Vec<String>,
     /// The size in bytes of each skipped file the walk could measure, by path.
     pub sizes: &'a std::collections::HashMap<String, u64>,
     /// The file limit the walk applied.
@@ -1414,6 +1424,7 @@ impl SkippedFileList {
             (not_inspected_versions, SkipReason::NotInspectedVersionsOnly),
             (skips.excluded_never_read, SkipReason::ExcludedNeverRead),
             (skips.symlink, SkipReason::Symlink),
+            (skips.name_not_text, SkipReason::NameNotText),
         ] {
             for path in paths {
                 if reason == SkipReason::ExcludedNeverRead
@@ -1517,6 +1528,9 @@ pub enum SkipReason {
     /// A symbolic link: never followed, so the file or folder it points to (inside the repository,
     /// outside it, or nothing) is not read, billed or counted through it.
     Symlink,
+    /// A tracked file whose NAME is not UTF-8 text: the file is not read (its contents were
+    /// never looked at), and the name is shown with each invalid byte as a hex escape.
+    NameNotText,
 }
 
 impl SkipReason {
@@ -1541,6 +1555,7 @@ impl SkipReason {
                 "excluded by agreement; nothing here is read by default".to_string()
             }
             SkipReason::Symlink => crate::onboard::files::symlink_label(),
+            SkipReason::NameNotText => crate::onboard::files::name_not_text_label(),
         }
     }
 }
@@ -4607,6 +4622,7 @@ mod tests {
                 not_inspected_type: Vec::new(),
                 excluded_never_read: Vec::new(),
                 symlink: Vec::new(),
+                name_not_text: Vec::new(),
                 sizes: &sizes,
                 file_cap: 20_000,
             },

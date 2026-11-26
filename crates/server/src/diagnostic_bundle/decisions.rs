@@ -55,6 +55,7 @@ pub mod enums {
         "not_inspected_type",
         "not_inspected_versions_only",
         "symlink",
+        "name_not_text",
     ];
     pub const STAGE: &[&str] = &[
         "scan_pass",

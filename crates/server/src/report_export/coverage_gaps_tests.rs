@@ -362,6 +362,7 @@ fn report_from_walk_with(
             not_inspected_type: Vec::new(),
             excluded_never_read: never_read,
             symlink: extracted.symlinks,
+            name_not_text: extracted.names_not_text,
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
         },
@@ -428,6 +429,7 @@ fn a_generated_file_is_named_in_coverage_as_scanned_for_secrets_only_and_not_bil
             not_inspected_type: Vec::new(),
             excluded_never_read: Vec::new(),
             symlink: extracted.symlinks,
+            name_not_text: extracted.names_not_text,
             sizes: &extracted.skipped_sizes,
             file_cap: extracted.file_cap,
         },
@@ -479,6 +481,7 @@ fn a_generated_file_that_was_not_searched_is_worded_as_not_searched() {
             not_inspected_type: Vec::new(),
             excluded_never_read: Vec::new(),
             symlink: Vec::new(),
+            name_not_text: Vec::new(),
             sizes: &sizes,
             file_cap: 20_000,
         },
@@ -681,6 +684,40 @@ fn each_renderer_carries_the_size_the_summary_and_the_file_limit() {
         "{all}"
     );
     assert!(all.contains("reached the 2-file limit"), "{all}");
+}
+
+/// A tracked file whose name is not UTF-8 text is counted in the total under its own reason, so
+/// the sentence names it and its parts add up to the number it opens with.
+#[test]
+fn a_file_name_that_is_not_valid_text_is_named_in_the_summary_sentence() {
+    let mut list = SkippedFileList::default();
+    for n in 0..2 {
+        list.push(
+            "acme/app",
+            format!("l/legacy_\\xFF{n}.py"),
+            SkipReason::NameNotText,
+        );
+    }
+    list.push("acme/app", "a/big.json".to_string(), SkipReason::Oversize);
+    list.push("acme/app", "a/blob.bin".to_string(), SkipReason::NotText);
+    let totals = list.totals();
+    assert_eq!(totals.total(), 4);
+    let sentence = super::coverage_gaps::skipped_summary_sentence(&totals, &[]).unwrap();
+    assert_eq!(
+        sentence,
+        "4 files were not read for the inspection: 1 over the 1 MB file size limit, 1 not UTF-8 \
+         text, 2 with a file name that is not UTF-8 text."
+    );
+    let mut one = SkippedFileList::default();
+    one.push(
+        "acme/app",
+        "legacy_\\xFF.py".to_string(),
+        SkipReason::NameNotText,
+    );
+    assert_eq!(
+        super::coverage_gaps::skipped_summary_sentence(&one.totals(), &[]).unwrap(),
+        "1 file was not read for the inspection: 1 with a file name that is not UTF-8 text."
+    );
 }
 
 /// Symbolic links are counted in the total, so the sentence names them: its parts add up to the
@@ -968,6 +1005,7 @@ fn a_never_read_pattern_is_counted_once_and_is_not_a_file() {
                 not_inspected_type: Vec::new(),
                 excluded_never_read: vec!["*/node_modules/**".to_string()],
                 symlink: Vec::new(),
+                name_not_text: Vec::new(),
                 sizes: &sizes,
                 file_cap: 20_000,
             },
@@ -1049,6 +1087,7 @@ fn a_type_not_inspected_yet_mixes_with_another_reason_and_is_stated_as_not_bille
             not_inspected_type: vec!["Views/Index.cshtml".to_string()],
             excluded_never_read: Vec::new(),
             symlink: Vec::new(),
+            name_not_text: Vec::new(),
             sizes: &sizes,
             file_cap: 20_000,
         },

@@ -83,6 +83,7 @@
       "not_inspected_type": 4,
       "not_inspected_versions_only": 2,
       "symlink": 1,
+      "name_not_text": 0,
       "secret_over_budget": 1
     },
     "file_cap_hits": [{"repo": "acme-web", "not_scanned": 0, "limit": 2000}]

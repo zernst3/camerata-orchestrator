@@ -238,6 +238,7 @@ fn not_read_groups(extracted: &super::files::ExtractedRepo) -> Vec<NotReadGroup>
         (SkipReason::NotInspectedType, &plain),
         (SkipReason::NotInspectedVersionsOnly, &versions),
         (SkipReason::Symlink, &extracted.symlinks),
+        (SkipReason::NameNotText, &extracted.names_not_text),
     ]
     .into_iter()
     .filter(|(_, paths)| !paths.is_empty())
