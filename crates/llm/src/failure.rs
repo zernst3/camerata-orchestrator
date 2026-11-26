@@ -480,6 +480,7 @@ pub fn classify_text(text: &str) -> (FailureClass, bool) {
         "temporarily unavailable",
         "service unavailable",
         "bad gateway",
+        "api_error",
     ];
     if transport.iter().any(|p| lower.contains(p))
         || mentions_status(&lower, &["500", "502", "503"])

@@ -3308,10 +3308,7 @@ pub fn parse_batch_results_jsonl(
                 billed: None,
             });
         } else {
-            let error_msg = v["result"]["error"]["message"]
-                .as_str()
-                .unwrap_or(result_type)
-                .to_string();
+            let error_msg = batch_error_text(&v["result"]["error"], result_type);
             rows.push(BatchResultRow {
                 custom_id,
                 response: None,
@@ -3321,6 +3318,21 @@ pub fn parse_batch_results_jsonl(
         }
     }
     Ok(rows)
+}
+
+/// The text of an errored batch row. The Message Batches API nests it:
+/// `error: {type: "error", error: {type: "<kind>", message: "..."}}`. The inner kind is kept in
+/// the text (`<kind>: <message>`) so the failure classifier sees `billing_error` and the like. A
+/// flat `error.message` still reads; otherwise the result type stands in.
+fn batch_error_text(error: &serde_json::Value, result_type: &str) -> String {
+    let inner = &error["error"];
+    if let Some(msg) = inner["message"].as_str() {
+        return match inner["type"].as_str() {
+            Some(kind) => format!("{kind}: {msg}"),
+            None => msg.to_string(),
+        };
+    }
+    error["message"].as_str().unwrap_or(result_type).to_string()
 }
 
 /// The batch results keyed by `custom_id`: the answers, and the per-item reason for every
@@ -5103,6 +5115,75 @@ mod tests {
         );
         let v = serde_json::to_value(&none).unwrap();
         assert_eq!(v["params"]["output_config"]["effort"], "high", "{v}");
+    }
+
+    /// The error text of the single errored row in `jsonl`.
+    fn errored_row_text(jsonl: &str) -> String {
+        let rows = parse_batch_results_jsonl(jsonl, BATCH_CACHE_TTL).expect("parse");
+        assert_eq!(rows.len(), 1, "one row");
+        rows[0].error.clone().expect("an errored row carries text")
+    }
+
+    /// The Message Batches API nests an errored row's text one level deeper than a flat error:
+    /// `result.error.error.message`. A credit row must classify as a billing stop.
+    #[test]
+    fn batch_errored_row_nested_credit_message_classes_auth_or_billing() {
+        let text = errored_row_text(
+            r#"{"custom_id":"x","result":{"type":"errored","error":{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}}}"#,
+        );
+        assert!(text.contains("credit balance is too low"), "{text}");
+        assert_eq!(
+            crate::failure::classify_text(&text).0,
+            crate::failure::FailureClass::AuthOrBilling,
+            "{text}"
+        );
+        let text = errored_row_text(
+            r#"{"custom_id":"x","result":{"type":"errored","error":{"type":"error","error":{"type":"billing_error","message":"Payment issue"}}}}"#,
+        );
+        assert_eq!(
+            crate::failure::classify_text(&text).0,
+            crate::failure::FailureClass::AuthOrBilling,
+            "{text}"
+        );
+        for etype in ["authentication_error", "permission_error"] {
+            let line = format!(
+                r#"{{"custom_id":"x","result":{{"type":"errored","error":{{"type":"error","error":{{"type":"{etype}","message":"nope"}}}}}}}}"#
+            );
+            let text = errored_row_text(&line);
+            assert_eq!(
+                crate::failure::classify_text(&text).0,
+                crate::failure::FailureClass::AuthOrBilling,
+                "{text}"
+            );
+        }
+    }
+
+    /// Transient nested rows are not billing stops and may be tried again.
+    #[test]
+    fn batch_errored_row_nested_transient_is_not_auth_or_billing() {
+        for (etype, msg) in [
+            ("overloaded_error", "Overloaded"),
+            ("rate_limit_error", "Number of requests exceeded"),
+            ("api_error", "Internal server error"),
+        ] {
+            let line = format!(
+                r#"{{"custom_id":"x","result":{{"type":"errored","error":{{"type":"error","error":{{"type":"{etype}","message":"{msg}"}}}}}}}}"#
+            );
+            let text = errored_row_text(&line);
+            let (class, retry) = crate::failure::classify_text(&text);
+            assert_ne!(class, crate::failure::FailureClass::AuthOrBilling, "{text}");
+            assert_ne!(class, crate::failure::FailureClass::Content, "{text}");
+            assert!(retry, "{text}");
+        }
+    }
+
+    /// The old flat fixture still parses to its message.
+    #[test]
+    fn batch_errored_row_flat_message_still_parses() {
+        let text = errored_row_text(
+            r#"{"custom_id":"c1-b0","result":{"type":"errored","error":{"message":"token limit exceeded"}}}"#,
+        );
+        assert_eq!(text, "token limit exceeded");
     }
 
     /// `parse_batch_results_jsonl` extracts succeeded rows, maps error rows, and skips

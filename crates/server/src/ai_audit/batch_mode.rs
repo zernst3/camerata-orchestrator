@@ -272,6 +272,23 @@ pub(crate) struct BatchWork {
     pub req: LlmRequest,
 }
 
+/// Whether an error row that was NOT billed is a credit or billing refusal (the account or the
+/// credential was refused), and if so, stop the run now through run health. Both batch paths
+/// (the scan pass's [`submit_round`] and the stage runner) call this, so a credit row maps to
+/// the same class, the same stop reason and the same message in each. Waiting or sending again
+/// fixes neither, so a caller that gets `true` never resends the row in that attempt; nothing
+/// is recorded on the meter for it, because the provider did not bill it.
+pub(crate) fn stop_run_on_billing_row(meter: Option<&UsageMeter>, error: &str) -> bool {
+    use camerata_llm::failure::{classify_text, FailureClass};
+    if classify_text(error).0 != FailureClass::AuthOrBilling {
+        return false;
+    }
+    if let Some(m) = meter {
+        m.health().note_failure(FailureClass::AuthOrBilling, error);
+    }
+    true
+}
+
 /// Why one batch item has no reply, and whether sending it again is safe.
 #[derive(Debug, Clone)]
 pub(crate) struct ItemFailure {
@@ -451,7 +468,7 @@ pub(crate) async fn submit_round(
                             .iter()
                             .map(|(path, _)| path.clone())
                             .collect(),
-                        class: camerata_llm::failure::FailureClass::SpendLimit,
+                        class: camerata_llm::failure::FailureClass::OutageStop,
                     });
                 }
             }
@@ -532,12 +549,15 @@ pub(crate) async fn submit_round(
                                 reprice(&mut billed);
                                 m.record_stage(Stage::ScanPass, &billed);
                             }
+                            // A credit or billing row (never billed) stops the run now, as in the
+                            // stage runner, and is neither resubmitted nor second-tried.
+                            let sendable = !refused && !stop_run_on_billing_row(ctx.meter, &error);
                             out.results.insert(
                                 w.custom_id.clone(),
                                 Err(ItemFailure {
                                     reason: error,
-                                    resubmittable: !refused,
-                                    second_tryable: !refused,
+                                    resubmittable: sendable,
+                                    second_tryable: sendable,
                                 }),
                             );
                         }

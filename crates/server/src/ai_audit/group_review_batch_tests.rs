@@ -25,7 +25,7 @@ const MODEL: &str = "claude-fable-5-1";
 const INPUT_TOKENS: u64 = 2_000;
 const OUTPUT_TOKENS: u64 = 300;
 const CACHE_READ_TOKENS: u64 = 1_500;
-const CREDIT_ERROR: &str =
+pub(super) const CREDIT_ERROR: &str =
     "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing.";
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ fn site(rule: &str, i: usize) -> Finding {
 }
 
 /// A report holding `n` sites of each `(rule, n)`; one rule group per rule.
-fn report_of(rules: &[(&str, usize)]) -> ScanReport {
+pub(super) fn report_of(rules: &[(&str, usize)]) -> ScanReport {
     let mut report = ScanReport::gated(&["acme/app".to_string()]);
     report.gated = false;
     report.code_lines = 40_000;
@@ -160,7 +160,7 @@ impl LlmPort for Realtime {
 
 /// A fake Message Batches API that answers each item with the stand-in group review reply (or an
 /// error row).
-struct FakeBatch {
+pub(super) struct FakeBatch {
     realtime: Realtime,
     /// Per accepted batch (`msgbatch_<n>`): `(custom id, the reply the item gets)`.
     batches: Mutex<Vec<Vec<(String, String)>>>,
@@ -177,7 +177,7 @@ struct FakeBatch {
 }
 
 impl FakeBatch {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             realtime: Realtime::new(),
             batches: Mutex::new(Vec::new()),
@@ -193,11 +193,11 @@ impl FakeBatch {
         self.hang = true;
         self
     }
-    fn erroring(mut self, text: &str) -> Self {
+    pub(super) fn erroring(mut self, text: &str) -> Self {
         self.error_rows = Some(text.to_string());
         self
     }
-    fn batch_count(&self) -> usize {
+    pub(super) fn batch_count(&self) -> usize {
         self.batches.lock().unwrap().len()
     }
     fn items_sent(&self) -> usize {
@@ -281,11 +281,11 @@ impl BatchApi for FakeBatch {
     }
 }
 
-fn seam(api: &Arc<FakeBatch>) -> BatchSeam {
+pub(super) fn seam(api: &Arc<FakeBatch>) -> BatchSeam {
     BatchSeam::new(api.clone() as Arc<dyn BatchApi>)
 }
 
-async fn run(
+pub(super) async fn run(
     report: &mut ScanReport,
     llm: &dyn LlmPort,
     batch: bool,

@@ -383,6 +383,9 @@ mod fix_model_tests;
 mod batch_default_tests;
 
 #[cfg(test)]
+mod scan_pass_credit_tests;
+
+#[cfg(test)]
 mod applies_to_routing_tests;
 
 mod candidate_passes;

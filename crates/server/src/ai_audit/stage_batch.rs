@@ -59,8 +59,8 @@ use tokio::time::Instant;
 
 use super::batch_mode::{
     batch_cache_ttl, batch_poll_interval, disclosable_error, max_batch_body_bytes, note_batch_call,
-    plan_item_ranges, poll_and_fetch, reply_shows_no_caching, should_warm_batch, BatchApi,
-    BatchSeam, JobCancelled, PollProgress, RoundContext,
+    plan_item_ranges, poll_and_fetch, reply_shows_no_caching, should_warm_batch,
+    stop_run_on_billing_row, BatchApi, BatchSeam, JobCancelled, PollProgress, RoundContext,
 };
 use super::repo_map::estimate_tokens;
 use super::request_budget::ensure_request_fits;
@@ -1529,15 +1529,10 @@ fn settle_rows<S: StageItems>(
                 if refused {
                     book.fail(&work.id, FailureClass::Content, &error, None);
                     report_progress(ctx, stage, book);
-                } else if camerata_llm::failure::classify_text(&error).0
-                    == FailureClass::AuthOrBilling
-                {
+                } else if stop_run_on_billing_row(ctx.meter, &error) {
                     // The account or the credential was refused: waiting or sending again fixes
-                    // neither. The run stops now (run health), not a round later, and the item
+                    // neither. The run stopped now (run health), not a round later, and the item
                     // is failed with its real class, never resent and never labeled transport.
-                    if let Some(m) = ctx.meter {
-                        m.health().note_failure(FailureClass::AuthOrBilling, &error);
-                    }
                     book.fail(&work.id, FailureClass::AuthOrBilling, &error, None);
                     report_progress(ctx, stage, book);
                 } else if let Some(again) = resend_or_fail(
