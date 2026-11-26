@@ -361,3 +361,32 @@ fn a_value_that_reads_back_changed_is_refused() {
         }
     );
 }
+
+#[test]
+fn the_comparison_names_every_kind_of_loss() {
+    use serde_json::json;
+    let same = json!({"a": [1, {"b": "x"}]});
+    assert_eq!(first_dropped(&same, &same, ""), None);
+    // A key the re-read added (a field added since) is not a loss.
+    assert_eq!(
+        first_dropped(&json!({"a": 1}), &json!({"a": 1, "new": null}), ""),
+        None
+    );
+    assert_eq!(
+        first_dropped(&json!({"a": 1, "b": 2}), &json!({"a": 1}), "").as_deref(),
+        Some("`b`")
+    );
+    // A list that reads back shorter lost an element, even when the rest matches.
+    assert_eq!(
+        first_dropped(&json!({"a": [1, 2]}), &json!({"a": [1]}), "").as_deref(),
+        Some("`a`")
+    );
+    assert_eq!(
+        first_dropped(&json!({"a": [1, 2]}), &json!({"a": [1, 3]}), "").as_deref(),
+        Some("`a[1]`")
+    );
+    assert_eq!(
+        first_dropped(&json!("x"), &json!("y"), "").as_deref(),
+        Some("the rule itself")
+    );
+}
