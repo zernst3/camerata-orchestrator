@@ -1633,6 +1633,9 @@ pub fn build_report_json_with_counts(
             .filter(|n| n.tool == "osv-scanner")
             .all(crate::dep_audit::note_proves_clean);
     let (dep_summary_line, dep_worst, dep_more_line) = dependency_summary(&dep_rows);
+    let audited_files = report.ledger.audited_dependency_files();
+    let (checked_line, checked_listed, checked_more_line) =
+        audited_dependency_summary(audited_files, report.repos.len() > 1);
     let dependency_snapshot = DependencySnapshotJson {
         rows: dep_rows,
         coverage_notes: dep_coverage_notes,
@@ -1640,6 +1643,17 @@ pub fn build_report_json_with_counts(
         summary_line: dep_summary_line,
         worst: dep_worst,
         more_line: dep_more_line,
+        audited_files: audited_files
+            .iter()
+            .map(|f| AuditedDependencyFileJson {
+                repo: f.repo.clone(),
+                path: f.path.clone(),
+                vendored: f.vendored,
+            })
+            .collect(),
+        checked_line,
+        checked_listed,
+        checked_more_line,
     };
 
     // ── Executive summary ──────────────────────────────────────────────────────
@@ -2051,7 +2065,14 @@ pub fn build_report_json_with_counts(
         excluded_false_positive: counts.rows.ruled_out,
         held_for_review: held_for_review_total,
         next_steps: counts_prose::next_steps(counts, multi_repo, review_state, opts.internal),
-        deterministic_note: deterministic_note_for(method_facts.finder),
+        deterministic_note: {
+            let base = deterministic_note_for(method_facts.finder);
+            if pom_checked(report.ledger.audited_dependency_files()) {
+                format!("{base} {MAVEN_DECLARED_ONLY}")
+            } else {
+                base
+            }
+        },
         ai_tier_note: ai_tier_note_for(
             review_state,
             coverage_gaps::repos_without_ai_review(report).len(),
@@ -2228,6 +2249,105 @@ fn dependency_summary(
         String::new()
     };
     (summary, worst, more)
+}
+
+/// The most audited dependency files the PDF lists; the workbook lists them all.
+pub(crate) const PDF_MAX_AUDITED_FILES: usize = 12;
+
+/// The Maven sentence, said once in the dependency section and once in the method text (and so in
+/// the workbook note), whenever a pom.xml was checked. osv-scanner, run without network
+/// resolution, reads the dependencies a pom.xml declares with an explicit version: a version that
+/// comes from a parent POM is not resolved, and neither are the dependencies pulled in.
+pub(crate) const MAVEN_DECLARED_ONLY: &str = "Dependencies declared with an explicit version in pom.xml files were checked. Dependencies whose version comes from a parent POM, and the dependencies they pull in, were not.";
+
+/// Whether any audited dependency file is a pom.xml.
+pub(crate) fn pom_checked(files: &[crate::scan_ledger::AuditedDependencyFile]) -> bool {
+    files
+        .iter()
+        .any(|f| f.path.rsplit('/').next() == Some("pom.xml"))
+}
+
+/// The audited dependency files in the one order the PDF and the workbook both list them:
+/// vendored files first (so the mark is visible even when the PDF lists only some), each group in
+/// the order recorded.
+pub(crate) fn audited_in_display_order(
+    files: &[crate::scan_ledger::AuditedDependencyFile],
+) -> Vec<&crate::scan_ledger::AuditedDependencyFile> {
+    let mut ordered: Vec<&crate::scan_ledger::AuditedDependencyFile> = files.iter().collect();
+    ordered.sort_by_key(|f| !f.vendored);
+    ordered
+}
+
+/// One audited dependency file as a line: its path, led by the repo when the scan has several,
+/// and ending "(vendored)" when it sits inside a folder of bundled outside code.
+pub(crate) fn audited_file_label(
+    f: &crate::scan_ledger::AuditedDependencyFile,
+    multi_repo: bool,
+) -> String {
+    let lead = if multi_repo {
+        format!("{}: ", f.repo)
+    } else {
+        String::new()
+    };
+    let mark = if f.vendored { " (vendored)" } else { "" };
+    format!("{lead}{}{mark}", f.path)
+}
+
+/// The client-visible disclosure of which dependency files the audit was given: one sentence
+/// (empty when none were), the first [`PDF_MAX_AUDITED_FILES`] as lines, and the "more in the
+/// Dependencies sheet" line when some are left out.
+pub(crate) fn audited_dependency_summary(
+    files: &[crate::scan_ledger::AuditedDependencyFile],
+    multi_repo: bool,
+) -> (String, Vec<String>, String) {
+    if files.is_empty() {
+        return (String::new(), Vec::new(), String::new());
+    }
+    let vendored = files.iter().filter(|f| f.vendored).count();
+    let mut line = format!("Dependency files checked: {}.", files.len());
+    if vendored > 0 {
+        line.push_str(&format!(
+            " {vendored} of them {} vendored, meaning inside a folder of bundled outside code \
+             such as a vendor folder.",
+            if vendored == 1 { "is" } else { "are" }
+        ));
+    }
+    if pom_checked(files) {
+        line.push(' ');
+        line.push_str(MAVEN_DECLARED_ONLY);
+    }
+    let listed: Vec<String> = audited_in_display_order(files)
+        .into_iter()
+        .take(PDF_MAX_AUDITED_FILES)
+        .map(|f| audited_file_label(f, multi_repo))
+        .collect();
+    let more = if files.len() > PDF_MAX_AUDITED_FILES {
+        crate::xlsx_export::vocabulary::more_in_sheet(
+            files.len() - PDF_MAX_AUDITED_FILES,
+            crate::xlsx_export::vocabulary::DEPENDENCIES,
+        )
+    } else {
+        String::new()
+    };
+    (line, listed, more)
+}
+
+/// The workbook's version of the disclosure: the sentence and EVERY audited file, one per line,
+/// or `None` when no dependency file was checked.
+pub(crate) fn audited_dependencies_note(
+    files: &[crate::scan_ledger::AuditedDependencyFile],
+    multi_repo: bool,
+) -> Option<String> {
+    let (line, _, _) = audited_dependency_summary(files, multi_repo);
+    if line.is_empty() {
+        return None;
+    }
+    let mut note = line;
+    for f in audited_in_display_order(files) {
+        note.push('\n');
+        note.push_str(&audited_file_label(f, multi_repo));
+    }
+    Some(note)
 }
 
 /// The first `sentences` sentences of `text` on one line, cut at a word at `max_chars`.

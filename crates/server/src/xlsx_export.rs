@@ -2403,7 +2403,13 @@ pub fn build_workbook_with_counts(
         sheets::needs_a_decision_table(&lay),
         sheets::conventions_table(&convention_rows, &lay),
         sheets::departures_table(&deviation_groups, &lay),
-        sheets::dependencies_table(&sorted_deps),
+        sheets::dependencies_table(
+            &sorted_deps,
+            crate::report_export::audited_dependencies_note(
+                report.ledger.audited_dependency_files(),
+                report.repos.len() > 1,
+            ),
+        ),
         sheets::rules_checked_table(&coverage_rows, &rules_applied_rows, &lay, corpus),
     ];
     if let Some(patterns) = &patterns_json {

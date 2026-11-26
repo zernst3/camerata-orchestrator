@@ -1010,6 +1010,23 @@ pub struct DependencySnapshotJson {
     pub worst: Vec<DependencyFindingJson>,
     /// "and 12 more in the Dependencies sheet"; empty when none are left out.
     pub more_line: String,
+    /// Every dependency file (manifest or lockfile) the audit was given, vendored ones marked.
+    pub audited_files: Vec<AuditedDependencyFileJson>,
+    /// "Dependency files checked: 3. One of them is vendored, ..."; empty when none were checked.
+    pub checked_line: String,
+    /// The first few audited files as lines, each ending "(vendored)" when it is ([`PDF_MAX_AUDITED_FILES`]).
+    pub checked_listed: Vec<String>,
+    /// "and 5 more in the Dependencies sheet"; empty when none are left out.
+    pub checked_more_line: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditedDependencyFileJson {
+    pub repo: String,
+    /// Repo-relative path.
+    pub path: String,
+    /// The file sits inside a folder of bundled outside code such as `vendor/`.
+    pub vendored: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

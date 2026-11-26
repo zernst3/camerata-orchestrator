@@ -75,6 +75,30 @@ fn a_tool_that_failed_on_one_repo_is_not_reported_as_having_run_on_it() {
     );
 }
 
+/// A note about files that could not be copied into the private copy is keyed by its own id, so
+/// a zero-finding rule of a tool is not marked "did not run" because of it.
+#[test]
+fn a_not_copied_note_does_not_mark_a_zero_finding_rule_as_not_run() {
+    let mut report = two_repo_report();
+    record_for_both(&mut report);
+    report.coverage_notes = vec![crate::scan_mirror::not_copied_note(
+        "acme/one",
+        crate::scan_mirror::MIRROR_NOTE_TOOL,
+        &["src/acme-a.js".to_string()],
+    )
+    .expect("note")];
+    reconcile_external_tool_ledger(&mut report, &attempted_on(&["acme/one", "acme/two"]), None);
+
+    let one = report.ledger.rule_for_repo(RULE, "acme/one").unwrap();
+    assert!(one.ran && one.skip_reason.is_none(), "{one:?}");
+    assert!(
+        report.failed_passes.is_empty(),
+        "{:?}",
+        report.failed_passes
+    );
+    assert_eq!(report.ledger.healthy_rule_ids(), vec![RULE.to_string()]);
+}
+
 #[test]
 fn findings_from_one_repo_are_no_evidence_the_tool_ran_on_the_other() {
     let mut report = two_repo_report();

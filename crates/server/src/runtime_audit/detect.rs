@@ -1068,10 +1068,13 @@ impl SiblingReader<'_> {
         let path = dir.join(name);
         // A path that cannot be made relative to the root cannot be judged: not read.
         let rel = path.strip_prefix(self.root).ok()?;
-        if self
-            .scope
-            .excludes(&rel.to_string_lossy().replace('\\', "/"))
-        {
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if self.scope.excludes(&rel) {
+            return None;
+        }
+        // A sibling that is a symbolic link, or sits behind one, is not read: it can point at a
+        // file outside the repository. Local twin of `onboard::files::is_regular_file_inside`.
+        if !crate::scan_mirror::is_regular_file_inside(self.root, &rel) {
             return None;
         }
         // Never through a link: the sibling may point outside the repository.

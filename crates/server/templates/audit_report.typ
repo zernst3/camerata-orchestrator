@@ -747,6 +747,19 @@
   ]
 ]
 
+#if d.dependency_snapshot.checked_line != "" [
+  #v(0.2cm)
+  #block(above: 4pt, below: 4pt, width: 100%)[
+    #text(size: 8.5pt, fill: ink_faint)[#d.dependency_snapshot.checked_line]
+    #for line in d.dependency_snapshot.checked_listed [
+      #linebreak()#text(size: 8.5pt, fill: ink_faint)[#breakable(line, n: 60)]
+    ]
+    #if d.dependency_snapshot.checked_more_line != "" [
+      #linebreak()#text(size: 8.5pt, fill: ink_faint)[#d.dependency_snapshot.checked_more_line]
+    ]
+  ]
+]
+
 // ── 12. Next steps ───────────────────────────────────────────────────────────────────────
 // A short, factual "what happens after this report" paragraph (`report_export::next_steps_note`,
 // authored prose, never an LLM call).

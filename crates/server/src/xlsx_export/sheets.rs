@@ -1163,7 +1163,7 @@ fn dep_action(row: &DepRow) -> String {
     }
 }
 
-pub(super) fn dependencies_table(sorted: &[DepRow]) -> Table {
+pub(super) fn dependencies_table(sorted: &[DepRow], audited_note: Option<String>) -> Table {
     let mut table = Table::new(
         v::DEPENDENCIES,
         vec![
@@ -1206,6 +1206,7 @@ pub(super) fn dependencies_table(sorted: &[DepRow]) -> Table {
         table.rows.push(c.assemble(&table.cols));
     }
     table.empty_note = Some("No known vulnerable dependencies were found.".into());
+    table.header_note = audited_note;
     table
 }
 

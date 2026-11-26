@@ -485,6 +485,16 @@ impl StageLedgerEntry {
     }
 }
 
+/// One dependency file (a manifest or a lockfile) the dependency audit was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditedDependencyFile {
+    pub repo: String,
+    /// Repo-relative, `/`-separated.
+    pub path: String,
+    /// The file sits inside a folder of bundled outside code such as `vendor/`.
+    pub vendored: bool,
+}
+
 /// The scan-wide evaluation ledger: per-rule execution facts + per-stage row accounting,
 /// accumulated during a scan (see `onboard::audit_repos`, `ai_audit::audit_repo`) and carried
 /// into the report build (`report_export::build_report_json`). See the module doc comment.
@@ -615,6 +625,11 @@ pub struct ScanLedger {
     /// existed, or by a caller that does not record one.
     #[serde(default)]
     engagement: Option<crate::client_lock::EngagementRecord>,
+    /// The dependency files (manifests and lockfiles) the dependency audit was given, per repo,
+    /// with those inside a bundled-code folder marked vendored. Disclosed in the dependency
+    /// section of every export. `serde(default)` so an older ledger still loads.
+    #[serde(default)]
+    audited_dependency_files: Vec<AuditedDependencyFile>,
     /// H11: set when this run re-audited only the files that changed since an earlier
     /// inspection and carried the rest of that inspection's findings forward. The exporters
     /// state it on the cover, so a reader never takes a partial re-audit for a full one.
@@ -1808,6 +1823,16 @@ impl ScanLedger {
     /// True when the run stopped on an outage, so the inspection is incomplete.
     pub fn is_outage_stopped(&self) -> bool {
         self.outage.is_some()
+    }
+
+    /// Add the dependency files one repo's audit was given.
+    pub fn record_audited_dependency_files(&mut self, files: Vec<AuditedDependencyFile>) {
+        self.audited_dependency_files.extend(files);
+    }
+
+    /// The dependency files the audit was given, across repos, in the order recorded.
+    pub fn audited_dependency_files(&self) -> &[AuditedDependencyFile] {
+        &self.audited_dependency_files
     }
 
     /// Record the engagement this scan ran under. Overwrites: one scan, one record.

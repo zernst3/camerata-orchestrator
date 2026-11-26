@@ -51,6 +51,8 @@ use crate::tool_provisioning;
 
 mod manifests;
 
+pub(crate) use manifests::is_dependency_file;
+
 /// Whether the dependency audit opens a file of this name as a package manifest.
 pub(crate) fn reads_package_manifest(file_name: &str) -> bool {
     manifests::is_manifest(file_name)
@@ -110,6 +112,7 @@ pub fn note_means_scanned(note: &CoverageNote) -> bool {
     note.message.contains(NO_LOCKFILES)
         || note.message.contains(MANIFESTS_UNAUDITED)
         || note.message.contains(UNREAD_FILES)
+        || note.message.contains(crate::scan_mirror::NOT_COPIED_PHRASE)
 }
 
 /// True when a dep-audit coverage note leaves nothing unchecked, so "no known vulnerable
@@ -120,6 +123,7 @@ pub fn note_proves_clean(note: &CoverageNote) -> bool {
     note.message.contains(NO_LOCKFILES)
         && !note.message.contains(MANIFESTS_UNAUDITED)
         && !note.message.contains(UNREAD_FILES)
+        && !note.message.contains(crate::scan_mirror::NOT_COPIED_PHRASE)
 }
 
 // ─── JSON parser (pure, unit-tested) ─────────────────────────────────────────
@@ -223,6 +227,16 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
             .and_then(|s| s.get("path"))
             .and_then(|p| p.as_str())
             .unwrap_or("(unknown lockfile)");
+
+        // osv-scanner follows a symbolic link to a lockfile, so a link pointing outside the
+        // repository would put an outside file's packages in the report. Such a result is
+        // dropped whole: no file outside the repository is ever quoted.
+        if std::fs::symlink_metadata(lockfile_abs)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            continue;
+        }
 
         // Make the path relative to the repo root when possible.  osv-scanner
         // emits absolute paths; we store only the relative part in the finding.
@@ -690,7 +704,22 @@ async fn run_dep_audit_with_tooling(
     tooling_dir: &Path,
     scope: &RepoScope,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
-    let (mut findings, mut note) = run_dep_audit_core(repo, repo_dir, tooling_dir, scope).await;
+    run_dep_audit_in(repo, repo_dir, repo_dir, tooling_dir, scope).await
+}
+
+/// [`run_dep_audit_with_tooling`] with the folder osv-scanner runs on (`scan_dir`, the scan's
+/// mirror of the repository) apart from the repository itself (`repo_dir`). osv-scanner, its
+/// output paths and its messages use `scan_dir`; the manifest walk that names uncovered manifests
+/// reads `repo_dir` (it follows no link and reads only manifests).
+async fn run_dep_audit_in(
+    repo: &str,
+    repo_dir: &Path,
+    scan_dir: &Path,
+    tooling_dir: &Path,
+    scope: &RepoScope,
+) -> (Vec<Finding>, Option<CoverageNote>) {
+    let (mut findings, mut note) =
+        run_dep_audit_core(repo, repo_dir, scan_dir, tooling_dir, scope).await;
     // osv-scanner discovers lockfiles itself (`-r`), so a lockfile the project's exclusion list
     // names is dropped from its results here: the audit reports nothing about an excluded file.
     drop_excluded(&mut findings, scope);
@@ -729,6 +758,7 @@ fn drop_excluded(findings: &mut Vec<Finding>, scope: &RepoScope) {
 async fn run_dep_audit_core(
     repo: &str,
     repo_dir: &Path,
+    scan_dir: &Path,
     tooling_dir: &Path,
     scope: &RepoScope,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
@@ -752,7 +782,7 @@ async fn run_dep_audit_core(
                     tool: TOOL_NAME.to_string(),
                     message: scrub_local_paths(
                         &format!("dependency audit (osv-scanner) did not run: {e}"),
-                        repo_dir,
+                        scan_dir,
                     ),
                 }),
             );
@@ -773,8 +803,11 @@ async fn run_dep_audit_core(
     let result = tokio::time::timeout(
         Duration::from_secs(120),
         tokio::process::Command::new(&bin_str)
-            .args(["--format", "json", "-r"])
-            .arg(repo_dir)
+            .args(osv_args(scan_dir))
+            .envs(
+                crate::scan_mirror::git_ceiling_for(scan_dir)
+                    .map(|c| ("GIT_CEILING_DIRECTORIES", c)),
+            )
             .kill_on_drop(true)
             .output(),
     )
@@ -794,7 +827,7 @@ async fn run_dep_audit_core(
                             "dependency audit (osv-scanner) did not run: \
                              could not spawn process: {e}"
                         ),
-                        repo_dir,
+                        scan_dir,
                     ),
                 }),
             );
@@ -852,7 +885,7 @@ async fn run_dep_audit_core(
                     "dependency audit (osv-scanner) did not run: \
                      process exited with code {code}: {stderr}"
                 ),
-                repo_dir,
+                scan_dir,
             )
         } else {
             // Exit OK but empty stdout: osv-scanner printed nothing, which a completed scan
@@ -872,7 +905,7 @@ async fn run_dep_audit_core(
     }
 
     // Parse the JSON output.
-    match parse_osv_json(repo, repo_dir, &stdout) {
+    match parse_osv_json(repo, scan_dir, &stdout) {
         Ok(findings) => {
             // M12: a successful run used to say nothing about what it left out: manifests no
             // lockfile covers, and files osv-scanner reported on stderr that it could not read.
@@ -880,7 +913,7 @@ async fn run_dep_audit_core(
             let message = manifests::success_gap_message(
                 unaudited_manifest_sentence(repo_dir, scope).await,
                 &stderr,
-                repo_dir,
+                scan_dir,
             );
             let note = message.map(|message| CoverageNote {
                 tool_failed: false,
@@ -898,11 +931,33 @@ async fn run_dep_audit_core(
                 tool: TOOL_NAME.to_string(),
                 message: scrub_local_paths(
                     &format!("dependency audit (osv-scanner) could not parse output: {e}"),
-                    repo_dir,
+                    scan_dir,
                 ),
             }),
         ),
     }
+}
+
+/// The osv-scanner argument vector: JSON output, recursive discovery from `scan_dir`, the scan's
+/// mirror of the repository (never the checkout).
+fn osv_args(scan_dir: &Path) -> Vec<std::ffi::OsString> {
+    // `--experimental-no-resolve`: for Maven, only the dependencies a pom.xml declares are
+    // checked, and nothing is sent to Maven Central to resolve the ones they pull in.
+    // `--no-ignore`: the mirror already holds exactly the files to read, and `.gitignore` files
+    // are in it; osv-scanner must read every file it is given, a tracked lockfile that matches an
+    // ignore rule included.
+    let mut args: Vec<std::ffi::OsString> = [
+        "--format",
+        "json",
+        "--experimental-no-resolve",
+        "--no-ignore",
+        "-r",
+    ]
+    .into_iter()
+    .map(std::ffi::OsString::from)
+    .collect();
+    args.push(scan_dir.as_os_str().to_owned());
+    args
 }
 
 /// The coverage message for a clean exit with nothing on stdout. A scan that completed always
@@ -921,6 +976,102 @@ async fn unaudited_manifest_sentence(repo_dir: &Path, scope: &RepoScope) -> Opti
         .await
         .ok()?;
     manifests::manifests_sentence(&found)
+}
+
+/// The folders whose files are bundled outside code: a dependency file in one is marked vendored.
+const THIRD_PARTY_DIRS: &[&str] = &["vendor", "third_party", "node_modules", "bower_components"];
+
+/// The dependency files osv-scanner read for the repo at `root`: every regular, tracked lockfile
+/// or manifest osv-scanner parses, none of them a link and none the project's exclusion list
+/// names; those inside a third-party folder are marked vendored. The files are exactly those
+/// given to osv-scanner ([`crate::scan_mirror::osv_paths`]) that it parses, so a manifest it
+/// ignores (`package.json`) is never listed as checked.
+pub fn audited_dependency_files(
+    repo: &str,
+    root: &Path,
+    scope: &RepoScope,
+) -> Vec<crate::scan_ledger::AuditedDependencyFile> {
+    crate::scan_mirror::dependency_files(root, scope)
+        .into_iter()
+        .filter(|p| manifests::is_osv_read_file(p.rsplit('/').next().unwrap_or(p)))
+        .filter(|p| crate::scan_mirror::is_regular_file_inside(root, p))
+        .map(|path| {
+            let vendored = path
+                .rsplit('/')
+                .skip(1)
+                .any(|dir| THIRD_PARTY_DIRS.contains(&dir));
+            crate::scan_ledger::AuditedDependencyFile {
+                repo: repo.to_string(),
+                path,
+                vendored,
+            }
+        })
+        .collect()
+}
+
+/// Of the dependency files computed from the checkout, those that are really in osv-scanner's
+/// mirror. A file that failed to copy is not given to the tool, so it must not be listed as
+/// checked.
+fn given_to_osv(
+    files: Vec<crate::scan_ledger::AuditedDependencyFile>,
+    mirror: &Path,
+    copy_failed: &[String],
+) -> Vec<crate::scan_ledger::AuditedDependencyFile> {
+    files
+        .into_iter()
+        .filter(|f| !copy_failed.contains(&f.path) && mirror.join(&f.path).is_file())
+        .collect()
+}
+
+/// Fold the files that failed to copy into the audit's outcome. When the audit did not run (a
+/// timeout, a spawn or parse error, provisioning), its own note stands as it is and no file is
+/// listed as checked: appending the not-copied text would make that note read as a run that
+/// happened. When it ran, the not-copied text is added, so the run is never read as clean.
+fn with_copy_failures(
+    repo: &str,
+    note: Option<CoverageNote>,
+    files: Vec<crate::scan_ledger::AuditedDependencyFile>,
+    copy_failed: &[String],
+) -> (
+    Option<CoverageNote>,
+    Vec<crate::scan_ledger::AuditedDependencyFile>,
+) {
+    if note.as_ref().is_some_and(|n| !note_means_scanned(n)) {
+        return (note, Vec::new());
+    }
+    let Some(extra) = crate::scan_mirror::not_copied_note(repo, TOOL_NAME, copy_failed) else {
+        return (note, files);
+    };
+    let note = match note {
+        Some(mut n) => {
+            n.message = format!("{} {}", n.message, extra.message);
+            Some(n)
+        }
+        None => Some(extra),
+    };
+    (note, files)
+}
+
+/// [`given_to_osv`] for another module's test.
+#[cfg(test)]
+pub(crate) fn given_to_osv_for_test(
+    files: Vec<crate::scan_ledger::AuditedDependencyFile>,
+    mirror: &Path,
+    copy_failed: &[String],
+) -> Vec<crate::scan_ledger::AuditedDependencyFile> {
+    given_to_osv(files, mirror, copy_failed)
+}
+
+/// After a repo's dependency audit: when osv-scanner actually scanned it, record the dependency
+/// files it was given (from [`run_dep_audit_listed`]), for the dependency section of the exports.
+pub fn record_audited_files(
+    report: &mut crate::onboard::ScanReport,
+    files: Vec<crate::scan_ledger::AuditedDependencyFile>,
+    run: Option<&crate::vuln_intel::OsvRun>,
+) {
+    if run.is_some_and(|r| r.ran) {
+        report.ledger.record_audited_dependency_files(files);
+    }
 }
 
 /// Run osv-scanner on `repo_dir` and return `(findings, coverage_note)`.
@@ -945,6 +1096,22 @@ pub async fn run_dep_audit(
     repo_dir: &Path,
     scope: &RepoScope,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
+    let (findings, note, _files) = run_dep_audit_listed(repo, repo_dir, scope).await;
+    (findings, note)
+}
+
+/// [`run_dep_audit`] plus the dependency files osv-scanner was actually given: the ones that
+/// are in its mirror, so a file that failed to copy is never listed as checked (it is named in
+/// the coverage note instead). Empty when the audit did not run.
+pub async fn run_dep_audit_listed(
+    repo: &str,
+    repo_dir: &Path,
+    scope: &RepoScope,
+) -> (
+    Vec<Finding>,
+    Option<CoverageNote>,
+    Vec<crate::scan_ledger::AuditedDependencyFile>,
+) {
     // Resolve the Camerata tooling dir where provisioned binaries live.
     let tooling_dir = match tool_provisioning::tooling_dir() {
         Some(d) => d,
@@ -959,10 +1126,61 @@ pub async fn run_dep_audit(
                               could not resolve Camerata data dir for tool provisioning"
                         .to_string(),
                 }),
+                Vec::new(),
             );
         }
     };
-    run_dep_audit_with_tooling(repo, repo_dir, &tooling_dir, scope).await
+    // The scan's mirror: osv-scanner runs on a private copy of the admitted files and manifests,
+    // never on the checkout, so a link inside the checkout cannot lead it to an outside file.
+    if std::env::var(DISABLE_ENV_VAR)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        let (findings, note) =
+            run_dep_audit_with_tooling(repo, repo_dir, &tooling_dir, scope).await;
+        return (findings, note, Vec::new());
+    }
+    let dir = repo_dir.to_path_buf();
+    let scope_for_read = scope.clone();
+    let staged = tokio::task::spawn_blocking(move || {
+        crate::onboard::files::read_local_repo_files(&dir, &scope_for_read)
+            .map(|ex| crate::scan_mirror::osv_paths(&ex, &dir, &scope_for_read))
+    })
+    .await;
+    let mirror = match staged {
+        Ok(Ok(rels)) => crate::scan_mirror::Mirror::build(repo_dir, rels, repo)
+            .await
+            .map_err(|e| e.to_string()),
+        Ok(Err(e)) => Err(format!("the repository could not be read: {e}")),
+        Err(e) => Err(e.to_string()),
+    };
+    let mirror = match mirror {
+        Ok(m) => m,
+        Err(why) => {
+            return (
+                Vec::new(),
+                Some(CoverageNote {
+                    tool_failed: true,
+                    repo: Some(repo.to_string()),
+                    tool: TOOL_NAME.to_string(),
+                    message: format!("dependency audit (osv-scanner) did not run: {why}"),
+                }),
+                Vec::new(),
+            );
+        }
+    };
+    let copy_failed = mirror.copy_failed.clone();
+    let (findings, note) =
+        run_dep_audit_in(repo, repo_dir, mirror.path(), &tooling_dir, scope).await;
+    // The dependency files it was given: those that are really in the mirror.
+    let files = given_to_osv(
+        audited_dependency_files(repo, repo_dir, scope),
+        mirror.path(),
+        &copy_failed,
+    );
+    mirror.finish().await;
+    let (note, files) = with_copy_failures(repo, note, files, &copy_failed);
+    (findings, note, files)
 }
 
 // ─── tests (pure parser + severity mapping) ──────────────────────────────────
@@ -1182,6 +1400,291 @@ mod tests {
             r#"{"schemaVersion":"1.0","results":[{"source":{"path":"/home/runner/work/my-repo/Cargo.lock","type":"lockfile"},"packages":[{"package":{"name":"time","version":"0.1.45","ecosystem":"crates.io"},"vulnerabilities":[{"id":"RUSTSEC-2020-0071","aliases":["#,
             r#""GHSA-wcg3-cvx6-7396"],"summary":"Potential segfault in the time crate","database_specific":{"severity":"HIGH"},"severity":[{"type":"CVSS_V3","score":"7.0"}]}],"groups":[{"ids":["RUSTSEC-2020-0071"]}]}]}]}"#
         )
+    }
+
+    /// A lockfile that is a symbolic link to a file outside the repository: osv-scanner reads
+    /// it and reports its packages, and the report must carry none of them. Real files and
+    /// the same result for a regular lockfile are untouched.
+    #[cfg(unix)]
+    #[test]
+    fn a_result_for_a_symlinked_lockfile_is_dropped() {
+        let outside = tempfile::TempDir::new().unwrap();
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::write(outside.path().join("acme-outside.lock"), "x").unwrap();
+        std::fs::write(repo.path().join("Cargo.lock"), "x").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("acme-outside.lock"),
+            repo.path().join("acme-linked.lock"),
+        )
+        .unwrap();
+        let result = |path: &std::path::Path| {
+            format!(
+                r#"{{"results":[{{"source":{{"path":"{}","type":"lockfile"}},
+                "packages":[{{"package":{{"name":"a","version":"1","ecosystem":"crates.io"}},
+                "vulnerabilities":[{{"id":"CVE-9","summary":"x","database_specific":{{"severity":"HIGH"}}}}]}}]}}]}}"#,
+                path.display()
+            )
+        };
+        let linked = parse_osv_json(
+            "acme/api",
+            repo.path(),
+            &result(&repo.path().join("acme-linked.lock")),
+        )
+        .unwrap();
+        assert!(
+            linked.is_empty(),
+            "a symlinked lockfile reported: {linked:?}"
+        );
+        let regular = parse_osv_json(
+            "acme/api",
+            repo.path(),
+            &result(&repo.path().join("Cargo.lock")),
+        )
+        .unwrap();
+        assert_eq!(regular.len(), 1, "a regular lockfile is still reported");
+    }
+
+    /// The dependency files the audit is given: tracked and vendored lockfiles both, only the
+    /// second marked vendored; a gitignored vendored lockfile and a linked one are neither
+    /// audited nor listed.
+    #[cfg(unix)]
+    #[test]
+    fn audited_files_are_the_regular_dependency_files_with_vendored_ones_marked() {
+        let outside = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let w = |root: &Path, rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "{}").unwrap();
+        };
+        w(outside.path(), "acme-outside-package-lock.json");
+        w(repo.path(), "package-lock.json");
+        w(repo.path(), "vendor/acme-x/package-lock.json");
+        w(repo.path(), "vendor/acme-ignored/package-lock.json");
+        std::fs::write(repo.path().join(".gitignore"), "vendor/acme-ignored/\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("acme-outside-package-lock.json"),
+            repo.path().join("acme-linked-package-lock.json"),
+        )
+        .unwrap();
+        for args in [vec!["init", "-q"], vec!["add", "-A"]] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        // A manifest osv-scanner does not parse is given to it but never listed as checked.
+        w(repo.path(), "package.json");
+        w(repo.path(), "Cargo.toml");
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        // Untracked and not ignored: not audited, not listed.
+        w(repo.path(), "acme-new/package-lock.json");
+        let got: Vec<(String, bool)> =
+            audited_dependency_files("acme/web", repo.path(), &RepoScope::none())
+                .into_iter()
+                .map(|f| (f.path, f.vendored))
+                .collect();
+        assert_eq!(
+            got,
+            [
+                ("package-lock.json".to_string(), false),
+                ("vendor/acme-x/package-lock.json".to_string(), true)
+            ]
+        );
+        // The same files are what osv-scanner's mirror is given.
+        let ex =
+            crate::onboard::files::read_local_repo_files(repo.path(), &RepoScope::none()).unwrap();
+        let given = crate::scan_mirror::osv_paths(&ex, repo.path(), &RepoScope::none());
+        assert!(given.iter().any(|p| p == "vendor/acme-x/package-lock.json"));
+        assert!(!given.iter().any(|p| p.contains("acme-ignored")));
+    }
+
+    /// A dependency file that did not reach osv-scanner's mirror (its copy failed) is not listed
+    /// as checked.
+    #[test]
+    fn a_file_missing_from_the_mirror_is_not_listed_as_checked() {
+        let mirror = tempfile::tempdir().unwrap();
+        std::fs::write(mirror.path().join("package-lock.json"), "{}").unwrap();
+        // A partial file a failed copy left: present, but named in `copy_failed`.
+        std::fs::write(mirror.path().join("Cargo.lock"), "[[pack").unwrap();
+        let file = |path: &str| crate::scan_ledger::AuditedDependencyFile {
+            repo: "acme/web".to_string(),
+            path: path.to_string(),
+            vendored: false,
+        };
+        let given = given_to_osv(
+            vec![
+                file("package-lock.json"),
+                file("svc/yarn.lock"),
+                file("Cargo.lock"),
+            ],
+            mirror.path(),
+            &["Cargo.lock".to_string()],
+        );
+        let paths: Vec<&str> = given.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["package-lock.json"]);
+    }
+
+    /// A tracked lockfile that a `.gitignore` rule matches is still given to osv-scanner and listed
+    /// as checked: tracked files are read whatever the ignore rules say.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_lockfile_that_matches_gitignore_is_audited_and_listed() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("package-lock.json"), "{}").unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "package-lock.json\n").unwrap();
+        for args in [vec!["init", "-q"], vec!["add", "-f", "package-lock.json"]] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let got = audited_dependency_files("acme/web", repo.path(), &RepoScope::none());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].path, "package-lock.json");
+    }
+
+    /// Real osv-scanner on a mirror whose `.gitignore` names the lockfile, under a parent that is
+    /// itself a git checkout: with the engine's arguments (`--no-ignore`) and the git ceiling at
+    /// the mirror folder, it reads the lockfile. Offline (no vulnerability query); skips when
+    /// osv-scanner is not provisioned.
+    #[cfg(unix)]
+    #[test]
+    fn live_osv_reads_a_lockfile_a_gitignore_names_when_run_with_no_ignore() {
+        let Some(tooling) = tool_provisioning::tooling_dir() else {
+            return;
+        };
+        let bin = tool_provisioning::osv_scanner_bin(&tool_provisioning::osv_scanner_dir(&tooling));
+        if !bin.is_file() {
+            eprintln!("skipping: osv-scanner is not provisioned on this machine");
+            return;
+        }
+        let parent = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(parent.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(parent.path().join(".gitignore"), "package-lock.json\n").unwrap();
+        let mirror = parent.path().join("mirror").join("acme_web");
+        std::fs::create_dir_all(&mirror).unwrap();
+        std::fs::write(mirror.join(".gitignore"), "package-lock.json\n").unwrap();
+        std::fs::write(
+            mirror.join("package-lock.json"),
+            r#"{"name":"a","lockfileVersion":3,"packages":{"":{"name":"a"},"node_modules/lodash":{"version":"4.17.15"}}}"#,
+        )
+        .unwrap();
+        let run = |args: Vec<std::ffi::OsString>| {
+            let out = std::process::Command::new(&bin)
+                .arg("--experimental-offline-vulnerabilities")
+                .args(args)
+                .env("GIT_CEILING_DIRECTORIES", mirror.parent().unwrap())
+                .output()
+                .unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        let with = run(osv_args(&mirror));
+        assert!(
+            with.contains("Scanned") && with.contains("package-lock.json"),
+            "osv did not read the ignored lockfile: {with}"
+        );
+    }
+
+    /// A lockfile that failed to copy never reads as "no known vulnerable dependencies", and a run
+    /// that happened never reads as not run.
+    #[test]
+    fn a_not_copied_note_is_never_clean_and_still_means_the_run_happened() {
+        let note = |message: String| CoverageNote {
+            tool_failed: false,
+            repo: None,
+            tool: TOOL_NAME.to_string(),
+            message,
+        };
+        let copy = crate::scan_mirror::not_copied_note("acme/web", TOOL_NAME, &["a.lock".into()])
+            .expect("note");
+        // The not-copied text is only ever added to a note of a run that happened (see
+        // `with_copy_failures`), or stands alone for one that had no other note; either way
+        // the audit ran, and it is not clean.
+        assert!(note_means_scanned(&copy));
+        assert!(!note_proves_clean(&copy));
+        // Appended to a "found no lockfiles" note: still not clean.
+        let both = note(format!(
+            "dependency audit (osv-scanner) {NO_LOCKFILES} in acme/web; no dependency exposure \
+             detected. {}",
+            copy.message
+        ));
+        assert!(note_means_scanned(&both));
+        assert!(!note_proves_clean(&both));
+    }
+
+    /// A copy failure next to an audit that did not run (a timeout) never makes it read as a
+    /// run that happened: the note stands unchanged and no lockfile is listed as checked.
+    #[test]
+    fn a_copy_failure_next_to_a_timeout_lists_no_lockfile_as_checked() {
+        let timeout = CoverageNote {
+            tool_failed: false,
+            repo: Some("acme/web".to_string()),
+            tool: TOOL_NAME.to_string(),
+            message: "dependency audit (osv-scanner) did not run: subprocess timed out after 120 s"
+                .to_string(),
+        };
+        let file = crate::scan_ledger::AuditedDependencyFile {
+            repo: "acme/web".to_string(),
+            path: "package-lock.json".to_string(),
+            vendored: false,
+        };
+        let (note, files) = with_copy_failures(
+            "acme/web",
+            Some(timeout.clone()),
+            vec![file.clone()],
+            &["src/acme-a.js".to_string()],
+        );
+        let note = note.expect("note");
+        assert_eq!(note.message, timeout.message, "the note is not rewritten");
+        assert!(!note_means_scanned(&note));
+        assert!(!crate::vuln_intel::OsvRun::from_note("acme/web", Some(&note)).ran);
+        assert!(files.is_empty(), "never read, so never listed: {files:?}");
+        // The run that did happen keeps its files, and is never clean.
+        let (ran_note, ran_files) =
+            with_copy_failures("acme/web", None, vec![file], &["src/acme-a.js".to_string()]);
+        let ran_note = ran_note.expect("note");
+        assert!(note_means_scanned(&ran_note) && !note_proves_clean(&ran_note));
+        assert_eq!(ran_files.len(), 1);
+    }
+
+    /// osv-scanner is pointed at exactly the folder it is given: the scan passes the mirror.
+    #[test]
+    fn osv_args_target_the_scan_directory() {
+        let args = osv_args(Path::new("/state/scan-mirrors/scan-1/mirror/acme_web"));
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--format",
+                "json",
+                "--experimental-no-resolve",
+                "--no-ignore",
+                "-r",
+                "/state/scan-mirrors/scan-1/mirror/acme_web"
+            ]
+        );
     }
 
     #[test]

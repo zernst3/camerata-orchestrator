@@ -130,6 +130,7 @@ mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;
 mod scan_cli_version;
+pub mod scan_mirror;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
@@ -2681,21 +2682,23 @@ async fn onboard_audit(
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
                 let repo_scope = scan_scope.for_repo(spec);
-                let run = crate::dep_audit::run_dep_audit(spec, dir, &repo_scope);
-                let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
-                    Ok(result) => result,
-                    Err(_elapsed) => (
-                        Vec::new(),
-                        Some(crate::onboard::CoverageNote {
-                            tool_failed: false,
-                            repo: None,
-                            tool: "osv-scanner".to_string(),
-                            message: format!(
+                let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope);
+                let (dep_findings, dep_note, dep_files) =
+                    match timeout(dep_audit_timeout, run).await {
+                        Ok(result) => result,
+                        Err(_elapsed) => (
+                            Vec::new(),
+                            Some(crate::onboard::CoverageNote {
+                                tool_failed: false,
+                                repo: None,
+                                tool: "osv-scanner".to_string(),
+                                message: format!(
                                 "dependency audit (osv-scanner) timed out after 60 s for {spec}"
                             ),
-                        }),
-                    ),
-                };
+                            }),
+                            Vec::new(),
+                        ),
+                    };
                 let dep_note = dep_note.map(|mut note| {
                     note.repo.get_or_insert_with(|| spec.to_string());
                     note
@@ -2704,6 +2707,7 @@ async fn onboard_audit(
                     spec,
                     dep_note.as_ref(),
                 ));
+                crate::dep_audit::record_audited_files(&mut report, dep_files, osv_runs.last());
                 if !dep_findings.is_empty() {
                     report.findings.extend(dep_findings);
                 }
@@ -3448,21 +3452,23 @@ pub(crate) async fn start_audit_job(
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
                     let repo_scope = scan_scope.for_repo(spec);
-                    let run = crate::dep_audit::run_dep_audit(spec, dir, &repo_scope);
-                    let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
-                        Ok(result) => result,
-                        Err(_elapsed) => (
-                            Vec::new(),
-                            Some(crate::onboard::CoverageNote {
-                                tool_failed: false,
-                                repo: None,
-                                tool: "osv-scanner".to_string(),
-                                message: format!(
+                    let run = crate::dep_audit::run_dep_audit_listed(spec, dir, &repo_scope);
+                    let (dep_findings, dep_note, dep_files) =
+                        match timeout(dep_audit_timeout, run).await {
+                            Ok(result) => result,
+                            Err(_elapsed) => (
+                                Vec::new(),
+                                Some(crate::onboard::CoverageNote {
+                                    tool_failed: false,
+                                    repo: None,
+                                    tool: "osv-scanner".to_string(),
+                                    message: format!(
                                     "dependency audit (osv-scanner) timed out after 60 s for {spec}"
                                 ),
-                            }),
-                        ),
-                    };
+                                }),
+                                Vec::new(),
+                            ),
+                        };
                     let dep_note = dep_note.map(|mut note| {
                         note.repo.get_or_insert_with(|| spec.to_string());
                         note
@@ -3476,6 +3482,7 @@ pub(crate) async fn start_audit_job(
                         spec,
                         dep_note.as_ref(),
                     ));
+                    crate::dep_audit::record_audited_files(&mut report, dep_files, osv_runs.last());
                     if !dep_findings.is_empty() {
                         report.findings.extend(dep_findings);
                     }

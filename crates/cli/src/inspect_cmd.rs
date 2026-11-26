@@ -1529,13 +1529,17 @@ pub async fn run_inspect_pipeline_with(
     let dep_audit_rows_in = report.findings.len();
     let mut osv_runs: Vec<camerata_server::vuln_intel::OsvRun> = Vec::new();
     for (spec, dir) in &sources {
-        let (dep_findings, dep_note) =
-            camerata_server::dep_audit::run_dep_audit(spec, dir, &controls.scope.for_repo(spec))
-                .await;
+        let (dep_findings, dep_note, dep_files) = camerata_server::dep_audit::run_dep_audit_listed(
+            spec,
+            dir,
+            &controls.scope.for_repo(spec),
+        )
+        .await;
         osv_runs.push(camerata_server::vuln_intel::OsvRun::from_note(
             spec,
             dep_note.as_ref(),
         ));
+        camerata_server::dep_audit::record_audited_files(&mut report, dep_files, osv_runs.last());
         if !dep_findings.is_empty() {
             report.findings.extend(dep_findings);
         }

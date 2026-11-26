@@ -221,6 +221,64 @@ fn covered(
     false
 }
 
+/// File names (beyond the manifests and lockfiles in [`RULES`]) that dependency tools read.
+const EXTRA_DEPENDENCY_FILES: &[&str] = &[
+    "go.mod",
+    "go.sum",
+    "requirements.txt",
+    "pom.xml",
+    "packages.lock.json",
+    "gradle.lockfile",
+    "buildscript-gradle.lockfile",
+    "conan.lock",
+    "Package.resolved",
+    "Podfile.lock",
+    "deno.lock",
+    "flake.lock",
+];
+
+/// Whether `file_name` is a dependency file: a manifest or a lockfile a dependency tool reads.
+/// Broader than [`is_manifest`] on purpose: a name in this set is given to the dependency audit,
+/// and a name missing from it would be a lockfile nothing ever reads.
+pub(crate) fn is_dependency_file(file_name: &str) -> bool {
+    rule_for(file_name).is_some()
+        || EXTRA_DEPENDENCY_FILES.contains(&file_name)
+        || RULES.iter().any(|r| r.locks.contains(&file_name))
+}
+
+/// The file names osv-scanner 1.9.2 (the pinned version) actually parses, reconciled by running
+/// the provisioned binary offline on one neutral fixture per candidate name: it reported scanning
+/// exactly these (`pom.xml` is recognised as a lockfile but needs the network to resolve, so
+/// offline it reports a failed attempt). A manifest such as
+/// `package.json` or `Cargo.toml` is not in this set: osv-scanner reads the lockfile beside it,
+/// so listing the manifest as "checked" would contradict the note on manifests no lockfile covers.
+const OSV_READS: &[&str] = &[
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    "go.mod",
+    "gradle.lockfile",
+    "buildscript-gradle.lockfile",
+    "mix.lock",
+    "Pipfile.lock",
+    "poetry.lock",
+    "pdm.lock",
+    "pubspec.lock",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "pom.xml",
+    "packages.lock.json",
+    "conan.lock",
+];
+
+/// Whether osv-scanner parses a file of this name.
+pub(crate) fn is_osv_read_file(file_name: &str) -> bool {
+    OSV_READS.contains(&file_name)
+}
+
 /// The manifests under `repo_dir` that no lockfile covers, as repo-relative paths in sorted
 /// order. Only files the walk can name are reported; a tree walk that hits the entry limit stops
 /// there, so the list can undercount but never invents a path.
@@ -425,6 +483,35 @@ pub fn success_gap_message(
 
 #[cfg(test)]
 mod tests {
+    /// The list osv-scanner 1.9.2 reported scanning, no more: a name it ignores is never listed
+    /// as checked.
+    #[test]
+    fn only_the_names_osv_scanner_parses_are_listed_as_checked() {
+        for parsed in [
+            "package-lock.json",
+            "requirements-dev.txt",
+            "pdm.lock",
+            "go.mod",
+            "pom.xml",
+        ] {
+            assert!(is_osv_read_file(parsed), "{parsed}");
+        }
+        for ignored in [
+            "Podfile.lock",
+            "Package.resolved",
+            "uv.lock",
+            "deno.lock",
+            "bun.lock",
+            "go.sum",
+            "npm-shrinkwrap.json",
+            "package.json",
+            "Cargo.toml",
+            "pyproject.toml",
+        ] {
+            assert!(!is_osv_read_file(ignored), "{ignored}");
+        }
+    }
+
     use super::*;
 
     fn write(root: &Path, rel: &str, text: &str) {
@@ -444,6 +531,22 @@ mod tests {
             ["package.json"]
         );
         write(dir.path(), "package-lock.json", "{}");
+        assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
+    }
+
+    /// A manifest that is a symbolic link is neither read nor reported: the link can point at
+    /// a file outside the repository.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_manifest_is_not_read_or_reported() {
+        let outside = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write(outside.path(), "acme-package.json", DEPS);
+        std::os::unix::fs::symlink(
+            outside.path().join("acme-package.json"),
+            dir.path().join("package.json"),
+        )
+        .unwrap();
         assert!(unaudited_manifests(dir.path(), &RepoScope::none()).is_empty());
     }
 

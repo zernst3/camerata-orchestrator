@@ -790,6 +790,35 @@ pub(crate) fn admitted_previews(
         .collect()
 }
 
+/// The languages present, the admitted files and the paths for the private copy (or why they
+/// could not be listed).
+pub(crate) type StagedForScan = (
+    std::collections::HashSet<String>,
+    Vec<(String, String)>,
+    Result<Vec<String>, String>,
+);
+
+/// What one repository's tools are given: the languages present, the admitted files (for the
+/// evidence check), and the paths the private copy holds for the code tools: the admitted set plus
+/// the Cargo files a build needs ([`crate::scan_mirror::code_tool_paths`]).
+pub(crate) fn staged_for_scan(
+    dir: &std::path::Path,
+    scope: &crate::onboard::scope::RepoScope,
+) -> StagedForScan {
+    match crate::onboard::files::read_local_repo_files(dir, scope) {
+        Ok(ex) => {
+            let langs = crate::scan_tools::languages_from_files(&ex.files);
+            let staged = crate::scan_mirror::code_tool_paths(&ex, dir, scope);
+            (langs, ex.files, Ok(staged))
+        }
+        Err(e) => (
+            Default::default(),
+            Vec::new(),
+            Err(format!("the repository could not be read: {e}")),
+        ),
+    }
+}
+
 /// Run the scan-time deterministic preview pass over each local repo source and append
 /// its preview findings to the report. A no-op when there are no preview-runnable rules
 /// (or the corpus is unavailable). Preview findings are ADVISORY-but-deterministic — they
@@ -860,16 +889,46 @@ pub async fn merge_scan_preview(
                 // tools whose language is absent (e.g. no eslint on a Rust-only repo).
                 let dir_clone = dir.clone();
                 let repo_scope = scope.for_repo(spec);
-                let (present_languages, repo_files) = tokio::task::spawn_blocking(move || {
-                    crate::onboard::files::read_local_repo_files(&dir_clone, &repo_scope)
-                        .map(|ex| (crate::scan_tools::languages_from_files(&ex.files), ex.files))
-                        .unwrap_or_default()
-                })
-                .await
-                .unwrap_or_default();
+                let (present_languages, repo_files, staged) =
+                    tokio::task::spawn_blocking(move || staged_for_scan(&dir_clone, &repo_scope))
+                        .await
+                        .unwrap_or_else(|e| {
+                            (
+                                Default::default(),
+                                Vec::new(),
+                                Err(format!("the file list could not be made: {e}")),
+                            )
+                        });
+                // Every external tool runs on the scan's mirror of this repository (the admitted
+                // files and the Cargo files a build needs, no link, no `.git`), never on the
+                // checkout. Built once here, removed
+                // when this repository's tools finish, on every path out of this block.
+                let mirror = match staged {
+                    Ok(rels) => crate::scan_mirror::Mirror::build(dir, rels, spec)
+                        .await
+                        .map_err(|e| e.to_string()),
+                    Err(why) => Err(why),
+                };
+                let mirror = match mirror {
+                    Ok(m) => m,
+                    Err(why) => {
+                        // Never a silent skip: every tool that would have run is disclosed as a
+                        // failed part, so the run can be resumed.
+                        let tool_names = crate::scan_tools::preview_tool_ids_for_rules(
+                            &for_repo,
+                            &lookup,
+                            Some(&present_languages),
+                        );
+                        report
+                            .coverage_notes
+                            .extend(crate::scan_mirror::not_run_notes(spec, tool_names, &why));
+                        continue;
+                    }
+                };
+                let copy_failed = mirror.copy_failed.clone();
                 let (previews, mut notes, attempted) = crate::scan_tools::run_scan_tools(
                     spec,
-                    dir,
+                    mirror.path(),
                     &for_repo,
                     &lookup,
                     Some(&present_languages),
@@ -878,6 +937,19 @@ pub async fn merge_scan_preview(
                     sources.len() > 1,
                 )
                 .await;
+                // A tool's message must not name the private copy's folder.
+                for note in &mut notes {
+                    note.message =
+                        crate::scan_mirror::scrub_mirror_path(&note.message, mirror.path());
+                }
+                mirror.finish().await;
+                // Keyed by its own id, never a tool's name: a note keyed by a tool's name would read
+                // as that tool not running, and every rule of it with no finding as "did not run".
+                notes.extend(crate::scan_mirror::not_copied_note(
+                    spec,
+                    crate::scan_mirror::MIRROR_NOTE_TOOL,
+                    &copy_failed,
+                ));
                 // The linters run over the whole checkout, so a result in a file the exclusion
                 // list names is dropped here, before it can reach the report.
                 let previews = admitted_previews(previews, spec, scope);
@@ -1693,6 +1765,33 @@ pub(crate) struct DeltaRetest {
 
 #[cfg(test)]
 mod tests {
+    /// What one repository's code tools are given in production: the admitted set plus the Cargo
+    /// files a build needs, never another repo's lockfile or a vendored dependency file.
+    #[test]
+    fn staged_for_scan_gives_code_tools_the_admitted_set_and_cargo_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in [
+            "src/acme-ok.rs",
+            "Cargo.toml",
+            "Cargo.lock",
+            "package-lock.json",
+            "vendor/acme-lib/package-lock.json",
+        ] {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        }
+        let (_langs, _files, staged) =
+            staged_for_scan(dir.path(), &crate::onboard::scope::RepoScope::none());
+        let staged = staged.expect("readable");
+        assert!(staged.iter().any(|p| p == "Cargo.lock"), "{staged:?}");
+        assert!(staged.iter().any(|p| p == "src/acme-ok.rs"), "{staged:?}");
+        assert!(
+            !staged.iter().any(|p| p.ends_with("package-lock.json")),
+            "{staged:?}"
+        );
+    }
+
     use super::*;
 
     /// Item 31: a linter runs over the whole checkout, so a preview finding in a file the

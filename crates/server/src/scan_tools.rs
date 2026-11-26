@@ -542,6 +542,69 @@ pub const ESLINT_FORMATTER: &str = "json";
 /// never pass an npm formatter package" is assertable in a unit test instead of
 /// only observable by running a real eslint against a real provisioned workspace.
 pub fn eslint_args(config_path: &str, runnable_selectors: &[String]) -> Vec<String> {
+    eslint_args_ignoring_links(config_path, runnable_selectors, &[])
+}
+
+/// Most symbolic links the eslint run will name on its command line. A repository with more
+/// than this is reported as "eslint did not run" (a disclosed gap) rather than started with an
+/// argument list the operating system may refuse.
+pub const ESLINT_LINK_IGNORE_LIMIT: usize = 3000;
+
+/// Every symbolic link under `repo`, as repository-relative `/`-separated paths in sorted order.
+/// The walk never follows a link, and skips `node_modules` and `.git`, which eslint never reads.
+///
+/// eslint follows a symbolic link to a FILE (it lints the file the link points at), so a link
+/// that points outside the repository would put an outside file's contents in front of the
+/// linter and its findings in the report. Each path returned here is handed to eslint as an
+/// `--ignore-pattern`, so the linked file is never opened.
+pub fn symlinks_under(repo: &Path) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![repo.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_symlink() {
+                if let Ok(rel) = path.strip_prefix(repo) {
+                    found.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            } else if kind.is_dir() {
+                let name = entry.file_name();
+                if name != "node_modules" && name != ".git" {
+                    stack.push(path);
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// One `--ignore-pattern` value for a repository-relative path: glob characters in the name are
+/// escaped so the pattern names exactly that one path.
+fn eslint_ignore_pattern(rel: &str) -> String {
+    let mut out = String::with_capacity(rel.len() + 2);
+    for (i, c) in rel.chars().enumerate() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\') || (i == 0 && matches!(c, '!' | '#')) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// [`eslint_args`] plus one `--ignore-pattern` per symbolic link in `ignored_links`
+/// (see [`symlinks_under`]), so eslint never opens a linked file.
+pub fn eslint_args_ignoring_links(
+    config_path: &str,
+    runnable_selectors: &[String],
+    ignored_links: &[String],
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--config".to_string(),
         config_path.to_string(),
@@ -556,6 +619,10 @@ pub fn eslint_args(config_path: &str, runnable_selectors: &[String]) -> Vec<Stri
     for sel in runnable_selectors {
         args.push("--rule".to_string());
         args.push(format!("{{\"{sel}\": \"error\"}}"));
+    }
+    for link in ignored_links {
+        args.push("--ignore-pattern".to_string());
+        args.push(eslint_ignore_pattern(link));
     }
     args.push(".".to_string());
     args
@@ -1046,6 +1113,105 @@ pub fn parse_ruff_json(repo: &str, json: &str) -> anyhow::Result<Vec<Finding>> {
     Ok(out)
 }
 
+/// The `cargo clippy` argument vector: the selected lints as warnings, and every lint capped at
+/// `warn` so the repository's own `#![deny(warnings)]` or `[lints]` deny settings cannot turn a
+/// lint into a build error. Without the cap such a repository would fail the run and every
+/// finding would be lost, while every lint still reports as a warning with it.
+fn clippy_args(selectors: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "clippy".into(),
+        "--message-format=json".into(),
+        "--quiet".into(),
+        "--".into(),
+        "--cap-lints".into(),
+        "warn".into(),
+    ];
+    for sel in selectors {
+        // Selectors from the corpus are bare lint names (`unwrap_used`);
+        // clippy wants the `clippy::` namespace.
+        let lint = if sel.contains("::") {
+            sel.clone()
+        } else {
+            format!("clippy::{sel}")
+        };
+        args.push("-W".into());
+        args.push(lint);
+    }
+    args
+}
+
+/// `cargo clippy` builds the package in its working directory, so a repository with no
+/// `Cargo.toml` there cannot be built at all. That is a tool that could not run, a disclosed limit,
+/// not a build that failed (which locks a client export until resumed).
+fn clippy_without_manifest(dir: &Path) -> Option<anyhow::Error> {
+    if dir.join("Cargo.toml").is_file() {
+        return None;
+    }
+    Some(tool_not_run(
+        "cargo clippy could not run: this repository has no Cargo.toml at its root to build",
+    ))
+}
+
+/// How a `cargo clippy` run ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClippyBuild {
+    /// The build finished: its messages are a result.
+    Finished,
+    /// The build did not finish for a reason that belongs to the repository (a missing library, a
+    /// private registry, a path dependency outside it): a tool that could not run, with the reason
+    /// named. The parser alone would report such a run as clean.
+    NotFinished(String),
+    /// cargo was killed by a signal (out of memory, an operator's kill): it has no exit code. A
+    /// failed part, because running it again can succeed.
+    Killed,
+}
+
+/// Classify the end of a `cargo clippy` run from its messages, whether it exited with status 0 and
+/// its exit code (`None` for a process a signal ended).
+pub fn clippy_build_state(ndjson: &str, exit_ok: bool, exit_code: Option<i32>) -> ClippyBuild {
+    if !exit_ok {
+        return match exit_code {
+            None => ClippyBuild::Killed,
+            Some(_) => ClippyBuild::NotFinished("cargo exited with an error".to_string()),
+        };
+    }
+    let finished_failed = ndjson.lines().any(|raw| {
+        serde_json::from_str::<serde_json::Value>(raw.trim()).is_ok_and(|v| {
+            v.get("reason").and_then(|r| r.as_str()) == Some("build-finished")
+                && v.get("success").and_then(|s| s.as_bool()) == Some(false)
+        })
+    });
+    if finished_failed {
+        ClippyBuild::NotFinished("cargo reported that the build did not succeed".to_string())
+    } else {
+        ClippyBuild::Finished
+    }
+}
+
+/// The outcome for a clippy run whose build did not finish: a tool that could not run, with the
+/// reason named, never a clean run and never a failed part. The causes are deterministic for the
+/// repository, so re-running cannot clear them: the rules stay not run, a disclosed limit of the
+/// scope. cargo's own stderr is NOT in this message (it can carry a home folder or a private
+/// registry address, and this text reaches the client export); it goes to the operator log.
+fn clippy_not_finished(why: &str, stderr: &str) -> anyhow::Error {
+    tracing::warn!(
+        "cargo clippy did not finish ({why}); stderr: {}",
+        stderr.trim()
+    );
+    tool_not_run(format!(
+        "clippy did not finish building this repository ({why}), so it checked none of the \
+         rules it was asked to preview."
+    ))
+}
+
+/// The failure for a clippy run killed before it finished. Counted as invoked and failed.
+fn clippy_killed() -> anyhow::Error {
+    anyhow::anyhow!(
+        "clippy was stopped before it finished building this repository (cargo was killed, for \
+         example for lack of memory), so it checked none of the rules it was asked to preview"
+    )
+}
+
 /// Parse `cargo clippy --message-format=json` into preview [`Finding`]s. Clippy
 /// emits NDJSON (one JSON object per line); the relevant ones are
 /// `{"reason":"compiler-message","message":{...}}` whose `code.code` is the lint
@@ -1366,6 +1532,7 @@ fn ruff_args(select: &str) -> Vec<String> {
     [
         "check",
         "--isolated",
+        "--no-respect-gitignore",
         "--no-cache",
         "--output-format",
         "json",
@@ -1387,6 +1554,7 @@ fn semgrep_args(rules_dir: &str) -> Vec<String> {
     [
         "--sarif",
         "--metrics=off",
+        "--no-git-ignore",
         "--config",
         rules_dir,
         "--quiet",
@@ -1400,9 +1568,28 @@ fn semgrep_args(rules_dir: &str) -> Vec<String> {
 /// The one place a scan tool process is built: working directory, arguments and the fixed
 /// child environment. Every tool run goes through here so no call path can skip the semgrep
 /// environment (no vendor version check, see [`camerata_core::semgrep_env`]).
+#[cfg(test)]
 fn tool_process(dir: &Path, program: &str, args: &[&str]) -> tokio::process::Command {
+    tool_process_env(dir, program, args, &[])
+}
+
+/// [`tool_process`] plus extra environment variables for this one tool (for example
+/// `CARGO_TARGET_DIR` for `cargo clippy` on a mirror).
+fn tool_process_env(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &Path)],
+) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args).current_dir(dir).kill_on_drop(true);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    // On a scan mirror, git never looks above it for a parent repository's settings.
+    if let Some(ceiling) = crate::scan_mirror::git_ceiling_for(dir) {
+        cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
+    }
     camerata_core::apply_semgrep_env(cmd.as_std_mut());
     cmd
 }
@@ -1413,22 +1600,47 @@ async fn run_capture_stdout(
     args: &[&str],
     on_progress: Option<&HeartbeatFn>,
 ) -> std::io::Result<(String, bool, String)> {
+    run_capture_stdout_env(dir, program, args, &[], on_progress).await
+}
+
+async fn run_capture_stdout_env(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &Path)],
+    on_progress: Option<&HeartbeatFn>,
+) -> std::io::Result<(String, bool, String)> {
+    let (stdout, status, stderr) =
+        run_capture_status_env(dir, program, args, envs, on_progress).await?;
+    Ok((stdout, status.success(), stderr))
+}
+
+/// [`run_capture_stdout_env`] returning the whole exit status, so a caller can tell a process
+/// that exited with a code from one that was killed by a signal (which has no code).
+async fn run_capture_status_env(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &Path)],
+    on_progress: Option<&HeartbeatFn>,
+) -> std::io::Result<(String, std::process::ExitStatus, String)> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
     match on_progress {
         None => {
             // Fast path: no heartbeat needed. Buffer everything.
-            let out = tool_process(dir, program, args).output().await?;
+            let out = tool_process_env(dir, program, args, envs).output().await?;
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            Ok((stdout, out.status.success(), stderr))
+            let stderr =
+                crate::scan_mirror::scrub_mirror_path(&String::from_utf8_lossy(&out.stderr), dir);
+            Ok((stdout, out.status, stderr))
         }
         Some(cb) => {
             // Streaming path: read stdout line-by-line, firing the heartbeat on
             // every line.  Stderr is captured separately (piped, read to the end
             // AFTER stdout closes) so it doesn't interleave with the JSON stdout
             // the parsers expect but is still available as failure evidence.
-            let mut child = tool_process(dir, program, args)
+            let mut child = tool_process_env(dir, program, args, envs)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()?;
@@ -1453,7 +1665,10 @@ async fn run_capture_stdout(
             }
 
             let status = child.wait().await?;
-            Ok((accumulated, status.success(), stderr))
+            // The message is cut to a short excerpt later, so the private copy's folder is
+            // removed from it now, before it can be cut in the middle.
+            let stderr = crate::scan_mirror::scrub_mirror_path(&stderr, dir);
+            Ok((accumulated, status, stderr))
         }
     }
 }
@@ -1714,7 +1929,8 @@ async fn run_one_tool<'r>(
     // dir). The probe is best-effort: if `target/` doesn't exist (non-Rust repo),
     // newest_mtime returns None and the probe just skips its ticks silently.
     let _mtime_probe = on_progress.as_ref().map(|cb| {
-        let target_dir: PathBuf = dir.join("target");
+        let target_dir: PathBuf =
+            crate::scan_mirror::cargo_target_dir_for(dir).unwrap_or_else(|| dir.join("target"));
         spawn_mtime_probe(target_dir, cb.clone(), MTIME_PROBE_INTERVAL)
     });
     // Collect the per-rule selector tokens from each rule's linter source.
@@ -1794,26 +2010,26 @@ async fn run_one_tool<'r>(
         ScanTool::Clippy => {
             // Camerata-supplied config: warn on exactly the selected lints via
             // RUSTFLAGS-style `-W clippy::<lint>` passed after `--`. Output as JSON.
-            let mut args: Vec<String> = vec![
-                "clippy".into(),
-                "--message-format=json".into(),
-                "--quiet".into(),
-                "--".into(),
-            ];
-            for sel in &selectors {
-                // Selectors from the corpus are bare lint names (`unwrap_used`);
-                // clippy wants the `clippy::` namespace.
-                let lint = if sel.contains("::") {
-                    sel.clone()
-                } else {
-                    format!("clippy::{sel}")
-                };
-                args.push("-W".into());
-                args.push(lint);
+            if let Some(not_run) = clippy_without_manifest(dir) {
+                return Err(not_run);
             }
+            let args = clippy_args(&selectors);
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let (stdout, _ok, stderr) =
-                run_capture_stdout(dir, "cargo", &arg_refs, on_progress.as_ref()).await?;
+            // On a scan mirror, cargo builds into the run's own folder (removed with the
+            // mirror), never into a `target/` beside the checkout.
+            let target = crate::scan_mirror::cargo_target_dir_for(dir);
+            let envs: Vec<(&str, &Path)> = target
+                .iter()
+                .map(|t| ("CARGO_TARGET_DIR", t.as_path()))
+                .collect();
+            let (stdout, status, stderr) =
+                run_capture_status_env(dir, "cargo", &arg_refs, &envs, on_progress.as_ref())
+                    .await?;
+            match clippy_build_state(&stdout, status.success(), status.code()) {
+                ClippyBuild::Finished => {}
+                ClippyBuild::NotFinished(why) => return Err(clippy_not_finished(&why, &stderr)),
+                ClippyBuild::Killed => return Err(clippy_killed()),
+            }
             match parse_clippy_json(repo, &stdout) {
                 Ok(fs) => Ok((fs, Vec::new())),
                 Err(e) => Err(tool_output_error(
@@ -1883,7 +2099,17 @@ async fn run_one_tool<'r>(
                 )));
             }
 
-            let args = eslint_args(&config_str, &runnable);
+            // eslint follows a link to a file, so name every link in the repository as an ignore
+            // pattern: a link that points outside the repository is never opened.
+            let links = symlinks_under(dir);
+            if links.len() > ESLINT_LINK_IGNORE_LIMIT {
+                return Err(tool_not_run(format!(
+                    "the repository holds {} symbolic links (limit {ESLINT_LINK_IGNORE_LIMIT}); \
+                     eslint is not run because it would follow them",
+                    links.len()
+                )));
+            }
+            let args = eslint_args_ignoring_links(&config_str, &runnable, &links);
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             let (stdout, _ok, stderr) =
                 run_capture_stdout(dir, &bin_str, &arg_refs, on_progress.as_ref()).await?;
@@ -4834,6 +5060,516 @@ export function Thing({ id }) {
             return None;
         }
         Some(workspace)
+    }
+
+    /// (a) Every external tool is started in the directory it is given, and targets `.` (or,
+    /// for osv-scanner, that directory: see `dep_audit::osv_args_target_the_scan_directory`).
+    /// The scan passes the mirror as that directory.
+    #[test]
+    fn every_tool_runs_in_the_given_directory_and_targets_it() {
+        let mirror = Path::new("/state/scan-mirrors/scan-1/mirror/acme_web");
+        for (program, args) in [
+            ("semgrep", semgrep_args("/rules")),
+            ("ruff", ruff_args("E501")),
+            ("eslint", eslint_args("/cfg/c.mjs", &["eqeqeq".to_string()])),
+        ] {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let cmd = tool_process(mirror, program, &refs);
+            assert_eq!(cmd.as_std().get_current_dir(), Some(mirror), "{program}");
+            assert_eq!(args.last().map(String::as_str), Some("."), "{program}");
+        }
+        // cargo takes no path: it builds the package in its working directory, into a target
+        // folder beside the mirror.
+        let target = crate::scan_mirror::cargo_target_dir_for(mirror).expect("mirror target");
+        let cmd = tool_process_env(
+            mirror,
+            "cargo",
+            &["clippy"],
+            &[("CARGO_TARGET_DIR", target.as_path())],
+        );
+        assert_eq!(cmd.as_std().get_current_dir(), Some(mirror));
+        let env: Vec<_> = cmd.as_std().get_envs().collect();
+        assert!(
+            env.iter().any(
+                |(k, v)| *k == "CARGO_TARGET_DIR" && v.map(Path::new) == Some(target.as_path())
+            ),
+            "{env:?}"
+        );
+        assert!(
+            target.starts_with("/state/scan-mirrors/scan-1/mirror-target"),
+            "{target:?}"
+        );
+    }
+
+    /// The mirror's tools never read git settings from above it, and semgrep and ruff do not
+    /// apply ignore rules on top of the already filtered mirror.
+    #[test]
+    fn mirror_runs_pin_the_git_ceiling_and_the_no_gitignore_flags() {
+        let mirror = Path::new("/state/scan-mirrors/scan-1/mirror/acme_web");
+        let cmd = tool_process(mirror, "semgrep", &[]);
+        let ceiling = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, v)| v);
+        assert_eq!(
+            ceiling,
+            Some(std::ffi::OsStr::new("/state/scan-mirrors/scan-1/mirror"))
+        );
+        let plain = tool_process(Path::new("/work/app"), "semgrep", &[]);
+        assert!(plain
+            .as_std()
+            .get_envs()
+            .all(|(k, _)| k != "GIT_CEILING_DIRECTORIES"));
+        assert!(semgrep_args("/rules")
+            .iter()
+            .any(|a| a == "--no-git-ignore"));
+        assert!(ruff_args("E501")
+            .iter()
+            .any(|a| a == "--no-respect-gitignore"));
+    }
+
+    /// The clippy arguments cap every lint at warn after `--`, so a repo that denies warnings
+    /// cannot fail the run.
+    #[test]
+    fn clippy_args_cap_lints_at_warn_after_the_separator() {
+        let args = clippy_args(&["unwrap_used".to_string()]);
+        let sep = args.iter().position(|a| a == "--").expect("separator");
+        assert_eq!(&args[sep + 1..sep + 3], ["--cap-lints", "warn"], "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-W", "clippy::unwrap_used"]));
+    }
+
+    /// A repository that denies warnings still yields its clippy finding, and the run is not a
+    /// failed tool. Real cargo clippy on a neutral fixture crate; skips when it is not installed.
+    #[tokio::test]
+    async fn a_repo_that_denies_warnings_still_yields_its_clippy_finding() {
+        let probe = std::process::Command::new("cargo")
+            .args(["clippy", "--version"])
+            .output();
+        if !probe.is_ok_and(|o| o.status.success()) {
+            eprintln!("skipping: cargo clippy is not installed");
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"acme-deny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src").join("lib.rs"),
+            "#![deny(warnings)]\npub fn f(x: Option<u32>) -> u32 {\n    x.unwrap()\n}\n",
+        )
+        .unwrap();
+        let args = clippy_args(&["unwrap_used".to_string()]);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (stdout, ok, stderr) = run_capture_stdout_env(
+            dir.path(),
+            "cargo",
+            &refs,
+            &[("CARGO_TARGET_DIR", target.path())],
+            None,
+        )
+        .await
+        .expect("cargo must spawn");
+        assert!(
+            clippy_build_state(&stdout, ok, Some(i32::from(!ok))) == ClippyBuild::Finished,
+            "a repo that denies warnings failed the run: {stderr}"
+        );
+        let findings = parse_clippy_json("acme/deny", &stdout).unwrap();
+        assert!(
+            findings.iter().any(|f| f.rule_id.contains("unwrap_used")),
+            "{findings:?} {stdout}"
+        );
+    }
+
+    /// A Rust repository with no Cargo.toml cannot be built: clippy is not run (a disclosed
+    /// limit), not failed.
+    #[test]
+    fn clippy_without_a_cargo_toml_is_not_run_rather_than_failed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = clippy_without_manifest(dir.path()).expect("no manifest");
+        assert!(!tool_invoked_and_failed(&err), "{err}");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        assert!(clippy_without_manifest(dir.path()).is_none());
+    }
+
+    /// A clippy build that failed is a failed tool, never a clean run.
+    #[test]
+    fn a_failed_clippy_build_is_never_reported_clean() {
+        let not_finished = |s: ClippyBuild| matches!(s, ClippyBuild::NotFinished(_));
+        // Exit status alone.
+        assert!(not_finished(clippy_build_state("", false, Some(101))));
+        // Exit 0 but cargo says the build did not succeed.
+        let failed = r#"{"reason":"build-finished","success":false}"#;
+        assert!(not_finished(clippy_build_state(failed, true, Some(0))));
+        // The parser alone sees nothing wrong in either case: this is the silent clean.
+        assert!(parse_clippy_json("acme/api", failed).unwrap().is_empty());
+        // A finished build is not a failure.
+        let ok = r#"{"reason":"build-finished","success":true}"#;
+        assert_eq!(clippy_build_state(ok, true, Some(0)), ClippyBuild::Finished);
+        let err = clippy_not_finished("cargo exited with an error", "error: could not compile");
+        assert!(err.to_string().contains("checked none of the rules"));
+        // A build that did not finish is a disclosed limit (rules not run, never clean), not a
+        // failed part: no resume can clear a missing library or a path dependency.
+        assert!(!tool_invoked_and_failed(&err));
+    }
+
+    /// A cargo killed by a signal (out of memory, an operator's kill) has no exit code: a failed
+    /// part a resume can clear, not a disclosed limit. A real process killed by a signal proves
+    /// the status carries no code.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_killed_clippy_is_a_failed_part_not_a_disclosed_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (_out, status, _err) =
+            run_capture_status_env(dir.path(), "sh", &["-c", "kill -9 $$"], &[], None)
+                .await
+                .expect("sh must spawn");
+        assert!(!status.success());
+        assert_eq!(status.code(), None, "a signal leaves no exit code");
+        assert_eq!(
+            clippy_build_state("", status.success(), status.code()),
+            ClippyBuild::Killed
+        );
+        assert!(tool_invoked_and_failed(&clippy_killed()));
+        // And an exit with a code is the other class.
+        assert!(matches!(
+            clippy_build_state("", false, Some(101)),
+            ClippyBuild::NotFinished(_)
+        ));
+    }
+
+    /// cargo's stderr (a home folder, a private registry address) never reaches a message the
+    /// client export prints.
+    #[test]
+    fn clippy_stderr_stays_out_of_the_message_the_client_reads() {
+        let stderr = "error: failed to get `acme` from https://registry.acme.example/index \
+                      at /Users/auditor/work/app/Cargo.toml";
+        let err = clippy_not_finished("cargo exited with an error", stderr).to_string();
+        assert!(!err.contains("/Users/auditor"), "{err}");
+        assert!(!err.contains("registry.acme.example"), "{err}");
+        assert!(err.contains("did not finish building"), "{err}");
+    }
+
+    /// (pin, live) eslint on the mirror lints the admitted files and no longer a gitignored
+    /// hand-written file or a file in a noise folder. Before the mirror, eslint read neither
+    /// `.gitignore` nor the reader's noise rules, so such a file's findings reached the report
+    /// although Coverage never listed it and the client was never quoted for it; that was an
+    /// inconsistency, fixed here on purpose. The control run on the checkout proves the fixture
+    /// does make eslint lint the ignored file. Skips when no eslint workspace is cached.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_eslint_on_the_mirror_does_not_lint_gitignored_files() {
+        let Some(workspace) = cached_eslint_workspace().await else {
+            eprintln!("skipping: no cached Camerata eslint workspace on this machine");
+            return;
+        };
+        let bin_str = tool_provisioning::eslint_bin(&workspace)
+            .to_string_lossy()
+            .into_owned();
+        let config_str = tool_provisioning::eslint_config_path(&workspace)
+            .to_string_lossy()
+            .into_owned();
+        let (_outside, repo) = repo_with_outside_links();
+        let r = repo.path();
+        std::fs::write(
+            r.join("src").join("acme-x.js"),
+            "var x = 1; if (x == 2) {}\n",
+        )
+        .unwrap();
+        std::fs::write(r.join(".gitignore"), "src/acme-x.js\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(r)
+            .status()
+            .unwrap()
+            .success());
+        let files_linted = |dir: std::path::PathBuf, args: Vec<String>| {
+            let bin = bin_str.clone();
+            async move {
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let (stdout, _ok, stderr) = run_capture_stdout(&dir, &bin, &refs, None)
+                    .await
+                    .expect("eslint must spawn");
+                let v: serde_json::Value = serde_json::from_str(&stdout)
+                    .unwrap_or_else(|e| panic!("eslint json: {e}: {stdout} {stderr}"));
+                let root = std::fs::canonicalize(&dir).unwrap();
+                let mut files: Vec<String> = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| {
+                        let p = std::fs::canonicalize(f["filePath"].as_str().unwrap())
+                            .unwrap_or_else(|_| f["filePath"].as_str().unwrap().into());
+                        p.strip_prefix(&root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect();
+                files.sort();
+                files
+            }
+        };
+        let selectors = vec!["eqeqeq".to_string()];
+        let links = symlinks_under(r);
+        let before = files_linted(
+            r.to_path_buf(),
+            eslint_args_ignoring_links(&config_str, &selectors, &links),
+        )
+        .await;
+        assert!(
+            before.iter().any(|f| f == "src/acme-x.js"),
+            "control: eslint lints a gitignored file on the checkout: {before:?}"
+        );
+
+        let ex = crate::onboard::files::read_local_repo_files(
+            r,
+            &crate::onboard::scope::RepoScope::none(),
+        )
+        .unwrap();
+        let admitted = crate::scan_mirror::admitted_paths(&ex);
+        let run = tempfile::TempDir::new().unwrap();
+        let mirror = crate::scan_mirror::Mirror::build_blocking(
+            r,
+            &admitted,
+            &run.path().join("scan-pin"),
+            "acme/web",
+            &|_| Some(u64::MAX),
+        )
+        .expect("mirror");
+        let after = files_linted(
+            mirror.path().to_path_buf(),
+            eslint_args(&config_str, &selectors),
+        )
+        .await;
+        assert!(after.iter().any(|f| f == "src/acme-ok.js"), "{after:?}");
+        assert!(!after.iter().any(|f| f == "src/acme-x.js"), "{after:?}");
+        // Every file the mirror run linted is an admitted file.
+        for f in &after {
+            assert!(
+                admitted.contains(f),
+                "{f} linted but not admitted: {after:?}"
+            );
+        }
+    }
+
+    /// (c, live) Real eslint on a mirror of a repo with outside-pointing links: the finding names
+    /// the client's relative path, and no tool path names the mirror. Skips when no eslint
+    /// workspace is cached.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_eslint_on_a_mirror_reports_real_relative_paths_and_never_the_links() {
+        let Some(workspace) = cached_eslint_workspace().await else {
+            eprintln!("skipping: no cached Camerata eslint workspace on this machine");
+            return;
+        };
+        let bin_str = tool_provisioning::eslint_bin(&workspace)
+            .to_string_lossy()
+            .into_owned();
+        let config_str = tool_provisioning::eslint_config_path(&workspace)
+            .to_string_lossy()
+            .into_owned();
+        let (_outside, repo) = repo_with_outside_links();
+        let rels = crate::scan_mirror::admitted_paths(
+            &crate::onboard::files::read_local_repo_files(
+                repo.path(),
+                &crate::onboard::scope::RepoScope::none(),
+            )
+            .unwrap(),
+        );
+        let run = tempfile::TempDir::new().unwrap();
+        let mirror = crate::scan_mirror::Mirror::build_blocking(
+            repo.path(),
+            &rels,
+            &run.path().join("scan-live"),
+            "acme/web",
+            &|_| Some(u64::MAX),
+        )
+        .expect("mirror");
+        let args = eslint_args(&config_str, &["eqeqeq".to_string()]);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (stdout, _ok, stderr) = run_capture_stdout(mirror.path(), &bin_str, &refs, None)
+            .await
+            .expect("eslint must spawn");
+        let (mut findings, _shape) = parse_eslint_json("acme/web", &stdout)
+            .unwrap_or_else(|e| panic!("eslint json: {e}: {stdout} {stderr}"));
+        findings.retain(|f| is_in_repo_scope(mirror.path(), &f.path));
+        for f in &mut findings {
+            f.path = repo_relative_path(mirror.path(), &f.path);
+        }
+        let paths: Vec<&str> = findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["src/acme-ok.js"], "{stdout}");
+        assert!(
+            !stdout.contains("acme-link"),
+            "a link reached eslint: {stdout}"
+        );
+    }
+
+    /// A neutral fixture: one regular file with a loose-equality use, plus links that point
+    /// OUTSIDE it (a file link and a folder link) to files with the same violation. Returns
+    /// `(outside, repo)` temp dirs; the outside dir must outlive the run.
+    #[cfg(unix)]
+    fn repo_with_outside_links() -> (tempfile::TempDir, tempfile::TempDir) {
+        let outside = tempfile::TempDir::new().expect("tempdir");
+        let repo = tempfile::TempDir::new().expect("tempdir");
+        let violation = "export function f(a, b) {\n  if (a == b) { return 1; }\n  return 2;\n}\n";
+        std::fs::write(outside.path().join("acme-outside.js"), violation).unwrap();
+        std::fs::create_dir(outside.path().join("acme-outdir")).unwrap();
+        std::fs::write(
+            outside.path().join("acme-outdir").join("acme-inner.js"),
+            violation,
+        )
+        .unwrap();
+        std::fs::create_dir(repo.path().join("src")).unwrap();
+        std::fs::write(repo.path().join("src").join("acme-ok.js"), violation).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("acme-outside.js"),
+            repo.path().join("src").join("acme-link.js"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("acme-outdir"),
+            repo.path().join("acme-linkdir"),
+        )
+        .unwrap();
+        (outside, repo)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_under_names_file_and_folder_links_and_skips_node_modules() {
+        let (_outside, repo) = repo_with_outside_links();
+        std::fs::create_dir_all(repo.path().join("node_modules").join("acme-dep")).unwrap();
+        std::os::unix::fs::symlink(
+            repo.path().join("src"),
+            repo.path()
+                .join("node_modules")
+                .join("acme-dep")
+                .join("acme-self"),
+        )
+        .unwrap();
+        assert_eq!(
+            symlinks_under(repo.path()),
+            ["acme-linkdir", "src/acme-link.js"]
+        );
+    }
+
+    #[test]
+    fn eslint_args_ignore_every_named_link_before_the_target() {
+        let links = vec!["src/acme-link.js".to_string(), "#odd[1].js".to_string()];
+        let args = eslint_args_ignoring_links("/cfg/c.mjs", &["eqeqeq".to_string()], &links);
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--ignore-pattern", "src/acme-link.js"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--ignore-pattern", "\\#odd\\[1\\].js"]),
+            "special characters are escaped: {args:?}"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("."));
+        // With no links the vector is exactly the plain one.
+        assert_eq!(
+            eslint_args_ignoring_links("/cfg/c.mjs", &["eqeqeq".to_string()], &[]),
+            eslint_args("/cfg/c.mjs", &["eqeqeq".to_string()])
+        );
+    }
+
+    /// Real eslint over a repo whose links point outside it: the engine's argument vector
+    /// must lint only the regular file. The control run (no ignore patterns) proves the
+    /// fixture does make eslint follow the link. Skips when no eslint workspace is cached.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_eslint_never_opens_a_file_a_link_points_to_outside_the_repo() {
+        let Some(workspace) = cached_eslint_workspace().await else {
+            eprintln!("skipping: no cached Camerata eslint workspace on this machine");
+            return;
+        };
+        let bin_str = tool_provisioning::eslint_bin(&workspace)
+            .to_string_lossy()
+            .into_owned();
+        let config_str = tool_provisioning::eslint_config_path(&workspace)
+            .to_string_lossy()
+            .into_owned();
+        let (_outside, repo) = repo_with_outside_links();
+        let selectors = vec!["eqeqeq".to_string()];
+        let linted = |args: Vec<String>| {
+            let bin = bin_str.clone();
+            let dir = repo.path().to_path_buf();
+            async move {
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let (stdout, _ok, stderr) = run_capture_stdout(&dir, &bin, &refs, None)
+                    .await
+                    .expect("eslint must spawn");
+                let v: serde_json::Value = serde_json::from_str(&stdout)
+                    .unwrap_or_else(|e| panic!("eslint json: {e}: {stdout} {stderr}"));
+                v.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| f["filePath"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let control = linted(eslint_args(&config_str, &selectors)).await;
+        assert!(
+            control.iter().any(|p| p.ends_with("acme-link.js")),
+            "control: eslint follows a file link, so this fixture can fail: {control:?}"
+        );
+
+        let links = symlinks_under(repo.path());
+        let guarded = linted(eslint_args_ignoring_links(&config_str, &selectors, &links)).await;
+        assert!(
+            guarded.iter().any(|p| p.ends_with("acme-ok.js")),
+            "the regular file is still linted: {guarded:?}"
+        );
+        assert!(
+            !guarded.iter().any(|p| p.contains("acme-link")),
+            "a linked file was opened: {guarded:?}"
+        );
+    }
+
+    /// Real semgrep over the same kind of fixture: it must not report a file reached through a
+    /// link. Local rules only, no network. Skips when semgrep is not cached on this machine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_semgrep_does_not_follow_links_out_of_the_repo() {
+        let Some(tooling) = tool_provisioning::tooling_dir() else {
+            return;
+        };
+        let bin = tool_provisioning::semgrep_bin(&tool_provisioning::semgrep_venv_dir(&tooling));
+        if !bin.exists() {
+            eprintln!("skipping: no cached Camerata semgrep on this machine");
+            return;
+        }
+        let (_outside, repo) = repo_with_outside_links();
+        let rules = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            rules.path().join("acme.yml"),
+            "rules:\n- id: acme-eqeq\n  languages: [javascript]\n  severity: ERROR\n  \
+             message: loose equality\n  pattern: $A == $B\n",
+        )
+        .unwrap();
+        let args = semgrep_args(&rules.path().to_string_lossy());
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (stdout, _ok, stderr) =
+            run_capture_stdout(repo.path(), &bin.to_string_lossy(), &refs, None)
+                .await
+                .expect("semgrep must spawn");
+        assert!(stdout.contains("acme-ok.js"), "control: {stdout} {stderr}");
+        assert!(
+            !stdout.contains("acme-link"),
+            "a link was followed: {stdout}"
+        );
+        assert!(
+            !stdout.contains("acme-inner"),
+            "a folder link was followed: {stdout}"
+        );
     }
 
     /// req_c11, THE DECISIVE LIVE PROOF: against the real eslint binary in the real

@@ -624,6 +624,29 @@ fn a_composer_framework_counts_only_when_it_is_in_require_not_require_dev() {
     );
 }
 
+/// A manifest beside the lockfile that is a symbolic link to a file outside the repository is not
+/// read: the framework is then not shown to be direct, exactly as if the manifest were absent.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_sibling_manifest_is_not_read() {
+    let lock = "{\n  \"packages\": [\n    {\n      \"name\": \"laravel/framework\",\n      \"version\": \"v10.38.0\"\n    }\n  ]\n}\n";
+    let outside = repo(&[(
+        "acme-composer.json",
+        "{\"require\": {\"laravel/framework\": \"^10.0\"}}",
+    )]);
+    let linked = repo(&[("composer.lock", lock)]);
+    std::os::unix::fs::symlink(
+        outside.path().join("acme-composer.json"),
+        linked.path().join("composer.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        frameworks(&linked),
+        vec![(Product::Laravel, "composer.lock".to_string(), true)],
+        "a linked manifest must not show the framework as direct"
+    );
+}
+
 #[test]
 fn a_rails_gem_in_a_dev_or_test_group_is_not_direct() {
     let lock = "GEM\n  specs:\n    rails (7.1.2)\n";
