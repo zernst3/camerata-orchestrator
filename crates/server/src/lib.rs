@@ -125,6 +125,7 @@ pub mod review_view;
 pub mod routine;
 pub mod run;
 pub mod run_health;
+pub mod run_plan;
 pub mod run_store;
 mod run_target;
 pub mod runtime_audit;

@@ -10,6 +10,9 @@
 //! ([`exact_sample_tokens`]) goes through the `count_tokens` endpoint, which Anthropic does not
 //! bill.
 
+pub mod full_scan;
+pub mod wording;
+
 use crate::ai_audit::{representative_scan_sample, ScanMode};
 use crate::onboard::SelectedRule;
 
