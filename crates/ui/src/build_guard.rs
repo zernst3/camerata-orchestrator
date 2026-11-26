@@ -78,11 +78,12 @@ pub fn find_mismatch(
     if !builds_match(ui, server) {
         return Some(Mismatch::Build);
     }
-    // A server that does not name a folder cannot be shown to use the inspection's: refused.
-    if server.data_dir.is_none() || server.data_dir != folders.data_dir {
+    // A server that does not name a folder the app has is refused. As with the build, neither
+    // side naming one is not a mismatch: there is nothing to compare.
+    if server.data_dir != folders.data_dir {
         return Some(Mismatch::DataFolder);
     }
-    if server.state_dir.is_none() || server.state_dir != folders.state_dir {
+    if server.state_dir != folders.state_dir {
         return Some(Mismatch::StateFolder);
     }
     None
