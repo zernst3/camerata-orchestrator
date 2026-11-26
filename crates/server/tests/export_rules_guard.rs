@@ -244,6 +244,20 @@ fn offences(file: &str, lines: &[(usize, String)]) -> Vec<String> {
         .collect()
 }
 
+/// Every live-library spelling in the named functions' bodies.
+fn function_offences(root: &Path, list: &[(&str, &[&str])]) -> Vec<String> {
+    let mut hits = Vec::new();
+    for (file, functions) in list {
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        for name in *functions {
+            let body = function_lines(&text, name)
+                .unwrap_or_else(|| panic!("{file} has no fn {name}; update this guard's list"));
+            hits.extend(offences(file, &body));
+        }
+    }
+    hits
+}
+
 #[test]
 fn export_paths_never_read_the_live_rule_library() {
     let root = repo_root();
@@ -270,14 +284,19 @@ fn export_paths_never_read_the_live_rule_library() {
             hits.extend(offences(&rel, &non_test_lines(&text)));
         }
     }
-    for (file, functions) in EXPORT_AND_REVIEW_FUNCTIONS {
-        let text = std::fs::read_to_string(root.join(file)).unwrap();
-        for name in *functions {
-            let body = function_lines(&text, name)
-                .unwrap_or_else(|| panic!("{file} has no fn {name}; update this guard's list"));
-            hits.extend(offences(file, &body));
-        }
-    }
+    hits.extend(function_offences(&root, EXPORT_AND_REVIEW_FUNCTIONS));
+    // A positive control through the same scan: the inspection's own loader is found.
+    assert!(
+        !function_offences(
+            &root,
+            &[(
+                "crates/server/src/routes/scan.rs",
+                &["split_scannable_rules"]
+            )]
+        )
+        .is_empty(),
+        "the function scan finds a live load where there is one"
+    );
     assert!(
         hits.is_empty(),
         "an export or review path reads the live rule library; read the inspection's rules \
