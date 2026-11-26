@@ -44,19 +44,28 @@ mod workspace;
 
 use dioxus::prelude::*;
 
-/// Where the BFF subprocess binds, and the URL the cockpit fetches from. The desktop
+/// Where the BFF subprocess binds by default, and so the URL the cockpit fetches from. The desktop
 /// shell talks to this local server over HTTP (the same server that runs in the
 /// cloud later); the UI never calls the backend crates in-process for cockpit data.
 pub const BFF_ADDR: &str = "127.0.0.1:8787";
-pub const BFF_URL: &str = "http://127.0.0.1:8787";
 
-/// The BFF base URL the cockpit's HTTP helpers talk to. Production uses the embedded BFF at
-/// [`BFF_URL`]; tests override it via `CAMERATA_BFF_URL` to point a helper at a mock server
-/// (wiremock). New/converted network helpers should call this instead of `BFF_URL` directly so they
-/// are testable. (The override is process-global env, so mock-server tests that set it should not
-/// run concurrently with other helpers that read it — keep such tests narrowly scoped.)
+/// The address the app starts or attaches to its server on: `CAMERATA_SERVER_ADDR` when set (an
+/// inspection on its own address, beside a dev server on the default one; #566), else
+/// [`BFF_ADDR`].
+pub fn bff_addr() -> String {
+    server_process::bff_addr_from(
+        std::env::var(server_process::SERVER_ADDR_ENV).ok().as_deref(),
+        BFF_ADDR,
+    )
+}
+
+/// The BFF base URL the cockpit's HTTP helpers talk to: `http://` and [`bff_addr`]. Tests override
+/// it via `CAMERATA_BFF_URL` to point a helper at a mock server (wiremock). Network helpers call
+/// this, never a fixed address, so they are testable and follow the address the app runs on. (The
+/// override is process-global env, so mock-server tests that set it should not run concurrently
+/// with other helpers that read it — keep such tests narrowly scoped.)
 pub fn bff_base() -> String {
-    std::env::var("CAMERATA_BFF_URL").unwrap_or_else(|_| BFF_URL.to_string())
+    std::env::var("CAMERATA_BFF_URL").unwrap_or_else(|_| format!("http://{}", bff_addr()))
 }
 
 fn main() {
@@ -132,7 +141,7 @@ fn App() -> Element {
     use_hook(|| {
         std::thread::spawn(|| match tokio::runtime::Runtime::new() {
             Ok(rt) => rt.block_on(async {
-                let cfg = server_process::ServerLaunchConfig::for_addr(BFF_ADDR);
+                let cfg = server_process::ServerLaunchConfig::for_addr(&bff_addr());
                 match server_process::ensure_server_running(&cfg).await {
                     Ok(guard) => server_process::hold_for_app_lifetime(guard),
                     // ensure_server_running already exhausted the takeover retries;

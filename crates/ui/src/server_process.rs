@@ -107,12 +107,48 @@ pub fn resolve_server_bin() -> PathBuf {
 // ── health probing + the reuse-vs-spawn decision ────────────────────────────
 
 /// What the startup sequence should do about the BFF port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchDecision {
-    /// A healthy camerata BFF already answers on the port — use it, spawn nothing.
+    /// A healthy camerata BFF of this app's build, on this app's folders, already answers on the
+    /// port — use it, spawn nothing.
     ReuseExisting,
     /// Nothing healthy there — spawn our own server.
     SpawnNew,
+    /// A healthy camerata BFF answers, but from another build or on another data or state folder
+    /// (#566): do not attach to it, do not spawn over it and do not kill it. The sentence names
+    /// both sides.
+    Refuse(String),
+}
+
+/// What the app expects of a server before it attaches to it (#566): its own build and the folders
+/// a server started from its environment resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedServer {
+    pub ui_build: Option<String>,
+    pub folders: crate::build_guard::Folders,
+}
+
+impl ExpectedServer {
+    /// This app's build and the folders of this process's environment.
+    pub fn for_this_app() -> Self {
+        Self {
+            ui_build: crate::build_guard::UI_COMMIT.map(str::to_string),
+            folders: crate::build_guard::Folders::for_this_app(),
+        }
+    }
+}
+
+/// The environment variable that names the address the app starts or attaches to its server on.
+/// The server reads the same name for the address it binds.
+pub const SERVER_ADDR_ENV: &str = "CAMERATA_SERVER_ADDR";
+
+/// The address the app uses: `CAMERATA_SERVER_ADDR` when set and non-blank, else `default`.
+pub fn bff_addr_from(env_value: Option<&str>, default: &str) -> String {
+    env_value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(default)
+        .to_string()
 }
 
 /// One health probe: `GET {base}/api/health` must return 200 AND identify itself as
@@ -120,14 +156,7 @@ pub enum LaunchDecision {
 /// The identity check keeps us from "reusing" some unrelated dev server that happens to
 /// answer 200 on the port. Any network/timeout/parse failure is simply "not healthy".
 async fn probe_health(client: &reqwest::Client, base_url: &str) -> bool {
-    let url = format!("{}/api/health", base_url.trim_end_matches('/'));
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => body.get("service").and_then(|s| s.as_str()) == Some("camerata-server"),
-            Err(_) => false,
-        },
-        _ => false,
-    }
+    crate::build_guard::probe(client, base_url).await.is_some()
 }
 
 /// A short-timeout client for health probes, so a wedged socket can't hang startup.
@@ -139,14 +168,27 @@ fn probe_client() -> reqwest::Client {
 }
 
 /// The reuse-vs-spawn DECISION, isolated so it's testable against a mock server: probe
-/// the base URL once; healthy → [`LaunchDecision::ReuseExisting`], anything else →
-/// [`LaunchDecision::SpawnNew`].
-pub async fn decide_reuse_or_spawn(base_url: &str) -> LaunchDecision {
-    if probe_health(&probe_client(), base_url).await {
-        LaunchDecision::ReuseExisting
-    } else {
-        LaunchDecision::SpawnNew
+/// the base URL once; nothing healthy → [`LaunchDecision::SpawnNew`]; a healthy server is
+/// compared with `expected` (build, then data folder, then state folder) before it is reused, and
+/// one that differs is [`LaunchDecision::Refuse`]d with a sentence naming both sides.
+pub async fn decide_reuse_or_spawn(base_url: &str, expected: &ExpectedServer) -> LaunchDecision {
+    match crate::build_guard::probe(&probe_client(), base_url).await {
+        None => LaunchDecision::SpawnNew,
+        Some(server) => {
+            let _ = (expected, server);
+            LaunchDecision::ReuseExisting
+        }
     }
+}
+
+/// The sentence the launcher prints when it refuses a server.
+fn refusal_sentence(base_url: &str, line: &str) -> String {
+    format!(
+        "[camerata-ui] not attaching to the camerata server on {base_url}: {line} An inspection \
+         keeps its projects and runs in its own folders. Quit that server, or start the app on \
+         its own address and folders: {}",
+        crate::build_guard::ISOLATED_LAUNCH_COMMAND
+    )
 }
 
 /// Outcome of waiting for a just-spawned child to become healthy.
@@ -342,16 +384,20 @@ pub struct ServerLaunchConfig {
     pub extra_env: Vec<(String, String)>,
     /// How long each spawn attempt waits for the health endpoint before giving up.
     pub health_timeout: Duration,
+    /// The build and folders a server already on the port must match before it is reused (#566).
+    pub expected: ExpectedServer,
 }
 
 impl ServerLaunchConfig {
-    /// The production config for `addr`: resolved binary, inherited env, 10s readiness.
+    /// The production config for `addr`: resolved binary, inherited env, 10s readiness, and
+    /// this app's own build and folders as what a server on the port must match.
     pub fn for_addr(addr: &str) -> Self {
         Self {
             addr: addr.to_string(),
             bin: resolve_server_bin(),
             extra_env: Vec::new(),
             health_timeout: Duration::from_secs(10),
+            expected: ExpectedServer::for_this_app(),
         }
     }
 
@@ -372,24 +418,24 @@ impl ServerLaunchConfig {
 pub async fn ensure_server_running(cfg: &ServerLaunchConfig) -> anyhow::Result<ServerGuard> {
     let base = cfg.base_url();
 
-    if decide_reuse_or_spawn(&base).await == LaunchDecision::ReuseExisting {
-        eprintln!(
-            "[camerata-ui] healthy camerata BFF already on {} — reusing it (no spawn)",
-            cfg.addr
-        );
-        return Ok(ServerGuard::reused());
+    match decide_reuse_or_spawn(&base, &cfg.expected).await {
+        LaunchDecision::ReuseExisting => {
+            eprintln!(
+                "[camerata-ui] healthy camerata BFF already on {} — reusing it (no spawn)",
+                cfg.addr
+            );
+            return Ok(ServerGuard::reused());
+        }
+        // A healthy server of another build or folder: never attach to it, never kill it.
+        LaunchDecision::Refuse(why) => anyhow::bail!(why),
+        LaunchDecision::SpawnNew => {}
     }
 
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
-        let mut command = Command::new(&cfg.bin);
-        command.env("CAMERATA_SERVER_ADDR", &cfg.addr);
-        for (k, v) in &cfg.extra_env {
-            command.env(k, v);
-        }
         // stdout/stderr inherit by default — server logs land in the app console,
         // exactly where the embedded BFF's logs used to go.
-        let mut child = command.spawn().map_err(|e| {
+        let mut child = server_command(cfg).spawn().map_err(|e| {
             anyhow::anyhow!(
                 "could not spawn camerata-server at {}: {e}\n\
                  (set CAMERATA_SERVER_BIN to the server binary, or `cargo build -p camerata-server`)",
@@ -412,13 +458,17 @@ pub async fn ensure_server_running(cfg: &ServerLaunchConfig) -> anyhow::Result<S
 
                 // Startup race: another cockpit instance may have spawned a server that
                 // just became healthy (our child then died with AddrInUse). Reuse it
-                // rather than killing it.
-                if probe_health(&probe_client(), &base).await {
-                    eprintln!(
-                        "[camerata-ui] another camerata BFF became healthy on {} — reusing it",
-                        cfg.addr
-                    );
-                    return Ok(ServerGuard::reused());
+                // rather than killing it, when it is this app's build on this app's folders.
+                match decide_reuse_or_spawn(&base, &cfg.expected).await {
+                    LaunchDecision::ReuseExisting => {
+                        eprintln!(
+                            "[camerata-ui] another camerata BFF became healthy on {} — reusing it",
+                            cfg.addr
+                        );
+                        return Ok(ServerGuard::reused());
+                    }
+                    LaunchDecision::Refuse(why) => anyhow::bail!(why),
+                    LaunchDecision::SpawnNew => {}
                 }
 
                 if attempt < MAX_ATTEMPTS {
@@ -453,6 +503,19 @@ pub async fn ensure_server_running(cfg: &ServerLaunchConfig) -> anyhow::Result<S
          ╚══════════════════════════════════════════════════════════════╝\n",
         cfg.addr
     )
+}
+
+/// The command that starts the server: the binary, the bind address in `CAMERATA_SERVER_ADDR` and
+/// the config's extra variables. Everything else, `CAMERATA_DATA_DIR` and `CAMERATA_STATE_DIR`
+/// among it, is inherited from the app's own environment, so a server the app starts runs on the
+/// folders the app expects (pinned by `the_spawned_server_inherits_the_data_and_state_folders`).
+fn server_command(cfg: &ServerLaunchConfig) -> Command {
+    let mut command = Command::new(&cfg.bin);
+    command.env(SERVER_ADDR_ENV, &cfg.addr);
+    for (k, v) in &cfg.extra_env {
+        command.env(k, v);
+    }
+    command
 }
 
 /// Park a guard for the remainder of the process lifetime. `main.rs` calls this from the
@@ -554,21 +617,147 @@ mod tests {
 
     // ── reuse-vs-spawn decision against a mock BFF ──────────────────────────
 
-    #[tokio::test]
-    async fn decide_reuses_when_health_is_a_camerata_bff() {
+    const APP_COMMIT: &str = "1111111111111111111111111111111111111111";
+    const OTHER_COMMIT: &str = "2222222222222222222222222222222222222222";
+    const ACME_DATA: &str = "/Users/auditor/inspections/acme-2026/camerata";
+    const ACME_STATE: &str = "/Users/auditor/inspections/acme-2026/state/camerata";
+    const DEV_DATA: &str = "/Users/auditor/dev-data/camerata";
+
+    /// What the app expects: its build, on the inspection's folders.
+    fn expected() -> ExpectedServer {
+        ExpectedServer {
+            ui_build: Some(APP_COMMIT.to_string()),
+            folders: crate::build_guard::Folders {
+                data_dir: Some(ACME_DATA.to_string()),
+                state_dir: Some(ACME_STATE.to_string()),
+            },
+        }
+    }
+
+    /// A stub camerata server whose health reports `commit`, `data_dir` and `state_dir`.
+    async fn stub_server(commit: &str, data_dir: &str, state_dir: &str) -> wiremock::MockServer {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/health"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({ "status": "ok", "service": "camerata-server" }),
-                ),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "status": "ok", "service": "camerata-server",
+                                    "commit": commit, "dirty": false,
+                                    "data_dir": data_dir, "state_dir": state_dir }),
+            ))
             .mount(&server)
             .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn decide_reuses_when_health_is_a_camerata_bff() {
+        let server = stub_server(APP_COMMIT, ACME_DATA, ACME_STATE).await;
         assert_eq!(
-            decide_reuse_or_spawn(&server.uri()).await,
+            decide_reuse_or_spawn(&server.uri(), &expected()).await,
             LaunchDecision::ReuseExisting
+        );
+    }
+
+    /// #566: a healthy server from another build is not attached to; the refusal names both.
+    #[tokio::test]
+    async fn decide_refuses_a_healthy_server_of_another_build_and_names_both() {
+        let server = stub_server(OTHER_COMMIT, ACME_DATA, ACME_STATE).await;
+        let LaunchDecision::Refuse(why) = decide_reuse_or_spawn(&server.uri(), &expected()).await
+        else {
+            panic!("a server of another build must be refused");
+        };
+        assert!(why.contains("commit 11111111"), "names the app build: {why}");
+        assert!(why.contains("commit 22222222"), "names the server build: {why}");
+    }
+
+    /// #566: a healthy server of the same build on another data folder (a dev server on the same
+    /// address) is not attached to; the refusal names both folders.
+    #[tokio::test]
+    async fn decide_refuses_a_healthy_server_on_another_data_folder_and_names_both() {
+        let server = stub_server(APP_COMMIT, DEV_DATA, ACME_STATE).await;
+        let LaunchDecision::Refuse(why) = decide_reuse_or_spawn(&server.uri(), &expected()).await
+        else {
+            panic!("a server on another data folder must be refused");
+        };
+        assert!(why.contains(ACME_DATA), "names the app's folder: {why}");
+        assert!(why.contains(DEV_DATA), "names the server's folder: {why}");
+        assert!(
+            why.contains(crate::build_guard::ISOLATED_LAUNCH_COMMAND),
+            "{why}"
+        );
+    }
+
+    /// #566: the launcher neither attaches to a refused server nor spawns over it (the binary here
+    /// does not exist, so a spawn would fail with "could not spawn").
+    #[tokio::test]
+    async fn ensure_refuses_a_server_on_another_data_folder_without_spawning() {
+        let server = stub_server(APP_COMMIT, DEV_DATA, ACME_STATE).await;
+        let cfg = ServerLaunchConfig {
+            addr: server.uri().trim_start_matches("http://").to_string(),
+            bin: PathBuf::from("/nonexistent/never-spawned"),
+            extra_env: Vec::new(),
+            health_timeout: Duration::from_secs(1),
+            expected: expected(),
+        };
+        let err = ensure_server_running(&cfg)
+            .await
+            .expect_err("a server on another data folder must be refused")
+            .to_string();
+        assert!(err.contains(DEV_DATA) && err.contains(ACME_DATA), "{err}");
+        assert!(!err.contains("could not spawn"), "nothing was spawned: {err}");
+    }
+
+    /// #566: a server the app starts inherits the app's `CAMERATA_DATA_DIR` and
+    /// `CAMERATA_STATE_DIR`, so it runs on the folders the app expects. The "server" here is a
+    /// script that writes its environment to a file, started through the real command builder.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_spawned_server_inherits_the_data_and_state_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("scratch");
+        let dump = dir.path().join("env.txt");
+        let script = dir.path().join("fake-server");
+        std::fs::write(&script, "#!/bin/sh\nenv > \"$CAMERATA_ENV_DUMP\"\n").expect("script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let _data = camerata_test_env::EnvGuard::set(
+            "CAMERATA_DATA_DIR",
+            "/Users/auditor/inspections/acme-2026",
+        );
+        let _state = camerata_test_env::EnvGuard::set(
+            "CAMERATA_STATE_DIR",
+            "/Users/auditor/inspections/acme-2026/state",
+        );
+        let cfg = ServerLaunchConfig {
+            addr: "127.0.0.1:8790".to_string(),
+            bin: script,
+            extra_env: vec![(
+                "CAMERATA_ENV_DUMP".to_string(),
+                dump.display().to_string(),
+            )],
+            health_timeout: Duration::from_secs(1),
+            expected: expected(),
+        };
+        let status = server_command(&cfg).status().expect("the script runs");
+        assert!(status.success());
+        let env = std::fs::read_to_string(&dump).expect("the script wrote its environment");
+        let lines: Vec<&str> = env.lines().collect();
+        for want in [
+            "CAMERATA_DATA_DIR=/Users/auditor/inspections/acme-2026",
+            "CAMERATA_STATE_DIR=/Users/auditor/inspections/acme-2026/state",
+            "CAMERATA_SERVER_ADDR=127.0.0.1:8790",
+        ] {
+            assert!(lines.contains(&want), "the server must see {want}: {env}");
+        }
+    }
+
+    #[test]
+    fn the_address_comes_from_the_environment_when_set() {
+        assert_eq!(bff_addr_from(None, "127.0.0.1:8787"), "127.0.0.1:8787");
+        assert_eq!(bff_addr_from(Some("  "), "127.0.0.1:8787"), "127.0.0.1:8787");
+        assert_eq!(
+            bff_addr_from(Some(" 127.0.0.1:8790 "), "127.0.0.1:8787"),
+            "127.0.0.1:8790"
         );
     }
 
@@ -577,7 +766,7 @@ mod tests {
         // Mock server with NO /api/health mount — the probe gets a 404.
         let server = wiremock::MockServer::start().await;
         assert_eq!(
-            decide_reuse_or_spawn(&server.uri()).await,
+            decide_reuse_or_spawn(&server.uri(), &expected()).await,
             LaunchDecision::SpawnNew
         );
     }
@@ -595,7 +784,7 @@ mod tests {
             .mount(&server)
             .await;
         assert_eq!(
-            decide_reuse_or_spawn(&server.uri()).await,
+            decide_reuse_or_spawn(&server.uri(), &expected()).await,
             LaunchDecision::SpawnNew
         );
     }
@@ -607,32 +796,24 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         drop(listener);
         assert_eq!(
-            decide_reuse_or_spawn(&format!("http://{addr}")).await,
+            decide_reuse_or_spawn(&format!("http://{addr}"), &expected()).await,
             LaunchDecision::SpawnNew
         );
     }
 
     #[tokio::test]
     async fn ensure_reuses_existing_healthy_bff_without_spawning() {
-        // With a healthy mock BFF on the addr, ensure_server_running must return a
-        // no-child guard even though cfg.bin points at a nonexistent binary (proof it
-        // never tried to spawn).
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/api/health"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({ "status": "ok", "service": "camerata-server" }),
-                ),
-            )
-            .mount(&server)
-            .await;
+        // With a healthy mock BFF of this app's build and folders on the addr,
+        // ensure_server_running must return a no-child guard even though cfg.bin points at a
+        // nonexistent binary (proof it never tried to spawn).
+        let server = stub_server(APP_COMMIT, ACME_DATA, ACME_STATE).await;
         let addr = server.uri().trim_start_matches("http://").to_string();
         let cfg = ServerLaunchConfig {
             addr,
             bin: PathBuf::from("/nonexistent/never-spawned"),
             extra_env: Vec::new(),
             health_timeout: Duration::from_secs(1),
+            expected: expected(),
         };
         let guard = ensure_server_running(&cfg).await.expect("reuse path");
         assert!(!guard.owns_child());
@@ -672,15 +853,27 @@ mod tests {
         let addr = listener.local_addr().expect("addr").to_string();
         drop(listener);
 
+        // The inspection's own folders (#566): the child is told them, and its health names them.
+        let data = scratch.join("data");
+        let state = scratch.join("state");
         let cfg = ServerLaunchConfig {
             addr,
             bin,
             extra_env: vec![
                 ("HOME".to_string(), scratch.display().to_string()),
+                ("CAMERATA_DATA_DIR".to_string(), data.display().to_string()),
+                ("CAMERATA_STATE_DIR".to_string(), state.display().to_string()),
                 // Keep the child fully offline/inert: no GitHub polling from a test.
                 ("CAMERATA_GITHUB_TOKEN".to_string(), String::new()),
             ],
             health_timeout: Duration::from_secs(15),
+            expected: ExpectedServer {
+                ui_build: crate::build_guard::UI_COMMIT.map(str::to_string),
+                folders: crate::build_guard::Folders {
+                    data_dir: Some(data.join("camerata").display().to_string()),
+                    state_dir: Some(state.join("camerata").display().to_string()),
+                },
+            },
         };
 
         let guard = ensure_server_running(&cfg)
@@ -702,6 +895,12 @@ mod tests {
             .await
             .expect("rules JSON");
         assert!(rules.is_array(), "expected the rules list, got: {rules}");
+        // A second launch with the same expectation finds this server and may reuse it.
+        assert_eq!(
+            decide_reuse_or_spawn(&cfg.base_url(), &cfg.expected).await,
+            LaunchDecision::ReuseExisting,
+            "the spawned server runs on the inspection's own folders"
+        );
 
         // Drop the guard → the child must be terminated (SIGTERM path) and reaped.
         drop(guard);
@@ -722,7 +921,7 @@ mod tests {
         }
         // And the port must answer nothing.
         assert_eq!(
-            decide_reuse_or_spawn(&cfg.base_url()).await,
+            decide_reuse_or_spawn(&cfg.base_url(), &cfg.expected).await,
             LaunchDecision::SpawnNew
         );
 
