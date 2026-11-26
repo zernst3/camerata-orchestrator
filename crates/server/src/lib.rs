@@ -125,6 +125,7 @@ pub mod review_view;
 pub mod routine;
 pub mod run;
 pub mod run_health;
+pub mod run_import;
 pub mod run_store;
 mod run_target;
 pub mod runtime_audit;
@@ -987,20 +988,33 @@ impl AppState {
     pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
         // The patterns across services are derived from the ledger and the findings; rebuilt
         // here so the stored report (and the cockpit tab that reads it) never lags them.
-        let mut report = report;
-        // A finding the reviewer put back after the engine threw it out stays put when the scan
-        // runs again (A12 item 2): its restore is a decision in the store, and the new run's
-        // report gets the row back before it is recorded.
-        report.reinstate_restored(&crate::decisions::restored_keys_of(
-            &self.decisions.active(&project_id),
-        ));
-        report.refresh_patterns_across_services();
+        let report = self.prepare_full_inspection(&project_id, report);
         self.record_inspection(
             &project_id,
             &report,
             crate::inspections::InspectionKind::Full,
         );
         self.set_last_scan_in_memory(project_id, report);
+    }
+
+    /// What a full inspection's report goes through before it is recorded: the reviewer's
+    /// restores come back and the patterns across services are rebuilt. The one copy of that
+    /// step, shared by [`Self::set_last_scan`] (the app's own scans) and
+    /// [`crate::run_import`] (a command line run brought into the app).
+    pub(crate) fn prepare_full_inspection(
+        &self,
+        project_id: &str,
+        report: crate::onboard::ScanReport,
+    ) -> crate::onboard::ScanReport {
+        let mut report = report;
+        // A finding the reviewer put back after the engine threw it out stays put when the scan
+        // runs again (A12 item 2): its restore is a decision in the store, and the new run's
+        // report gets the row back before it is recorded.
+        report.reinstate_restored(&crate::decisions::restored_keys_of(
+            &self.decisions.active(project_id),
+        ));
+        report.refresh_patterns_across_services();
+        report
     }
 
     /// Replace a project's in-memory last scan and the project-agnostic recent scan WITHOUT
@@ -1035,17 +1049,8 @@ impl AppState {
         report: &crate::onboard::ScanReport,
         kind: crate::inspections::InspectionKind,
     ) -> Option<crate::inspections::InspectionEntry> {
-        if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
-            return None;
-        }
-        // The stored report is the sealed artifact every export is built from, so it carries
-        // only redacted text: sweep a CLONE (the caller's copy is left as handed in) before
-        // anything reaches the file.
-        let mut sealed = report.clone();
-        sealed.sweep_secrets_before_seal();
-        let entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
-        match self.inspections.append(entry) {
-            Ok(stored) => Some(stored),
+        match self.try_record_inspection(project_id, report, kind) {
+            Ok(stored) => stored,
             Err(e) => {
                 tracing::warn!(
                     project = project_id,
@@ -1056,6 +1061,28 @@ impl AppState {
                 self.inspections.latest(project_id)
             }
         }
+    }
+
+    /// [`Self::record_inspection`] that hands back a failed write instead of logging it:
+    /// `Ok(None)` when `report` is not a real inspection (the connect-GitHub gate, a compliance
+    /// block, no audited repo), `Ok(Some(entry))` once the entry is stored. The one place an
+    /// entry is built and swept, shared by the app's scans and [`crate::run_import`].
+    pub(crate) fn try_record_inspection(
+        &self,
+        project_id: &str,
+        report: &crate::onboard::ScanReport,
+        kind: crate::inspections::InspectionKind,
+    ) -> Result<Option<crate::inspections::InspectionEntry>, std::io::Error> {
+        if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
+            return Ok(None);
+        }
+        // The stored report is the sealed artifact every export is built from, so it carries
+        // only redacted text: sweep a CLONE (the caller's copy is left as handed in) before
+        // anything reaches the file.
+        let mut sealed = report.clone();
+        sealed.sweep_secrets_before_seal();
+        let entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
+        self.inspections.append(entry).map(Some)
     }
 
     /// Remember Claude Code sessions that model calls made AFTER the inspection finished (the
