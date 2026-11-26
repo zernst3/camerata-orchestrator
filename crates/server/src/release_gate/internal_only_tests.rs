@@ -115,6 +115,7 @@ async fn an_export_of_a_project_whose_draft_carries_the_log_names_none_of_it() {
         })
         .expect("project exists");
     state.set_last_scan(project.id.clone(), super::tests::scan_report());
+    crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
     let log = serde_json::json!({
         "review_groups": { "g": { "opened_at_ms": 1, "active_ms": 72_000_000, "group_reviewed": true } },
         "review_rows": { "r": { "reviewed_by": "operator", "reviewed_at_ms": 3, "review_decision_ms": 4 } },

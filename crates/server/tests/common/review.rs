@@ -131,6 +131,27 @@ pub fn path_key(key: &str) -> String {
 
 /// A project with `n_sql` SQL rows and the story rows. The scan's escalation settings are the
 /// design's, so the budget is the floor of 20 until a test changes the project's settings.
+/// The bundled rule library, loaded once on a thread of its own (the fixture is synchronous and
+/// may be called from inside a test's runtime).
+pub fn bundled_rules() -> &'static camerata_rules::RuleSet {
+    static RULES: std::sync::OnceLock<camerata_rules::RuleSet> = std::sync::OnceLock::new();
+    RULES.get_or_init(|| {
+        std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let (rules, errors) = runtime.block_on(camerata_rules::load_corpus_lenient(
+                &camerata_rules::corpus_path(),
+            ));
+            assert!(errors.is_empty(), "the bundled corpus loads: {errors:?}");
+            rules
+        })
+        .join()
+        .expect("the corpus loads")
+    })
+}
+
 pub fn review_fixture(n_sql: usize) -> ReviewFixture {
     assert!(n_sql >= 6, "the fixture needs six SQL rows for its stories");
     let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
@@ -300,6 +321,12 @@ pub fn review_fixture(n_sql: usize) -> ReviewFixture {
     entry.report.tree = Some(tree);
 
     let entry = state.inspections().append(entry).expect("append");
+    // The rules the inspection ran with: the bundled library, kept as its run would keep it, so
+    // the exports and the review rows read them (#560).
+    assert!(state
+        .inspections()
+        .attach_rule_snapshot(&project.id, bundled_rules())
+        .expect("keep the rules"));
     let app = router(state.clone());
     ReviewFixture {
         state,

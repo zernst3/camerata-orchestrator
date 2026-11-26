@@ -2063,7 +2063,19 @@ async fn finding_context_missing_file_degrades_gracefully() {
 /// produce for the same rule id + a default `Finding`.
 #[tokio::test]
 async fn finding_fix_returns_resolve_fix_output_for_a_known_rule() {
+    // The fix comes from the rules the active project's inspection ran with (#560): here the
+    // bundled library, attached as its snapshot.
     let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Acme", vec!["owner/repo".to_string()])
+        .expect("project created");
+    assert!(state.projects.set_active(&project.id));
+    state.set_last_scan(
+        project.id.clone(),
+        make_scan_report("SUPABASE-RLS-ENABLED-1"),
+    );
+    crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
     let app = router(state);
     let resp = app
         .oneshot(

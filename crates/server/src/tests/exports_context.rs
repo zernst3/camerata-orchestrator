@@ -117,6 +117,7 @@ async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         project.id.clone(),
         make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
     );
+    crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
 
     let resp = export_product(
         axum::extract::State(state),
@@ -274,6 +275,13 @@ async fn product_export_is_refused_while_an_engine_check_no_is_uncorrected() {
             crate::inspections::InspectionKind::Full,
         ))
         .expect("inspection stored");
+    assert!(state
+        .inspections
+        .attach_rule_snapshot(
+            &project.id,
+            crate::export_rules::test_support::bundled_rules()
+        )
+        .expect("keep the rules"));
     let key = entry.report.findings[0].site_key.clone();
     let export = |state: AppState, id: String| async move {
         export_product(
@@ -663,6 +671,7 @@ async fn no_corpus_freshness_text_reaches_any_client_artifact() {
             project.id.clone(),
             make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
         );
+        crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
         let resp = export_product(
             axum::extract::State(state),
             axum::extract::Path(project.id.clone()),
