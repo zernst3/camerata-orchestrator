@@ -89,6 +89,32 @@ cargo run -p camerata-ui
 ```
 The desktop app opens with its embedded server; the topbar shows the live connection status.
 
+### Run an inspection in its own folders
+
+Each client inspection can keep its projects and its saved runs in a folder of its own, apart from
+every other inspection and from any development server. Start the app with:
+
+```bash
+CAMERATA_DATA_DIR=/Users/auditor/inspections/acme-2026 CAMERATA_STATE_DIR=/Users/auditor/inspections/acme-2026/state CAMERATA_SERVER_ADDR=127.0.0.1:8790 cargo run -p camerata-ui
+```
+
+- `CAMERATA_DATA_DIR` holds the projects and the inspection results (under `camerata/`).
+- `CAMERATA_STATE_DIR` holds the saved runs (under `camerata/runs`). **Resume** lists and finds
+  only the runs in this folder, so the inspection never resumes another one's run.
+- `CAMERATA_SERVER_ADDR` is the address the app starts its server on. Use one no other server
+  holds; the default is `127.0.0.1:8787`.
+
+The server the app starts inherits all three, so it runs on those folders. Start the app the same
+way each time for the same inspection.
+
+**The app never attaches to another server.** Before it uses a server already on its address, the
+app checks the build the server comes from and the two folders the server runs on. A server from
+another build, or on another data or state folder (a development server left running, say), is
+refused: the app does not attach to it and does not stop it. The screen **This app and the server
+on its address use different data folders** (or **state folders**, or **This app and its server
+come from different builds**) names both sides. Quit the other server, or start the app on its
+own address and folders with the command above.
+
 ### Backend: CLI vs API (per project)
 
 Every project-scoped AI call, including the brownfield scan, the alternative-recommendation pass,

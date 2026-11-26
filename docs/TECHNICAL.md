@@ -142,7 +142,20 @@ When you run `cargo run -p camerata-ui`:
    already on the port instead of spawning a duplicate, and runs a detached
    watchdog that kills the child process when the desktop app exits.
    `camerata-ui` no longer has a crate dependency on `camerata-server` at all.
-2. The BFF binds Axum to `127.0.0.1:8787`. All cockpit data flows over
+   **Identity before reuse (#566).** `/api/health` reports `commit`, `dirty`,
+   `data_dir` (`app_dirs::camerata_dir()`) and `state_dir`
+   (`scan_cache::state_dir::dir()`). Before reusing a healthy server, the launcher
+   (`decide_reuse_or_spawn`) compares them with the app's own build and the folders
+   its own environment resolves (`build_guard::Folders::for_this_app`, through the
+   same `camerata_api_types::data_dir` and `state_dir` functions the server uses):
+   build first, then data folder, then state folder. A server that differs, or names
+   no folder where the app has one, is `LaunchDecision::Refuse`d: the launcher neither attaches to it nor
+   spawns over it nor kills it, and `BuildGuard` shows the screen that names both
+   sides instead of the cockpit. A spawned server inherits the app's environment, so
+   `CAMERATA_DATA_DIR` and `CAMERATA_STATE_DIR` reach it (pinned by
+   `the_spawned_server_inherits_the_data_and_state_folders`).
+2. The BFF binds Axum to `CAMERATA_SERVER_ADDR`, `127.0.0.1:8787` by default; the app
+   starts or attaches to its server on the same variable (`bff_addr`). All cockpit data flows over
    localhost HTTP/WebSocket (today via raw `reqwest` calls from `crates/ui`,
    not yet through the typed `camerata-client`). The cockpit never calls
    backend crates directly.

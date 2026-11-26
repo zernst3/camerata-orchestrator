@@ -3,14 +3,18 @@
 
 use crate::*;
 
-/// Liveness plus the build identity: the app compares `commit` with its own and refuses to run
-/// against a server from a different build. `commit` is `null` for a build outside a git checkout.
+/// Liveness plus the build identity and the folders the server runs on: the app compares
+/// `commit` with its own, and `data_dir` and `state_dir` with the folders its own environment
+/// resolves, and refuses to run against a server that differs (#566). `commit` is `null` for a
+/// build outside a git checkout; `data_dir` is `null` when no data folder can be found.
 pub(crate) async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "service": "camerata-server",
         "commit": ENGINE_COMMIT,
         "dirty": ENGINE_DIRTY,
+        "data_dir": crate::app_dirs::camerata_dir().map(|d| d.display().to_string()),
+        "state_dir": crate::scan_cache::state_dir::dir().display().to_string(),
     }))
 }
 

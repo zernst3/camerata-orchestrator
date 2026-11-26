@@ -49,6 +49,40 @@ async fn health_reports_the_build_identity() {
     );
 }
 
+/// #566: the health route names the data folder and the state folder the server runs on, so the
+/// app can refuse a server that would put an inspection's projects or runs in another folder.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn health_names_the_data_and_state_folders_the_server_runs_on() {
+    let app = router(AppState::seeded());
+    let _data = camerata_test_env::EnvGuard::set(
+        "CAMERATA_DATA_DIR",
+        "/Users/auditor/inspections/acme-2026/data",
+    );
+    let _state = camerata_test_env::EnvGuard::set(
+        "CAMERATA_STATE_DIR",
+        "/Users/auditor/inspections/acme-2026/state",
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(
+        json["data_dir"], "/Users/auditor/inspections/acme-2026/data/camerata",
+        "the health route names the data folder: {json}"
+    );
+    assert_eq!(
+        json["state_dir"], "/Users/auditor/inspections/acme-2026/state/camerata",
+        "the health route names the state folder: {json}"
+    );
+}
+
 /// `/api/usage` returns the cumulative ledger snapshot in the documented shape, and
 /// reflects calls recorded on the shared ledger (proving the endpoint reads the same
 /// state the chokepoint writes). Provider-agnostic: records an Anthropic-shaped (cost

@@ -708,6 +708,62 @@ fn a_run_record_without_a_project_id_reads_as_no_project() {
     assert_eq!(crate::run_store::read_record(&id).unwrap().project_id, None);
 }
 
+/// #566: an inspection run under its own state folder (`CAMERATA_STATE_DIR`) is listed and
+/// previewed for resuming only while the server runs on that folder. A server on another folder
+/// lists none of its runs and does not find it by id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn resumes_find_only_the_runs_of_the_state_folder_the_server_runs_on() {
+    let root = tempfile::tempdir().unwrap();
+    let acme_state = root.path().join("acme-2026-state");
+    let other_state = root.path().join("dev-state");
+    let repo = root.path().join("repo");
+    for d in [&acme_state, &other_state, &repo] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    stage_fixture(&repo);
+
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("acme-isolated", vec!["acme/one".to_string()])
+        .unwrap();
+    state
+        .settings
+        .set_repo_path("acme/one", Some(repo.to_string_lossy().into_owned()));
+    let app = router(state.clone());
+    let listing = format!("/api/inspections?project_id={}", project.id);
+
+    let run_id = {
+        let _acme = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &acme_state);
+        let id = saved_cockpit_run_in(Some(&project.id), &[("acme/one", &repo)]).run_id();
+        let (_, body) = get_json(app.clone(), &listing).await;
+        let ids: Vec<&str> = body["inspections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert_eq!(ids, [id.as_str()], "its own folder lists the run: {body}");
+        id
+    };
+
+    let _other = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &other_state);
+    let (status, body) = get_json(app.clone(), &listing).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["inspections"].as_array().unwrap().len(),
+        0,
+        "another state folder lists none of its runs: {body}"
+    );
+    let (status, _) = get_json(app.clone(), &format!("/api/inspections/{run_id}/plan")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "another state folder does not find the run by id"
+    );
+}
+
 /// `GET /api/inspections` lists the open project's saved inspections with where each stands, a
 /// live one is never offered for resuming, another project's runs are not listed, the plan and
 /// resume live under the same namespace, and the two old `/api/runs/:id/...` paths still answer.

@@ -282,9 +282,9 @@ pub fn TerminalBubble() -> Element {
     let mut tabs = use_signal(Vec::<TermTab>::new);
     let mut active_tab = use_signal(|| 0usize);
 
-    // Derive the WebSocket URL from BFF_URL: replace "http://" with "ws://".
+    // Derive the WebSocket URL from the BFF base: replace "http://" with "ws://".
     // RUNTIME-TODO: for a TLS-terminated cloud deployment this must be "wss://".
-    let ws_base = crate::BFF_URL.replacen("http://", "ws://", 1);
+    let ws_base = crate::bff_base().replacen("http://", "ws://", 1);
 
     // Inject xterm.js from CDN on first open.
     let mut xterm_loaded = use_signal(|| false);

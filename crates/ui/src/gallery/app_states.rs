@@ -19,7 +19,10 @@ fn build_mismatch() -> String {
             server: ServerBuild {
                 commit: Some("a81d0e4c2b3f46570817263544536271809fedcb".to_string()),
                 dirty: false,
+                ..ServerBuild::default()
             },
+            folders: Default::default(),
+            mismatch: crate::build_guard::Mismatch::Build,
         },
     )
 }

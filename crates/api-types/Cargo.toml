@@ -23,6 +23,10 @@ thiserror = { workspace = true }
 # `claude_cli::PromptWriter` writes a prompt to a child's stdin through `AsyncWrite` on a spawned
 # task. `io-util`, `rt` and `time` only: no process, no net, so this stays a leaf with no transport code.
 tokio = { workspace = true, features = ["io-util", "rt", "time"] }
+# `data_dir` resolves the per-user application-data folder (`dirs::data_dir()`), so the server and
+# the app read one implementation of where an inspection's stores live (#566). A leaf crate with
+# no camerata dependency; the server already uses the same version.
+dirs = "6"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "rt", "macros", "time"] }
