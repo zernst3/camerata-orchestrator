@@ -78,8 +78,9 @@
 //      `fix_fields_never_contain_raw_template_syntax`. Separately (OPEN, C5-6 — a product-
 //      polish gap, not a correctness bug): the GENERIC placeholder filler
 //      (`generic_placeholder_filler`) legitimately renders "the affected table"/"the affected
-//      file"/etc. when a detector captured no concrete object name, which reads as boilerplate
-//      next to an otherwise-specific fix: `fix_fields_can_fall_back_to_the_generic_affected_noun_phrase`.
+//      file"/etc. when a detector captured no concrete object name. ACCEPTED by ruling
+//      (2026-11-25, #345); STANDING (passes):
+//      `fix_fields_can_fall_back_to_the_generic_affected_noun_phrase`.
 //  11. Every curated (action-bucket) row for a rule with AUTHORED remediation has a non-empty
 //      `fix` and a non-empty hour estimate — never a silently missing Fix block for a rule this
 //      corpus actually authors one for. (This is deliberately scoped to AUTHORED rules — a
@@ -1002,32 +1003,47 @@ async fn fix_fields_never_contain_raw_template_syntax() {
     );
 }
 
+/// Accepted behavior, by owner ruling (2026-11-25, issue #345 option 3): when a detector
+/// captured no concrete value for a rule's placeholder token, the Fix line carries the generic
+/// filled wording (for example "the affected table"), never a raw or dangling placeholder. When
+/// a value IS captured, the specific value appears instead. The generic wording is accepted as
+/// is; issue #345 tracks the later polish.
 #[tokio::test]
-#[ignore = "C5-6 open (product-polish, not a correctness bug): `generic_placeholder_filler` \
-                legitimately renders \"the affected table\" when a detector captured no \
-                concrete object name for a rule's `<table>`-style token (f_rls in this \
-                fixture, which deliberately omits the `table` capture) — this is FILLED text, \
-                never a raw/dangling placeholder, but it reads as generic boilerplate right \
-                next to an otherwise-specific Fix line. Worth deciding whether the fix line \
-                should instead omit the sentence, or whether every AUDIT_RULES floor checker \
-                should be required to populate its own `captures` (several already do — see \
-                `onboard::audit::enrich_secret_context`)."]
 async fn fix_fields_can_fall_back_to_the_generic_affected_noun_phrase() {
     let fx = build_fixture().await;
+    let unfilled_token = regex::Regex::new(r"<[^<>]*>").expect("static regex must compile");
+    let mut generic_fix_lines = 0;
     let mut offenders = Vec::new();
     for (loc, text) in all_client_text_fields(&fx) {
         if !(loc.ends_with(".fix") || loc.ends_with(".fix_for_this_finding")) {
             continue;
         }
-        if text.contains("the affected ") {
+        if text.contains("the affected table") {
+            generic_fix_lines += 1;
+        }
+        if text.contains('{') || unfilled_token.is_match(&text) {
             offenders.push(format!("{loc}: {text:?}"));
         }
     }
     assert!(
-        offenders.is_empty(),
-        "a fix field falls back to the generic \"the affected <noun>\" phrase instead of \
-             naming the real object: {offenders:#?}"
+        generic_fix_lines > 0,
+        "the fixture's f_rls finding has no captured table, so at least one Fix line must \
+         carry the generic \"the affected table\" wording"
     );
+    assert!(
+        offenders.is_empty(),
+        "a fix field carries a raw or dangling placeholder instead of filled wording: \
+         {offenders:#?}"
+    );
+
+    // The captured half: a detector-supplied value replaces the generic wording.
+    let mut captures = std::collections::BTreeMap::new();
+    captures.insert("table".to_string(), "payments".to_string());
+    let with_value = instantiate_remediation("Enable RLS on <table>.", "a.sql", &captures);
+    assert_eq!(with_value, "Enable RLS on payments.");
+    let without_value =
+        instantiate_remediation("Enable RLS on <table>.", "a.sql", &Default::default());
+    assert_eq!(without_value, "Enable RLS on the affected table.");
 }
 
 // ── Invariant 11 (STANDING) ──────────────────────────────────────────────────────────
