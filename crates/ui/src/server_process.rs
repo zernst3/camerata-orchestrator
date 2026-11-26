@@ -117,6 +117,7 @@ pub enum LaunchDecision {
     /// A healthy camerata BFF answers, but from another build or on another data or state folder
     /// (#566): do not attach to it, do not spawn over it and do not kill it. The sentence names
     /// both sides.
+    #[allow(dead_code)] // scaffold (#566): decide_reuse_or_spawn builds it in the next commit
     Refuse(String),
 }
 
@@ -182,6 +183,7 @@ pub async fn decide_reuse_or_spawn(base_url: &str, expected: &ExpectedServer) ->
 }
 
 /// The sentence the launcher prints when it refuses a server.
+#[allow(dead_code)] // scaffold (#566): decide_reuse_or_spawn uses it in the next commit
 fn refusal_sentence(base_url: &str, line: &str) -> String {
     format!(
         "[camerata-ui] not attaching to the camerata server on {base_url}: {line} An inspection \
