@@ -368,4 +368,72 @@ mod tests {
         assert_eq!(plan.pieces, 4);
         assert!((plan.per_piece_usd - 3.0).abs() < 1e-9);
     }
+
+    fn store(dir: &std::path::Path, spent_usd: f64, pieces_done: usize, pieces_left: usize) {
+        let cp = CostCheckpoint {
+            spent_usd,
+            pieces_done,
+            pieces_left,
+            ..CostCheckpoint::default()
+        };
+        std::fs::write(dir.join(CHECKPOINT_FILE), serde_json::to_vec(&cp).unwrap()).unwrap();
+    }
+
+    /// A checkpoint with nothing finished has no per-piece figure to resume from (spent / 0), so
+    /// it gives no plan, whether or not pieces are left.
+    #[test]
+    fn a_stored_checkpoint_with_no_piece_done_gives_no_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), 3.0, 0, 3);
+        assert!(CheckpointPlan::from_stored(dir.path()).is_none());
+        let none_left = tempfile::tempdir().unwrap();
+        store(none_left.path(), 0.0, 0, 0);
+        assert!(CheckpointPlan::from_stored(none_left.path()).is_none());
+    }
+
+    /// With more than one piece done, spent divided by done differs from spent times done, so a
+    /// wrong operator (multiply for divide) shows. Pieces planned are done plus left.
+    #[test]
+    fn a_stored_checkpoint_with_several_pieces_done_seeds_spent_over_done() {
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), 6.0, 2, 3);
+        let plan = CheckpointPlan::from_stored(dir.path()).unwrap();
+        assert_eq!(plan.pieces, 5);
+        // 6 / 2 = 3 (6 x 2 would be 12).
+        assert!((plan.per_piece_usd - 3.0).abs() < 1e-9);
+        let three = tempfile::tempdir().unwrap();
+        store(three.path(), 3.0, 3, 1);
+        let plan = CheckpointPlan::from_stored(three.path()).unwrap();
+        assert_eq!(plan.pieces, 4);
+        // 3 / 3 = 1 (3 x 3 would be 9).
+        assert!((plan.per_piece_usd - 1.0).abs() < 1e-9);
+    }
+
+    /// An estimate that assumed zero problems has nothing to scale against: the later stages are
+    /// added unscaled and the projection stays finite (no division by zero).
+    #[test]
+    fn an_assumption_of_zero_problems_adds_the_later_stages_unscaled() {
+        let i = ProjectionInput {
+            later_stages_usd: 8.0,
+            assumed_problems: Some(0),
+            problems_found: 5,
+            ..base()
+        };
+        let total = projected_total(&i);
+        assert!(total.is_finite());
+        // 22 + 8 = 30.
+        assert!((total - 30.0).abs() < 1e-9);
+    }
+
+    /// The same with no problem found: 0 / 0 must not turn the later stages into nothing.
+    #[test]
+    fn an_assumption_of_zero_problems_with_none_found_still_counts_the_later_stages() {
+        let i = ProjectionInput {
+            later_stages_usd: 8.0,
+            assumed_problems: Some(0),
+            problems_found: 0,
+            ..base()
+        };
+        assert!((projected_total(&i) - 30.0).abs() < 1e-9);
+    }
 }
