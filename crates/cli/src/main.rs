@@ -80,10 +80,14 @@ enum Command {
 
     /// List canonical stories for the active project via the BFF (GET /api/stories).
     Stories,
-    /// Get the current state of a governed run by id via the BFF (GET /api/runs/:id).
+    /// Get the current state of a governed run by id via the BFF (GET /api/runs/:id), or work on
+    /// a saved inspection run (`camerata run import --run <ID>`).
+    #[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
     Run {
         /// The run id, e.g. as returned by `start-run`.
-        run_id: String,
+        run_id: Option<String>,
+        #[command(subcommand)]
+        action: Option<RunAction>,
     },
     /// List every Unit of Work for the active project via the BFF (GET /api/uows).
     Uows,
@@ -449,6 +453,25 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum RunAction {
+    /// Bring a saved `camerata inspect` run into the app for review (#562). Reads the run's
+    /// record and its saved report and never changes the run folder. Refused, with the reason,
+    /// when the run is not complete, when its engine pin is missing or does not match its report,
+    /// when the rule library loaded now is not the run's, or when the report is missing or cannot
+    /// be read. Importing a run twice changes nothing. Close the app first: it reads its store
+    /// when it opens.
+    Import {
+        /// The run's id, as `camerata inspect` printed it.
+        #[arg(long, value_name = "ID")]
+        run: String,
+        /// The app project to import into. Default: the one project whose repositories are the
+        /// run's.
+        #[arg(long, value_name = "PROJECT-ID")]
+        project: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum DiagnoseAction {
     /// Write a diagnostic bundle for a run and print its preview. Reads three operator files
     /// only: the run's `run.json`, the integrity ledger and the failure report. Every field is
@@ -600,9 +623,34 @@ async fn main() -> anyhow::Result<()> {
             let client = make_client(bff_url);
             print_result(camerata::http_cmd::handle_stories(&client).await)
         }
-        Command::Run { run_id } => {
+        Command::Run {
+            action: Some(RunAction::Import { run, project }),
+            ..
+        } => {
+            match camerata_server::run_import::import_cli_run_here(&run, project.as_deref()).await {
+                Ok(done) => {
+                    println!("{}", done.message());
+                    Ok(())
+                }
+                Err(refusal) => {
+                    eprintln!("camerata run import: {refusal}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::Run {
+            run_id: Some(run_id),
+            action: None,
+        } => {
             let client = make_client(bff_url);
             print_result(camerata::http_cmd::handle_run(&client, &run_id).await)
+        }
+        Command::Run {
+            run_id: None,
+            action: None,
+        } => {
+            // `arg_required_else_help` answers a bare `camerata run` before this point.
+            anyhow::bail!("give a run id, or `camerata run import --run <ID>`")
         }
         Command::Uows => {
             let client = make_client(bff_url);
@@ -1252,11 +1300,50 @@ mod cli_parse_tests {
         assert!(Cli::try_parse_from(["camerata", "uows"]).is_ok());
     }
 
+    /// `camerata run import --run <id>` parses into the import, with an optional `--project`;
+    /// the run is required. Matched on the debug text so the test reads the same before and
+    /// after the command exists.
+    #[test]
+    fn run_import_parses_the_run_and_an_optional_project() {
+        let cli = Cli::try_parse_from(["camerata", "run", "import", "--run", "run-acme-1"]);
+        assert!(
+            cli.is_ok(),
+            "`run import --run` must parse: {:?}",
+            cli.err()
+        );
+        let shown = format!("{:?}", cli.unwrap().command);
+        assert!(
+            shown.contains("Import")
+                && shown.contains("\"run-acme-1\"")
+                && shown.contains("project: None"),
+            "{shown}"
+        );
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "run",
+            "import",
+            "--run",
+            "run-acme-1",
+            "--project",
+            "proj-2",
+        ]);
+        assert!(cli.is_ok(), "`--project` must parse: {:?}", cli.err());
+        let shown = format!("{:?}", cli.unwrap().command);
+        assert!(shown.contains("Some(\"proj-2\")"), "{shown}");
+        assert!(
+            Cli::try_parse_from(["camerata", "run", "import"]).is_err(),
+            "the run is required"
+        );
+    }
+
     #[test]
     fn run_requires_a_run_id_positional() {
         let cli = Cli::try_parse_from(["camerata", "run", "run-42"]).expect("must parse");
         match cli.command {
-            Command::Run { run_id } => assert_eq!(run_id, "run-42"),
+            Command::Run {
+                run_id,
+                action: None,
+            } => assert_eq!(run_id.as_deref(), Some("run-42")),
             other => panic!("expected Command::Run, got a different variant: {other:?}"),
         }
         assert!(Cli::try_parse_from(["camerata", "run"]).is_err());

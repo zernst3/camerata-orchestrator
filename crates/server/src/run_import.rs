@@ -318,15 +318,286 @@ pub fn import_cli_run(
     state: &AppState,
     request: &ImportRequest<'_>,
 ) -> Result<Imported, ImportRefusal> {
-    let _ = (state, request);
-    Err(ImportRefusal::NoDataDir)
+    let record = read_record_at(request.run_dir)?;
+    let run_id = record.run_id.clone();
+    if record.status != RunStatus::Complete {
+        return Err(ImportRefusal::Incomplete {
+            status: match record.status {
+                RunStatus::Running => "it is marked running".to_string(),
+                RunStatus::Incomplete => "a part failed or did not run".to_string(),
+                RunStatus::Complete => unreachable!("checked above"),
+            },
+            reasons: record.incomplete_reasons.clone(),
+            run_id,
+        });
+    }
+    let pin = check_pin(&record, request.rule_digest)?;
+    let report = read_report(&run_id, request.run_dir)?;
+    check_report_is_the_runs(&record, pin, &report)?;
+    if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
+        return Err(ImportRefusal::NotAnInspection { run_id });
+    }
+    // Importing twice changes nothing (and a run goes into one project only).
+    if let Some(found) = state.inspections.find_run(&run_id) {
+        if request
+            .project_id
+            .is_some_and(|named| named != found.project_id)
+        {
+            return Err(ImportRefusal::ImportedElsewhere {
+                run_id,
+                project_id: found.project_id,
+                entry_id: found.id,
+            });
+        }
+        let project_name = state
+            .projects
+            .get(&found.project_id)
+            .map(|p| p.name)
+            .unwrap_or_default();
+        return Ok(Imported {
+            project_id: found.project_id,
+            project_name,
+            entry_id: found.id,
+            run_id,
+            already_imported: true,
+            findings: found.report.findings.len(),
+        });
+    }
+    let project = resolve_project(state, &run_id, &report.repos, request.project_id)?;
+
+    // The app's own store path, the steps an app scan goes through.
+    let report = state.prepare_full_inspection(&project.id, report);
+    let stored = state
+        .try_record_inspection(
+            &project.id,
+            &report,
+            crate::inspections::InspectionKind::Full,
+        )
+        .map_err(|e| ImportRefusal::StoreWriteFailed {
+            run_id: run_id.clone(),
+            why: e.to_string(),
+        })?
+        .ok_or_else(|| ImportRefusal::NotAnInspection {
+            run_id: run_id.clone(),
+        })?;
+    state.set_last_scan_in_memory(project.id.clone(), report);
+    Ok(Imported {
+        project_id: project.id,
+        project_name: project.name,
+        entry_id: stored.id,
+        run_id,
+        already_imported: false,
+        findings: stored.report.findings.len(),
+    })
+}
+
+/// The run's record, read without taking its lock or writing anything.
+fn read_record_at(run_dir: &Path) -> Result<RunRecord, ImportRefusal> {
+    let run_id = run_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let path = run_dir.join("run.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ImportRefusal::RunNotFound {
+                run_id,
+                dir: run_dir.display().to_string(),
+            })
+        }
+        Err(e) => {
+            return Err(ImportRefusal::RunUnreadable {
+                run_id,
+                why: format!("{} could not be read ({e})", path.display()),
+            })
+        }
+    };
+    let record: RunRecord =
+        serde_json::from_slice(&bytes).map_err(|e| ImportRefusal::RunUnreadable {
+            run_id: run_id.clone(),
+            why: format!(
+                "{} does not read back as a run record ({e})",
+                path.display()
+            ),
+        })?;
+    if record.schema != STORE_SCHEMA_VERSION {
+        return Err(ImportRefusal::RunUnreadable {
+            run_id,
+            why: format!(
+                "it was saved by another version of Camerata (layout {} instead of {})",
+                record.schema, STORE_SCHEMA_VERSION
+            ),
+        });
+    }
+    Ok(record)
+}
+
+/// The run's pin, when it names its build and its rule library is the one loaded now.
+fn check_pin<'r>(
+    record: &'r RunRecord,
+    rule_digest: &str,
+) -> Result<&'r crate::run_store::engine_pin::EnginePin, ImportRefusal> {
+    let run_id = || record.run_id.clone();
+    let Some(pin) = record.pin.as_ref() else {
+        return Err(ImportRefusal::PinMissing {
+            run_id: run_id(),
+            why: "it recorded no engine pin (it was started before Camerata recorded which build \
+                  ran it)"
+                .to_string(),
+        });
+    };
+    if pin
+        .build
+        .commit
+        .as_deref()
+        .is_none_or(|c| c.trim().is_empty())
+    {
+        return Err(ImportRefusal::PinMissing {
+            run_id: run_id(),
+            why: "its engine pin did not record its commit".to_string(),
+        });
+    }
+    if pin.corpus_version.trim().is_empty() || pin.corpus_version != rule_digest {
+        return Err(ImportRefusal::RuleDigestMismatch {
+            run_id: run_id(),
+            pinned: if pin.corpus_version.trim().is_empty() {
+                "(none recorded)".to_string()
+            } else {
+                pin.corpus_version.clone()
+            },
+            loaded: rule_digest.to_string(),
+        });
+    }
+    Ok(pin)
+}
+
+/// The run's saved report, read whole.
+fn read_report(run_id: &str, run_dir: &Path) -> Result<ScanReport, ImportRefusal> {
+    let path = run_dir.join(REPORT_FILE);
+    let shown = path.display().to_string();
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ImportRefusal::ReportMissing {
+                run_id: run_id.to_string(),
+                path: shown,
+            })
+        }
+        Err(e) => {
+            return Err(ImportRefusal::ReportUnreadable {
+                run_id: run_id.to_string(),
+                path: shown,
+                why: e.to_string(),
+            })
+        }
+    };
+    serde_json::from_slice(&bytes).map_err(|e| ImportRefusal::ReportUnreadable {
+        run_id: run_id.to_string(),
+        path: shown,
+        why: format!("it does not read back as a report ({e})"),
+    })
+}
+
+/// The report must be the one the run's pinned engine made for this run.
+fn check_report_is_the_runs(
+    record: &RunRecord,
+    pin: &crate::run_store::engine_pin::EnginePin,
+    report: &ScanReport,
+) -> Result<(), ImportRefusal> {
+    let mismatch = |why: String| {
+        Err(ImportRefusal::EnginePinMismatch {
+            run_id: record.run_id.clone(),
+            why,
+        })
+    };
+    if report.run_id.as_deref() != Some(record.run_id.as_str()) {
+        return mismatch(format!(
+            "the report names run {}",
+            report.run_id.as_deref().unwrap_or("(none)")
+        ));
+    }
+    if report.provenance.camerata_version != pin.build.version {
+        return mismatch(format!(
+            "the report was made by Camerata {} and the run is pinned to {}",
+            report.provenance.camerata_version, pin.build.version
+        ));
+    }
+    if report.provenance.rules_fingerprint != record.rules_fingerprint {
+        return mismatch(
+            "the report's rule selection is not the one the run was started with".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The app project the run goes into: the one named, which must hold every repo of the run, or
+/// else the one project that does.
+fn resolve_project(
+    state: &AppState,
+    run_id: &str,
+    repos: &[String],
+    named: Option<&str>,
+) -> Result<crate::project::Project, ImportRefusal> {
+    let holds = |p: &crate::project::Project| -> Vec<String> {
+        repos
+            .iter()
+            .filter(|r| {
+                !p.repos
+                    .iter()
+                    .any(|have| have.trim().eq_ignore_ascii_case(r.trim()))
+            })
+            .cloned()
+            .collect()
+    };
+    if let Some(id) = named {
+        let project = state
+            .projects
+            .get(id)
+            .ok_or_else(|| ImportRefusal::ProjectUnknown {
+                project_id: id.to_string(),
+            })?;
+        let missing = holds(&project);
+        if !missing.is_empty() {
+            return Err(ImportRefusal::ProjectReposDiffer {
+                run_id: run_id.to_string(),
+                project_id: project.id,
+                missing,
+            });
+        }
+        return Ok(project);
+    }
+    let mut candidates: Vec<crate::project::Project> = state
+        .projects
+        .list()
+        .into_iter()
+        .filter(|p| holds(p).is_empty())
+        .collect();
+    match candidates.len() {
+        0 => Err(ImportRefusal::NoProject {
+            run_id: run_id.to_string(),
+            repos: repos.to_vec(),
+        }),
+        1 => Ok(candidates.remove(0)),
+        _ => Err(ImportRefusal::ProjectAmbiguous {
+            run_id: run_id.to_string(),
+            repos: repos.to_vec(),
+            projects: candidates
+                .iter()
+                .map(|p| format!("{} ({})", p.name, p.id))
+                .collect(),
+        }),
+    }
 }
 
 /// The folder of run `run_id` under `runs_root`, refusing an id that is not one folder name (so
 /// an id can never reach outside the runs folder).
 pub fn run_dir_in(runs_root: &Path, run_id: &str) -> Result<PathBuf, ImportRefusal> {
-    let _ = runs_root;
-    Err(ImportRefusal::InvalidRunId(run_id.to_string()))
+    let id = run_id.trim();
+    if id.is_empty() || id != run_id || id == "." || id == ".." || id.contains(['/', '\\']) {
+        return Err(ImportRefusal::InvalidRunId(run_id.to_string()));
+    }
+    Ok(runs_root.join(id))
 }
 
 /// The import as the command line runs it: the run `run_id` from this user's runs folder, into
@@ -353,11 +624,6 @@ pub async fn import_cli_run_here(
             rule_digest: &rule_digest,
         },
     )
-}
-
-#[allow(dead_code)]
-fn unused(_: &ScanReport, _: &RunRecord, _: RunStatus, _: &str, _: u32) {
-    let _ = (REPORT_FILE, STORE_SCHEMA_VERSION);
 }
 
 #[cfg(test)]

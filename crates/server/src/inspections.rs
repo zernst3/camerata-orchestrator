@@ -293,6 +293,16 @@ impl InspectionStore {
         result.map(|()| entry)
     }
 
+    /// The entry recorded for the saved run `run_id` (its report's `run_id`), in any project.
+    /// How an import knows a run is already in the store.
+    pub fn find_run(&self, run_id: &str) -> Option<InspectionEntry> {
+        self.lock()
+            .values()
+            .flatten()
+            .find(|e| e.report.run_id.as_deref() == Some(run_id))
+            .cloned()
+    }
+
     /// The newest entry for a project.
     pub fn latest(&self, project_id: &str) -> Option<InspectionEntry> {
         self.lock().get(project_id).and_then(|l| l.last()).cloned()

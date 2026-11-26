@@ -156,6 +156,16 @@ async fn an_imported_run_opens_on_the_review_screens_like_an_app_scan_of_the_sam
     let from_scan = review_screens(&scanned.state, &scanned.project_id).await;
     let from_import = review_screens(&imported.state, &imported.project_id).await;
     assert_eq!(from_import.len(), from_scan.len(), "the same screens");
+    // The screens are not empty: every fixture row is on a sites page, and the secret is not.
+    let sites: String = from_import
+        .iter()
+        .filter(|(uri, _)| uri.contains("/review/sites"))
+        .map(|(_, body)| body.to_string())
+        .collect();
+    for path in ["src/q0.rs", "src/q1.rs", "src/q2.rs", "src/q3.rs", ".env"] {
+        assert!(sites.contains(path), "the review screens show {path}");
+    }
+    assert!(!sites.contains(&secret().value), "and never the raw secret");
     for ((uri, scan), (_, import)) in from_scan.iter().zip(&from_import) {
         assert_eq!(import, scan, "{uri} reads the same for the imported run");
     }
