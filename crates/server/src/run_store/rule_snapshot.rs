@@ -339,15 +339,150 @@ pub fn read_run_dir(run_dir: &Path) -> Result<RunSnapshot, SnapshotRefusal> {
 
 /// [`read_run_dir`] for the run `run_id` in this user's run store.
 pub fn read_run(run_id: &str) -> Result<RunSnapshot, SnapshotRefusal> {
+    read_run_dir(&checked_run_dir(run_id)?)
+}
+
+// ── Backfill: the snapshot of a run made before snapshots were kept ─────────────────────────
+
+/// What [`backfill`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Backfilled {
+    /// The snapshot was written from the folder, whose rules have the run's pinned digest.
+    Written { digest: String, rules: usize },
+    /// The run already keeps a snapshot that verifies; nothing was written.
+    AlreadyKept { digest: String },
+}
+
+/// Why [`backfill`] wrote nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackfillRefusal {
+    /// The run cannot take a snapshot (no record, no pin, no rule library, a bad run id).
+    Run(SnapshotRefusal),
+    /// The folder holds no rule library to read.
+    NoLibrary { folder: String },
+    /// Rule files in the folder did not load, so it is not the library the run loaded.
+    Unloadable { folder: String, files: Vec<String> },
+    /// The folder's rules are not the rules the run ran with.
+    DigestMismatch {
+        run_id: String,
+        pinned: String,
+        found: String,
+    },
+    /// The snapshot could not be written.
+    Io(String),
+}
+
+impl std::fmt::Display for BackfillRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Run(refusal) => write!(f, "{refusal}"),
+            Self::NoLibrary { folder } => write!(
+                f,
+                "{folder} holds no rule library (no rule files were found there). Nothing was \
+                 written."
+            ),
+            Self::Unloadable { folder, files } => write!(
+                f,
+                "{} rule files in {folder} did not load ({}), so it cannot be shown to be the \
+                 library the inspection ran with. Nothing was written.",
+                files.len(),
+                files.join("; ")
+            ),
+            Self::DigestMismatch {
+                run_id,
+                pinned,
+                found,
+            } => write!(
+                f,
+                "The rule library in that folder is not the one run {run_id} ran with: it reads \
+                 as {found} and the run recorded {pinned}. Name the folder that holds the rule \
+                 library of the build that ran the inspection. Nothing was written."
+            ),
+            Self::Io(why) => write!(f, "The snapshot could not be written: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for BackfillRefusal {}
+
+/// Save the snapshot of the run `run_id` from the rule library in `folder`, for a run made
+/// before snapshots were kept. The folder is loaded the way an inspection loads its library and
+/// its digest is computed; unless it equals the run's pinned rule digest nothing is written.
+/// It never guesses: a folder with a rule file that does not load, or with no rules, is refused.
+/// A run that already keeps a snapshot that verifies is left as it is.
+pub async fn backfill(run_id: &str, folder: &Path) -> Result<Backfilled, BackfillRefusal> {
+    let run_dir = checked_run_dir(run_id).map_err(BackfillRefusal::Run)?;
+    let record = super::load_record(&run_dir).map_err(|e| {
+        BackfillRefusal::Run(SnapshotRefusal::new(
+            Some(run_id),
+            RefusalKind::RunUnreadable(e.to_string()),
+        ))
+    })?;
+    let refuse = |kind| BackfillRefusal::Run(SnapshotRefusal::new(Some(&record.run_id), kind));
+    let pinned = record
+        .pin
+        .as_ref()
+        .ok_or_else(|| refuse(RefusalKind::NoPin))?
+        .corpus_version
+        .clone();
+    if pinned.trim().is_empty() {
+        return Err(refuse(RefusalKind::NoRules));
+    }
+    if let Ok(kept) = read_run_dir(&run_dir) {
+        return Ok(Backfilled::AlreadyKept {
+            digest: kept.digest,
+        });
+    }
+    let shown = folder.display().to_string();
+    if !folder.is_dir() {
+        return Err(BackfillRefusal::NoLibrary { folder: shown });
+    }
+    let (rules, errors) = camerata_rules::load_corpus_lenient(folder).await;
+    if !errors.is_empty() {
+        return Err(BackfillRefusal::Unloadable {
+            folder: shown,
+            files: errors
+                .iter()
+                .map(|(path, error)| format!("{}: {error}", path.display()))
+                .collect(),
+        });
+    }
+    if rules.is_empty() {
+        return Err(BackfillRefusal::NoLibrary { folder: shown });
+    }
+    let found = camerata_rules::corpus_version(&rules);
+    if found != pinned {
+        return Err(BackfillRefusal::DigestMismatch {
+            run_id: record.run_id.clone(),
+            pinned,
+            found,
+        });
+    }
+    write_in(&run_dir, &rules).map_err(|e| BackfillRefusal::Io(e.to_string()))?;
+    // Read back exactly as an export will, so a write that does not verify is said now.
+    let kept = read_run_dir(&run_dir).map_err(BackfillRefusal::Run)?;
+    Ok(Backfilled::Written {
+        digest: kept.digest,
+        rules: kept.rules.len(),
+    })
+}
+
+/// The folder of the run `run_id` in this user's run store, refusing anything that is not a
+/// plain run id (so a run id can never name a path outside the store).
+fn checked_run_dir(run_id: &str) -> Result<PathBuf, SnapshotRefusal> {
     if run_id.trim().is_empty() || run_id.contains(['/', '\\']) || run_id.starts_with('.') {
         return Err(SnapshotRefusal::new(
             Some(run_id),
             RefusalKind::RunUnreadable("it is not a run id".to_string()),
         ));
     }
-    read_run_dir(&super::runs_dir().join(run_id))
+    Ok(super::runs_dir().join(run_id))
 }
 
 #[cfg(test)]
 #[path = "rule_snapshot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rule_snapshot_backfill_tests.rs"]
+mod backfill_tests;
