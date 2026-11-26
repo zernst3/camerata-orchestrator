@@ -1,5 +1,5 @@
 //! #356: a batch whose results expired, or that the provider no longer has, before it was fetched
-//! no longer hands its id back on every resume.
+//! no longer hands its id back on every resume; and a resend chain has one owner per link.
 //!
 //! The stage polls a batch it left running by id before it submits anything again
 //! (`stage_batch::resume_batches`). These tests do the same through the journal: a poll of the
@@ -184,6 +184,136 @@ async fn a_gone_batch_is_answered_from_the_journal_on_a_later_poll() {
             fake.polls.load(Ordering::SeqCst),
             polls,
             "the provider is not asked again about a batch it said it no longer has"
+        );
+    })
+    .await;
+}
+
+/// Two batches whose credit-stopped rows are the same request (`i2`): one from the three items,
+/// one from `i4` and `i2`.
+fn other_set() -> Vec<BatchItem> {
+    vec![named("i4"), named("i2")]
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resend_is_owned_by_one_chain_and_after_a_restart_each_id_reads_its_own_rows() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = git_repo();
+        let store = new_run(&repo);
+        let fake = Arc::new(Ledger::failing(&["i2"]));
+        {
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let a = api.submit(three()).await.unwrap();
+            api.fetch(&a, CacheTtl::FiveMinutes).await.unwrap();
+            let b = api.submit(other_set()).await.unwrap();
+            api.fetch(&b, CacheTtl::FiveMinutes).await.unwrap();
+        }
+        let store = reopen(store);
+        fake.restore_credit();
+        let (resend_a, resend_b) = {
+            let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+            let ra = api.submit(three()).await.unwrap();
+            let rb = api.submit(other_set()).await.unwrap();
+            (ra, rb)
+            // The process stops before either resend is fetched.
+        };
+        assert_ne!(
+            resend_a, resend_b,
+            "a resend already linked from one batch is not adopted by a second"
+        );
+        assert_eq!(fake.sent()[2..], [s(&["i2"]), s(&["i2"])]);
+
+        // A restart: the stage polls and fetches each batch by the id it saved.
+        let store = reopen(store);
+        let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+        let rows = api.fetch(&resend_a, CacheTtl::FiveMinutes).await.unwrap();
+        assert_eq!(ids_of(&rows), ["i1", "i2", "i3"]);
+        assert!(rows.iter().all(|r| r.response.is_some()));
+        let rows = api.fetch(&resend_b, CacheTtl::FiveMinutes).await.unwrap();
+        assert_eq!(ids_of(&rows), ["i4", "i2"]);
+        assert!(rows.iter().all(|r| r.response.is_some()));
+        assert_eq!(fake.sent().len(), 4, "nothing more is submitted");
+    })
+    .await;
+}
+
+/// A run saved before the rule above can hold a batch linked from two others: the first batch
+/// of the three items, and the batch of `i4` and `i2`. After a restart the resend is read as
+/// part of the chain whose first batch was submitted first (then the lower file name). Returns
+/// the items a fetch of the resend by id answers, after each of three restarts.
+async fn read_a_resend_linked_from_two(three_first: bool) -> Vec<Vec<String>> {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let fake = Arc::new(Ledger::failing(&["i2"]));
+    {
+        let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+        let a = api.submit(three()).await.unwrap();
+        api.fetch(&a, CacheTtl::FiveMinutes).await.unwrap();
+        let b = api.submit(other_set()).await.unwrap();
+        api.fetch(&b, CacheTtl::FiveMinutes).await.unwrap();
+    }
+    let store = reopen(store);
+    fake.restore_credit();
+    let resend = {
+        let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+        api.submit(three()).await.unwrap()
+    };
+    // Link the second batch to the same resend, the way an older build could, and date the two.
+    let batches = store.dir().join("batches");
+    let mut files: Vec<(std::path::PathBuf, serde_json::Value)> = std::fs::read_dir(&batches)
+        .unwrap()
+        .map(|e| {
+            let path = e.unwrap().path();
+            let v = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            (path, v)
+        })
+        .collect();
+    let link = files
+        .iter()
+        .find_map(|(_, v)| (!v["follow"].is_null()).then(|| v["follow"].clone()))
+        .expect("the first batch links its resend");
+    let (early, late) = ("2001-01-01T00:00:00Z", "2002-01-01T00:00:00Z");
+    for (path, v) in &mut files {
+        let of_three = v["custom_ids"] == serde_json::json!(["i1", "i2", "i3"]);
+        let of_other = v["custom_ids"] == serde_json::json!(["i4", "i2"]);
+        if of_other {
+            v["follow"] = link.clone();
+        }
+        if of_three || of_other {
+            let first = of_three == three_first;
+            v["submitted_at"] = serde_json::json!(if first { early } else { late });
+            std::fs::write(&*path, serde_json::to_vec(&*v).unwrap()).unwrap();
+        }
+    }
+    let mut read = Vec::new();
+    let mut store = store;
+    for _ in 0..3 {
+        store = reopen(store);
+        let api = journal::JournalBatchApi::new(fake.clone(), store.clone());
+        let rows = api.fetch(&resend, CacheTtl::FiveMinutes).await.unwrap();
+        read.push(ids_of(&rows));
+    }
+    read
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_resend_linked_from_two_batches_on_disk_is_read_with_the_one_submitted_first() {
+    seeded(async {
+        let three_items = s(&["i1", "i2", "i3"]);
+        let other_items = s(&["i4", "i2"]);
+        assert_eq!(
+            read_a_resend_linked_from_two(true).await,
+            vec![three_items.clone(); 3],
+            "the three items were submitted first: their chain owns the resend"
+        );
+        assert_eq!(
+            read_a_resend_linked_from_two(false).await,
+            vec![other_items.clone(); 3],
+            "i4 and i2 were submitted first: their chain owns the resend"
         );
     })
     .await;

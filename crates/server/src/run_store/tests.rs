@@ -1269,7 +1269,7 @@ mod batches {
         anyhow::Error::new(f)
     }
 
-    /// #356: a batch that expired or is gone before it was fetched.
+    /// #356: a batch that expired or is gone before it was fetched, and resend chains.
     mod gone_batch;
 
     fn named(cid: &str) -> BatchItem {

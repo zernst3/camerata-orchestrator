@@ -999,6 +999,17 @@ fn batch_chain(dir: &Path, key: &str, n: usize) -> Vec<(String, usize, BatchFile
     chain
 }
 
+/// Every `(key, n)` some stored batch file links to as its follow-up.
+fn follow_targets(dir: &Path) -> std::collections::HashSet<(String, usize)> {
+    std::fs::read_dir(dir.join("batches"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|e| read_json::<BatchFile>(&e.path()))
+        .filter_map(|f| f.follow)
+        .collect()
+}
+
 /// The rows a batch file answers for: its fetched rows, or for a gone batch the rows it owed
 /// ([`StoredRow::owed_by_gone`]). `None` for a batch not fetched and not gone.
 fn file_rows(file: &BatchFile) -> Option<Vec<StoredRow>> {
@@ -1156,16 +1167,20 @@ impl BatchApi for JournalBatchApi {
             // its own hash. The caller gets the new id, and its fetch returns the stored rows with
             // the new rows.
             let key2 = hash_items(&again);
+            let linked_from_elsewhere = follow_targets(&dir);
             let mut link_to = None;
             let mut n2 = 0;
             while let Some(file) = read_json::<BatchFile>(&batch_path(&dir, &key2, n2)) {
                 // A batch of these very items that was submitted and never linked or fetched (a
                 // kill between its record and the link, or the stage's own batch of them) may be
-                // running and billed: adopt it, never submit the items twice. A gone batch has
-                // nothing to adopt.
+                // running and billed: adopt it, never submit the items twice. A batch another
+                // file already links to is that chain's, and is never adopted by a second one:
+                // a follow link has one owner, so a fetch of its id after a restart reads one
+                // chain (#356). A gone batch has nothing to adopt.
                 if file.rows.is_none()
                     && file.gone.is_none()
                     && !chain.iter().any(|(k, i, _)| *k == key2 && *i == n2)
+                    && !linked_from_elsewhere.contains(&(key2.clone(), n2))
                 {
                     link_to = Some(file.batch_id.clone());
                     break;
@@ -1339,12 +1354,16 @@ impl JournalBatchApi {
             .collect();
         let own = files.iter().find(|f| f.batch_id == batch_id)?;
         let mut view = (own.key.clone(), own.n);
-        // Walk back to the batch the stage first submitted (a bounded walk).
+        // Walk back to the batch the stage first submitted (a bounded walk). A follow link has one
+        // owner (a submit never adopts a batch another file links to); a run saved before that
+        // rule can hold a batch linked from two files, and it is read with the one submitted
+        // first, then the lower `(key, n)`, so the same id reads the same chain every time.
         for _ in 0..1_000 {
-            match files
+            let before = files
                 .iter()
-                .find(|f| f.follow.as_ref() == Some(&(view.0.clone(), view.1)))
-            {
+                .filter(|f| f.follow.as_ref() == Some(&(view.0.clone(), view.1)))
+                .min_by(|a, b| (&a.submitted_at, &a.key, a.n).cmp(&(&b.submitted_at, &b.key, b.n)));
+            match before {
                 Some(before) => view = (before.key.clone(), before.n),
                 None => break,
             }
