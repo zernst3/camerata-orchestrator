@@ -1846,11 +1846,11 @@ fn a_resume_after_a_credit_row_in_a_batch_sends_the_row_again_and_finishes() {
 // ---------------------------------------------------------------------------------------------
 
 /// The walk reads the files git tracks and the walk skipped (a committed file under a
-/// `.gitignore` pattern) from `git ls-files -z`. One tracked path that is not UTF-8 makes that
-/// whole list unusable, so every such file goes unread and unnamed, with nothing said. This
-/// machine's file system cannot hold a non-UTF-8 name, so the path is put into the index only.
+/// `.gitignore` pattern) from `git ls-files -z`. One tracked path that is not UTF-8 must not make
+/// that whole list unusable: the other tracked files are read, and the bad path is named as not
+/// read. This machine's file system cannot hold a non-UTF-8 name, so the path is put into the
+/// index only.
 #[test]
-#[ignore = "bug: one tracked path that is not UTF-8 drops the whole git ls-files union (files.rs git_tracked_files), so tracked files under a .gitignore pattern are neither read nor named"]
 fn a_tracked_path_that_is_not_utf8_does_not_hide_the_other_tracked_files() {
     let repo = tempfile::tempdir().unwrap();
     let root = repo.path();
@@ -1906,14 +1906,13 @@ fn a_tracked_path_that_is_not_utf8_does_not_hide_the_other_tracked_files() {
     .unwrap();
     let read: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
     assert!(read.contains(&"main.py"), "{read:?}");
-    let named: Vec<&String> = extracted
-        .skipped_unreadable
-        .iter()
-        .chain(&extracted.symlinks)
-        .collect();
     assert!(
-        read.contains(&"hidden/kept.py") || named.iter().any(|p| p.contains("kept.py")),
-        "the tracked file under a .gitignore pattern is read or named, not dropped: read {read:?}, \
-         named {named:?}"
+        read.contains(&"hidden/kept.py"),
+        "the tracked file under a .gitignore pattern is read: {read:?}"
+    );
+    assert_eq!(
+        extracted.names_not_text,
+        ["legacy_\\xFF.py"],
+        "the bad path is named as not read, with its invalid byte as a hex escape"
     );
 }

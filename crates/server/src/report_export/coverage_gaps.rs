@@ -254,6 +254,7 @@ pub(super) fn skipped_summary_sentence(
         SkipReason::NotInspectedType,
         SkipReason::NotInspectedVersionsOnly,
         SkipReason::Symlink,
+        SkipReason::NameNotText,
     ]
     .into_iter()
     .filter(|r| totals.of(*r) > 0)
@@ -277,6 +278,8 @@ pub(super) fn skipped_summary_sentence(
                 "symbolic link (not read through)".to_string()
             }
             SkipReason::Symlink => "symbolic links (not read through)".to_string(),
+            // The sentence part says the cause; the label gives the full reason in the table.
+            SkipReason::NameNotText => "with a file name that is not UTF-8 text".to_string(),
             _ => in_a_list(&r.label()),
         };
         format!("{} {label}", totals.of(r))

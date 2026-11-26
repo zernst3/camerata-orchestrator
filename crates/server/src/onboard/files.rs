@@ -94,6 +94,12 @@ pub fn symlink_label() -> String {
     "a symbolic link; what it points to is not read through it".to_string()
 }
 
+/// The reason a tracked file with a name that is not UTF-8 text is not read, as Coverage states
+/// it. Only the name is wrong; the file's contents were never looked at.
+pub fn name_not_text_label() -> String {
+    "a file name that is not UTF-8 text; the file is not read".to_string()
+}
+
 /// Files larger than this are not read for the inspection. An admitted text file over it (and not
 /// excluded by agreement) is a pre-start warning, never a refusal, and is listed under Coverage;
 /// the secret checks still search it up to [`MAX_SECRET_SCAN_BYTES`].
@@ -939,6 +945,9 @@ pub struct ExtractedRepo {
     /// the file nor the folder a link points to is read, sized or counted through it. Listed under
     /// Coverage with [`symlink_label`], never dropped silently.
     pub symlinks: Vec<String>,
+    /// Tracked paths whose name is not UTF-8 text, shown with each invalid byte as an uppercase
+    /// hex escape (`caf\xE9.py`), so two different names never read the same: the file is not read. Listed under Coverage with [`name_not_text_label`].
+    pub names_not_text: Vec<String>,
     /// Files neither admitted, listed, noise nor excluded, counted by type ([`type_key`]), most
     /// files first: the operator-only tally in `camerata count --json` that makes a new silent
     /// type visible on the first count. Never shown to a client.
@@ -1001,6 +1010,7 @@ impl ExtractedRepo {
         self.generated.sort();
         self.not_inspected.sort();
         self.symlinks.sort();
+        self.names_not_text.sort();
         self
     }
 
@@ -1166,6 +1176,7 @@ struct WalkSink {
     generated: Vec<String>,
     not_inspected: Vec<String>,
     symlinks: Vec<String>,
+    names_not_text: Vec<String>,
     unclassified: std::collections::BTreeMap<String, usize>,
 }
 
@@ -1182,6 +1193,7 @@ impl WalkSink {
             generated: Vec::new(),
             not_inspected: Vec::new(),
             symlinks: Vec::new(),
+            names_not_text: Vec::new(),
             unclassified: std::collections::BTreeMap::new(),
         }
     }
@@ -1195,10 +1207,33 @@ impl WalkSink {
         }
     }
 
+    /// Name a tracked path whose bytes are not UTF-8 (`rel` is its displayed form, invalid bytes
+    /// as hex escapes) as not read, with its own reason ([`name_not_text_label`]): its contents
+    /// were never looked at. It has no size. It gets the same checks as any file, on the displayed
+    /// name: an agreed exclusion wins (and marks its pattern matched), noise and a type the
+    /// inspection does not read are skipped like any other.
+    fn not_utf8_name(&mut self, rel: String) {
+        self.classify_inner(rel, std::path::Path::new(""), || None, true);
+    }
+
     /// Classify `rel` (at `full`): counted as excluded noise, listed as generated, or admitted
     /// for reading. `len` is asked for only when the file is admissible; `None` (a
     /// size that cannot be read, or an entry that is gone) skips it.
     fn classify(&mut self, rel: String, full: &std::path::Path, len: impl FnOnce() -> Option<u64>) {
+        self.classify_inner(rel, full, len, false);
+    }
+
+    /// [`Self::classify`], and the one body behind it. `name_only` is a tracked path whose name is
+    /// not UTF-8 (`rel` is its displayed form): it gets every check a good path gets, but nothing
+    /// is opened, sized or read, and an admissible one is named as not read under
+    /// [`name_not_text_label`] instead of being admitted.
+    fn classify_inner(
+        &mut self,
+        rel: String,
+        full: &std::path::Path,
+        len: impl FnOnce() -> Option<u64>,
+        name_only: bool,
+    ) {
         // Belt-and-suspenders: noise denylist on top of gitignore (catches projects whose
         // build artefacts are not yet gitignored, or repos where target/ was committed).
         let noise = is_noise_path(&rel, &self.extra_dirs);
@@ -1219,6 +1254,9 @@ impl WalkSink {
             }
             return;
         }
+        if name_only && noise {
+            return;
+        }
         if noise && admissible {
             self.excluded_noise_paths.push(rel.clone());
         }
@@ -1235,13 +1273,21 @@ impl WalkSink {
             // generated one is skipped.
             let size = len();
             if is_not_inspected_type(&rel) {
-                if let Some(len) = size {
+                if name_only {
+                    // A name that is not UTF-8 has no file to size, so it would be skipped as a
+                    // missing one: it is named as not read instead, never silent.
+                    self.names_not_text.push(rel);
+                } else if let Some(len) = size {
                     self.admitted.sizes.insert(rel.clone(), len);
                     self.not_inspected.push(rel);
                 }
             } else if size.is_some() {
                 *self.unclassified.entry(type_key(&rel)).or_insert(0) += 1;
             }
+            return;
+        }
+        if name_only {
+            self.names_not_text.push(rel);
             return;
         }
         // A file that declares itself generated in a comment near its top is not read for the
@@ -1275,6 +1321,7 @@ impl WalkSink {
             generated: self.generated,
             not_inspected: self.not_inspected,
             symlinks: self.symlinks,
+            names_not_text: self.names_not_text,
             unclassified_types: {
                 let mut tally: Vec<(String, usize)> = self.unclassified.into_iter().collect();
                 tally.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -1467,8 +1514,15 @@ fn read_local_repo_files_gitignore(
     // regardless, so this is purely additive and never turns a working scan into an error.
     // It runs past the cap too, so a tracked file beyond the cap is named like any other.
     {
-        if let Some(tracked) = git_tracked_files(root) {
-            for rel in tracked {
+        if let Some(TrackedPaths { text, not_utf8 }) = git_tracked_files(root) {
+            // A tracked path whose bytes are not UTF-8 cannot be opened by a text name. It is
+            // named as not read (invalid bytes as hex escapes, so it is lossless) instead of
+            // dropping the whole list. The displayed name never goes into `seen`: a valid path
+            // that happens to read the same must not be skipped.
+            for rel in not_utf8 {
+                sink.not_utf8_name(rel);
+            }
+            for rel in text {
                 if seen.contains(&rel) {
                     continue;
                 }
@@ -1506,10 +1560,11 @@ fn read_local_repo_files_gitignore(
 /// The full set of git-TRACKED file paths under `root` (relative, forward-slashed), via
 /// `git ls-files -z` (NUL-separated so paths with spaces/unicode parse unambiguously, and so
 /// a path itself can never be mistaken for the separator). Returns `None` on any failure (no
-/// `git` binary on PATH, non-zero exit, non-UTF-8 output, ...) — the caller treats that as "no
-/// union available," never a hard error: the primary gitignore-aware walk already ran and
-/// still stands on its own.
-fn git_tracked_files(root: &std::path::Path) -> Option<Vec<String>> {
+/// `git` binary on PATH, non-zero exit, ...) — the caller treats that as "no union available,"
+/// never a hard error: the primary gitignore-aware walk already ran and still stands on its own.
+/// Each path is decoded on its own: one that is not UTF-8 is returned apart, in its displayed
+/// form, and never costs the other paths.
+fn git_tracked_files(root: &std::path::Path) -> Option<TrackedPaths> {
     let output = std::process::Command::new("git")
         .args(crate::workspace::GIT_NO_REPO_COMMANDS)
         .args(["ls-files", "-z"])
@@ -1519,13 +1574,39 @@ fn git_tracked_files(root: &std::path::Path) -> Option<Vec<String>> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8(output.stdout).ok()?;
-    Some(
-        text.split('\0')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.replace('\\', "/"))
-            .collect(),
-    )
+    // Split on NUL first and decode each path on its own: one path that is not UTF-8 must not
+    // make every other tracked file unusable.
+    let mut paths = TrackedPaths::default();
+    for raw in output.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        match std::str::from_utf8(raw) {
+            Ok(s) => paths.text.push(s.replace('\\', "/")),
+            Err(_) => paths.not_utf8.push(display_non_utf8_path(raw)),
+        }
+    }
+    Some(paths)
+}
+
+/// The displayed form of a path that is not UTF-8: the valid parts as text (backslash to slash,
+/// as for every path), each invalid byte as an uppercase hex escape (`caf\xE9.py`). Lossless, so
+/// two names that differ in one byte read differently.
+fn display_non_utf8_path(raw: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for chunk in raw.utf8_chunks() {
+        out.push_str(&chunk.valid().replace('\\', "/"));
+        for byte in chunk.invalid() {
+            let _ = write!(out, "\\x{byte:02X}");
+        }
+    }
+    out
+}
+
+/// What `git ls-files -z` listed: the paths that decode, and the paths that do not (shown as
+/// [`display_non_utf8_path`] gives them).
+#[derive(Default)]
+struct TrackedPaths {
+    text: Vec<String>,
+    not_utf8: Vec<String>,
 }
 
 /// Noise-denylist walk (fallback for non-git directories). Iterative DFS so a deep tree
@@ -3241,6 +3322,205 @@ mod tests {
             ),
             "{}",
             inspected_types_sentence()
+        );
+    }
+
+    #[test]
+    fn a_tracked_path_that_is_not_utf8_is_named_and_does_not_hide_the_other_tracked_files() {
+        use std::os::unix::ffi::OsStrExt;
+        let run = |root: &std::path::Path, args: &[&std::ffi::OsStr]| {
+            let out = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let os = std::ffi::OsStr::new;
+        run(root, &[os("init"), os("-q")]);
+        write(root, ".gitignore", "hidden/\n");
+        write(root, "hidden/kept.py", "def kept():\n    return 1\n");
+        write(root, "main.py", "def main():\n    return 2\n");
+        run(root, &[os("add"), os("-f"), os("hidden/kept.py")]);
+        run(root, &[os("add"), os("main.py")]);
+        // An index entry whose path bytes are not UTF-8; the file system cannot hold the name.
+        let blob = {
+            use std::io::Write;
+            let mut child = std::process::Command::new("git")
+                .current_dir(root)
+                .args(["hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(b"x = 1\n").unwrap();
+            let out = child.wait_with_output().unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let mut arg: Vec<u8> = format!("100644,{blob},").into_bytes();
+        arg.extend_from_slice(b"legacy_\xff.py");
+        run(
+            root,
+            &[
+                os("update-index"),
+                os("--add"),
+                os("--cacheinfo"),
+                std::ffi::OsStr::from_bytes(&arg),
+            ],
+        );
+
+        let extracted = scan(root);
+        let read = paths(&extracted);
+        assert!(read.contains(&"main.py".to_string()), "{read:?}");
+        assert!(
+            read.contains(&"hidden/kept.py".to_string()),
+            "the tracked file under a .gitignore pattern is read: {read:?}"
+        );
+        assert_eq!(
+            extracted.names_not_text,
+            ["legacy_\\xFF.py"],
+            "the bad path is named as not read, invalid bytes shown as hex"
+        );
+        assert!(extracted.skipped_unreadable.is_empty());
+
+        // The Coverage count: the left-out counts add up to the total.
+        let mut list = crate::scan_ledger::SkippedFileList::default();
+        list.record_repo(
+            "acme/app",
+            crate::scan_ledger::RepoSkips {
+                oversize: extracted.skipped_oversize.clone(),
+                beyond_cap: extracted.skipped_beyond_cap.clone(),
+                not_text: extracted.skipped_unreadable.clone(),
+                excluded_by_agreement: extracted.excluded_by_agreement.clone(),
+                long_line: extracted.skipped_long_line.clone(),
+                generated: extracted.generated.clone(),
+                generated_unsearched: Vec::new(),
+                not_inspected_type: extracted.not_inspected.clone(),
+                excluded_never_read: Vec::new(),
+                symlink: extracted.symlinks.clone(),
+                name_not_text: extracted.names_not_text.clone(),
+                sizes: &extracted.skipped_sizes,
+                file_cap: extracted.file_cap,
+            },
+        );
+        let totals = list.totals();
+        assert_eq!(totals.name_not_text, 1);
+        assert_eq!(totals.not_text, 0);
+        assert_eq!(totals.total(), 1);
+        assert_eq!(
+            crate::scan_ledger::SkipReason::NameNotText.label(),
+            "a file name that is not UTF-8 text; the file is not read"
+        );
+    }
+
+    /// A repo whose index also holds each of `bad` (raw path bytes, not UTF-8). The file system
+    /// cannot hold such a name, so the entries are put into the index only.
+    fn repo_with_index_only_paths(root: &std::path::Path, bad: &[&[u8]]) {
+        use std::os::unix::ffi::OsStrExt;
+        let git = |args: &[&std::ffi::OsStr]| {
+            let out = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        let os = std::ffi::OsStr::new;
+        git(&[os("init"), os("-q")]);
+        write(root, "main.py", "def main():\n    return 2\n");
+        git(&[os("add"), os("main.py")]);
+        let blob = {
+            use std::io::Write;
+            let mut child = std::process::Command::new("git")
+                .current_dir(root)
+                .args(["hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(b"x = 1\n").unwrap();
+            let out = child.wait_with_output().unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        for name in bad {
+            let mut arg: Vec<u8> = format!("100644,{blob},").into_bytes();
+            arg.extend_from_slice(name);
+            git(&[
+                os("update-index"),
+                os("--add"),
+                os("--cacheinfo"),
+                std::ffi::OsStr::from_bytes(&arg),
+            ]);
+        }
+    }
+
+    #[test]
+    fn two_bad_names_that_differ_in_one_byte_are_both_named_and_counted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        repo_with_index_only_paths(root, &[b"caf\xe9.py", b"caf\xe8.py"]);
+        let extracted = scan(root);
+        assert_eq!(
+            extracted.names_not_text,
+            ["caf\\xE8.py", "caf\\xE9.py"],
+            "each invalid byte is shown as an uppercase hex escape, so no two names collapse"
+        );
+        let mut list = crate::scan_ledger::SkippedFileList::default();
+        for name in &extracted.names_not_text {
+            list.push(
+                "acme/app",
+                name.clone(),
+                crate::scan_ledger::SkipReason::NameNotText,
+            );
+        }
+        assert_eq!(list.totals().name_not_text, 2);
+        assert_eq!(list.totals().total(), 2);
+    }
+
+    #[test]
+    fn a_bad_name_gets_the_same_exclusion_type_and_noise_checks_as_a_good_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        repo_with_index_only_paths(
+            root,
+            &[
+                b"seeds/data_\xff.py",
+                b"logo_\xff.png",
+                b"node_modules/dep_\xff.js",
+                b"src/legacy_\xff.py",
+                b"Views/Index_\xff.cshtml",
+            ],
+        );
+        let scope = crate::onboard::scope::ScanScope::from_patterns(&["app/seeds/**".to_string()])
+            .unwrap()
+            .for_repo("acme/app");
+        let extracted = read_local_repo_files(root, &scope).unwrap();
+        assert_eq!(
+            extracted.names_not_text,
+            ["Views/Index_\\xFF.cshtml", "src/legacy_\\xFF.py"],
+            "a bad name of a type not inspected yet is named too, as a good one is"
+        );
+        assert_eq!(
+            extracted.excluded_by_agreement,
+            ["seeds/data_\\xFF.py"],
+            "a bad name under an excluded folder is excluded by agreement"
+        );
+        assert_eq!(
+            extracted.matched_patterns,
+            [0],
+            "and the pattern is marked matched"
         );
     }
 }
