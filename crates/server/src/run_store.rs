@@ -38,6 +38,7 @@
 
 pub mod engine_pin;
 pub mod journal;
+pub mod rule_snapshot;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -976,7 +977,7 @@ pub(crate) struct StoreState {
 }
 
 /// What to create a run from.
-pub struct NewRun {
+pub struct NewRun<'a> {
     pub project_key: String,
     pub repos: Vec<(String, PathBuf)>,
     pub models: ModelsRecord,
@@ -990,6 +991,10 @@ pub struct NewRun {
     pub project_id: Option<String>,
     /// The build and rule library this run starts on, from [`engine_pin::EnginePin::for_run`].
     pub pin: engine_pin::EnginePin,
+    /// The rule library the run loaded: the same set `pin`'s rule digest was computed over. It
+    /// is kept in the run's folder ([`rule_snapshot`]) so every later export reads exactly these
+    /// rules. `None` only when no rule library loaded (the pin's digest is then empty).
+    pub rules: Option<&'a camerata_rules::RuleSet>,
 }
 
 /// A fresh run id: the time, then six random hex digits.
@@ -1043,13 +1048,36 @@ fn plan_for(repos: &[(String, PathBuf)], include_alternatives: bool) -> Vec<Part
 impl RunStore {
     /// Begin a new run: the folder, the record with every part pending and the lock, all written
     /// before any work starts.
-    pub fn create(new: NewRun) -> Result<Arc<Self>, RunStoreError> {
+    ///
+    /// The rule snapshot is written here, before the record, for the command line and the app
+    /// alike: a run whose rules cannot be kept is not created, because it could never be
+    /// exported.
+    pub fn create(new: NewRun<'_>) -> Result<Arc<Self>, RunStoreError> {
         let session = Session::begin();
         let run_id = new_run_id();
         let dir = runs_dir().join(&run_id);
         create_private_dir(&dir).map_err(|e| RunStoreError::Io(e.to_string()))?;
         create_private_dir(&dir.join("calls")).map_err(|e| RunStoreError::Io(e.to_string()))?;
         create_private_dir(&dir.join("batches")).map_err(|e| RunStoreError::Io(e.to_string()))?;
+        if new.rules.is_none() && !new.pin.corpus_version.is_empty() {
+            return Err(RunStoreError::Refused(
+                "the run names a rule library but was not handed the rules to keep; the run \
+                 was not started"
+                    .to_string(),
+            ));
+        }
+        if let Some(rules) = new.rules {
+            let digest = rule_snapshot::write_in(&dir, rules).map_err(|e| {
+                RunStoreError::Io(format!("the rules this run loaded could not be kept: {e}"))
+            })?;
+            if digest != new.pin.corpus_version {
+                return Err(RunStoreError::Refused(format!(
+                    "the rules kept with this run ({digest}) are not the rules its build \
+                     recorded ({}); the run was not started",
+                    new.pin.corpus_version
+                )));
+            }
+        }
         let mut seed = [0u8; crate::prompt_frame::NONCE_BYTES];
         getrandom::getrandom(&mut seed).map_err(|e| RunStoreError::Io(e.to_string()))?;
         let repos = new

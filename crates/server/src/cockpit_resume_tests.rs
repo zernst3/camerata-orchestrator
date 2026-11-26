@@ -481,6 +481,7 @@ fn saved_cockpit_run(
     use crate::run_store as rs;
     rs::RunStore::create(rs::NewRun {
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
+        rules: None,
         project_key: "listing-test".to_string(),
         repos: vec![(name.to_string(), dir.to_path_buf())],
         models: rs::ModelsRecord {
@@ -514,6 +515,7 @@ fn saved_cockpit_run_in(
     use crate::run_store as rs;
     rs::RunStore::create(rs::NewRun {
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
+        rules: None,
         project_key: "listing-test".to_string(),
         repos: repos
             .iter()

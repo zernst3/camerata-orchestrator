@@ -111,6 +111,7 @@ fn git_repo() -> tempfile::TempDir {
 fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
     RunStore::create(NewRun {
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
+        rules: None,
         project_key: "proj-r5".to_string(),
         repos: vec![(REPO.to_string(), repo.path().to_path_buf())],
         models: crate::run_store::ModelsRecord {

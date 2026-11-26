@@ -1375,6 +1375,7 @@ pub async fn run_inspect_pipeline_with(
                 origin: camerata_server::run_store::RunOrigin::Cli,
                 project_id: None,
                 pin: engine_pin.clone(),
+                rules: corpus.as_ref(),
             }) {
                 Ok(store) => {
                     if let Some(prior) = &incremental_prior {

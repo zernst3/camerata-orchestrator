@@ -136,6 +136,7 @@ fn key() -> AiScanKey {
 fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
     RunStore::create(NewRun {
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
+        rules: None,
         project_key: "proj-1".to_string(),
         repos: vec![("acme/api".to_string(), repo.path().to_path_buf())],
         models: models(),
@@ -1655,6 +1656,7 @@ fn the_preview_says_what_remains_and_why_a_resume_cannot_start() {
 fn cockpit_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
     RunStore::create(NewRun {
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
+        rules: None,
         project_key: "proj-1".to_string(),
         repos: vec![("acme/api".to_string(), repo.path().to_path_buf())],
         models: models(),
@@ -1757,6 +1759,7 @@ fn the_listing_holds_only_the_runs_the_caller_says_belong_to_the_project() {
     drop(cockpit_run(&repo));
     let stranger = RunStore::create(NewRun {
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
+        rules: None,
         project_key: "proj-2".to_string(),
         repos: vec![("acme/other".to_string(), other.path().to_path_buf())],
         models: models(),

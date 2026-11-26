@@ -1366,6 +1366,7 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
                 None,
                 &Default::default(),
             ),
+            rules: None,
             project_key: camerata_server::scan_cache::state_dir::repo_state_key(repo.path()),
             repos: vec![("acme/one".to_string(), repo.path().to_path_buf())],
             models: rs::ModelsRecord {

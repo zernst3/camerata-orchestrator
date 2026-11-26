@@ -3288,6 +3288,7 @@ pub(crate) async fn start_audit_job(
                     origin: rs::RunOrigin::Cockpit,
                     project_id: project_id.clone(),
                     pin: engine_pin,
+                    rules: corpus.as_ref(),
                 }) {
                     Ok(store) => {
                         if let Some(p) = &prior {

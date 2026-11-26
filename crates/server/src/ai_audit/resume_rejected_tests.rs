@@ -32,6 +32,7 @@ async fn seeded<F: std::future::Future>(fut: F) -> F::Output {
 fn new_run(repo_dir: &std::path::Path) -> Arc<RunStore> {
     RunStore::create(NewRun {
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
+        rules: None,
         project_key: "proj-1".to_string(),
         repos: vec![("o/r".to_string(), repo_dir.to_path_buf())],
         models: ModelsRecord {
