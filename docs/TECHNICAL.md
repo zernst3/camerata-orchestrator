@@ -149,7 +149,7 @@ When you run `cargo run -p camerata-ui`:
    its own environment resolves (`build_guard::Folders::for_this_app`, through the
    same `camerata_api_types::data_dir` and `state_dir` functions the server uses):
    build first, then data folder, then state folder. A server that differs, or names
-   no folder, is `LaunchDecision::Refuse`d: the launcher neither attaches to it nor
+   no folder where the app has one, is `LaunchDecision::Refuse`d: the launcher neither attaches to it nor
    spawns over it nor kills it, and `BuildGuard` shows the screen that names both
    sides instead of the cockpit. A spawned server inherits the app's environment, so
    `CAMERATA_DATA_DIR` and `CAMERATA_STATE_DIR` reach it (pinned by
