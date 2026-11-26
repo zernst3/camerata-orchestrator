@@ -55,6 +55,38 @@ struct State {
     counter: usize,
 }
 
+/// #565: a project saved before the backend setting existed has no `backend` key, which reads as
+/// the CLI. A client engagement (what such a project is, unless it says otherwise) runs only on
+/// the API, so on the CLI every run of it would be refused. Each such project gets
+/// `"backend": "api"` before the file is read into projects; one that is not a client engagement
+/// keeps the CLI, and a saved backend is never changed. Returns the names of the projects moved.
+fn open_old_client_engagements_on_the_api(raw: &mut serde_json::Value) -> Vec<String> {
+    let Some(projects) = raw.get_mut("projects").and_then(|p| p.as_array_mut()) else {
+        return Vec::new();
+    };
+    let mut moved = Vec::new();
+    for project in projects.iter_mut().filter_map(|p| p.as_object_mut()) {
+        if project.contains_key("backend") {
+            continue;
+        }
+        let client_engagement = project
+            .get("client_engagement")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(camerata_app_core::project::default_client_engagement);
+        if client_engagement {
+            project.insert("backend".to_string(), serde_json::json!("api"));
+            moved.push(
+                project
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+    }
+    moved
+}
+
 impl ProjectStore {
     /// An empty, NON-persisted store (tests / clean in-memory use).
     pub fn new() -> Self {
@@ -65,10 +97,33 @@ impl ProjectStore {
     /// persist every change back to it. This is what the running app uses, so
     /// projects survive restarts.
     pub fn load_or_new(path: std::path::PathBuf) -> Self {
+        let mut backend_moved = Vec::new();
         let mut state = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|s| serde_json::from_str::<State>(&s).ok())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|mut raw| {
+                backend_moved = open_old_client_engagements_on_the_api(&mut raw);
+                serde_json::from_value::<State>(raw).ok()
+            })
             .unwrap_or_default();
+        for name in &backend_moved {
+            tracing::info!(
+                "project {name}: saved before the backend setting existed; a client engagement \
+                 runs only on the API, so it now opens on the API backend"
+            );
+        }
+        for project in state
+            .projects
+            .iter()
+            .filter(|p| p.review.finder_moved_to_agent)
+        {
+            tracing::info!(
+                "project {}: saved before the finder setting existed, so it opens on the agent \
+                 finder until a finder is picked",
+                project.name
+            );
+        }
+        let moved_backend = !backend_moved.is_empty();
         // A project that saved the previous default over-budget set (five reasons) loads the new
         // default (seven): say so once, and the run's ledger records the set in force.
         if camerata_api_types::project::take_over_budget_set_upgrade_notice() {
@@ -108,7 +163,7 @@ impl ProjectStore {
             inner: std::sync::Arc::new(Mutex::new(state)),
             path: Some(std::sync::Arc::new(path)),
         };
-        if moved {
+        if moved || moved_backend {
             store.save();
         }
         store
@@ -1453,8 +1508,8 @@ mod finder_setting_tests {
     use camerata_api_types::project::ProjectFinder;
 
     /// Outside review Part 1 item 3: a new project runs the agent finder on Opus 5.5 for both the
-    /// finder and the group review; a project saved before the setting existed, and one that saved
-    /// Engine, stay Engine.
+    /// finder and the group review; one that saved Engine stays Engine. A project saved before the
+    /// setting existed opens on the agent finder (#565).
     #[test]
     fn a_new_project_defaults_to_the_agent_finder_on_opus_5_5() {
         let store = ProjectStore::new();
@@ -1477,22 +1532,25 @@ mod finder_setting_tests {
 
     #[test]
     fn a_saved_project_keeps_its_saved_finder() {
-        // Saved before the finder setting existed: Engine, as it has always loaded.
+        // Saved before the finder setting existed: the agent finder, with the note (#565).
         let legacy: Project =
             serde_json::from_value(serde_json::json!({ "id": "old", "name": "Old" })).unwrap();
-        assert_eq!(legacy.review.finder, ProjectFinder::Engine);
+        assert_eq!(legacy.review.finder, ProjectFinder::Agent);
+        assert!(legacy.review.finder_moved_to_agent);
         // Saved with Engine chosen: stays Engine.
         let saved: Project = serde_json::from_value(serde_json::json!({
             "id": "e", "name": "E", "review": { "finder": "engine" },
         }))
         .unwrap();
         assert_eq!(saved.review.finder, ProjectFinder::Engine);
-        // Saved with a review block that has no finder key: Engine too.
+        // Saved with a review block that has no finder key: the agent finder too (#565).
         let partial: Project = serde_json::from_value(serde_json::json!({
             "id": "p", "name": "P", "review": { "escalation_floor": 7 },
         }))
         .unwrap();
-        assert_eq!(partial.review.finder, ProjectFinder::Engine);
+        assert_eq!(partial.review.finder, ProjectFinder::Agent);
+        assert!(partial.review.finder_moved_to_agent);
+        assert_eq!(partial.review.escalation_floor, 7);
     }
 
     #[test]

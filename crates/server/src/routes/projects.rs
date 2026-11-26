@@ -953,8 +953,10 @@ fn set_project_finder(state: &AppState, id: &str, word: &str) -> Json<serde_json
     let Some(project) = state.projects.get(id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
+    // The operator has chosen now: the note that an old project moved to the agent finder goes.
     let settings = camerata_api_types::project::ReviewSettings {
         finder,
+        finder_moved_to_agent: false,
         ..project.review
     };
     match state.projects.set_review_settings(id, settings) {

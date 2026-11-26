@@ -881,7 +881,13 @@ async fn a_client_engagement_audit_is_refused_before_any_repository_is_read() {
     // (a new project's default) does not use it.
     state
         .projects
-        .set_review_settings(&p.id, camerata_api_types::project::ReviewSettings::legacy())
+        .set_review_settings(
+            &p.id,
+            camerata_api_types::project::ReviewSettings {
+                finder: camerata_api_types::project::ProjectFinder::Engine,
+                ..camerata_api_types::project::ReviewSettings::default()
+            },
+        )
         .unwrap()
         .unwrap();
     let req = |model: Option<&str>| AuditReq {

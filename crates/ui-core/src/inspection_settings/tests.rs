@@ -363,3 +363,19 @@ fn an_unconfirmed_or_unreadable_write_does_not_claim_the_value_was_kept() {
         save_error_line(Stage::Fix, "unknown step")
     );
 }
+
+/// #565: the note shows only while the project carries the moved flag, and it is the shared line.
+#[test]
+fn the_finder_moved_note_follows_the_flag() {
+    use camerata_api_types::project::FINDER_MOVED_NOTE;
+    let moved = ReviewSettings {
+        finder_moved_to_agent: true,
+        ..ReviewSettings::for_new_project()
+    };
+    assert_eq!(finder_moved_note(&moved), Some(FINDER_MOVED_NOTE));
+    assert_eq!(finder_moved_note(&ReviewSettings::for_new_project()), None);
+    assert_eq!(
+        finder_moved_note(&ReviewSettings::legacy()),
+        Some(FINDER_MOVED_NOTE)
+    );
+}

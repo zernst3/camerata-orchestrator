@@ -1,0 +1,33 @@
+{
+  "projects": [
+    {
+      "id": "proj-1",
+      "name": "acme-ledger",
+      "repos": ["acme/ledger"],
+      "ruleset": {},
+      "onboarded": ["acme/ledger"],
+      "cli_active": false
+    },
+    {
+      "id": "proj-2",
+      "name": "acme-billing",
+      "repos": ["acme/billing"],
+      "ruleset": {},
+      "onboarded": [],
+      "backend": "cli",
+      "client_engagement": true,
+      "review": { "finder": "engine", "escalation_floor": 7 }
+    },
+    {
+      "id": "proj-3",
+      "name": "acme-internal-tools",
+      "repos": ["acme/internal-tools"],
+      "ruleset": {},
+      "onboarded": [],
+      "client_engagement": false,
+      "review": { "escalation_floor": 9 }
+    }
+  ],
+  "active": "proj-1",
+  "counter": 3
+}

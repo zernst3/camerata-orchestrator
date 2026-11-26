@@ -94,7 +94,10 @@ pub fn default_routine_secs() -> u64 {
 /// - **`Cli`** (the serde default AND the [`Default`] impl, i.e. the value of an ABSENT
 ///   `backend` field in a legacy persisted file, so legacy behavior never changes) — the
 ///   Claude Code CLI, i.e. the operator's own logged-in subscription. No API key needed.
-///   A NEW project does not start here: it starts on [`ProjectBackend::for_new_project`].
+///   A NEW project does not start here: it starts on [`ProjectBackend::for_new_project`]. An
+///   old CLIENT ENGAGEMENT with no `backend` key does not stay here either: the project store
+///   opens it on `Api` when it loads the file (#565, `camerata_server::project`), since a client
+///   engagement on the CLI is refused on every run.
 /// - **`Api`** — the Anthropic Messages API. Needs an Anthropic key (saved in the app, else the `ANTHROPIC_API_KEY` env fallback). A
 ///   missing key never falls back to the CLI — `resolve_backend` reports
 ///   `BackendResolution::Blocked` and the caller must not start any model call. This is the
@@ -285,20 +288,15 @@ pub const FINDER_DEFAULT_MODEL: &str = "claude-opus-5-5";
 
 /// Which finder a project's scans use. `Agent` (the default for a new project) has one model
 /// review each part of the code; `Engine` is the rule by rule scan. A project saved before the
-/// setting existed loads as `Engine` ([`legacy_finder`]), never silently as the new default. The
-/// server turns it into the run's finder choice. Set only on the project, never by the
-/// environment.
+/// setting existed opens on `Agent` too, with a one line note that says so
+/// ([`ReviewSettings::finder_moved_to_agent`], #565). The server turns it into the run's finder
+/// choice. Set only on the project, never by the environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectFinder {
     Engine,
     #[default]
     Agent,
-}
-
-/// What a saved project with no `finder` key loads as: the engine, as it always has.
-fn legacy_finder() -> ProjectFinder {
-    ProjectFinder::Engine
 }
 
 impl ProjectFinder {
@@ -323,8 +321,10 @@ impl ProjectFinder {
 /// The project's review-tree settings (design D3, D5 and A3): how many escalations a run may put
 /// in the architect's queue, which reasons may exceed that number, and the group reviewer's
 /// model. Every field `serde(default)`s so a project written before the settings existed loads
-/// with the design values.
+/// with the design values. It is read through [`StoredReviewSettings`], so a missing `finder` is
+/// seen as missing (#565).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredReviewSettings")]
 pub struct ReviewSettings {
     /// Escalations per 1,000 counted lines. Default 1.0.
     #[serde(default = "default_escalation_rate")]
@@ -362,11 +362,77 @@ pub struct ReviewSettings {
     /// written before the setting existed loads with [`DEFAULT_SAMPLE_SIZE_PER_RUN`].
     #[serde(default = "default_sample_size_per_run")]
     pub sample_size_per_run: usize,
-    /// Which finder the project's scans use. A new project starts on the agent finder; a project
-    /// written before the setting existed loads as the engine.
-    #[serde(default = "legacy_finder")]
+    /// Which finder the project's scans use. A new project starts on the agent finder, and so does
+    /// a project written before the setting existed, with [`Self::finder_moved_to_agent`] set
+    /// (#565).
     pub finder: ProjectFinder,
+    /// True when the project was saved before the finder setting existed and so opened on the
+    /// agent finder (the default) instead of the engine it ran before. While it is true the
+    /// settings show [`FINDER_MOVED_NOTE`]; picking a finder clears it. Not written when false, so
+    /// a project file that never moved is unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub finder_moved_to_agent: bool,
 }
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// [`ReviewSettings`] as a project file stores it: every field with the same default, except that
+/// `finder` is an `Option`, so a file that never chose a finder is told apart from one that chose
+/// the agent finder. Only deserialization goes through it.
+#[derive(Deserialize)]
+struct StoredReviewSettings {
+    #[serde(default = "default_escalation_rate")]
+    escalation_rate_per_kloc: f32,
+    #[serde(default = "default_escalation_floor")]
+    escalation_floor: usize,
+    #[serde(
+        default = "default_over_budget_reasons",
+        deserialize_with = "deserialize_over_budget_reasons"
+    )]
+    over_budget_reasons: Vec<crate::review::EscalationReason>,
+    #[serde(default)]
+    group_review_model: String,
+    #[serde(default)]
+    dup_check_model: String,
+    #[serde(default)]
+    finder_model: String,
+    #[serde(default)]
+    clone_judge_model: String,
+    #[serde(default = "default_sample_size_per_run")]
+    sample_size_per_run: usize,
+    #[serde(default)]
+    finder: Option<ProjectFinder>,
+    #[serde(default)]
+    finder_moved_to_agent: bool,
+}
+
+impl From<StoredReviewSettings> for ReviewSettings {
+    fn from(stored: StoredReviewSettings) -> Self {
+        // #565: no saved finder opens on the agent finder, and says so until a finder is picked.
+        let (finder, finder_moved_to_agent) = match stored.finder {
+            Some(finder) => (finder, stored.finder_moved_to_agent),
+            None => (ProjectFinder::Agent, true),
+        };
+        Self {
+            escalation_rate_per_kloc: stored.escalation_rate_per_kloc,
+            escalation_floor: stored.escalation_floor,
+            over_budget_reasons: stored.over_budget_reasons,
+            group_review_model: stored.group_review_model,
+            dup_check_model: stored.dup_check_model,
+            finder_model: stored.finder_model,
+            clone_judge_model: stored.clone_judge_model,
+            sample_size_per_run: stored.sample_size_per_run,
+            finder,
+            finder_moved_to_agent,
+        }
+    }
+}
+
+/// The one line the settings show while [`ReviewSettings::finder_moved_to_agent`] is true.
+pub const FINDER_MOVED_NOTE: &str =
+    "This project was saved before the finder setting existed, so it now opens on the Agent finder.";
 
 /// The default `sample_size_per_run`: the size design A2b suggests for an early engagement.
 pub const DEFAULT_SAMPLE_SIZE_PER_RUN: usize = 50;
@@ -442,12 +508,12 @@ impl ReviewSettings {
         }
     }
 
-    /// The settings of a project saved before the review settings existed: the design values with
-    /// the engine finder, which is what such a project has always run. A new project uses
-    /// [`Default`] (the agent finder). The project file's `review` field loads this when absent.
+    /// The settings of a project saved before the review settings existed: the design values on
+    /// the agent finder, with the note that the finder moved there (#565). The project file's
+    /// `review` field loads this when absent.
     pub fn legacy() -> Self {
         Self {
-            finder: legacy_finder(),
+            finder_moved_to_agent: true,
             ..Self::default()
         }
     }
@@ -465,6 +531,7 @@ impl Default for ReviewSettings {
             clone_judge_model: String::new(),
             sample_size_per_run: default_sample_size_per_run(),
             finder: ProjectFinder::default(),
+            finder_moved_to_agent: false,
         }
     }
 }
@@ -485,8 +552,11 @@ mod review_settings_tests {
         assert!(fresh.dup_check_model.is_empty());
         assert!(fresh.clone_judge_model.is_empty());
         assert_eq!(CLONE_JUDGE_DEFAULT_MODEL, "claude-haiku-5-5");
-        // A project saved before the settings existed still loads as the engine.
-        assert_eq!(ReviewSettings::legacy().finder, ProjectFinder::Engine);
+        // #565: a project saved before the settings existed opens on the agent finder, with the
+        // note that says so.
+        assert_eq!(ReviewSettings::legacy().finder, ProjectFinder::Agent);
+        assert!(ReviewSettings::legacy().finder_moved_to_agent);
+        assert!(!fresh.finder_moved_to_agent);
     }
 
     #[test]
@@ -534,13 +604,12 @@ mod review_settings_tests {
 
     #[test]
     fn a_project_written_before_the_settings_existed_loads_with_the_defaults() {
-        // The design values, on the engine finder: such a project has always run the engine, and a
-        // new project's default (the agent finder) is not applied to it.
+        // The design values on the agent finder (#565), with the note that the finder moved.
         let s: ReviewSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, ReviewSettings::legacy());
         assert_eq!(
             ReviewSettings {
-                finder: ProjectFinder::Agent,
+                finder_moved_to_agent: false,
                 ..s
             },
             ReviewSettings::default()
@@ -581,16 +650,36 @@ mod review_settings_tests {
         );
     }
 
-    /// Outside review Part 1 item 3: a new settings value runs the agent finder; the legacy load
-    /// (no `finder` key) stays on the engine.
+    /// #565 (replacing outside review Part 1 item 3's "a legacy load stays on engine"): a new
+    /// settings value and a load with no `finder` key both run the agent finder; the load says
+    /// it moved. A saved finder is kept, with no note.
     #[test]
-    fn the_review_settings_default_to_the_agent_finder_and_a_legacy_load_stays_on_engine() {
+    fn an_old_project_with_no_finder_key_opens_on_the_agent_finder_with_a_note() {
         assert_eq!(ProjectFinder::default(), ProjectFinder::Agent);
         assert_eq!(ReviewSettings::default().finder, ProjectFinder::Agent);
-        let legacy: ReviewSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(legacy.finder, ProjectFinder::Engine);
-        let saved: ReviewSettings = serde_json::from_str(r#"{"finder":"engine"}"#).unwrap();
-        assert_eq!(saved.finder, ProjectFinder::Engine);
+        let old: ReviewSettings =
+            serde_json::from_str(r#"{"group_review_model":"claude-opus-5-5"}"#).unwrap();
+        assert_eq!(old.finder, ProjectFinder::Agent);
+        assert!(
+            old.finder_moved_to_agent,
+            "a load with no finder key must carry the moved note"
+        );
+        for (json, finder) in [
+            (r#"{"finder":"engine"}"#, ProjectFinder::Engine),
+            (r#"{"finder":"agent"}"#, ProjectFinder::Agent),
+        ] {
+            let saved: ReviewSettings = serde_json::from_str(json).unwrap();
+            assert_eq!(saved.finder, finder, "{json}");
+            assert!(!saved.finder_moved_to_agent, "{json}");
+        }
+        // The note survives a save and a reload, until a finder is picked.
+        let reloaded: ReviewSettings =
+            serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(reloaded, old);
+        // Settings that never moved write no note key, so their file is unchanged.
+        assert!(!serde_json::to_string(&ReviewSettings::default())
+            .unwrap()
+            .contains("finder_moved_to_agent"));
     }
 
     #[test]
