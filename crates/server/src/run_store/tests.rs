@@ -1137,6 +1137,11 @@ mod batches {
         omitted: std::sync::Mutex<Vec<String>>,
         fetches: AtomicUsize,
         realtime: Option<Scripted>,
+        /// Batch ids the provider no longer has: every poll and fetch answers 404.
+        gone: std::sync::Mutex<Vec<String>>,
+        /// Batch ids that ended with every request expired and whose results cannot be fetched.
+        expired_empty: std::sync::Mutex<Vec<String>>,
+        polls: AtomicUsize,
     }
 
     impl Ledger {
@@ -1183,7 +1188,20 @@ mod batches {
             sent.push(items.into_iter().map(|i| i.custom_id).collect());
             Ok(format!("msgbatch_{}", sent.len()))
         }
-        async fn poll(&self, _id: &str) -> anyhow::Result<BatchStatus> {
+        async fn poll(&self, id: &str) -> anyhow::Result<BatchStatus> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if self.gone.lock().unwrap().iter().any(|g| g == id) {
+                return Err(not_found());
+            }
+            if self.expired_empty.lock().unwrap().iter().any(|g| g == id) {
+                return Ok(BatchStatus {
+                    processing_status: "ended".to_string(),
+                    request_counts: BatchRequestCounts {
+                        expired: 1,
+                        ..BatchRequestCounts::default()
+                    },
+                });
+            }
             Ok(BatchStatus {
                 processing_status: "ended".to_string(),
                 request_counts: BatchRequestCounts::default(),
@@ -1191,6 +1209,12 @@ mod batches {
         }
         async fn fetch(&self, id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
             self.fetches.fetch_add(1, Ordering::SeqCst);
+            if self.gone.lock().unwrap().iter().any(|g| g == id) {
+                return Err(not_found());
+            }
+            if self.expired_empty.lock().unwrap().iter().any(|g| g == id) {
+                anyhow::bail!("Message Batches API HTTP 503: results unavailable");
+            }
             let which: usize = id.trim_start_matches("msgbatch_").parse().unwrap();
             let ids = self.sent.lock().unwrap()[which - 1].clone();
             let failing = self.credit_fail.lock().unwrap().clone();
@@ -1231,6 +1255,22 @@ mod batches {
                 .collect())
         }
     }
+
+    /// The provider's answer for a batch it no longer has (its results expired, or it is gone).
+    fn not_found() -> anyhow::Error {
+        use camerata_llm::failure::{FailureClass, LlmCallFailure};
+        let body =
+            r#"{"type":"error","error":{"type":"not_found_error","message":"batch not found"}}"#;
+        let mut f = LlmCallFailure::new(
+            FailureClass::Content,
+            format!("batch results HTTP 404 Not Found: {body}"),
+        );
+        f.http = Some((404, body.to_string()));
+        anyhow::Error::new(f)
+    }
+
+    /// #356: a batch that expired or is gone before it was fetched, and resend chains.
+    mod gone_batch;
 
     fn named(cid: &str) -> BatchItem {
         let mut i = item();
