@@ -175,15 +175,12 @@ async fn with_composer(
     run_id: Option<&str>,
     compose: impl FnOnce(&ReviewComposer<'_>) -> Response,
 ) -> Response {
-    // The rule's bounds ride on each row; a corpus that is not there shows none.
-    let dir = camerata_rules::corpus_path();
-    let corpus = if dir.exists() {
-        let (set, errs) = camerata_rules::load_corpus_lenient(&dir).await;
-        crate::log_corpus_load_errors("review rows", &errs);
-        Some(set)
-    } else {
-        None
-    };
+    // The rule's bounds ride on each row: the rules the inspection ran with (its run's
+    // snapshot), never the live library. An inspection without verified rules shows none, and
+    // its export refuses with the reason (#560).
+    let corpus = state.inspections.latest(id).and_then(|latest| {
+        crate::export_rules::rules_for_review(state, id, latest.report.run_id.as_deref())
+    });
     with_composer_using(state, id, run_id, corpus.as_ref(), compose)
 }
 

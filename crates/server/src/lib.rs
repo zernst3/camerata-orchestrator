@@ -65,6 +65,7 @@ pub mod engine_check;
 pub mod escalation;
 pub mod eval;
 pub mod evidence;
+pub(crate) mod export_rules;
 pub mod feature_flags;
 pub mod finding_status;
 pub mod fix;
@@ -1043,7 +1044,8 @@ impl AppState {
         // anything reaches the file.
         let mut sealed = report.clone();
         sealed.sweep_secrets_before_seal();
-        let entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
+        let mut entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
+        entry.rule_digest = self.keep_run_rule_snapshot(project_id, report.run_id.as_deref());
         match self.inspections.append(entry) {
             Ok(stored) => Some(stored),
             Err(e) => {
@@ -1054,6 +1056,36 @@ impl AppState {
                 );
                 // The in-memory copy was updated before the write failed, so it is the newest.
                 self.inspections.latest(project_id)
+            }
+        }
+    }
+
+    /// Copy the rules the run `run_id` kept (verified against its pin) beside the inspection
+    /// store, so the inspection keeps them after the run's folder is gone, and return their
+    /// digest. `None` (logged) when the run kept none or they do not verify: every export of the
+    /// inspection then refuses with the reason ([`crate::export_rules`]).
+    fn keep_run_rule_snapshot(&self, project_id: &str, run_id: Option<&str>) -> Option<String> {
+        let run_id = run_id?;
+        let snapshot = match crate::run_store::rule_snapshot::read_run(run_id) {
+            Ok(snapshot) => snapshot,
+            Err(refusal) => {
+                tracing::warn!(project = project_id, run = run_id, "{refusal}");
+                return None;
+            }
+        };
+        match self
+            .inspections
+            .keep_rule_snapshot(&snapshot.digest, &snapshot.bytes)
+        {
+            Ok(()) => Some(snapshot.digest),
+            Err(e) => {
+                tracing::warn!(
+                    project = project_id,
+                    run = run_id,
+                    error = %e,
+                    "could not keep the rules this inspection ran with beside it"
+                );
+                None
             }
         }
     }
@@ -3288,6 +3320,7 @@ pub(crate) async fn start_audit_job(
                     origin: rs::RunOrigin::Cockpit,
                     project_id: project_id.clone(),
                     pin: engine_pin,
+                    rules: corpus.as_ref(),
                 }) {
                     Ok(store) => {
                         if let Some(p) = &prior {
@@ -3845,16 +3878,15 @@ async fn export_triage_log(State(state): State<AppState>, Path(id): Path<String>
     let report = report.seal_with_restored(&crate::decisions::restored_keys_of(
         &state.decisions.active(&id),
     ));
-    let corpus_path = camerata_rules::corpus_path();
-    let corpus = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
-    } else {
-        None
+    // The rules the inspection ran with, never the live library (#560).
+    let rules = match crate::export_rules::rules_for_export(&state, &id, &report) {
+        Ok(rules) => rules,
+        Err(refusal) => return crate::export_rules::refusal_response(&refusal),
     };
     let reviewed = reviewed_for_export(&state, &id, &report, &std::collections::HashMap::new());
     let csv = match xlsx_export::triage_log::operator_csv(
         &reviewed,
-        corpus.as_ref(),
+        Some(&rules),
         &project_chosen_options(&project),
     ) {
         Ok(csv) => csv,
@@ -4008,16 +4040,12 @@ async fn export_audit_report(
         &state.decisions.active(&id),
     ));
 
-    // Best-effort corpus load for the citation join (§4.4) — mirrors `split_scannable_rules`'
-    // own fallback: a missing/unreadable corpus degrades every citation to "AI-advisory,
-    // model-inferred." rather than failing the export.
-    let corpus_path = camerata_rules::corpus_path();
-    let corpus = if corpus_path.exists() {
-        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        crate::log_corpus_load_errors("rule citations", &errs);
-        Some(set)
-    } else {
-        None
+    // The rules the inspection ran with (rule text, fix text, citations, severities, sources),
+    // read from its run's snapshot and verified against the run's pin. Never the live library,
+    // and no fallback: a missing or damaged snapshot refuses the export (#560).
+    let rules = match crate::export_rules::rules_for_export(&state, &id, &report) {
+        Ok(rules) => rules,
+        Err(refusal) => return crate::export_rules::refusal_response(&refusal),
     };
 
     // The same options, set the same way, as the package route: the PDF is the one the package
@@ -4031,7 +4059,7 @@ async fn export_audit_report(
     // The release gate, the same one the package route passes: every check over the package this
     // PDF belongs to, so a held row, an incomplete run, a secret or an unsynced change refuses
     // the PDF exactly as it refuses the zip. Only the PDF is returned.
-    let gated = match gated_release(&reviewed, corpus.as_ref(), &req.options).await {
+    let gated = match gated_release(&reviewed, &rules, &req.options).await {
         Ok(gated) => gated,
         Err(response) => return response,
     };
@@ -4107,16 +4135,18 @@ struct GatedExport {
 /// review). `Ok` only when every check passed; every refusal is already the 422 the routes
 /// return (`{ ok: false, gate, message, ... }`, problems naming each site), and any other failure
 /// is a 500. A pinned test lists the routes that write client files and asserts each one calls
-/// this.
+/// this. `rules` are the inspection's own, from its run's snapshot
+/// ([`crate::export_rules::rules_for_export`]), never the live library.
 async fn gated_release(
     reviewed: &crate::report_export::ReviewedReport,
-    corpus: Option<&camerata_rules::RuleSet>,
+    rules: &camerata_rules::RuleSet,
     options: &crate::report_export::ReportOptions,
 ) -> Result<GatedExport, Response> {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let package = match crate::release_gate::build_product_package(reviewed, corpus, options).await
+    let package = match crate::release_gate::build_product_package(reviewed, Some(rules), options)
+        .await
     {
         Ok(package) => package,
         Err(e) => {
@@ -4344,13 +4374,11 @@ async fn export_product(
         &state.decisions.active(&id),
     ));
 
-    let corpus_path = camerata_rules::corpus_path();
-    let corpus = if corpus_path.exists() {
-        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        crate::log_corpus_load_errors("rule citations", &errs);
-        Some(set)
-    } else {
-        None
+    // The rules the inspection ran with, from its run's snapshot; a missing or damaged one
+    // refuses the export (#560).
+    let rules = match crate::export_rules::rules_for_export(&state, &id, &report) {
+        Ok(rules) => rules,
+        Err(refusal) => return crate::export_rules::refusal_response(&refusal),
     };
 
     // The same options, set the same way, as the PDF route (`prepare_export_options`).
@@ -4362,7 +4390,7 @@ async fn export_product(
     // The reviewer's overlay (decisions, edits, additions, merges, splits) over the sealed rows:
     // after the seal, before the gate, in every export.
     let reviewed = reviewed_for_export(&state, &id, &report, &req.dispositions);
-    let released = match gated_release(&reviewed, corpus.as_ref(), &req.options).await {
+    let released = match gated_release(&reviewed, &rules, &req.options).await {
         Ok(gated) => gated.released,
         Err(response) => return response,
     };

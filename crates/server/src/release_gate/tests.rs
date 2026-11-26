@@ -1132,6 +1132,7 @@ fn app_with_a_leaking_path(p: &Planted) -> (crate::AppState, String) {
     let mut report = scan_report();
     report.findings[0].path = format!("src/{}.rs", p.value);
     state.set_last_scan(project.id.clone(), report);
+    crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
     (state, project.id)
 }
 
@@ -1232,6 +1233,7 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         })
         .expect("project exists");
     state.set_last_scan(project.id.clone(), scan_report());
+    crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
     let resp = crate::export_product(
         axum::extract::State(state),
         axum::extract::Path(project.id),
@@ -1472,6 +1474,7 @@ async fn both_export_routes_refuse_a_project_with_no_client_name() {
             .create("Acme", vec!["acme/portal".to_string()])
             .expect("project created");
         state.set_last_scan(project.id.clone(), scan_report());
+        crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
         let resp = if route == "pdf" {
             crate::export_audit_report(
                 axum::extract::State(state),

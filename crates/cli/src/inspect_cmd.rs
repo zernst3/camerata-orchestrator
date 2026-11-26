@@ -1375,6 +1375,7 @@ pub async fn run_inspect_pipeline_with(
                 origin: camerata_server::run_store::RunOrigin::Cli,
                 project_id: None,
                 pin: engine_pin.clone(),
+                rules: corpus.as_ref(),
             }) {
                 Ok(store) => {
                     if let Some(prior) = &incremental_prior {
@@ -1743,11 +1744,31 @@ pub async fn run_inspect_pipeline_with(
         };
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
+    // The rules the package carries are the run's own snapshot, read back from the run's folder
+    // and verified against its pin exactly as any later export reads them (#560), never the
+    // library loaded above. A run that could not be saved kept none, so its export is refused.
+    let rules = match store.as_ref().map_or_else(
+        || {
+            Err(
+                camerata_server::run_store::rule_snapshot::SnapshotRefusal::new(
+                    None,
+                    camerata_server::run_store::rule_snapshot::RefusalKind::NoRun,
+                ),
+            )
+        },
+        |s| camerata_server::run_store::rule_snapshot::read_run_dir(s.dir()),
+    ) {
+        Ok(snapshot) => snapshot.rules,
+        Err(refusal) => {
+            let _ = finish_run(store.as_ref(), &report, false);
+            return Err(InspectError::Failed(refusal.to_string()));
+        }
+    };
     // `release_product_export` is the release gate: it returns bytes only when every check
     // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
     let released = match release_product_export(
         &report,
-        corpus.as_ref(),
+        Some(&rules),
         Some(model_record),
         &args.client,
         !args.client_engagement,
@@ -1788,7 +1809,7 @@ pub async fn run_inspect_pipeline_with(
             .ok()
             .as_deref(),
     ) {
-        match write_triage_log_beside_zip(&report, corpus.as_ref(), &args.export) {
+        match write_triage_log_beside_zip(&report, Some(&rules), &args.export) {
             Ok(path) => eprintln!(
                 "camerata inspect: triage log (internal, not part of the client package): {}",
                 path.display()

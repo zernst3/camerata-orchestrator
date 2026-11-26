@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use camerata_core::RuleId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod applies_to;
@@ -85,7 +85,7 @@ pub enum RulesError {
 /// Tier ordering by strictness/automation: `Prose` < `Structured` < `Mechanical`
 /// < `Architectural`. `Architectural` is the most precise tier — it never
 /// produces a false "probably" the way a regex digest scan can.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EnforcementKind {
     Prose,
@@ -182,7 +182,7 @@ impl std::fmt::Display for EnforcementKind {
 /// an absent `kind` must not silently resolve to a permissive value. [`Rule::kind`] is
 /// `Option<RuleKind>`, and the corpus-load gate (`rules_missing_kind`, exercised by
 /// `req_a5_1_every_corpus_rule_declares_a_kind`) fails the build on any `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleKind {
     /// No acceptable alternative anywhere — every non-correct option is the absence/degenerate
@@ -410,7 +410,7 @@ impl std::fmt::Display for RuleKind {
 /// `serde(default)` resolves to [`Verification::Draft`], so every existing rule
 /// TOML (which predates this field) and any rule that omits `verification`
 /// loads as `Draft`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Verification {
     /// AI-generated / designed; not yet checked against any external authority.
@@ -526,7 +526,7 @@ impl std::fmt::Display for Verification {
 /// relevance = "errcheck's own docs state the default is to report every unchecked error \
 ///              return, which is exactly the check this rule mirrors."
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleSource {
     /// Canonical URL of the source (style guide section, standard, linter docs).
     pub url: String,
@@ -589,7 +589,7 @@ pub struct RuleSource {
 /// at = "2026-06-20"
 /// against = ["clippy 1.83", "Google Java Style Guide 2024-01"]
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedProvenance {
     /// Who confirmed the verification (a human identifier — name / handle).
     pub by: String,
@@ -885,7 +885,7 @@ struct OptionToml {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// One alternative the architect can codify for a rule (a `[[option]]` block).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleOption {
     /// Stable option id (what gets codified as the choice).
     pub id: String,
@@ -959,7 +959,7 @@ pub struct RuleOption {
 }
 
 /// How a rule's escalation condition is handled when an agent's work meets it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum EscalationSeverity {
     /// Log a warning and let the run CONTINUE (advisory). For non-guard conditions.
@@ -978,7 +978,7 @@ pub enum EscalationSeverity {
 /// self-escalates when its work meets one; the deterministic backstop fires only when the selected
 /// (or default) option carries a spec. A met `HardPause` condition pauses the run for human review;
 /// a `SoftFlag` logs + continues.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EscalationSpec {
     /// The condition the agent watches for, in plain language (e.g. "the change would modify or
     /// delete an existing test"). This is what the agent is grounded with and self-reports against.
@@ -989,7 +989,13 @@ pub struct EscalationSpec {
 }
 
 /// A single camerata principle loaded from the corpus.
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` are the form a run's rule snapshot keeps (the server's
+/// `run_store::rule_snapshot`): the parsed rule exactly as the inspection loaded it, read back
+/// by any later build to export that inspection. A field added here later needs
+/// `#[serde(default)]` so a snapshot written before it still reads; the snapshot reader refuses
+/// a snapshot that holds a field this build does not know, so nothing is dropped silently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     /// Stable, traceable rule id — mapped from [`camerata_core::RuleId`].
     pub id: RuleId,
@@ -1210,7 +1216,7 @@ pub struct Rule {
 /// stack (`RepoStack::frameworks` in `camerata-server`) must contain `framework`, AND the
 /// finding's file path must match `path_glob` (see [`glob_match`]). A rule with no
 /// `stack_exceptions` behaves exactly as before this field existed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackException {
     /// The framework/language marker (matched against the detected stack's framework list,
     /// e.g. `"Supabase"`, `"Next.js"`) that must be present for this exception to apply.

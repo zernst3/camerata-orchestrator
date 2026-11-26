@@ -52,16 +52,11 @@ pub(crate) async fn get_rewrite_advisory(
             "This project has no completed inspection yet. Run an audit first.",
         );
     };
-    // The corpus gives each rule its enforcement tier and each Fix its authored effort. A missing
-    // or unreadable corpus leaves both to the rows, as every export does.
-    let corpus_path = camerata_rules::corpus_path();
-    let corpus = if corpus_path.exists() {
-        let (set, errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        crate::log_corpus_load_errors("rewrite advisory", &errs);
-        Some(set)
-    } else {
-        None
-    };
+    // The rules give each rule its enforcement tier and each Fix its authored effort: the rules
+    // the inspection ran with (its run's snapshot), never the live library. Without verified
+    // rules both are left to the rows (#560).
+    let corpus =
+        crate::export_rules::rules_for_review(&state, &id, latest.report.run_id.as_deref());
     Json(AdvisoryDocument {
         rewrite_advisory: compute(&latest.report, corpus.as_ref()),
     })

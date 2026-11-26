@@ -289,6 +289,7 @@ fn journal_run(repo: &tempfile::TempDir) -> Arc<crate::run_store::RunStore> {
     use crate::run_store::{ModelsRecord, NewRun, RunOrigin, RunStore};
     RunStore::create(NewRun {
         pin: crate::run_store::engine_pin::EnginePin::for_run(None, &Default::default()),
+        rules: None,
         project_key: "proj-1".to_string(),
         repos: vec![("acme/widgets".to_string(), repo.path().to_path_buf())],
         models: ModelsRecord {

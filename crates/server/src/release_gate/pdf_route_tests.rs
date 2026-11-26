@@ -60,6 +60,7 @@ fn state_with(report: ScanReport) -> (crate::AppState, String) {
         })
         .expect("project exists");
     state.set_last_scan(project.id.clone(), report);
+    crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
     (state, project.id)
 }
 
@@ -891,6 +892,7 @@ async fn the_triage_log_route_says_it_is_internal_on_its_first_line_and_in_its_f
         project.id.clone(),
         crate::onboard::ScanReport::gated(&["acme/portal".to_string()]),
     );
+    crate::export_rules::test_support::attach_bundled_rules(&state, &project.id);
     let resp =
         crate::export_triage_log(axum::extract::State(state), axum::extract::Path(project.id))
             .await;

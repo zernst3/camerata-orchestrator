@@ -102,6 +102,12 @@ pub struct InspectionEntry {
     /// Set when a client package was generated from this entry.
     #[serde(default)]
     pub package: Option<PackageRecord>,
+    /// The rule digest the inspection's run pinned, when the rules it ran with are kept beside
+    /// this store ([`InspectionStore::keep_rule_snapshot`]). Every export reads the rules from
+    /// that copy, which outlives the run's own folder (source deletion removes the run). `None`
+    /// for an inspection recorded before snapshots were kept, or whose run kept none.
+    #[serde(default)]
+    pub rule_digest: Option<String>,
 }
 
 impl InspectionEntry {
@@ -122,6 +128,7 @@ impl InspectionEntry {
             model_sessions: p.model_sessions.clone(),
             model_sessions_cleared: false,
             package: None,
+            rule_digest: None,
             report,
         }
     }
@@ -162,6 +169,9 @@ pub struct InspectionStore {
     dir: Option<Arc<PathBuf>>,
     /// project id -> entries, oldest first.
     mem: Arc<Mutex<BTreeMap<String, Vec<InspectionEntry>>>>,
+    /// Rule snapshots kept by an in-memory store (digest -> file bytes). A file-backed store keeps
+    /// them on disk instead ([`rule_snapshots`]).
+    snapshots: Arc<Mutex<BTreeMap<String, Arc<Vec<u8>>>>>,
 }
 
 /// Give every finding its stable site key ([`camerata_api_types::site_key`]). Ordinals are
@@ -251,6 +261,7 @@ impl InspectionStore {
         Self {
             dir: Some(Arc::new(dir)),
             mem: Arc::new(Mutex::new(mem)),
+            snapshots: Arc::default(),
         }
     }
 
@@ -494,6 +505,8 @@ fn unique_id(entry: &InspectionEntry, existing: &[InspectionEntry]) -> String {
         n += 1;
     }
 }
+
+mod rule_snapshots;
 
 #[cfg(test)]
 mod state_tests;

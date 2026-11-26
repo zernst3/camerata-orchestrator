@@ -5306,6 +5306,7 @@ canonical path>` for one repo and `project-<count>-<hash of the sorted paths>` f
 | `runs/<run-id>/lock.json` | the lock, with process id and a heartbeat |
 | `runs/<run-id>/calls/`, `batches/` | every stored model answer, and every submitted Message Batch |
 | `runs/<run-id>/prior_manifest.json` | the incremental baseline the run started from |
+| `runs/<run-id>/rules/sha256-<hex>.json` | the rule snapshot: the parsed rules the run loaded, named by its pinned rule digest (section 14) |
 | `runs/<run-id>/checkpoints/` | stage checkpoints: `finder_<repo>`, `alternatives_<repo>`, `fix_<repo>`, `duplicate-check` and the others |
 | `runs/<run-id>/cost_checkpoint.json` | the latest cost checkpoint |
 | `runs/<run-id>/duplicate_checks.json` | the duplicate check's answers |
@@ -5536,7 +5537,8 @@ JSON files in `dirs::data_dir()/camerata/`:
 | `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus`, the precise `UowStage` lifecycle, `history`, `gate_provenance`, `sign_off`, `evidence`, and a `decisions` read-cache (durable home is the `ArtifactStore`). See §10. |
 | `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, `RoutineStatus` (Idle/Running/BlockedNeedsReview/Done/Failed), last_run/last_fired, project_id, and a bounded `runs` history (cap 20). The auto-fire scheduler (`auto_fire.rs`) ticks over these; see 4c. |
 | `escalations.json` | `EscalationStore` (`crates/server/src/escalation.rs`) | Routine escalations: a blocked run's reason/options/suggestions, the human↔lead-engineer conversation, status (open/resolved), and the translated resume directive. |
-| `inspections/<project_id>.json` | `InspectionStore` (`crates/server/src/inspections.rs`) | One file per project: every completed inspection as an `InspectionEntry` (id, `InspectionKind` Full or DeltaRetest, the audited refs with commit, branch, origin and default branch, the sealed report with its finding excerpts, the Claude Code sessions its model calls created, and the `PackageRecord` of the client package generated from it). The durable twin of the in-memory last scan: `AppState::get_last_scan` falls back to the latest entry after a restart, so exports and the review screen never need the source. Written atomically (temp file and rename). |
+| `inspections/<project_id>.json` | `InspectionStore` (`crates/server/src/inspections.rs`) | One file per project: every completed inspection as an `InspectionEntry` (id, `InspectionKind` Full or DeltaRetest, the audited refs with commit, branch, origin and default branch, the sealed report with its finding excerpts, the Claude Code sessions its model calls created, the `PackageRecord` of the client package generated from it, and `rule_digest`, the rules it ran with). The durable twin of the in-memory last scan: `AppState::get_last_scan` falls back to the latest entry after a restart, so exports and the review screen never need the source. Written atomically (temp file and rename). |
+| `inspections/rule-snapshots/sha256-<hex>.json` | `InspectionStore::keep_rule_snapshot` (`crates/server/src/inspections/rule_snapshots.rs`) | The rule snapshot of each inspection's run, copied when the inspection is recorded, one file per distinct rule library. Every export and review screen reads its rules from here (section 14). |
 | `source-records.json` | `SourceRecordStore` (`crates/server/src/client_source/records.rs`) | Machine-local proof of source deletion (`DeletionRecord`: what was removed from where and when, byte and file counts, outcome per location, the method sentence, residuals) and re-fetch records. Per-project strictly increasing `seq` decides whether a repo is deleted or fetched back; timestamps are never compared. Never exported with a project. |
 | `scan-cache.json` | `ScanCacheStore` (`crates/server/src/scan_cache.rs`) | Per-project incremental-scan manifest (file fingerprints and the last AI findings). Holds finding excerpts, so source deletion purges the repo's slice (`remove_repo`). |
 
@@ -7726,6 +7728,32 @@ Besides those files the run folder holds `checkpoints/` (stage checkpoints), `co
 occurrence. `batches/<digest>-<n>.json` holds a submitted Message Batch (its id the moment the
 submit returned, its results once fetched). `lock.json` is the lock (below) and holds the process id and a heartbeat time.
 `prior_manifest.json` is the incremental baseline the run started from.
+`rules/sha256-<hex>.json` is the rule snapshot (below).
+
+**The rules a run ran with (#560).** Only the inspection is pinned to an engine build; triage and
+export can run on any newer build, but the rules a client package carries must be exactly the
+rules the inspection ran with. So `RunStore::create`, which the command line and the cockpit both
+call, writes the parsed rule set the run loaded to `rules/sha256-<hex>.json`, named by the rule
+digest the engine pin records (`camerata_rules::corpus_version`), and refuses to start a run whose
+rules cannot be kept or do not match its pin (`run_store::rule_snapshot`). When the cockpit records
+the inspection, the snapshot is copied beside the inspection store
+(`inspections/rule-snapshots/`, content addressed, and named on the entry as `rule_digest`), because
+deleting a client's source removes the run folder while the inspection stays.
+
+Every export (the PDF, the package with its workbook, CSV and JSON, the triage log) and every review
+screen (the review rows, the rewrite advisory, the finding modal's fix) reads its rule text, fix
+text, citations, severities and sources from that snapshot (`crate::export_rules` in the app,
+`rule_snapshot::read_run_dir` at the end of `camerata inspect`), never from the live library; the
+guard test `export_rules_guard.rs` fails on any export or review path that names the live loader.
+A read verifies the snapshot every time: it must parse, name its kind and format, read back with
+no field dropped (a field this build does not know refuses; one this build added since, at its
+default, is fine) and recompute to the run's pinned digest. The export fails closed: a missing
+snapshot, a digest mismatch or a parse error refuses it with `{ ok: false, gate: "rule_snapshot",
+reason, message }`, and a missing one names the backfill command (`camerata run snapshot-rules
+--run <id> --from <rule library folder>`). There is no fallback to "AI-advisory, model-inferred"
+citations any more. A review screen without a verified snapshot shows no rule data. Renderer,
+wording and format fixes in a newer build apply to an older run; the rule content stays the
+inspection's.
 
 **Granularity.** Parts are tracked at the stage level in the plan, and individual model calls are
 recorded as the stage reaches them, because how many calls a stage makes depends on the stage
