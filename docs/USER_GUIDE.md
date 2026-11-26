@@ -1279,7 +1279,7 @@ finds. Camerata has two.
 | How it works | The scan passes check the code rule by rule (batches of rules over chunks of code), then the calibration model (stage 1) rates each problem. | The code is cut into **pieces**. One model agent reads each piece in a small **review room** with the selected rules as its **checklist** and writes its problems as files. |
 | Which models | The **Scan model** and **Calibration (stage 1)**. | The **Finder model**. The scan passes, the alternatives stage and calibration are replaced by it. |
 | Coverage | Recorded in the scan ledger. | From the **tool trace** only (what the agent actually read). |
-| Current default | **Yes.** A new project, and a project saved before the setting existed, starts on Engine. | Opt in per project. |
+| Current default | Opt in per project. | **Yes.** A new project starts on Agent, and so does a project saved before the setting existed, with the note "This project was saved before the finder setting existed, so it now opens on the Agent finder." under the Finder row until a finder is picked. |
 
 Everything after the finder is the same for both: the possible-duplicate check, the group reviewer
 (stage 2), the fix stage, the review screen, the release gate and the package.
@@ -3359,7 +3359,7 @@ project's setting, else the built-in default, applies. The built-in defaults are
 scan, Claude Opus 5.5 for calibration (stage 1), Claude Opus 5.5 for the group reviewer (stage 2) and
 for the agent finder, Claude Sonnet 5.5 for the possible-duplicate check, Claude Haiku 5.5 for the fix
 wording (unless the `fix_on_haiku` measure is off) and, for the duplicate-code judge (the clone judge),
-the project's fast model band (Claude Haiku 5.5 unless the project's fast band says otherwise). A project saved before a model setting existed opens with these built-in defaults, except the finder: a project saved before the finder setting existed stays on Engine, and a new project starts on Agent.
+the project's fast model band (Claude Haiku 5.5 unless the project's fast band says otherwise). A project saved before a model setting existed opens with these built-in defaults. A new project starts on Agent, and so does a project saved before the finder setting existed, which shows the note "This project was saved before the finder setting existed, so it now opens on the Agent finder." under the Finder row until a finder is picked. A client engagement saved before the backend setting existed opens on the API backend, the only backend a client engagement runs on; a backend the project saved is kept, so a client engagement saved on CLI is still refused before any file is read.
 The review screen's Settings lane shows every one of these rows (§3a, "The Settings lane").
 
 #### L3 AI code review

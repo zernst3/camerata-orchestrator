@@ -793,7 +793,9 @@ Key design points:
   (`docs/design/2026-09-22_per-project-backend.md`). Every project-scoped seam (the
   brownfield scan, the alternative-recommendation pass, the disagreement rescan, and the
   gov-dev driver) resolves the transport from that project's own `Project.backend` field
-  (`Cli` | `Api`, default `Cli`) via `resolve_backend_for_project` in
+  (`Cli` | `Api`; a new project starts on `Api`; an absent key reads as `Cli`, except that
+  `ProjectStore::load_or_new` opens a client engagement saved before the field existed on `Api`,
+  #565) via `resolve_backend_for_project` in
   `crates/server/src/lib.rs`: `Cli` always drives `claude -p` through `ClaudeCliDriver`;
   `Api` with an Anthropic key present (the keychain-saved key, else the `ANTHROPIC_API_KEY` env
   fallback; see "Anthropic key resolution" below) runs Camerata's Claude agents
@@ -4269,7 +4271,7 @@ review, flags, export) is the same for both.
 | Idea | The engine cuts the code into chunks, asks the model about each chunk against the rules in batches, then a calibration stage rates each site | One model agent reads each part of the code in a review room and writes its problems. The rules are its checklist. |
 | Switch (app) | Settings, Finder row, "Engine (rule by rule)" | Settings, Finder row, "Agent (one model reviews each part)" |
 | Switch (CLI) | `--finder engine` | `--finder agent` |
-| Default today | Opt in | **Agent.** `ProjectFinder::default()` is `Agent` (`crates/api-types/src/project.rs`) and `--finder` defaults to `agent`. A project saved before the setting existed loads as Engine. |
+| Default today | Opt in | **Agent.** `ProjectFinder::default()` is `Agent` (`crates/api-types/src/project.rs`) and `--finder` defaults to `agent`. A project saved before the setting existed opens on Agent too, with `ReviewSettings::finder_moved_to_agent` set (it is read through `StoredReviewSettings`, where a missing `finder` is seen as missing); the settings show `FINDER_MOVED_NOTE` under the Finder row until a finder is picked, and picking one clears it (#565). A saved `engine` is kept. |
 | Model setting | scan model and calibration model | finder model (built-in default Opus 5.5) |
 | Stages used | alternatives, scan passes, resolution, detail, calibration | the agent stages of this section (pieces, joints, conventions) |
 | Rating of a row | calibration (stage 1) | the agent's own `sure`, `effort` and `label`, through the same `apply_verdicts` code a calibration verdict goes through (`run/rating.rs`). The stored note says "Rated by the review agent that found it; no second reviewer rated this problem." |
@@ -4677,7 +4679,7 @@ are locked until it finishes.").
 | Finder model | `finder_model` | The agent finder's model. Used only when the finder is Agent. | Opus 5.5 (`FINDER_DEFAULT_MODEL`). Hint: "not set: Claude Opus 5.5; used when the finder is agent". | yes |
 | Duplicate check | `duplicate_check` | The possible-duplicate check (section 6h) | Sonnet 5.5 (`DUP_CHECK_DEFAULT_MODEL`). Hint: "not set: Claude Sonnet 5.5". | yes |
 | Clone judge | `clone_judge` | The duplicate-code checker, which judges clone candidates. Runs only when a clone rule is selected. | The project's fast tier model, whose built-in default is Haiku 5.5. Hint: "not set: the project's fast tier model". | yes |
-| Finder (separate row) | `finder` | Not a model. `agent` or `engine`. The choices read "Agent (one model reviews each part)" and "Engine (rule by rule)". Hint: "agent: one model reviews each part; engine: rule by rule". | **Agent** (`ProjectFinder::default()`; a project saved before the setting existed loads as Engine) | no |
+| Finder (separate row) | `finder` | Not a model. `agent` or `engine`. The choices read "Agent (one model reviews each part)" and "Engine (rule by rule)". Hint: "agent: one model reviews each part; engine: rule by rule". | **Agent** (`ProjectFinder::default()`; a project saved before the setting existed opens on Agent with the one line note, #565) | no |
 
 "(not set)" means the setting is empty and the run uses the default named in the table. It is
 offered only where a run-time default exists that an explicit pick would override. Choosing it sends
