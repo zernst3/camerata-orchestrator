@@ -3422,3 +3422,53 @@ async fn review_scan_report_shows_its_group_review_rows_in_agent_activity() {
         "{rows:#?}"
     );
 }
+
+/// #582: the group reviewer reads every repo's rows at once, so over a run that is not complete it
+/// does not start. A part that failed for a reason other than an outage is enough, and so is an
+/// outage stop.
+#[tokio::test]
+async fn the_group_reviewer_does_not_start_on_an_incomplete_or_stopped_run() {
+    let controls = crate::cost_cap::RunControls::default();
+    let rules = vec![(SQL.to_string(), "Never concatenate SQL.".to_string())];
+
+    // A fix part failed after its retries: the run is incomplete, and no outage is involved.
+    let mut report = report_of(&[(SQL, 3)]);
+    report.failed_passes.push(crate::ai_audit::FailedPass {
+        repo: "acme/app".to_string(),
+        pass: "fix-specific generation".to_string(),
+        reason: "the fix text did not finish".to_string(),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
+    });
+    assert!(report.cross_repo_stage_refusal().is_some());
+    let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
+    let ran = review_scan_report(
+        &mut report, &llm, &controls, &rules, false, false, None, None, None,
+    )
+    .await;
+    assert!(ran.is_none(), "the group reviewer ran on an incomplete run");
+    assert!(llm.calls().is_empty());
+    assert!(
+        report
+            .ledger
+            .runner_notes()
+            .iter()
+            .any(|n| n.contains("not started")),
+        "{:?}",
+        report.ledger.runner_notes()
+    );
+
+    // A complete run is reviewed as before.
+    let mut report = report_of(&[(SQL, 3)]);
+    assert!(report.cross_repo_stage_refusal().is_none());
+    let llm = Reviewer::new(|call| Ok(one_group(call, "x")));
+    let ran = review_scan_report(
+        &mut report, &llm, &controls, &rules, false, false, None, None, None,
+    )
+    .await;
+    assert!(ran.is_some());
+    assert!(!llm.calls().is_empty());
+}

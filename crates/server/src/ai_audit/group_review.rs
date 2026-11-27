@@ -2500,6 +2500,15 @@ pub async fn review_scan_report(
     if report.findings.is_empty() {
         return None;
     }
+    // The group reviewer reads every repo's rows at once: over an incomplete or stopped run it
+    // does not start, sends nothing, and a resume runs it once over the whole set (#582).
+    if let Some(why) = report.cross_repo_stage_refusal() {
+        report.ledger.record_runner_notes(vec![format!(
+            "{STAGE_GROUP_REVIEW}: not started, because this inspection is not complete ({why}); \
+             a resume runs it once every repository has finished"
+        )]);
+        return None;
+    }
     let model = controls.group_review_model_for();
     let repo_shape = format!(
         "This scan covers {} repositor{} with {} code files and about {} lines of code.",

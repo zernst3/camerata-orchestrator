@@ -772,3 +772,32 @@ async fn a_duplicate_check_batch_submitted_before_a_stop_is_fetched_by_a_real_ti
     );
     assert!(hinted(&r, "src/c.rs"), "its answers were applied");
 }
+
+/// #582: the check reads pairs across every repo's rows, so over a run that is not complete (here
+/// a part failed after its retries, no outage) it does not start and sends nothing.
+#[tokio::test]
+async fn the_check_does_not_start_on_an_incomplete_run() {
+    let mut r = report();
+    r.failed_passes.push(crate::ai_audit::FailedPass {
+        repo: "acme/app".to_string(),
+        pass: "fix-specific generation".to_string(),
+        reason: "the fix text did not finish".to_string(),
+        files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
+    });
+    let llm = Script::new(c_same_d_different);
+    run(&mut r, &llm).await;
+    assert_eq!(llm.calls(), 0, "the check started on an incomplete run");
+    assert!(!any_hint(&r));
+    assert!(
+        r.ledger
+            .runner_notes()
+            .iter()
+            .any(|n| n.contains("possible-duplicate check: not started")),
+        "{:?}",
+        r.ledger.runner_notes()
+    );
+}

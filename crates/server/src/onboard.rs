@@ -1279,6 +1279,29 @@ impl ScanReport {
         out
     }
 
+    /// Why a stage that reads across repos (the group reviewer, the possible-duplicate check) must
+    /// not start on this report, in plain words for the operator; `None` when it may.
+    ///
+    /// Owner ruling (#582): "A failure stops/pauses the scan, period." Such a stage reads every
+    /// repo's rows and fix text at once, so over a partial row set it would spend on a review
+    /// that the resume has to throw away and redo, and its output would describe an inspection
+    /// that never happened. It refuses while any part failed or did not run
+    /// ([`Self::incomplete_reasons`]) and while the run is outage-stopped. The outage stop is
+    /// named on its own although `incomplete_reasons` already counts it: the stage must never
+    /// start after a stop, whatever a later change to that list does.
+    pub fn cross_repo_stage_refusal(&self) -> Option<String> {
+        let reasons = self.incomplete_reasons();
+        if !reasons.is_empty() {
+            return Some(reasons.join("; "));
+        }
+        if self.ledger.is_outage_stopped() {
+            return Some(
+                "the run stopped because the model provider could not be reached".to_string(),
+            );
+        }
+        None
+    }
+
     /// Record a repo the scan was asked to inspect and could not (a folder that is gone, files
     /// that could not be read): a failed `repository read` pass, a not-run ledger row for every
     /// rule that applies to it, and an entry in [`Self::repos_not_inspected`]. The repo is never
